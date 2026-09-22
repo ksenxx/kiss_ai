@@ -357,6 +357,7 @@ def run(
     parent_task_id: str = "",
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
+    side_channel: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -429,6 +430,13 @@ def run(
             refuses to spawn further reviewers.  Only meaningful with
             *parent_task_id*; no agent-script getter, for the same
             reason as *parent_task_id*.
+        side_channel: Whether the run is a side channel of the parent
+            — a sub-agent whose result is delivered into the PARENT's
+            transcript (the ``/ask`` answer panel), so its own nested
+            tab is scaffolding that is closed when the run ends and
+            never re-opened by a replay.  Persisted on the child's
+            history row; only meaningful with *parent_task_id*; no
+            agent-script getter.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -783,6 +791,7 @@ def run(
             "parentTaskId": parent_task_id,
             "parentTabId": parent_tab_id,
             "parentReviewer": parent_reviewer,
+            "sideChannel": side_channel,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,

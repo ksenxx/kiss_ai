@@ -67,8 +67,14 @@ def _init_repo(repo: str) -> None:
     git("commit", "-q", "-m", "seed")
 
 
-class RunAgentSubagentTabTest(unittest.TestCase):
-    """Sub-agent dispatches get run_parallel tab semantics end to end."""
+class DaemonUdsHarness(unittest.TestCase):
+    """A real daemon on a temporary Unix socket plus a webview-like viewer.
+
+    Shared by the sub-agent tab suites: ``setUp`` isolates persistence
+    and config under a temp ``.kiss`` dir, serves a
+    :class:`RemoteAccessServer` on a UDS, and exposes helpers to open a
+    viewer connection, send it commands and stub the LLM boundary.
+    """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="run_agent_subtab_")
@@ -276,6 +282,10 @@ class RunAgentSubagentTabTest(unittest.TestCase):
             return raw
 
         self._parent_class.run = stub_run
+
+
+class RunAgentSubagentTabTest(DaemonUdsHarness):
+    """Sub-agent dispatches get run_parallel tab semantics end to end."""
 
     def test_parented_dispatch_gets_run_parallel_tab_semantics(self) -> None:
         """The full sub-agent tab contract, driven over the real daemon."""

@@ -1236,8 +1236,12 @@ class _CommandsMixin:
         (possibly blocked) tool call.
 
         The nested tab is closed by the frontend the moment the
-        answering session ends, so the answer itself is delivered
-        separately: when :func:`daemon_client.run` returns (or
+        answering session ends (``subagentDone``), and the child is
+        dispatched as a *side channel* so replays of the parent (or of
+        the child itself) re-issue that close instead of re-opening a
+        finished tab — see :meth:`_announce_subagent_rows`.  The
+        answer itself is therefore delivered separately: when
+        :func:`daemon_client.run` returns (or
         raises), the worker broadcasts a persisted ``ask_answer``
         event into the OWNER task's transcript via
         :meth:`_broadcast_ask_answer`, and the running task's tab
@@ -1292,6 +1296,7 @@ class _CommandsMixin:
                     append_to_system_prompt=append_to_system_prompt,
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
+                    side_channel=True,
                     chat_id=chat_id,
                     use_worktree=False,
                     auto_commit=False,

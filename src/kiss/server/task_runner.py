@@ -1393,6 +1393,11 @@ class _TaskRunnerMixin:
                 # check in ``agent_dispatch._dispatch`` already passed.
                 "reviewer": bool(cmd.get("parentReviewer"))
                 or _is_review_task(str(cmd.get("prompt", "") or "")),
+                # A side channel (the /ask answerer) reports into the
+                # parent's transcript; its nested tab is closed when
+                # the run ends and replays keep it closed.  Persisted
+                # with the child's row (see persistence._add_task).
+                "side_channel": bool(cmd.get("sideChannel")),
             }
             if parent_task_id
             else None
