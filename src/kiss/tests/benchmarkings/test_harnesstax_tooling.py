@@ -11,9 +11,9 @@ ledger database with the real schema, then run the ``aggregate``, ``audit``,
 ``analyze`` and ``report`` command-line tools as subprocesses with
 ``HARNESSTAX_RESULTS_ROOT`` / ``HARNESSTAX_HOME`` pointing at the tree.
 
-Not covered here: the turn cap in ``sea_core.on_llm_call`` and the client
-timeout in ``harbor_agent`` need a live daemon, a model and a container; they
-were exercised by hand with ``HARNESSTAX_MAX_TURNS=3`` on a real trial.
+Not covered here: the client timeout in ``harbor_agent`` and the container
+attach need a live daemon, a model and a container; they were exercised by
+hand on a real trial.
 """
 
 from __future__ import annotations
@@ -344,33 +344,6 @@ def test_aggregate_falls_back_to_trajectory_without_ledger(tree: dict[str, Path]
     assert rec["turns"] == 6 and rec["cost"] == pytest.approx(0.05) and rec["tokens"] == 5000
 
 
-def test_aggregate_counts_spend_only_through_the_turn_cap(tree: dict[str, Path]) -> None:
-    """An attempt that ran past the cap is billed through its cap-th call.
-
-    The ledger is preferred; the trajectory trailers are the fallback.
-    """
-    # Every synthetic trial has 4 calls; with a cap of 3 each is over the cap.  The SWE
-    # trials are not in the ledger (trajectory fallback: call 4's trailer = spend through
-    # call 3); the timed-out TB trial is (ledger: first 3 usage events).
-    proc = run_tool(tree, "aggregate", "--phase", PHASE, HARNESSTAX_MAX_TURNS="3")
-    assert proc.returncode == 0, proc.stderr
-    summary = json.loads((tree["root"] / PHASE / "summary.json").read_text())
-    swe = next(r for r in summary["records"] if r["benchmark"] == "swebench-lite")
-    assert swe["turns"] == 3 and swe["cost"] == pytest.approx(0.03) and swe["tokens"] == 3000
-    timed_out = next(r for r in summary["records"] if r["task"] == "train-fasttext")
-    assert timed_out["turns"] == 3 and timed_out["cost"] == pytest.approx(0.3)
-    # the same trials are flagged as overruns: tool calls ran after the cap
-    proc = run_tool(tree, "audit", "--phase", PHASE, HARNESSTAX_MAX_TURNS="3")
-    assert proc.returncode == 0, proc.stderr
-    assert (
-        proc.stdout.count("overrun") >= 5
-        and "1 tool call(s) executed after the 3-turn cap" in proc.stdout
-    )
-    # with the real cap nothing is an overrun
-    proc = run_tool(tree, "audit", "--phase", PHASE)
-    assert "overrun" not in proc.stdout
-
-
 def test_audit_flags_and_quarantines(tree: dict[str, Path]) -> None:
     """The audit lists incomplete and fallback-served trials and moves them out of the tree."""
     proc = run_tool(tree, "audit", "--phase", PHASE)
@@ -483,17 +456,6 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
         "cost_usd": 0.01,
         "tokens": 1000,
     }
-    # a cap of 2 counts two calls and the spend through call 2 (read from call 3's trailer)
-    assert trials.trajectory_metrics(tmp_path, max_turns=2) == {
-        "turns": 2,
-        "cost_usd": 0.02,
-        "tokens": 2000,
-    }
-    assert trials.trajectory_metrics(tmp_path, max_turns=9) == {
-        "turns": 5,
-        "cost_usd": 0.04,
-        "tokens": 4000,
-    }
     assert trials.count_turns(tmp_path) == 5
     assert trials.trajectory_metrics(tmp_path / "missing") == {
         "turns": 0,
@@ -569,52 +531,66 @@ def test_daemon_pinned_catalog_drops_fallbacks(tmp_path: Path) -> None:
     assert json.loads(target.read_text()) == [{"name": "a"}, {"name": "b"}]
 
 
-def test_turn_cap_ends_the_run_before_the_extra_call(tmp_path: Path) -> None:
-    """Calls 1..N pass through and are logged; call N+1 raises the terminal error promptly."""
-    import threading
+def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
+    """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
+    import docker
 
     from benchmarkings.harnesstax import sea_core
-    from kiss.core.kiss_error import BudgetExceededError
 
+    # The hook ends the trial when its container is gone, so the test needs a
+    # live one; without a Docker daemon the liveness check is skipped.
+    container_name = "c"
+    live = None
+    try:
+        client = docker.from_env()
+        client.ping()
+        live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
+        container_name = live.id
+    except Exception:
+        pass
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(
             {
-                "container": "c",
+                "container": container_name,
+                "workdir": "/app",
                 "prompt": "p",
                 "model": MODEL,
-                "max_turns": 3,
                 "trajectory": str(tmp_path / "trajectory.jsonl"),
             }
         )
     )
     harness = sea_core.ContainerHarness(str(config))
-    for expected in (1, 2, 3):
-        assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
-            {"role": "user", "content": "x"}
-        ]
-        assert harness.turns == expected
-    outcome: list[BaseException | None] = []
-    worker = threading.Thread(target=lambda: outcome.append(_call_capped(harness)))
-    worker.start()
-    worker.join(timeout=5)
-    assert not worker.is_alive(), "the capped call deadlocked"
-    assert isinstance(outcome[0], BudgetExceededError)
+    try:
+        for expected in range(1, 202):
+            assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
+                {"role": "user", "content": "x"}
+            ]
+            assert harness.turns == expected
+    finally:
+        if live is not None:
+            live.remove(force=True)
+    if live is not None:
+        # the container is gone: the next model call ends the trial
+        from kiss.core.kiss_error import BudgetExceededError
+
+        with pytest.raises(BudgetExceededError):
+            harness.on_llm_call([])
+    assert harness.on_tool_call("Bash", {"command": "ls"}) == "OK"
+    assert harness.on_tool_call("ask_user_question", {"question": "?"}) != "OK"
+    assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
+    assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
+    assert harness.docker_image() == f"container:{container_name}"
+    assert harness.if_append_basic_tools() and not harness.use_memory() and not harness.use_web_tools()
+    assert "/app" in harness.system_prompt()
     events = [
-        json.loads(line)["event"]
+        json.loads(line)
         for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
     ]
-    assert events == ["llm_call", "llm_call", "llm_call", "turn_cap"]
-    assert harness.turns == 3
+    assert [e["event"] for e in events].count("llm_call") == 201 + (live is not None)
+    tool_events = [e for e in events if e["event"] == "tool_call"]
+    assert [e["blocked"] for e in tool_events] == [False, True, True, True]
 
-
-def _call_capped(harness: object) -> BaseException | None:
-    """Invoke the hook once more and return the exception it raised (or None)."""
-    try:
-        harness.on_llm_call([])  # type: ignore[attr-defined]
-    except BaseException as exc:  # noqa: BLE001 - the test inspects the type
-        return exc
-    return None
 
 
 def test_audit_agent_error_and_deadline_aware_contamination(tree: dict[str, Path]) -> None:
@@ -663,3 +639,63 @@ def test_audit_agent_error_and_deadline_aware_contamination(tree: dict[str, Path
         "pypi-server" not in proc.stdout
     )  # timed out, and the fallback call came after the deadline
     assert "4 flagged trial(s)" in proc.stdout
+
+
+def test_time_limit_note_in_prompt_and_tool_results(tmp_path: Path) -> None:
+    """With a time limit the prompt states it and every tool result gets the wall-clock note."""
+    import docker
+
+    from benchmarkings.harnesstax import sea_core
+
+    # on_llm_call ends the trial when the container is gone, so a live one is
+    # needed wherever a Docker daemon is available
+    container_name = "c"
+    live = None
+    try:
+        client = docker.from_env()
+        client.ping()
+        live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
+        container_name = live.id
+    except Exception:
+        pass
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "container": container_name, "workdir": "/app", "prompt": "p", "model": MODEL,
+        "trajectory": str(tmp_path / "trajectory.jsonl"), "time_limit_seconds": 1500,
+    }))
+    harness = sea_core.ContainerHarness(str(config))
+    assert "hard wall-clock limit of 25 minutes" in harness.system_prompt()
+    anthropic = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "out"}]}
+    anthropic_list = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                                   "content": [{"type": "text", "text": "out"}]}]}
+    responses = {"type": "function_call_output", "call_id": "c", "output": "out"}
+    chat = {"role": "tool", "tool_call_id": "c", "content": "out"}
+    for message in (anthropic, anthropic_list, responses, chat):
+        harness.on_llm_call([message])
+    assert anthropic["content"][0]["content"].startswith("out\n\n[wall clock: 0 min used, 25 min left")
+    assert anthropic_list["content"][0]["content"][-1]["text"].startswith("[wall clock:")
+    assert responses["output"].startswith("out\n\n[wall clock:")
+    assert chat["content"].startswith("out\n\n[wall clock:")
+    # the task prompt and assistant turns are never annotated
+    prompt = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+    harness.on_llm_call([prompt, assistant])
+    assert prompt == {"role": "user", "content": "task"}
+    assert assistant["content"] == [{"type": "text", "text": "hi"}]
+    assert not sea_core.append_to_last_tool_result("not a dict", "n")
+    events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    assert "[wall clock:" in json.dumps(events[0]["new_messages"])
+    # without a limit nothing is added and the prompt does not mention one
+    config.write_text(json.dumps({
+        "container": container_name, "workdir": "/app", "prompt": "p", "model": MODEL,
+        "trajectory": str(tmp_path / "t2.jsonl"),
+    }))
+    plain = sea_core.ContainerHarness(str(config))
+    assert "wall-clock limit" not in plain.system_prompt()
+    message = {"type": "function_call_output", "call_id": "c", "output": "out"}
+    try:
+        plain.on_llm_call([message])
+    finally:
+        if live is not None:
+            live.remove(force=True)
+    assert message["output"] == "out"

@@ -158,6 +158,7 @@ except `append_basic_tools`, whose getter is
 | `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
 | `is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
 | `tool_profile()`         | `str`                           | `""` (daemon's choice)    | `toolProfile`       |
+| `docker_image()`         | `str`                           | `""` (host)               | `dockerImage`       |
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
@@ -240,6 +241,14 @@ The parameters without getters:
   `""` keeps the daemon's usual choice.  An unknown name fails the
   task when it starts.  Ignored when `if_append_basic_tools()` is
   `False`, which builds no built-in toolset at all.
+- **`docker_image()`** — the Docker image the run's shell and file
+  tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
+  execute in: an image name starts a fresh container that is removed
+  when the task ends, `container:<name-or-id>` attaches to a container
+  the caller already runs (commands run in its working directory, it
+  is left running afterwards), `""` runs the tools on the host.
+  `run_parallel` sub-agents share the task's container; `bash_job`
+  and persistent memory are unavailable in a Docker run.
 
 ### Hook getters (no `run()` parameter)
 

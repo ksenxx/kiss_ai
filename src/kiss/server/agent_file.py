@@ -76,6 +76,7 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("use_memory", "useMemory"),
     ("is_parallel", "useParallel"),
     ("tool_profile", "toolProfile"),
+    ("docker_image", "dockerImage"),
 )
 """The overridable ``run`` parameters, as ``(getter_name, wire_field)`` pairs.
 
@@ -106,6 +107,10 @@ tool profile the run's built-in toolset is cut down to — a key of
 ``sorcar_agent.TOOL_PROFILES`` (``"full"``, ``"review"``, ``"shell"``,
 ``"bash"``) or ``""`` for the daemon's usual choice; the task runner
 rejects an unknown name when the task starts.
+``docker_image()`` (wire field ``dockerImage``) returns the Docker
+image the run's shell and file tools execute in, or
+``container:<name-or-id>`` to attach to a running container, or ``""``
+for the host.
 ``parent_task_id`` / ``parent_tab_id`` (wire fields ``parentTaskId``
 / ``parentTabId``) are absent by design: they are the
 CALLING task's identity — what marks the dispatched run as that
@@ -165,7 +170,7 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     elif param in (
         "work_dir", "model", "chat_id", "system_prompt",
         "append_to_system_prompt", "append_to_prompt", "scope_work_dir",
-        "tool_profile",
+        "tool_profile", "docker_image",
     ):
         ok = isinstance(value, str)
         expected = "a string"
