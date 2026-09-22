@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -36,6 +40,12 @@ def _asset_hash(name: str) -> str:
 def _asset_urls(html: str, name: str) -> list[str]:
     urls = re.findall(r'(?:href|src)="([^"]+)"', html)
     return [u for u in urls if f"/media/{name}" in u]
+
+
+def _sw_version(sw_script: str) -> str:
+    match = re.search(r'"version": "([0-9a-f]{16})"', sw_script)
+    assert match is not None, "service worker script has no manifest version"
+    return match.group(1)
 
 
 class TestWebviewMediaCacheBust(unittest.TestCase):
@@ -75,6 +85,105 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
             response.headers["Cache-Control"],
             "no-cache, no-store, must-revalidate",
         )
+
+
+class TestMediaVersionFollowsFileChanges(unittest.TestCase):
+    """A running daemon must hand out new ``?v=`` URLs after the media
+    files change on disk.
+
+    Regression: ``_media_url`` hashed each asset once per process, so a
+    daemon that outlived an in-place upgrade served the fresh
+    ``chat.html`` (re-read per request) with the OLD ``main.css`` URL.
+    The remote webapp's service worker is cache first for ``/media``,
+    so phones rendered the new markup — the "Working directory" bottom
+    sheet — with a stylesheet that had no rules for it: the sheet sat
+    unstyled below the chat.
+    """
+
+    def setUp(self) -> None:
+        # A stand-in media directory: every packaged asset symlinked,
+        # main.css a real copy this test can edit.
+        self.media_dir = Path(tempfile.mkdtemp(prefix="kiss-media-"))
+        for entry in web_server.MEDIA_DIR.iterdir():
+            if entry.name == "main.css":
+                shutil.copyfile(entry, self.media_dir / entry.name)
+            else:
+                (self.media_dir / entry.name).symlink_to(entry)
+        self.real_media_dir = web_server.MEDIA_DIR
+        web_server.MEDIA_DIR = self.media_dir
+        web_server._MEDIA_VERSION_CACHE.clear()
+
+    def tearDown(self) -> None:
+        web_server.MEDIA_DIR = self.real_media_dir
+        web_server._MEDIA_VERSION_CACHE.clear()
+        shutil.rmtree(self.media_dir, ignore_errors=True)
+
+    def _bump_mtime(self, path: Path) -> None:
+        # Coarse-mtime file systems could stamp a same-second rewrite
+        # with the old mtime; force a visibly later one.
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    def _serve(self, url: str) -> bytes:
+        server = RemoteAccessServer(host="127.0.0.1", port=0)
+        conn = SimpleNamespace(remote_address=("127.0.0.1", 0))
+        response = asyncio.run(
+            server._process_request(
+                cast(ServerConnection, conn), Request(path=url, headers=Headers()),
+            ),
+        )
+        assert response is not None
+        self.assertEqual(response.status_code, 200)
+        return response.body or b""
+
+    def test_new_css_on_disk_yields_new_url_sw_manifest_and_body(self) -> None:
+        css = self.media_dir / "main.css"
+        html_before = web_server._build_html()
+        sw_before = web_server._build_service_worker()
+        (url_before,) = _asset_urls(html_before, "main.css")
+        self.assertIn(url_before, sw_before)
+        # A repeat call with the file untouched is served from the cache.
+        self.assertEqual(web_server._media_url("main.css"), url_before)
+
+        rule = "\n#workdir-panel { outline: 1px solid red; }\n"
+        css.write_text(css.read_text(encoding="utf-8") + rule, encoding="utf-8")
+        self._bump_mtime(css)
+
+        html_after = web_server._build_html()
+        sw_after = web_server._build_service_worker()
+        (url_after,) = _asset_urls(html_after, "main.css")
+        self.assertNotEqual(url_after, url_before)
+        self.assertEqual(url_after, f"/media/main.css?v={_asset_hash('main.css')}")
+        self.assertIn(url_after, sw_after)
+        self.assertNotIn(url_before, sw_after)
+        # The manifest hash — and so the worker's cache name — moved too.
+        self.assertNotEqual(_sw_version(sw_before), _sw_version(sw_after))
+        self.assertIn(rule.encode("utf-8"), self._serve(url_after))
+
+    def test_same_size_replacement_with_preserved_mtime_yields_new_url(self) -> None:
+        # `cp -p` / archive extraction keep the source's mtime and a
+        # same-size edit keeps st_size: the fingerprint must still move
+        # (ctime cannot be preserved from userspace).
+        css = self.media_dir / "main.css"
+        url_before = web_server._media_url("main.css")
+        st = css.stat()
+        data = bytearray(css.read_bytes())
+        data[-1:] = b"X" if data[-1:] != b"X" else b"Y"
+        css.write_bytes(bytes(data))
+        os.utime(css, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(css.stat().st_mtime_ns, st.st_mtime_ns)
+        self.assertEqual(css.stat().st_size, st.st_size)
+        url_after = web_server._media_url("main.css")
+        self.assertNotEqual(url_after, url_before)
+        self.assertEqual(url_after, f"/media/main.css?v={_asset_hash('main.css')}")
+
+    def test_rewrite_with_same_bytes_keeps_the_url(self) -> None:
+        css = self.media_dir / "main.css"
+        url_before = web_server._media_url("main.css")
+        css.write_bytes(css.read_bytes())
+        self._bump_mtime(css)
+        # The stat changed, so the bytes are re-hashed — to the same value.
+        self.assertEqual(web_server._media_url("main.css"), url_before)
 
 
 if __name__ == "__main__":

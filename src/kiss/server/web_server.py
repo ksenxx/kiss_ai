@@ -284,7 +284,11 @@ def _ensure_voice_model() -> Path | None:
         except Exception:
             logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
             return None
-_MEDIA_VERSION_CACHE: dict[str, str] = {}
+# Per media asset: (stat fingerprint, sha256 prefix) of the bytes last
+# hashed by _media_url.  The fingerprint (see _media_fingerprint) is
+# checked on every call so the hash is recomputed after the file
+# changes on disk.
+_MEDIA_VERSION_CACHE: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 
 TRAJECTORY_TEMPLATE = (
     Path(__file__).resolve().parents[1]
@@ -3157,13 +3161,39 @@ class WebPrinter(JsonPrinter):
 
 
 def _media_url(name: str) -> str:
-    """Return a cache-busted URL for a packaged web media asset."""
-    ver = _MEDIA_VERSION_CACHE.get(name)
-    if ver is None:
-        data = (MEDIA_DIR / name).read_bytes()
-        ver = hashlib.sha256(data).hexdigest()[:16]
-        _MEDIA_VERSION_CACHE[name] = ver
-    return f"/media/{name}?v={ver}"
+    """Return a cache-busted URL for a packaged web media asset.
+
+    The ``?v=`` value is a prefix of the sha256 of the file's CURRENT
+    bytes: the file is stat'ed on every call and re-hashed whenever its
+    :func:`_media_fingerprint` differs from the one last hashed.  A
+    daemon keeps running across an in-place upgrade of the media files
+    (the VS Code extension replaces them under the same paths), and
+    ``chat.html`` is re-read on every request; a hash frozen at first
+    use would pair the new page with the OLD ``main.css`` / ``main.js``
+    on every browser whose service worker (media/sw.js, cache first
+    for ``/media``) still holds the old URL — on a phone that showed up
+    as the unstyled "Working directory" sheet stuck below the chat.
+    """
+    path = MEDIA_DIR / name
+    fingerprint = _media_fingerprint(path)
+    cached = _MEDIA_VERSION_CACHE.get(name)
+    if cached is None or cached[0] != fingerprint:
+        ver = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        cached = (fingerprint, ver)
+        _MEDIA_VERSION_CACHE[name] = cached
+    return f"/media/{name}?v={cached[1]}"
+
+
+def _media_fingerprint(path: Path) -> tuple[int, int, int, int]:
+    """Return a stat-based change fingerprint of a media file.
+
+    ``(st_mtime_ns, st_ctime_ns, st_size, st_ino)``: a copy that
+    preserves the source's mtime and size (``cp -p``, archive
+    extraction) still moves ctime — which userspace cannot set — and
+    an atomic rename-in-place replacement changes the inode.
+    """
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
 
 _VSCODE_THEME_VARS_CSS = (
@@ -3463,8 +3493,9 @@ def _app_shell_urls() -> list[str]:
     :func:`_build_html` keeps it in lockstep with the page: an asset
     added to the template is precached without a second list to
     maintain.  The hashes come from :func:`_media_url`, so the list
-    is stable for the daemon's lifetime and changes exactly when an
-    asset's bytes change.
+    is stable while the assets on disk are unchanged and changes
+    exactly when an asset's bytes change — even under a daemon that
+    keeps running across an in-place upgrade.
     """
     urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
     return ["/", *urls]
