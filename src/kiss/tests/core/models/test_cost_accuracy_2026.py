@@ -254,18 +254,29 @@ class TestDirectMoonshotCachePricing:
         assert cost == pytest.approx(expected)
 
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
-        """openrouter.ai 2026-09: kimi-k3 $1.70 in, $0.17 cache read (0.1x), on every alias."""
+        """OpenRouter kimi-k3 charges cache reads at 0.1x input on the base entry and every alias.
+
+        The literal prices are not pinned: openrouter.ai repriced kimi-k3 from
+        $1.70 to $3.00 per 1M input tokens in 2026-09 and ``update_models.py``
+        tracks the live price.  What must hold is that no alias silently falls
+        back to the 0.25x Moonshot default for cache reads, and that the
+        thinking aliases bill exactly like the base model.
+        """
+        base = MODEL_INFO["openrouter/moonshotai/kimi-k3"]
+        assert base.input_price_per_1M > 0
+        assert base.cache_read_price_per_1M == pytest.approx(base.input_price_per_1M * 0.1)
         for name in (
-            "openrouter/moonshotai/kimi-k3",
             "openrouter/moonshotai/kimi-k3-low",
             "openrouter/moonshotai/kimi-k3-high",
             "openrouter/moonshotai/kimi-k3-max",
-            "openrouter/~moonshotai/kimi-latest",
         ):
             info = MODEL_INFO[name]
-            assert info.input_price_per_1M == pytest.approx(1.70), name
-            assert info.output_price_per_1M == pytest.approx(8.50), name
-            assert info.cache_read_price_per_1M == pytest.approx(0.17), name
+            assert info.input_price_per_1M == pytest.approx(base.input_price_per_1M), name
+            assert info.output_price_per_1M == pytest.approx(base.output_price_per_1M), name
+            assert info.cache_read_price_per_1M == pytest.approx(base.cache_read_price_per_1M), name
+        latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
+        assert latest.input_price_per_1M > 0
+        assert latest.cache_read_price_per_1M == pytest.approx(latest.input_price_per_1M * 0.1)
 
 
 class TestDirectCatalogPricesMatchProviderPages:

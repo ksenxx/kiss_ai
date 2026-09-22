@@ -1743,7 +1743,7 @@
     "alias_of": "gpt-6-astra"
   },
   "gpt-6-luna": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1754,7 +1754,7 @@
     "use_responses_api": true
   },
   "gpt-6-luna-high": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1766,7 +1766,7 @@
     "alias_of": "gpt-6-luna"
   },
   "gpt-6-luna-low": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1778,7 +1778,7 @@
     "alias_of": "gpt-6-luna"
   },
   "gpt-6-luna-medium": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1790,7 +1790,7 @@
     "alias_of": "gpt-6-luna"
   },
   "gpt-6-luna-xhigh": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1802,7 +1802,7 @@
     "alias_of": "gpt-6-luna"
   },
   "gpt-6-sol": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1813,7 +1813,7 @@
     "use_responses_api": true
   },
   "gpt-6-sol-high": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1825,7 +1825,7 @@
     "alias_of": "gpt-6-sol"
   },
   "gpt-6-sol-low": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1837,7 +1837,7 @@
     "alias_of": "gpt-6-sol"
   },
   "gpt-6-sol-medium": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -1849,7 +1849,7 @@
     "alias_of": "gpt-6-sol"
   },
   "gpt-6-sol-xhigh": {
-    "context_length": 0,
+    "context_length": 400000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": false,
@@ -3875,7 +3875,7 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "openrouter.ai 2026-09: $1.70 in / $8.50 out, cache read $0.17 (0.1x)",
+    "comment": "openrouter.ai 2026-09-22: $3.00 in / $15.00 out, cache read $0.30 (0.1x)",
     "thinking": "high",
     "use_responses_api": true
   },
@@ -3887,7 +3887,7 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "openrouter.ai 2026-09: $1.70 in / $8.50 out, cache read $0.17 (0.1x)",
+    "comment": "openrouter.ai 2026-09-22: $3.00 in / $15.00 out, cache read $0.30 (0.1x)",
     "thinking": "high",
     "use_responses_api": true,
     "alias_of": "openrouter/moonshotai/kimi-k3"
@@ -3900,7 +3900,7 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "openrouter.ai 2026-09: $1.70 in / $8.50 out, cache read $0.17 (0.1x)",
+    "comment": "openrouter.ai 2026-09-22: $3.00 in / $15.00 out, cache read $0.30 (0.1x)",
     "thinking": "low",
     "use_responses_api": true,
     "alias_of": "openrouter/moonshotai/kimi-k3"
@@ -3913,7 +3913,7 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "openrouter.ai 2026-09: $1.70 in / $8.50 out, cache read $0.17 (0.1x)",
+    "comment": "openrouter.ai 2026-09-22: $3.00 in / $15.00 out, cache read $0.30 (0.1x)",
     "thinking": "max",
     "use_responses_api": true,
     "alias_of": "openrouter/moonshotai/kimi-k3"

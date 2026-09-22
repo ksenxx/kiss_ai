@@ -61,8 +61,11 @@ import pytest
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.kiss_error import KISSError
-
-IMAGE = "python:3.11-slim"
+from kiss.tests.agents.sorcar.docker_test_containers import (
+    IMAGE,
+    image_container_ids,
+    remove_new_image_containers,
+)
 
 
 def _docker_available() -> bool:
@@ -81,18 +84,13 @@ pytestmark = [
 
 @pytest.fixture
 def cleanup() -> Iterator[None]:
-    """Snapshot existing containers; force-remove anything new afterwards."""
+    """Snapshot existing IMAGE containers; force-remove new IMAGE containers afterwards."""
     client = docker.from_env()
-    before = {c.id for c in client.containers.list(all=True)}
+    before = image_container_ids(client)
     try:
         yield
     finally:
-        for container in client.containers.list(all=True):
-            if container.id not in before:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+        remove_new_image_containers(client, before)
 
 
 def test_kill_exec_after_concurrent_close_is_a_noop(cleanup: None) -> None:
