@@ -18,6 +18,7 @@ import enum
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -587,8 +588,8 @@ class _MergeFlowMixin:
                         manual=manual, work_dir=requested_dir,
                     )
                     return
-                diff = _git(work_dir, "diff", "--cached")
-                if not diff.stdout.strip():
+                diff_text = GitWorktreeOps.staged_diff(Path(work_dir))
+                if not diff_text:
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
                         message="Nothing to commit.", manual=manual, work_dir=requested_dir,
@@ -624,7 +625,7 @@ class _MergeFlowMixin:
                     ) or None
                 msg = (
                     generate_commit_message_from_diff(
-                        diff.stdout,
+                        diff_text,
                         user_prompt=user_prompt,
                         task_result=task_result,
                     )
@@ -912,15 +913,18 @@ class _MergeFlowMixin:
                     message=f"Staging failed in {repo.name}: {first_line}",
                 )
                 return
-            diff = _git(str(repo), lit, "diff", "--cached", "--", *changed)
-            if diff.returncode != 0:
+            # ``--quiet`` exits 1 when the paths differ, 0 when they do
+            # not, and anything else on failure.
+            diff = _git(str(repo), lit, "diff", "--cached", "--quiet", "--", *changed)
+            if diff.returncode not in (0, 1):
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
                     message=f"git diff failed in {repo.name}.",
                 )
                 return
-            if not diff.stdout.strip():
+            if diff.returncode == 0:
                 return
+            diff_text = GitWorktreeOps.staged_diff(repo, pathspecs=changed)
             self.printer.broadcast({
                 "type": "autocommit_progress",
                 "message": f"Committing changes in {repo.name}…",
@@ -937,7 +941,7 @@ class _MergeFlowMixin:
             try:
                 msg = (
                     generate_commit_message_from_diff(
-                        diff.stdout,
+                        diff_text,
                         user_prompt=user_prompt,
                         task_result=task_result,
                     )
@@ -1844,6 +1848,11 @@ class _MergeFlowMixin:
                     if tab_id:
                         progress_event["tabId"] = tab_id
                     self.printer.broadcast(progress_event)
+                    logger.info(
+                        "Worktree merge started: tab=%s worktree=%s thread=%s",
+                        tab_id, wt._wt_dir, threading.current_thread().name,
+                    )
+                    started = time.monotonic()
                     if resolve_conflicts:
                         usage_before = _agent_usage(wt)
                         try:
@@ -1856,6 +1865,10 @@ class _MergeFlowMixin:
                     else:
                         msg = wt.merge()
                     success = "Successfully merged" in msg
+                    logger.info(
+                        "Worktree merge finished: tab=%s success=%s elapsed=%.1fs",
+                        tab_id, success, time.monotonic() - started,
+                    )
                     return {"success": success, "message": msg}
                 # Only the AUTOMATIC discard (post-task finalize /
                 # session-resume, internal=True) rescues git-ignored
