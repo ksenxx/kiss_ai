@@ -6,17 +6,20 @@
 // End-to-end tests for the host side of the Task Info relay
 // (out/SorcarPanelManager.js + out/SorcarSidebarView.js) against a
 // REAL Unix-domain-socket daemon stub:
-//  - setMetaSink pushes the current state right away (placeholders
-//    when no panel reported yet);
-//  - a panel webview's `metaUpdate` reaches the sink while that panel
-//    is active, is cached while it is not, and the cache repaints the
-//    sink on panel activation and on the active panel's close;
-//  - a panel webview's `getInfoFile` is forwarded to the daemon, and
-//    the daemon's direct `infoFile` reply is relayed back into the
-//    webview;
+//  - setMetaSink pushes the current state right away (the (null, null)
+//    placeholders when no panel reported yet);
+//  - a panel webview's `metaUpdate` {values, taskUpdate} reaches the
+//    sink while that panel is active, is cached while it is not, and
+//    the cache repaints the sink on panel activation and on the active
+//    panel's close;
+//  - refreshActiveTaskUpdate posts `refreshTaskUpdate` to the ACTIVE
+//    panel's webview only, and is a no-op without panels;
+//  - a panel webview's `getTaskUpdate` is forwarded to the daemon with
+//    exactly {tabId, knownSig, token, refresh}, and the daemon's direct
+//    `taskUpdate` reply is relayed back into the webview;
 //  - SorcarSidebarView.postMetaState before the webview resolves is
 //    caught up on the webview's `ready` (the meta view's late-resolve
-//    path).
+//    path), and its webview's `metaRefresh` calls onMetaRefresh.
 
 'use strict';
 
@@ -210,14 +213,18 @@ async function runTest() {
 
   // --- setMetaSink pushes the placeholder state right away -------------
   const sinkCalls = [];
-  manager.setMetaSink((values, progressMd) => {
-    sinkCalls.push({values, progressMd});
+  manager.setMetaSink((values, taskUpdate) => {
+    sinkCalls.push({values, taskUpdate});
   });
   assert.deepStrictEqual(
     sinkCalls,
-    [{values: null, progressMd: ''}],
+    [{values: null, taskUpdate: null}],
     'no panels: the sink starts on the placeholder state',
   );
+
+  // --- refreshActiveTaskUpdate without panels is a no-op ---------------
+  manager.refreshActiveTaskUpdate();
+  assert.strictEqual(createdPanels.length, 0, 'no panel is created by a refresh');
 
   // --- the active panel's metaUpdate reaches the sink -------------------
   manager.openNewChat();
@@ -225,7 +232,7 @@ async function runTest() {
   const tabA = tabIdOf(panelA);
   assert.deepStrictEqual(
     sinkCalls[sinkCalls.length - 1],
-    {values: null, progressMd: ''},
+    {values: null, taskUpdate: null},
     'a fresh active panel has no cached values yet',
   );
   const valuesA = {
@@ -238,14 +245,34 @@ async function runTest() {
     workdir: '/a',
     maxBudget: '$10.00',
   };
-  panelA._recv.fire({type: 'metaUpdate', values: valuesA, progressMd: '# a'});
+  const updateA = {
+    content: '<h4>So far</h4><ul><li>read the spec</li></ul>',
+    running: false,
+    updatedAt: 1790000000000,
+    cost: 0.04,
+    error: '',
+  };
+  panelA._recv.fire({type: 'metaUpdate', values: valuesA, taskUpdate: updateA});
   await waitFor(
     () =>
       sinkCalls.length > 0 &&
-      sinkCalls[sinkCalls.length - 1].progressMd === '# a',
+      sinkCalls[sinkCalls.length - 1].taskUpdate !== null,
     'the active panel metaUpdate must reach the sink',
   );
   assert.deepStrictEqual(sinkCalls[sinkCalls.length - 1].values, valuesA);
+  assert.deepStrictEqual(
+    sinkCalls[sinkCalls.length - 1].taskUpdate,
+    updateA,
+    'the task-update state rides along with the values',
+  );
+
+  // --- refreshActiveTaskUpdate reaches the ACTIVE panel only -----------
+  manager.refreshActiveTaskUpdate();
+  assert.deepStrictEqual(
+    panelA._posted.filter(m => m.type === 'refreshTaskUpdate'),
+    [{type: 'refreshTaskUpdate'}],
+    'the active panel gets one refreshTaskUpdate',
+  );
 
   // --- a second (active) panel repaints the sink; a BACKGROUND panel's
   // report is cached without repainting --------------------------------
@@ -254,22 +281,24 @@ async function runTest() {
   panelA.active = false;
   assert.deepStrictEqual(
     sinkCalls[sinkCalls.length - 1],
-    {values: null, progressMd: ''},
+    {values: null, taskUpdate: null},
     'activating an unreported panel shows the placeholders',
   );
   const valuesB = {...valuesA, tokens: '2.00K', workdir: '/b'};
-  panelB._recv.fire({type: 'metaUpdate', values: valuesB, progressMd: ''});
+  panelB._recv.fire({type: 'metaUpdate', values: valuesB, taskUpdate: null});
   await waitFor(
     () =>
       sinkCalls[sinkCalls.length - 1].values &&
       sinkCalls[sinkCalls.length - 1].values.tokens === '2.00K',
     'the new active panel metaUpdate must reach the sink',
   );
+  assert.strictEqual(sinkCalls[sinkCalls.length - 1].taskUpdate, null);
   const sinkLenAfterB = sinkCalls.length;
+  const updateA2 = {...updateA, content: '<p>a2</p>', running: true};
   panelA._recv.fire({
     type: 'metaUpdate',
     values: {...valuesA, tokens: '1.50K'},
-    progressMd: '# a2',
+    taskUpdate: updateA2,
   });
   await new Promise(r => setTimeout(r, 200));
   assert.strictEqual(
@@ -278,12 +307,29 @@ async function runTest() {
     'a background panel report must not repaint the sink',
   );
 
+  // The refresh goes to the active panel (B), not the background one.
+  manager.refreshActiveTaskUpdate();
+  assert.strictEqual(
+    panelB._posted.filter(m => m.type === 'refreshTaskUpdate').length,
+    1,
+    'the now-active panel B gets the refresh',
+  );
+  assert.strictEqual(
+    panelA._posted.filter(m => m.type === 'refreshTaskUpdate').length,
+    1,
+    'the background panel A gets no further refresh',
+  );
+
   // --- switching back to panel A pushes its cached values ---------------
   panelB.active = false;
   panelA.active = true;
   panelA._viewState.fire({webviewPanel: panelA});
   assert.strictEqual(sinkCalls[sinkCalls.length - 1].values.tokens, '1.50K');
-  assert.strictEqual(sinkCalls[sinkCalls.length - 1].progressMd, '# a2');
+  assert.deepStrictEqual(
+    sinkCalls[sinkCalls.length - 1].taskUpdate,
+    updateA2,
+    'the cached task update repaints on activation',
+  );
 
   // --- closing the active panel repaints from the remaining one ---------
   panelA.dispose();
@@ -297,39 +343,56 @@ async function runTest() {
     daemonCommands.find(c => c.type === 'closeTab' && c.tabId === tabA);
   await waitFor(closeTabCmd, 'the user close retires the chat tab');
 
-  // --- getInfoFile forwards to the daemon; infoFile relays back ---------
+  // --- getTaskUpdate forwards to the daemon; taskUpdate relays back -----
   const tabB = tabIdOf(panelB);
   panelB._recv.fire({
-    type: 'getInfoFile',
-    workDir: '/b',
+    type: 'getTaskUpdate',
     tabId: tabB,
     knownSig: 'old-sig',
     token: '7',
+    refresh: true,
+    workDir: '/stale-field',
   });
   await waitFor(
-    () => daemonCommands.some(c => c.type === 'getInfoFile'),
-    'getInfoFile must be forwarded to the daemon',
+    () => daemonCommands.some(c => c.type === 'getTaskUpdate'),
+    'getTaskUpdate must be forwarded to the daemon',
   );
-  const fwd = daemonCommands.find(c => c.type === 'getInfoFile');
-  assert.strictEqual(fwd.workDir, '/b');
+  const fwd = daemonCommands.find(c => c.type === 'getTaskUpdate');
+  assert.deepStrictEqual(
+    Object.keys(fwd).sort(),
+    ['knownSig', 'refresh', 'tabId', 'token', 'type'],
+    'exactly tabId, knownSig, token and refresh are forwarded',
+  );
   assert.strictEqual(fwd.tabId, tabB);
   assert.strictEqual(fwd.knownSig, 'old-sig');
   assert.strictEqual(fwd.token, '7');
+  assert.strictEqual(fwd.refresh, true);
   await daemonBroadcast({
-    type: 'infoFile',
+    type: 'taskUpdate',
     tabId: tabB,
     token: '7',
+    taskId: 'task-b',
     exists: true,
     sig: '9:9',
-    content: 'progress text',
+    content: '<p>report text</p>',
+    error: '',
+    running: false,
+    cost: 0.07,
+    updatedAt: 1790000100000,
   });
   await waitFor(
-    () => panelB._posted.some(m => m.type === 'infoFile'),
-    'the infoFile reply must be relayed into the webview',
+    () => panelB._posted.some(m => m.type === 'taskUpdate'),
+    'the taskUpdate reply must be relayed into the webview',
   );
-  const reply = panelB._posted.find(m => m.type === 'infoFile');
-  assert.strictEqual(reply.content, 'progress text');
+  const reply = panelB._posted.find(m => m.type === 'taskUpdate');
+  assert.strictEqual(reply.content, '<p>report text</p>');
   assert.strictEqual(reply.token, '7');
+  assert.strictEqual(reply.sig, '9:9');
+  assert.strictEqual(reply.running, false);
+  assert.strictEqual(reply.cost, 0.07);
+  assert.strictEqual(reply.updatedAt, 1790000100000);
+  assert.strictEqual(reply.exists, true);
+  assert.strictEqual(reply.error, '');
 
   // --- postMetaState before the webview resolves is flushed on ready ----
   const metaView = new SorcarSidebarView(vscodeStub.Uri.file(EXT_ROOT), {
@@ -337,7 +400,14 @@ async function runTest() {
     bodyAttrs: ' class="editor-tab-mode meta-panel-mode"',
     onEvent: () => {},
   });
-  metaView.postMetaState(valuesB, '# cached');
+  const cachedUpdate = {
+    content: '<p>cached</p>',
+    running: false,
+    updatedAt: 1790000200000,
+    cost: 0.01,
+    error: '',
+  };
+  metaView.postMetaState(valuesB, cachedUpdate);
   const host = makeFakePanel('kissSorcar.metaViewSecondary', 'Task Info');
   metaView.attachWebviewHost(
     {
@@ -363,15 +433,29 @@ async function runTest() {
   );
   const flushed = host._posted.find(m => m.type === 'metaState');
   assert.deepStrictEqual(flushed.values, valuesB);
-  assert.strictEqual(flushed.progressMd, '# cached');
+  assert.deepStrictEqual(flushed.taskUpdate, cachedUpdate);
 
   // A later postMetaState reaches the resolved webview directly.
-  metaView.postMetaState(null, '');
+  metaView.postMetaState(null, null);
   await waitFor(
     () =>
       host._posted.filter(m => m.type === 'metaState').length >= 2 &&
       host._posted[host._posted.length - 1].values === null,
     'a live postMetaState must reach the webview',
+  );
+  assert.strictEqual(host._posted[host._posted.length - 1].taskUpdate, null);
+
+  // --- the view's metaRefresh message calls onMetaRefresh ---------------
+  let refreshCalls = 0;
+  metaView.onMetaRefresh = () => {
+    refreshCalls += 1;
+  };
+  host._recv.fire({type: 'metaRefresh'});
+  await waitFor(() => refreshCalls === 1, 'metaRefresh must call onMetaRefresh');
+  assert.strictEqual(
+    daemonCommands.filter(c => c.type === 'getTaskUpdate').length,
+    1,
+    'metaRefresh is a host hook, not a daemon command',
   );
 
   metaView.dispose();

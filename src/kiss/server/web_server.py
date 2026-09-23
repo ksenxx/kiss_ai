@@ -111,6 +111,7 @@ from kiss.server.json_printer import (
 )
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
+from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
@@ -4806,6 +4807,8 @@ class RemoteAccessServer:
         self._voice_speaker_lock = threading.Lock()
 
         self._printer = WebPrinter()
+        # Task-update reports for the task-info panel (getTaskUpdate).
+        self._task_updates = TaskUpdateRunner()
         self._printer.work_dir = self.work_dir
         self._vscode_server = VSCodeServer(printer=self._printer)
         if self.work_dir:
@@ -7157,154 +7160,83 @@ class RemoteAccessServer:
                 return state.agent
         return states[0].agent if states else None
 
-    async def _handle_get_info_file(
+    async def _handle_get_task_update(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Send a remote-web client the contents of ``tmp/PROGRESS.md``.
+        """Send a client the task-update report for the task its tab shows.
 
-        Handles the ``getInfoFile`` command polled by ``media/main.js``
-        for the info subpanel of the docked task-info panel (remote
-        desktop mode): the subpanel mirrors the ``tmp/PROGRESS.md`` of
-        the task RUNNING in the tab, and shows nothing when that task
-        has not written one — in particular never the file a previous
-        task left behind.  Two facts about the tab's task drive that
-        (:meth:`_tab_task_agent`):
+        Handles the ``getTaskUpdate`` command polled by ``media/main.js``
+        for the info subpanel of the task-info panel: the subpanel shows
+        the report the :mod:`~kiss.agents.seas.task_update_sea` agent
+        wrote about the task RUNNING in the tab (:meth:`_tab_task_agent`),
+        never a file the task left on disk.  :class:`TaskUpdateRunner`
+        owns the reports: this poll makes it run the agent when the tab's
+        task has no report yet, when the report is
+        :data:`~kiss.server.task_update.UPDATE_INTERVAL_S` old, or when
+        the poll carries ``refresh: true`` (the panel's refresh button);
+        the reply reflects the state right after that decision, so a
+        refresh answers ``running: true`` at once and the report itself
+        arrives with a later poll.
 
-        * its effective work dir (``agent.work_dir``, assigned by
-          ``RelentlessAgent._reset`` once the run begins — the
-          worktree work dir for a worktree-mode run) is the ONLY
-          directory read while it is known; the tab's ``workDir`` (the
-          main checkout) holds the previous task's copy — rescued from
-          its merged worktree or written by an earlier non-worktree
-          run — and must not be served as a fallback;
-        * a file whose mtime predates the run's start
-          (``agent._task_start_ms``, stamped by the task runner before
-          the run does anything) is treated as missing, so the main
-          checkout's stale copy stays hidden during a non-worktree run
-          and during the setup window before ``_reset`` (when the
-          agent's ``work_dir`` is unset or still the previous run's).
-          One second of tolerance absorbs coarse filesystem
-          timestamps.  Agents without the stamp (``run_parallel``
-          sub-agents, which run in the parent's dir) are not gated.
+        The reply is sent directly to the requesting *endpoint* — never
+        broadcast — with the shape::
 
-        A tab attached to no task (nothing to gate against) keeps the
-        older resolution: the tab's recorded worktree dir
-        (:meth:`WebPrinter.worktree_dir_for_tab`) first, then
-        ``workDir`` (falling back to the daemon work dir exactly like
-        the other file handlers).  The reply is sent directly to the
-        requesting *endpoint* — never broadcast — with the shape::
-
-            {"type": "infoFile", "exists": <bool>, "sig": <str>,
-             "content": <utf-8 text>,           # changed or missing
+            {"type": "taskUpdate", "exists": <bool>, "sig": <str>,
+             "content": <html>, "error": <str>, "running": <bool>,
+             "cost": <usd>, "updatedAt": <epoch ms>,
              "unchanged": true,                  # sig == cmd knownSig
-             "workDir": <echo of cmd workDir>,
-             "tabId": <echo of cmd tabId>,
+             "tabId": <echo of cmd tabId>, "taskId": <task id>,
              "token": <echo of cmd token>}
 
-        ``token`` is an opaque client request tag: the webview matches
-        replies by it instead of by ``workDir``, whose dispatch-stamped
-        value may differ from what the client sent (root paths are
-        blanked and re-pinned by ``ServerApi.dispatch``).
-
-        ``sig`` fingerprints the file (``"<path>:<mtime_ns>:<size>"``,
-        ``""`` when missing — the path prefix makes a switch between
-        directories always look changed); a poll whose ``knownSig``
-        matches it is answered with ``unchanged: true`` and no
-        ``content``, so an idle file costs a stat per poll instead of
-        a re-read and re-send.  A missing, unreadable, non-regular,
-        oversized (:data:`_OPEN_FILE_MAX_BYTES`) or pre-task file
-        replies ``exists: false`` with empty content — the client
-        renders that as an empty subpanel rather than an error.
-
-        The file is opened ONCE (``O_NONBLOCK``, so a FIFO planted at
-        the path cannot hang the worker thread) and the sig, the type /
-        size checks and the read all use that one descriptor's
-        ``fstat``: a concurrent replacement of the path cannot pair one
-        version's sig with another version's content, and the read is
-        bounded by the fstat'ed size.  A file rewritten mid-read can
-        still yield a short/torn read, which at worst mismatches the
-        sig and heals on the next poll.
+        ``token`` is an opaque client request tag the webview matches
+        replies by.  ``sig`` fingerprints the report state; a poll whose
+        ``knownSig`` matches it is answered with ``unchanged: true`` and
+        no ``content``.  A tab attached to no running task, or to a task
+        whose history row is not allocated yet, replies ``exists: false``
+        with empty content — the client renders that as an empty
+        subpanel rather than an error.
 
         Args:
-            cmd: The parsed ``getInfoFile`` command (optional
-                ``workDir``, ``tabId``, ``knownSig``).
+            cmd: The parsed ``getTaskUpdate`` command (``tabId``,
+                optional ``knownSig``, ``token``, ``refresh``).
             endpoint: The requesting WSS connection.
         """
-        raw_work_dir = self._cmd_str(cmd, "workDir")
-        work_dir = self._cmd_work_dir(cmd)
+        from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+        from kiss.server import agent_state
+
         tab_id = self._cmd_str(cmd, "tabId")
         known_sig = self._cmd_str(cmd, "knownSig")
         token = self._cmd_str(cmd, "token")
+        force = bool(cmd.get("refresh"))
+        reply: dict[str, Any] = {
+            "type": "taskUpdate",
+            "tabId": tab_id,
+            "token": token,
+            "taskId": "",
+            "exists": False,
+            "sig": "",
+            "content": "",
+        }
         agent = self._tab_task_agent(tab_id) if tab_id else None
-        task_dir = str(getattr(agent, "work_dir", "") or "")
-        start_ms = int(getattr(agent, "_task_start_ms", 0) or 0)
-        # Files last modified before the task started belong to a
-        # previous task; 0 disables the gate.
-        min_mtime_ns = (start_ms - 1000) * 1_000_000 if start_ms > 0 else 0
-        candidates: list[Path] = []
-        if task_dir:
-            candidates.append(Path(task_dir) / "tmp" / "PROGRESS.md")
-        else:
-            wt_dir = self._printer.worktree_dir_for_tab(tab_id) if tab_id else ""
-            if wt_dir and wt_dir != work_dir:
-                candidates.append(Path(wt_dir) / "tmp" / "PROGRESS.md")
-            candidates.append(Path(work_dir) / "tmp" / "PROGRESS.md")
-
-        def _read_info() -> dict[str, Any]:
-            reply: dict[str, Any] = {
-                "type": "infoFile",
-                "workDir": raw_work_dir,
-                "tabId": tab_id,
-                "token": token,
-                "exists": False,
-                "sig": "",
-                "content": "",
-            }
-            for path in candidates:
-                try:
-                    fd = os.open(
-                        str(path),
-                        os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
-                    )
-                except OSError:
-                    continue
-                try:
-                    st = os.fstat(fd)
-                    if (
-                        not stat_module.S_ISREG(st.st_mode)
-                        or st.st_size > _OPEN_FILE_MAX_BYTES
-                        or st.st_mtime_ns < min_mtime_ns
-                    ):
-                        continue
-                    sig = f"{path}:{st.st_mtime_ns}:{st.st_size}"
-                    if known_sig and known_sig == sig:
-                        reply["exists"] = True
-                        reply["sig"] = sig
-                        reply["unchanged"] = True
-                        del reply["content"]
-                        return reply
-                    chunks: list[bytes] = []
-                    remaining = st.st_size
-                    while remaining > 0:
-                        chunk = os.read(fd, remaining)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                        remaining -= len(chunk)
-                except OSError:
-                    continue
-                finally:
-                    os.close(fd)
-                reply["exists"] = True
-                reply["sig"] = sig
-                reply["content"] = b"".join(chunks).decode(
-                    "utf-8", errors="replace",
-                )
-                return reply
-            return reply
-
-        reply = await asyncio.to_thread(_read_info)
-        await self._reply_direct(endpoint, reply, "getInfoFile")
+        state = agent_state.find_by_agent(agent) if agent is not None else None
+        task_id = _persisted_task_id(agent) if agent is not None else ""
+        # The state is keyed by the persisted task id only once the run
+        # has allocated its history row (``agent_task_allocated`` re-keys
+        # it); until then a reused tab's agent still reports the PREVIOUS
+        # task's id, which must not be shown or re-run as this task's.
+        if (
+            state is not None
+            and state.is_task_active
+            and task_id
+            and state.task_id == task_id
+        ):
+            update = self._task_updates.poll(task_id, agent, force=force)
+            reply["taskId"] = task_id
+            reply.update(update.payload())
+            if known_sig and known_sig == update.sig:
+                reply["unchanged"] = True
+                del reply["content"]
+        await self._reply_direct(endpoint, reply, "getTaskUpdate")
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.

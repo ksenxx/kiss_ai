@@ -667,7 +667,7 @@ body.remote-chat .running-item-ids::before {
 
 /* The task-info panel's INNER layout, shared by the desktop docking
    below and the mobile drawer: the live-metadata bullet list on top,
-   the tmp/PROGRESS.md subpanel filling the rest. */
+   the task-update subpanel filling the rest. */
 body.remote-chat #meta-list {
   list-style: disc outside;
   margin: 0;
@@ -702,14 +702,13 @@ body.remote-chat .meta-item .meta-value {
   color: var(--dim);
 }
 
-/* The info subpanel below the task-info list mirrors the active
-   workdir's tmp/PROGRESS.md (getInfoFile poll in main.js).  Its flex
+/* The info subpanel below the task-info list shows the running
+   task's task update (getTaskUpdate poll in main.js).  Its flex
    basis is 0 so its own content never squeezes the list above:
    it grows into exactly the space the list leaves free — the rest
    of the panel — and scrolls inside.  While there is nothing to
-   show (no running task, or the file is missing or empty) main.js
-   drops the `visible` class and the WHOLE subpanel disappears,
-   header included. */
+   show (no running task) main.js drops the `visible` class and the
+   WHOLE subpanel disappears, header included. */
 body.remote-chat #meta-info {
   display: none;
   flex-direction: column;

@@ -272,16 +272,22 @@
         <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
         <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
       </ul>
-      <!-- Info subpanel: mirrors the RUNNING task's ./tmp/PROGRESS.md
-           (main.js polls getInfoFile every second, so the panel
-           refreshes as soon as the file changes; a worktree-mode task's
-           copy is read from its worktree) and fills all the panel space
-           the list above leaves free.  While there is nothing to show —
-           no running task, or no file — main.js keeps the `visible`
-           class off and the whole subpanel, header included, stays
-           hidden. -->
-      <div id="meta-info" aria-label="tmp/PROGRESS.md">
-        <div class="sidebar-hdr">tmp/PROGRESS.md</div>
+      <!-- Info subpanel: the RUNNING task's task update — the report of
+           the task-update agent (src/kiss/agents/seas/task_update_sea.py)
+           on what the task has done so far and its partial results.
+           main.js polls getTaskUpdate while the task runs; the daemon
+           runs the agent on the first poll, every 10 minutes after that,
+           and when the refresh button (top right) is pressed.  The
+           subpanel fills all the panel space the list above leaves free.
+           While there is nothing to show — no running task — main.js
+           keeps the `visible` class off and the whole subpanel, header
+           included, stays hidden. -->
+      <div id="meta-info" aria-label="Task update">
+        <div class="sidebar-hdr meta-info-hdr">
+          <span>Task update</span>
+          <button type="button" id="meta-info-refresh" title="Run the task update now" aria-label="Refresh task update"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-info-status" class="meta-info-status" aria-live="polite"></div>
         <div id="meta-info-content" class="md-body"></div>
       </div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>

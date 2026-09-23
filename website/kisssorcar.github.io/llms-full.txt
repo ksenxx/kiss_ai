@@ -238,7 +238,7 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
-The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a docked **Task Info sidebar** next to the chat — live token, cost, step, elapsed-time, machine, work-dir, and budget metrics for the visible tab's running task, plus a live view of that task's own `tmp/PROGRESS.md`.
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a docked **Task Info sidebar** next to the chat — live token, cost, step, elapsed-time, machine, work-dir, and budget metrics for the visible tab's running task, plus a **Task update**: a short report, written by the bundled `task_update` agent (`src/kiss/agents/seas/task_update_sea.py`), of what that task has done so far and its partial results. The agent runs when the panel first shows the task, every 10 minutes after that, and whenever you press the refresh button at the top right of the report; it runs as a sub-agent in the task's own chat and its cost counts towards the task.
 
 ## Python Client API
 
@@ -659,7 +659,7 @@ $WORK/agents           # agents shared by the team
 
 ### Precedence when two folders define the same name
 
-Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge` and `/sh`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
+Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge`, `/sh` and `/task_update`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
 
 ### Changes take effect while the daemon runs
 
