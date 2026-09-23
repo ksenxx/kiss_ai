@@ -8,8 +8,11 @@ Provides HTTPS + WSS access to the Sorcar chat interface from any
 browser, including mobile devices.  Uses the ``websockets`` library to
 serve both HTTPS (for the HTML page and static media assets) and
 WSS (for bidirectional command/event communication) on a single port.
-TLS is always enabled; a self-signed certificate is auto-generated in
-``~/.kiss/tls/`` when no explicit certificate is provided.
+TLS is always enabled; when no explicit certificate is provided a
+machine-local CA and a server certificate signed by it are auto-generated
+in ``~/.kiss/tls/`` (:mod:`kiss.server.tls_certs`).  Trusting the CA once
+(``kiss-web --trust-ca`` on this machine, the ``/ca.crt`` download on a
+phone) removes the browser warning on the Local and LAN URLs.
 
 Authentication uses the ``remote_password`` setting from
 ``~/.kiss/config.json``.  While that password is empty, the server is
@@ -46,7 +49,6 @@ import base64
 import binascii
 import collections
 import contextlib
-import datetime
 import errno
 import hashlib
 import html
@@ -104,6 +106,7 @@ from kiss.core.vscode_config import (
     save_config,
 )
 from kiss.server import sorcar as sorcar_api
+from kiss.server import tls_certs
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
@@ -1716,6 +1719,7 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
 def _save_url_file(
     url_file: Path, local_url: str, tunnel_url: str | None = None,
     loopback_url: str | None = None, lan_urls: list[str] | None = None,
+    local_ca: bool = False,
 ) -> None:
     """Write the active server URLs to ``url_file``.
 
@@ -1732,6 +1736,10 @@ def _save_url_file(
         loopback_url: The ``https://127.0.0.1:PORT`` URL, or None.
         lan_urls: ``https://<lan-ip>:PORT`` URLs for the host's
             routable LAN addresses, or None.
+        local_ca: True when the daemon serves the auto-generated,
+            locally-signed certificate, so the ``/ca.crt`` download and
+            ``kiss-web --trust-ca`` apply (the webview shows the trust
+            hint only then).
     """
     data: dict[str, object] = {"local": local_url}
     if tunnel_url:
@@ -1740,6 +1748,8 @@ def _save_url_file(
         data["loopback"] = loopback_url
     if lan_urls:
         data["lan"] = list(lan_urls)
+    if local_ca:
+        data["localCa"] = True
     _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
 
 
@@ -1999,6 +2009,21 @@ def _get_local_ips() -> frozenset[str]:
     )
 
 
+def _trust_local_ca() -> None:
+    """``kiss-web --trust-ca``: trust the local CA in this user's browsers.
+
+    Creates the CA first when no daemon has run yet, then installs
+    ``~/.kiss/tls/ca.pem`` into every trust store found
+    (:func:`kiss.server.tls_trust.trust_local_ca`) and prints one line
+    per store plus the phone instructions.
+    """
+    from kiss.server.tls_trust import trust_local_ca
+
+    _refresh_local_tls_pair(_get_local_ips())
+    for line in trust_local_ca(_tls_dir() / tls_certs.CA_CERT_FILE):
+        print(line)
+
+
 def _print_url() -> None:
     """Print the active remote URL from ``~/.kiss/remote-url.json``.
 
@@ -2136,76 +2161,25 @@ def _generate_self_signed_cert(
     cert_path: Path,
     key_path: Path,
 ) -> None:
-    """Generate a self-signed TLS certificate and private key.
+    """Generate a locally-signed TLS cert/key pair at *cert_path*/*key_path*.
 
-    Creates an RSA 2048-bit key and a self-signed X.509 certificate
-    valid for 10 years, covering ``localhost``, ``127.0.0.1``, ``::1``,
-    and all ``*.local`` names.  Parent directories are created as needed.
-
-    M4: the validity is intentionally long-lived (10 years) so the
-    auto-generated developer cert does not silently start failing
-    after a year.  :func:`_create_ssl_context` also regenerates an
-    expiring/expired cert, so even if the validity changes again the
-    auto-renewal path will rescue it.
+    Creates (or reuses) the machine-local CA beside the certificate
+    (``ca.pem`` / ``ca-key.pem`` in ``cert_path.parent``) and issues a
+    server certificate signed by it covering ``localhost``, the
+    hostname, ``127.0.0.1`` and ``::1`` (see
+    :mod:`kiss.server.tls_certs`).  Kept under its historical name for
+    the test fixtures that build throwaway servers; the daemon itself
+    goes through :func:`_create_ssl_context`, which also adds the LAN IPs.
 
     Args:
         cert_path: Where to write the PEM-encoded certificate.
         key_path: Where to write the PEM-encoded private key.
     """
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "KISS Sorcar"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "KISS Sorcar"),
-    ])
-
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName("localhost"),
-                x509.DNSName("*.local"),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-                x509.IPAddress(ipaddress.IPv6Address("::1")),
-            ]),
-            critical=False,
-        )
-        .sign(key, hashes.SHA256())
-    )
-
-    for d in {cert_path.parent, key_path.parent}:
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            logger.debug("Could not chmod 0700 on %s", d, exc_info=True)
-
-    key_bytes = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption(),
-    )
-    if key_path.exists():
-        key_path.unlink()
-    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, key_bytes)
-    finally:
-        os.close(fd)
-    os.chmod(key_path, 0o600)
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    ca_cert_path = cert_path.parent / tls_certs.CA_CERT_FILE
+    ca_key_path = cert_path.parent / tls_certs.CA_KEY_FILE
+    if not tls_certs._ca_pair_is_usable(ca_cert_path, ca_key_path):
+        tls_certs.generate_local_ca(ca_cert_path, ca_key_path)
+    tls_certs.issue_server_cert(cert_path, key_path, ca_cert_path, ca_key_path)
 
 
 def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
@@ -2235,100 +2209,144 @@ def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
         time.sleep(0.05)
 
 
+def _tls_lock_path() -> Path:
+    """Return the lock file serialising sibling daemons' access to :func:`_tls_dir`."""
+    tls_dir = _tls_dir()
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    return tls_dir / ".tls.lock"
+
+
+def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
+    """Under the TLS lock, (re)issue the auto-generated pair for *lan_ips* and load it into *ctx*.
+
+    Serialises sibling daemons with an exclusive file lock held from the
+    check through ``load_cert_chain``: the check-then-generate sequence
+    and the pair publication are not atomic, so two concurrent processes
+    could otherwise publish (or load) a mismatched cert/key pair (F4-10).
+    The lock is bounded like the UDS sidecar lock in ``_bind_uds``: a
+    blocking ``LOCK_EX`` behind a wedged sibling would stall startup
+    forever, and cancelling the ``to_thread`` caller cannot interrupt
+    the executor syscall.
+
+    Self-heals a pair that OpenSSL rejects (a daemon that died between
+    writing the key and the certificate leaves a mismatched pair every
+    future load would refuse, F4-10 residual): the server certificate
+    is re-issued under the same lock and loaded again.
+
+    Args:
+        ctx: The server context to load; must not be serving yet (see
+            :meth:`RemoteAccessServer._refresh_tls_cert` for a live one).
+        lan_ips: The host's current LAN IP addresses; each must be in
+            the certificate's SAN or the ``https://<lan-ip>:PORT`` URL
+            fails hostname verification even on a browser that trusts
+            the local CA.
+
+    Returns:
+        The PEM bytes of the certificate that was loaded.
+    """
+    tls_dir = _tls_dir()
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+        cert_path, key_path = tls_certs.ensure_local_tls_pair(tls_dir, lan_ips)
+        try:
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+        except ssl.SSLError:
+            logger.warning(
+                "Auto-generated TLS cert/key pair in %s is mismatched or "
+                "corrupt; re-issuing", tls_dir,
+            )
+            key_path.unlink(missing_ok=True)
+            cert_path, key_path = tls_certs.ensure_local_tls_pair(tls_dir, lan_ips)
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+        return cert_path.read_bytes()
+
+
+def _refresh_local_tls_pair(lan_ips: Iterable[str]) -> bytes:
+    """Under the TLS lock, (re)issue the auto-generated pair for *lan_ips* and return its cert PEM.
+
+    Executor half of :meth:`RemoteAccessServer._refresh_tls_cert`: the
+    generation (key, signing, file writes) runs off the event loop, and the
+    returned bytes tell the caller whether the certificate on disk
+    differs from the one its live context is serving.
+
+    Args:
+        lan_ips: See :func:`_load_local_tls_pair`.
+    """
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+        cert_path, _key_path = tls_certs.ensure_local_tls_pair(_tls_dir(), lan_ips)
+        return cert_path.read_bytes()
+
+
+def _reload_local_tls_pair_if_unlocked(ctx: ssl.SSLContext, cert_pem: bytes) -> bool:
+    """Load the on-disk pair into the live *ctx* if it is still *cert_pem* and the lock is free.
+
+    Event-loop half of :meth:`RemoteAccessServer._refresh_tls_cert`.
+    ``load_cert_chain`` must run on the event-loop thread, where every
+    ``SSL_new`` for accepted connections also runs, so the context is
+    never mutated concurrently with a handshake setup.  The lock is
+    therefore only tried, never waited for: a busy sibling or a pair a
+    sibling has meanwhile replaced makes this a no-op and the next
+    watchdog tick retries.
+
+    Args:
+        ctx: The live server context.
+        cert_pem: The certificate bytes the caller observed under the
+            lock in :func:`_refresh_local_tls_pair`.
+
+    Returns:
+        True when the pair was loaded into *ctx*.
+    """
+    tls_dir = _tls_dir()
+    cert_path = tls_dir / tls_certs.SERVER_CERT_FILE
+    key_path = tls_dir / tls_certs.SERVER_KEY_FILE
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        if not lock_exclusive(lock_file, blocking=False):
+            return False
+        if cert_path.read_bytes() != cert_pem:
+            return False
+        ctx.load_cert_chain(str(cert_path), str(key_path))
+        return True
+
+
 def _create_ssl_context(
     certfile: str | None = None,
     keyfile: str | None = None,
+    lan_ips: Iterable[str] | None = None,
 ) -> ssl.SSLContext:
     """Create an SSL context for the HTTPS/WSS server.
 
     If *certfile* and *keyfile* are provided, loads them directly.
-    Otherwise auto-generates a self-signed certificate in
-    ``~/.kiss/tls/`` and uses that.
+    Otherwise uses the machine-local CA in ``~/.kiss/tls/`` to issue a
+    server certificate covering ``localhost``, the hostname, the
+    loopback addresses and *lan_ips*, re-issuing it when it is missing,
+    expiring, signed by a different CA or lacking one of the IPs.
 
     Args:
         certfile: Path to PEM certificate file, or None for auto-gen.
         keyfile: Path to PEM private key file, or None for auto-gen.
+        lan_ips: LAN IP addresses the auto-generated certificate must
+            cover; probed with :func:`_get_local_ips` when ``None``.
 
     Returns:
         A configured ``ssl.SSLContext`` ready for ``websockets.serve()``.
     """
-    if certfile and keyfile:
-        cert_path = Path(certfile)
-        key_path = Path(keyfile)
-    else:
-        tls_dir = _tls_dir()
-        cert_path = tls_dir / "cert.pem"
-        key_path = tls_dir / "key.pem"
-        # Serialise sibling daemons with an exclusive file lock: the
-        # check-then-generate sequence and the pair publication are
-        # not atomic, so two concurrent processes could otherwise
-        # publish (or load) a mismatched cert/key pair (F4-10).
-        tls_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = tls_dir / ".tls.lock"
-        with open(lock_path, "w", encoding="utf-8") as lock_file:
-            # Bounded like the UDS sidecar lock in ``_bind_uds``: a
-            # blocking ``LOCK_EX`` behind a wedged sibling would stall
-            # startup forever, and cancelling the ``to_thread`` caller
-            # cannot interrupt the executor syscall.
-            _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
-            if not cert_path.is_file() or not key_path.is_file():
-                logger.info(
-                    "Generating self-signed TLS certificate in %s", tls_dir,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-            elif _self_signed_cert_needs_renewal(cert_path):
-                logger.info(
-                    "Self-signed TLS certificate %s is expired or "
-                    "expiring within 30 days; regenerating",
-                    cert_path,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            try:
-                ctx.load_cert_chain(str(cert_path), str(key_path))
-            except ssl.SSLError:
-                # Crash-consistent pair publish (F4-10 residual): a
-                # daemon that died between writing the key and the
-                # cert leaves a mismatched pair on disk that every
-                # future load would reject.  Self-heal under the
-                # lock: regenerate the pair and load the fresh one.
-                logger.warning(
-                    "Auto-generated TLS cert/key pair in %s is "
-                    "mismatched or corrupt; regenerating", tls_dir,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-                ctx.load_cert_chain(str(cert_path), str(key_path))
-            return ctx
-
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(str(cert_path), str(key_path))
+    if certfile and keyfile:
+        ctx.load_cert_chain(certfile, keyfile)
+        return ctx
+    _load_local_tls_pair(ctx, _get_local_ips() if lan_ips is None else lan_ips)
     return ctx
 
 
-def _self_signed_cert_needs_renewal(
-    cert_path: Path, threshold_days: int = 30,
-) -> bool:
-    """Return True if *cert_path* is expired or expires within *threshold_days*.
-
-    Helper for M4 — the auto-generated TLS cert is regenerated when it
-    is close to (or past) its ``not_valid_after`` date.  Returns True
-    on parse errors so a corrupt cert is also regenerated rather than
-    crashing the server at ``load_cert_chain``.
-    """
+def _local_ca_cert_bytes() -> bytes | None:
+    """Return the PEM bytes of the auto-generated CA, or None when absent."""
+    ca_path = _tls_dir() / tls_certs.CA_CERT_FILE
     try:
-        from cryptography import x509
-
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        not_after = cert.not_valid_after_utc
-    except Exception:
-        return True
-    return not_after - datetime.datetime.now(datetime.UTC) <= datetime.timedelta(
-        days=threshold_days,
-    )
+        return ca_path.read_bytes()
+    except OSError:
+        return None
 
 
 class FifoSendLock:
@@ -4610,13 +4628,20 @@ _WS_SHIM_JS = r"""
 """
 
 
-def _http_response(status: int, content_type: str, body: bytes) -> Response:
+def _http_response(
+    status: int,
+    content_type: str,
+    body: bytes,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> Response:
     """Build a proper HTTP/1.1 Response for the websockets server.
 
     Args:
         status: HTTP status code (e.g. 200, 404).
         content_type: MIME type for the Content-Type header.
         body: Response body bytes.
+        extra_headers: Additional ``(name, value)`` headers, e.g. a
+            ``Content-Disposition`` for downloads.
 
     Returns:
         A websockets ``Response`` with Content-Length and Connection headers.
@@ -4631,6 +4656,7 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
             ("Cache-Control", "no-cache, no-store, must-revalidate"),
             ("Pragma", "no-cache"),
             ("Expires", "0"),
+            *(extra_headers or []),
         ]),
         body,
     )
@@ -4847,6 +4873,7 @@ class RemoteAccessServer:
         self._uds_lock_timeout_s = uds_owner_wait_s + 30.0
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._tls_refresh_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
         self._version_check_task: asyncio.Task[None] | None = None
         self._shutdown_initiated = False
@@ -4855,6 +4882,9 @@ class RemoteAccessServer:
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # PEM of the auto-generated server certificate the live SSL
+        # context is serving; see :meth:`_refresh_tls_cert`.
+        self._tls_loaded_cert: bytes = b""
         self._ips_probed = False
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
@@ -4968,6 +4998,23 @@ class RemoteAccessServer:
             return await asyncio.to_thread(_trajectory_jobs_response)
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return await asyncio.to_thread(_trajectory_job_response, path)
+        if path == "/ca.crt":
+            # The auto-generated local CA certificate (public data, no
+            # key) so a phone on the LAN can install and trust it and
+            # stop warning about the Local/LAN URLs.  The MIME type
+            # makes iOS offer the profile installer; the filename
+            # keeps Android's download recognisable.  Absent when the
+            # daemon runs with an explicit --certfile pair.
+            ca_bytes = await asyncio.to_thread(
+                _local_ca_cert_bytes,
+            ) if self._serves_local_ca else None
+            if ca_bytes is None:
+                return _http_response(404, "text/plain", b"Not Found")
+            return _http_response(
+                200, "application/x-x509-ca-cert", ca_bytes,
+                [("Content-Disposition",
+                  'attachment; filename="kiss-sorcar-local-ca.crt"')],
+            )
         if path == "/voice-model.tar.gz":
             model_file = await asyncio.to_thread(_ensure_voice_model)
             if model_file is None:
@@ -7273,6 +7320,11 @@ class RemoteAccessServer:
         """The ``https://127.0.0.1:PORT`` URL for local-machine access."""
         return f"https://127.0.0.1:{self.port}"
 
+    @property
+    def _serves_local_ca(self) -> bool:
+        """True when the served certificate is signed by the auto-generated local CA."""
+        return not self._ssl_certfile
+
     def _lan_urls(self) -> list[str]:
         """Return ``https://<lan-ip>:PORT`` URLs for this host's LAN IPs.
 
@@ -7310,7 +7362,7 @@ class RemoteAccessServer:
         """
         _save_url_file(
             self._url_file, self._local_url, tunnel_url,
-            self._loopback_url, self._lan_urls(),
+            self._loopback_url, self._lan_urls(), self._serves_local_ca,
         )
 
     def _write_url_file_logged(self, tunnel_url: str | None) -> None:
@@ -7372,6 +7424,7 @@ class RemoteAccessServer:
             "tunnelActive": tunnel_active,
             "loopbackUrl": self._loopback_url,
             "lanUrls": self._lan_urls(),
+            "localCa": self._serves_local_ca,
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
@@ -8509,12 +8562,63 @@ class RemoteAccessServer:
                 raise
             except Exception:
                 logger.debug("Watchdog IP check error", exc_info=True)
+            # Single-flight background task: re-issuing a certificate
+            # (key generation, signing, lock wait) must not delay the
+            # tick and the IP-change restart decision above.
+            if self._tls_refresh_task is None or self._tls_refresh_task.done():
+                self._tls_refresh_task = asyncio.create_task(
+                    self._refresh_tls_cert_logged(),
+                )
             try:
                 await self._watchdog_ping_clients()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
+
+    async def _refresh_tls_cert_logged(self) -> None:
+        """Run :meth:`_refresh_tls_cert`, logging any failure (watchdog task body)."""
+        try:
+            await self._refresh_tls_cert()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Could not re-issue the TLS server certificate", exc_info=True,
+            )
+
+    async def _refresh_tls_cert(self) -> None:
+        """Keep the live context's auto-generated certificate current.
+
+        Called every watchdog tick.  The certificate must be re-issued
+        when the machine's LAN IPs change (in tunnel mode an IP change
+        does not restart the daemon, see :meth:`_watchdog_check_ip_change`,
+        and the new ``https://<lan-ip>:PORT`` URL would fail hostname
+        verification even on a browser that trusts the local CA) and
+        when it is expiring (a daemon that stays up for years must not
+        end up serving an expired certificate).  A sibling daemon may
+        also have re-issued it.  All three cases reduce to: make the
+        pair on disk current for :attr:`_last_ips`
+        (:func:`_refresh_local_tls_pair`, off-thread, a no-op when it
+        already is) and, when the certificate on disk differs from the
+        one loaded, hot-load it (:func:`_reload_local_tls_pair_if_unlocked`,
+        on the loop thread).  New handshakes then present the new
+        certificate; existing connections are untouched.  Explicit
+        ``certfile``/``keyfile`` pairs are never rewritten.
+        """
+        if self._ssl_certfile or self._ssl_context is None:
+            return
+        cert_pem = await asyncio.to_thread(_refresh_local_tls_pair, self._last_ips)
+        if cert_pem == self._tls_loaded_cert or self._ssl_context is None:
+            return
+        if _reload_local_tls_pair_if_unlocked(self._ssl_context, cert_pem):
+            first_load = not self._tls_loaded_cert
+            self._tls_loaded_cert = cert_pem
+            logger.log(
+                logging.DEBUG if first_load else logging.INFO,
+                "Reloaded the TLS server certificate (LAN IPs %s)",
+                sorted(self._last_ips),
+            )
 
     def _watchdog_check_url_file(self) -> None:
         """Re-write ``~/.kiss/remote-url.json`` if it went missing.
@@ -9044,11 +9148,18 @@ class RemoteAccessServer:
     async def _setup_server_after_uds(self) -> None:
         """Continue :meth:`_setup_server` after the UDS bind."""
         if self._ssl_context is None:
+            lan_ips = await asyncio.to_thread(_get_local_ips)
             self._ssl_context = await asyncio.to_thread(
                 _create_ssl_context,
                 self._ssl_certfile,
                 self._ssl_keyfile,
+                lan_ips,
             )
+            # ``_tls_loaded_cert`` stays empty: the first watchdog tick
+            # loads the on-disk certificate under the lock
+            # (:meth:`_refresh_tls_cert`), which is race-free — reading
+            # the file here, after the lock was released, could record a
+            # sibling's newer certificate the context is not serving.
 
         last_err: OSError | None = None
         for attempt in range(_BIND_RETRY_ATTEMPTS):
@@ -9795,6 +9906,8 @@ class RemoteAccessServer:
         async with self._lifecycle_lock:
             await _cancel_task(self._watchdog_task)
             self._watchdog_task = None
+            await _cancel_task(self._tls_refresh_task)
+            self._tls_refresh_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
             await _cancel_task(self._update_watch_task)
@@ -9907,11 +10020,20 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--url", action="store_true",
         help="Print the active remote URL and exit",
     )
+    parser.add_argument(
+        "--trust-ca", action="store_true",
+        help="Install the local CA that signs the webapp's TLS certificate "
+        "into this user's browser trust stores (removes the certificate "
+        "warning on the Local and LAN URLs) and exit",
+    )
     parser.add_argument("--workdir", default=None, help="Working directory")
     args = parser.parse_args()
 
     if args.url:
         _print_url()
+        return
+    if args.trust_ca:
+        _trust_local_ca()
         return
 
     tunnel_token, tunnel_url = _resolve_tunnel_settings()

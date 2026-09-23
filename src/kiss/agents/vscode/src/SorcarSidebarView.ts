@@ -1284,6 +1284,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     let local = '';
     let loopback = '';
     let lanUrls: string[] = [];
+    let localCa = false;
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       tunnel = data.tunnel || '';
@@ -1292,13 +1293,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (Array.isArray(data.lan)) {
         lanUrls = data.lan.filter((u: unknown) => typeof u === 'string');
       }
+      localCa = data.localCa === true;
     } catch {}
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
     const ntfyUrl = this._getNtfyUrl();
     const key =
       `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}|` +
-      `${loopback}|${lanUrls.join(',')}`;
+      `${loopback}|${lanUrls.join(',')}|${localCa ? '1' : '0'}`;
     if (key === this._lastSentUrl) return;
     this._lastSentUrl = key;
     const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
@@ -1310,6 +1312,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     if (lanUrls.length > 0) {
       msg.lanUrls = lanUrls;
+    }
+    if (localCa) {
+      msg.localCa = true;
     }
     this._sendToWebview(msg);
   }

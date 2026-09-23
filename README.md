@@ -155,7 +155,17 @@ kiss-web --workdir "$HOME/projects/my-repo"
 
 # Print the active remote (cloudflared) URL and exit.
 kiss-web --url
+
+# Trust the daemon's TLS certificate in this user's browsers and exit.
+kiss-web --trust-ca
 ```
+
+The web app is always served over HTTPS. The Cloudflare URL uses Cloudflare's certificate; the Local (`https://127.0.0.1:PORT`) and LAN (`https://<lan-ip>:PORT`) URLs use a certificate the daemon issues from a machine-local certificate authority kept in `~/.kiss/tls/` (`ca.pem`, `ca-key.pem`). Browsers warn about that certificate until they trust the CA, once per device:
+
+- On the machine running the daemon: `kiss-web --trust-ca` adds `ca.pem` to the Chromium/Firefox NSS databases (Linux, needs `certutil` from `libnss3-tools`), the login keychain (macOS) or the user Root store (Windows). Restart the browser afterwards.
+- On a phone or tablet on the same network: open `https://<lan-ip>:PORT/ca.crt`, install the downloaded certificate, then enable trust for it (iOS: Settings > General > About > Certificate Trust Settings; Android: Settings > Security > Encryption & credentials > Install a certificate > CA certificate). Compare the SHA-256 fingerprint printed by `kiss-web --trust-ca` with the one the device shows.
+
+The CA certificate is public; the CA key never leaves `~/.kiss/tls/`. The server certificate is re-issued automatically when it is expiring or when the machine's LAN address changes, so the CA has to be trusted only once. The password gate and the LAN lockdown while no `remote_password` is set are unchanged.
 
 ### Python client API
 

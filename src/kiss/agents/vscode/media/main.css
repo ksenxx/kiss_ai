@@ -830,6 +830,16 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .remote-url-copy:hover { color: var(--fg); }
 
+/* One-line note under the Local/LAN URL bars telling the user how to
+   trust the local CA that signs their certificate (kiss-web --trust-ca
+   on this machine, the /ca.crt download on a phone). */
+.remote-url-tls-hint {
+  font-size: var(--fs-sm); color: var(--dim); padding: 0 10px;
+}
+.remote-url-tls-hint code { font-size: inherit; user-select: all; }
+.remote-url-tls-hint a { color: var(--accent); text-decoration: none; }
+.remote-url-tls-hint a:hover { text-decoration: underline; }
+
 .welcome-config {
   display: flex; flex-direction: column; gap: 8px;
   width: 100%; max-width: 720px; margin-bottom: 14px;
@@ -840,6 +850,7 @@ body.remote-chat #welcome-config { display: none !important; }
 #welcome-remote-url .remote-url-label { text-align: center; }
 #welcome-remote-url .remote-url-row { justify-content: center; }
 #welcome-remote-url .remote-url-link { flex: 0 1 auto; max-width: 100%; }
+#welcome-remote-url .remote-url-tls-hint { text-align: center; }
 .welcome-config-label { text-align: left; }
 
 #suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
