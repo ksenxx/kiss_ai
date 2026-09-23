@@ -80,6 +80,22 @@ class TaskUpdate:
         }
 
 
+def mark_legacy_updates_as_side_channels() -> int:
+    """Stamp task-update children persisted before the side-channel flag.
+
+    Rows written by earlier releases of :func:`run_task_update_sea`
+    carry ``is_side_channel = 0``, so every reload of a chat re-opened
+    each finished update as a dead sub-agent tab.  The daemon calls this
+    once at startup; it is idempotent.
+
+    Returns:
+        The number of rows newly stamped.
+    """
+    from kiss.agents.sorcar.persistence import _mark_legacy_side_channel_rows
+
+    return _mark_legacy_side_channel_rows(task_update_sea.PROMPT_TEMPLATE)
+
+
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     """Run the task-update agent in-process for *task_id*.
 
@@ -87,7 +103,10 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     stamped like a ``run_parallel`` child (``_tab_id`` /
     ``_subagent_info``) and resumed on *parent_agent*'s chat, so the
     frontend opens it as a nested tab of the task's tab and its history
-    row nests under the task's row in the same chat.  It uses the parent's
+    row nests under the task's row in the same chat.  The stamp marks it
+    a side channel: its tab is open only while it runs — a reload never
+    re-opens the finished tab, because its report lives in the task-info
+    panel, not in the tab.  It uses the parent's
     model unless the agent script defines ``model()``, the script's system
     prompt, tools and budget cap, and runs in the parent's work dir.
 
@@ -136,10 +155,17 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     )
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
+    # A side channel like the ``/ask`` answerer: its report lands in the
+    # task-info panel, so the finished child has no tab worth reopening.
+    # The daemon replays a finished side channel as ``subagentDone``
+    # instead of ``openSubagentTab`` (see ``server._is_side_channel_row``);
+    # without the stamp every reload re-opened one finished tab per
+    # periodic update.
     agent._subagent_info = {
         "parent_task_id": task_id,
         "parent_tab_id": parent_tab_id,
         "reviewer": False,
+        "side_channel": True,
     }
     agent.resume_chat_by_id(str(getattr(parent_agent, "chat_id", "") or ""))
     epoch_getter = getattr(parent_agent, "_usage_epoch", None)
