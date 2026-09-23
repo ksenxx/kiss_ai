@@ -93,6 +93,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_subagent_rows_by_parent_task_id,
 )
+from kiss.core.brand import BRAND, PRODUCT_NAME
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
@@ -1952,7 +1953,7 @@ def _post_url_to_message_board(
             data=data,
             method="POST",
             headers={
-                "Title": "KISS Sorcar Remote URL",
+                "Title": f"{PRODUCT_NAME} Remote URL",
                 "Tags": "link,kiss-sorcar",
                 "Click": url,
                 "User-Agent": "kiss-web",
@@ -2038,7 +2039,7 @@ def _print_url() -> None:
     if url:
         print(url)
     else:
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
+        print(f"{PRODUCT_NAME} web server is not running.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -3634,6 +3635,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         The complete HTML document string.
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+    brand_css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
     hljs_dark_css = (MEDIA_DIR / "highlight-vscode-dark.css").read_text(
         encoding="utf-8",
     )
@@ -3641,7 +3643,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
-    page_title = html.escape(title.strip()) or "KISS Sorcar chat"
+    page_title = html.escape(title.strip()) or f"{PRODUCT_NAME} chat"
     # Both highlight.js themes ship inline; share.js's theme toggle
     # flips which one applies through the style elements' media
     # attribute (dark is the default).
@@ -3659,6 +3661,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         '<style id="hljs-style-light" media="not all">\n'
         + hljs_light_css + "\n</style>\n"
         "<style>\n" + main_css + "\n</style>\n"
+        "<style>\n" + brand_css + "\n</style>\n"
         "<style>\n" + _SHARE_PAGE_CSS + "</style>\n"
         "</head>\n"
         "<body>\n"
@@ -3726,9 +3729,15 @@ def _build_html() -> str:
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
+        "BRAND_STYLE_HREF": _media_url("brand.css"),
         "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
+        "PRODUCT_NAME": html.escape(PRODUCT_NAME),
+        "TAGLINE": html.escape(BRAND["tagline"]),
+        "BRAND_JSON": json.dumps(
+            {"productName": PRODUCT_NAME, "shortName": BRAND["short_name"]},
+        ).replace("</", "<\\/"),
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
         "ENTERKEYHINT": ' enterkeyhint="send"',
         "MODEL_NAME": "loading...",
@@ -4110,9 +4119,10 @@ _WS_SHIM_JS = r"""
   function _updateLoadingMsg(reconnecting) {
     var msg = document.getElementById('kiss-server-loading-msg');
     if (!msg) return;
+    var product = (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
     msg.textContent = reconnecting
-      ? 'Reconnecting to KISS Sorcar Server ...'
-      : 'KISS Sorcar Server is starting ...';
+      ? 'Reconnecting to ' + product + ' Server ...'
+      : product + ' Server is starting ...';
   }
 
   // Non-zero while the server has told us (via an ``auth_locked``
@@ -5404,7 +5414,7 @@ class RemoteAccessServer:
             "type": "notification",
             "id": "server-reset-restarting",
             "severity": "info",
-            "message": "Restarting the KISS Sorcar web server…",
+            "message": f"Restarting the {PRODUCT_NAME} web server…",
         }, conn_id)
         self._write_server_reset_flag(conn_id)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
@@ -5515,7 +5525,7 @@ class RemoteAccessServer:
                 "type": "notification",
                 "id": "server-reset-complete",
                 "severity": "info",
-                "message": "KISS Sorcar web server restart complete.",
+                "message": f"{PRODUCT_NAME} web server restart complete.",
             },
         )
 
@@ -5577,7 +5587,7 @@ class RemoteAccessServer:
             self._broadcast_to_conn({
                 "type": "notice",
                 "text": (
-                    "A KISS Sorcar update is already running… "
+                    f"A {PRODUCT_NAME} update is already running… "
                     f"(output: {self._update_log_path})"
                 ),
             }, conn_id)
@@ -5601,7 +5611,7 @@ class RemoteAccessServer:
         self._broadcast_to_conn({
             "type": "notice",
             "text": (
-                "An update of KISS Sorcar is getting installed… "
+                f"An update of {PRODUCT_NAME} is getting installed… "
                 f"(output: {self._update_log_path})"
             ),
         }, conn_id)
@@ -5704,7 +5714,7 @@ class RemoteAccessServer:
         except OSError as exc:
             self._broadcast_to_conn({
                 "type": "error",
-                "text": f"Failed to start KISS Sorcar update: {exc}",
+                "text": f"Failed to start {PRODUCT_NAME} update: {exc}",
             }, conn_id)
             return None
         finally:
@@ -5738,10 +5748,10 @@ class RemoteAccessServer:
             output = self._update_log_path.read_bytes()[log_offset:]
         except OSError:
             output = b""
-        text = f"KISS Sorcar update failed (exit {proc.returncode}), see {self._update_log_path}"
+        text = f"{PRODUCT_NAME} update failed (exit {proc.returncode}), see {self._update_log_path}"
         for line in output.decode("utf-8", errors="replace").splitlines():
             if "another KISS update is already running" in line:
-                text = f"KISS Sorcar update: {line.strip()}"
+                text = f"{PRODUCT_NAME} update: {line.strip()}"
                 break
         self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
 
@@ -9348,7 +9358,7 @@ class RemoteAccessServer:
         an injected ``KeyboardInterrupt``).
         """
         await self._setup_server()
-        print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
+        print(f"{PRODUCT_NAME} remote access: {self._local_url}", file=sys.stderr)
         print(f"Local machine:             {self._loopback_url}", file=sys.stderr)
         for lan_url in self._lan_urls():
             print(f"LAN:                       {lan_url}", file=sys.stderr)
@@ -10039,7 +10049,7 @@ def main() -> None:  # pragma: no cover — CLI entry point
     """CLI entry point for the remote access server."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="KISS Sorcar Remote Access Server")
+    parser = argparse.ArgumentParser(description=f"{PRODUCT_NAME} Remote Access Server")
     parser.add_argument(
         "--url", action="store_true",
         help="Print the active remote URL and exit",

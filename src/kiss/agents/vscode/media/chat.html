@@ -6,14 +6,15 @@
   {{CSP_META}}
   <link href="{{STYLE_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
-  <title>KISS Sorcar</title>
+  <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
+  <title>{{PRODUCT_NAME}}</title>
   {{HEAD_STYLE}}
 </head>
 <body{{BODY_CLASS_ATTR}}>
   <div id="kiss-server-loading" role="status" aria-live="polite">
     <div class="kiss-server-loading-inner">
       <div class="kiss-server-loading-spinner" aria-hidden="true"></div>
-      <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div>
+      <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">{{PRODUCT_NAME}} Server is starting ...</div>
     </div>
   </div>
   <div id="app" style="display:none;">
@@ -44,8 +45,8 @@
          reference via aria-controls="output". -->
     <div id="output" role="tabpanel" aria-label="Chat">
       <div id="welcome">
-        <h2>Welcome to KISS Sorcar</h2>
-        <p>Your AI assistant. Ask me anything!</p>
+        <h2>Welcome to {{PRODUCT_NAME}}</h2>
+        <p>{{TAGLINE}}</p>
         <div id="welcome-config" class="welcome-config" style="display:none;">
           <div id="welcome-remote-url"></div>
           <label class="config-label welcome-config-label">Remote password
@@ -351,7 +352,7 @@
     <div id="settings-panel">
       <button id="settings-panel-close">&times;</button>
       <div class="sidebar-section">
-        <div class="sidebar-hdr">Sorcar Configuration{{VERSION_SUFFIX}}</div>
+        <div class="sidebar-hdr">{{PRODUCT_NAME}} Configuration{{VERSION_SUFFIX}}</div>
         <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Remote password
@@ -527,6 +528,7 @@
 
   <script{{NONCE_ATTR}} src="{{HLJS_SRC}}"></script>
   <script{{NONCE_ATTR}} src="{{MARKED_SRC}}"></script>
+  <script{{NONCE_ATTR}}>window.__BRAND__ = {{BRAND_JSON}};</script>
   {{SHIM_SCRIPT}}<script{{NONCE_ATTR}}>window.__TRICKS__ = {{TRICKS_JSON}};</script>
   <script{{NONCE_ATTR}}>window.__TIPS__ = {{TIPS_JSON}};</script>
   <script{{NONCE_ATTR}} src="{{TIPS_SRC}}"></script>

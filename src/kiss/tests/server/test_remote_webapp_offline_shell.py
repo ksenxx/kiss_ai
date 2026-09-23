@@ -48,6 +48,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page, sync_playwright
 
+from kiss.core.brand import PRODUCT_NAME
+
 MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
 
 
@@ -375,7 +377,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             during = page.evaluate(_UI_STATE_JS)
             assert during["appShown"], during
             assert during["overlayShown"] and during["banner"], during
-            assert during["msg"] == "Reconnecting to KISS Sorcar Server ...", during
+            assert during["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", during
             assert during["input"] == "typed while offline", during
             assert during["marker"] == "before-outage", during
             rect = during["overlayRect"]
@@ -494,7 +496,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             offline = page.evaluate(_UI_STATE_JS)
             assert offline["overlayShown"] and not offline["banner"], offline
             assert not offline["appShown"], offline
-            assert offline["msg"] == "Reconnecting to KISS Sorcar Server ...", offline
+            assert offline["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", offline
             assert offline["offlineMeta"], offline
             # The one reload an offline copy gets is recorded when it
             # happens, not when the copy is parsed.

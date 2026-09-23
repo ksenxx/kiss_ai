@@ -39,6 +39,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -209,7 +210,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             notice, seen = await self._drain_until(reader, "notice")
             self._assert_no_unknown_command(seen)
             self.assertIn(
-                "An update of KISS Sorcar is getting installed",
+                f"An update of {PRODUCT_NAME} is getting installed",
                 str(notice.get("text", "")),
             )
             # Poll for the marker *content*, not mere existence: the
@@ -256,7 +257,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             notice, seen = await self._drain_until(reader, "notice")
             self._assert_no_unknown_command(seen)
             self.assertIn(
-                "An update of KISS Sorcar is getting installed",
+                f"An update of {PRODUCT_NAME} is getting installed",
                 str(notice.get("text", "")),
             )
             # Poll for the marker *content*, not mere existence: the

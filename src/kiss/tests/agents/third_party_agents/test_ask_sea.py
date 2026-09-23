@@ -38,6 +38,7 @@ import pytest
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.agents.third_party_agents import ask_sea
+from kiss.core.brand import BRAND, render_brand
 
 # The literal placeholder the /ask flow substitutes at dispatch time.
 _PLACEHOLDER = "<task_id>"
@@ -72,10 +73,12 @@ def _reset_registry() -> Iterator[None]:
 
 
 def test_system_prompt_returns_system_lite_md() -> None:
-    """system_prompt MUST return the bytes of SYSTEM_LITE.md verbatim."""
+    """system_prompt MUST return SYSTEM_LITE.md with only the brand placeholders filled."""
     text = ask_sea.system_prompt()
-    expected = ask_sea._SYSTEM_LITE_PATH.read_text(encoding="utf-8")
+    expected = render_brand(ask_sea._SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
     assert text == expected
+    assert "{{IDENTITY}}" not in text
+    assert BRAND["identity"] in text
     # SYSTEM_LITE.md is the ablation prompt: it MUST contain the
     # ``<identity>`` opening tag the ablation file starts with; a
     # blank / accidentally-empty file would silently satisfy equality
@@ -134,8 +137,8 @@ def test_system_prompt_falls_back_to_bundled_copy(
     missing = tmp_path / "does-not-exist.md"
     monkeypatch.setattr(ask_sea, "_SYSTEM_LITE_PATH", missing)
     text = ask_sea.system_prompt()
-    assert text == ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_text(
-        encoding="utf-8",
+    assert text == render_brand(
+        ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_text(encoding="utf-8"),
     )
 
 

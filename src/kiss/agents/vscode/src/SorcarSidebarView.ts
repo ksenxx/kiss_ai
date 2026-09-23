@@ -214,6 +214,7 @@ import {
   showWarningNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
+import {PRODUCT_NAME} from './brand';
 
 /**
  * The webview surface a chat controller drives, abstracting over the
@@ -2059,7 +2060,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const shellPath = updateShellPath();
     if (shellPath === null) {
       vscode.window.showErrorMessage(
-        'Updating KISS Sorcar runs install.sh under bash, which was not found. ' +
+        `Updating ${PRODUCT_NAME} runs install.sh under bash, which was not found. ` +
           'Install Git for Windows (it ships bash.exe) and try again.',
       );
       return;
@@ -2070,14 +2071,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       command +
       '; _kiss_rc=$?; ' +
       'if [ "$_kiss_rc" -ne 0 ]; then ' +
-      'printf "\\n>>> KISS Sorcar update exited with status %s. ' +
+      `printf "\\n>>> ${PRODUCT_NAME} update exited with status %s. ` +
       'Press Enter to close this terminal.\\n" "$_kiss_rc"; ' +
       'while IFS= read -r _kiss_enter; do ' +
       'if [ -z "$_kiss_enter" ]; then break; fi; ' +
       'done; ' +
       'fi; exit "$_kiss_rc"';
     const terminal = vscode.window.createTerminal({
-      name: 'KISS Sorcar Update',
+      name: `${PRODUCT_NAME} Update`,
       cwd,
       shellPath,
       shellArgs: ['-c', guarded],
@@ -2109,7 +2110,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // audit0902-coverage:start
     const scriptPath = findInstallScript();
     showInformationNotification(
-      'An update of KISS Sorcar is getting installed…',
+      `An update of ${PRODUCT_NAME} is getting installed…`,
     );
     if (!scriptPath) {
       // No ~/.kiss/kiss_ai clone with an install.sh on this machine (the

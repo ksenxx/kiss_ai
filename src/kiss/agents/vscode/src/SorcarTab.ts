@@ -10,6 +10,7 @@ import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
 import {ensureUserAssetFromDefault, kissHomeDir} from './userAssets';
 import {readVersionPy} from './UpdateChecker';
+import {BRAND} from './brand';
 
 export const MY_INJECTION_DEFAULT_BODY =
   'Write end-to-end 100% coverage tests for the feature first.' +
@@ -413,9 +414,16 @@ export function buildChatHtml(
     VIEWPORT: 'width=device-width, initial-scale=1.0',
     CSP_META: csp,
     STYLE_HREF: u('main.css'),
+    BRAND_STYLE_HREF: u('brand.css'),
     HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
     HEAD_STYLE: '',
     BODY_CLASS_ATTR: bodyAttrs || '',
+    PRODUCT_NAME: escapeHtml(BRAND.productName),
+    TAGLINE: escapeHtml(BRAND.tagline),
+    BRAND_JSON: JSON.stringify({
+      productName: BRAND.productName,
+      shortName: BRAND.shortName,
+    }).replace(/<\//g, '<\\/'),
     INPUT_PLACEHOLDER: placeholder,
     ENTERKEYHINT: '',
     // The model name can come from user settings or the daemon; escape it
