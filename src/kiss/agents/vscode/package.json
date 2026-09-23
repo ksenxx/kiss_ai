@@ -1,7 +1,7 @@
 {
   "name": "kiss-sorcar",
-  "displayName": "KISS Sorcar",
-  "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
+  "displayName": "Seamless Loop",
+  "description": "Seamless Loop (s10s): SeamlessLabs' AI coding and research assistant, built on KISS Sorcar. Local, bring your own API key.",
   "version": "2026.9.22",
   "publisher": "ksenxx",
   "repository": {
@@ -28,7 +28,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": true,
-      "description": "KISS Sorcar runs a local Python backend; opt-in API keys and shell tools require trust."
+      "description": "Seamless Loop runs a local Python backend; opt-in API keys and shell tools require trust."
     }
   },
   "contributes": {
@@ -36,14 +36,14 @@
       "activitybar": [
         {
           "id": "kissSorcarContainer",
-          "title": "KISS Sorcar",
+          "title": "Seamless Loop",
           "icon": "media/kiss-icon.svg"
         }
       ],
       "secondarySidebar": [
         {
           "id": "kissSorcarSecondary",
-          "title": "KISS Sorcar",
+          "title": "Seamless Loop",
           "icon": "media/kiss-icon.svg",
           "order": -100
         }
@@ -75,7 +75,7 @@
     "commands": [
       {
         "command": "kissSorcar.openPanel",
-        "title": "KISS: Open Chat",
+        "title": "s10s: Open Chat",
         "icon": {
           "light": "media/kiss-icon.svg",
           "dark": "media/kiss-icon.svg"
@@ -83,47 +83,47 @@
       },
       {
         "command": "kissSorcar.newConversation",
-        "title": "KISS: New Conversation",
+        "title": "s10s: New Conversation",
         "icon": "$(add)"
       },
       {
         "command": "kissSorcar.openSettings",
-        "title": "KISS: Open Settings",
+        "title": "s10s: Open Settings",
         "icon": "$(settings-gear)"
       },
       {
         "command": "kissSorcar.stopTask",
-        "title": "KISS: Stop Current Task"
+        "title": "s10s: Stop Current Task"
       },
       {
         "command": "kissSorcar.generateCommitMessage",
-        "title": "KISS: Generate Commit Message",
+        "title": "s10s: Generate Commit Message",
         "icon": "$(sparkle)"
       },
       {
         "command": "kissSorcar.gitCommit",
-        "title": "KISS: Git Commit",
+        "title": "s10s: Git Commit",
         "icon": "$(git-commit)"
       },
       {
         "command": "kissSorcar.toggleFocus",
-        "title": "KISS: Focus Chat"
+        "title": "s10s: Focus Chat"
       },
       {
         "command": "kissSorcar.focusEditor",
-        "title": "KISS: Focus Editor"
+        "title": "s10s: Focus Editor"
       },
       {
         "command": "kissSorcar.runSelection",
-        "title": "KISS: Run Selection in Chat"
+        "title": "s10s: Run Selection in Chat"
       },
       {
         "command": "kissSorcar.insertSelectionToChat",
-        "title": "KISS: Insert Selection into Chat"
+        "title": "s10s: Insert Selection into Chat"
       },
       {
         "command": "kissSorcar.showHistory",
-        "title": "KISS: Show Chat History",
+        "title": "s10s: Show Chat History",
         "icon": "media/kiss-icon.png"
       }
     ],
@@ -190,7 +190,7 @@
       "workbench.notifications.position": "bottom-left"
     },
     "configuration": {
-      "title": "KISS Sorcar",
+      "title": "Seamless Loop",
       "properties": {
         "kissSorcar.defaultModel": {
           "type": "string",
@@ -205,7 +205,7 @@
         "kissSorcar.editorTabsMode": {
           "type": "boolean",
           "default": true,
-          "description": "Open each KISS Sorcar chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
+          "description": "Open each Seamless Loop chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
         }
       }
     }
