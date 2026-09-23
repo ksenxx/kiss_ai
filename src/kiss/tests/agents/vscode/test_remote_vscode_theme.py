@@ -274,6 +274,19 @@ VSCODE_UI_FONT = (
 VSCODE_EDITOR_FONT = 'Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace'
 
 
+def _font_families(stack: str) -> list[str]:
+    """Split a ``font-family`` value into comparable family names.
+
+    Computed styles come back re-serialised by the engine: quotes are
+    normalised, and since Chromium 15x the legacy ``BlinkMacSystemFont``
+    alias is reported as ``"system-ui"``, the font it has always
+    resolved to.  Comparing the normalised lists keeps the test about
+    which families are requested, not about how Chromium spells them.
+    """
+    families = [name.strip().strip('"') for name in stack.split(",")]
+    return ["system-ui" if name == "BlinkMacSystemFont" else name for name in families]
+
+
 @pytest.mark.timeout(180)
 def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) -> None:
     """Served page + real Chromium: Dark Modern by default, Light
@@ -368,10 +381,10 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
     # Fonts do not depend on the theme: VS Code's workbench stack at
     # 14px for the UI and the composer, the editor stack for code.
     for probe in (dark, light):
-        assert probe["fontFamily"] == VSCODE_UI_FONT, probe
-        assert probe["inputFont"] == VSCODE_UI_FONT, probe
+        assert _font_families(probe["fontFamily"]) == _font_families(VSCODE_UI_FONT), probe
+        assert _font_families(probe["inputFont"]) == _font_families(VSCODE_UI_FONT), probe
         assert probe["fontSize"] == "14px", probe
-        assert probe["codeFont"] == VSCODE_EDITOR_FONT, probe
+        assert _font_families(probe["codeFont"]) == _font_families(VSCODE_EDITOR_FONT), probe
 
     # Toggling back restores Dark Modern exactly.
     assert back["light"] is False, back

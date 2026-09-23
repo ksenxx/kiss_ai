@@ -1897,14 +1897,31 @@ def get_fallback_model(model_name: str) -> str | None:
         :func:`openrouter_twin`) if the OpenRouter key is configured;
         ``None`` when neither exists or the model is unknown.
     """
-    info = _lookup_model_info(model_name)
-    if info is None:
-        return None
-    if info.fallback:
-        return info.fallback
+    declared = declared_fallback(model_name)
+    if declared or _lookup_model_info(model_name) is None:
+        return declared
     if not getattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", ""):
         return None
     return openrouter_twin(model_name)
+
+
+def declared_fallback(model_name: str) -> str | None:
+    """Return the ``fallback`` the catalog declares for *model_name*, if any.
+
+    Unlike :func:`get_fallback_model` this never falls through to the
+    OpenRouter twin, so callers can tell a fallback the user chose (which
+    lives wherever the user's ``model_config`` points) from the implicit
+    cross-provider twin.
+
+    Args:
+        model_name: The model name reported by the agent.
+
+    Returns:
+        The declared fallback model name, or ``None`` when the entry
+        declares none or the model is unknown.
+    """
+    info = _lookup_model_info(model_name)
+    return info.fallback if info is not None and info.fallback else None
 
 
 def _twin_key(name: str) -> str:

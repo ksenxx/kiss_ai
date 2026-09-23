@@ -47,10 +47,14 @@ def _system_message(request: dict[str, Any]) -> str:
 
 def test_sea_getters_follow_the_user_contract() -> None:
     """The SEA's getters pin the run: Bash-only, no worktree, no extras."""
-    assert sh_sea.system_prompt() == (
-        "Run the command in the user's prompt using the Bash tool and return "
-        "the output immediately as result with no reasoning."
-    )
+    # The prompt's wording is free to evolve; the contract is that the
+    # agent runs the user's command through Bash and hands the raw
+    # output to ``finish``.
+    prompt = sh_sea.system_prompt()
+    assert prompt == sh_sea.SYSTEM_PROMPT
+    assert "call the Bash tool with the user's command exactly as written" in prompt
+    assert "call the `finish` tool" in prompt
+    assert "must never be empty" in prompt
     assert sh_sea.tool_profile() == "bash"
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     assert sh_sea.use_worktree() is False
