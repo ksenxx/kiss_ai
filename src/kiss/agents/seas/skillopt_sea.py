@@ -16,6 +16,12 @@ Implements the outer loop of SkillOpt (arXiv 2605.23904) for two kinds of
   copy of the file with that constant replaced; every other getter is kept,
   so a rollout runs the candidate exactly as ``/name`` would.  A candidate is
   rejected before any rollout when it changes anything but that constant.
+* :class:`ConstantTarget` — any Python module plus the name of a module-level
+  string constant (``--constant SYSTEM_PROMPT``).  The constant's value is the
+  trainable text; it may be a ``str.format`` template, and a candidate must
+  keep exactly the original's replacement fields.  This is how a SEA whose
+  prompt is built inside a class or a function (for example the HarnessTax
+  container SEA, ``benchmarkings/harnesstax/sea_core.py``) is optimized.
 
 One optimization round: roll the current best out on the training batch,
 let a failure analyst and a success analyst propose patches over
@@ -53,6 +59,21 @@ rollout finished successfully.  ``split`` is ``train``, ``select`` or
 absent (both).  Rollouts run in-process with :class:`SorcarAgent`, so the
 loop needs no daemon and its spend is folded into the calling task.
 
+Two optional eval-set entries plug a benchmark in:
+
+* ``"env": {"class": "pkg.module:Class", ...}`` names an :class:`Env`
+  subclass (built with the remaining entries as keyword arguments) that
+  replaces the in-process rollouts and their grading, e.g. a class that
+  runs each task in its own Docker container and grades with the
+  benchmark's official harness.
+* ``"train_rollouts": "rollouts.json"`` (relative to the eval set) imports
+  trajectories of the target's current text — a ``rollouts.json`` as the
+  optimizer itself writes — so the analysts can mine an existing
+  experiment's failures instead of re-rolling the training batch.  A task
+  with an imported trajectory is never rolled out (the env may not even be
+  able to run it): the trajectory stands in for it in every round, so give
+  such tasks ``split: train`` and keep the selection tasks runnable.
+
 Candidate SEAs are written to scratch directories, so a SEA target must be
 self-contained: one that imports sibling modules or reads files next to
 ``__file__`` fails the pre-rollout gate ("cannot be loaded as a SEA").
@@ -64,17 +85,20 @@ import argparse
 import ast
 import difflib
 import html
+import importlib
 import json
 import logging
 import math
 import os
 import re
 import shutil
+import string
 import subprocess
 import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from itertools import repeat
@@ -225,11 +249,27 @@ def _splice(source: str, node: ast.Constant, text: str) -> str:
     return (raw[:start] + _string_literal(text).encode() + raw[end:]).decode()
 
 
-def _fingerprint(source: str) -> str:
-    """Return the AST dump of *source* with the prompt constant blanked."""
+def _constant_node(tree: ast.Module, name: str) -> ast.Constant:
+    """Return the string-literal node of the last module-level assignment to *name* in *tree*."""
+    values = [v for v in (_assigned_value(n, name) for n in tree.body) if v is not None]
+    if not values:
+        raise ValueError(f"no module-level assignment to {name}")
+    value = values[-1]
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value
+    raise ValueError(f"{name} must be assigned a string literal")
+
+
+def _fingerprint(source: str, find: Callable[[ast.Module], ast.Constant]) -> str:
+    """Return the AST dump of *source* with the constant that *find* locates blanked."""
     tree = ast.parse(source)
-    _prompt_constant(tree).value = ""
+    find(tree).value = ""
     return ast.dump(tree)
+
+
+def _format_fields(text: str) -> set[str]:
+    """Return the ``str.format`` field names of *text* (``ValueError`` on unbalanced braces)."""
+    return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
 
 
 def _execute_sea(path: Path) -> dict[str, Any]:
@@ -266,7 +306,9 @@ class SeaTarget(Target):
         try:
             candidate = self.render(text)
             compile(candidate, str(self.path), "exec")
-            if _fingerprint(candidate) != _fingerprint(self._source()):
+            if _fingerprint(candidate, _prompt_constant) != _fingerprint(
+                self._source(), _prompt_constant
+            ):
                 return "candidate changes code outside the system_prompt() constant"
         except (SyntaxError, ValueError) as exc:
             return f"candidate does not compile: {exc}"
@@ -323,9 +365,87 @@ def _call_getter(ns: dict[str, Any], name: str) -> Any:
     return getter() if callable(getter) else None
 
 
-def load_target(path: str | Path) -> Target:
-    """Return the :class:`SeaTarget` (``.py``) or :class:`SkillTarget` (``.md``) for *path*."""
+class ConstantTarget(Target):
+    """A Python module whose trainable text is the module-level string constant *constant*.
+
+    The constant may be a ``str.format`` template (``"... {workdir} ..."``); a
+    candidate must keep exactly the original's replacement fields so the
+    module's ``.format(...)`` call keeps working.  Rolled out in-process, the
+    text is used as the agent's system prompt; an eval set whose ``env`` runs
+    the module's own harness (a container benchmark, say) formats it itself.
+    """
+
+    kind = "constant"
+
+    def __init__(self, path: Path, constant: str) -> None:
+        """Bind the target to the constant *constant* of the module at *path*."""
+        super().__init__(path)
+        if not constant.isidentifier():
+            raise ValueError(f"constant name must be an identifier, not {constant!r}")
+        self.constant = constant
+
+    def _source(self) -> str:
+        return self.path.read_text(encoding="utf-8")
+
+    def _find(self, tree: ast.Module) -> ast.Constant:
+        return _constant_node(tree, self.constant)
+
+    def text(self) -> str:
+        """Return the constant's value."""
+        return str(self._find(ast.parse(self._source())).value)
+
+    def render(self, text: str) -> str:
+        """Return the module with the constant replaced by *text*."""
+        source = self._source()
+        return _splice(source, self._find(ast.parse(source)), text)
+
+    def candidate_name(self) -> str:
+        """``foo.py`` -> ``foo_candidate.py``."""
+        return f"{self.path.stem.removesuffix('_sea')}_candidate.py"
+
+    def materialize(self, text: str, dest_dir: Path) -> Target:
+        """Write a candidate module carrying *text* into *dest_dir* and return it as a target."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / self.candidate_name()
+        dest.write_text(self.render(text), encoding="utf-8")
+        return ConstantTarget(dest, self.constant)
+
+    def validate(self, text: str) -> str:
+        """Reject text whose module does not compile, changes code, or breaks the template."""
+        try:
+            candidate = self.render(text)
+            compile(candidate, str(self.path), "exec")
+            if _fingerprint(candidate, self._find) != _fingerprint(self._source(), self._find):
+                return f"candidate changes code outside the {self.constant} constant"
+        except (SyntaxError, ValueError) as exc:
+            return f"candidate does not compile: {exc}"
+        try:
+            fields = _format_fields(text)
+        except ValueError as exc:
+            return f"candidate is not a valid format template: {exc}"
+        original = _format_fields(self.text())
+        if fields != original:
+            return (
+                f"candidate changes the template's replacement fields: "
+                f"{sorted(fields)} != {sorted(original)}"
+            )
+        try:
+            text.format(**dict.fromkeys(fields, ""))
+        except (ValueError, KeyError, IndexError, AttributeError) as exc:
+            return f"candidate is not a valid format template: {exc}"
+        return ""
+
+    def rollout_kwargs(self) -> dict[str, Any]:
+        """Use the constant as the agent's system prompt."""
+        return {"base_system_prompt": self.text()}
+
+
+def load_target(path: str | Path, constant: str = "") -> Target:
+    """Return the target for *path*: a :class:`ConstantTarget` when *constant* names a
+    module-level string, else the :class:`SeaTarget` (``.py``) or :class:`SkillTarget` (``.md``)."""
     p = Path(path)
+    if constant:
+        return ConstantTarget(p, constant)
     if p.suffix == ".py":
         return SeaTarget(p)
     if p.suffix == ".md":
@@ -351,10 +471,29 @@ class EvalTask:
     split: str = ""
 
 
-def load_evals(path: Path) -> tuple[list[EvalTask], dict[str, Any]]:
-    """Load the eval set at *path*; return ``(tasks, rollout_defaults)``."""
+@dataclass
+class EvalSet:
+    """A loaded eval set.
+
+    ``rollout`` holds the ``SorcarAgent.run`` defaults of in-process rollouts;
+    ``env`` is ``{"class": "module:Class", ...kwargs}`` naming an :class:`Env`
+    that replaces them (``None`` for in-process rollouts); ``train_rollouts``
+    are imported trajectories of the target's original text; a task with
+    one is never rolled out, the trajectory is its training rollout.
+    """
+
+    tasks: list[EvalTask]
+    rollout: dict[str, Any] = field(default_factory=dict)
+    env: dict[str, Any] | None = None
+    train_rollouts: list[Rollout] = field(default_factory=list)
+
+
+def load_evals(path: Path) -> EvalSet:
+    """Load the eval set at *path* (a ``{"tasks": [...], ...}`` object or a bare task list)."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    raw_tasks = data["tasks"] if isinstance(data, dict) else data
+    if not isinstance(data, dict):
+        data = {"tasks": data}
+    raw_tasks = data["tasks"]
     tasks: list[EvalTask] = []
     for i, item in enumerate(raw_tasks):
         expect = item.get("expect", [])
@@ -376,8 +515,28 @@ def load_evals(path: Path) -> tuple[list[EvalTask], dict[str, Any]]:
     for task in tasks:
         if task.split not in ("", "train", "select"):
             raise ValueError(f"task {task.id}: split must be train, select or absent")
-    defaults = dict(data.get("rollout", {})) if isinstance(data, dict) else {}
-    return tasks, defaults
+    env = data.get("env")
+    if env is not None and not (isinstance(env, dict) and ":" in str(env.get("class", ""))):
+        raise ValueError('env must be an object with a "class": "module:Class" entry')
+    imported: list[Rollout] = []
+    if data.get("train_rollouts"):
+        rollouts_path = Path(path).parent / str(data["train_rollouts"])
+        imported = load_rollouts(rollouts_path)
+        train_ids = {t.id for t in tasks if t.split == "train"}
+        unknown = sorted({r.task_id for r in imported} - train_ids)
+        if unknown:
+            # An imported trajectory never counts as a selection rollout: it
+            # describes the original text, not the candidate under test.
+            raise ValueError(
+                f"train_rollouts must name tasks with split 'train'; not so: {unknown[:5]}"
+            )
+    return EvalSet(tasks, dict(data.get("rollout", {})), env, imported)
+
+
+def load_rollouts(path: Path) -> list[Rollout]:
+    """Load a ``rollouts.json`` (a list of :class:`Rollout` dicts, as the optimizer writes them)."""
+    items = json.loads(Path(path).read_text(encoding="utf-8"))
+    return [Rollout(**item) for item in items]
 
 
 def plain_text(result: str) -> str:
@@ -456,6 +615,8 @@ class OptimizeConfig:
     max_cost: float = 20.0
     fresh: bool = False
     trajectory_chars: int = 3000
+    trajectory_total_chars: int = 20000
+    constant: str = ""
 
 
 def _parse_result(raw: str) -> tuple[bool, str]:
@@ -570,6 +731,56 @@ def run_rollout(
     return Rollout(
         task.id, passed, verdict, summary, success, trajectory, cost, tokens, steps, error
     )
+
+
+class Env(ABC):
+    """Where a candidate is rolled out on eval tasks and how the rollouts are graded."""
+
+    @abstractmethod
+    def rollouts(
+        self, target: Target, tasks: list[EvalTask], cfg: OptimizeConfig, work_root: Path
+    ) -> list[Rollout]:
+        """Roll *target* out on *tasks*; return one :class:`Rollout` per task, in task order.
+
+        Per-task artifacts (scratch directories, logs) go under *work_root*.
+        """
+
+
+class InProcessEnv(Env):
+    """Rollouts with :class:`SorcarAgent` in this process, graded by the tasks' own rules."""
+
+    def __init__(self, defaults: dict[str, Any] | None = None) -> None:
+        """*defaults* is the eval set's ``rollout`` object."""
+        self.defaults = defaults or {}
+
+    def rollouts(
+        self, target: Target, tasks: list[EvalTask], cfg: OptimizeConfig, work_root: Path
+    ) -> list[Rollout]:
+        """Run :func:`run_rollout` for every task, ``cfg.max_workers`` at a time."""
+        with ThreadPoolExecutor(max_workers=max(1, cfg.max_workers)) as pool:
+            return list(
+                pool.map(
+                    run_rollout,
+                    repeat(target),
+                    tasks,
+                    repeat(cfg),
+                    [work_root / t.id for t in tasks],
+                    repeat(self.defaults),
+                )
+            )
+
+
+def make_env(spec: dict[str, Any] | None, defaults: dict[str, Any]) -> Env:
+    """Build the eval set's :class:`Env`: ``spec["class"]`` (``module:Class``) with the
+    remaining entries as keyword arguments, or :class:`InProcessEnv` when *spec* is ``None``."""
+    if not spec:
+        return InProcessEnv(defaults)
+    kwargs = dict(spec)
+    module_name, _, class_name = str(kwargs.pop("class")).partition(":")
+    env = getattr(importlib.import_module(module_name), class_name)(**kwargs)
+    if not isinstance(env, Env):
+        raise ValueError(f"{module_name}:{class_name} is not an Env")
+    return env
 
 
 # --------------------------------------------------------------------------
@@ -704,11 +915,23 @@ were rejected before (they did not improve the pass rate when tried). Keep ancho
 {format}"""
 
 
-def _format_trajectories(rollouts: list[Rollout], tasks: dict[str, EvalTask]) -> str:
+def _clip(text: str, limit: int) -> str:
+    """Return *text* when it fits *limit*, else its head and tail around an omission mark."""
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.6)
+    tail = limit - head
+    return f"{text[:head]}\n  [... {len(text) - limit} characters omitted ...]\n{text[-tail:]}"
+
+
+def _format_trajectories(
+    rollouts: list[Rollout], tasks: dict[str, EvalTask], limit: int = 20000
+) -> str:
+    """Render *rollouts* for an analyst, each trajectory clipped to *limit* characters."""
     parts = []
     for r in rollouts:
         task = tasks[r.task_id]
-        steps = "\n".join(f"  [{m['role']}] {m['text']}" for m in r.trajectory)
+        steps = _clip("\n".join(f"  [{m['role']}] {m['text']}" for m in r.trajectory), limit)
         parts.append(
             f"## Task {r.task_id}\nprompt: {task.prompt}\nverdict: {r.verdict}\n"
             f"steps={r.steps} cost=${r.cost:.4f}\n{steps}"
@@ -773,8 +996,11 @@ class Optimizer:
         """Load the target, the eval set and any earlier state under ``cfg.out_dir``."""
         self.cfg = cfg
         self.parent = parent
-        self.target = load_target(cfg.target)
-        self.tasks, self.rollout_defaults = load_evals(cfg.evals)
+        self.target = load_target(cfg.target, cfg.constant)
+        evals = load_evals(cfg.evals)
+        self.tasks = evals.tasks
+        self.env = make_env(evals.env, evals.rollout)
+        self.imported = {r.task_id: r for r in evals.train_rollouts}
         self.tasks_by_id = {t.id: t for t in self.tasks}
         self.train = [t for t in self.tasks if t.split != "select"]
         self.select = [t for t in self.tasks if t.split != "train"]
@@ -831,18 +1057,9 @@ class Optimizer:
         _attribute(self.parent, cost, tokens, steps)
 
     def _rollouts(self, target: Target, tasks: list[EvalTask], work_root: Path) -> list[Rollout]:
-        """Roll *target* out on *tasks* in parallel; results in task order."""
-        with ThreadPoolExecutor(max_workers=max(1, self.cfg.max_workers)) as pool:
-            results = list(
-                pool.map(
-                    run_rollout,
-                    repeat(target),
-                    tasks,
-                    repeat(self.cfg),
-                    [work_root / t.id for t in tasks],
-                    repeat(self.rollout_defaults),
-                )
-            )
+        """Roll *target* out on *tasks* through the env; results in task order."""
+        work_root.mkdir(parents=True, exist_ok=True)
+        results = self.env.rollouts(target, tasks, self.cfg, work_root)
         for r in results:
             self._spend(r.cost, r.tokens, r.steps)
             self._log(
@@ -880,7 +1097,9 @@ class Optimizer:
                 template,
                 {
                     "text": self.state["best_text"],
-                    "trajectories": _format_trajectories(batch, self.tasks_by_id),
+                    "trajectories": _format_trajectories(
+                        batch, self.tasks_by_id, self.cfg.trajectory_total_chars
+                    ),
                     "format": substitute_prompt_args(
                         PATCH_FORMAT, {"max_patches": str(self.cfg.edit_budget)}
                     ),
@@ -976,8 +1195,16 @@ class Optimizer:
         self.state["history"].append(summary)
 
         best = self.target.materialize(self.state["best_text"], round_dir / "best")
-        self._log("rolling out the current best on the training batch")
-        train_rollouts = self._rollouts(best, batch, round_dir / "train")
+        # A task with an imported trajectory is offline: the env may not be able
+        # to run it at all (a Terminal-Bench trial fed to an SWE-bench env), so
+        # its imported trajectory stands in for its training rollout every round.
+        train_rollouts = [self.imported[t.id] for t in batch if t.id in self.imported]
+        if train_rollouts:
+            self._log(f"using {len(train_rollouts)} imported trajectories for the training batch")
+        todo = [t for t in batch if t.id not in self.imported]
+        if todo:
+            self._log("rolling out the current best on the training batch")
+            train_rollouts += self._rollouts(best, todo, round_dir / "train")
         by_id = {r.task_id: r for r in train_rollouts}
         missing = [t for t in self.select if t.id not in by_id]
         if missing:
@@ -1122,16 +1349,20 @@ def run_optimization(cfg: OptimizeConfig, parent: Any = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
-You are SkillOpt, an optimizer for agent instruction texts. You can optimize two kinds
-of target: a skill (a SKILL.md file) or a Sorcar Extension Agent (a *_sea.py file whose
-system_prompt() getter returns a string constant). The optimization loop is implemented
-in your tools; you drive it and report the outcome.
+You are SkillOpt, an optimizer for agent instruction texts. You can optimize three kinds
+of target: a skill (a SKILL.md file), a Sorcar Extension Agent (a *_sea.py file whose
+system_prompt() getter returns a string constant), or a named module-level string
+constant of any Python file (pass `constant`, e.g. SYSTEM_PROMPT, for a SEA that formats
+its prompt inside a class). The optimization loop is implemented in your tools; you
+drive it and report the outcome.
 
 Procedure:
-1. Identify from the user's request: the target file, the eval set JSON, how many epochs
-   (default 1), the rollout model (default: your own model) and where to keep artifacts
-   (default: <work_dir>/tmp/skillopt/<target stem>). If the eval set path is missing, ask
-   the user for it; do not write one yourself unless asked.
+1. Identify from the user's request: the target file (and constant name, if any), the
+   eval set JSON, how many epochs (default 1), the rollout model (default: your own
+   model) and where to keep artifacts (default: <work_dir>/tmp/skillopt/<target stem>).
+   If the eval set path is missing, ask the user for it; do not write one yourself unless
+   asked. An eval set may name its own rollout env (`"env"`) and imported trajectories
+   (`"train_rollouts"`) that stand in for their tasks' training rollouts.
 2. Call `optimize` once with those arguments. It runs every round (rollouts, analysts,
    ranking, gate) and returns a report. It can take many minutes; that is expected.
 3. Report back: pass rate before and after, which patches were accepted or rejected and
@@ -1159,12 +1390,16 @@ def optimize(
     rollout_budget: float = 1.0,
     max_cost: float = 20.0,
     fresh: bool = False,
+    constant: str = "",
 ) -> str:
     """Optimize a skill or SEA prompt against an eval set and return the report.
 
     Args:
         target: Path of the SKILL.md or *_sea.py to optimize (never modified).
         evals: Path of the eval set JSON (see the module docstring for the format).
+        constant: Name of a module-level string constant of *target* to optimize
+            instead of its ``system_prompt()`` text (for a SEA that builds its
+            prompt inside a class or function).
         out_dir: Directory for state, logs, trajectories and candidates
             (default: ``<target dir>/.skillopt/<target stem>``).
         epochs: Passes over the training tasks (one round per batch of 40 tasks).
@@ -1201,6 +1436,7 @@ def optimize(
         rollout_budget=rollout_budget,
         max_cost=max_cost,
         fresh=fresh,
+        constant=constant,
     )
     return format_report(run_optimization(cfg, parent))
 
@@ -1302,6 +1538,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--max-cost", type=float, default=20.0)
     parser.add_argument("--fresh", action="store_true")
+    parser.add_argument(
+        "--constant", default="", help="module-level string constant of --target to optimize"
+    )
+    parser.add_argument("--trajectory-total-chars", type=int, default=20000)
     args = parser.parse_args(argv)
     cfg = OptimizeConfig(
         target=Path(args.target),
@@ -1317,10 +1557,17 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps,
         max_cost=args.max_cost,
         fresh=args.fresh,
+        trajectory_total_chars=args.trajectory_total_chars,
+        constant=args.constant,
     )
     print(format_report(run_optimization(cfg)))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # ``python -m`` loads this file as ``__main__``; an env module importing
+    # ``kiss.agents.seas.skillopt_sea`` would otherwise get a second copy of
+    # ``Env`` and fail the ``isinstance`` check in ``make_env``.
+    from kiss.agents.seas.skillopt_sea import main as _main
+
+    raise SystemExit(_main())

@@ -23,11 +23,15 @@ import pytest
 
 from kiss.agents.seas import sh_sea, skillopt_sea
 from kiss.agents.seas.skillopt_sea import (
+    ConstantTarget,
+    Env,
     EvalTask,
     OptimizeConfig,
     Patch,
+    Rollout,
     SeaTarget,
     SkillTarget,
+    Target,
     apply_patch,
     edit_budget,
     format_report,
@@ -227,10 +231,64 @@ def test_sea_fingerprint_detects_code_changes_outside_the_prompt(tmp_path: Path)
     )
     same_code = base.replace("'a'", "'totally different prompt'")
     changed = base.replace("return False", "return True")
-    assert skillopt_sea._fingerprint(base) == skillopt_sea._fingerprint(same_code)
-    assert skillopt_sea._fingerprint(base) != skillopt_sea._fingerprint(changed)
+    find = skillopt_sea._prompt_constant
+    assert skillopt_sea._fingerprint(base, find) == skillopt_sea._fingerprint(same_code, find)
+    assert skillopt_sea._fingerprint(base, find) != skillopt_sea._fingerprint(changed, find)
     assert ast.literal_eval(skillopt_sea._string_literal('ends with "')) == 'ends with "'
     assert ast.literal_eval(skillopt_sea._string_literal('a\n"""\\\n')) == 'a\n"""\\\n'
+
+
+_TEMPLATE_MODULE = '''\
+"""A harness that formats its prompt inside a class."""
+
+SYSTEM_PROMPT = """\\
+Work in {workdir}.
+Be careful.{test_context}
+"""
+LIMIT = 3
+
+
+class Harness:
+    def system_prompt(self):
+        return SYSTEM_PROMPT.format(workdir="/app", test_context="")
+'''
+
+
+def test_constant_target_reads_splices_and_keeps_the_template_fields(tmp_path: Path) -> None:
+    """A named constant is the text; candidates must keep its code and its format fields."""
+    module = tmp_path / "harness_core.py"
+    module.write_text(_TEMPLATE_MODULE, encoding="utf-8")
+    target = load_target(module, "SYSTEM_PROMPT")
+    assert isinstance(target, ConstantTarget) and target.kind == "constant"
+    assert target.text() == "Work in {workdir}.\nBe careful.{test_context}\n"
+    assert target.rollout_kwargs() == {"base_system_prompt": target.text()}
+    new = "Work in {workdir}.{test_context}\nVerify with the real checker.\n"
+    assert target.validate(new) == ""
+    candidate = target.materialize(new, tmp_path / "cand")
+    assert candidate.path.name == "harness_core_candidate.py"
+    assert isinstance(candidate, ConstantTarget) and candidate.text() == new
+    ns: dict[str, Any] = {}
+    exec(compile(candidate.path.read_text(encoding="utf-8"), "c", "exec"), ns)  # noqa: S102
+    assert ns["Harness"]().system_prompt() == "Work in /app.\nVerify with the real checker.\n"
+    assert ns["LIMIT"] == 3
+    assert "replacement fields" in target.validate("Work in {workdir}.\n")
+    assert "replacement fields" in target.validate(new + " {extra}")
+    assert "not a valid format template" in target.validate(new + " stray }")
+    assert "not a valid format template" in target.validate(
+        new.replace("{workdir}", "{workdir:bad}")
+    )
+    assert "not a valid format template" in target.validate(new.replace("{workdir}", "{workdir!x}"))
+    assert target.validate('"""' + new) == ""
+    assert "does not compile" in ConstantTarget(module, "LIMIT").validate("x")
+    with pytest.raises(ValueError, match="no module-level assignment"):
+        ConstantTarget(module, "MISSING").text()
+    with pytest.raises(ValueError, match="identifier"):
+        ConstantTarget(module, "not-a-name")
+    assert target.proposal_path() == tmp_path / "harness_core.py.proposed"
+    assert target.write_proposal(new).read_text(encoding="utf-8") == candidate.path.read_text(
+        encoding="utf-8"
+    )
+    assert isinstance(load_target(module), SeaTarget)
 
 
 def test_skill_target_uses_the_whole_file_as_text(tmp_path: Path) -> None:
@@ -257,7 +315,7 @@ def test_skill_target_uses_the_whole_file_as_text(tmp_path: Path) -> None:
 
 def test_load_evals_normalizes_and_validates(tmp_path: Path) -> None:
     """String ``expect`` becomes a list, ids default, duplicates and bad splits are errors."""
-    tasks, defaults = load_evals(
+    evals = load_evals(
         _evals(
             tmp_path,
             [
@@ -267,18 +325,68 @@ def test_load_evals_normalizes_and_validates(tmp_path: Path) -> None:
             rollout={"max_steps": 3},
         )
     )
+    tasks = evals.tasks
     assert [t.id for t in tasks] == ["task1", "b"]
     assert tasks[0].expect == ["a"] and tasks[1].split == "select"
-    assert defaults == {"max_steps": 3}
+    assert evals.rollout == {"max_steps": 3}
+    assert evals.env is None and evals.train_rollouts == []
     bare = tmp_path / "bare.json"
     bare.write_text('[{"id": "x", "prompt": "p"}]', encoding="utf-8")
-    assert load_evals(bare)[0][0].id == "x" and load_evals(bare)[1] == {}
+    assert load_evals(bare).tasks[0].id == "x" and load_evals(bare).rollout == {}
     with pytest.raises(ValueError, match="unique"):
         load_evals(_evals(tmp_path, [{"id": "a", "prompt": "p"}, {"id": "a", "prompt": "q"}]))
     with pytest.raises(ValueError, match="split"):
         load_evals(_evals(tmp_path, [{"id": "a", "prompt": "p", "split": "test"}]))
-    real_tasks, real_defaults = load_evals(_EVALS)
-    assert len(real_tasks) == 10 and real_defaults["web_tools"] is False
+    with pytest.raises(ValueError, match="module:Class"):
+        load_evals(_evals(tmp_path, [{"id": "a", "prompt": "p"}], env={"class": "nocolon"}))
+    real = load_evals(_EVALS)
+    assert len(real.tasks) == 10 and real.rollout["web_tools"] is False
+
+
+def test_load_evals_imports_train_rollouts_and_env(tmp_path: Path) -> None:
+    """``train_rollouts`` is read relative to the eval set; unknown task ids are an error."""
+    rollouts = [
+        {
+            "task_id": "a",
+            "passed": False,
+            "verdict": "wrong",
+            "result": "r",
+            "success": True,
+            "trajectory": [{"role": "user", "text": "p"}],
+            "cost": 0.1,
+            "tokens": 5,
+            "steps": 2,
+        }
+    ]
+    (tmp_path / "rollouts.json").write_text(json.dumps(rollouts), encoding="utf-8")
+    evals = load_evals(
+        _evals(
+            tmp_path,
+            [
+                {"id": "a", "prompt": "p", "split": "train"},
+                {"id": "b", "prompt": "q", "split": "select"},
+            ],
+            train_rollouts="rollouts.json",
+            env={
+                "class": "kiss.agents.seas.skillopt_sea:InProcessEnv",
+                "defaults": {"max_steps": 2},
+            },
+        )
+    )
+    assert [r.task_id for r in evals.train_rollouts] == ["a"] and evals.train_rollouts[
+        0
+    ].error == ""
+    env = skillopt_sea.make_env(evals.env, evals.rollout)
+    assert isinstance(env, skillopt_sea.InProcessEnv) and env.defaults == {"max_steps": 2}
+    assert isinstance(skillopt_sea.make_env(None, {"x": 1}), skillopt_sea.InProcessEnv)
+    with pytest.raises(ValueError, match="not an Env"):
+        skillopt_sea.make_env(
+            {"class": "kiss.agents.seas.skillopt_sea:EvalTask", "id": "a", "prompt": "p"}, {}
+        )
+    with pytest.raises(ValueError, match="split 'train'"):
+        load_evals(_evals(tmp_path, [{"id": "b", "prompt": "q"}], train_rollouts="rollouts.json"))
+    with pytest.raises(ValueError, match="split 'train'"):
+        load_evals(_evals(tmp_path, [{"id": "a", "prompt": "p"}], train_rollouts="rollouts.json"))
 
 
 def test_verify_grades_expect_regex_check_and_success(tmp_path: Path) -> None:
@@ -374,7 +482,9 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     assert "at most 4 patches" in ranker_prompt and "Return the exact output." in ranker_prompt
     assert "- b: 'echo beta' -> missing expected text: ['beta']" in ranker_prompt
     candidate_system = str(requests[7]["messages"][0]["content"])
-    assert candidate_system.startswith(sh_sea.system_prompt() + "\nReturn the exact output.")
+    assert candidate_system.startswith(
+        sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output."
+    )
     assert "# Restricted tool profile: bash" in candidate_system
 
     assert report["improved"] is True
@@ -391,7 +501,10 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     assert SeaTarget(proposal.with_suffix("")).text() == sh_sea.system_prompt()
     ns: dict[str, Any] = {}
     exec(compile(proposal.read_text(encoding="utf-8"), str(proposal), "exec"), ns)  # noqa: S102
-    assert ns["system_prompt"]() == sh_sea.system_prompt() + "\nReturn the exact output.\n"
+    assert (
+        ns["system_prompt"]()
+        == sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output.\n"
+    )
     assert ns["tool_profile"]() == "bash"
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
@@ -419,6 +532,154 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
     text = format_report(report)
     assert "proposal written to" in text and "+Return the exact output." in text
     assert skillopt_sea.status(str(out)).splitlines()[3:] == text.splitlines()[3:]
+
+
+class MarkerEnv(Env):
+    """A benchmark stand-in: a task passes when the text carries *marker* (or the task is ``easy``).
+
+    Every call is appended to *log* as ``[work_root name, task ids]`` so the
+    test can check which tasks were rolled out and which were imported.
+    """
+
+    def __init__(self, log: str, marker: str) -> None:
+        self.log = Path(log)
+        self.marker = marker
+
+    def rollouts(
+        self, target: Target, tasks: list[EvalTask], cfg: OptimizeConfig, work_root: Path
+    ) -> list[Rollout]:
+        with self.log.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps([work_root.name, [t.id for t in tasks]]) + "\n")
+        text = target.text()
+        rollouts = []
+        for task in tasks:
+            passed = self.marker in text or task.id == "easy"
+            verdict = "pass" if passed else f"text lacks {self.marker!r}"
+            rollouts.append(
+                Rollout(
+                    task.id,
+                    passed,
+                    verdict,
+                    "r",
+                    True,
+                    [{"role": "result", "text": "r"}],
+                    0.01,
+                    10,
+                    1,
+                )
+            )
+        return rollouts
+
+
+def test_imported_trajectories_and_a_custom_env_drive_a_constant_target(tmp_path: Path) -> None:
+    """Imported trajectories are the training rollouts of every round; the env gates the candidates.
+
+    Model calls (no rollout touches the model): failure analyst and success
+    analyst over the imported trajectories, then the ranker, in both rounds.
+    """
+    module = tmp_path / "harness_core.py"
+    module.write_text(_TEMPLATE_MODULE, encoding="utf-8")
+    long_trajectory = [{"role": "assistant", "text": "[call Bash] " + "x" * 1500}] * 20
+    rollouts = [
+        {
+            "task_id": "t1",
+            "passed": False,
+            "verdict": "tests failed",
+            "result": "",
+            "success": True,
+            "trajectory": long_trajectory,
+            "cost": 0.5,
+            "tokens": 100,
+            "steps": 20,
+        },
+        {
+            "task_id": "t2",
+            "passed": True,
+            "verdict": "resolved",
+            "result": "",
+            "success": True,
+            "trajectory": [{"role": "result", "text": "done"}],
+            "cost": 0.2,
+            "tokens": 50,
+            "steps": 5,
+        },
+    ]
+    (tmp_path / "rollouts.json").write_text(json.dumps(rollouts), encoding="utf-8")
+    log = tmp_path / "env_calls.jsonl"
+    evals = _evals(
+        tmp_path,
+        [
+            {"id": "t1", "prompt": "fix the bug", "split": "train"},
+            {"id": "t2", "prompt": "add a flag", "split": "train"},
+            {"id": "easy", "prompt": "select 1", "split": "select"},
+            {"id": "hard", "prompt": "select 2", "split": "select"},
+        ],
+        train_rollouts="rollouts.json",
+        env={"class": f"{__name__}:MarkerEnv", "log": str(log), "marker": "Verify"},
+    )
+    patch1 = {
+        "op": "add",
+        "anchor": "Be careful.",
+        "text": " Verify with the checker.",
+        "rationale": "",
+    }
+    patch2 = {"op": "add", "anchor": "", "text": "Also keep notes.", "rationale": ""}
+    script = [
+        _patches_body(patch1),
+        _patches_body(),
+        _patches_body(patch1),
+        _patches_body(patch2),
+        _patches_body(),
+        _patches_body(patch2),
+    ]
+    with serve(script) as (url, requests):
+        report = run_optimization(
+            _config(
+                tmp_path,
+                module,
+                evals,
+                url,
+                constant="SYSTEM_PROMPT",
+                epochs=2,
+                trajectory_total_chars=1000,
+            )
+        )
+    assert len(requests) == 6
+    failure_prompt = str(requests[0]["messages"][-1]["content"])
+    assert "## Task t1" in failure_prompt and "tests failed" in failure_prompt
+    assert "characters omitted" in failure_prompt and len(failure_prompt) < 6000
+    assert "## Task t2" in str(requests[1]["messages"][-1]["content"])
+    assert "- hard: 'select 2' -> text lacks 'Verify'" in str(
+        requests[2]["messages"][-1]["content"]
+    )
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [
+        ["select_best", ["easy", "hard"]],
+        ["select_candidate", ["easy", "hard"]],
+        ["select_best", ["easy", "hard"]],
+        ["select_candidate", ["easy", "hard"]],
+    ]
+    # Round 2's failure analyst sees the imported failure with the accepted text.
+    round2_failure = str(requests[3]["messages"][-1]["content"])
+    assert "## Task t1" in round2_failure and "Verify with the checker." in round2_failure
+    rounds = report["rounds"]
+    assert rounds[0]["accepted"] is True and rounds[0]["best_score"] == 0.5
+    assert rounds[0]["candidate_score"] == 1.0
+    assert rounds[1]["accepted"] is False and rounds[1]["reason"] == "rejected: 1.000 <= 1.000"
+    assert report["kind"] == "constant" and report["best_score"] == 1.0
+    proposal = Path(report["proposal"])
+    assert proposal == tmp_path / "harness_core.py.proposed"
+    ns: dict[str, Any] = {}
+    exec(compile(proposal.read_text(encoding="utf-8"), str(proposal), "exec"), ns)  # noqa: S102
+    assert (
+        ns["Harness"]().system_prompt() == "Work in /app.\nBe careful. Verify with the checker.\n"
+    )
+    assert module.read_text(encoding="utf-8") == _TEMPLATE_MODULE
+    log_text = (tmp_path / "out" / "log.txt").read_text(encoding="utf-8")
+    assert log_text.count("using 2 imported trajectories for the training batch") == 2
+    assert "rolling out the current best on the training batch" not in log_text
+    assert not (tmp_path / "out" / "round_01" / "train").exists()
+    assert not (tmp_path / "out" / "round_02" / "train").exists()
 
 
 def test_second_round_resumes_and_rejects_a_tie_or_regression(tmp_path: Path) -> None:
