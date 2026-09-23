@@ -1,47 +1,83 @@
 /*
- * remote-codex.css — Codex mobile / ChatGPT-app restyle for the
- * REMOTE webapp only.  Loaded exclusively by the standalone
- * remote page built by ``web_server._build_html()``.
+ * remote-codex.css — layout restyle of the REMOTE webapp (phone
+ * drawers, docked desktop panels, pill controls).  Loaded exclusively
+ * by the standalone remote page built by ``web_server._build_html()``.
  *
- * All colors are routed through the custom properties declared on
- * ``body.remote-chat`` (dark, the default) so that the Light Modern
- * palette in ``body.remote-chat.light-theme`` re-themes the whole
- * page.  The theme is toggled by the sun/moon button in the tab bar
- * (see ``renderTabBar`` in main.js) and persisted in localStorage.
+ * Colours: the page uses ONLY VS Code's "Dark Modern" / "Light
+ * Modern" theme colours.  web_server.py inlines them as ``--vscode-*``
+ * variables (Dark Modern on ``:root``, Light Modern on
+ * ``body.remote-chat.light-theme``), and the single palette block
+ * below maps every semantic name this file and main.css use onto
+ * those variables.  main.css derives the same semantic names at
+ * ``:root``, where a body-level light override is invisible, which is
+ * why they are re-derived here on ``body``: a declaration such as
+ * ``--fg: var(--vscode-editor-foreground)`` resolves on the body, after
+ * the light theme has swapped the ``--vscode-*`` value, so one block
+ * serves both themes.  The fallbacks are the Dark Modern values, for a
+ * page that lacks the injected variables.  The theme is toggled by the
+ * sun/moon item in the "..." menu (see ``applyRemoteTheme`` in main.js)
+ * and persisted in localStorage.
  */
 
 body.remote-chat {
-  --bg: #0d0d0d;
-  --bg2: #0d0d0d;
-  --surface: #171717;
-  --surface2: #212121;
-  --fg: #ececec;
-  --fg-strong: #fff;
-  --dim: #afafaf;
-  --faint: #8e8e8e;
-  --icon: #cdcdcd;
-  --input-bg: #212121;
-  --chip-bg: #1a1a1a;
-  --chip-border: #3a3a3a;
-  --border: rgb(255 255 255 / 10%);
-  --border-8: rgb(255 255 255 / 8%);
-  --border-12: rgb(255 255 255 / 12%);
-  --border-15: rgb(255 255 255 / 15%);
-  --border-18: rgb(255 255 255 / 18%);
-  --border-25: rgb(255 255 255 / 25%);
-  --border-30: rgb(255 255 255 / 30%);
-  --ring: rgb(255 255 255 / 20%);
-  --ring-focus: rgb(255 255 255 / 35%);
-  --hover: rgb(255 255 255 / 8%);
-  --hover-strong: rgb(255 255 255 / 15%);
-  --hover-faint: rgb(255 255 255 / 4%);
-  --send-bg: #fff;
-  --send-fg: #0d0d0d;
-  --send-hover-bg: #ececec;
-  --send-disabled-bg: rgb(255 255 255 / 25%);
-  --shadow: rgb(0 0 0 / 50%);
-  --favorite: #f5b400;
-  --copied: #4caf50;
+  /* main.css :root names, re-derived (see the header comment). */
+  --bg: var(--vscode-editor-background, #1f1f1f);
+  --bg2: var(--vscode-sideBar-background, #181818);
+  --surface: var(--vscode-sideBar-background, #181818);
+  --surface2: var(--vscode-input-background, #313131);
+  --fg: var(--vscode-editor-foreground, #ccc);
+  --dim: var(--vscode-tab-inactiveForeground, #9d9d9d);
+  --accent: var(--vscode-textLink-foreground, #4daafc);
+  --border: var(--vscode-panel-border, #2b2b2b);
+  --input-bg: var(--vscode-input-background, #313131);
+  --green: var(--vscode-terminal-ansiGreen, #0dbc79);
+  --red: var(--vscode-terminal-ansiRed, #cd3131);
+  --yellow: var(--vscode-terminal-ansiYellow, #e5e510);
+  --purple: var(--vscode-terminal-ansiMagenta, #bc3fbc);
+  --cyan: var(--vscode-terminal-ansiCyan, #11a8cd);
+  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
+  --error: var(--vscode-errorForeground, #f85149);
+  --warning: var(--vscode-editorWarning-foreground, #cca700);
+
+  /* Names used only by this file. */
+  --fg-strong: var(--vscode-tab-activeForeground, #fff);
+  --faint: var(--vscode-input-placeholderForeground, #989898);
+  --icon: var(--vscode-icon-foreground, #ccc);
+  --chip-bg: var(--vscode-input-background, #313131);
+  --chip-border: var(--vscode-input-border, #3c3c3c);
+  --border-soft: var(--vscode-sideBar-border, #2b2b2b);
+  --border-widget: var(--vscode-widget-border, #313131);
+  --border-input: var(--vscode-input-border, #3c3c3c);
+  --border-hover: color-mix(in srgb, var(--fg) 30%, transparent);
+  --ring: var(--vscode-input-border, #3c3c3c);
+  --ring-focus: var(--vscode-focusBorder, #0078d4);
+  --hover: var(--vscode-list-hoverBackground, #2a2d2e);
+  --hover-strong: var(--vscode-toolbar-hoverBackground, #5a5d5e50);
+  --selected: var(--vscode-list-inactiveSelectionBackground, #37373d);
+  --menu-bg: var(--vscode-editorWidget-background, #202020);
+  --link: var(--vscode-textLink-foreground, #4daafc);
+  --link-active: var(--vscode-textLink-activeForeground, #4daafc);
+  --scrollbar: var(--vscode-scrollbarSlider-background, #79797966);
+  --tabs-bg: var(--vscode-editorGroupHeader-tabsBackground, #2b2b2b);
+  --tab-active-line: var(--vscode-tab-activeBorderTop, #0078d4);
+  --activity-active: var(--vscode-activityBar-foreground, #d7d7d7);
+  --activity-inactive: var(--vscode-activityBar-inactiveForeground, #868686);
+  --activity-line: var(--vscode-activityBar-activeBorder, #0078d4);
+  --send-bg: var(--vscode-button-background, #0078d4);
+  --send-fg: var(--vscode-button-foreground, #fff);
+  --send-hover-bg: var(--vscode-button-hoverBackground, #026ec1);
+  --send-disabled-bg: color-mix(in srgb, var(--send-bg) 40%, transparent);
+  --shadow: var(--vscode-widget-shadow, #0000005c);
+
+  /* Status colours main.css paints with GitHub / Material literals
+     (history row icons, filter chips, the update button): aliased so
+     the remote overrides below keep decorative tokens out of plain
+     properties (test_no_decorative_color_tokens_in_codex_css). */
+  --status-ok: var(--green);
+  --status-fail: var(--error);
+  --status-done: var(--accent);
+  --favorite: var(--warning);
+  --copied: var(--green);
 
   /* The settings dialog's green outline (see #settings-panel below):
      a semantic alias of the theme green, so the light theme's --green
@@ -84,70 +120,12 @@ body.remote-chat {
   color: var(--fg);
 }
 
-/*
- * Light theme — palette borrowed from VS Code's "Light Modern"
- * default theme.  Re-declares both the ``--vscode-*`` variables used
- * directly by main.css rules and the semantic variables main.css
- * derives at ``:root`` (those resolve at the root element, so the
- * body-level ``--vscode-*`` overrides alone would not reach them).
- */
-body.remote-chat.light-theme {
-  --vscode-editor-background: #fff;
-  --vscode-editor-foreground: #3b3b3b;
-  --vscode-input-background: #fff;
-  --vscode-button-foreground: #fff;
-  --vscode-sideBar-background: #f8f8f8;
-  --vscode-textLink-foreground: #005fb8;
-  --vscode-descriptionForeground: #616161;
-  --vscode-panel-border: #e5e5e5;
-  --vscode-terminal-ansiRed: #cd3131;
-  --vscode-terminal-ansiGreen: #107c10;
-  --vscode-terminal-ansiYellow: #949800;
-  --vscode-terminal-ansiMagenta: #bc05bc;
-  --vscode-terminal-ansiCyan: #0598bc;
-  --accent: #005fb8;
-  --green: #107c10;
-  --red: #cd3131;
-  --yellow: #949800;
-  --purple: #bc05bc;
-  --cyan: #0598bc;
-  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
-  --bg: #fff;
-  --bg2: #fff;
-  --surface: #f8f8f8;
-  --surface2: #f3f3f3;
-  --fg: #3b3b3b;
-  --fg-strong: #1f1f1f;
-  --dim: #616161;
-  --faint: #8b8b8b;
-  --icon: #5f5f5f;
-  --input-bg: #f3f3f3;
-  --chip-bg: #f6f6f6;
-  --chip-border: #d4d4d4;
-  --border: rgb(0 0 0 / 10%);
-  --border-8: rgb(0 0 0 / 8%);
-  --border-12: rgb(0 0 0 / 12%);
-  --border-15: rgb(0 0 0 / 15%);
-  --border-18: rgb(0 0 0 / 20%);
-  --border-25: rgb(0 0 0 / 25%);
-  --border-30: rgb(0 0 0 / 30%);
-  --ring: rgb(0 0 0 / 10%);
-  --ring-focus: rgb(0 0 0 / 25%);
-  --hover: rgb(0 0 0 / 5%);
-  --hover-strong: rgb(0 0 0 / 8%);
-  --hover-faint: rgb(0 0 0 / 4%);
-  --send-bg: #1f1f1f;
-  --send-fg: #fff;
-  --send-hover-bg: #333;
-  --send-disabled-bg: rgb(0 0 0 / 15%);
-  --shadow: rgb(0 0 0 / 18%);
-  --favorite: #b58500;
-  --copied: #107c10;
-}
-
+/* The tab strip: VS Code's editor-group header colours — a darker
+   band, dim inactive tabs, the active tab in the editor background
+   with the accent line on its top edge. */
 body.remote-chat #tab-bar {
-  background: var(--bg);
-  border-bottom: none;
+  background: var(--tabs-bg);
+  border-bottom: 1px solid var(--border);
   padding: 8px 10px 4px;
 }
 
@@ -169,9 +147,10 @@ body.remote-chat #tab-bar .chat-tab:hover {
 }
 
 body.remote-chat #tab-bar .chat-tab.active {
-  background: var(--surface2);
-  border-color: var(--border-18);
-  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--border-input);
+  border-top-color: var(--tab-active-line);
+  color: var(--fg-strong);
 }
 
 body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
@@ -186,13 +165,13 @@ body.remote-chat #tab-status-bar {
 
 body.remote-chat #input-drawer-btn {
   background: var(--surface2);
-  border-color: var(--border-15);
+  border-color: var(--border-input);
   color: var(--dim);
 }
 
 body.remote-chat #input-drawer-btn:hover {
   color: var(--fg);
-  border-color: var(--border-30);
+  border-color: var(--border-hover);
 }
 
 /* The button bar (#input-footer) stays visible while collapsed, so the
@@ -275,8 +254,8 @@ body.remote-chat #voice-btn.active {
 }
 
 body.remote-chat #more-menu {
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  background: var(--menu-bg);
+  border: 1px solid var(--border-widget);
   border-radius: 16px;
   box-shadow: 0 8px 24px var(--shadow);
 }
@@ -294,7 +273,7 @@ body.remote-chat .more-menu-item:hover:not(:disabled) {
 
 body.remote-chat #model-btn {
   background: transparent;
-  border: 1px solid var(--border-15);
+  border: 1px solid var(--border-input);
   border-radius: 999px;
   padding: 6px 12px;
   height: 32px;
@@ -307,7 +286,7 @@ body.remote-chat #model-btn {
 
 body.remote-chat #model-btn:hover:not(:disabled) {
   background: var(--hover);
-  border-color: var(--border-25);
+  border-color: var(--border-hover);
   color: var(--fg);
 }
 
@@ -342,8 +321,8 @@ body.remote-chat #stop-btn {
 }
 
 body.remote-chat #model-dropdown {
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  background: var(--menu-bg);
+  border: 1px solid var(--border-widget);
   border-radius: 16px;
   box-shadow: 0 8px 24px var(--shadow);
   overflow: hidden;
@@ -368,7 +347,7 @@ body.remote-chat .file-chip.error {
 
 body.remote-chat .suggestion-chip {
   background: transparent;
-  border: 1px solid var(--border-12);
+  border: 1px solid var(--border-widget);
   border-radius: 16px;
   color: var(--fg);
 }
@@ -384,7 +363,7 @@ body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel,
 body.remote-chat #workdir-panel {
   background: var(--surface);
-  border-right: 1px solid var(--border-8);
+  border-right: 1px solid var(--border-soft);
 }
 
 body.remote-chat #settings-panel {
@@ -442,8 +421,8 @@ body.remote-chat .config-update-btn {
 
 body.remote-chat #auth-modal .auth-modal-content,
 body.remote-chat .server-reset-confirm-content {
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  background: var(--menu-bg);
+  border: 1px solid var(--border-widget);
   border-radius: 16px;
   box-shadow: 0 8px 24px var(--shadow);
 }
@@ -451,6 +430,114 @@ body.remote-chat .server-reset-confirm-content {
 body.remote-chat .auth-modal-btn,
 body.remote-chat .server-reset-confirm-btn {
   border-radius: 999px;
+}
+
+/*
+ * main.css paints a few affordances with GitHub / Material literals
+ * (they must keep those exact values in the VS Code webview, where
+ * tests pin them).  On the remote page they take the theme's own
+ * status colours instead.
+ */
+body.remote-chat .sidebar-item-failed,
+body.remote-chat .hf-chip-errored:has(> input:checked) .hf-chip-dot {
+  color: var(--status-fail);
+}
+
+body.remote-chat .sidebar-item-running,
+body.remote-chat .sidebar-item-completed,
+body.remote-chat .ids-copy-btn.copied,
+body.remote-chat .sidebar-item-copy.copied,
+body.remote-chat .hf-chip-running:has(> input:checked) .hf-chip-dot,
+body.remote-chat .config-update-btn .update-available-icon {
+  color: var(--status-ok);
+}
+
+body.remote-chat .hf-chip-succeeded:has(> input:checked) .hf-chip-dot {
+  color: var(--status-done);
+}
+
+body.remote-chat .sidebar-item-favorite.favorited,
+body.remote-chat .sidebar-item-favorite.favorited:hover,
+body.remote-chat .hf-chip-favorite:has(> input:checked) .hf-chip-icon {
+  color: var(--favorite);
+}
+
+body.remote-chat .config-update-btn.has-update {
+  border-color: color-mix(in srgb, var(--status-ok) 60%, var(--border));
+  background: color-mix(in srgb, var(--status-ok) 10%, transparent);
+}
+
+body.remote-chat .config-update-btn.has-update:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--status-ok) 18%, transparent);
+}
+
+body.remote-chat .config-update-btn .update-available-icon {
+  filter: none;
+}
+
+/* VS Code hands every webview a base stylesheet (links in
+   textLink.foreground, the scrollbar slider) that main.css relies on;
+   the remote page has no host, so it declares those defaults here. */
+body.remote-chat a {
+  color: var(--link);
+}
+
+body.remote-chat a:hover {
+  color: var(--link-active);
+}
+
+body.remote-chat ::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+}
+
+/* The attention pulse on a background tab glows in the theme's
+   green instead of main.css's Material green (the keyframes cannot be
+   scoped, so the remote page swaps in its own). */
+@keyframes remote-running-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 1px var(--shadow); }
+  50% { opacity: 0.4; box-shadow: 0 0 6px 2px color-mix(in srgb, var(--status-ok) 50%, transparent); }
+}
+
+body.remote-chat .chat-tab-attention {
+  animation-name: remote-running-pulse;
+}
+
+/* The delete-confirmation pair: VS Code secondary buttons with the
+   theme's fail / ok colours for the labels instead of dark red and
+   dark green on white. */
+body.remote-chat .sidebar-confirm-yes,
+body.remote-chat .sidebar-confirm-no {
+  background: var(--menu-bg);
+  border-color: var(--border-input);
+}
+
+body.remote-chat .sidebar-confirm-yes:hover,
+body.remote-chat .sidebar-confirm-no:hover {
+  background: var(--hover);
+  filter: none;
+}
+
+body.remote-chat .sidebar-confirm-yes { color: var(--status-fail); }
+
+body.remote-chat .sidebar-confirm-no { color: var(--status-ok); }
+
+/* The frequent-tasks list: main.js skips its hashed pastel row
+   backgrounds on the remote page (renderFrequentTasks), so the inline
+   buttons and the count badge, which main.css tunes for dark text on
+   pastel, take the theme foregrounds here. */
+body.remote-chat .frequent-item .sidebar-item-delete,
+body.remote-chat .frequent-item .sidebar-item-copy {
+  color: var(--icon);
+}
+
+body.remote-chat .frequent-item .sidebar-item-delete:hover,
+body.remote-chat .frequent-item .sidebar-item-copy:hover {
+  background: var(--hover-strong);
+}
+
+body.remote-chat .frequent-item-count {
+  color: var(--dim);
+  background: var(--selected);
 }
 
 @media (width <= 600px) {
@@ -462,26 +549,26 @@ body.remote-chat .server-reset-confirm-btn {
 
 /* The activity bar (Tasks / Explorer / Source Control) exists only on
    the remote page: a VS Code window has the real Explorer and Source
-   Control views.  Colors come from the Codex palette so the strip
-   reads as a slightly darker column beside the panel, like VS Code's
-   activity bar beside its sidebar. */
+   Control views.  It takes VS Code's activityBar.* colours: the
+   sidebar background, dim inactive icons, the accent line beside the
+   active one. */
 body.remote-chat #activity-bar {
   display: flex;
-  background: var(--surface2);
-  border-right: 1px solid var(--border-8);
+  background: var(--surface);
+  border-right: 1px solid var(--border-soft);
 }
 
 body.remote-chat .activity-btn {
-  color: var(--dim);
+  color: var(--activity-inactive);
 }
 
 body.remote-chat .activity-btn:hover,
 body.remote-chat .activity-btn.active {
-  color: var(--fg);
+  color: var(--activity-active);
 }
 
 body.remote-chat .activity-btn.active {
-  border-left-color: var(--fg);
+  border-left-color: var(--activity-line);
 }
 
 body.remote-chat .explorer-row:hover,
@@ -495,7 +582,7 @@ body.remote-chat .explorer-row.is-dir > .explorer-icon {
 }
 
 body.remote-chat .scm-commit.expanded {
-  background: var(--hover-faint);
+  background: var(--selected);
 }
 
 body.remote-chat .scm-section-hdr:hover {
@@ -525,7 +612,7 @@ body.remote-chat.sidebar-resizing {
 }
 
 body.remote-chat .running-item {
-  background-color: var(--hover-faint);
+  background-color: var(--selected);
   color: var(--fg);
 }
 
@@ -630,7 +717,7 @@ body.remote-chat #meta-info {
   min-height: 0;
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid var(--border-8);
+  border-top: 1px solid var(--border-soft);
 }
 
 body.remote-chat #meta-info.visible {
@@ -687,7 +774,7 @@ body.remote-chat #meta-info-content {
     bottom: 0;
     width: min(85vw, 360px);
     background: var(--surface);
-    border-left: 1px solid var(--border-8);
+    border-left: 1px solid var(--border-soft);
     transform: translateX(100%);
     transition: transform 0.2s ease;
     z-index: 200;
@@ -743,7 +830,7 @@ body.remote-chat #meta-info-content {
   body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
     width: var(--sidebar-w, var(--sidebar-default-w));
-    border-right: 1px solid var(--border-8);
+    border-right: 1px solid var(--border-soft);
 
     /* The panel may be dragged as narrow as --sidebar-min-w (10px).
        With box-sizing:border-box the fixed 2 x 16px padding of
@@ -798,7 +885,7 @@ body.remote-chat #meta-info-content {
     bottom: 0;
     width: var(--meta-w, var(--meta-panel-w));
     background: var(--surface);
-    border-left: 1px solid var(--border-8);
+    border-left: 1px solid var(--border-soft);
     padding: 16px;
     padding-left: min(16px, calc(var(--meta-w, var(--meta-panel-w)) / 4));
     padding-right: min(16px, calc(var(--meta-w, var(--meta-panel-w)) / 4));
@@ -842,6 +929,6 @@ body.remote-chat #meta-info-content {
   body.remote-chat.remote-desktop #meta-resizer:hover,
   body.remote-chat.remote-desktop #meta-resizer:active,
   body.remote-chat.remote-desktop #meta-resizer:focus-visible {
-    background: var(--border-12);
+    background: var(--border-widget);
   }
 }

@@ -56,7 +56,7 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
         html = web_server._build_html()
         for name in (
             "main.css",
-            "highlight-github-dark.min.css",
+            "highlight-vscode-dark.css",
             "highlight.min.js",
             "marked.min.js",
             "panelCopy.js",

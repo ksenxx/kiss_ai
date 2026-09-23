@@ -3291,28 +3291,193 @@ def _media_fingerprint(path: Path) -> tuple[int, int, int, int]:
     return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
 
 
-_VSCODE_THEME_VARS_CSS = (
-    ":root {\n"
-    "      --vscode-font-size: 16px;\n"
+_VSCODE_FONT_VARS_CSS = (
+    # VS Code's workbench font (src/vs/base/browser/fonts.ts
+    # DEFAULT_FONT_FAMILY) is chosen per platform; the browser cannot
+    # know which VS Code build the user runs, so the stack lists the
+    # macOS, Windows and Linux choices in turn.  Same for the editor
+    # font (src/vs/editor/common/config/fontInfo.ts
+    # EDITOR_FONT_DEFAULTS).  Both sizes are VS Code's default editor
+    # font size: an earlier request made the chat text match the task
+    # panel, which sizes itself with --vscode-editor-font-size.
+    "      --vscode-font-size: 14px;\n"
     "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
-    "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
-    "      --vscode-editor-font-size: 16px;\n"
-    "      --vscode-editor-font-family: Menlo, Monaco, "
-    "'Courier New', monospace;\n"
-    "      --vscode-editor-background: #1e1e1e;\n"
+    '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
+    "sans-serif;\n"
+    "      --vscode-font-weight: normal;\n"
+    "      --vscode-editor-font-size: 14px;\n"
+    '      --vscode-editor-font-family: Menlo, Monaco, Consolas, '
+    '"Droid Sans Mono", "Courier New", monospace;\n'
+    "      --vscode-editor-font-weight: normal;\n"
+)
+"""VS Code's default fonts, as the ``--vscode-*`` variables a webview
+receives (``src/vs/workbench/contrib/webview/browser/themeing.ts``)."""
+
+_VSCODE_DARK_MODERN_CSS = (
+    # extensions/theme-defaults/themes/dark_modern.json, plus the
+    # colour-registry defaults it inherits (list.*, terminal.ansi*,
+    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground).
+    "      --vscode-foreground: #cccccc;\n"
+    "      --vscode-descriptionForeground: #9d9d9d;\n"
+    "      --vscode-errorForeground: #f85149;\n"
+    "      --vscode-icon-foreground: #cccccc;\n"
+    "      --vscode-focusBorder: #0078d4;\n"
+    "      --vscode-editor-background: #1f1f1f;\n"
     "      --vscode-editor-foreground: #cccccc;\n"
-    "      --vscode-input-background: #3c3c3c;\n"
+    "      --vscode-editor-selectionBackground: #264f78;\n"
+    "      --vscode-editorWidget-background: #202020;\n"
+    "      --vscode-editorWarning-foreground: #cca700;\n"
+    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
+    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
+    "      --vscode-editorGutter-modifiedBackground: #0078d4;\n"
+    "      --vscode-sideBar-background: #181818;\n"
+    "      --vscode-sideBar-border: #2b2b2b;\n"
+    "      --vscode-panel-border: #2b2b2b;\n"
+    "      --vscode-widget-border: #313131;\n"
+    "      --vscode-widget-shadow: #0000005c;\n"
+    "      --vscode-editorGroupHeader-tabsBackground: #2b2b2b;\n"
+    "      --vscode-tab-activeBackground: #1f1f1f;\n"
+    "      --vscode-tab-inactiveBackground: #2b2b2b;\n"
+    "      --vscode-tab-activeForeground: #ffffff;\n"
+    "      --vscode-tab-inactiveForeground: #9d9d9d;\n"
+    "      --vscode-tab-activeBorderTop: #0078d4;\n"
+    "      --vscode-activityBar-foreground: #d7d7d7;\n"
+    "      --vscode-activityBar-inactiveForeground: #868686;\n"
+    "      --vscode-activityBar-activeBorder: #0078d4;\n"
+    "      --vscode-list-hoverBackground: #2a2d2e;\n"
+    "      --vscode-list-activeSelectionBackground: #04395e;\n"
+    "      --vscode-list-inactiveSelectionBackground: #37373d;\n"
+    "      --vscode-input-background: #313131;\n"
+    "      --vscode-input-foreground: #cccccc;\n"
+    "      --vscode-input-border: #3c3c3c;\n"
+    "      --vscode-input-placeholderForeground: #989898;\n"
+    "      --vscode-dropdown-background: #313131;\n"
+    "      --vscode-dropdown-border: #3c3c3c;\n"
+    "      --vscode-button-background: #0078d4;\n"
     "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-sideBar-background: #252526;\n"
-    "      --vscode-textLink-foreground: #3794ff;\n"
-    "      --vscode-descriptionForeground: #8b8b8b;\n"
-    "      --vscode-panel-border: #80808059;\n"
-    "      --vscode-terminal-ansiRed: #f44747;\n"
-    "      --vscode-terminal-ansiGreen: #6a9955;\n"
-    "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-    "      --vscode-terminal-ansiMagenta: #c586c0;\n"
-    "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
-    "    }\n"
+    "      --vscode-button-hoverBackground: #026ec1;\n"
+    "      --vscode-button-border: #ffffff1a;\n"
+    "      --vscode-button-secondaryBackground: #00000000;\n"
+    "      --vscode-button-secondaryForeground: #cccccc;\n"
+    "      --vscode-button-secondaryHoverBackground: #2b2b2b;\n"
+    "      --vscode-badge-background: #616161;\n"
+    "      --vscode-badge-foreground: #f8f8f8;\n"
+    "      --vscode-textLink-foreground: #4daafc;\n"
+    "      --vscode-textLink-activeForeground: #4daafc;\n"
+    "      --vscode-textCodeBlock-background: #2b2b2b;\n"
+    "      --vscode-textBlockQuote-background: #2b2b2b;\n"
+    "      --vscode-textBlockQuote-border: #616161;\n"
+    "      --vscode-textPreformat-foreground: #d0d0d0;\n"
+    "      --vscode-textPreformat-background: #3c3c3c;\n"
+    "      --vscode-menu-background: #1f1f1f;\n"
+    "      --vscode-menu-selectionBackground: #0078d4;\n"
+    "      --vscode-notifications-background: #1f1f1f;\n"
+    "      --vscode-notifications-border: #2b2b2b;\n"
+    "      --vscode-toolbar-hoverBackground: #5a5d5e50;\n"
+    "      --vscode-scrollbarSlider-background: #79797966;\n"
+    "      --vscode-terminal-foreground: #cccccc;\n"
+    "      --vscode-terminal-ansiBlack: #000000;\n"
+    "      --vscode-terminal-ansiRed: #cd3131;\n"
+    "      --vscode-terminal-ansiGreen: #0dbc79;\n"
+    "      --vscode-terminal-ansiYellow: #e5e510;\n"
+    "      --vscode-terminal-ansiBlue: #2472c8;\n"
+    "      --vscode-terminal-ansiMagenta: #bc3fbc;\n"
+    "      --vscode-terminal-ansiCyan: #11a8cd;\n"
+    "      --vscode-terminal-ansiWhite: #e5e5e5;\n"
+    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
+    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --vscode-terminal-ansiBrightGreen: #23d18b;\n"
+    "      --vscode-terminal-ansiBrightYellow: #f5f543;\n"
+    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --vscode-terminal-ansiBrightWhite: #e5e5e5;\n"
+)
+"""VS Code's "Dark Modern" theme as ``--vscode-*`` variables."""
+
+_VSCODE_LIGHT_MODERN_CSS = (
+    # extensions/theme-defaults/themes/light_modern.json and the
+    # colour-registry light defaults, one line per Dark Modern line.
+    "      --vscode-foreground: #3b3b3b;\n"
+    "      --vscode-descriptionForeground: #3b3b3b;\n"
+    "      --vscode-errorForeground: #f85149;\n"
+    "      --vscode-icon-foreground: #3b3b3b;\n"
+    "      --vscode-focusBorder: #005fb8;\n"
+    "      --vscode-editor-background: #ffffff;\n"
+    "      --vscode-editor-foreground: #3b3b3b;\n"
+    "      --vscode-editor-selectionBackground: #add6ff;\n"
+    "      --vscode-editorWidget-background: #f8f8f8;\n"
+    "      --vscode-editorWarning-foreground: #bf8803;\n"
+    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
+    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
+    "      --vscode-editorGutter-modifiedBackground: #005fb8;\n"
+    "      --vscode-sideBar-background: #f8f8f8;\n"
+    "      --vscode-sideBar-border: #e5e5e5;\n"
+    "      --vscode-panel-border: #e5e5e5;\n"
+    "      --vscode-widget-border: #e5e5e5;\n"
+    "      --vscode-widget-shadow: #00000029;\n"
+    "      --vscode-editorGroupHeader-tabsBackground: #e5e5e5;\n"
+    "      --vscode-tab-activeBackground: #ffffff;\n"
+    "      --vscode-tab-inactiveBackground: #e5e5e5;\n"
+    "      --vscode-tab-activeForeground: #3b3b3b;\n"
+    "      --vscode-tab-inactiveForeground: #616161;\n"
+    "      --vscode-tab-activeBorderTop: #005fb8;\n"
+    "      --vscode-activityBar-foreground: #1f1f1f;\n"
+    "      --vscode-activityBar-inactiveForeground: #616161;\n"
+    "      --vscode-activityBar-activeBorder: #005fb8;\n"
+    "      --vscode-list-hoverBackground: #f2f2f2;\n"
+    "      --vscode-list-activeSelectionBackground: #e8e8e8;\n"
+    "      --vscode-list-inactiveSelectionBackground: #e4e6f1;\n"
+    "      --vscode-input-background: #ffffff;\n"
+    "      --vscode-input-foreground: #3b3b3b;\n"
+    "      --vscode-input-border: #cecece;\n"
+    "      --vscode-input-placeholderForeground: #767676;\n"
+    "      --vscode-dropdown-background: #ffffff;\n"
+    "      --vscode-dropdown-border: #cecece;\n"
+    "      --vscode-button-background: #005fb8;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-button-hoverBackground: #0258a8;\n"
+    "      --vscode-button-border: #0000001a;\n"
+    "      --vscode-button-secondaryBackground: #e5e5e5;\n"
+    "      --vscode-button-secondaryForeground: #3b3b3b;\n"
+    "      --vscode-button-secondaryHoverBackground: #cccccc;\n"
+    "      --vscode-badge-background: #cccccc;\n"
+    "      --vscode-badge-foreground: #3b3b3b;\n"
+    "      --vscode-textLink-foreground: #005fb8;\n"
+    "      --vscode-textLink-activeForeground: #005fb8;\n"
+    "      --vscode-textCodeBlock-background: #f8f8f8;\n"
+    "      --vscode-textBlockQuote-background: #f8f8f8;\n"
+    "      --vscode-textBlockQuote-border: #e5e5e5;\n"
+    "      --vscode-textPreformat-foreground: #3b3b3b;\n"
+    "      --vscode-textPreformat-background: #0000001f;\n"
+    "      --vscode-menu-background: #ffffff;\n"
+    "      --vscode-menu-selectionBackground: #005fb8;\n"
+    "      --vscode-notifications-background: #ffffff;\n"
+    "      --vscode-notifications-border: #e5e5e5;\n"
+    "      --vscode-toolbar-hoverBackground: #b8b8b850;\n"
+    "      --vscode-scrollbarSlider-background: #64646466;\n"
+    "      --vscode-terminal-foreground: #3b3b3b;\n"
+    "      --vscode-terminal-ansiBlack: #000000;\n"
+    "      --vscode-terminal-ansiRed: #cd3131;\n"
+    "      --vscode-terminal-ansiGreen: #107c10;\n"
+    "      --vscode-terminal-ansiYellow: #949800;\n"
+    "      --vscode-terminal-ansiBlue: #0451a5;\n"
+    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
+    "      --vscode-terminal-ansiCyan: #0598bc;\n"
+    "      --vscode-terminal-ansiWhite: #555555;\n"
+    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
+    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --vscode-terminal-ansiBrightGreen: #14ce14;\n"
+    "      --vscode-terminal-ansiBrightYellow: #b5ba00;\n"
+    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --vscode-terminal-ansiBrightWhite: #a5a5a5;\n"
+)
+"""VS Code's "Light Modern" theme as ``--vscode-*`` variables."""
+
+_VSCODE_THEME_VARS_CSS = (
+    ":root {\n" + _VSCODE_FONT_VARS_CSS + _VSCODE_DARK_MODERN_CSS + "    }\n"
 )
 """The VS Code theme variables main.css derives its palette from.
 
@@ -3320,35 +3485,23 @@ The webview gets them from VS Code itself; the remote webapp
 (:func:`_build_html`) and the shared chat pages
 (:func:`_build_share_page`) run in a plain browser, so both inline
 this block — one copy, so the two pages can never disagree on the
-palette.
+palette.  Dark Modern is the default theme; the light theme swaps in
+:data:`_SHARE_PAGE_LIGHT_VARS_CSS`.
 """
 
 _SHARE_PAGE_LIGHT_VARS_CSS = (
-    "html.light-theme {\n"
-    "      --vscode-editor-background: #ffffff;\n"
-    "      --vscode-editor-foreground: #3b3b3b;\n"
-    "      --vscode-input-background: #ffffff;\n"
-    "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-sideBar-background: #f8f8f8;\n"
-    "      --vscode-textLink-foreground: #005fb8;\n"
-    "      --vscode-descriptionForeground: #616161;\n"
-    "      --vscode-panel-border: #e5e5e5;\n"
-    "      --vscode-terminal-ansiRed: #cd3131;\n"
-    "      --vscode-terminal-ansiGreen: #107c10;\n"
-    "      --vscode-terminal-ansiYellow: #949800;\n"
-    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
-    "      --vscode-terminal-ansiCyan: #0598bc;\n"
-    "    }\n"
+    "html.light-theme,\n"
+    "    body.remote-chat.light-theme {\n" + _VSCODE_LIGHT_MODERN_CSS + "    }\n"
 )
-"""Light-mode overrides for a shared chat page's theme toggle.
+"""Light Modern overrides for the light/dark theme toggles.
 
-The values mirror VS Code's "Light Modern" palette (the same ones the
-remote webapp's light theme uses, see ``media/remote-codex.css``).
-They are declared on ``html.light-theme`` — the same element the
-``:root`` block of :data:`_VSCODE_THEME_VARS_CSS` targets but with
-higher specificity — so ``main.css``'s ``:root``-level derived
-variables (``--bg``, ``--fg``, ...) pick them up when ``share.js``
-toggles the ``light-theme`` class on ``<html>``.
+Both pages inline this block after :data:`_VSCODE_THEME_VARS_CSS`.
+``share.js`` toggles the ``light-theme`` class on ``<html>``, the
+same element the ``:root`` block targets, so ``main.css``'s
+``:root``-level derived variables (``--bg``, ``--fg``, ...) pick the
+overrides up.  ``main.js`` toggles it on ``<body>`` instead, where
+``media/remote-codex.css`` re-derives every semantic variable from
+the ``--vscode-*`` names, so the remote page follows too.
 """
 
 _SHARE_PAGE_CSS = """\
@@ -3441,10 +3594,10 @@ def _build_share_page(title: str, body_html: str) -> str:
         The complete HTML document string.
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
-    hljs_dark_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+    hljs_dark_css = (MEDIA_DIR / "highlight-vscode-dark.css").read_text(
         encoding="utf-8",
     )
-    hljs_light_css = (MEDIA_DIR / "highlight-github-light.min.css").read_text(
+    hljs_light_css = (MEDIA_DIR / "highlight-vscode-light.css").read_text(
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
@@ -3505,9 +3658,10 @@ def _build_html() -> str:
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
-        "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
+        "    body { background: var(--vscode-editor-background, #1f1f1f);\n"
         "            color: var(--vscode-editor-foreground, #cccccc); }\n"
-        "    " + _VSCODE_THEME_VARS_CSS + "  </style>"
+        "    " + _VSCODE_THEME_VARS_CSS
+        + "    " + _SHARE_PAGE_LIGHT_VARS_CSS + "  </style>"
     )
     auth_modal = (
         '    <div id="auth-modal" style="display:none;">\n'
@@ -3532,7 +3686,7 @@ def _build_html() -> str:
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
-        "HLJS_CSS_HREF": _media_url("highlight-github-dark.min.css"),
+        "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
@@ -3551,8 +3705,8 @@ def _build_html() -> str:
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
             + json.dumps({
-                "dark": _media_url("highlight-github-dark.min.css"),
-                "light": _media_url("highlight-github-light.min.css"),
+                "dark": _media_url("highlight-vscode-dark.css"),
+                "light": _media_url("highlight-vscode-light.css"),
             })
             + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
         ),

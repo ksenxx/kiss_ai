@@ -259,10 +259,16 @@ def test_every_codex_rule_scoped_under_remote_chat() -> None:
 
 
 def test_codex_page_palette() -> None:
-    """Near-black Codex page background + #ececec primary text."""
-    css = _read_codex_css()
-    assert "#0d0d0d" in css, "Codex page background #0d0d0d missing"
-    assert "#ececec" in css, "Codex primary text #ececec missing"
+    """The page background and primary text are VS Code's editor
+    colours, taken from the injected --vscode-* variables with the
+    Dark Modern values as fallbacks."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--bg:\s*var\(--vscode-editor-background,\s*#1f1f1f\)", dark
+    ), "page background must be editor.background (Dark Modern #1f1f1f)"
+    assert re.search(
+        r"--fg:\s*var\(--vscode-editor-foreground,\s*#ccc\)", dark
+    ), "primary text must be editor.foreground (Dark Modern #cccccc)"
 
 
 def _dark_palette_block() -> str:
@@ -274,15 +280,15 @@ def _dark_palette_block() -> str:
 
 
 def test_codex_composer_card() -> None:
-    """Composer = --surface2 (#212121 in dark) card at 28px radius with
-    an inset edge drawn via --ring (translucent white in dark)."""
+    """Composer = --surface2 (VS Code's input.background) card at 28px
+    radius with an inset edge drawn via --ring (input.border)."""
     dark = _dark_palette_block()
-    assert re.search(r"--surface2:\s*#212121\b", dark), (
-        "composer surface --surface2: #212121 missing from dark palette"
-    )
     assert re.search(
-        r"--ring:\s*rgba?\(255[,\s]+255[,\s]+255", dark
-    ), "--ring must be a translucent white in the dark palette"
+        r"--surface2:\s*var\(--vscode-input-background,\s*#313131\)", dark
+    ), "composer surface --surface2 must be input.background"
+    assert re.search(
+        r"--ring:\s*var\(--vscode-input-border,\s*#3c3c3c\)", dark
+    ), "--ring must be input.border"
     css = _read_codex_css()
     m = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
@@ -302,18 +308,15 @@ def test_codex_composer_card() -> None:
 
 def test_codex_circular_composer_controls() -> None:
     """Composer controls are 36px circles; send is a --send-bg circle
-    (white in dark theme, near-black in light theme)."""
+    in VS Code's button colours (button.background / foreground)."""
     dark = _dark_palette_block()
-    assert re.search(r"--send-bg:\s*#fff\b", dark), (
-        "--send-bg must be white in the dark palette"
-    )
+    assert re.search(
+        r"--send-bg:\s*var\(--vscode-button-background,\s*#0078d4\)", dark
+    ), "--send-bg must be button.background"
+    assert re.search(
+        r"--send-fg:\s*var\(--vscode-button-foreground,\s*#fff\)", dark
+    ), "--send-fg must be button.foreground"
     css = _read_codex_css()
-    light = re.search(
-        r"body\.remote-chat\.light-theme\s*\{([^}]*)\}", css
-    )
-    assert light and re.search(
-        r"--send-bg:\s*#1f1f1f\b", light.group(1)
-    ), "--send-bg must be near-black in the light palette"
     m = re.search(r"body\.remote-chat #send-btn[^{]*\{([^}]*)\}", css)
     assert m, "#send-btn rule missing"
     send = m.group(1)
@@ -351,7 +354,10 @@ def test_codex_rounded_panels() -> None:
     css = _read_codex_css()
     assert "body.remote-chat #sidebar" in css
     assert "body.remote-chat #settings-panel" in css
-    assert "#171717" in css, "drawer surface #171717 missing"
+    assert re.search(
+        r"--surface:\s*var\(--vscode-sideBar-background,\s*#181818\)",
+        _dark_palette_block(),
+    ), "drawer surface must be sideBar.background (Dark Modern #181818)"
 
 
 def test_desktop_media_query_docks_sidebar() -> None:
@@ -441,9 +447,16 @@ def test_error_panels_keep_red() -> None:
 
 
 def test_muted_label_color_tokens_present() -> None:
-    """Activity labels use the Codex muted grays."""
-    css = _read_codex_css()
-    assert "#8e8e8e" in css or "#afafaf" in css
+    """Muted labels use VS Code's dim foregrounds: tab.inactiveForeground
+    for --dim and input.placeholderForeground for --faint."""
+    dark = _dark_palette_block()
+    assert re.search(
+        r"--dim:\s*var\(--vscode-tab-inactiveForeground,\s*#9d9d9d\)", dark
+    )
+    assert re.search(
+        r"--faint:\s*var\(--vscode-input-placeholderForeground,\s*#989898\)",
+        dark,
+    )
 
 
 def test_main_js_remote_desktop_wiring() -> None:
