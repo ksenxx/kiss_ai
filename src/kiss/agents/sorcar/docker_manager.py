@@ -12,6 +12,7 @@ import os
 import queue
 import shlex
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -52,6 +53,19 @@ _REAP_POLL_MAX_INTERVAL_S = 5.0
 #: ``docker_image`` spelling that attaches to an already running container
 #: (``container:<name-or-id>``) instead of starting one from an image.
 ATTACH_PREFIX = "container:"
+
+#: Docker label stamped on every container ``open()`` starts, valued
+#: :func:`owner_label_value` of the starting process.  The daemon is shared
+#: with other work (benchmarks, concurrent test processes), so the image
+#: alone cannot tell a container of this process from a stranger's; the
+#: label lets bookkeeping and cleanup filter with
+#: ``containers.list(filters={"label": f"{OWNER_LABEL}={owner_label_value()}"})``.
+OWNER_LABEL = "kiss.owner"
+
+
+def owner_label_value() -> str:
+    """Return the :data:`OWNER_LABEL` value of the current process (``host:pid``)."""
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _new_utf8_decoder() -> Any:
@@ -237,6 +251,7 @@ class DockerManager:
             "tty": True,
             "stdin_open": True,
             "command": "/bin/bash",
+            "labels": {OWNER_LABEL: owner_label_value()},
         }
         if self.mount_shared_volume:
             self.host_shared_path = tempfile.mkdtemp()
