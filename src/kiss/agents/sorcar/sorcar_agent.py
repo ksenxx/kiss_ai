@@ -319,7 +319,7 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
-    if not GitWorktreeOps.staged_diff(commit_dir):
+    if not GitWorktreeOps.has_staged_changes(commit_dir):
         return False
     _safe_notify(notify_fn, "generating", "")
     try:

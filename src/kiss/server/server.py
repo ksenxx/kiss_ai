@@ -65,7 +65,6 @@ from kiss.server.autocomplete import (
     ranked_function_calling_models,
 )
 from kiss.server.commands import _CommandsMixin
-from kiss.server.diff_merge import _git
 from kiss.server.helpers import (
     generate_commit_message_from_diff,
     model_vendor,
@@ -2800,8 +2799,7 @@ class VSCodeServer(
                     }
                 )
                 return
-            cached_result = _git(work_dir, "diff", "--cached")
-            diff_text = cached_result.stdout.strip()
+            diff_text = GitWorktreeOps.staged_diff(Path(work_dir))
             if not diff_text:  # pragma: no branch — LLM API required for else
                 self.printer.broadcast(
                     {
