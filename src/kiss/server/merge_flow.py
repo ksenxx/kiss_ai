@@ -1546,7 +1546,7 @@ class _MergeFlowMixin:
                     f"Wait for it to finish (or stop it) before {verb}."
                 ),
             }
-        if state.is_merging:
+        if state.merge_in_progress():
             return {
                 "success": False,
                 "message": (

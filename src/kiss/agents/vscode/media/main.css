@@ -21,6 +21,8 @@
   --purple: var(--vscode-terminal-ansiMagenta);
   --cyan: var(--vscode-terminal-ansiCyan);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
+  --error: var(--vscode-errorForeground, #f48771);
+  --warning: var(--vscode-editorWarning-foreground, #e5c07b);
   --fs-xs:  0.636rem;
   --fs-sm:  0.818rem;
   --fs-md:  0.909rem;
@@ -73,7 +75,7 @@ body {
   background: var(--bg2);
   border: 2px solid color-mix(in srgb, var(--accent) 70%, var(--fg));
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgb(0 0 0 / 45%));
   overflow: hidden;
   animation: kiss-notification-in 0.18s ease-out;
 }
@@ -646,7 +648,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   z-index: 200;
   min-width: 160px;
   padding: 4px 0;
@@ -828,6 +830,16 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .remote-url-copy:hover { color: var(--fg); }
 
+/* One-line note under the Local/LAN URL bars telling the user how to
+   trust the local CA that signs their certificate (kiss-web --trust-ca
+   on this machine, the /ca.crt download on a phone). */
+.remote-url-tls-hint {
+  font-size: var(--fs-sm); color: var(--dim); padding: 0 10px;
+}
+.remote-url-tls-hint code { font-size: inherit; user-select: all; }
+.remote-url-tls-hint a { color: var(--accent); text-decoration: none; }
+.remote-url-tls-hint a:hover { text-decoration: underline; }
+
 .welcome-config {
   display: flex; flex-direction: column; gap: 8px;
   width: 100%; max-width: 720px; margin-bottom: 14px;
@@ -838,6 +850,7 @@ body.remote-chat #welcome-config { display: none !important; }
 #welcome-remote-url .remote-url-label { text-align: center; }
 #welcome-remote-url .remote-url-row { justify-content: center; }
 #welcome-remote-url .remote-url-link { flex: 0 1 auto; max-width: 100%; }
+#welcome-remote-url .remote-url-tls-hint { text-align: center; }
 .welcome-config-label { text-align: left; }
 
 #suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
@@ -872,7 +885,7 @@ body.remote-chat #welcome-config { display: none !important; }
 
 .think {
   padding: 8px 12px; margin: 8px 0;
-  border: 1px solid rgb(121 192 255 / 12%); border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 12%, transparent); border-radius: 8px;
   background: color-mix(in srgb, var(--cyan) 4%, transparent); max-height: 200px; overflow-y: auto;
 }
 
@@ -902,7 +915,7 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 
 .txt pre {
-  background: rgb(0 0 0 / 30%); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  background: var(--vscode-textCodeBlock-background, rgb(0 0 0 / 30%)); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 10px; overflow-x: auto; margin: 6px 0;
 }
 .txt pre code { background: none; padding: 0; }
@@ -1207,7 +1220,7 @@ body.ask-answering #input-container {
 }
 
 .llm-panel {
-  border: 1px solid rgb(88 166 255 / 15%); border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent); border-radius: 8px;
   margin: 6px 0; max-height: 350px; overflow-y: auto;
   padding: 8px 10px; background: color-mix(in srgb, var(--accent) 3%, transparent);
 }
@@ -1217,7 +1230,7 @@ body.ask-answering #input-container {
 /* The composer's wait spinner: the shared ring (see .status-spinner)
    in the accent colour, faded in while a task runs. */
 #wait-spinner {
-  color: rgb(88 166 255 / 70%);
+  color: color-mix(in srgb, var(--accent) 70%, transparent);
   transition: opacity 0.2s; opacity: 0;
 }
 
@@ -1226,13 +1239,13 @@ body.ask-answering #input-container {
 .followup-bar {
   display: flex; flex-direction: column; gap: 4px;
   padding: 8px 12px; margin: 8px 0;
-  background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid rgb(88 166 255 / 15%);
+  background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
   border-radius: 8px; cursor: pointer; transition: all 0.15s;
   animation: fadeIn .3s ease;
 }
 
 .followup-bar:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: rgb(88 166 255 / 25%);
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 .fu-label {
@@ -1382,7 +1395,7 @@ body.content-tab-open #send-btn { display: none !important; }
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px; transition: border-color 0.2s;
 }
-#input-container:focus-within { border-color: rgb(88 166 255 / 40%); }
+#input-container:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 #input-wrap { display: flex; align-items: flex-start; gap: 4px; }
 #input-text-wrap { flex: 1; min-width: 0; position: relative; }
 
@@ -1517,7 +1530,7 @@ body.content-tab-open #send-btn { display: none !important; }
   min-width: 180px; max-width: min(280px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: none; flex-direction: column; padding: 4px;
-  z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;
+  z-index: 100; box-shadow: 0 -6px 28px var(--vscode-widget-shadow, rgb(0 0 0 / 50%)); margin-bottom: 4px;
 }
 #more-menu.open { display: flex; }
 
@@ -1553,7 +1566,7 @@ body.remote-chat #theme-btn { display: flex; }
   position: absolute; bottom: 100%; right: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   max-height: min(320px, calc(100vh - 120px)); display: none; flex-direction: column;
-  z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;
+  z-index: 100; box-shadow: 0 -6px 28px var(--vscode-widget-shadow, rgb(0 0 0 / 50%)); margin-bottom: 4px;
   overflow: hidden;
 }
 #model-dropdown.open { display: flex; }
@@ -1572,7 +1585,7 @@ body.remote-chat #theme-btn { display: flex; }
 
 #model-search {
   width: 100%; background: transparent; border: none;
-  border-bottom: 1px solid rgb(255 255 255 / 6%); color: var(--fg);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg);
   font-size: var(--fs-base); padding: 8px 28px 8px 12px; outline: none; font-family: inherit;
 }
 #model-search::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
@@ -1581,7 +1594,7 @@ body.remote-chat #theme-btn { display: flex; }
 .model-item {
   padding: 5px 10px; font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 66%, transparent);
   cursor: pointer; display: flex; justify-content: space-between; align-items: center;
-  border-bottom: 1px solid rgb(255 255 255 / 2%); transition: background 0.08s;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 2%, transparent); transition: background 0.08s;
 }
 .model-item:hover, .model-item.sel { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
@@ -1601,7 +1614,7 @@ body.remote-chat #theme-btn { display: flex; }
   text-transform: uppercase; letter-spacing: 0.05em;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: var(--bg2);
-  border-bottom: 1px solid rgb(255 255 255 / 4%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
   position: sticky; top: 0; z-index: 1;
 }
 
@@ -1614,7 +1627,7 @@ body.remote-chat #theme-btn { display: flex; }
   position: absolute; bottom: 100%; left: 0; right: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   max-height: 300px; overflow-y: auto; display: none;
-  z-index: 50; box-shadow: 0 -8px 32px rgb(0 0 0 / 45%), 0 0 0 1px color-mix(in srgb, var(--fg) 4%, transparent);
+  z-index: 50; box-shadow: 0 -8px 32px var(--vscode-widget-shadow, rgb(0 0 0 / 45%)), 0 0 0 1px color-mix(in srgb, var(--fg) 4%, transparent);
   margin-bottom: 4px; animation: acSlideUp 0.15s ease;
 }
 
@@ -1623,14 +1636,14 @@ body.remote-chat #theme-btn { display: flex; }
   text-transform: uppercase; letter-spacing: 0.08em;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: var(--bg2);
-  border-bottom: 1px solid rgb(255 255 255 / 3.5%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 3.5%, transparent);
   position: sticky; top: 0; z-index: 1;
 }
 
 .ac-item {
   padding: 2px 12px; font-size: var(--fs-sm); cursor: pointer;
   display: flex; align-items: center; gap: 4px;
-  border-bottom: 1px solid rgb(255 255 255 / 2%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 2%, transparent);
   border-left: 2px solid transparent;
   transition: background 0.1s, border-color 0.1s;
 }
@@ -1676,7 +1689,7 @@ body.remote-chat #theme-btn { display: flex; }
 .ac-hint {
   font-size: var(--fs-xs); color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
-  border: 1px solid rgb(255 255 255 / 5%);
+  border: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
   padding: 1px 5px; border-radius: 4px; margin-left: auto;
   flex-shrink: 0;
   font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
@@ -1685,12 +1698,12 @@ body.remote-chat #theme-btn { display: flex; }
 .ac-item.sel .ac-hint {
   color: color-mix(in srgb, var(--accent) 54%, transparent);
   background: color-mix(in srgb, var(--accent) 6%, transparent);
-  border-color: rgb(88 166 255 / 12%);
+  border-color: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .ac-footer {
   padding: 2px 12px; font-size: var(--fs-xs); color: color-mix(in srgb, var(--fg) 50%, transparent);
-  border-top: 1px solid rgb(255 255 255 / 4%);
+  border-top: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
   display: flex; gap: 14px;
   background: var(--bg2);
   position: sticky; bottom: 0;
@@ -1700,7 +1713,7 @@ body.remote-chat #theme-btn { display: flex; }
   background: color-mix(in srgb, var(--fg) 5%, transparent); color: color-mix(in srgb, var(--fg) 50%, transparent);
   padding: 1px 5px; border-radius: 3px; font-size: var(--fs-xs);
   font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
-  border: 1px solid rgb(255 255 255 / 4%);
+  border: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
 #sidebar {
@@ -1734,6 +1747,59 @@ body.remote-chat #theme-btn { display: flex; }
 
 #meta-drawer-btn,
 #meta-close { display: none; }
+
+/* The info subpanel's header row (every task-info surface): the
+   "Task update" title on the left, the refresh button at the top
+   right.  The button turns while the daemon runs the task-update
+   agent and is disabled meanwhile (a second press cannot start a
+   second run). */
+.meta-info-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#meta-info-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+#meta-info-refresh:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  color: var(--fg);
+}
+
+#meta-info-refresh:disabled { cursor: default; }
+
+#meta-info-refresh.spinning svg { animation: status-spin 1s linear infinite; }
+
+/* The line under the header: "Updating…", or when and at what cost
+   the shown report was produced, and the last run's failure. */
+.meta-info-status {
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  margin: -6px 0 6px;
+  min-height: 0;
+  overflow-wrap: anywhere;
+}
+
+.meta-info-status:empty { display: none; }
+
+.meta-info-pending {
+  font-style: italic;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
 
 /* Every VS Code webview drops the burger — the history panel lives in
    the PRIMARY sidebar in both editor-tabs and sidebar mode. Only the
@@ -1968,13 +2034,14 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The dimming backdrop behind every side panel -- history sidebar,
-   task info drawer, settings, frequent tasks, tricks: one rule, five
-   ids. */
+   task info drawer, settings, frequent tasks, tricks, working
+   directory: one rule, six ids. */
 #sidebar-overlay,
 #meta-overlay,
 #settings-overlay,
 #frequent-overlay,
-#tricks-overlay {
+#tricks-overlay,
+#workdir-overlay {
   position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
   z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
 }
@@ -1983,7 +2050,8 @@ body.sidebar-chat-mode #meta-info-content {
 #meta-overlay.open,
 #settings-overlay.open,
 #frequent-overlay.open,
-#tricks-overlay.open { opacity: 1; pointer-events: auto; }
+#tricks-overlay.open,
+#workdir-overlay.open { opacity: 1; pointer-events: auto; }
 
 /* The settings panel: a centered dialog. No entry animation — it is
    display-toggled, never slid in from an edge. */
@@ -2060,32 +2128,102 @@ body.sidebar-chat-mode #meta-info-content {
 
 #tricks-panel.open { transform: translateY(0); }
 
+/* The "Working directory" bottom sheet ("..." menu): same geometry as
+   the Inject sheet. */
+#workdir-panel {
+  position: fixed;
+  left: 5%;
+  right: 5%;
+  bottom: 0;
+  width: 90%;
+  height: 60vh;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+  transform: translateY(100%);
+  transition: transform 0.2s ease;
+  z-index: 200;
+  padding: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#workdir-panel.open { transform: translateY(0); }
+
 /* The "x" of every side panel; the bottom sheets' buttons also stack
    above their own list pane. */
 #sidebar-close,
 #settings-panel-close,
 #frequent-panel-close,
-#tricks-panel-close {
+#tricks-panel-close,
+#workdir-panel-close {
   position: absolute; top: 12px; right: 12px; background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: 4px 8px; border-radius: 4px;
 }
 
 #frequent-panel-close,
-#tricks-panel-close { z-index: 1; }
+#tricks-panel-close,
+#workdir-panel-close { z-index: 1; }
 
 #sidebar-close:hover,
 #settings-panel-close:hover,
 #frequent-panel-close:hover,
-#tricks-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+#tricks-panel-close:hover,
+#workdir-panel-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
-/* The scrolling list pane of both bottom sheets. */
+/* The scrolling list pane of the bottom sheets. */
 #frequent-list,
-#tricks-list {
+#tricks-list,
+#workdir-list {
   flex: 1;
   overflow-y: auto;
   scrollbar-width: thin;
   margin-top: 2px;
 }
+
+/* One previously opened working directory: its path and when it was
+   last opened. */
+.workdir-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.workdir-item:hover,
+.workdir-item:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  outline: none;
+}
+
+.workdir-item-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.workdir-item-ago {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  white-space: nowrap;
+}
+
+#workdir-empty,
+#workdir-error {
+  padding: 8px 10px;
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+#workdir-error { color: var(--red, #f14c4c); margin-bottom: 6px; }
 
 .tricks-item {
   padding: 8px 10px;
@@ -2649,7 +2787,7 @@ body.sidebar-chat-mode #meta-info-content {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   font-size: var(--fs-base);
   color: var(--fg);
   user-select: none;
@@ -2712,7 +2850,7 @@ body.sidebar-chat-mode #meta-info-content {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+  box-shadow: 0 8px 32px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   color: var(--fg);
   font-size: var(--fs-base);
 }
@@ -2887,7 +3025,8 @@ body.sidebar-chat-mode #meta-info-content {
 
 #history-search,
 #tricks-search,
-#tricks-add-input {
+#tricks-add-input,
+#workdir-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-base); padding: 6px 28px 6px 10px;
   outline: none; box-sizing: border-box;
@@ -2896,11 +3035,19 @@ body.sidebar-chat-mode #meta-info-content {
 
 #history-search:focus,
 #tricks-search:focus,
-#tricks-add-input:focus { border-color: var(--accent); }
+#tricks-add-input:focus,
+#workdir-input:focus { border-color: var(--accent); }
 
-/* The Inject promptlet panel's "new promptlet" box with its Add button. */
-#tricks-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
-#tricks-add-row #tricks-add-input { flex: 1; min-width: 0; padding-right: 10px; }
+/* The Inject promptlet panel's "new promptlet" box with its Add button,
+   and the Working directory panel's path box with its Open and
+   folder buttons. */
+#tricks-add-row,
+#workdir-open-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+
+#tricks-add-row #tricks-add-input,
+#workdir-open-row #workdir-input { flex: 1; min-width: 0; padding-right: 10px; }
+
+#workdir-pick-btn { padding: 6px 8px; }
 
 /* The search box with the flat-list / chat-panels switch on its right. */
 .history-search-row { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
@@ -3103,7 +3250,7 @@ body.sidebar-chat-mode #meta-info-content {
   position: fixed; z-index: 10000;
   background: var(--bg, #1e1e1e);
   border: 1px solid var(--border); border-radius: 6px;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+  box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgb(0 0 0 / 35%));
   padding: 8px; width: 220px;
   font-size: var(--fs-md); color: var(--fg);
   user-select: none;
@@ -3559,7 +3706,7 @@ body.remote-chat .running-item.history-active-task:hover {
 .server-reset-confirm-content {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: 12px; padding: 20px; width: 90%; max-width: 360px;
-  box-sizing: border-box; box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  box-sizing: border-box; box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgb(0 0 0 / 40%));
 }
 
 .server-reset-confirm-title {
@@ -3606,7 +3753,7 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .md-body pre {
-  background: rgb(0 0 0 / 30%); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  background: var(--vscode-textCodeBlock-background, rgb(0 0 0 / 30%)); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0;
 }
 .md-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
@@ -3629,14 +3776,20 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
-.hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
+
+/* The block takes the theme's code-block colour whatever highlight.js
+   sheet is loaded (the sheets paint their own .hljs background). */
+.hljs {
+  background: var(--vscode-textCodeBlock-background, var(--surface2)) !important;
+  border-radius: 6px; padding: 10px !important;
+}
 
 #custom-tooltip {
   position: fixed; z-index: 10000; background: var(--bg2); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
   font-size: var(--fs-sm); line-height: 1.4; white-space: pre-wrap;
   word-break: break-word; max-width: min(350px, calc(100vw - 20px)); pointer-events: none;
-  opacity: 0; transition: opacity 0.15s; box-shadow: 0 2px 8px rgb(0 0 0 / 30%);
+  opacity: 0; transition: opacity 0.15s; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgb(0 0 0 / 30%));
 }
 #custom-tooltip.visible { opacity: 1; }
 
@@ -3908,7 +4061,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgb(0 0 0 / 35%));
   pointer-events: none;
 }
 

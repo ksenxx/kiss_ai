@@ -708,6 +708,67 @@ async function testReplayLandsAtEnd(remote) {
 }
 
 // --------------------------------------------------------------------
+// A reconnect replays the transcript on screen (the daemon re-sends the
+// whole task after `ready`): the user's reading position must survive
+// the rebuild when they had scrolled up, while a bottom-pinned view
+// still lands at the end.
+// --------------------------------------------------------------------
+
+async function testReconnectReplayKeepsReadingPosition(remote) {
+  const {win, posted} = makeWebview({remote});
+  const O = win.document.getElementById('output');
+  const geoO = {sh: 4000, ch: 500};
+  fakeGeometry(O, geoO);
+  const tabId = startRunningTask(win, posted);
+  send(win, {type: 'tool_call', name: 'Bash', command: 'make'});
+  send(win, {type: 'system_output', text: 'line\n'});
+  const events = [
+    {type: 'prompt', text: 'do the thing'},
+    {type: 'tool_call', name: 'Bash', command: 'make'},
+    {type: 'system_output', text: 'line\n'},
+    {type: 'text_delta', text: 'more'},
+    {type: 'text_end'},
+  ];
+  const replay = () =>
+    send(win, {type: 'task_events', tabId, task: 'replayed', task_id: 3, events});
+
+  // Reading an earlier part of the transcript when the socket drops.
+  const readingAt = 700;
+  userScroll(win, O, readingAt);
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
+  replay();
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    readingAt,
+    'BUG (' +
+      label(remote) +
+      '): the reconnect replay yanked the chat away from where the user ' +
+      'was reading',
+  );
+  // The lock is still on: streaming does not pull the view down.
+  geoO.sh += 300;
+  send(win, {type: 'text_delta', text: 'streamed after reconnect'});
+  await nextFrames(win);
+  assert.strictEqual(O.scrollTop, readingAt, 'lock must survive the replay');
+
+  // At the bottom, a replay lands at the end as before.
+  userScroll(win, O, bottom(geoO));
+  replay();
+  await nextFrames(win);
+  assert.strictEqual(
+    O.scrollTop,
+    bottom(geoO),
+    'BUG (' + label(remote) + '): a bottom-pinned replay did not land at the end',
+  );
+  win.close();
+  console.log(
+    '  ok - a reconnect replay keeps the reading position (' + label(remote) + ')',
+  );
+}
+
+// --------------------------------------------------------------------
 // Background-tab events stream into a detached fragment and must never
 // move the visible chat's scroll position.
 // --------------------------------------------------------------------
@@ -1741,6 +1802,7 @@ async function main() {
     await testBashPanelAutoScrolls(remote);
     await testThoughtsPanelAutoScrolls(remote);
     await testReplayLandsAtEnd(remote);
+    await testReconnectReplayKeepsReadingPosition(remote);
     await testBackgroundTabDoesNotScrollActiveChat(remote);
     await testStaticSubpanelsAutoScroll(remote);
     await testBashFlushOnNextToolCallScrolls(remote);

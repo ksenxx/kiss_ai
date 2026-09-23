@@ -41,7 +41,7 @@
     'openFile',
     'saveFile',
     'checkPaths',
-    'getInfoFile',
+    'getTaskUpdate',
     'listDir',
     'gitStatus',
     'gitLog',

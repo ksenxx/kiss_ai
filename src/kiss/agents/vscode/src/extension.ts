@@ -99,7 +99,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The secondary-sidebar Task Info view (editor-tabs mode): the
   // remote webapp's rightmost desktop panel — live task metadata plus
-  // the running task's tmp/PROGRESS.md — rendered by the same chat
+  // the running task's task update — rendered by the same chat
   // webview in meta-panel-mode. It mirrors the ACTIVE chat editor
   // panel: the panel manager relays each active panel's metaUpdate
   // reports into it through setMetaSink below.
@@ -117,9 +117,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
   context.subscriptions.push({dispose: () => metaView?.dispose()});
-  panelManager.setMetaSink((values, progressMd) => {
-    metaView?.postMetaState(values, progressMd);
+  panelManager.setMetaSink((values, taskUpdate) => {
+    metaView?.postMetaState(values, taskUpdate);
   });
+  // The view's refresh button runs the task-update agent for the
+  // ACTIVE chat editor panel's task.
+  metaView.onMetaRefresh = () => panelManager?.refreshActiveTaskUpdate();
 
   // Bring the Task Info view on screen in the secondary sidebar
   // without stealing the keyboard focus from wherever the caller

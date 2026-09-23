@@ -17,8 +17,6 @@ from kiss.core.base import Base
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.context_compaction import (
     CHARS_PER_TOKEN,
-    COMPACTION_START_TOKENS,
-    COMPACTION_STEP_TOKENS,
     apply_compaction,
     dropped_chars,
     plan_compaction,
@@ -64,6 +62,10 @@ _NON_RETRYABLE_PHRASES = (
 )
 MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
+# ``model_config`` keys that name the caller's endpoint and its credentials;
+# they belong to the provider that just failed and do not travel to the
+# implicit OpenRouter-twin fallback.
+_ENDPOINT_CONFIG_KEYS = frozenset({"base_url", "api_key", "extra_headers"})
 # Default stall timeout (seconds of output silence) for a run-to-completion
 # model executing a whole task in one CLI invocation.  The per-turn default
 # (300 s, see CLITextModel._cli_turn) is too short for a full agentic run,
@@ -231,7 +233,7 @@ class KISSAgent(Base):
         conversation, so tools that assume the model still sees an
         earlier output (the Read tool's dedupe) can forget it."""
         self._llm_hook_conversation_index = 0
-        self._next_compaction_at = COMPACTION_START_TOKENS
+        self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         """Wall-clock start of the last request that read or wrote the
         provider's prompt cache (a model call or a keep-alive ping)."""
@@ -268,7 +270,7 @@ class KISSAgent(Base):
         self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
-        self._next_compaction_at = COMPACTION_START_TOKENS
+        self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         self._llm_hook_conversation_index = 0
         self.budget_used = 0.0  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -618,16 +620,23 @@ class KISSAgent(Base):
         Consulted by :meth:`_run_agentic_loop` after a recoverable
         model-level failure: a non-retryable provider error (model gated /
         deprecated, credit balance too low, etc.) or repeated empty turns
-        from a provider adapter.  If ``MODEL_INFO`` registers a ``fallback``
-        for the current model name, this method:
+        from a provider adapter.  If
+        :func:`kiss.core.models.model_info.get_fallback_model` names a
+        fallback for the current model (one declared in the catalog, or
+        the model's OpenRouter twin when ``OPENROUTER_API_KEY`` is
+        configured), this method:
 
         1. Guards against repeated swaps within a single run (only one
            fallback is allowed per :meth:`run` invocation).
         1. Rebuilds the model via :func:`kiss.core.models.model_info.model`
-           using the same ``model_config`` originally passed to
-           :meth:`run` (preserving ``base_url``/``api_key`` overrides
-           used by end-to-end tests) and the printer's streaming
-           callbacks.
+           using the ``model_config`` originally passed to :meth:`run`
+           and the printer's streaming callbacks.  A fallback declared
+           in the catalog keeps the caller's endpoint overrides
+           (``base_url``, ``api_key``, ``extra_headers``: it lives where
+           the user pointed); the implicit OpenRouter twin is a different
+           provider, so those keys are dropped and the twin routes
+           through OpenRouter with the configured OpenRouter key instead
+           of re-using the endpoint and credentials that just failed.
         1. Copies the primary model's conversation history onto the
            new model so no context is lost.
         1. Rebuilds :attr:`_cached_tools_schema` so
@@ -637,21 +646,26 @@ class KISSAgent(Base):
 
         Returns:
             The new model name on a successful swap, or ``None`` when no
-            fallback is registered, the fallback equals the current
+            fallback is available, the fallback equals the current
             model, or the one-shot guard has already been consumed.
         """
-        from kiss.core.models.model_info import get_fallback_model
+        from kiss.core.models.model_info import declared_fallback, get_fallback_model
         if self._fallback_used:
             return None
         new_name = get_fallback_model(self.model_name)
         if not new_name or new_name == self.model_name:
             return None
+        fallback_config = self._model_config
+        if fallback_config and declared_fallback(self.model_name) is None:
+            fallback_config = {
+                k: v for k, v in fallback_config.items() if k not in _ENDPOINT_CONFIG_KEYS
+            } or None
         old_conversation = list(self.model.conversation)
         token_cb = self.printer.token_callback if self.printer else None
         thinking_cb = self.printer.thinking_callback if self.printer else None
         new_model = model(
             new_name,
-            model_config=self._model_config,
+            model_config=fallback_config,
             token_callback=token_cb,
             thinking_callback=thinking_cb,
         )
@@ -972,7 +986,7 @@ class KISSAgent(Base):
                 self.step_count,
             )
             return
-        self._next_compaction_at = self.context_tokens_used + COMPACTION_STEP_TOKENS
+        self._next_compaction_at = self.context_tokens_used + DEFAULT_CONFIG.compaction_step_tokens
         compacted = apply_compaction(plan)
         logger.info(
             "Compacted %d old tool outputs (~%d of %d context tokens): agent=%s step=%d",

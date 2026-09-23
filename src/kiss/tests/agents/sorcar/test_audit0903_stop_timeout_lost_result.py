@@ -329,7 +329,7 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
-            str(script), "finishes while stop is in flight", timeout="0.3",
+            "finishes while stop is in flight", str(script), timeout="0.3",
         )
         assert "did not finish within" not in out
         assert yaml.safe_load(out) == {
@@ -415,7 +415,7 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
         out = make_run_agent_tool(str(tmp_path))(
-            str(script), "finishes without terminal status", timeout="0.3",
+            "finishes without terminal status", str(script), timeout="0.3",
         )
         assert "MAY STILL BE RUNNING" in out
         assert "never confirmed" in out

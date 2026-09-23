@@ -31,8 +31,11 @@ import pytest
 
 from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.kiss_error import KISSError
-
-IMAGE = "python:3.11-slim"
+from kiss.tests.agents.sorcar.docker_test_containers import (
+    IMAGE,
+    image_container_ids,
+    remove_new_image_containers,
+)
 
 
 def _docker_available() -> bool:
@@ -50,19 +53,14 @@ pytestmark = [
 
 
 @pytest.fixture
-def cleanup() -> Iterator[set[str | None]]:
-    """Snapshot existing containers; force-remove anything new afterwards."""
+def cleanup() -> Iterator[set[str]]:
+    """Snapshot this process's containers; force-remove the new ones afterwards."""
     client = docker.from_env()
-    before: set[str | None] = {c.id for c in client.containers.list(all=True)}
+    before = image_container_ids(client)
     try:
         yield before
     finally:
-        for container in client.containers.list(all=True):
-            if container.id not in before:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+        remove_new_image_containers(client, before)
 
 
 def test_concurrent_opens_start_exactly_one_container(cleanup: set[str]) -> None:
@@ -93,7 +91,7 @@ def test_concurrent_opens_start_exactly_one_container(cleanup: set[str]) -> None
         assert len(errors) == 1, f"expected exactly one refusal, got {outcomes!r}"
         assert isinstance(errors[0], KISSError)
         assert mgr.container is not None
-        started = {c.id for c in client.containers.list(all=True)} - cleanup
+        started = image_container_ids(client) - cleanup
         assert started == {mgr.container.id}, (
             f"containers started: {started}, tracked: {mgr.container.id}"
         )
@@ -138,7 +136,7 @@ def test_concurrent_close_and_open_never_orphan(cleanup: set[str]) -> None:
             t.start()
         for t in threads:
             t.join(timeout=180)
-        alive = {c.id for c in client.containers.list(all=True)} - cleanup
+        alive = image_container_ids(client) - cleanup
         if open_error[0] is None:
             # open ran after close: exactly the new container remains.
             assert mgr.container is not None

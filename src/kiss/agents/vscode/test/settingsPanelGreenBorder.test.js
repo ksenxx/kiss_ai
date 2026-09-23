@@ -63,12 +63,13 @@ function testRemoteSurfaceUsesGreenThemeBorder() {
     /--settings-border:\s*var\(--green\)/.test(palette),
     'the remote palette must alias --settings-border to the theme green',
   );
-  // The light theme re-points --green at body level so the border
-  // re-themes with the sun/moon toggle.
-  const light = cssRule(REMOTE_CSS, 'body.remote-chat.light-theme');
+  // --green is derived on the body from the VS Code variable, which
+  // the Light Modern block web_server.py injects re-points on
+  // body.remote-chat.light-theme, so the border re-themes with the
+  // sun/moon toggle.
   assert.ok(
-    /--green:\s*#107c10/.test(light),
-    'the remote light theme must override --green for the border',
+    /--green:\s*var\(--vscode-terminal-ansiGreen\b/.test(palette),
+    'the remote palette must derive --green from --vscode-terminal-ansiGreen',
   );
   console.log('PASS remote-codex.css keeps the green border on remote');
 }

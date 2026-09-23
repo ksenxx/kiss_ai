@@ -16,27 +16,36 @@ from __future__ import annotations
 
 import pytest
 
+# VS Code's default fonts (src/vs/base/browser/fonts.ts and
+# src/vs/editor/common/config/fontInfo.ts, all three platforms' stacks
+# in turn) and the "Dark Modern" theme
+# (extensions/theme-defaults/themes/dark_modern.json plus the colour
+# registry defaults it inherits, e.g. terminal.ansi*).
 VSCODE_VARS = {
-    "--vscode-font-size": "16px",
+    "--vscode-font-size": "14px",
     "--vscode-font-family": (
-        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
-        "'Helvetica Neue', Arial, sans-serif"
+        '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", '
+        'system-ui, "Ubuntu", "Droid Sans", sans-serif'
     ),
-    "--vscode-editor-font-size": "16px",
+    "--vscode-editor-font-size": "14px",
     "--vscode-editor-font-family": (
-        "Menlo, Monaco, 'Courier New', monospace"
+        'Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace'
     ),
-    "--vscode-editor-background": "#1e1e1e",
+    "--vscode-editor-background": "#1f1f1f",
     "--vscode-editor-foreground": "#cccccc",
-    "--vscode-descriptionForeground": "#8b8b8b",
-    "--vscode-panel-border": "#80808059",
-    "--vscode-sideBar-background": "#252526",
-    "--vscode-textLink-foreground": "#3794ff",
-    "--vscode-terminal-ansiRed": "#f44747",
-    "--vscode-terminal-ansiGreen": "#6a9955",
-    "--vscode-terminal-ansiYellow": "#d7ba7d",
-    "--vscode-terminal-ansiMagenta": "#c586c0",
-    "--vscode-terminal-ansiCyan": "#4ec9b0",
+    "--vscode-descriptionForeground": "#9d9d9d",
+    "--vscode-panel-border": "#2b2b2b",
+    "--vscode-sideBar-background": "#181818",
+    "--vscode-textLink-foreground": "#4daafc",
+    "--vscode-button-background": "#0078d4",
+    "--vscode-focusBorder": "#0078d4",
+    "--vscode-input-background": "#313131",
+    "--vscode-input-border": "#3c3c3c",
+    "--vscode-terminal-ansiRed": "#cd3131",
+    "--vscode-terminal-ansiGreen": "#0dbc79",
+    "--vscode-terminal-ansiYellow": "#e5e510",
+    "--vscode-terminal-ansiMagenta": "#bc3fbc",
+    "--vscode-terminal-ansiCyan": "#11a8cd",
 }
 
 

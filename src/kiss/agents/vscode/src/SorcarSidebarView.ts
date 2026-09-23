@@ -203,6 +203,7 @@ import {
   Attachment,
   AgentCommand,
   MetaPanelValues,
+  TaskUpdateState,
 } from './types';
 import {
   clearWebviewNotificationPoster,
@@ -263,10 +264,14 @@ export type PanelEvent =
   // chat claim is void.
   | {kind: 'registrationDropped'}
   // The panel's live task-info values changed (tokens, cost, steps,
-  // time, machine, workdir, max budget, tmp/PROGRESS.md): the panel
+  // time, machine, workdir, max budget, task update): the panel
   // manager caches them and, when this is the ACTIVE panel, relays
   // them to the secondary sidebar's Task Info view.
-  | {kind: 'metaUpdate'; values: MetaPanelValues; progressMd: string};
+  | {
+      kind: 'metaUpdate';
+      values: MetaPanelValues;
+      taskUpdate: TaskUpdateState | null;
+    };
 
 /** One tab of the daemon's canonical `tabs_state` registry snapshot. */
 export interface RegistryTabEntry {
@@ -367,10 +372,11 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // poller that runs install.sh once no task is in flight, and
   // rebroadcasts update_available with `pendingIdle`.
   updateWhenIdle: ['cancel'],
-  // The 1s tmp/PROGRESS.md poll of a RUNNING task (metainfo block in
-  // main.js): the daemon resolves the tab's task and answers with a
-  // direct `infoFile` that the client-listener relay passes back.
-  getInfoFile: ['workDir', 'tabId', 'knownSig', 'token'],
+  // The task-update poll of a RUNNING task (metainfo block in
+  // main.js): the daemon resolves the tab's task, runs the task-update
+  // agent when due (or when `refresh` is set) and answers with a
+  // direct `taskUpdate` that the client-listener relay passes back.
+  getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings
@@ -414,6 +420,18 @@ export function updateShellPath(): string | null {
   return candidates.find(c => fs.existsSync(c)) ?? null;
 }
 
+/**
+ * The real directory behind *p* (`..` segments and symlinks resolved),
+ * or '' when *p* is empty or not an existing directory.
+ */
+function realDirectory(p: string): string {
+  try {
+    return p && fs.statSync(p).isDirectory() ? fs.realpathSync(p) : '';
+  } catch {
+    return '';
+  }
+}
+
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: ChatWebviewHost;
   private _panelHooks?: PanelHooks;
@@ -440,6 +458,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * on screen reach the primary-sidebar history panel (postActiveTask).
    */
   public onActiveTask?: (chatId: string, taskId: string) => void;
+  /**
+   * Task Info view only (meta-panel-mode): called when the view's
+   * task-update refresh button is pressed (its `metaRefresh` message).
+   * extension.ts relays it to the active chat editor panel, which
+   * polls the daemon with `refresh: true`.
+   */
+  public onMetaRefresh?: () => void;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
@@ -1259,6 +1284,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     let local = '';
     let loopback = '';
     let lanUrls: string[] = [];
+    let localCa = false;
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       tunnel = data.tunnel || '';
@@ -1267,13 +1293,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (Array.isArray(data.lan)) {
         lanUrls = data.lan.filter((u: unknown) => typeof u === 'string');
       }
+      localCa = data.localCa === true;
     } catch {}
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
     const ntfyUrl = this._getNtfyUrl();
     const key =
       `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}|` +
-      `${loopback}|${lanUrls.join(',')}`;
+      `${loopback}|${lanUrls.join(',')}|${localCa ? '1' : '0'}`;
     if (key === this._lastSentUrl) return;
     this._lastSentUrl = key;
     const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
@@ -1285,6 +1312,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     if (lanUrls.length > 0) {
       msg.lanUrls = lanUrls;
+    }
+    if (localCa) {
+      msg.localCa = true;
     }
     this._sendToWebview(msg);
   }
@@ -1844,8 +1874,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._panelHooks?.onEvent({
           kind: 'metaUpdate',
           values: message.values,
-          progressMd: message.progressMd,
+          taskUpdate: message.taskUpdate,
         });
+        break;
+
+      case 'metaRefresh':
+        this.onMetaRefresh?.();
         break;
 
       case 'activeTask':
@@ -1890,7 +1924,63 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         await cfg.update('editorTabsMode', !!message.enabled, target);
         break;
       }
+
+      case 'openWorkDir':
+        await this._openWorkDir(message.path);
+        break;
+
+      case 'pickWorkDir': {
+        const wd = this._getWorkDir();
+        const picked = await vscode.window.showOpenDialog({
+          canSelectFolders: true,
+          canSelectFiles: false,
+          canSelectMany: false,
+          openLabel: 'Open as Working Directory',
+          defaultUri: wd ? vscode.Uri.file(wd) : undefined,
+        });
+        if (picked && picked[0]) await this._openWorkDir(picked[0].fsPath);
+        break;
+      }
     }
+  }
+
+  /**
+   * Open *dir* as this window's folder.
+   *
+   * A VS Code window's working directory is its workspace folder, so a
+   * directory chosen in the "Working directory" panel becomes a
+   * `vscode.openFolder` in this window.  A path that is not a
+   * directory, a file-system root, the folder this window already
+   * shows, or an open VS Code refuses is reported back to the panel as
+   * `workDirError` instead.
+   */
+  private async _openWorkDir(dir: string): Promise<void> {
+    const target = String(dir || '').trim();
+    const error = await this._openWorkDirError(target);
+    if (error) this._sendToWebview({type: 'workDirError', text: error});
+  }
+
+  /** Open *target* in this window; the failure text, or '' on success. */
+  private async _openWorkDirError(target: string): Promise<string> {
+    const real = realDirectory(target);
+    if (!real) return 'Not a directory: ' + (target || '(empty path)');
+    if (path.dirname(real) === real) {
+      // `/`, `C:\`, a UNC share root: the daemon never runs in one.
+      return 'A file-system root cannot be the working directory; pick a folder.';
+    }
+    const current = this._getWorkDir();
+    if (current && realDirectory(current) === real) {
+      return target + ' is already the working directory of this window.';
+    }
+    try {
+      await vscode.commands.executeCommand(
+        'vscode.openFolder',
+        vscode.Uri.file(target),
+      );
+    } catch (err) {
+      return 'Could not open ' + target + ': ' + String(err);
+    }
+    return '';
   }
 
   /**
@@ -2236,14 +2326,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    *
    * @param values The panel's #meta-list display strings, or null to
    *     show the placeholder dashes (no chat panel is reporting).
-   * @param progressMd Raw markdown of the running task's
-   *     tmp/PROGRESS.md, '' to hide the info subpanel.
+   * @param taskUpdate The running task's task-update report state,
+   *     null to hide the info subpanel.
    */
   public postMetaState(
     values: MetaPanelValues | null,
-    progressMd: string,
+    taskUpdate: TaskUpdateState | null,
   ): void {
-    this._lastMetaState = {type: 'metaState', values, progressMd};
+    this._lastMetaState = {type: 'metaState', values, taskUpdate};
     this._sendToWebview(this._lastMetaState);
   }
 

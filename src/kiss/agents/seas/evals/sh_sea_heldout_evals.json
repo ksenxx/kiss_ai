@@ -1,0 +1,31 @@
+{
+  "rollout": {"web_tools": false, "is_parallel": false, "use_memory": false},
+  "tasks": [
+    {
+      "id": "word-count",
+      "prompt": "printf 'one two three\\nfour five\\n' | wc -w",
+      "expect": ["5"]
+    },
+    {
+      "id": "env-variable",
+      "prompt": "KISS_SKILLOPT_VAR=held-out; echo \"value=$KISS_SKILLOPT_VAR\"",
+      "expect": ["value=held-out"]
+    },
+    {
+      "id": "sorted-lines",
+      "prompt": "printf 'pear\\napple\\nfig\\n' | sort",
+      "expect_regex": "apple\\s*\\n\\s*fig\\s*\\n\\s*pear"
+    },
+    {
+      "id": "failing-grep",
+      "prompt": "echo needle | grep haystack; echo \"grep=$?\"",
+      "expect": ["grep=1"]
+    },
+    {
+      "id": "file-roundtrip",
+      "prompt": "printf 'alpha\\nbeta\\n' > notes.txt && wc -l < notes.txt && head -n 1 notes.txt",
+      "expect": ["2", "alpha"],
+      "check": "test -f notes.txt"
+    }
+  ]
+}

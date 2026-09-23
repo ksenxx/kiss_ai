@@ -1,0 +1,57 @@
+{
+  "rollout": {"web_tools": false, "is_parallel": false, "use_memory": false},
+  "tasks": [
+    {
+      "id": "echo-basic",
+      "prompt": "echo hello world",
+      "expect": ["hello world"]
+    },
+    {
+      "id": "arithmetic",
+      "prompt": "echo $((7*6))",
+      "expect": ["42"]
+    },
+    {
+      "id": "multiline-order",
+      "prompt": "seq 1 5 | tail -n 2",
+      "expect_regex": "4\\s*\\n\\s*5"
+    },
+    {
+      "id": "missing-path-exit-code",
+      "prompt": "ls /nonexistent_dir_kiss_skillopt; echo \"exit=$?\"",
+      "expect": ["No such file", "exit=2"]
+    },
+    {
+      "id": "no-output",
+      "prompt": "true",
+      "expect_regex": "(?i)(no output|empty|nothing|exit(ed)?\\s*(with\\s*)?(code|status)?\\s*0|succeeded|successfully|completed)"
+    },
+    {
+      "id": "stderr-capture",
+      "prompt": "echo to-stderr >&2; echo to-stdout",
+      "expect": ["to-stderr", "to-stdout"]
+    },
+    {
+      "id": "quoting",
+      "prompt": "printf '%s\\n' \"don't\" 'say \"hi\"'",
+      "expect": ["don't", "say \"hi\""]
+    },
+    {
+      "id": "files-in-workdir",
+      "prompt": "mkdir -p d && echo content > d/f.txt && cat d/f.txt && ls d",
+      "expect": ["content", "f.txt"],
+      "check": "test -f d/f.txt"
+    },
+    {
+      "id": "python-inline",
+      "prompt": "python3 -c \"print(sum(range(101)))\"",
+      "expect": ["5050"]
+    },
+    {
+      "id": "nonzero-exit-reported",
+      "prompt": "sh -c 'echo partial; exit 3'",
+      "expect": ["partial"],
+      "expect_regex": "(?i)(exit|status|code|return)[^0-9\\n]{0,30}3\\b"
+    }
+  ]
+}

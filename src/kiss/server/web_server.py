@@ -8,8 +8,11 @@ Provides HTTPS + WSS access to the Sorcar chat interface from any
 browser, including mobile devices.  Uses the ``websockets`` library to
 serve both HTTPS (for the HTML page and static media assets) and
 WSS (for bidirectional command/event communication) on a single port.
-TLS is always enabled; a self-signed certificate is auto-generated in
-``~/.kiss/tls/`` when no explicit certificate is provided.
+TLS is always enabled; when no explicit certificate is provided a
+machine-local CA and a server certificate signed by it are auto-generated
+in ``~/.kiss/tls/`` (:mod:`kiss.server.tls_certs`).  Trusting the CA once
+(``kiss-web --trust-ca`` on this machine, the ``/ca.crt`` download on a
+phone) removes the browser warning on the Local and LAN URLs.
 
 Authentication uses the ``remote_password`` setting from
 ``~/.kiss/config.json``.  While that password is empty, the server is
@@ -44,8 +47,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import collections
 import contextlib
-import datetime
 import errno
 import hashlib
 import html
@@ -103,6 +106,7 @@ from kiss.core.vscode_config import (
     save_config,
 )
 from kiss.server import sorcar as sorcar_api
+from kiss.server import tls_certs
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
@@ -110,6 +114,7 @@ from kiss.server.json_printer import (
 )
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
+from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
@@ -284,7 +289,11 @@ def _ensure_voice_model() -> Path | None:
         except Exception:
             logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
             return None
-_MEDIA_VERSION_CACHE: dict[str, str] = {}
+# Per media asset: (stat fingerprint, sha256 prefix) of the bytes last
+# hashed by _media_url.  The fingerprint (see _media_fingerprint) is
+# checked on every call so the hash is recomputed after the file
+# changes on disk.
+_MEDIA_VERSION_CACHE: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 
 TRAJECTORY_TEMPLATE = (
     Path(__file__).resolve().parents[1]
@@ -1710,6 +1719,7 @@ def _wait_for_remote_password(timeout: float = 30.0) -> str:
 def _save_url_file(
     url_file: Path, local_url: str, tunnel_url: str | None = None,
     loopback_url: str | None = None, lan_urls: list[str] | None = None,
+    local_ca: bool = False,
 ) -> None:
     """Write the active server URLs to ``url_file``.
 
@@ -1726,6 +1736,10 @@ def _save_url_file(
         loopback_url: The ``https://127.0.0.1:PORT`` URL, or None.
         lan_urls: ``https://<lan-ip>:PORT`` URLs for the host's
             routable LAN addresses, or None.
+        local_ca: True when the daemon serves the auto-generated,
+            locally-signed certificate, so the ``/ca.crt`` download and
+            ``kiss-web --trust-ca`` apply (the webview shows the trust
+            hint only then).
     """
     data: dict[str, object] = {"local": local_url}
     if tunnel_url:
@@ -1734,6 +1748,8 @@ def _save_url_file(
         data["loopback"] = loopback_url
     if lan_urls:
         data["lan"] = list(lan_urls)
+    if local_ca:
+        data["localCa"] = True
     _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
 
 
@@ -1993,6 +2009,21 @@ def _get_local_ips() -> frozenset[str]:
     )
 
 
+def _trust_local_ca() -> None:
+    """``kiss-web --trust-ca``: trust the local CA in this user's browsers.
+
+    Creates the CA first when no daemon has run yet, then installs
+    ``~/.kiss/tls/ca.pem`` into every trust store found
+    (:func:`kiss.server.tls_trust.trust_local_ca`) and prints one line
+    per store plus the phone instructions.
+    """
+    from kiss.server.tls_trust import trust_local_ca
+
+    _refresh_local_tls_pair(_get_local_ips())
+    for line in trust_local_ca(_tls_dir() / tls_certs.CA_CERT_FILE):
+        print(line)
+
+
 def _print_url() -> None:
     """Print the active remote URL from ``~/.kiss/remote-url.json``.
 
@@ -2130,76 +2161,25 @@ def _generate_self_signed_cert(
     cert_path: Path,
     key_path: Path,
 ) -> None:
-    """Generate a self-signed TLS certificate and private key.
+    """Generate a locally-signed TLS cert/key pair at *cert_path*/*key_path*.
 
-    Creates an RSA 2048-bit key and a self-signed X.509 certificate
-    valid for 10 years, covering ``localhost``, ``127.0.0.1``, ``::1``,
-    and all ``*.local`` names.  Parent directories are created as needed.
-
-    M4: the validity is intentionally long-lived (10 years) so the
-    auto-generated developer cert does not silently start failing
-    after a year.  :func:`_create_ssl_context` also regenerates an
-    expiring/expired cert, so even if the validity changes again the
-    auto-renewal path will rescue it.
+    Creates (or reuses) the machine-local CA beside the certificate
+    (``ca.pem`` / ``ca-key.pem`` in ``cert_path.parent``) and issues a
+    server certificate signed by it covering ``localhost``, the
+    hostname, ``127.0.0.1`` and ``::1`` (see
+    :mod:`kiss.server.tls_certs`).  Kept under its historical name for
+    the test fixtures that build throwaway servers; the daemon itself
+    goes through :func:`_create_ssl_context`, which also adds the LAN IPs.
 
     Args:
         cert_path: Where to write the PEM-encoded certificate.
         key_path: Where to write the PEM-encoded private key.
     """
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "KISS Sorcar"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "KISS Sorcar"),
-    ])
-
-    now = datetime.datetime.now(datetime.UTC)
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(issuer)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(
-            x509.SubjectAlternativeName([
-                x509.DNSName("localhost"),
-                x509.DNSName("*.local"),
-                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-                x509.IPAddress(ipaddress.IPv6Address("::1")),
-            ]),
-            critical=False,
-        )
-        .sign(key, hashes.SHA256())
-    )
-
-    for d in {cert_path.parent, key_path.parent}:
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(d, 0o700)
-        except OSError:
-            logger.debug("Could not chmod 0700 on %s", d, exc_info=True)
-
-    key_bytes = key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption(),
-    )
-    if key_path.exists():
-        key_path.unlink()
-    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(fd, key_bytes)
-    finally:
-        os.close(fd)
-    os.chmod(key_path, 0o600)
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    ca_cert_path = cert_path.parent / tls_certs.CA_CERT_FILE
+    ca_key_path = cert_path.parent / tls_certs.CA_KEY_FILE
+    if not tls_certs._ca_pair_is_usable(ca_cert_path, ca_key_path):
+        tls_certs.generate_local_ca(ca_cert_path, ca_key_path)
+    tls_certs.issue_server_cert(cert_path, key_path, ca_cert_path, ca_key_path)
 
 
 def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
@@ -2229,100 +2209,198 @@ def _flock_with_deadline(lock_file: Any, timeout: float) -> None:
         time.sleep(0.05)
 
 
+def _tls_lock_path() -> Path:
+    """Return the lock file serialising sibling daemons' access to :func:`_tls_dir`."""
+    tls_dir = _tls_dir()
+    tls_dir.mkdir(parents=True, exist_ok=True)
+    return tls_dir / ".tls.lock"
+
+
+def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
+    """Under the TLS lock, (re)issue the auto-generated pair for *lan_ips* and load it into *ctx*.
+
+    Serialises sibling daemons with an exclusive file lock held from the
+    check through ``load_cert_chain``: the check-then-generate sequence
+    and the pair publication are not atomic, so two concurrent processes
+    could otherwise publish (or load) a mismatched cert/key pair (F4-10).
+    The lock is bounded like the UDS sidecar lock in ``_bind_uds``: a
+    blocking ``LOCK_EX`` behind a wedged sibling would stall startup
+    forever, and cancelling the ``to_thread`` caller cannot interrupt
+    the executor syscall.
+
+    Self-heals a pair that OpenSSL rejects (a daemon that died between
+    writing the key and the certificate leaves a mismatched pair every
+    future load would refuse, F4-10 residual): the server certificate
+    is re-issued under the same lock and loaded again.
+
+    Args:
+        ctx: The server context to load; must not be serving yet (see
+            :meth:`RemoteAccessServer._refresh_tls_cert` for a live one).
+        lan_ips: The host's current LAN IP addresses; each must be in
+            the certificate's SAN or the ``https://<lan-ip>:PORT`` URL
+            fails hostname verification even on a browser that trusts
+            the local CA.
+
+    Returns:
+        The PEM bytes of the certificate that was loaded.
+    """
+    tls_dir = _tls_dir()
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+        cert_path, key_path = tls_certs.ensure_local_tls_pair(tls_dir, lan_ips)
+        try:
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+        except ssl.SSLError:
+            logger.warning(
+                "Auto-generated TLS cert/key pair in %s is mismatched or "
+                "corrupt; re-issuing", tls_dir,
+            )
+            key_path.unlink(missing_ok=True)
+            cert_path, key_path = tls_certs.ensure_local_tls_pair(tls_dir, lan_ips)
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+        return cert_path.read_bytes()
+
+
+def _refresh_local_tls_pair(lan_ips: Iterable[str]) -> bytes:
+    """Under the TLS lock, (re)issue the auto-generated pair for *lan_ips* and return its cert PEM.
+
+    Executor half of :meth:`RemoteAccessServer._refresh_tls_cert`: the
+    generation (key, signing, file writes) runs off the event loop, and the
+    returned bytes tell the caller whether the certificate on disk
+    differs from the one its live context is serving.
+
+    Args:
+        lan_ips: See :func:`_load_local_tls_pair`.
+    """
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
+        cert_path, _key_path = tls_certs.ensure_local_tls_pair(_tls_dir(), lan_ips)
+        return cert_path.read_bytes()
+
+
+def _reload_local_tls_pair_if_unlocked(ctx: ssl.SSLContext, cert_pem: bytes) -> bool:
+    """Load the on-disk pair into the live *ctx* if it is still *cert_pem* and the lock is free.
+
+    Event-loop half of :meth:`RemoteAccessServer._refresh_tls_cert`.
+    ``load_cert_chain`` must run on the event-loop thread, where every
+    ``SSL_new`` for accepted connections also runs, so the context is
+    never mutated concurrently with a handshake setup.  The lock is
+    therefore only tried, never waited for: a busy sibling or a pair a
+    sibling has meanwhile replaced makes this a no-op and the next
+    watchdog tick retries.
+
+    Args:
+        ctx: The live server context.
+        cert_pem: The certificate bytes the caller observed under the
+            lock in :func:`_refresh_local_tls_pair`.
+
+    Returns:
+        True when the pair was loaded into *ctx*.
+    """
+    tls_dir = _tls_dir()
+    cert_path = tls_dir / tls_certs.SERVER_CERT_FILE
+    key_path = tls_dir / tls_certs.SERVER_KEY_FILE
+    with open(_tls_lock_path(), "w", encoding="utf-8") as lock_file:
+        if not lock_exclusive(lock_file, blocking=False):
+            return False
+        if cert_path.read_bytes() != cert_pem:
+            return False
+        ctx.load_cert_chain(str(cert_path), str(key_path))
+        return True
+
+
 def _create_ssl_context(
     certfile: str | None = None,
     keyfile: str | None = None,
+    lan_ips: Iterable[str] | None = None,
 ) -> ssl.SSLContext:
     """Create an SSL context for the HTTPS/WSS server.
 
     If *certfile* and *keyfile* are provided, loads them directly.
-    Otherwise auto-generates a self-signed certificate in
-    ``~/.kiss/tls/`` and uses that.
+    Otherwise uses the machine-local CA in ``~/.kiss/tls/`` to issue a
+    server certificate covering ``localhost``, the hostname, the
+    loopback addresses and *lan_ips*, re-issuing it when it is missing,
+    expiring, signed by a different CA or lacking one of the IPs.
 
     Args:
         certfile: Path to PEM certificate file, or None for auto-gen.
         keyfile: Path to PEM private key file, or None for auto-gen.
+        lan_ips: LAN IP addresses the auto-generated certificate must
+            cover; probed with :func:`_get_local_ips` when ``None``.
 
     Returns:
         A configured ``ssl.SSLContext`` ready for ``websockets.serve()``.
     """
-    if certfile and keyfile:
-        cert_path = Path(certfile)
-        key_path = Path(keyfile)
-    else:
-        tls_dir = _tls_dir()
-        cert_path = tls_dir / "cert.pem"
-        key_path = tls_dir / "key.pem"
-        # Serialise sibling daemons with an exclusive file lock: the
-        # check-then-generate sequence and the pair publication are
-        # not atomic, so two concurrent processes could otherwise
-        # publish (or load) a mismatched cert/key pair (F4-10).
-        tls_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = tls_dir / ".tls.lock"
-        with open(lock_path, "w", encoding="utf-8") as lock_file:
-            # Bounded like the UDS sidecar lock in ``_bind_uds``: a
-            # blocking ``LOCK_EX`` behind a wedged sibling would stall
-            # startup forever, and cancelling the ``to_thread`` caller
-            # cannot interrupt the executor syscall.
-            _flock_with_deadline(lock_file, _TLS_LOCK_TIMEOUT_S)
-            if not cert_path.is_file() or not key_path.is_file():
-                logger.info(
-                    "Generating self-signed TLS certificate in %s", tls_dir,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-            elif _self_signed_cert_needs_renewal(cert_path):
-                logger.info(
-                    "Self-signed TLS certificate %s is expired or "
-                    "expiring within 30 days; regenerating",
-                    cert_path,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-            try:
-                ctx.load_cert_chain(str(cert_path), str(key_path))
-            except ssl.SSLError:
-                # Crash-consistent pair publish (F4-10 residual): a
-                # daemon that died between writing the key and the
-                # cert leaves a mismatched pair on disk that every
-                # future load would reject.  Self-heal under the
-                # lock: regenerate the pair and load the fresh one.
-                logger.warning(
-                    "Auto-generated TLS cert/key pair in %s is "
-                    "mismatched or corrupt; regenerating", tls_dir,
-                )
-                _generate_self_signed_cert(cert_path, key_path)
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-                ctx.load_cert_chain(str(cert_path), str(key_path))
-            return ctx
-
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(str(cert_path), str(key_path))
+    if certfile and keyfile:
+        ctx.load_cert_chain(certfile, keyfile)
+        return ctx
+    _load_local_tls_pair(ctx, _get_local_ips() if lan_ips is None else lan_ips)
     return ctx
 
 
-def _self_signed_cert_needs_renewal(
-    cert_path: Path, threshold_days: int = 30,
-) -> bool:
-    """Return True if *cert_path* is expired or expires within *threshold_days*.
-
-    Helper for M4 — the auto-generated TLS cert is regenerated when it
-    is close to (or past) its ``not_valid_after`` date.  Returns True
-    on parse errors so a corrupt cert is also regenerated rather than
-    crashing the server at ``load_cert_chain``.
-    """
+def _local_ca_cert_bytes() -> bytes | None:
+    """Return the PEM bytes of the auto-generated CA, or None when absent."""
+    ca_path = _tls_dir() / tls_certs.CA_CERT_FILE
     try:
-        from cryptography import x509
+        return ca_path.read_bytes()
+    except OSError:
+        return None
 
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-        not_after = cert.not_valid_after_utc
-    except Exception:
+
+class FifoSendLock:
+    """Per-endpoint FIFO lock whose waiters cost O(1) each.
+
+    Every outbound payload is its own event-loop task queued on the
+    endpoint's send lock (:meth:`WebPrinter._locked_send`).  With many
+    concurrent streaming tasks that queue grows to thousands of
+    waiters, and :class:`asyncio.Lock` removes each woken waiter from
+    its deque with ``deque.remove`` (O(n)), so a backlog of *n* sends
+    costs O(n^2) loop time and starves the event loop (observed with
+    60 daemon tasks: clients dropped by the drain timeout, results
+    never delivered).  This lock hands ownership to the leftmost live
+    waiter on :meth:`release` and never scans the queue.
+    """
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._waiters: collections.deque[asyncio.Future[None]] = collections.deque()
+
+    def locked(self) -> bool:
+        """Return True while some task holds the lock."""
+        return self._locked
+
+    async def acquire(self) -> bool:
+        """Wait in FIFO order until the lock is owned by the caller."""
+        if not self._locked:
+            self._locked = True
+            return True
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                # release() already handed the lock to us; pass it on.
+                self.release()
+            raise
         return True
-    return not_after - datetime.datetime.now(datetime.UTC) <= datetime.timedelta(
-        days=threshold_days,
-    )
+
+    def release(self) -> None:
+        """Hand the lock to the next live waiter, or unlock."""
+        while self._waiters:
+            fut = self._waiters.popleft()
+            if not fut.done():
+                fut.set_result(None)  # ownership transfers; stays locked
+                return
+        self._locked = False
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
 
 
 class WebPrinter(JsonPrinter):
@@ -2356,7 +2434,7 @@ class WebPrinter(JsonPrinter):
         self._loop: asyncio.AbstractEventLoop | None = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
-        self._send_locks: dict[Any, asyncio.Lock] = {}
+        self._send_locks: dict[Any, FifoSendLock] = {}
         self._uds_drain_timeout: float = _UDS_DRAIN_TIMEOUT
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
@@ -2619,8 +2697,38 @@ class WebPrinter(JsonPrinter):
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
             self._send_to_ws_clients(
-                f'{base}, "tabId": {json.dumps(tab_id)}}}'
+                f'{base}, "tabId": {json.dumps(tab_id)}}}', tab_id,
             )
+
+    def _uds_writers_for_tab(self, tab_id: str) -> list[asyncio.StreamWriter]:
+        """UDS writers that receive a task event copy stamped *tab_id*.
+
+        Webview connections mirror the whole tab registry and peers
+        that never addressed a tab keep receiving every copy.  A
+        headless peer that addressed only OTHER tabs (a ``run_agent``
+        or benchmark client driving its own ``api-…`` tab) is skipped:
+        sending every streamed token of every task to dozens of such
+        clients multiplied the event loop's work by the number of
+        clients and starved it (drain timeouts dropped clients).
+
+        Args:
+            tab_id: The frontend tab id the copy is stamped with.
+
+        Returns:
+            The writers to schedule the copy on.
+        """
+        with self._ws_lock:
+            skip: set[Any] = set()
+            for conn_id, tabs in self._uds_local_tab_sets.items():
+                if (
+                    tabs
+                    and tab_id not in tabs
+                    and conn_id not in self._uds_webview_conns
+                ):
+                    endpoint = self._conn_endpoints.get(conn_id)
+                    if endpoint is not None:
+                        skip.add(endpoint)
+            return [w for w in self._uds_writers if w not in skip]
 
     @staticmethod
     def _increment_count(counts: dict[str, int], key: str) -> None:
@@ -2888,7 +2996,7 @@ class WebPrinter(JsonPrinter):
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_uds_writers(self, data: str) -> None:
+    def _send_to_uds_writers(self, data: str, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
         UDS peers (VS Code extension webviews, Python clients) are
@@ -2897,13 +3005,20 @@ class WebPrinter(JsonPrinter):
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
+            tab_id: The tab the payload is stamped with, when it is a
+                task-event copy; only the peers that can show that tab
+                receive it (see :meth:`_uds_writers_for_tab`).  Empty
+                for global events, which reach every peer.
         """
-        with self._ws_lock:
-            endpoints = list(self._uds_writers)
+        if tab_id:
+            endpoints = self._uds_writers_for_tab(tab_id)
+        else:
+            with self._ws_lock:
+                endpoints = list(self._uds_writers)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_ws_clients(self, data: str) -> None:
+    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to every connected client.
 
         Factored out of :meth:`broadcast` so fan-out copies for
@@ -2916,9 +3031,12 @@ class WebPrinter(JsonPrinter):
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
+            tab_id: The stamped tab of a task-event copy (empty for
+                global events); UDS delivery is narrowed to the peers
+                that can show it.
         """
         self._send_to_wss_clients(data)
-        self._send_to_uds_writers(data)
+        self._send_to_uds_writers(data, tab_id)
 
     def _send_to_conn(self, conn_id: str, data: str) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
@@ -2938,7 +3056,7 @@ class WebPrinter(JsonPrinter):
             return
         self._schedule_send(endpoint, data)
 
-    def send_lock(self, endpoint: Any) -> asyncio.Lock:
+    def send_lock(self, endpoint: Any) -> FifoSendLock:
         """Return the per-endpoint lock serialising outbound sends.
 
         Every code path that writes to *endpoint* — the broadcast
@@ -2951,12 +3069,12 @@ class WebPrinter(JsonPrinter):
             endpoint: The client connection the payload targets.
 
         Returns:
-            The (lazily created) ``asyncio.Lock`` for *endpoint*.
+            The (lazily created) :class:`FifoSendLock` for *endpoint*.
         """
         with self._ws_lock:
             lock = self._send_locks.get(endpoint)
             if lock is None:
-                lock = asyncio.Lock()
+                lock = FifoSendLock()
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock
@@ -3157,37 +3275,228 @@ class WebPrinter(JsonPrinter):
 
 
 def _media_url(name: str) -> str:
-    """Return a cache-busted URL for a packaged web media asset."""
-    ver = _MEDIA_VERSION_CACHE.get(name)
-    if ver is None:
-        data = (MEDIA_DIR / name).read_bytes()
-        ver = hashlib.sha256(data).hexdigest()[:16]
-        _MEDIA_VERSION_CACHE[name] = ver
-    return f"/media/{name}?v={ver}"
+    """Return a cache-busted URL for a packaged web media asset.
 
+    The ``?v=`` value is a prefix of the sha256 of the file's CURRENT
+    bytes: the file is stat'ed on every call and re-hashed whenever its
+    :func:`_media_fingerprint` differs from the one last hashed.  A
+    daemon keeps running across an in-place upgrade of the media files
+    (the VS Code extension replaces them under the same paths), and
+    ``chat.html`` is re-read on every request; a hash frozen at first
+    use would pair the new page with the OLD ``main.css`` / ``main.js``
+    on every browser whose service worker (media/sw.js, cache first
+    for ``/media``) still holds the old URL — on a phone that showed up
+    as the unstyled "Working directory" sheet stuck below the chat.
+    """
+    path = MEDIA_DIR / name
+    fingerprint = _media_fingerprint(path)
+    cached = _MEDIA_VERSION_CACHE.get(name)
+    if cached is None or cached[0] != fingerprint:
+        ver = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        cached = (fingerprint, ver)
+        _MEDIA_VERSION_CACHE[name] = cached
+    return f"/media/{name}?v={cached[1]}"
+
+
+def _media_fingerprint(path: Path) -> tuple[int, int, int, int]:
+    """Return a stat-based change fingerprint of a media file.
+
+    ``(st_mtime_ns, st_ctime_ns, st_size, st_ino)``: a copy that
+    preserves the source's mtime and size (``cp -p``, archive
+    extraction) still moves ctime — which userspace cannot set — and
+    an atomic rename-in-place replacement changes the inode.
+    """
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)
+
+
+_VSCODE_FONT_VARS_CSS = (
+    # VS Code's workbench font (src/vs/base/browser/fonts.ts
+    # DEFAULT_FONT_FAMILY) is chosen per platform; the browser cannot
+    # know which VS Code build the user runs, so the stack lists the
+    # macOS, Windows and Linux choices in turn.  Same for the editor
+    # font (src/vs/editor/common/config/fontInfo.ts
+    # EDITOR_FONT_DEFAULTS).  Both sizes are VS Code's default editor
+    # font size: an earlier request made the chat text match the task
+    # panel, which sizes itself with --vscode-editor-font-size.
+    "      --vscode-font-size: 14px;\n"
+    "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
+    '"Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", '
+    "sans-serif;\n"
+    "      --vscode-font-weight: normal;\n"
+    "      --vscode-editor-font-size: 14px;\n"
+    '      --vscode-editor-font-family: Menlo, Monaco, Consolas, '
+    '"Droid Sans Mono", "Courier New", monospace;\n'
+    "      --vscode-editor-font-weight: normal;\n"
+)
+"""VS Code's default fonts, as the ``--vscode-*`` variables a webview
+receives (``src/vs/workbench/contrib/webview/browser/themeing.ts``)."""
+
+_VSCODE_DARK_MODERN_CSS = (
+    # extensions/theme-defaults/themes/dark_modern.json, plus the
+    # colour-registry defaults it inherits (list.*, terminal.ansi*,
+    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground).
+    "      --vscode-foreground: #cccccc;\n"
+    "      --vscode-descriptionForeground: #9d9d9d;\n"
+    "      --vscode-errorForeground: #f85149;\n"
+    "      --vscode-icon-foreground: #cccccc;\n"
+    "      --vscode-focusBorder: #0078d4;\n"
+    "      --vscode-editor-background: #1f1f1f;\n"
+    "      --vscode-editor-foreground: #cccccc;\n"
+    "      --vscode-editor-selectionBackground: #264f78;\n"
+    "      --vscode-editorWidget-background: #202020;\n"
+    "      --vscode-editorWarning-foreground: #cca700;\n"
+    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
+    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
+    "      --vscode-editorGutter-modifiedBackground: #0078d4;\n"
+    "      --vscode-sideBar-background: #181818;\n"
+    "      --vscode-sideBar-border: #2b2b2b;\n"
+    "      --vscode-panel-border: #2b2b2b;\n"
+    "      --vscode-widget-border: #313131;\n"
+    "      --vscode-widget-shadow: #0000005c;\n"
+    "      --vscode-editorGroupHeader-tabsBackground: #2b2b2b;\n"
+    "      --vscode-tab-activeBackground: #1f1f1f;\n"
+    "      --vscode-tab-inactiveBackground: #2b2b2b;\n"
+    "      --vscode-tab-activeForeground: #ffffff;\n"
+    "      --vscode-tab-inactiveForeground: #9d9d9d;\n"
+    "      --vscode-tab-activeBorderTop: #0078d4;\n"
+    "      --vscode-activityBar-foreground: #d7d7d7;\n"
+    "      --vscode-activityBar-inactiveForeground: #868686;\n"
+    "      --vscode-activityBar-activeBorder: #0078d4;\n"
+    "      --vscode-list-hoverBackground: #2a2d2e;\n"
+    "      --vscode-list-activeSelectionBackground: #04395e;\n"
+    "      --vscode-list-inactiveSelectionBackground: #37373d;\n"
+    "      --vscode-input-background: #313131;\n"
+    "      --vscode-input-foreground: #cccccc;\n"
+    "      --vscode-input-border: #3c3c3c;\n"
+    "      --vscode-input-placeholderForeground: #989898;\n"
+    "      --vscode-dropdown-background: #313131;\n"
+    "      --vscode-dropdown-border: #3c3c3c;\n"
+    "      --vscode-button-background: #0078d4;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-button-hoverBackground: #026ec1;\n"
+    "      --vscode-button-border: #ffffff1a;\n"
+    "      --vscode-button-secondaryBackground: #00000000;\n"
+    "      --vscode-button-secondaryForeground: #cccccc;\n"
+    "      --vscode-button-secondaryHoverBackground: #2b2b2b;\n"
+    "      --vscode-badge-background: #616161;\n"
+    "      --vscode-badge-foreground: #f8f8f8;\n"
+    "      --vscode-textLink-foreground: #4daafc;\n"
+    "      --vscode-textLink-activeForeground: #4daafc;\n"
+    "      --vscode-textCodeBlock-background: #2b2b2b;\n"
+    "      --vscode-textBlockQuote-background: #2b2b2b;\n"
+    "      --vscode-textBlockQuote-border: #616161;\n"
+    "      --vscode-textPreformat-foreground: #d0d0d0;\n"
+    "      --vscode-textPreformat-background: #3c3c3c;\n"
+    "      --vscode-menu-background: #1f1f1f;\n"
+    "      --vscode-menu-selectionBackground: #0078d4;\n"
+    "      --vscode-notifications-background: #1f1f1f;\n"
+    "      --vscode-notifications-border: #2b2b2b;\n"
+    "      --vscode-toolbar-hoverBackground: #5a5d5e50;\n"
+    "      --vscode-scrollbarSlider-background: #79797966;\n"
+    "      --vscode-terminal-foreground: #cccccc;\n"
+    "      --vscode-terminal-ansiBlack: #000000;\n"
+    "      --vscode-terminal-ansiRed: #cd3131;\n"
+    "      --vscode-terminal-ansiGreen: #0dbc79;\n"
+    "      --vscode-terminal-ansiYellow: #e5e510;\n"
+    "      --vscode-terminal-ansiBlue: #2472c8;\n"
+    "      --vscode-terminal-ansiMagenta: #bc3fbc;\n"
+    "      --vscode-terminal-ansiCyan: #11a8cd;\n"
+    "      --vscode-terminal-ansiWhite: #e5e5e5;\n"
+    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
+    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --vscode-terminal-ansiBrightGreen: #23d18b;\n"
+    "      --vscode-terminal-ansiBrightYellow: #f5f543;\n"
+    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --vscode-terminal-ansiBrightWhite: #e5e5e5;\n"
+)
+"""VS Code's "Dark Modern" theme as ``--vscode-*`` variables."""
+
+_VSCODE_LIGHT_MODERN_CSS = (
+    # extensions/theme-defaults/themes/light_modern.json and the
+    # colour-registry light defaults, one line per Dark Modern line.
+    "      --vscode-foreground: #3b3b3b;\n"
+    "      --vscode-descriptionForeground: #3b3b3b;\n"
+    "      --vscode-errorForeground: #f85149;\n"
+    "      --vscode-icon-foreground: #3b3b3b;\n"
+    "      --vscode-focusBorder: #005fb8;\n"
+    "      --vscode-editor-background: #ffffff;\n"
+    "      --vscode-editor-foreground: #3b3b3b;\n"
+    "      --vscode-editor-selectionBackground: #add6ff;\n"
+    "      --vscode-editorWidget-background: #f8f8f8;\n"
+    "      --vscode-editorWarning-foreground: #bf8803;\n"
+    "      --vscode-editorGutter-addedBackground: #2ea043;\n"
+    "      --vscode-editorGutter-deletedBackground: #f85149;\n"
+    "      --vscode-editorGutter-modifiedBackground: #005fb8;\n"
+    "      --vscode-sideBar-background: #f8f8f8;\n"
+    "      --vscode-sideBar-border: #e5e5e5;\n"
+    "      --vscode-panel-border: #e5e5e5;\n"
+    "      --vscode-widget-border: #e5e5e5;\n"
+    "      --vscode-widget-shadow: #00000029;\n"
+    "      --vscode-editorGroupHeader-tabsBackground: #e5e5e5;\n"
+    "      --vscode-tab-activeBackground: #ffffff;\n"
+    "      --vscode-tab-inactiveBackground: #e5e5e5;\n"
+    "      --vscode-tab-activeForeground: #3b3b3b;\n"
+    "      --vscode-tab-inactiveForeground: #616161;\n"
+    "      --vscode-tab-activeBorderTop: #005fb8;\n"
+    "      --vscode-activityBar-foreground: #1f1f1f;\n"
+    "      --vscode-activityBar-inactiveForeground: #616161;\n"
+    "      --vscode-activityBar-activeBorder: #005fb8;\n"
+    "      --vscode-list-hoverBackground: #f2f2f2;\n"
+    "      --vscode-list-activeSelectionBackground: #e8e8e8;\n"
+    "      --vscode-list-inactiveSelectionBackground: #e4e6f1;\n"
+    "      --vscode-input-background: #ffffff;\n"
+    "      --vscode-input-foreground: #3b3b3b;\n"
+    "      --vscode-input-border: #cecece;\n"
+    "      --vscode-input-placeholderForeground: #767676;\n"
+    "      --vscode-dropdown-background: #ffffff;\n"
+    "      --vscode-dropdown-border: #cecece;\n"
+    "      --vscode-button-background: #005fb8;\n"
+    "      --vscode-button-foreground: #ffffff;\n"
+    "      --vscode-button-hoverBackground: #0258a8;\n"
+    "      --vscode-button-border: #0000001a;\n"
+    "      --vscode-button-secondaryBackground: #e5e5e5;\n"
+    "      --vscode-button-secondaryForeground: #3b3b3b;\n"
+    "      --vscode-button-secondaryHoverBackground: #cccccc;\n"
+    "      --vscode-badge-background: #cccccc;\n"
+    "      --vscode-badge-foreground: #3b3b3b;\n"
+    "      --vscode-textLink-foreground: #005fb8;\n"
+    "      --vscode-textLink-activeForeground: #005fb8;\n"
+    "      --vscode-textCodeBlock-background: #f8f8f8;\n"
+    "      --vscode-textBlockQuote-background: #f8f8f8;\n"
+    "      --vscode-textBlockQuote-border: #e5e5e5;\n"
+    "      --vscode-textPreformat-foreground: #3b3b3b;\n"
+    "      --vscode-textPreformat-background: #0000001f;\n"
+    "      --vscode-menu-background: #ffffff;\n"
+    "      --vscode-menu-selectionBackground: #005fb8;\n"
+    "      --vscode-notifications-background: #ffffff;\n"
+    "      --vscode-notifications-border: #e5e5e5;\n"
+    "      --vscode-toolbar-hoverBackground: #b8b8b850;\n"
+    "      --vscode-scrollbarSlider-background: #64646466;\n"
+    "      --vscode-terminal-foreground: #3b3b3b;\n"
+    "      --vscode-terminal-ansiBlack: #000000;\n"
+    "      --vscode-terminal-ansiRed: #cd3131;\n"
+    "      --vscode-terminal-ansiGreen: #107c10;\n"
+    "      --vscode-terminal-ansiYellow: #949800;\n"
+    "      --vscode-terminal-ansiBlue: #0451a5;\n"
+    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
+    "      --vscode-terminal-ansiCyan: #0598bc;\n"
+    "      --vscode-terminal-ansiWhite: #555555;\n"
+    "      --vscode-terminal-ansiBrightBlack: #666666;\n"
+    "      --vscode-terminal-ansiBrightRed: #f14c4c;\n"
+    "      --vscode-terminal-ansiBrightGreen: #14ce14;\n"
+    "      --vscode-terminal-ansiBrightYellow: #b5ba00;\n"
+    "      --vscode-terminal-ansiBrightBlue: #3b8eea;\n"
+    "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
+    "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
+    "      --vscode-terminal-ansiBrightWhite: #a5a5a5;\n"
+)
+"""VS Code's "Light Modern" theme as ``--vscode-*`` variables."""
 
 _VSCODE_THEME_VARS_CSS = (
-    ":root {\n"
-    "      --vscode-font-size: 16px;\n"
-    "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
-    "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
-    "      --vscode-editor-font-size: 16px;\n"
-    "      --vscode-editor-font-family: Menlo, Monaco, "
-    "'Courier New', monospace;\n"
-    "      --vscode-editor-background: #1e1e1e;\n"
-    "      --vscode-editor-foreground: #cccccc;\n"
-    "      --vscode-input-background: #3c3c3c;\n"
-    "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-sideBar-background: #252526;\n"
-    "      --vscode-textLink-foreground: #3794ff;\n"
-    "      --vscode-descriptionForeground: #8b8b8b;\n"
-    "      --vscode-panel-border: #80808059;\n"
-    "      --vscode-terminal-ansiRed: #f44747;\n"
-    "      --vscode-terminal-ansiGreen: #6a9955;\n"
-    "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-    "      --vscode-terminal-ansiMagenta: #c586c0;\n"
-    "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
-    "    }\n"
+    ":root {\n" + _VSCODE_FONT_VARS_CSS + _VSCODE_DARK_MODERN_CSS + "    }\n"
 )
 """The VS Code theme variables main.css derives its palette from.
 
@@ -3195,35 +3504,23 @@ The webview gets them from VS Code itself; the remote webapp
 (:func:`_build_html`) and the shared chat pages
 (:func:`_build_share_page`) run in a plain browser, so both inline
 this block — one copy, so the two pages can never disagree on the
-palette.
+palette.  Dark Modern is the default theme; the light theme swaps in
+:data:`_SHARE_PAGE_LIGHT_VARS_CSS`.
 """
 
 _SHARE_PAGE_LIGHT_VARS_CSS = (
-    "html.light-theme {\n"
-    "      --vscode-editor-background: #ffffff;\n"
-    "      --vscode-editor-foreground: #3b3b3b;\n"
-    "      --vscode-input-background: #ffffff;\n"
-    "      --vscode-button-foreground: #ffffff;\n"
-    "      --vscode-sideBar-background: #f8f8f8;\n"
-    "      --vscode-textLink-foreground: #005fb8;\n"
-    "      --vscode-descriptionForeground: #616161;\n"
-    "      --vscode-panel-border: #e5e5e5;\n"
-    "      --vscode-terminal-ansiRed: #cd3131;\n"
-    "      --vscode-terminal-ansiGreen: #107c10;\n"
-    "      --vscode-terminal-ansiYellow: #949800;\n"
-    "      --vscode-terminal-ansiMagenta: #bc05bc;\n"
-    "      --vscode-terminal-ansiCyan: #0598bc;\n"
-    "    }\n"
+    "html.light-theme,\n"
+    "    body.remote-chat.light-theme {\n" + _VSCODE_LIGHT_MODERN_CSS + "    }\n"
 )
-"""Light-mode overrides for a shared chat page's theme toggle.
+"""Light Modern overrides for the light/dark theme toggles.
 
-The values mirror VS Code's "Light Modern" palette (the same ones the
-remote webapp's light theme uses, see ``media/remote-codex.css``).
-They are declared on ``html.light-theme`` — the same element the
-``:root`` block of :data:`_VSCODE_THEME_VARS_CSS` targets but with
-higher specificity — so ``main.css``'s ``:root``-level derived
-variables (``--bg``, ``--fg``, ...) pick them up when ``share.js``
-toggles the ``light-theme`` class on ``<html>``.
+Both pages inline this block after :data:`_VSCODE_THEME_VARS_CSS`.
+``share.js`` toggles the ``light-theme`` class on ``<html>``, the
+same element the ``:root`` block targets, so ``main.css``'s
+``:root``-level derived variables (``--bg``, ``--fg``, ...) pick the
+overrides up.  ``main.js`` toggles it on ``<body>`` instead, where
+``media/remote-codex.css`` re-derives every semantic variable from
+the ``--vscode-*`` names, so the remote page follows too.
 """
 
 _SHARE_PAGE_CSS = """\
@@ -3316,10 +3613,10 @@ def _build_share_page(title: str, body_html: str) -> str:
         The complete HTML document string.
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
-    hljs_dark_css = (MEDIA_DIR / "highlight-github-dark.min.css").read_text(
+    hljs_dark_css = (MEDIA_DIR / "highlight-vscode-dark.css").read_text(
         encoding="utf-8",
     )
-    hljs_light_css = (MEDIA_DIR / "highlight-github-light.min.css").read_text(
+    hljs_light_css = (MEDIA_DIR / "highlight-vscode-light.css").read_text(
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
@@ -3380,9 +3677,10 @@ def _build_html() -> str:
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
         "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
-        "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
+        "    body { background: var(--vscode-editor-background, #1f1f1f);\n"
         "            color: var(--vscode-editor-foreground, #cccccc); }\n"
-        "    " + _VSCODE_THEME_VARS_CSS + "  </style>"
+        "    " + _VSCODE_THEME_VARS_CSS
+        + "    " + _SHARE_PAGE_LIGHT_VARS_CSS + "  </style>"
     )
     auth_modal = (
         '    <div id="auth-modal" style="display:none;">\n'
@@ -3407,7 +3705,7 @@ def _build_html() -> str:
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
-        "HLJS_CSS_HREF": _media_url("highlight-github-dark.min.css"),
+        "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
@@ -3426,8 +3724,8 @@ def _build_html() -> str:
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
             + json.dumps({
-                "dark": _media_url("highlight-github-dark.min.css"),
-                "light": _media_url("highlight-github-light.min.css"),
+                "dark": _media_url("highlight-vscode-dark.css"),
+                "light": _media_url("highlight-vscode-light.css"),
             })
             + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
         ),
@@ -3463,8 +3761,9 @@ def _app_shell_urls() -> list[str]:
     :func:`_build_html` keeps it in lockstep with the page: an asset
     added to the template is precached without a second list to
     maintain.  The hashes come from :func:`_media_url`, so the list
-    is stable for the daemon's lifetime and changes exactly when an
-    asset's bytes change.
+    is stable while the assets on disk are unchanged and changes
+    exactly when an asset's bytes change — even under a daemon that
+    keeps running across an in-place upgrade.
     """
     urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
     return ["/", *urls]
@@ -3759,15 +4058,17 @@ _WS_SHIM_JS = r"""
   var _ws = null;
   var _pending = [];
   var _authenticated = false;
-  // Tracks whether this client has previously completed a full
-  // auth handshake.  Once true, the next successful ``auth_ok``
-  // after an ``onclose`` (i.e. a server restart or network blip)
-  // means the page state is stale relative to the freshly booted
-  // backend and we must reload the page so the normal load
-  // pipeline replays history, restored tabs, etc.  Without
-  // this the page only re-binds the socket and the
-  // user is left staring at the "KISS Sorcar Server is starting
-  // ..." overlay (or stale UI) until they manually refresh.
+  // True once an authenticated session has lost its socket (a server
+  // restart, a network blip, the phone's browser sleeping the tab).
+  // The page is NOT reloaded when the socket comes back: main.js keeps
+  // every tab, transcript and draft in memory, and on the
+  // ``daemonStatus`` ``connected: true`` that follows the re-auth it
+  // sends ``ready`` again, which makes the server push what changed
+  // meanwhile (tab registry, transcript replays, tasks, settings).  A
+  // reload would repaint the whole app from a blank page on every
+  // blip — visible as flicker on a phone that drops the connection
+  // each time the browser is backgrounded.  This flag only picks the
+  // wording of the status surface ("Reconnecting" vs "starting").
   var _hadAuthThenClosed = false;
   // Reconnect backoff attempt count — reset to 0 after a successful
   // ``auth_ok`` so a fresh disconnect tries again almost immediately.
@@ -3775,24 +4076,6 @@ _WS_SHIM_JS = r"""
   // Pending reconnect timer id, used so visibilitychange / pageshow /
   // online wake-ups can short-circuit the scheduled delay.
   var _reconnectTimer = null;
-
-  // ``sessionStorage`` persists across the ``window.location.reload()``
-  // performed inside the ``_hadAuthThenClosed`` branch of ``auth_ok``,
-  // which lets the freshly-loaded page detect "this load is actually
-  // a reconnect from a previously-authenticated session" and label the
-  // loading overlay accordingly.
-  var _RECONNECT_FLAG = 'sorcar-reconnect-pending';
-
-  function _readReconnectingFlag() {
-    try { return sessionStorage.getItem(_RECONNECT_FLAG) === '1'; }
-    catch (e) { return false; }
-  }
-  function _setReconnectingFlag(on) {
-    try {
-      if (on) sessionStorage.setItem(_RECONNECT_FLAG, '1');
-      else sessionStorage.removeItem(_RECONNECT_FLAG);
-    } catch (e) {}
-  }
 
   /**
    * Replace the overlay text so the user sees an accurate status.
@@ -3835,36 +4118,30 @@ _WS_SHIM_JS = r"""
       'Asking for the password again in ' + secs + 's ...';
   }
 
-  // Apply the reconnect label immediately on script start when the
-  // sessionStorage flag survives from the prior page instance.  Without
-  // this the user would briefly see "Server is starting ..." after
-  // backgrounding Safari and returning, even though we know the server
-  // is up and we are merely re-establishing the WebSocket.
-  if (_readReconnectingFlag()) {
-    _updateLoadingMsg(true);
-  }
-
   // A page the service worker answered from its cache because the
   // server was unreachable carries the ``kiss-offline-shell`` meta
   // (see media/sw.js).  Its code may be older than what the server
-  // now runs, so the first successful handshake reloads it — exactly
-  // as a reconnect after an outage does.  The sessionStorage flag
-  // survives that reload and stops a loop when the page fetch keeps
-  // timing out (slow link) while the WebSocket still comes up: the
-  // second cached load is kept.  A page the server itself served
-  // clears the flag.
+  // now runs, so the first successful handshake reloads it — the one
+  // reload the shim still performs, and only on a page that was never
+  // live.  The sessionStorage flag survives that reload and stops a
+  // loop when the page fetch keeps timing out (slow link) while the
+  // WebSocket still comes up: the second cached load is kept.  A page
+  // the server itself served clears the flag.
+  //
+  // The worker only holds a copy because the server was reachable
+  // earlier, so a cached page is a reconnect from the user's point of
+  // view and its overlay says so from the start (and keeps saying so
+  // while the connection attempts fail).
   var _OFFLINE_RELOADED_FLAG = 'sorcar-offline-reloaded';
+  var _offlineShell =
+    !!document.querySelector('meta[name="kiss-offline-shell"]');
   var _reloadOnFirstAuth = false;
-  // Set when a lost session (or an offline-cached page) has been
-  // re-authenticated and the page waits for the server's ``pong``
-  // before reloading itself; ``_inflight`` holds the commands flushed
-  // on that connection until the pong confirms them, so a connection
-  // that dies first re-queues them for the next one (at-least-once:
-  // a settings save may be applied twice, never silently lost).
-  var _reloadOnPong = false;
+  if (_offlineShell) _updateLoadingMsg(true);
+  // The commands flushed on a reconnected socket, kept until the
+  // server's ``pong`` confirms it has taken them (see ``auth_ok``).
   var _inflight = [];
   try {
-    if (document.querySelector('meta[name="kiss-offline-shell"]')) {
+    if (_offlineShell) {
       _reloadOnFirstAuth =
         sessionStorage.getItem(_OFFLINE_RELOADED_FLAG) !== '1';
     } else {
@@ -3880,7 +4157,7 @@ _WS_SHIM_JS = r"""
   // right after each of its own keep-alive pings (every 15 s, see
   // ``RemoteAccessServer._ping_one_ws``); a socket that has been
   // silent for ``_STALE_AFTER_MS`` is therefore dead and is dropped
-  // here so the regular reconnect path (banner, backoff, reload on
+  // here so the regular reconnect path (banner, backoff, resync on
   // re-auth) takes over.  Any frame counts as life, so a slow server
   // command cannot cause a false alarm.
   var _STALE_CHECK_MS = 15000;
@@ -3922,8 +4199,8 @@ _WS_SHIM_JS = r"""
   // Offline app shell: the service worker served at ``/sw.js`` (see
   // ``_build_service_worker``) caches this page and its ``/media``
   // assets, so the app still opens — and stays on screen — when the
-  // connection is slow, flaky or gone, and a reload after a
-  // reconnect is served network-first.  Best effort: browsers refuse
+  // connection is slow, flaky or gone; a page load is served
+  // network-first.  Best effort: browsers refuse
   // a worker fetched over a self-signed certificate (the LAN URL),
   // and the app must keep working without one.
   if (typeof navigator !== 'undefined' && navigator.serviceWorker &&
@@ -4064,32 +4341,21 @@ _WS_SHIM_JS = r"""
   // proves nothing about the batch flushed on it: the next connection
   // sends the batch again, ahead of whatever has been queued since.
   function _requeueUnconfirmed() {
-    if (!_reloadOnPong) return;
+    if (_inflight.length === 0) return;
     _pending = _inflight.concat(_pending);
     _inflight = [];
-    _reloadOnPong = false;
   }
 
   // Shared by the socket's ``onclose`` and the stale-socket check
   // (``_checkStale``), which drops a half-open socket that will never
   // fire ``onclose`` on its own.
   function _onSocketClosed() {
-    // Latch "we had a real session and then lost it" so the next
-    // successful ``auth_ok`` reloads the page.  We only set the
-    // flag when the prior socket had completed its auth handshake
-    // — a fresh page that has not yet authenticated must NOT
-    // trigger a reload on its first ``auth_ok``.
-    if (_authenticated) {
-      _hadAuthThenClosed = true;
-      // Persist the reconnect-state across the ``location.reload()``
-      // that ``auth_ok`` will trigger so the freshly-loaded page
-      // labels its overlay "Reconnecting ..." instead of the
-      // misleading "KISS Sorcar Server is starting ...".  Mobile
-      // Safari frequently kills the WebSocket whenever the user
-      // switches apps, so this is the common case, not an edge
-      // case.
-      _setReconnectingFlag(true);
-    }
+    // Latch "we had a real session and then lost it": the status
+    // surface below says "Reconnecting" rather than "starting", and
+    // main.js keeps the app on screen under a banner.  Only a socket
+    // that had completed its auth handshake counts — a fresh page
+    // that never authenticated has nothing on screen to keep.
+    if (_authenticated) _hadAuthThenClosed = true;
     _authenticated = false;
     _requeueUnconfirmed();
     _stopStaleCheck();
@@ -4112,11 +4378,11 @@ _WS_SHIM_JS = r"""
       }, lockedDelay);
       return;
     }
-    // Switch the overlay text BEFORE re-revealing it: once we have
-    // had at least one successful handshake (current page or any
-    // previous one, latched via sessionStorage) every overlay
-    // appearance is a reconnect from the user's perspective.
-    _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
+    // Switch the overlay text BEFORE re-revealing it: once this page
+    // has had a successful handshake (or came from the worker's cache,
+    // which only exists because the server was reachable before) every
+    // overlay appearance is a reconnect from the user's perspective.
+    _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
     // Tell the app the socket is down.  Symmetric to the ``auth_ok``
     // dispatch above and to ``SorcarSidebarView.ts``'s disconnect
     // handler in the VS Code path.  ``reconnecting: true`` — the
@@ -4127,8 +4393,8 @@ _WS_SHIM_JS = r"""
     // seconds.  A page that never authenticated has nothing to show
     // and keeps the full overlay.  The banner also tells the user
     // that sending is on hold (``main.js`` holds prompts back while
-    // the daemon is down); the reload on the next ``auth_ok``
-    // resyncs everything.
+    // the daemon is down); on the next ``auth_ok`` main.js sends
+    // ``ready`` again and the server resyncs everything in place.
     _dispatchToApp({
       type: 'daemonStatus', connected: false,
       reconnecting: _hadAuthThenClosed,
@@ -4154,12 +4420,18 @@ _WS_SHIM_JS = r"""
       // have taken: when the wake-up listeners win the race against
       // the dead socket's queued ``onclose`` (the common mobile Safari
       // case), an authenticated session is being replaced right here,
-      // so record the loss now — otherwise the new socket's
-      // ``auth_ok`` would skip the reload and leave the page on stale
-      // pre-restart state.
+      // so record the loss now and tell the app, exactly as the
+      // ``onclose`` would have: without the ``connected: false`` the
+      // app never learns the session dropped, so it would not send
+      // ``ready`` again on the replacement's ``auth_ok`` and miss the
+      // resync.  (No reconnect is scheduled here: this IS the
+      // reconnect.)
       if (_authenticated) {
         _hadAuthThenClosed = true;
-        _setReconnectingFlag(true);
+        _updateLoadingMsg(true);
+        _dispatchToApp({
+          type: 'daemonStatus', connected: false, reconnecting: true,
+        });
       }
       _requeueUnconfirmed();
       _dropSocket(_ws);
@@ -4179,30 +4451,26 @@ _WS_SHIM_JS = r"""
       _lastFrameAt = Date.now();
       if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
-        // Recover from a server restart / network blip: if we had
-        // already authenticated at least once and the WS later
-        // closed, the page JS state is stale relative to the
-        // freshly booted backend.  Reload so the normal page-load
-        // pipeline (history replay, restored tabs, ...) runs
-        // against the new server state.  A page the service worker
-        // served from its offline cache reloads on its first
-        // handshake for the same reason (``_reloadOnFirstAuth``).
-        // The reload is gated by ``_hadAuthThenClosed`` so the
-        // very first authentication on a fresh page load does NOT
-        // reload (otherwise we would loop forever).
-        var reloading = _hadAuthThenClosed || _reloadOnFirstAuth;
+        if (_reloadOnFirstAuth) {
+          // A page the service worker served from its offline cache
+          // may run code older than the server's: reload it once, now
+          // that the server is reachable.  Nothing posted so far
+          // matters — the overlay kept the app off screen, so the
+          // queue holds only the boot commands the fresh page repeats.
+          _reloadOnFirstAuth = false;
+          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
+          try { window.location.reload(); } catch (e) {}
+          return;
+        }
+        // Recover from a server restart / network blip in place: the
+        // page keeps its state and main.js, on the ``daemonStatus``
+        // dispatched below, sends ``ready`` again so the server pushes
+        // what changed while the socket was down.  No reload — that
+        // would repaint the whole app on every blip.
         _hadAuthThenClosed = false;
         _authenticated = true;
         _stopStaleCheck();
         _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
-        // We have a live, authenticated socket — any future
-        // disconnect IS a reconnect, but the just-completed
-        // handshake is not.  Drop the sessionStorage flag so a
-        // subsequent fresh tab (different browsing session, same
-        // device) doesn't mislabel its first overlay.  A reload
-        // keeps the flag intact so the next page labels its overlay
-        // "Reconnecting".
-        _setReconnectingFlag(reloading);
         _reconnectAttempt = 0;
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
@@ -4218,21 +4486,19 @@ _WS_SHIM_JS = r"""
         }
         // Everything the page posted while the connection was down
         // (a settings save, a model change, a closed tab, ...) goes
-        // out now, on the new connection, so none of it is lost to
-        // the reload below.
+        // out now, on the new connection, in the order it was posted.
+        // The server handles a connection's commands one at a time, so
+        // its ``pong`` proves it has taken every command sent before
+        // the ``ping``; until then the batch stays in ``_inflight`` and
+        // a connection that dies first re-sends it on the next one
+        // (at-least-once: a settings save may be applied twice, never
+        // silently lost).  main.js holds prompts back while the daemon
+        // is down, so a ``runTask`` is never in such a batch.
         var batch = _pending;
         _pending = [];
         for (var i = 0; i < batch.length; i++) _ws.send(batch[i]);
-        if (reloading) {
-          // The server handles a connection's commands one at a
-          // time, so its ``pong`` proves it has taken every command
-          // flushed above; the page reloads when it arrives (see the
-          // ``pong`` branch).  Until then — and if the reload never
-          // happens because the user cancels the browser's "unsaved
-          // changes" dialog a dirty editor tab raises — this is a
-          // working, authenticated page, not a wedged one.
+        if (batch.length > 0) {
           _inflight = batch;
-          _reloadOnPong = true;
           _ws.send(JSON.stringify({type: 'ping'}));
         }
         // Hide the "KISS Sorcar Server is starting ..." overlay now
@@ -4242,21 +4508,17 @@ _WS_SHIM_JS = r"""
         // same window ``message`` event ``media/main.js`` listens for.
         // Without this the overlay covers ``#app`` forever and the
         // user only ever sees "KISS Sorcar Server is starting ...".
+        // On a reconnect main.js answers this with a fresh ``ready``
+        // (its ``daemonWasDown`` path), which is what resyncs the
+        // page: it goes out after the batch above, so a queued change
+        // is applied before the server replays state to this client.
         _dispatchToApp({type: 'daemonStatus', connected: true});
         return;
       }
       if (msg.type === 'pong') {
-        if (!_reloadOnPong) return;
-        _reloadOnPong = false;
+        // The server has taken the whole batch flushed on this
+        // connection; nothing is owed any more.
         _inflight = [];
-        if (_reloadOnFirstAuth) {
-          // Record the offline-cached page's one reload only now that
-          // it really happens; a cached page that went away before
-          // this point (auth never completed) has not used it up.
-          _reloadOnFirstAuth = false;
-          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
-        }
-        try { window.location.reload(); } catch (e) {}
         return;
       }
       if (msg.type === 'auth_required') {
@@ -4366,13 +4628,20 @@ _WS_SHIM_JS = r"""
 """
 
 
-def _http_response(status: int, content_type: str, body: bytes) -> Response:
+def _http_response(
+    status: int,
+    content_type: str,
+    body: bytes,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> Response:
     """Build a proper HTTP/1.1 Response for the websockets server.
 
     Args:
         status: HTTP status code (e.g. 200, 404).
         content_type: MIME type for the Content-Type header.
         body: Response body bytes.
+        extra_headers: Additional ``(name, value)`` headers, e.g. a
+            ``Content-Disposition`` for downloads.
 
     Returns:
         A websockets ``Response`` with Content-Length and Connection headers.
@@ -4387,6 +4656,7 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
             ("Cache-Control", "no-cache, no-store, must-revalidate"),
             ("Pragma", "no-cache"),
             ("Expires", "0"),
+            *(extra_headers or []),
         ]),
         body,
     )
@@ -4563,6 +4833,8 @@ class RemoteAccessServer:
         self._voice_speaker_lock = threading.Lock()
 
         self._printer = WebPrinter()
+        # Task-update reports for the task-info panel (getTaskUpdate).
+        self._task_updates = TaskUpdateRunner()
         self._printer.work_dir = self.work_dir
         self._vscode_server = VSCodeServer(printer=self._printer)
         if self.work_dir:
@@ -4601,6 +4873,7 @@ class RemoteAccessServer:
         self._uds_lock_timeout_s = uds_owner_wait_s + 30.0
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._tls_refresh_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
         self._version_check_task: asyncio.Task[None] | None = None
         self._shutdown_initiated = False
@@ -4609,6 +4882,9 @@ class RemoteAccessServer:
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # PEM of the auto-generated server certificate the live SSL
+        # context is serving; see :meth:`_refresh_tls_cert`.
+        self._tls_loaded_cert: bytes = b""
         self._ips_probed = False
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
@@ -4722,6 +4998,23 @@ class RemoteAccessServer:
             return await asyncio.to_thread(_trajectory_jobs_response)
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return await asyncio.to_thread(_trajectory_job_response, path)
+        if path == "/ca.crt":
+            # The auto-generated local CA certificate (public data, no
+            # key) so a phone on the LAN can install and trust it and
+            # stop warning about the Local/LAN URLs.  The MIME type
+            # makes iOS offer the profile installer; the filename
+            # keeps Android's download recognisable.  Absent when the
+            # daemon runs with an explicit --certfile pair.
+            ca_bytes = await asyncio.to_thread(
+                _local_ca_cert_bytes,
+            ) if self._serves_local_ca else None
+            if ca_bytes is None:
+                return _http_response(404, "text/plain", b"Not Found")
+            return _http_response(
+                200, "application/x-x509-ca-cert", ca_bytes,
+                [("Content-Disposition",
+                  'attachment; filename="kiss-sorcar-local-ca.crt"')],
+            )
         if path == "/voice-model.tar.gz":
             model_file = await asyncio.to_thread(_ensure_voice_model)
             if model_file is None:
@@ -7097,154 +7390,83 @@ class RemoteAccessServer:
                 return state.agent
         return states[0].agent if states else None
 
-    async def _handle_get_info_file(
+    async def _handle_get_task_update(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Send a remote-web client the contents of ``tmp/PROGRESS.md``.
+        """Send a client the task-update report for the task its tab shows.
 
-        Handles the ``getInfoFile`` command polled by ``media/main.js``
-        for the info subpanel of the docked task-info panel (remote
-        desktop mode): the subpanel mirrors the ``tmp/PROGRESS.md`` of
-        the task RUNNING in the tab, and shows nothing when that task
-        has not written one — in particular never the file a previous
-        task left behind.  Two facts about the tab's task drive that
-        (:meth:`_tab_task_agent`):
+        Handles the ``getTaskUpdate`` command polled by ``media/main.js``
+        for the info subpanel of the task-info panel: the subpanel shows
+        the report the :mod:`~kiss.agents.seas.task_update_sea` agent
+        wrote about the task RUNNING in the tab (:meth:`_tab_task_agent`),
+        never a file the task left on disk.  :class:`TaskUpdateRunner`
+        owns the reports: this poll makes it run the agent when the tab's
+        task has no report yet, when the report is
+        :data:`~kiss.server.task_update.UPDATE_INTERVAL_S` old, or when
+        the poll carries ``refresh: true`` (the panel's refresh button);
+        the reply reflects the state right after that decision, so a
+        refresh answers ``running: true`` at once and the report itself
+        arrives with a later poll.
 
-        * its effective work dir (``agent.work_dir``, assigned by
-          ``RelentlessAgent._reset`` once the run begins — the
-          worktree work dir for a worktree-mode run) is the ONLY
-          directory read while it is known; the tab's ``workDir`` (the
-          main checkout) holds the previous task's copy — rescued from
-          its merged worktree or written by an earlier non-worktree
-          run — and must not be served as a fallback;
-        * a file whose mtime predates the run's start
-          (``agent._task_start_ms``, stamped by the task runner before
-          the run does anything) is treated as missing, so the main
-          checkout's stale copy stays hidden during a non-worktree run
-          and during the setup window before ``_reset`` (when the
-          agent's ``work_dir`` is unset or still the previous run's).
-          One second of tolerance absorbs coarse filesystem
-          timestamps.  Agents without the stamp (``run_parallel``
-          sub-agents, which run in the parent's dir) are not gated.
+        The reply is sent directly to the requesting *endpoint* — never
+        broadcast — with the shape::
 
-        A tab attached to no task (nothing to gate against) keeps the
-        older resolution: the tab's recorded worktree dir
-        (:meth:`WebPrinter.worktree_dir_for_tab`) first, then
-        ``workDir`` (falling back to the daemon work dir exactly like
-        the other file handlers).  The reply is sent directly to the
-        requesting *endpoint* — never broadcast — with the shape::
-
-            {"type": "infoFile", "exists": <bool>, "sig": <str>,
-             "content": <utf-8 text>,           # changed or missing
+            {"type": "taskUpdate", "exists": <bool>, "sig": <str>,
+             "content": <html>, "error": <str>, "running": <bool>,
+             "cost": <usd>, "updatedAt": <epoch ms>,
              "unchanged": true,                  # sig == cmd knownSig
-             "workDir": <echo of cmd workDir>,
-             "tabId": <echo of cmd tabId>,
+             "tabId": <echo of cmd tabId>, "taskId": <task id>,
              "token": <echo of cmd token>}
 
-        ``token`` is an opaque client request tag: the webview matches
-        replies by it instead of by ``workDir``, whose dispatch-stamped
-        value may differ from what the client sent (root paths are
-        blanked and re-pinned by ``ServerApi.dispatch``).
-
-        ``sig`` fingerprints the file (``"<path>:<mtime_ns>:<size>"``,
-        ``""`` when missing — the path prefix makes a switch between
-        directories always look changed); a poll whose ``knownSig``
-        matches it is answered with ``unchanged: true`` and no
-        ``content``, so an idle file costs a stat per poll instead of
-        a re-read and re-send.  A missing, unreadable, non-regular,
-        oversized (:data:`_OPEN_FILE_MAX_BYTES`) or pre-task file
-        replies ``exists: false`` with empty content — the client
-        renders that as an empty subpanel rather than an error.
-
-        The file is opened ONCE (``O_NONBLOCK``, so a FIFO planted at
-        the path cannot hang the worker thread) and the sig, the type /
-        size checks and the read all use that one descriptor's
-        ``fstat``: a concurrent replacement of the path cannot pair one
-        version's sig with another version's content, and the read is
-        bounded by the fstat'ed size.  A file rewritten mid-read can
-        still yield a short/torn read, which at worst mismatches the
-        sig and heals on the next poll.
+        ``token`` is an opaque client request tag the webview matches
+        replies by.  ``sig`` fingerprints the report state; a poll whose
+        ``knownSig`` matches it is answered with ``unchanged: true`` and
+        no ``content``.  A tab attached to no running task, or to a task
+        whose history row is not allocated yet, replies ``exists: false``
+        with empty content — the client renders that as an empty
+        subpanel rather than an error.
 
         Args:
-            cmd: The parsed ``getInfoFile`` command (optional
-                ``workDir``, ``tabId``, ``knownSig``).
+            cmd: The parsed ``getTaskUpdate`` command (``tabId``,
+                optional ``knownSig``, ``token``, ``refresh``).
             endpoint: The requesting WSS connection.
         """
-        raw_work_dir = self._cmd_str(cmd, "workDir")
-        work_dir = self._cmd_work_dir(cmd)
+        from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
+        from kiss.server import agent_state
+
         tab_id = self._cmd_str(cmd, "tabId")
         known_sig = self._cmd_str(cmd, "knownSig")
         token = self._cmd_str(cmd, "token")
+        force = bool(cmd.get("refresh"))
+        reply: dict[str, Any] = {
+            "type": "taskUpdate",
+            "tabId": tab_id,
+            "token": token,
+            "taskId": "",
+            "exists": False,
+            "sig": "",
+            "content": "",
+        }
         agent = self._tab_task_agent(tab_id) if tab_id else None
-        task_dir = str(getattr(agent, "work_dir", "") or "")
-        start_ms = int(getattr(agent, "_task_start_ms", 0) or 0)
-        # Files last modified before the task started belong to a
-        # previous task; 0 disables the gate.
-        min_mtime_ns = (start_ms - 1000) * 1_000_000 if start_ms > 0 else 0
-        candidates: list[Path] = []
-        if task_dir:
-            candidates.append(Path(task_dir) / "tmp" / "PROGRESS.md")
-        else:
-            wt_dir = self._printer.worktree_dir_for_tab(tab_id) if tab_id else ""
-            if wt_dir and wt_dir != work_dir:
-                candidates.append(Path(wt_dir) / "tmp" / "PROGRESS.md")
-            candidates.append(Path(work_dir) / "tmp" / "PROGRESS.md")
-
-        def _read_info() -> dict[str, Any]:
-            reply: dict[str, Any] = {
-                "type": "infoFile",
-                "workDir": raw_work_dir,
-                "tabId": tab_id,
-                "token": token,
-                "exists": False,
-                "sig": "",
-                "content": "",
-            }
-            for path in candidates:
-                try:
-                    fd = os.open(
-                        str(path),
-                        os.O_RDONLY | getattr(os, "O_NONBLOCK", 0),
-                    )
-                except OSError:
-                    continue
-                try:
-                    st = os.fstat(fd)
-                    if (
-                        not stat_module.S_ISREG(st.st_mode)
-                        or st.st_size > _OPEN_FILE_MAX_BYTES
-                        or st.st_mtime_ns < min_mtime_ns
-                    ):
-                        continue
-                    sig = f"{path}:{st.st_mtime_ns}:{st.st_size}"
-                    if known_sig and known_sig == sig:
-                        reply["exists"] = True
-                        reply["sig"] = sig
-                        reply["unchanged"] = True
-                        del reply["content"]
-                        return reply
-                    chunks: list[bytes] = []
-                    remaining = st.st_size
-                    while remaining > 0:
-                        chunk = os.read(fd, remaining)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                        remaining -= len(chunk)
-                except OSError:
-                    continue
-                finally:
-                    os.close(fd)
-                reply["exists"] = True
-                reply["sig"] = sig
-                reply["content"] = b"".join(chunks).decode(
-                    "utf-8", errors="replace",
-                )
-                return reply
-            return reply
-
-        reply = await asyncio.to_thread(_read_info)
-        await self._reply_direct(endpoint, reply, "getInfoFile")
+        state = agent_state.find_by_agent(agent) if agent is not None else None
+        task_id = _persisted_task_id(agent) if agent is not None else ""
+        # The state is keyed by the persisted task id only once the run
+        # has allocated its history row (``agent_task_allocated`` re-keys
+        # it); until then a reused tab's agent still reports the PREVIOUS
+        # task's id, which must not be shown or re-run as this task's.
+        if (
+            state is not None
+            and state.is_task_active
+            and task_id
+            and state.task_id == task_id
+        ):
+            update = self._task_updates.poll(task_id, agent, force=force)
+            reply["taskId"] = task_id
+            reply.update(update.payload())
+            if known_sig and known_sig == update.sig:
+                reply["unchanged"] = True
+                del reply["content"]
+        await self._reply_direct(endpoint, reply, "getTaskUpdate")
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
@@ -7280,6 +7502,11 @@ class RemoteAccessServer:
     def _loopback_url(self) -> str:
         """The ``https://127.0.0.1:PORT`` URL for local-machine access."""
         return f"https://127.0.0.1:{self.port}"
+
+    @property
+    def _serves_local_ca(self) -> bool:
+        """True when the served certificate is signed by the auto-generated local CA."""
+        return not self._ssl_certfile
 
     def _lan_urls(self) -> list[str]:
         """Return ``https://<lan-ip>:PORT`` URLs for this host's LAN IPs.
@@ -7318,7 +7545,7 @@ class RemoteAccessServer:
         """
         _save_url_file(
             self._url_file, self._local_url, tunnel_url,
-            self._loopback_url, self._lan_urls(),
+            self._loopback_url, self._lan_urls(), self._serves_local_ca,
         )
 
     def _write_url_file_logged(self, tunnel_url: str | None) -> None:
@@ -7380,6 +7607,7 @@ class RemoteAccessServer:
             "tunnelActive": tunnel_active,
             "loopbackUrl": self._loopback_url,
             "lanUrls": self._lan_urls(),
+            "localCa": self._serves_local_ca,
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
@@ -8517,12 +8745,63 @@ class RemoteAccessServer:
                 raise
             except Exception:
                 logger.debug("Watchdog IP check error", exc_info=True)
+            # Single-flight background task: re-issuing a certificate
+            # (key generation, signing, lock wait) must not delay the
+            # tick and the IP-change restart decision above.
+            if self._tls_refresh_task is None or self._tls_refresh_task.done():
+                self._tls_refresh_task = asyncio.create_task(
+                    self._refresh_tls_cert_logged(),
+                )
             try:
                 await self._watchdog_ping_clients()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog WS ping error", exc_info=True)
+
+    async def _refresh_tls_cert_logged(self) -> None:
+        """Run :meth:`_refresh_tls_cert`, logging any failure (watchdog task body)."""
+        try:
+            await self._refresh_tls_cert()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Could not re-issue the TLS server certificate", exc_info=True,
+            )
+
+    async def _refresh_tls_cert(self) -> None:
+        """Keep the live context's auto-generated certificate current.
+
+        Called every watchdog tick.  The certificate must be re-issued
+        when the machine's LAN IPs change (in tunnel mode an IP change
+        does not restart the daemon, see :meth:`_watchdog_check_ip_change`,
+        and the new ``https://<lan-ip>:PORT`` URL would fail hostname
+        verification even on a browser that trusts the local CA) and
+        when it is expiring (a daemon that stays up for years must not
+        end up serving an expired certificate).  A sibling daemon may
+        also have re-issued it.  All three cases reduce to: make the
+        pair on disk current for :attr:`_last_ips`
+        (:func:`_refresh_local_tls_pair`, off-thread, a no-op when it
+        already is) and, when the certificate on disk differs from the
+        one loaded, hot-load it (:func:`_reload_local_tls_pair_if_unlocked`,
+        on the loop thread).  New handshakes then present the new
+        certificate; existing connections are untouched.  Explicit
+        ``certfile``/``keyfile`` pairs are never rewritten.
+        """
+        if self._ssl_certfile or self._ssl_context is None:
+            return
+        cert_pem = await asyncio.to_thread(_refresh_local_tls_pair, self._last_ips)
+        if cert_pem == self._tls_loaded_cert or self._ssl_context is None:
+            return
+        if _reload_local_tls_pair_if_unlocked(self._ssl_context, cert_pem):
+            first_load = not self._tls_loaded_cert
+            self._tls_loaded_cert = cert_pem
+            logger.log(
+                logging.DEBUG if first_load else logging.INFO,
+                "Reloaded the TLS server certificate (LAN IPs %s)",
+                sorted(self._last_ips),
+            )
 
     def _watchdog_check_url_file(self) -> None:
         """Re-write ``~/.kiss/remote-url.json`` if it went missing.
@@ -9052,11 +9331,18 @@ class RemoteAccessServer:
     async def _setup_server_after_uds(self) -> None:
         """Continue :meth:`_setup_server` after the UDS bind."""
         if self._ssl_context is None:
+            lan_ips = await asyncio.to_thread(_get_local_ips)
             self._ssl_context = await asyncio.to_thread(
                 _create_ssl_context,
                 self._ssl_certfile,
                 self._ssl_keyfile,
+                lan_ips,
             )
+            # ``_tls_loaded_cert`` stays empty: the first watchdog tick
+            # loads the on-disk certificate under the lock
+            # (:meth:`_refresh_tls_cert`), which is race-free — reading
+            # the file here, after the lock was released, could record a
+            # sibling's newer certificate the context is not serving.
 
         last_err: OSError | None = None
         for attempt in range(_BIND_RETRY_ATTEMPTS):
@@ -9803,6 +10089,8 @@ class RemoteAccessServer:
         async with self._lifecycle_lock:
             await _cancel_task(self._watchdog_task)
             self._watchdog_task = None
+            await _cancel_task(self._tls_refresh_task)
+            self._tls_refresh_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
             await _cancel_task(self._update_watch_task)
@@ -9915,11 +10203,20 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--url", action="store_true",
         help="Print the active remote URL and exit",
     )
+    parser.add_argument(
+        "--trust-ca", action="store_true",
+        help="Install the local CA that signs the webapp's TLS certificate "
+        "into this user's browser trust stores (removes the certificate "
+        "warning on the Local and LAN URLs) and exit",
+    )
     parser.add_argument("--workdir", default=None, help="Working directory")
     args = parser.parse_args()
 
     if args.url:
         _print_url()
+        return
+    if args.trust_ca:
+        _trust_local_ca()
         return
 
     tunnel_token, tunnel_url = _resolve_tunnel_settings()

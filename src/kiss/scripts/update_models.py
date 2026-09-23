@@ -127,6 +127,18 @@ _SSL_CTX = ssl.create_default_context()
 _CONTEXT_CAP_THRESHOLD = 1_000_000
 _CAPPED_CONTEXT_LENGTH = 500_000
 
+# Context length written for a vendor's model when neither the vendor API nor
+# OpenRouter reports one.  A catalog entry must never carry ``context_length``
+# 0: ``KISSAgent._handoff_context_tokens`` would evaluate to ``0.0`` and the
+# agent would raise ``ContextWindowExceededError`` on its first step.
+_OPENAI_DEFAULT_CONTEXT_LENGTH = 400_000
+_ANTHROPIC_DEFAULT_CONTEXT_LENGTH = 200_000
+_DEFAULT_CONTEXT_LENGTH_BY_SOURCE = {
+    "openai": _OPENAI_DEFAULT_CONTEXT_LENGTH,
+    "anthropic": _ANTHROPIC_DEFAULT_CONTEXT_LENGTH,
+    "gemini": _CAPPED_CONTEXT_LENGTH,
+}
+
 
 def _cap_context_length(ctx: int) -> int:
     """Return ``ctx`` capped at 500000 when it is 1000000 or above.
@@ -1316,7 +1328,11 @@ def _add_codex_candidates(
         if _is_excluded_openai_responses_only(codex_name):  # pragma: no branch
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
-        ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
+        ctx = (
+            or_info["context_length"]
+            if or_info and or_info.get("context_length")
+            else _OPENAI_DEFAULT_CONTEXT_LENGTH
+        )
         ctx = _cap_context_length(ctx)
         new_models.append(
             {
@@ -1567,7 +1583,11 @@ def compute_changes(
     for name in anthropic:  # pragma: no branch
         if name not in current:  # pragma: no branch
             or_info = _lookup_openrouter_pricing(name, "anthropic", openrouter)
-            ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 200000
+            ctx = (
+                or_info["context_length"]
+                if or_info and or_info.get("context_length")
+                else _ANTHROPIC_DEFAULT_CONTEXT_LENGTH
+            )
             inp = or_info["input_price_per_1M"] if or_info else 0.0
             out = or_info["output_price_per_1M"] if or_info else 0.0
             new_models.append(
@@ -1588,7 +1608,11 @@ def compute_changes(
             if _is_excluded_openai_responses_only(name):  # pragma: no branch
                 continue
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
-            ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 0
+            ctx = (
+                or_info["context_length"]
+                if or_info and or_info.get("context_length")
+                else _OPENAI_DEFAULT_CONTEXT_LENGTH
+            )
             inp = or_info["input_price_per_1M"] if or_info else 0.0
             out = or_info["output_price_per_1M"] if or_info else 0.0
             new_models.append(
@@ -1631,19 +1655,25 @@ def compute_changes(
             source = "gemini"
         if not source:  # pragma: no branch
             continue
-        or_info = _lookup_openrouter_pricing(name, source, openrouter)
-        if not or_info:  # pragma: no branch
-            continue
+        or_info = _lookup_openrouter_pricing(name, source, openrouter) or {}
+        pending = update_by_name.get(name)
+        pending_changes = pending["changes"] if pending else {}
         changed = {}
-        if not has_pricing and or_info.get("input_price_per_1M", 0) > 0:  # pragma: no branch
+        if not has_pricing and or_info.get("input_price_per_1M", 0) > 0:
             changed["input_price_per_1M"] = or_info["input_price_per_1M"]
             changed["output_price_per_1M"] = or_info["output_price_per_1M"]
-        if not has_context and or_info.get("context_length", 0) > 0:  # pragma: no branch
-            changed["context_length"] = or_info["context_length"]
-        if not changed:  # pragma: no branch
+        if not has_context and "context_length" not in pending_changes:
+            # Repair entries written with context 0: prefer the OpenRouter
+            # twin's real window, else the vendor default.  A context the
+            # vendor API itself reported (queued above, e.g. Gemini's
+            # ``inputTokenLimit``) is authoritative and is kept.
+            changed["context_length"] = (
+                or_info.get("context_length") or _DEFAULT_CONTEXT_LENGTH_BY_SOURCE[source]
+            )
+        if not changed:
             continue
-        if name in update_by_name:  # pragma: no branch
-            update_by_name[name]["changes"].update(changed)
+        if pending is not None:
+            pending_changes.update(changed)
         else:
             updates.append({"name": name, "changes": changed, "source": "openrouter-xref"})
 

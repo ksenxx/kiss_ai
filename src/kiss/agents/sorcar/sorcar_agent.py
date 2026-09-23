@@ -91,14 +91,19 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     }),
     # Shell runner: just enough to run commands and read their output.
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
+    "bash": frozenset({"Bash"}),
 }
-"""Tool profiles a sub-agent can run with (``finish`` is always added).
+"""Tool profiles an agent can run with (``finish`` is always added).
 
 Every tool schema is re-sent on every model step, so a reviewer that
 carries the browser, channel, cron and fan-out tools pays for ~30
 schemas it never calls.  The fan-out engine gives reviewer-marked
 children the ``review`` profile; a parent may name a profile explicitly
-through ``run_parallel(..., tool_profile=...)``.
+through ``run_parallel(..., tool_profile=...)``, and a top-level run
+through ``run(tool_profile=...)`` (the ``tool_profile`` parameter of
+:func:`kiss.server.sorcar.run` / the ``run_agent`` tool, or an agent
+script's ``tool_profile()`` getter).
 """
 
 
@@ -1624,6 +1629,13 @@ class SorcarAgent(RelentlessAgent):
             review_share = min(share, review_budget / max(1, sum(review_flags)))
             child_budgets = [review_share if flag else share for flag in review_flags]
         child_model = model_name or self.model_name
+        # Sub-agents act in the parent's live container, not on the host
+        # and not in a fresh container of their own.
+        child_docker_image: str | None = None
+        if self.docker_manager is not None and self.docker_manager.container is not None:
+            from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX
+
+            child_docker_image = ATTACH_PREFIX + self.docker_manager.container.id
         try:
             # Started inside the try: a stop injected between the start
             # and the try would otherwise leak the polling thread —
@@ -1634,6 +1646,7 @@ class SorcarAgent(RelentlessAgent):
                 max_workers=max_workers,
                 model_name=child_model,
                 work_dir=self.work_dir,
+                docker_image=child_docker_image,
                 printer=self.printer,
                 totals_out=totals,
                 usage_monitor=monitor,
@@ -1768,6 +1781,17 @@ class SorcarAgent(RelentlessAgent):
             Returns:
                 The user's typed response text.
             """
+            from kiss.agents.sorcar import cron_agent
+
+            if cron_agent.is_unattended(self):
+                # A cron run (or its sub-task) has no one to answer; a
+                # blocked question would only stall until the timeout.
+                return (
+                    "Error: this task runs unattended (scheduled automation) and "
+                    "nobody can answer. Do not ask again: proceed on the most "
+                    "reasonable assumption, or report the blocker in your final "
+                    "summary and finish."
+                )
             ask_callback = getattr(self, "_ask_user_question_callback", None)
             if ask_callback:
                 return str(ask_callback(question))
@@ -1982,6 +2006,10 @@ class SorcarAgent(RelentlessAgent):
                 task_list = parse_tasks_json(tasks)
             except ValueError as e:
                 return f"Error: {e.args[0]}"
+            from kiss.agents.sorcar import cron_agent
+
+            if cron_agent.is_unattended(self):
+                task_list = [cron_agent.unattended_child_prompt(t) for t in task_list]
             try:
                 workers: int | None = int(max_workers) if max_workers else None
             except ValueError:
@@ -2204,7 +2232,7 @@ class SorcarAgent(RelentlessAgent):
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 
         # Scheduled automations (cron) are not a built-in tool: the
-        # agent dispatches them via run_agent("cron", ...), which runs
+        # agent dispatches them via run_agent(agent="cron", ...), which runs
         # kiss.agents.sorcar.cron_agent as an agent script.  Passing
         # self makes each dispatched sub-task's cost/tokens/steps fold
         # into THIS task's accounting, so the end-of-task cost shown
@@ -2564,6 +2592,7 @@ class SorcarAgent(RelentlessAgent):
         ) = None,
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
         use_memory: bool | None = None,
+        tool_profile: str = "",
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2641,10 +2670,27 @@ class SorcarAgent(RelentlessAgent):
                 ``model_config["system_instruction"]``).  Forwarded to
                 every ``run_parallel`` sub-agent, so one override
                 governs the whole task tree.
+            tool_profile: Name of the tool profile this run's built-in
+                toolset is cut down to — a key of :data:`TOOL_PROFILES`
+                (``"full"``, ``"review"``, ``"shell"``, ``"bash"``) —
+                or ``""`` (the default) to let :meth:`_tool_profile`
+                decide (``full`` for a top-level task, ``review`` for a
+                reviewer sub-agent).  Applies to this agent only:
+                ``run_parallel`` children pick their own profile.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
+
+        Raises:
+            ValueError: If *tool_profile* is neither ``""`` nor a key of
+                :data:`TOOL_PROFILES`.
         """
+        if tool_profile and tool_profile not in TOOL_PROFILES:
+            raise ValueError(
+                f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
+                f"got {tool_profile!r}."
+            )
+        self._tool_profile_name = tool_profile
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._use_memory_override = use_memory
@@ -2697,7 +2743,10 @@ class SorcarAgent(RelentlessAgent):
                 + (system_prompt if system_prompt else "")
             )
             profile = self._tool_profile(prompt_template)
-            if profile != "full":
+            # No note without a built-in toolset to cut down: a run with
+            # ``append_basic_tools=False`` has only ``finish`` and the
+            # caller's tools, whatever profile it names.
+            if profile != "full" and self._append_basic_tools:
                 allowed = TOOL_PROFILES[profile]
                 assert allowed is not None
                 # The docker toolset has no job registry (see the docker
@@ -2901,6 +2950,7 @@ def run_tasks_parallel(
     use_memory: bool | None = None,
     tool_profile: str = "",
     child_budgets: list[float | None] | None = None,
+    docker_image: str | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -3008,6 +3058,10 @@ def run_tasks_parallel(
             as *tasks*); an entry of ``None`` falls back to *max_budget*.
             Used to clip reviewer children to the review allowance
             without touching their non-review siblings.
+        docker_image: ``docker_image`` for every child (normally the
+            parent's live container as ``container:<id>``, so the
+            children's tools act inside the same container); ``None``
+            runs the children's tools on the host.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -3092,7 +3146,7 @@ def run_tasks_parallel(
         # will carry the whole chat history, whose earlier tasks would
         # make every implementation-word heuristic fire.
         reviewer = parent_is_reviewer or is_review_task(task)
-        agent._tool_profile_name = tool_profile or (
+        child_profile = tool_profile or (
             "review"
             if DEFAULT_CONFIG.tool_profiles and reviewer and not is_implementation_task(task)
             else "full"
@@ -3131,6 +3185,8 @@ def run_tasks_parallel(
                 system_prompt=system_prompt_suffix or None,
                 web_tools=web_tools,
                 use_memory=use_memory,
+                tool_profile=child_profile,
+                docker_image=docker_image,
             )
             return result
         except KeyboardInterrupt:
