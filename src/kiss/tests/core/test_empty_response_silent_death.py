@@ -38,6 +38,18 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model_info import MODEL_INFO
+
+# A routed name: it has no OpenRouter twin, so after the empty turns the
+# loop raises instead of switching to a real fallback model (which it
+# would do for ``gpt-4o-mini`` whenever ``OPENROUTER_API_KEY`` is set).
+_MODEL = "openrouter/openai/gpt-4o-mini"
+
+
+@pytest.fixture(autouse=True)
+def _no_declared_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the model to no fallback even if ``~/.kiss/MY_MODELS.json`` declares one."""
+    monkeypatch.setattr(MODEL_INFO[_MODEL], "fallback", None)
 
 
 def _empty_assistant_response() -> dict[str, Any]:
@@ -128,7 +140,7 @@ class TestEmptyResponseSilentDeath:
             agent = KISSAgent("test-always-empty")
             with pytest.raises(KISSError) as excinfo:
                 agent.run(
-                    model_name="gpt-4o-mini",
+                    model_name=_MODEL,
                     prompt_template="hi",
                     max_steps=20,
                     max_budget=1.0,
@@ -141,7 +153,7 @@ class TestEmptyResponseSilentDeath:
             msg = str(excinfo.value).lower()
             assert "empty" in msg
             assert agent.step_count <= 2, (
-                f"Agent took {agent.step_count} steps; expected ≤2 before "
+                f"Agent took {agent.step_count} steps; expected <=2 before "
                 f"raising on consecutive empty responses"
             )
         finally:
@@ -197,7 +209,7 @@ class TestEmptyResponseSilentDeath:
 
             with pytest.raises(KISSError) as excinfo:
                 agent.run(
-                    model_name="gpt-4o-mini",
+                    model_name=_MODEL,
                     prompt_template="run a command",
                     tools=[_bash],
                     max_steps=20,
@@ -211,7 +223,7 @@ class TestEmptyResponseSilentDeath:
             msg = str(excinfo.value).lower()
             assert "empty" in msg
             assert agent.step_count <= 3, (
-                f"Agent took {agent.step_count} steps; expected ≤3"
+                f"Agent took {agent.step_count} steps; expected <=3"
             )
         finally:
             server.shutdown()

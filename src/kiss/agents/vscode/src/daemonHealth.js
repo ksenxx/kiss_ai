@@ -127,7 +127,15 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
 }
 
 function decideRestart(state) {
-  const {fingerprintMatches, health, activeTasks} = state;
+  const {fingerprintMatches, health, activeTasks, force} = state;
+  if (force) {
+    // The user answered "Restart now" to the deferred-update
+    // notification: they accept aborting whatever the daemon reports
+    // as running.  This is the only way out when the report is wrong
+    // — a daemon wedged on a stale busy tab keeps deferring the very
+    // restart that would load the code fixing it.
+    return {skip: false, reason: 'forced-by-user'};
+  }
   if (activeTasks && activeTasks.ok && activeTasks.count > 0) {
     return {skip: true, reason: 'active-tasks'};
   }

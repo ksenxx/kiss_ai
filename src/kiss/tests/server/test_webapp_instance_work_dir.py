@@ -70,6 +70,7 @@ globalThis.location = {host: 'example.test'};
 // DOMContentLoaded of this DOM-less harness.
 globalThis.document = {
   getElementById: () => null,
+  querySelector: () => null,
   readyState: 'complete',
   addEventListener: () => {},
 };
@@ -153,27 +154,13 @@ out.sent = ws0.sent.map(s => JSON.parse(s));
             [m["type"] for m in sent].index("getFiles"),
         )
 
-    def test_reconnect_after_prior_auth_reloads_page(self) -> None:
-        """After a dropped WebSocket post-auth the shim reloads the page
-        on the next ``auth_ok`` (recovering from a server restart).
-        The reload preserves ``sessionStorage`` so the post-reload
-        shim's first ``auth_ok`` replays ``setWorkDir`` from the pin
-        (covered by
-        ``test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok``).
-
-        Together these two tests preserve the per-tab work_dir
-        invariant across reconnects under the auto-reload design
-        introduced to recover from server restarts: the in-place
-        replay is replaced by a reload-then-replay round-trip whose
-        net observable effect on the server is the same
-        ``setWorkDir`` frame on the new connection.
-
-        The shim completes the handshake on the new connection first
-        (pin replay, then whatever the page posted during the outage)
-        and reloads only once the server's ``pong`` proves it has taken
-        all of it — so the page that requested the reload is a working
-        one until then, and stays one if the user cancels the reload
-        from the browser's unsaved-changes dialog."""
+    def test_reconnect_after_prior_auth_replays_pin_in_place(self) -> None:
+        """After a dropped WebSocket post-auth the shim re-authenticates
+        the new connection without reloading the page, and the pinned
+        work_dir goes out FIRST on that connection, ahead of whatever
+        the page posted during the outage: the server stamps each
+        connection's work_dir onto later commands, so the pin must be
+        there before the outage-queued command is taken."""
         out = _run_shim_harness("""
 globalThis.location.reload = () => {
   out.reloaded = (out.reloaded || 0) + 1;
@@ -183,6 +170,7 @@ const ws0 = FakeWS.instances[0];
 ws0.onopen();
 api.postMessage({type: 'setWorkDir', workDir: '/inst/a'});
 ws0.onmessage({data: JSON.stringify({type: 'auth_ok'})});
+ws0.onmessage({data: JSON.stringify({type: 'pong'})});
 ws0.onclose();
 // The last timer is the reconnect backoff (auth_ok armed the
 // stale-socket check before it; a closed socket makes that a no-op).
@@ -191,12 +179,9 @@ const ws1 = FakeWS.instances[1];
 ws1.onopen();
 api.postMessage({type: 'saveConfig', config: {edited: 'during the outage'}});
 ws1.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-out.reloadedBeforePong = out.reloaded || 0;
-ws1.onmessage({data: JSON.stringify({type: 'pong'})});
 out.sent1 = ws1.sent.map(s => JSON.parse(s));
 """)
-        self.assertEqual(out.get("reloadedBeforePong"), 0, out)
-        self.assertEqual(out.get("reloaded"), 1, out)
+        self.assertEqual(out.get("reloaded"), None, out)
         sent1 = out["sent1"]
         self.assertEqual(
             [m["type"] for m in sent1],
@@ -207,10 +192,8 @@ out.sent1 = ws1.sent.map(s => JSON.parse(s));
 
     def test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok(self) -> None:
         """A fresh shim whose sessionStorage already holds a pinned
-        work_dir (e.g. because the prior shim instance reloaded the
-        page on reconnect) MUST replay ``setWorkDir`` on its first
-        ``auth_ok``.  This is the post-reload half of the
-        reconnect-replay round-trip."""
+        work_dir (the user reloaded the page, or the browser restored
+        the tab) MUST replay ``setWorkDir`` on its first ``auth_ok``."""
         out = _run_shim_harness("""
 _ss['sorcar-work-dir'] = '/inst/a';  // pin from a prior page instance
 const ws0 = FakeWS.instances[0];

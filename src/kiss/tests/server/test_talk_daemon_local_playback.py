@@ -167,6 +167,16 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         ):
             writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
+        # The server handles ``ready`` on its own task; a talk broadcast
+        # before that lands sees no attached webview and leaves the copy
+        # unmuted.  Wait for the attachment the way the fan-out reads it.
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while tab_id not in self.server._printer.shown_local_uds_tabs([tab_id]):
+            self.assertLess(
+                asyncio.get_event_loop().time(), deadline,
+                "daemon never attached the webview client",
+            )
+            await asyncio.sleep(0.01)
         return reader, writer
 
     async def _collect_talks(
@@ -218,7 +228,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         web_tab = "webtab-" + uuid.uuid4().hex[:8]
         web_reader, web_writer = await self._connect(web_tab)
         self.server._printer.subscribe_tab(self.task_id, web_tab)
-        await asyncio.sleep(0.05)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-1", with_clip=True)
@@ -248,7 +257,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         web_reader, web_writer = await self._connect(web_tab)
         self.server._printer.subscribe_tab(self.task_id, web_tab)
         self.server._printer.subscribe_tab(self.task_id, remote_tab)
-        await asyncio.sleep(0.05)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-3", with_clip=True)
@@ -270,7 +278,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         web_tab = "webtab-" + uuid.uuid4().hex[:8]
         web_reader, web_writer = await self._connect(web_tab)
         self.server._printer.subscribe_tab(self.task_id, web_tab)
-        await asyncio.sleep(0.05)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-4", with_clip=False)
@@ -297,7 +304,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         probe_tab = "probe-" + uuid.uuid4().hex[:8]
         probe_reader, probe_writer = await self._connect(probe_tab)
         self.server._printer.subscribe_tab(self.task_id, remote_tab)
-        await asyncio.sleep(0.05)
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-daemon-5", with_clip=True)

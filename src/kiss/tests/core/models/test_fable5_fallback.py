@@ -35,6 +35,9 @@ tool call.
 
 from __future__ import annotations
 
+from typing import Any
+
+from kiss.core import config as config_module
 from kiss.core.models import model_info as model_info_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -51,9 +54,10 @@ class TestGetFallbackModel:
     def test_unknown_model_returns_none(self) -> None:
         assert get_fallback_model("does-not-exist-xyz") is None
 
-    def test_model_without_fallback_returns_none(self) -> None:
-        """A registered model that does not declare ``fallback``
-        returns ``None`` (not an error)."""
+    def test_model_without_fallback_returns_none(self, monkeypatch: Any) -> None:
+        """A registered model that does not declare ``fallback`` returns
+        ``None`` (not an error) when no OpenRouter key could route its twin."""
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
         assert get_fallback_model("claude-opus-4-8") is None
 
     def test_harbor_prefix_is_stripped(self) -> None:

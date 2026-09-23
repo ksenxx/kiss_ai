@@ -77,7 +77,7 @@ class _FakeWebPrinter(WebPrinter):
         self._sub_tabs: dict[str, str] = {}
         self._wire_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str) -> None:
+    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
         """Capture every payload that would have been sent over the WS.
 
         Also performs the synchronous frontend round-trip for

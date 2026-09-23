@@ -381,14 +381,34 @@ class TestMergeGuard(unittest.TestCase):
 
     @pytest.mark.slow
     def test_merging_does_not_block_other_tabs(self) -> None:
-        """A merge on one tab does not block tasks on other tabs."""
+        """A merge on one tab does not block tasks on other tabs.
+
+        The admitted task runs against the live default model, so the
+        prompt must leave it nothing to clarify: on 2026-09-23 the prompt
+        ``"test"`` made the model call ``ask_user_question``, and with no
+        user on the tab ``_await_user_response`` blocked the test until
+        the 600 s timeout.
+        """
         _register_wt_state("5", use_worktree=False, is_merging=True)
         self.events.clear()
-        self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "99"})
+        prompt = (
+            "Call the finish tool right now with success=true and the summary "
+            "'<p>OK</p>'. Do not ask the user anything and do not call any "
+            "other tool."
+        )
+        self.server._run_task_inner({"prompt": prompt, "model": "", "tabId": "99"})
         errors = [e for e in self.events if e["type"] == "error"]
         assert not any(
             "merge is in progress" in e.get("text", "") for e in errors
         )
+        # The task must actually have been admitted and run to completion
+        # on tab 99: a failed result (e.g. "No model available") is
+        # emitted before the merge guard and would pass the check above.
+        done = [
+            e for e in self.events
+            if e["type"] == "task_done" and e.get("tabId") == "99"
+        ]
+        assert done and done[-1].get("success") is True, self.events
 
 
 class TestWorktreeActionExceptionHandling(unittest.TestCase):

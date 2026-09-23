@@ -665,6 +665,37 @@ class CarryOverTablesTest(unittest.TestCase):
 
         self.assertEqual(self._models(self.new), {"claude-opus-5": 5})
 
+    def test_steer_inputs_come_back_with_the_newer_timestamp(self) -> None:
+        """Messages typed into running tasks feed autocomplete; no sync moves them."""
+        self._make(self.old, {})
+        self._make(self.new, {})
+        con = sqlite3.connect(self.old)
+        con.executemany(
+            "INSERT INTO steer_inputs(text, timestamp) VALUES (?, ?)",
+            [("focus on the tests", 10.0), ("skip the docs", 20.0)],
+        )
+        con.commit()
+        con.close()
+        con = sqlite3.connect(self.new)
+        con.execute(
+            "INSERT INTO steer_inputs(text, timestamp) VALUES (?, ?)",
+            ("skip the docs", 30.0),
+        )
+        con.commit()
+        con.close()
+
+        self._carry()
+
+        con = sqlite3.connect(f"file:{self.new}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT text, timestamp FROM steer_inputs ORDER BY text"
+            ).fetchall()
+        finally:
+            con.close()
+        self.assertEqual(
+            rows, [("focus on the tests", 10.0), ("skip the docs", 30.0)])
+
     def test_a_tally_of_nothing_is_left_where_it_is(self) -> None:
         """A NULL key matches nothing, so copying it would repeat for ever.
 

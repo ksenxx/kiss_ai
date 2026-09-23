@@ -36,15 +36,19 @@ def _free_port() -> int:
 
 
 def _make_server(
-    tmp_path: Path, name: str, uds_owner_wait_s: float = 30.0,
+    tmp_path: Path, uds_tmp_path: Path, name: str, uds_owner_wait_s: float = 30.0,
 ) -> RemoteAccessServer:
-    """Build a tunnel-less server whose files all live under ``tmp_path``."""
+    """Build a tunnel-less server whose files all live under ``tmp_path``.
+
+    Only the socket goes under ``uds_tmp_path``: ``tmp_path`` is too
+    long for ``sun_path`` on macOS.
+    """
     work_dir = tmp_path / name
     work_dir.mkdir()
     return RemoteAccessServer(
         host="127.0.0.1", port=_free_port(), use_tunnel=False,
         work_dir=str(work_dir), url_file=tmp_path / f"{name}-url.json",
-        uds_path=tmp_path / "sorcar.sock", uds_owner_wait_s=uds_owner_wait_s,
+        uds_path=uds_tmp_path / "sorcar.sock", uds_owner_wait_s=uds_owner_wait_s,
     )
 
 
@@ -79,23 +83,33 @@ def _stop_thread(server: RemoteAccessServer, thread: threading.Thread) -> None:
     assert not thread.is_alive()
 
 
-async def _bind_successor_uds(successor: RemoteAccessServer) -> bool:
-    """Start ``successor`` and report whether it got the UDS listener."""
+async def _bind_successor_uds(successor: RemoteAccessServer) -> tuple[bool, float]:
+    """Start ``successor``; report whether it got the UDS listener and how long
+    ``start_async`` took (its own teardown is not part of the measurement)."""
+    started = time.monotonic()
     await successor.start_async()
+    elapsed = time.monotonic() - started
     try:
-        return successor._uds_server is not None
+        return successor._uds_server is not None, elapsed
     finally:
         await successor.stop_async()
 
 
 @requires_unix_sockets
-def test_stopped_blocking_start_releases_uds_for_successor(tmp_path: Path) -> None:
+def test_stopped_blocking_start_releases_uds_for_successor(
+    tmp_path: Path, uds_tmp_path: Path,
+) -> None:
     save_config({"remote_password": ""})
-    server = _make_server(tmp_path, "first")
+    server = _make_server(tmp_path, uds_tmp_path, "first")
     thread = _start_on_thread(server)
-    assert server._uds_server is not None, "start() did not bind the UDS listener"
-    uds_path = server._uds_path
-    _stop_thread(server, thread)
+    try:
+        assert server._uds_server is not None, "start() did not bind the UDS listener"
+        uds_path = server._uds_path
+    finally:
+        # Stop the server even when the assertion fails: a server left
+        # running keeps its cron scheduler thread alive and breaks the
+        # cron tests that run later in the same pytest process.
+        _stop_thread(server, thread)
 
     close_leaked_listeners(server)
 
@@ -106,8 +120,8 @@ def test_stopped_blocking_start_releases_uds_for_successor(tmp_path: Path) -> No
     # leaked listener would still be accepting and the successor would
     # give up on its UDS after ``uds_owner_wait_s`` (kept short so a
     # regression fails in seconds rather than the 30 s default).
-    successor = _make_server(tmp_path, "second", uds_owner_wait_s=3.0)
-    started = time.monotonic()
-    assert asyncio.run(_bind_successor_uds(successor))
-    assert time.monotonic() - started < 3.0, "successor waited on a dead predecessor"
+    successor = _make_server(tmp_path, uds_tmp_path, "second", uds_owner_wait_s=3.0)
+    bound, elapsed = asyncio.run(_bind_successor_uds(successor))
+    assert bound
+    assert elapsed < 3.0, "successor waited on a dead predecessor"
     del server

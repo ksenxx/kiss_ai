@@ -90,7 +90,7 @@ class TestBuildHtml(unittest.TestCase):
         """The HTML references all required media assets."""
         html = _build_html()
         self.assertIn("/media/main.css", html)
-        self.assertIn("/media/highlight-github-dark.min.css", html)
+        self.assertIn("/media/highlight-vscode-dark.css", html)
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)
@@ -1818,7 +1818,14 @@ class TestGenerateSelfSignedCert(unittest.TestCase):
             self.assertTrue(cert_path.is_file())
             self.assertTrue(key_path.is_file())
             self.assertIn(b"BEGIN CERTIFICATE", cert_path.read_bytes())
-            self.assertIn(b"BEGIN RSA PRIVATE KEY", key_path.read_bytes())
+            # ECDSA P-256 key in PKCS#8 PEM (kiss.server.tls_certs).
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+
+            self.assertIn(b"BEGIN PRIVATE KEY", key_path.read_bytes())
+            key = serialization.load_pem_private_key(key_path.read_bytes(), None)
+            self.assertIsInstance(key, ec.EllipticCurvePrivateKey)
+            self.assertEqual(key.curve.name, "secp256r1")  # type: ignore[union-attr]
 
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(str(cert_path), str(key_path))

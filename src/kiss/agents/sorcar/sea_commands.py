@@ -385,6 +385,53 @@ def _load_sea_module(sea_path: Path) -> ModuleType:
     return module
 
 
+class SeaScriptError(RuntimeError):
+    """An SEA script failed to import or one of its getters raised.
+
+    Raised by :func:`sea_getter_is_false` with the original raise as
+    ``__cause__`` — ``BaseException`` included, so an SEA raising
+    ``KeyboardInterrupt``/``SystemExit`` at import time is reported as
+    a broken script, not as a cancelled task, while a genuinely
+    requested stop that landed inside the import stays recognisable
+    through the cause chain (``task_runner._stop_interrupt_wrapped``).
+    """
+
+
+def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
+    """Return whether the SEA at *sea_path* defines ``getter()`` returning ``False``.
+
+    Used by the task runner on the OUTER run of a ``/xxx`` command —
+    the relay that calls ``run_agent`` with its own work directory —
+    to honour an SEA's ``use_worktree()`` / ``auto_commit()`` verdicts
+    on that relay as well: an SEA that declares it works on the real
+    checkout (``/sh``, ``/merge``) must not be handed the relay's
+    worktree, and the relay must not auto-commit what such an SEA left
+    in the tree.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+        getter: Name of the zero-argument getter, e.g. ``"use_worktree"``.
+
+    Returns:
+        ``True`` only when the script defines a callable *getter* and
+        it returns exactly ``False``; a missing getter or any other
+        value yields ``False``.
+
+    Raises:
+        SeaScriptError: When the script fails to import or *getter*
+            raises (whatever it raises), so the relay fails with the
+            diagnostic instead of running against a broken SEA.
+    """
+    try:
+        fn = getattr(_load_sea_module(sea_path), getter, None)
+        return callable(fn) and fn() is False
+    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        raise SeaScriptError(
+            f"SEA {sea_path} failed while evaluating {getter}(): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     """Rewrite a slash-command prompt into an explicit ``run_agent`` call.
 

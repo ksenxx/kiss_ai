@@ -291,6 +291,30 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     assert.strictEqual(decision.reason, 'active-tasks');
   });
 
+  await test('decideRestart: RESTARTS despite reported active tasks when the user forced it (stale busy tab wedge, 2026-09-22)', () => {
+    const decision = decideRestart({
+      fingerprintMatches: false,
+      health: 'alive',
+      activeTasks: {ok: true, count: 1, tabs: ['337de134(task=ce7c419d)']},
+      force: true,
+    });
+    assert.strictEqual(decision.skip, false);
+    assert.strictEqual(decision.reason, 'forced-by-user');
+  });
+
+  await test('decideRestart: an unforced call is unchanged (force absent or false)', () => {
+    for (const force of [undefined, false]) {
+      const decision = decideRestart({
+        fingerprintMatches: false,
+        health: 'alive',
+        activeTasks: {ok: true, count: 1, tabs: ['x(task=74)']},
+        force,
+      });
+      assert.strictEqual(decision.skip, true);
+      assert.strictEqual(decision.reason, 'active-tasks');
+    }
+  });
+
   await test('decideRestart: skips restart when health probe is UNKNOWN and fingerprint matches (the actual lsof-timeout regression)', () => {
     const decision = decideRestart({
       fingerprintMatches: true,
