@@ -54,7 +54,7 @@ pytestmark = [
 
 @pytest.fixture
 def cleanup() -> Iterator[set[str]]:
-    """Snapshot existing IMAGE containers; force-remove new IMAGE containers afterwards."""
+    """Snapshot this process's containers; force-remove the new ones afterwards."""
     client = docker.from_env()
     before = image_container_ids(client)
     try:

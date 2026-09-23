@@ -5,45 +5,50 @@
 """Container bookkeeping for Docker tests that share the daemon with other work.
 
 The Docker daemon on a developer or CI machine is not exclusive to the test
-run: benchmarks and other tasks start and remove their own containers at
-the same time.  A test that snapshots ``client.containers.list(all=True)``
-before and after its own ``DockerManager.open()`` therefore sees foreign
-containers in the difference, and a teardown that force-removes "anything
-new" kills work it does not own.  ``containers.list()`` also inspects each
-listed container, so a foreign container removed between the two calls
-raises ``docker.errors.NotFound`` in the middle of the test's teardown.
+run: benchmarks, other tasks and concurrently running pytest processes start
+and remove their own containers at the same time.  A test that snapshots
+``client.containers.list(all=True)`` before and after its own
+``DockerManager.open()`` therefore sees foreign containers in the
+difference, and a teardown that force-removes "anything new" kills work it
+does not own.  ``containers.list()`` also inspects each listed container,
+so a foreign container removed between the two calls raises
+``docker.errors.NotFound`` in the middle of the test's teardown.
 
-Every helper here restricts itself to containers created from
-:data:`IMAGE`, the image all Sorcar Docker tests use, and lists them
-sparsely (no per-container inspect).  The image is the only ownership
-marker ``DockerManager`` leaves on a container, so the Docker tests still
-share it among themselves: run them in ONE pytest process (never in
-concurrent splits), or one test's teardown can remove another's container.
+``DockerManager.open()`` stamps every container it starts with the
+:data:`~kiss.agents.sorcar.docker_manager.OWNER_LABEL` label valued
+``host:pid`` of the starting process, so every helper here restricts itself
+to the containers this pytest process started and lists them sparsely (no
+per-container inspect).  Docker tests in concurrent pytest processes thus
+never count or remove each other's containers.
 """
 
 from __future__ import annotations
 
 import docker
 
+from kiss.agents.sorcar.docker_manager import OWNER_LABEL, owner_label_value
+
 IMAGE = "python:3.11-slim"
 
 
 def image_container_ids(client: docker.DockerClient) -> set[str]:
-    """Return the ids of every container, running or not, created from :data:`IMAGE`.
+    """Return the ids of every container, running or not, this process started.
 
     Args:
         client: The Docker client to query.
 
     Returns:
-        The container ids, filtered by ``ancestor`` so containers of other
-        workloads on the same daemon are never counted.
+        The container ids, filtered by the owner label so containers of
+        other processes on the same daemon are never counted.
     """
-    containers = client.containers.list(all=True, sparse=True, filters={"ancestor": IMAGE})
+    containers = client.containers.list(
+        all=True, sparse=True, filters={"label": f"{OWNER_LABEL}={owner_label_value()}"},
+    )
     return {container.id for container in containers if container.id}
 
 
 def remove_new_image_containers(client: docker.DockerClient, before: set[str]) -> None:
-    """Force-remove every :data:`IMAGE` container that is not in ``before``.
+    """Force-remove every container of this process that is not in ``before``.
 
     Args:
         client: The Docker client to act through.
