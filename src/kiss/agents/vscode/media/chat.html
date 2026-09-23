@@ -92,7 +92,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
-                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: open another folder">
+                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: the folder the next task runs in">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                   <span class="more-item-label">Working directory</span>
                 </button>
@@ -330,11 +330,14 @@
 
     <!-- The "Working directory" panel ("..." menu): type a directory or
          choose one with the folder button, or reopen one of the
-         directories opened so far (most recently opened first). -->
+         directories opened so far (most recently opened first).  In a
+         VS Code window the pick only changes the active chat's working
+         directory (the window keeps its folder). -->
     <div id="workdir-panel" role="dialog" aria-labelledby="workdir-panel-hdr" aria-hidden="true" inert>
       <button id="workdir-panel-close" aria-label="Close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
         <div class="sidebar-hdr" id="workdir-panel-hdr">Working directory</div>
+        <div id="workdir-current" hidden></div>
         <div id="workdir-open-row">
           <input type="text" id="workdir-input" placeholder="Path of a working directory..." aria-label="Working directory path" autocomplete="off" spellcheck="false">
           <button type="button" id="workdir-open-btn" class="config-update-btn" disabled>Open</button>

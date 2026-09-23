@@ -7863,6 +7863,10 @@ class RemoteAccessServer:
             "prompt": prompt,
             "model": cmd.get("model", ""),
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
+            # A tab pinned to a folder outside the client's workspace
+            # keeps its registry scope there (the webview sends the
+            # workspace); empty for ordinary runs.
+            "tabScopeWorkDir": cmd.get("tabScopeWorkDir", ""),
             "tabId": tab_id,
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", True),

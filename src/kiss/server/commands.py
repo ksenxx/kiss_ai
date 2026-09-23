@@ -2217,6 +2217,23 @@ class _CommandsMixin:
             self._complete_seq_latest.pop(conn_id, None)
             self._apply_new_work_dir(new_dir)
 
+    def _cmd_record_work_dir(self, cmd: dict[str, Any]) -> None:
+        """Add ``path`` to the "Working directory" panel's opened-so-far list.
+
+        Sent by the VS Code extension when a folder picked in that panel
+        becomes one chat tab's working directory.  Unlike ``setWorkDir``
+        this changes neither the connection's pin nor the daemon-wide
+        fallback: the window keeps its workspace folder and only the
+        tab's next task runs in ``path``.  A non-directory or a
+        filesystem root is ignored.
+        """
+        path = cmd.get("path", "")
+        if not isinstance(path, str) or not path or is_root_dir(path):
+            return
+        from kiss.core.vscode_config import record_recent_work_dir
+
+        record_recent_work_dir(path)
+
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
@@ -2245,6 +2262,7 @@ class _CommandsMixin:
         "worktreeAction": _cmd_worktree_action,
         "mainTreeAction": _cmd_main_tree_action,
         "setWorkDir": _cmd_set_work_dir,
+        "recordWorkDir": _cmd_record_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
         "getMyModels": _cmd_get_my_models,

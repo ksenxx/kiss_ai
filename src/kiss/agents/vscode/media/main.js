@@ -849,6 +849,12 @@
       t0: null,
       endTs: 0,
       workDir: '',
+      // A folder chosen in the "Working directory" panel for this tab's
+      // NEXT task (VS Code surface).  Kept apart from `workDir`, which
+      // task replays and the registry rewrite and the tab bar scopes
+      // by: the pick must survive both and must not hide the tab.
+      // Consumed by the submit that uses it.
+      pinnedWorkDir: '',
       streamState: null,
       streamLlmPanel: null,
       streamLlmPanelState: null,
@@ -1038,6 +1044,7 @@
 
   function workDirForTab(tabId) {
     const tab = getTab(tabId);
+    if (tab && tab.pinnedWorkDir) return tab.pinnedWorkDir;
     if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
     if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
     return '';
@@ -7366,6 +7373,7 @@
       input.value = '';
       syncWorkDirOpenBtn();
     }
+    renderCurrentWorkDir();
     renderRecentWorkDirs();
     // Another window may have opened a folder since the last reply.
     api.getConfig();
@@ -7399,6 +7407,18 @@
     if (!el) return;
     el.textContent = text;
     el.hidden = !text;
+  }
+
+  /**
+   * Show the directory the active chat's next task runs in (the tab's
+   * own pin, else the workspace) at the top of the panel.
+   */
+  function renderCurrentWorkDir() {
+    const el = document.getElementById('workdir-current');
+    if (!el) return;
+    const dir = workDirForTab(activeTabId);
+    el.textContent = dir ? 'Current: ' + dir : '';
+    el.hidden = !dir;
   }
 
   /** Enable the panel's Open button only while its box holds text. */
@@ -7463,11 +7483,14 @@
   /**
    * Make *dir* the working directory.
    *
-   * In a VS Code webview the working directory is the window's folder,
-   * so the host is asked to open *dir* there (openWorkDir ->
-   * vscode.openFolder; it answers workDirError when *dir* is not a
-   * folder).  On the remote webapp the daemon lists *dir* first
-   * (listDir with a 'workdir:' token): a real folder is adopted through
+   * In a VS Code webview only the active chat tab changes: the host
+   * checks that *dir* is a folder (openWorkDir -> workDirPicked, or
+   * workDirError) and applyTabWorkDir pins it as the directory the
+   * tab's next task runs in; the window's own folder is left alone.
+   * The request names the tab so a reply that arrives after a tab
+   * switch still lands on the tab that asked.
+   * On the remote webapp the daemon lists *dir* first (listDir with a
+   * 'workdir:' token): a real folder is adopted through
    * applyPickedWorkDir, anything else is reported in the panel.
    *
    * @param {string} dir The typed, chosen or previously opened path.
@@ -7483,7 +7506,9 @@
     }
     setWorkDirError('');
     if (!document.body.classList.contains('remote-chat')) {
-      postToHost({type: 'openWorkDir', path: dir});
+      const error = tabWorkDirError(activeTabId);
+      if (error) setWorkDirError(error);
+      else postToHost({type: 'openWorkDir', path: dir, tabId: activeTabId});
       return;
     }
     workDirCheckSeq++;
@@ -7514,6 +7539,55 @@
       return;
     }
     applyPickedWorkDir(dir);
+  }
+
+  /**
+   * Why tab *tabId* cannot take a working directory of its own right
+   * now ('' when it can): only an idle chat tab has a "next task".
+   *
+   * @param {string} tabId The tab asked to change.
+   */
+  function tabWorkDirError(tabId) {
+    const tab = getTab(tabId);
+    if (!tab || tab.isContentTab) {
+      return 'Switch to a chat tab to change its working directory.';
+    }
+    if (tab.isRunning) {
+      return (
+        'The running task keeps its working directory; ' +
+        'open a new chat or wait for it to finish.'
+      );
+    }
+    return '';
+  }
+
+  /**
+   * The VS Code host verified *dir* is a folder (workDirPicked): the
+   * next task of the tab that asked runs there.  Nothing else moves --
+   * the window keeps its folder, the settings' work dir stays the
+   * workspace, `tab.workDir` (what the tab bar scopes by) is untouched
+   * -- so only the tab's pin and the views browsing it change.
+   *
+   * @param {string} dir The folder in the host's canonical spelling.
+   * @param {string} tabId The tab that asked (the active one when the
+   *   request was made; it may no longer be active).
+   */
+  function applyTabWorkDir(dir, tabId) {
+    dir = String(dir || '').trim();
+    if (!dir || isRootDir(dir)) return;
+    if (!getTab(tabId)) return;
+    const error = tabWorkDirError(tabId);
+    if (error) {
+      setWorkDirError(error);
+      return;
+    }
+    getTab(tabId).pinnedWorkDir = dir;
+    if (tabId === activeTabId) {
+      explorerRoot = '';
+      scmWorkDir = '';
+      refreshSidebarDataViews(true);
+    }
+    closeWorkDirPanel();
   }
 
   /** Wire the "Working directory" menu item and its panel. */
@@ -7553,12 +7627,15 @@
       pickBtn.addEventListener('click', () => {
         // The in-page folder browser lists folders through the daemon's
         // listDir, which only the remote webapp's connection relays; a
-        // VS Code window uses the editor's own folder dialog.
+        // VS Code window uses the editor's own folder dialog (the pick
+        // comes back as workDirPicked, for the active tab alone).
         if (document.body.classList.contains('remote-chat')) {
           openFolderPicker('workdir');
-        } else {
-          postToHost({type: 'pickWorkDir'});
+          return;
         }
+        const error = tabWorkDirError(activeTabId);
+        if (error) setWorkDirError(error);
+        else postToHost({type: 'pickWorkDir', tabId: activeTabId});
       });
     }
     if (list) {
@@ -12581,9 +12658,15 @@
         }
         break;
       case 'workDirError':
-        // The VS Code host could not open the folder asked for by
+        // The VS Code host found no folder at the path asked for by
         // openWorkDir / pickWorkDir; the panel is still on screen.
         setWorkDirError(String(ev.text || ''));
+        break;
+      case 'workDirPicked':
+        // The VS Code host verified the folder: it becomes the working
+        // directory of the chat that asked (the window's folder is
+        // untouched).
+        applyTabWorkDir(ev.path, String(ev.tabId || activeTabId));
         break;
       case 'myModelsData':
         myModels = Array.isArray(ev.models) ? ev.models : [];
@@ -17134,7 +17217,21 @@
     if (webToolsToggleBtn && webToolsStateKnown) {
       msg.webTools = !!webToolsToggleBtn.checked;
     }
-    if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
+    const runDir = curTab ? curTab.pinnedWorkDir || curTab.workDir : '';
+    if (runDir) {
+      msg.workDir = runDir;
+      // A tab pinned (via the "Working directory" panel) to a folder
+      // outside this client's workspace still belongs to THIS tab bar:
+      // the run's registry scope stays the workspace, or the tab would
+      // vanish from here the moment the daemon publishes its work dir
+      // (see tabScopeWorkDir / isTabHidden).
+      if (configWorkDir && !tabMatchesWorkspace(runDir)) {
+        msg.tabScopeWorkDir = configWorkDir;
+      }
+    }
+    // The pick was for this task; from here on the run's own work dir
+    // (broadcast with its first event) is what the tab carries.
+    if (curTab) curTab.pinnedWorkDir = '';
     api.send(msg);
     t0 = Date.now();
     endTs = 0;
