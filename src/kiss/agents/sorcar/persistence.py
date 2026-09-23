@@ -1857,6 +1857,34 @@ def _allocate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
+def _mark_legacy_side_channel_rows(task_template: str) -> int:
+    """Stamp ``is_side_channel`` on sub-agent rows persisted before their
+    runner set the flag.
+
+    A side-channel child (see ``_add_task``) is recognised by its prompt:
+    *task_template* is that prompt with a ``{task_id}`` placeholder
+    standing for the child's ``parent_task_id``.  Rows already stamped
+    are left alone, so the call is idempotent and cheap to repeat.
+
+    Args:
+        task_template: The child's prompt template, e.g.
+            ``"What have the task with {task_id} done so far ..."``.
+
+    Returns:
+        The number of rows newly stamped.
+    """
+    prefix, _, suffix = task_template.partition("{task_id}")
+    db = _get_db()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        cursor = db.execute(
+            "UPDATE task_history SET is_side_channel = 1 "
+            "WHERE is_side_channel = 0 AND parent_task_id IS NOT NULL "
+            "AND parent_task_id != '' AND task = ? || parent_task_id || ?",
+            (prefix, suffix),
+        )
+    return int(cursor.rowcount or 0)
+
+
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 

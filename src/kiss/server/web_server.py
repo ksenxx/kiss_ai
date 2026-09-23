@@ -114,7 +114,10 @@ from kiss.server.json_printer import (
 )
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
-from kiss.server.task_update import TaskUpdateRunner
+from kiss.server.task_update import (
+    TaskUpdateRunner,
+    mark_legacy_updates_as_side_channels,
+)
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
@@ -2119,6 +2122,24 @@ def _rss_mb() -> float:
         return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
     except Exception:
         return -1.0
+
+
+def _stamp_legacy_side_channels() -> None:
+    """Stamp task-update rows persisted before the side-channel flag.
+
+    Without the stamp every chat reload re-opens each finished periodic
+    update as a dead sub-agent tab.  Best effort: a failure is logged
+    and never blocks startup.
+    """
+    try:
+        stamped = mark_legacy_updates_as_side_channels()
+    except Exception:
+        logger.warning("could not stamp legacy task-update rows", exc_info=True)
+        return
+    if stamped:
+        logger.info(
+            "Stamped %d legacy task-update rows as side channels", stamped,
+        )
 
 
 def _raise_open_file_limit() -> None:
@@ -8909,6 +8930,9 @@ class RemoteAccessServer:
         """
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
+        # Before any listener accepts a client: a replay must never see
+        # a legacy row unstamped.
+        _stamp_legacy_side_channels()
 
         if not _unix_sockets_supported():
             # CPython on Windows has no AF_UNIX, so the daemon's local
