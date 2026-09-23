@@ -19250,8 +19250,12 @@
       div.className = 'sidebar-item frequent-item';
       const text = String(t.task || '');
       div.dataset.tooltip = text;
-      div.style.backgroundColor = chatIdBgColor(text);
-      div.style.color = '#1a1a1a';
+      if (!document.body.classList.contains('remote-chat')) {
+        // The per-task pastel tint is a webview-only cue: the remote
+        // page paints with VS Code theme colours alone (remote-codex.css).
+        div.style.backgroundColor = chatIdBgColor(text);
+        div.style.color = '#1a1a1a';
+      }
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';

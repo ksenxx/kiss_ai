@@ -90,7 +90,7 @@ class TestBuildHtml(unittest.TestCase):
         """The HTML references all required media assets."""
         html = _build_html()
         self.assertIn("/media/main.css", html)
-        self.assertIn("/media/highlight-github-dark.min.css", html)
+        self.assertIn("/media/highlight-vscode-dark.css", html)
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)

@@ -21,6 +21,8 @@
   --purple: var(--vscode-terminal-ansiMagenta);
   --cyan: var(--vscode-terminal-ansiCyan);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
+  --error: var(--vscode-errorForeground, #f48771);
+  --warning: var(--vscode-editorWarning-foreground, #e5c07b);
   --fs-xs:  0.636rem;
   --fs-sm:  0.818rem;
   --fs-md:  0.909rem;
@@ -73,7 +75,7 @@ body {
   background: var(--bg2);
   border: 2px solid color-mix(in srgb, var(--accent) 70%, var(--fg));
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+  box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgb(0 0 0 / 45%));
   overflow: hidden;
   animation: kiss-notification-in 0.18s ease-out;
 }
@@ -646,7 +648,7 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   z-index: 200;
   min-width: 160px;
   padding: 4px 0;
@@ -872,7 +874,7 @@ body.remote-chat #welcome-config { display: none !important; }
 
 .think {
   padding: 8px 12px; margin: 8px 0;
-  border: 1px solid rgb(121 192 255 / 12%); border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 12%, transparent); border-radius: 8px;
   background: color-mix(in srgb, var(--cyan) 4%, transparent); max-height: 200px; overflow-y: auto;
 }
 
@@ -902,7 +904,7 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 
 .txt pre {
-  background: rgb(0 0 0 / 30%); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  background: var(--vscode-textCodeBlock-background, rgb(0 0 0 / 30%)); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 10px; overflow-x: auto; margin: 6px 0;
 }
 .txt pre code { background: none; padding: 0; }
@@ -1207,7 +1209,7 @@ body.ask-answering #input-container {
 }
 
 .llm-panel {
-  border: 1px solid rgb(88 166 255 / 15%); border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent); border-radius: 8px;
   margin: 6px 0; max-height: 350px; overflow-y: auto;
   padding: 8px 10px; background: color-mix(in srgb, var(--accent) 3%, transparent);
 }
@@ -1217,7 +1219,7 @@ body.ask-answering #input-container {
 /* The composer's wait spinner: the shared ring (see .status-spinner)
    in the accent colour, faded in while a task runs. */
 #wait-spinner {
-  color: rgb(88 166 255 / 70%);
+  color: color-mix(in srgb, var(--accent) 70%, transparent);
   transition: opacity 0.2s; opacity: 0;
 }
 
@@ -1226,13 +1228,13 @@ body.ask-answering #input-container {
 .followup-bar {
   display: flex; flex-direction: column; gap: 4px;
   padding: 8px 12px; margin: 8px 0;
-  background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid rgb(88 166 255 / 15%);
+  background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
   border-radius: 8px; cursor: pointer; transition: all 0.15s;
   animation: fadeIn .3s ease;
 }
 
 .followup-bar:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: rgb(88 166 255 / 25%);
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 .fu-label {
@@ -1382,7 +1384,7 @@ body.content-tab-open #send-btn { display: none !important; }
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px; transition: border-color 0.2s;
 }
-#input-container:focus-within { border-color: rgb(88 166 255 / 40%); }
+#input-container:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 #input-wrap { display: flex; align-items: flex-start; gap: 4px; }
 #input-text-wrap { flex: 1; min-width: 0; position: relative; }
 
@@ -1517,7 +1519,7 @@ body.content-tab-open #send-btn { display: none !important; }
   min-width: 180px; max-width: min(280px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   display: none; flex-direction: column; padding: 4px;
-  z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;
+  z-index: 100; box-shadow: 0 -6px 28px var(--vscode-widget-shadow, rgb(0 0 0 / 50%)); margin-bottom: 4px;
 }
 #more-menu.open { display: flex; }
 
@@ -1553,7 +1555,7 @@ body.remote-chat #theme-btn { display: flex; }
   position: absolute; bottom: 100%; right: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   max-height: min(320px, calc(100vh - 120px)); display: none; flex-direction: column;
-  z-index: 100; box-shadow: 0 -6px 28px rgb(0 0 0 / 50%); margin-bottom: 4px;
+  z-index: 100; box-shadow: 0 -6px 28px var(--vscode-widget-shadow, rgb(0 0 0 / 50%)); margin-bottom: 4px;
   overflow: hidden;
 }
 #model-dropdown.open { display: flex; }
@@ -1572,7 +1574,7 @@ body.remote-chat #theme-btn { display: flex; }
 
 #model-search {
   width: 100%; background: transparent; border: none;
-  border-bottom: 1px solid rgb(255 255 255 / 6%); color: var(--fg);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg);
   font-size: var(--fs-base); padding: 8px 28px 8px 12px; outline: none; font-family: inherit;
 }
 #model-search::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
@@ -1581,7 +1583,7 @@ body.remote-chat #theme-btn { display: flex; }
 .model-item {
   padding: 5px 10px; font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 66%, transparent);
   cursor: pointer; display: flex; justify-content: space-between; align-items: center;
-  border-bottom: 1px solid rgb(255 255 255 / 2%); transition: background 0.08s;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 2%, transparent); transition: background 0.08s;
 }
 .model-item:hover, .model-item.sel { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
@@ -1601,7 +1603,7 @@ body.remote-chat #theme-btn { display: flex; }
   text-transform: uppercase; letter-spacing: 0.05em;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: var(--bg2);
-  border-bottom: 1px solid rgb(255 255 255 / 4%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
   position: sticky; top: 0; z-index: 1;
 }
 
@@ -1614,7 +1616,7 @@ body.remote-chat #theme-btn { display: flex; }
   position: absolute; bottom: 100%; left: 0; right: 0;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
   max-height: 300px; overflow-y: auto; display: none;
-  z-index: 50; box-shadow: 0 -8px 32px rgb(0 0 0 / 45%), 0 0 0 1px color-mix(in srgb, var(--fg) 4%, transparent);
+  z-index: 50; box-shadow: 0 -8px 32px var(--vscode-widget-shadow, rgb(0 0 0 / 45%)), 0 0 0 1px color-mix(in srgb, var(--fg) 4%, transparent);
   margin-bottom: 4px; animation: acSlideUp 0.15s ease;
 }
 
@@ -1623,14 +1625,14 @@ body.remote-chat #theme-btn { display: flex; }
   text-transform: uppercase; letter-spacing: 0.08em;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: var(--bg2);
-  border-bottom: 1px solid rgb(255 255 255 / 3.5%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 3.5%, transparent);
   position: sticky; top: 0; z-index: 1;
 }
 
 .ac-item {
   padding: 2px 12px; font-size: var(--fs-sm); cursor: pointer;
   display: flex; align-items: center; gap: 4px;
-  border-bottom: 1px solid rgb(255 255 255 / 2%);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 2%, transparent);
   border-left: 2px solid transparent;
   transition: background 0.1s, border-color 0.1s;
 }
@@ -1676,7 +1678,7 @@ body.remote-chat #theme-btn { display: flex; }
 .ac-hint {
   font-size: var(--fs-xs); color: color-mix(in srgb, var(--fg) 50%, transparent);
   background: color-mix(in srgb, var(--fg) 4%, transparent);
-  border: 1px solid rgb(255 255 255 / 5%);
+  border: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
   padding: 1px 5px; border-radius: 4px; margin-left: auto;
   flex-shrink: 0;
   font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
@@ -1685,12 +1687,12 @@ body.remote-chat #theme-btn { display: flex; }
 .ac-item.sel .ac-hint {
   color: color-mix(in srgb, var(--accent) 54%, transparent);
   background: color-mix(in srgb, var(--accent) 6%, transparent);
-  border-color: rgb(88 166 255 / 12%);
+  border-color: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .ac-footer {
   padding: 2px 12px; font-size: var(--fs-xs); color: color-mix(in srgb, var(--fg) 50%, transparent);
-  border-top: 1px solid rgb(255 255 255 / 4%);
+  border-top: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
   display: flex; gap: 14px;
   background: var(--bg2);
   position: sticky; bottom: 0;
@@ -1700,7 +1702,7 @@ body.remote-chat #theme-btn { display: flex; }
   background: color-mix(in srgb, var(--fg) 5%, transparent); color: color-mix(in srgb, var(--fg) 50%, transparent);
   padding: 1px 5px; border-radius: 3px; font-size: var(--fs-xs);
   font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace);
-  border: 1px solid rgb(255 255 255 / 4%);
+  border: 1px solid color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
 #sidebar {
@@ -2721,7 +2723,7 @@ body.sidebar-chat-mode #meta-info-content {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   font-size: var(--fs-base);
   color: var(--fg);
   user-select: none;
@@ -2784,7 +2786,7 @@ body.sidebar-chat-mode #meta-info-content {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 8px 32px rgb(0 0 0 / 50%);
+  box-shadow: 0 8px 32px var(--vscode-widget-shadow, rgb(0 0 0 / 50%));
   color: var(--fg);
   font-size: var(--fs-base);
 }
@@ -3184,7 +3186,7 @@ body.sidebar-chat-mode #meta-info-content {
   position: fixed; z-index: 10000;
   background: var(--bg, #1e1e1e);
   border: 1px solid var(--border); border-radius: 6px;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+  box-shadow: 0 6px 18px var(--vscode-widget-shadow, rgb(0 0 0 / 35%));
   padding: 8px; width: 220px;
   font-size: var(--fs-md); color: var(--fg);
   user-select: none;
@@ -3640,7 +3642,7 @@ body.remote-chat .running-item.history-active-task:hover {
 .server-reset-confirm-content {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: 12px; padding: 20px; width: 90%; max-width: 360px;
-  box-sizing: border-box; box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  box-sizing: border-box; box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgb(0 0 0 / 40%));
 }
 
 .server-reset-confirm-title {
@@ -3687,7 +3689,7 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 .md-body pre {
-  background: rgb(0 0 0 / 30%); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  background: var(--vscode-textCodeBlock-background, rgb(0 0 0 / 30%)); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0;
 }
 .md-body pre code { background: none; padding: 0; font-size: var(--fs-md); }
@@ -3710,14 +3712,20 @@ body.remote-chat .running-item.history-active-task:hover {
 }
 
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
-.hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
+
+/* The block takes the theme's code-block colour whatever highlight.js
+   sheet is loaded (the sheets paint their own .hljs background). */
+.hljs {
+  background: var(--vscode-textCodeBlock-background, var(--surface2)) !important;
+  border-radius: 6px; padding: 10px !important;
+}
 
 #custom-tooltip {
   position: fixed; z-index: 10000; background: var(--bg2); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
   font-size: var(--fs-sm); line-height: 1.4; white-space: pre-wrap;
   word-break: break-word; max-width: min(350px, calc(100vw - 20px)); pointer-events: none;
-  opacity: 0; transition: opacity 0.15s; box-shadow: 0 2px 8px rgb(0 0 0 / 30%);
+  opacity: 0; transition: opacity 0.15s; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgb(0 0 0 / 30%));
 }
 #custom-tooltip.visible { opacity: 1; }
 
@@ -3989,7 +3997,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgb(0 0 0 / 35%));
   pointer-events: none;
 }
 
