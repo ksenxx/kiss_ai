@@ -74,6 +74,7 @@ The `ImproverAgent` optimizes existing agent code by analyzing and improving it 
 
 **Methods:**
 
+- `create_initial(task_description, work_dir, evolve_to_solve_task=False)`: Create a new agent from scratch (used by `AgentEvolver` for the initial population)
 - `improve(source_folder, work_dir, task_description, report_path)`: Improve an agent's code
 - `crossover_improve(primary_folder, primary_report_path, secondary_report_path, work_dir, task_description)`: Combine ideas from two agents
 
@@ -355,6 +356,13 @@ The improver applies various optimization strategies:
 
 ```python
 class ImproverAgent:
+    def create_initial(
+        self,
+        task_description: str,
+        work_dir: str,
+        evolve_to_solve_task: bool = False,
+    ) -> tuple[bool, ImprovementReport | None]: ...
+
     def improve(
         self,
         source_folder: str,
