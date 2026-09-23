@@ -525,6 +525,23 @@ def test_daemon_pinned_catalog_drops_fallbacks(tmp_path: Path) -> None:
     assert json.loads(target.read_text()) == [{"name": "a"}, {"name": "b"}]
 
 
+def test_daemon_server_waits_an_hour_for_benchmark_clients(tmp_path: Path) -> None:
+    """The private daemon's UDS drain timeout is the benchmark value, not the interactive 30 s."""
+    from benchmarkings.harnesstax import daemon
+
+    saved = {k: os.environ.get(k) for k in ("KISS_HOME", "KISS_SORCAR_SOCK")}
+    try:
+        server = daemon.build_server(tmp_path / "home", 8999)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert server._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
+    assert (tmp_path / "home" / "config.json").is_file()
+
+
 def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
     """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
     import docker
@@ -813,6 +830,92 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         assert off.pending_edits == []
     finally:
         live.remove(force=True)
+
+
+def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
+    """Destructive commands are blocked, install timeouts lifted, and the gate answers one finish."""
+    from benchmarkings.harnesstax import sea_core, trials
+
+    def harness(**extra: object) -> sea_core.ContainerHarness:
+        config = tmp_path / f"config-{len(extra)}.json"
+        config.write_text(json.dumps({
+            "container": "c", "workdir": "/app/", "prompt": "p", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"), **extra,
+        }))
+        return sea_core.ContainerHarness(str(config))
+
+    plain = harness()
+    blocked = sea_core.DESTRUCTIVE_VERDICT
+    for command in ("kill -9 -1", "sleep 1; kill -1", "pkill -9 -f .", "pkill -f '.' && ls",
+                    "rm -rf /app", "cd /tmp && rm -rf /app/*", "rm -rf /", "(rm -r /app)",
+                    "/bin/kill -9 -1", "kill -9 -1 >/dev/null", "kill -9 -1 # stop all",
+                    "kill -s KILL -1", "/usr/bin/pkill -f .", "pkill -f . 2>/dev/null",
+                    "pkill --full .", "pkill -f '.*'", "rm -rf '/app'", "/bin/rm -rf /app",
+                    "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
+                    "FOO=1 kill -9 -1"):
+        assert plain.on_tool_call("Bash", {"command": command}) == blocked, command
+    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "kill -9 -1"]'}) == blocked
+    assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == blocked
+    for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
+                    "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
+                    "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
+                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md", "echo ok # rm -rf /app"):
+        assert plain.on_tool_call("Bash", {"command": command}) == "OK", command
+    # installs and builds get a long timeout in place; other commands keep theirs
+    args: dict[str, object] = {"command": "apt-get install -y gcc"}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    args = {"command": "pip install numpy", "timeout_seconds": 1800}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 1800
+    args = {"command": "make -j4", "timeout_seconds": "bad"}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    for command in ("cd /x && make", "sudo apt-get update", "python3 -m pip install x",
+                    "DEBIAN_FRONTEND=noninteractive apt-get -y install x", "cmake .. && make"):
+        args = {"command": command, "timeout_seconds": 60}
+        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900, command
+    for command in ("ls -la", "grep -R make .", "python3 -c \"print('cmake')\"", "npm get registry",
+                    "echo make", "cat Makefile"):
+        args = {"command": command, "timeout_seconds": 30}
+        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 30, command
+    args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
+    args = {"commands": '["npm install"]'}  # the tool's own default (1800 s) is already long enough
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
+    args = {"commands": "not json; make", "timeout_seconds": 60}  # unparsable list: treated as one command
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
+    args = {"commands": '{"a": 1}'}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
+    assert plain.on_tool_call("Bash", {"command": 42}) == "OK"
+    assert plain.on_tool_call("Bash", {}) == "OK"
+    # no gate by default: every finish passes
+    assert plain.on_tool_call("finish", {"success": True}) == "OK"
+    assert plain.on_tool_call("finish", {}) == "OK"
+    gated = harness(finish_gate=True)
+    assert gated.on_tool_call("finish", {"success": False}) == "OK"
+    # an implicit (text-only) finish is vetoed once, without spending the gate
+    assert gated.on_tool_call("finish", {}) == sea_core.FINISH_GATE_VERDICT
+    assert gated.on_tool_call("finish", {}) == "OK"
+    assert gated.on_tool_call("finish", {"success": "true"}) == sea_core.FINISH_GATE_VERDICT
+    assert gated.on_tool_call("finish", {"success": True}) == "OK"
+    assert gated.on_tool_call("finish", {}) == "OK"
+    gated2 = harness(finish_gate=True, workdir="/testbed")
+    assert gated2.on_tool_call("finish", {"success": True}) == sea_core.FINISH_GATE_VERDICT
+    assert gated2.on_tool_call("finish", {"success": True}) == "OK"
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == blocked
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == "OK"
+    events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    gate_events = [e for e in events if e["tool"] == "finish" and e["args"] == {"success": True}]
+    assert [e["blocked"] for e in gate_events] == [False, False, True, False]
+    # the prompt carries the new rules and the trial config takes the gate from the environment
+    prompt = plain.system_prompt()
+    assert "Leave the container as verified" in prompt and "let the existing" not in prompt
+    assert trials.trial_config("c", "/app", MODEL)["finish_gate"] is False
+    os.environ["HARNESSTAX_FINISH_GATE"] = "1"
+    try:
+        assert trials.trial_config("c", "/app", MODEL) == {
+            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False, "finish_gate": True,
+        }
+    finally:
+        del os.environ["HARNESSTAX_FINISH_GATE"]
 
 
 def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:
