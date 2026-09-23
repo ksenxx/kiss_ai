@@ -146,6 +146,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Frames dispatched into the page arrive as jsdom objects whose
+// prototype differs from a literal's; compare them as plain data.
+function plain(x) {
+  return JSON.parse(JSON.stringify(x));
+}
+
 // The offline app-shell service worker is registered best-effort: a
 // rejected registration (self-signed certificate) and a throwing one
 // (no secure context) must both leave the shim running.
@@ -417,11 +423,13 @@ async function run() {
     const dom = buildDom({reloads});
     const {window} = dom;
     const appFrames = [];
+    const statusFrames = [];
     window.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type !== 'daemonStatus') appFrames.push(ev.data);
+      if (!ev.data) return;
+      if (ev.data.type === 'daemonStatus') statusFrames.push(ev.data);
+      else appFrames.push(ev.data);
     });
     window.sessionStorage.setItem('sorcar-state', '{"foo":1}');
-    window.sessionStorage.setItem('sorcar-reconnect-pending', '1');
     window.localStorage.setItem('sorcar-remote-pwd', 'savedpw');
     const sockets = [];
     installFakeWebSocket(window, sockets);
@@ -431,12 +439,12 @@ async function run() {
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     try {
       assert.strictEqual(
-        msgEl.textContent, 'Reconnecting to KISS Sorcar Server ...',
-        'surviving reconnect flag must relabel the overlay at load',
+        msgEl.textContent, 'KISS Sorcar Server is starting ...',
+        'a fresh page starts with the cold-start label',
       );
-      ok('reconnect flag from a prior page instance relabels the overlay');
+      ok('a fresh page shows the cold-start overlay label');
     } catch (err) {
-      fail('reconnect overlay label missing on load', err);
+      fail('cold-start overlay label wrong on load', err);
     }
 
     const api = window.acquireVsCodeApi();
@@ -472,19 +480,20 @@ async function run() {
     s0.sent.length = 0;
     s0.fireMessage({type: 'auth_ok'});
     try {
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), null,
-        'auth_ok must clear the reconnect flag',
+      assert.deepStrictEqual(
+        s0.sent.map((d) => JSON.parse(d).type), ['setWorkDir', 'setWorkDir', 'ping'],
+        'work-dir pin, the queued frame, then the probe',
       );
-      assert.strictEqual(s0.sent.length, 2, 'work-dir pin + queued frame');
       assert.ok(
-        /"type":"setWorkDir"/.test(s0.sent[0]) && /\/w/.test(s0.sent[0]),
+        /\/w/.test(s0.sent[0]),
         'pinned work dir must be re-announced FIRST after auth_ok',
       );
       ok('auth_ok replays the pinned work dir before flushing the queue');
     } catch (err) {
       fail('work-dir replay on auth_ok broken', err);
     }
+    // The server took the boot batch: nothing is owed to a later socket.
+    s0.fireMessage({type: 'pong'});
 
     api.postMessage({type: 'setWorkDir'});
     assert.strictEqual(
@@ -501,9 +510,10 @@ async function run() {
       assert.ok(isVisible(overlay), 'overlay re-shown on disconnect');
       assert.strictEqual(
         msgEl.textContent, 'Reconnecting to KISS Sorcar Server ...');
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
-        'authenticated disconnect persists the reconnect flag',
+      assert.deepStrictEqual(
+        plain(statusFrames[statusFrames.length - 1]),
+        {type: 'daemonStatus', connected: false, reconnecting: true},
+        'the app is told the socket dropped after it was authenticated',
       );
       ok('authenticated disconnect re-gates the app and labels a reconnect');
     } catch (err) {
@@ -539,54 +549,60 @@ async function run() {
     s2.onerror();
     s2.sent.length = 0;
     // Posted while the connection was down (a settings save, say): it
-    // goes out on the new connection before the reload, not into the
-    // void.
+    // goes out on the new connection, not into the void.
     api.postMessage({type: 'saveConfig', config: {edited: 'during the outage'}});
+    statusFrames.length = 0;
     s2.fireMessage({type: 'auth_ok'});
     try {
-      assert.strictEqual(reloads.length, 0, 'no reload before the server has taken the flushed commands');
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
-        'reload path must keep the reconnect flag for the next page',
-      );
+      // The page keeps its state: no reload.  main.js hears
+      // `connected: true` and re-sends `ready` itself, which is what
+      // resyncs it with the server.  The flushed batch is followed by
+      // a `ping` whose `pong` confirms the server took it.
+      assert.strictEqual(reloads.length, 0, 'a re-auth never reloads the page');
       const types = s2.sent.map((d) => JSON.parse(d).type);
       assert.deepStrictEqual(
-        types.slice(types.indexOf('saveConfig')), ['saveConfig', 'ping'],
+        types, ['saveConfig', 'ping'],
         'the outage-queued command is flushed, then the server is probed: ' + types,
       );
-      // Until the pong (and if the reload never happens because the user
-      // cancels the browser's unsaved-changes dialog) this is a working,
-      // authenticated page, not a wedged one.
+      assert.deepStrictEqual(
+        plain(statusFrames), [{type: 'daemonStatus', connected: true}],
+        'the app is told the socket is back, after the flush',
+      );
+      s2.fireMessage({type: 'pong'});
+      assert.ok(!appFrames.some((d) => d.type === 'pong'), 'pong never reaches the app');
       api.postMessage({type: 'runTask', prompt: 'after re-auth'});
       assert.ok(
         s2.sent.some((d) => /after re-auth/.test(d)),
-        'the page stays usable after the reload-triggering auth_ok',
+        'the page stays usable after the re-auth',
       );
       assert.ok(
         isVisible(window.document.getElementById('app')),
-        'the app is revealed again after the reload-triggering auth_ok',
+        'the app is revealed again after the re-auth',
       );
       s2.fireMessage({type: 'jobs', jobs: []});
       assert.ok(appFrames.some((d) => d.type === 'jobs'), 'server frames reach the app');
-      // The pong proves the server took everything sent before it.
-      s2.fireMessage({type: 'pong'});
-      assert.strictEqual(reloads.length, 1, 'the pong triggers the reload');
-      assert.ok(!appFrames.some((d) => d.type === 'pong'), 'pong never reaches the app');
-      s2.fireMessage({type: 'pong'});
-      assert.strictEqual(reloads.length, 1, 'a stray pong reloads nothing');
-      // A later drop of this (still authenticated) socket latches again;
-      // a drop while a pong is awaited forgets that wait.
+      // A later drop of this (still authenticated) socket is again a
+      // reconnect, and its re-auth again keeps the page.
+      statusFrames.length = 0;
       s2.fireClose();
+      assert.deepStrictEqual(
+        plain(statusFrames), [{type: 'daemonStatus', connected: false, reconnecting: true}],
+      );
       await sleep(400);
       const s3 = sockets[3];
       s3.fireOpen();
       s3.fireMessage({type: 'auth_ok'});
-      assert.strictEqual(reloads.length, 1, 'no reload before the pong');
-      s3.fireMessage({type: 'pong'});
-      assert.strictEqual(reloads.length, 2, 'the next lost session reloads again');
-      ok('re-auth after a real session triggers the reload path, not reuse');
+      assert.strictEqual(reloads.length, 0, 'the next lost session does not reload either');
+      assert.deepStrictEqual(
+        s3.sent.map((d) => JSON.parse(d).type), ['auth'],
+        'a confirmed batch is not sent again, and an empty flush is not probed',
+      );
+      assert.deepStrictEqual(
+        plain(statusFrames[statusFrames.length - 1]), {type: 'daemonStatus', connected: true},
+      );
+      ok('re-auth after a lost session resyncs in place, never reloads');
     } catch (err) {
-      fail('reload-on-reauth path broken', err);
+      fail('re-auth path broken', err);
     }
     window.close();
   }
@@ -595,58 +611,69 @@ async function run() {
     // Mobile-Safari ordering: the authenticated socket is already dead
     // (CLOSING) but its queued ``onclose`` has not run yet when a wake-up
     // listener fires.  connect() must record "had a session and lost it"
-    // itself, otherwise the replacement socket's auth_ok would skip the
-    // reload and leave the page on stale pre-restart state.
+    // itself, otherwise a replacement socket that fails would show the
+    // cold-start overlay label for a server that was merely dropped.
     const reloads = [];
     const dom = buildDom({reloads});
     const {window} = dom;
+    const statusFrames = [];
+    window.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.type === 'daemonStatus') statusFrames.push(ev.data);
+    });
     const sockets = [];
     const FakeWebSocket = installFakeWebSocket(window, sockets);
     wireOverlayContract(window);
     evalShim(window, shimJs);
+    const msgEl = window.document.getElementById('kiss-server-loading-msg');
     const s0 = sockets[0];
     s0.fireOpen();
     s0.fireMessage({type: 'auth_ok'});
-    assert.strictEqual(
-      window.sessionStorage.getItem('sorcar-reconnect-pending'), null,
-      'a live authenticated session carries no reconnect flag',
-    );
     s0.readyState = FakeWebSocket.CLOSING;
+    statusFrames.length = 0;
     window.dispatchEvent(new window.Event('focus'));
     try {
       assert.strictEqual(sockets.length, 2, 'CLOSING socket is replaced');
+      // The replacement itself tells the app the session dropped (the
+      // dead socket's onclose was discarded): without this the app
+      // would never re-send `ready` on the replacement's auth_ok.
+      assert.deepStrictEqual(
+        plain(statusFrames), [{type: 'daemonStatus', connected: false, reconnecting: true}],
+        'replacing an authenticated socket reports the drop to the app',
+      );
       assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
-        'replacing a still-authenticated socket must latch the reconnect flag',
+        msgEl.textContent, 'Reconnecting to KISS Sorcar Server ...',
+        'the latch taken by connect() labels the overlay',
       );
       const s1 = sockets[1];
-      s1.fireOpen();
-      s1.sent.length = 0;
-      window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'stale'});
-      s1.fireMessage({type: 'auth_ok'});
-      assert.ok(
-        s1.sent.some((d) => /"type":"runTask"/.test(d)) &&
-          s1.sent.some((d) => /"type":"ping"/.test(d)),
-        'the outage-queued command is flushed and the server probed',
+      // The replacement dies before it authenticates: still a reconnect.
+      statusFrames.length = 0;
+      s1.fireClose();
+      assert.deepStrictEqual(
+        plain(statusFrames), [{type: 'daemonStatus', connected: false, reconnecting: true}],
+        'the app keeps its banner mode after a wake-up replacement',
       );
-      // The OS kills this socket too before the pong; the wake-up
-      // replacement must carry the unconfirmed batch over as well.
-      s1.readyState = FakeWebSocket.CLOSING;
-      window.dispatchEvent(new window.Event('focus'));
+      window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'queued'});
+      await sleep(400);
       const s2 = sockets[2];
       s2.fireOpen();
       s2.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(
         s2.sent.map((d) => JSON.parse(d).type), ['auth', 'runTask', 'ping'],
+        'the command queued during the outage goes out on the new socket',
+      );
+      // The OS kills this socket too before the pong; the wake-up
+      // replacement carries the unconfirmed batch over as well.
+      s2.readyState = FakeWebSocket.CLOSING;
+      window.dispatchEvent(new window.Event('focus'));
+      const s3 = sockets[3];
+      s3.fireOpen();
+      s3.fireMessage({type: 'auth_ok'});
+      assert.deepStrictEqual(
+        s3.sent.map((d) => JSON.parse(d).type), ['auth', 'runTask', 'ping'],
         'a batch unconfirmed when the wake-up replaced its socket is re-sent',
       );
-      assert.strictEqual(reloads.length, 0, 'no reload before the pong');
-      s2.fireMessage({type: 'pong'});
-      assert.strictEqual(
-        reloads.length, 1,
-        'auth_ok after a lost session must take the reload path, not reuse',
-      );
-      ok('wake-up replacing a CLOSING authenticated socket latches the reload');
+      assert.strictEqual(reloads.length, 0, 'no reload after a wake-up replacement');
+      ok('wake-up replacing a CLOSING authenticated socket keeps the page');
     } catch (err) {
       fail('CLOSING-socket replacement lost the had-auth latch', err);
     }
@@ -692,8 +719,8 @@ async function run() {
 
     sock.sent.length = 0;
     sock.fireMessage({type: 'auth_ok'});
-    assert.ok(
-      !sock.sent.some((d) => /"type":"ping"/.test(d)),
+    assert.strictEqual(
+      reloads.length, 0,
       'no offline reload when sessionStorage cannot record the guard',
     );
     const api = window.acquireVsCodeApi();
@@ -921,10 +948,11 @@ async function run() {
   }
 
   {
-    // The commands flushed on a replacement connection stay unconfirmed
-    // until the server's pong: a connection that dies first re-queues
-    // them (ahead of anything queued since) for the next one, and a
-    // confirmed batch is never sent again.
+    // Commands posted across several outages go out in the order they
+    // were posted on whichever connection first authenticates, stay in
+    // flight until the server's pong confirms them (a connection that
+    // dies first re-sends them), and a confirmed batch is never sent
+    // again; the page itself is never reloaded along the way.
     const reloads = [];
     const dom = buildDom({reloads});
     const {window} = dom;
@@ -941,33 +969,40 @@ async function run() {
     await sleep(400);
     const s1 = sockets[1];
     s1.fireOpen();
-    s1.fireMessage({type: 'auth_ok'});
+    // Dies before it authenticates; the user keeps working meanwhile.
+    s1.fireClose();
+    api.postMessage({type: 'saveMyModel', name: 'second outage'});
+    // The backoff grows with every failed attempt; a wake-up listener
+    // short-circuits it.
+    window.dispatchEvent(new window.Event('focus'));
+    const s2 = sockets[2];
+    s2.fireOpen();
+    s2.fireMessage({type: 'auth_ok'});
     try {
-      assert.deepStrictEqual(types(s1), ['auth', 'saveConfig', 'ping']);
-      // Dies before the pong; the user keeps working meanwhile.
-      s1.fireClose();
-      api.postMessage({type: 'saveMyModel', name: 'second outage'});
-      await sleep(400);
-      const s2 = sockets[2];
-      s2.fireOpen();
-      s2.fireMessage({type: 'auth_ok'});
+      assert.deepStrictEqual(types(s1), ['auth'], 'nothing goes out before auth_ok');
       assert.deepStrictEqual(
         types(s2), ['auth', 'saveConfig', 'saveMyModel', 'ping'],
-        'the unconfirmed batch is sent again, ahead of the newer commands',
+        'every command queued during the outages goes out in order, then the probe',
       );
-      assert.strictEqual(reloads.length, 0);
-      s2.fireMessage({type: 'pong'});
-      assert.strictEqual(reloads.length, 1, 'the pong reloads');
+      // Dies before the pong: the batch is owed to the next connection.
       s2.fireClose();
-      await sleep(400);
+      window.dispatchEvent(new window.Event('focus'));
       const s3 = sockets[3];
       s3.fireOpen();
       s3.fireMessage({type: 'auth_ok'});
       assert.deepStrictEqual(
-        types(s3), ['auth', 'ping'],
-        'a confirmed batch is not sent again',
+        types(s3), ['auth', 'saveConfig', 'saveMyModel', 'ping'],
+        'an unconfirmed batch is sent again',
       );
-      ok('an outage batch stays in flight until the pong confirms it');
+      s3.fireMessage({type: 'pong'});
+      s3.fireClose();
+      window.dispatchEvent(new window.Event('focus'));
+      const s4 = sockets[4];
+      s4.fireOpen();
+      s4.fireMessage({type: 'auth_ok'});
+      assert.deepStrictEqual(types(s4), ['auth'], 'a confirmed batch is not sent again');
+      assert.strictEqual(reloads.length, 0, 'no outage reloads the page');
+      ok('outage-queued commands stay in flight until the pong, never reload');
     } catch (err) {
       fail('in-flight batch handling broken', err);
     }
@@ -983,37 +1018,48 @@ async function run() {
     const reloads = [];
     const dom = buildDom({offlineShell: true, reloads});
     const {window} = dom;
+    const statusFrames = [];
+    window.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.type === 'daemonStatus') statusFrames.push(ev.data);
+    });
     const sockets = [];
     installFakeWebSocket(window, sockets);
     wireOverlayContract(window);
     evalShim(window, shimJs);
-    const s0 = sockets[0];
+    const msgEl = window.document.getElementById('kiss-server-loading-msg');
+    try {
+      // The worker's copy exists because the server was reachable
+      // before: the overlay is a reconnect, before and after a failed
+      // attempt.
+      assert.strictEqual(msgEl.textContent, 'Reconnecting to KISS Sorcar Server ...');
+      sockets[0].fireClose();
+      assert.strictEqual(msgEl.textContent, 'Reconnecting to KISS Sorcar Server ...');
+      ok('an offline-cached page labels its overlay as a reconnect');
+    } catch (err) {
+      fail('offline-cached page overlay label wrong', err);
+    }
+    window.dispatchEvent(new window.Event('focus'));
+    statusFrames.length = 0;
+    const s0 = sockets[1];
     s0.fireOpen();
+    assert.strictEqual(
+      window.sessionStorage.getItem('sorcar-offline-reloaded'), null,
+      'the one reload is not used up before it happens (a page that ' +
+        'never gets this far leaves it to the next one)',
+    );
+    window.acquireVsCodeApi().postMessage({type: 'ready'});
     s0.fireMessage({type: 'auth_ok'});
     try {
-      assert.ok(
-        s0.sent.some((d) => /"type":"ping"/.test(d)),
-        'the first auth_ok of an offline-cached page probes the server',
-      );
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-offline-reloaded'), null,
-        'the one reload is not used up before it happens (a page that ' +
-          'never gets this far leaves it to the next one)',
-      );
-      s0.fireMessage({type: 'pong'});
       assert.strictEqual(reloads.length, 1, 'offline-cached page reloads on first auth_ok');
       assert.strictEqual(
         window.sessionStorage.getItem('sorcar-offline-reloaded'), '1',
         'the reload is recorded for the next page instance',
       );
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
-        'the next page labels its overlay as a reconnect',
+      assert.deepStrictEqual(
+        s0.sent.map((d) => JSON.parse(d).type), ['auth'],
+        'the boot queue is left to the fresh page, not flushed to a client about to go',
       );
-      assert.ok(
-        isVisible(window.document.getElementById('app')),
-        'the page stays usable while the reload is in flight',
-      );
+      assert.deepStrictEqual(statusFrames, [], 'the app is not revealed on a page that is going away');
       ok('offline-cached page reloads on its first auth_ok');
     } catch (err) {
       fail('offline shell reload broken', err);
@@ -1028,12 +1074,11 @@ async function run() {
     wireOverlayContract(wq);
     evalShim(wq, shimJs);
     socketsQ[0].fireOpen();
-    socketsQ[0].fireMessage({type: 'auth_ok'});
     Object.defineProperty(wq.Storage.prototype, 'setItem', {
       configurable: true,
       value() { throw new Error('QuotaExceededError'); },
     });
-    socketsQ[0].fireMessage({type: 'pong'});
+    socketsQ[0].fireMessage({type: 'auth_ok'});
     try {
       assert.strictEqual(reloads.length, 2, 'the reload happens even when the guard cannot be written');
       ok('an unwritable guard does not stop the offline-shell reload');
@@ -1042,7 +1087,9 @@ async function run() {
     }
     wq.close();
 
-    // Second cached load in the same session: the guard holds.
+    // Second cached load in the same session: the guard holds, and the
+    // page is a normal live page from here on (a later drop resyncs it
+    // in place like any other).
     const dom2 = buildDom({offlineShell: true, reloads});
     const w2 = dom2.window;
     w2.sessionStorage.setItem('sorcar-offline-reloaded', '1');
@@ -1053,13 +1100,14 @@ async function run() {
     sockets2[0].fireOpen();
     sockets2[0].fireMessage({type: 'auth_ok'});
     try {
-      assert.ok(
-        !sockets2[0].sent.some((d) => /"type":"ping"/.test(d)),
-        'no probe: the cached page is kept',
-      );
-      sockets2[0].fireMessage({type: 'pong'});
       assert.strictEqual(reloads.length, 2, 'no second reload: the cached page is kept');
+      assert.ok(isVisible(w2.document.getElementById('app')), 'the kept page is revealed');
       assert.strictEqual(w2.sessionStorage.getItem('sorcar-offline-reloaded'), '1');
+      sockets2[0].fireClose();
+      await sleep(400);
+      sockets2[1].fireOpen();
+      sockets2[1].fireMessage({type: 'auth_ok'});
+      assert.strictEqual(reloads.length, 2, 'a kept cached page reconnects without reloading');
       ok('a repeated offline-cached load does not reload again');
     } catch (err) {
       fail('offline shell reload loop guard broken', err);
@@ -1134,10 +1182,6 @@ async function run() {
       assert.deepStrictEqual(
         [last.connected, last.reconnecting], [false, true],
         'the app is told the connection is down (reconnecting banner)',
-      );
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'), '1',
-        'the lost session is latched so the next auth_ok reloads',
       );
       const backoff = timers[timers.length - 1];
       assert.notStrictEqual(backoff.ms, 15000, 'a reconnect is scheduled');
