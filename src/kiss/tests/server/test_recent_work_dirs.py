@@ -347,6 +347,37 @@ class TestRecentWorkDirsOverUds(IsolatedAsyncioTestCase):
         shutil.rmtree(self.dir_a)
         self.assertEqual(await self._recent_paths(reader, writer), [])
 
+    async def test_record_work_dir_only_records(self) -> None:
+        """A folder picked in a VS Code window's "Working directory" panel
+        arrives as ``recordWorkDir``: it joins the shared history but
+        changes neither the daemon-wide fallback nor the connection's
+        pin (only that chat tab's next task runs there)."""
+        reader, writer = await self._connect()
+        await self._send(
+            writer, {"type": "setWorkDir", "workDir": str(self.dir_a)},
+        )
+        await self._wait_recorded(str(self.dir_a))
+        await asyncio.sleep(0.02)
+        await self._send(
+            writer, {"type": "recordWorkDir", "path": str(self.dir_b)},
+        )
+        await self._wait_recorded(str(self.dir_b))
+        self.assertEqual(
+            await self._recent_paths(reader, writer),
+            [str(self.dir_b), str(self.dir_a)],
+        )
+        self.assertEqual(self.server._vscode_server.work_dir, str(self.dir_a))
+
+        # Junk and roots are ignored: nothing new is recorded, and the
+        # connection still answers afterwards.
+        for junk in (123, "", "/", str(self.dir_b / "missing")):
+            await self._send(writer, {"type": "recordWorkDir", "path": junk})
+        self.assertEqual(
+            await self._recent_paths(reader, writer),
+            [str(self.dir_b), str(self.dir_a)],
+        )
+        self.assertEqual(self.server._vscode_server.work_dir, str(self.dir_a))
+
     async def test_filesystem_root_is_never_recorded(self) -> None:
         """``_apply_new_work_dir`` refuses a root before recording it."""
         self.server._vscode_server._apply_new_work_dir("/")

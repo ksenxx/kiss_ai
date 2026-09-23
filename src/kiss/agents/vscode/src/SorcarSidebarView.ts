@@ -214,6 +214,7 @@ import {
   showWarningNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
+import {PRODUCT_NAME} from './brand';
 
 /**
  * The webview surface a chat controller drives, abstracting over the
@@ -1410,6 +1411,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     workDir?: string,
     autoCommit?: boolean,
     webTools?: boolean,
+    tabScopeWorkDir?: string,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     // No local setTaskText echo: the daemon's common run path
@@ -1420,6 +1422,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       prompt,
       model,
       workDir: effectiveWorkDir,
+      // Set by the webview when the tab's folder (picked in the
+      // "Working directory" panel) lies outside this window's
+      // workspace: the tab stays scoped to the workspace instead of
+      // disappearing from this tab bar when the run publishes its dir.
+      tabScopeWorkDir: tabScopeWorkDir || undefined,
       activeFile,
       attachments,
       useWorktree,
@@ -1539,6 +1546,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           effectiveWorkDir,
           message.autoCommit,
           message.webTools,
+          message.tabScopeWorkDir,
         );
         break;
       }
@@ -1926,7 +1934,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'openWorkDir':
-        await this._openWorkDir(message.path);
+        this._openWorkDir(message.path, message.tabId);
         break;
 
       case 'pickWorkDir': {
@@ -1935,52 +1943,54 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           canSelectFolders: true,
           canSelectFiles: false,
           canSelectMany: false,
-          openLabel: 'Open as Working Directory',
+          openLabel: 'Use as Working Directory',
           defaultUri: wd ? vscode.Uri.file(wd) : undefined,
         });
-        if (picked && picked[0]) await this._openWorkDir(picked[0].fsPath);
+        if (picked && picked[0]) {
+          this._openWorkDir(picked[0].fsPath, message.tabId);
+        }
         break;
       }
     }
   }
 
   /**
-   * Open *dir* as this window's folder.
+   * Check *dir*, chosen in the "Working directory" panel, and hand it
+   * back to the webview as the working directory of chat tab *tabId*
+   * (the tab that was active when the panel asked; the reply names it
+   * again so a tab switch during the folder dialog cannot pin another
+   * tab).
    *
-   * A VS Code window's working directory is its workspace folder, so a
-   * directory chosen in the "Working directory" panel becomes a
-   * `vscode.openFolder` in this window.  A path that is not a
-   * directory, a file-system root, the folder this window already
-   * shows, or an open VS Code refuses is reported back to the panel as
-   * `workDirError` instead.
+   * Only that chat's next task moves to *dir*: the window keeps its
+   * workspace folder (no `vscode.openFolder`).  An existing directory
+   * is answered with `workDirPicked` carrying its real path (`..` and
+   * symlinks resolved) and recorded in the daemon's opened-so-far list;
+   * a path that is not a directory or is a file-system root is reported
+   * back to the panel as `workDirError` instead.
    */
-  private async _openWorkDir(dir: string): Promise<void> {
+  private _openWorkDir(dir: string, tabId: string): void {
     const target = String(dir || '').trim();
-    const error = await this._openWorkDirError(target);
-    if (error) this._sendToWebview({type: 'workDirError', text: error});
-  }
-
-  /** Open *target* in this window; the failure text, or '' on success. */
-  private async _openWorkDirError(target: string): Promise<string> {
     const real = realDirectory(target);
-    if (!real) return 'Not a directory: ' + (target || '(empty path)');
+    if (!real) {
+      this._sendToWebview({
+        type: 'workDirError',
+        text: 'Not a directory: ' + (target || '(empty path)'),
+      });
+      return;
+    }
     if (path.dirname(real) === real) {
       // `/`, `C:\`, a UNC share root: the daemon never runs in one.
-      return 'A file-system root cannot be the working directory; pick a folder.';
+      this._sendToWebview({
+        type: 'workDirError',
+        text: 'A file-system root cannot be the working directory; pick a folder.',
+      });
+      return;
     }
-    const current = this._getWorkDir();
-    if (current && realDirectory(current) === real) {
-      return target + ' is already the working directory of this window.';
-    }
-    try {
-      await vscode.commands.executeCommand(
-        'vscode.openFolder',
-        vscode.Uri.file(target),
-      );
-    } catch (err) {
-      return 'Could not open ' + target + ': ' + String(err);
-    }
-    return '';
+    this._getApi().forward({
+      type: 'recordWorkDir',
+      path: real,
+    } as unknown as AgentCommand);
+    this._sendToWebview({type: 'workDirPicked', path: real, tabId});
   }
 
   /**
@@ -2059,7 +2069,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const shellPath = updateShellPath();
     if (shellPath === null) {
       vscode.window.showErrorMessage(
-        'Updating KISS Sorcar runs install.sh under bash, which was not found. ' +
+        `Updating ${PRODUCT_NAME} runs install.sh under bash, which was not found. ` +
           'Install Git for Windows (it ships bash.exe) and try again.',
       );
       return;
@@ -2070,14 +2080,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       command +
       '; _kiss_rc=$?; ' +
       'if [ "$_kiss_rc" -ne 0 ]; then ' +
-      'printf "\\n>>> KISS Sorcar update exited with status %s. ' +
+      `printf "\\n>>> ${PRODUCT_NAME} update exited with status %s. ` +
       'Press Enter to close this terminal.\\n" "$_kiss_rc"; ' +
       'while IFS= read -r _kiss_enter; do ' +
       'if [ -z "$_kiss_enter" ]; then break; fi; ' +
       'done; ' +
       'fi; exit "$_kiss_rc"';
     const terminal = vscode.window.createTerminal({
-      name: 'KISS Sorcar Update',
+      name: `${PRODUCT_NAME} Update`,
       cwd,
       shellPath,
       shellArgs: ['-c', guarded],
@@ -2109,7 +2119,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // audit0902-coverage:start
     const scriptPath = findInstallScript();
     showInformationNotification(
-      'An update of KISS Sorcar is getting installed…',
+      `An update of ${PRODUCT_NAME} is getting installed…`,
     );
     if (!scriptPath) {
       // No ~/.kiss/kiss_ai clone with an install.sh on this machine (the

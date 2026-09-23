@@ -26,6 +26,7 @@ import {
   showWarningNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
+import {PRODUCT_NAME} from './brand';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 // The daemon resolves its state directory from $KISS_HOME (see
@@ -492,7 +493,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   if (!kissProjectPath) {
     log('KISS project not found — skipping dependency setup');
     showErrorNotification(
-      'KISS Sorcar: Could not find the KISS project directory. ' +
+      `${PRODUCT_NAME}: Could not find the KISS project directory. ` +
         'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
         `See ${path.join(LOG_DIR, 'install.log')} for details.`,
     );
@@ -566,7 +567,7 @@ async function ensureDependenciesImpl(): Promise<void> {
         );
         if (!isChromiumInstalled()) {
           showWarningNotification(
-            'KISS Sorcar: Chromium browser update failed in background. ' +
+            `${PRODUCT_NAME}: Chromium browser update failed in background. ` +
               `See ${path.join(LOG_DIR, 'install.log')} for details.`,
           );
         }
@@ -575,7 +576,7 @@ async function ensureDependenciesImpl(): Promise<void> {
       void installGit().then(installed => {
         if (!installed) {
           showWarningNotification(
-            `KISS Sorcar: git is not available. ${gitInstallHint()}`,
+            `${PRODUCT_NAME}: git is not available. ${gitInstallHint()}`,
           );
         }
       });
@@ -588,7 +589,7 @@ async function ensureDependenciesImpl(): Promise<void> {
     const result = await withWebviewNotificationProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: 'KISS Sorcar: Setting up',
+        title: `${PRODUCT_NAME}: Setting up`,
         cancellable: false,
       },
       async progress => {
@@ -597,7 +598,7 @@ async function ensureDependenciesImpl(): Promise<void> {
             for (const bin of ['curl', 'tar']) {
               if (!commandExists(bin)) {
                 showErrorNotification(
-                  `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
+                  `${PRODUCT_NAME}: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
                 );
                 return {success: false, apiKeysReady: false};
               }
@@ -616,7 +617,7 @@ async function ensureDependenciesImpl(): Promise<void> {
                 ? 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
                 : 'curl -LsSf https://astral.sh/uv/install.sh | sh';
             showErrorNotification(
-              `KISS Sorcar: Failed to install uv. Install manually: ${manual}`,
+              `${PRODUCT_NAME}: Failed to install uv. Install manually: ${manual}`,
             );
             return {success: false, apiKeysReady: false};
           }
@@ -628,7 +629,7 @@ async function ensureDependenciesImpl(): Promise<void> {
           const gitInstalled = await installGit();
           if (!gitInstalled) {
             showWarningNotification(
-              `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`,
+              `${PRODUCT_NAME}: git could not be installed automatically. ${gitInstallHint()}`,
             );
           }
         }
@@ -652,7 +653,7 @@ async function ensureDependenciesImpl(): Promise<void> {
 
         if ((await checkPythonVersion(uvPath, kissProjectPath)) !== 'ok') {
           showErrorNotification(
-            `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
+            `${PRODUCT_NAME} requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
               `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
           );
           return {success: false, apiKeysReady: false};
@@ -695,10 +696,10 @@ async function ensureDependenciesImpl(): Promise<void> {
 
   if (showRestartNotification) {
     if (apiKeysReady) {
-      showInformationNotification('KISS Sorcar: Installation complete!');
+      showInformationNotification(`${PRODUCT_NAME}: Installation complete!`);
     } else {
       showWarningNotification(
-        'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
+        `${PRODUCT_NAME}: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ` +
           'Set an API key in your environment, then reload the window (Developer: Reload Window) to be prompted again.',
       );
     }
@@ -1187,7 +1188,7 @@ async function restartKissWebDaemonLocked(
         ? `Environment=KISS_HOME=${unitEscape(kissHomeEnv)}\n`
         : '';
       const serviceContent = `[Unit]
-Description=KISS Sorcar Remote Web Server
+Description=${PRODUCT_NAME} Remote Web Server
 After=network-online.target
 Wants=network-online.target
 
@@ -1379,7 +1380,7 @@ function offerForcedRestart(
   if (forcedRestartOffered) return;
   forcedRestartOffered = true;
   void showWarningNotification(
-    `KISS Sorcar: the kiss-web update is waiting for ${count} running ` +
+    `${PRODUCT_NAME}: the kiss-web update is waiting for ${count} running ` +
       'task(s) to finish and retries every minute. If no task is ' +
       'actually running, the daemon is stuck on a stale task and only a ' +
       'restart will clear it. Restarting now aborts any task that IS ' +
@@ -1647,7 +1648,7 @@ export function installCliScript(
       const cmdPath = path.join(binDir, 'sorcar.cmd');
       const script =
         '@echo off\r\n' +
-        'REM Installed by KISS Sorcar VS Code extension\r\n' +
+        `REM Installed by ${PRODUCT_NAME} VS Code extension\r\n` +
         'set "KISS_WORKDIR=%CD%"\r\n' +
         `"${absUvPath}" run --directory "${kissProjectPath}" sorcar %*\r\n`;
       writeFileAtomicSync(cmdPath, script);
@@ -1656,7 +1657,7 @@ export function installCliScript(
       const scriptPath = path.join(binDir, 'sorcar');
       const script =
         '#!/bin/bash\n' +
-        '# Installed by KISS Sorcar VS Code extension\n' +
+        `# Installed by ${PRODUCT_NAME} VS Code extension\n` +
         'export KISS_WORKDIR="$PWD"\n' +
         `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
       writeFileAtomicSync(scriptPath, script, 0o755);
@@ -2281,7 +2282,7 @@ async function promptForApiKey(
     if (key === undefined) {
       if (!optional) {
         const choice = await showWarningNotification(
-          `${displayName} is required for KISS Sorcar to function.`,
+          `${displayName} is required for ${PRODUCT_NAME} to function.`,
           'Enter Key',
           'Skip',
         );
@@ -2448,7 +2449,7 @@ export async function ensureApiKeys(
       if (hasAnyKey()) break;
 
       const choice = await showWarningNotification(
-        'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
+        `${PRODUCT_NAME} requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.`,
         'Enter Key',
         'Skip',
       );
@@ -2926,9 +2927,8 @@ async function ensureRemotePasswordLocked(
 
   log('ensureRemotePassword: password still empty — prompting user');
   const password = await vscode.window.showInputBox({
-    title: 'KISS Sorcar — Remote Access Password',
-    prompt:
-      'Set a password for the KISS Sorcar web / mobile app (press Esc to skip):',
+    title: `${PRODUCT_NAME} — Remote Access Password`,
+    prompt: `Set a password for the ${PRODUCT_NAME} web / mobile app (press Esc to skip):`,
     placeHolder: 'Enter a password',
     password: true,
     ignoreFocusOut: true,
@@ -2936,8 +2936,8 @@ async function ensureRemotePasswordLocked(
 
   if (password === undefined || password.trim() === '') {
     showInformationNotification(
-      'KISS Sorcar: You can set the remote access password later in the ' +
-        'KISS Sorcar settings panel (Remote password field).',
+      `${PRODUCT_NAME}: You can set the remote access password later in the ` +
+        `${PRODUCT_NAME} settings panel (Remote password field).`,
     );
     return 'skipped';
   }
@@ -2952,8 +2952,8 @@ async function ensureRemotePasswordLocked(
     const reason = err instanceof Error ? err.message : String(err);
     log(`ensureRemotePassword: saving the password failed: ${reason}`);
     showErrorNotification(
-      'KISS Sorcar: could not save the remote access password ' +
-        `(${reason}). Set it in the KISS Sorcar settings panel ` +
+      `${PRODUCT_NAME}: could not save the remote access password ` +
+        `(${reason}). Set it in the ${PRODUCT_NAME} settings panel ` +
         '(Remote password field) once the daemon is running.',
     );
     return 'failed';

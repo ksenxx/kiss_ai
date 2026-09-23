@@ -84,6 +84,10 @@ export type FromWebviewMessage =
       webTools?: boolean;
       tabId?: string;
       workDir?: string;
+      // The client's workspace, sent only when `workDir` (a folder
+      // picked in the "Working directory" panel) lies outside it, so
+      // the tab stays scoped to this window.
+      tabScopeWorkDir?: string;
     }
   | {type: 'stop'; tabId?: string}
   // The Stop button of one tool-call panel: interrupts only that tool
@@ -323,14 +327,16 @@ export type FromWebviewMessage =
   | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
   | {type: 'setEditorTabsMode'; enabled: boolean}
-  // The "Working directory" panel ("..." menu): open `path` as this
-  // window's folder (vscode.openFolder) -- a VS Code window's working
-  // directory IS its workspace folder.  The host answers a path that
-  // is not a directory with `workDirError`.
-  | {type: 'openWorkDir'; path: string}
+  // The "Working directory" panel ("..." menu): make `path` the working
+  // directory of chat tab `tabId`'s next task (the active tab when the
+  // panel asked).  The host only checks the folder exists (it never
+  // opens it as the window's workspace) and answers `workDirPicked`
+  // with its real path and the same `tabId`, or `workDirError` when it
+  // is not a directory.
+  | {type: 'openWorkDir'; path: string; tabId: string}
   // The panel's folder button: the editor's own folder dialog, then
-  // the same open.
-  | {type: 'pickWorkDir'}
+  // the same check.
+  | {type: 'pickWorkDir'; tabId: string}
   // The task-update poll of the visible tab's RUNNING task (metainfo
   // block in main.js): forwarded whole to the daemon, which answers
   // with a direct `taskUpdate` reply. `refresh` makes the daemon run
@@ -894,9 +900,13 @@ type ToWebviewMessageBody =
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
   | {type: 'workspaceWorkDir'; workDir: string}
-  // The "Working directory" panel's openWorkDir / pickWorkDir could not
-  // open the folder; shown inside the panel.
+  // The "Working directory" panel's openWorkDir / pickWorkDir named
+  // something that is not a folder; shown inside the panel.
   | {type: 'workDirError'; text: string}
+  // The folder asked for by openWorkDir / pickWorkDir exists: `path`
+  // (symlinks and `..` resolved) becomes the working directory of chat
+  // tab `tabId`'s next task; the window's folder is untouched.
+  | {type: 'workDirPicked'; path: string; tabId: string}
   | {
       // Canonical shared-tab snapshot broadcast by the daemon after
       // every tab-registry mutation; clients reconcile against it.
