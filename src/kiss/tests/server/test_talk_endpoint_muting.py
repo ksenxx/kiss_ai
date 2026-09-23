@@ -207,6 +207,16 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         ):
             writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
+        # The server handles ``ready`` on its own task; a talk broadcast
+        # before that lands sees no attached webview and leaves the copy
+        # unmuted.  Wait for the attachment the way the fan-out reads it.
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while tab_id not in self.server._printer.shown_local_uds_tabs([tab_id]):
+            self.assertLess(
+                asyncio.get_event_loop().time(), deadline,
+                "daemon never attached the webview client",
+            )
+            await asyncio.sleep(0.01)
         return reader, writer
 
     async def _collect_uds_talks(

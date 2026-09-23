@@ -5,6 +5,7 @@
 """Test suite for DockerManager without mocking."""
 
 import socket
+import time
 import unittest
 
 import docker
@@ -37,20 +38,30 @@ class TestDockerManager(unittest.TestCase):
 
         with DockerManager("python:3.11-slim", ports={8000: host_port}) as env:
             env.Bash("echo 'Hello from Docker!' > /tmp/index.html", "Create test file")
-            env.Bash("cd /tmp && python -m http.server 8000 &", "Start HTTP server")
-
-            import time
-
-            time.sleep(2)
+            # The server must not keep the exec's stdout/stderr: the daemon
+            # closes those streams once the exec's shell exits, and the
+            # server's request log would then die on a broken pipe and drop
+            # the connection without a response.
+            env.Bash(
+                "cd /tmp && python -m http.server 8000 > /tmp/server.log 2>&1 &",
+                "Start HTTP server",
+            )
 
             self.assertEqual(env.get_host_port(8000), host_port)
 
-            try:
-                response = requests.get(f"http://localhost:{host_port}/index.html", timeout=5)
-                self.assertEqual(response.status_code, 200)
-                self.assertIn("Hello from Docker!", response.text)
-            except requests.exceptions.ConnectionError:
-                self.fail(f"Could not connect to HTTP server on port {host_port}")
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    response = requests.get(
+                        f"http://localhost:{host_port}/index.html", timeout=5
+                    )
+                    break
+                except requests.exceptions.ConnectionError:
+                    if time.monotonic() >= deadline:
+                        self.fail(f"Could not connect to HTTP server on port {host_port}")
+                    time.sleep(0.2)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Hello from Docker!", response.text)
 
 
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")

@@ -43,9 +43,11 @@ from __future__ import annotations
 from typing import Any
 
 COMPACTION_START_TOKENS = 100_000
-"""Context size (tokens) at which the first compaction is considered."""
+"""Context size (tokens) at which the first compaction is considered
+(the default of ``Config.compaction_start_tokens``)."""
 COMPACTION_STEP_TOKENS = 100_000
-"""Context growth after a compaction before the next one is considered.
+"""Context growth after a compaction before the next one is considered
+(the default of ``Config.compaction_step_tokens``).
 Production sessions grew 2-5k tokens a step, so 100k is 20-50 steps of
 warm cache between two forced cache misses."""
 KEEP_RECENT_TOOL_RESULTS = 6

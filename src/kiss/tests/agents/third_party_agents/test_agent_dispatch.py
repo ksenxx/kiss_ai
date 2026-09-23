@@ -88,7 +88,7 @@ def test_docstring_lists_channels() -> None:
 
 
 def test_unknown_agent_error() -> None:
-    out = run_agent("no_such_channel", "say hi")
+    out = run_agent("say hi", "no_such_channel")
     assert out.startswith("Error: unknown agent")
     assert "not a path to a .py agent script" in out
     assert "slack" in out
@@ -97,22 +97,22 @@ def test_unknown_agent_error() -> None:
 def test_channel_name_is_normalized() -> None:
     # Case/whitespace variants still resolve; the unreachable daemon
     # then fails the dispatch cleanly instead of "unknown agent".
-    out = run_agent("  NTFY ", "say hi")
+    out = run_agent("say hi", "  NTFY ")
     assert "unknown agent" not in out
     assert out.startswith("Error: the ntfy agent task could not run:")
 
 
 def test_empty_task_error() -> None:
-    assert run_agent("slack", "   ") == (
+    assert run_agent("   ", "slack") == (
         "Error: task must be a non-empty string."
     )
 
 
 def test_bad_budget_error() -> None:
-    out = run_agent("slack", "say hi", max_budget="cheap")
+    out = run_agent("say hi", "slack", max_budget="cheap")
     assert out == "Error: max_budget must be a number, got 'cheap'."
     for bad in ("nan", "inf", "0", "-2"):
-        out = run_agent("slack", "say hi", max_budget=bad)
+        out = run_agent("say hi", "slack", max_budget=bad)
         assert out == (
             f"Error: max_budget must be a positive finite number, "
             f"got {bad!r}."
@@ -127,7 +127,7 @@ def test_channel_alias_normalization() -> None:
         ("home_assistant", "homeassistant"),
         ("SLACK", "slack"),
     ):
-        out = run_agent(alias, "say hi")
+        out = run_agent("say hi", alias)
         assert "unknown agent" not in out
         assert out.startswith(
             f"Error: the {canonical} agent task could not run:"
@@ -137,7 +137,7 @@ def test_channel_alias_normalization() -> None:
 def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
     # A hyphen is a channel-name separator, not a path marker: the
     # alias resolves to the channel even though "-" appears in it.
-    out = run_agent("home-assistant", "say hi")
+    out = run_agent("say hi", "home-assistant")
     assert "unknown agent" not in out
     assert out.startswith(
         "Error: the homeassistant agent task could not run:"
@@ -147,7 +147,7 @@ def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
 def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
     tmp_path: Path,
 ) -> None:
-    out = run_agent("ntfy", "say hi", max_budget="1.5")
+    out = run_agent("say hi", "ntfy", max_budget="1.5")
     assert out.startswith("Error: the ntfy agent task could not run:")
     assert "no-daemon.sock" in out
     # The workspace env var (unset before the call) is unset again.
@@ -196,7 +196,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     # stop-on-timeout cascade — a timed-out channel sub-task must not
     # outlive its workspace reservation.
     captured.clear()
-    tool("ntfy", "say hi")
+    tool("say hi", "ntfy")
     assert captured[0]["work_dir"] == str(tmp_path / "channel_work")
     assert captured[0]["scope_work_dir"] == str(caller)
     assert (
@@ -208,7 +208,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     # Cron mode: executes in the cron work dir, scoped to the caller;
     # an explicit ``timeout`` argument is parsed and forwarded.
     captured.clear()
-    tool("cron", "run 'echo hi' every 5 minutes", timeout="42.5")
+    tool("run 'echo hi' every 5 minutes", "cron", timeout="42.5")
     assert captured[0]["work_dir"] == cron_agent.work_dir()
     assert captured[0]["scope_work_dir"] == str(caller)
     assert captured[0]["timeout"] == 42.5
@@ -218,7 +218,7 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     script = caller / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     captured.clear()
-    tool(str(script), "say hi")
+    tool("say hi", str(script))
     assert captured[0]["work_dir"] == str(caller)
     assert captured[0]["scope_work_dir"] == str(caller)
     assert (
@@ -269,7 +269,7 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
 
     # Channel mode: no worktree, no auto-commit; classification
     # follows the daemon's configured default (no per-run override).
-    tool("ntfy", "say hi")
+    tool("say hi", "ntfy")
     assert captured[0]["use_worktree"] is False
     assert captured[0]["auto_commit"] is False
     assert captured[0]["classify_tasks"] is None
@@ -280,7 +280,7 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     # argument can turn it on; see
     # ``test_run_options_are_forwarded_to_daemon``).
     captured.clear()
-    tool("cron", "run 'echo hi' every 5 minutes")
+    tool("run 'echo hi' every 5 minutes", "cron")
     assert captured[0]["use_worktree"] is False
     assert captured[0]["auto_commit"] is False
     assert captured[0]["classify_tasks"] is False
@@ -290,7 +290,7 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     script = caller / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     captured.clear()
-    tool(str(script), "say hi")
+    tool("say hi", str(script))
     assert captured[0]["use_worktree"] is True
     assert captured[0]["auto_commit"] is True
     assert captured[0]["classify_tasks"] is None
@@ -307,21 +307,21 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "use_worktree", "auto_commit", "use_web_tools", "classify_tasks",
         "use_memory", "is_parallel", "append_basic_tools",
     ):
-        out = run_agent("ntfy", "say hi", **{name: "maybe"})
+        out = run_agent("say hi", "ntfy", **{name: "maybe"})
         assert out == f"Error: {name} must be 'true' or 'false', got 'maybe'."
-    assert run_agent("ntfy", "say hi", model_config="[1, 2]") == (
+    assert run_agent("say hi", "ntfy", model_config="[1, 2]") == (
         "Error: model_config must be a JSON object, got '[1, 2]'."
     )
-    out = run_agent("ntfy", "say hi", model_config="{not json")
+    out = run_agent("say hi", "ntfy", model_config="{not json")
     assert out.startswith(
         "Error: model_config must be a JSON object, got '{not json': "
     )
     missing = tmp_path / "no_such_tools.py"
-    out = run_agent("ntfy", "say hi", tools=str(missing))
+    out = run_agent("say hi", "ntfy", tools=str(missing))
     assert out == f"Error: tools file '{missing}' does not exist"
     not_py = tmp_path / "tools.txt"
     not_py.write_text("")
-    out = run_agent("ntfy", "say hi", tools=str(not_py))
+    out = run_agent("say hi", "ntfy", tools=str(not_py))
     assert out == f"Error: tools file '{not_py}' is not a Python (.py) file"
 
 
@@ -357,11 +357,11 @@ def test_channel_and_cron_refuse_worktree_and_auto_commit(
             {"auto_commit": "TRUE"},
             {"use_worktree": "false", "auto_commit": "true"},
         ):
-            out = run_agent(agent, "say hi", **kwargs)
+            out = run_agent("say hi", agent, **kwargs)
             assert out.startswith(f"Error: the {agent} {refused}"), out
     assert captured == []
 
-    run_agent("ntfy", "say hi", use_worktree="false", auto_commit=" False ")
+    run_agent("say hi", "ntfy", use_worktree="false", auto_commit=" False ")
     assert captured[0]["use_worktree"] is False
     assert captured[0]["auto_commit"] is False
 
@@ -401,7 +401,7 @@ def test_run_options_are_forwarded_to_daemon(
     tool = make_run_agent_tool(str(caller))
 
     # Nothing passed: the daemon's defaults decide.
-    tool(str(script), "say hi")
+    tool("say hi", str(script))
     defaults = captured[0]
     assert defaults["chat_id"] == ""
     assert defaults["system_prompt"] == ""
@@ -418,7 +418,7 @@ def test_run_options_are_forwarded_to_daemon(
     # explicit git-lifecycle values replacing the path-mode defaults.
     captured.clear()
     tool(
-        str(script), "say hi",
+        "say hi", str(script),
         chat_id=" chat-123 ",
         system_prompt="You are a terse helper.",
         tools="extra_tools.py",
@@ -451,7 +451,7 @@ def test_run_options_are_forwarded_to_daemon(
     # An absolute tools path is kept as given (resolved); path mode
     # honours an explicit worktree request too.
     captured.clear()
-    tool(str(script), "say hi", tools=str(tools_file), use_worktree="true")
+    tool("say hi", str(script), tools=str(tools_file), use_worktree="true")
     assert captured[0]["tools"] == str(tools_file)
     assert captured[0]["use_worktree"] is True
 
@@ -459,17 +459,17 @@ def test_run_options_are_forwarded_to_daemon(
     # tools path against the process working directory.
     monkeypatch.chdir(caller)
     captured.clear()
-    run_agent(str(script), "say hi", tools="extra_tools.py")
+    run_agent("say hi", str(script), tools="extra_tools.py")
     assert captured[0]["tools"] == str(tools_file)
 
     # An explicit classify_tasks overrides the mode default in every
     # mode: cron's pinned-off classification and the channel/path
     # "daemon decides" default alike.
     captured.clear()
-    tool("cron", "run 'echo hi' every 5 minutes", classify_tasks="true")
+    tool("run 'echo hi' every 5 minutes", "cron", classify_tasks="true")
     assert captured[0]["classify_tasks"] is True
     captured.clear()
-    tool("ntfy", "say hi", classify_tasks="False", use_memory="false")
+    tool("say hi", "ntfy", classify_tasks="False", use_memory="false")
     assert captured[0]["classify_tasks"] is False
     assert captured[0]["use_memory"] is False
 
@@ -516,13 +516,13 @@ def test_dispatch_forwards_parent_identity(
     parent._last_task_id = "a" * 32
     parent._tab_id = "webtab-7"
     tool = make_run_agent_tool(str(caller), parent)
-    tool(str(script), "say hi")
+    tool("say hi", str(script))
     assert captured[0]["parent_task_id"] == "a" * 32
     assert captured[0]["parent_tab_id"] == "webtab-7"
 
     # The same caller identity rides along in channel mode too.
     captured.clear()
-    tool("ntfy", "say hi")
+    tool("say hi", "ntfy")
     assert captured[0]["parent_task_id"] == "a" * 32
     assert captured[0]["parent_tab_id"] == "webtab-7"
 
@@ -531,13 +531,13 @@ def test_dispatch_forwards_parent_identity(
     fresh = ChatSorcarAgent("Fresh parent")
     fresh._tab_id = "webtab-8"
     captured.clear()
-    make_run_agent_tool(str(caller), fresh)(str(script), "say hi")
+    make_run_agent_tool(str(caller), fresh)("say hi", str(script))
     assert captured[0]["parent_task_id"] == ""
     assert captured[0]["parent_tab_id"] == ""
 
     # Standalone tools-file use: no calling agent at all.
     captured.clear()
-    make_run_agent_tool(str(caller))(str(script), "say hi")
+    make_run_agent_tool(str(caller))("say hi", str(script))
     assert captured[0]["parent_task_id"] == ""
     assert captured[0]["parent_tab_id"] == ""
 
@@ -548,7 +548,7 @@ def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
     # "cron" (any case/spacing) routes to the built-in cron agent
     # script, not to channel lookup: the dispatch fails only on the
     # unreachable daemon and runs in the cron work directory.
-    out = run_agent("  Cron ", "run 'echo hi' every 5 minutes")
+    out = run_agent("run 'echo hi' every 5 minutes", "  Cron ")
     assert "unknown agent" not in out
     assert out.startswith("Error: the cron agent task could not run:")
     assert "no-daemon.sock" in out
@@ -564,14 +564,14 @@ def test_docstring_and_error_mention_cron() -> None:
     # the channel list, only via its dedicated dispatch branch.
     assert "cron" not in available_channels()
     # A mistyped agent name gets a hint about the built-in cron agent.
-    out = run_agent("no_such_channel", "say hi")
+    out = run_agent("say hi", "no_such_channel")
     assert out.startswith("Error: unknown agent")
     assert "cron" in out
 
 
 def test_path_mode_missing_file_error(tmp_path: Path) -> None:
     missing = tmp_path / "no_such_agent.py"
-    out = run_agent(str(missing), "say hi")
+    out = run_agent("say hi", str(missing))
     assert out.startswith("Error: agent script")
     assert "does not exist" in out
 
@@ -579,7 +579,7 @@ def test_path_mode_missing_file_error(tmp_path: Path) -> None:
 def test_path_mode_non_python_file_error(tmp_path: Path) -> None:
     not_py = tmp_path / "agent.txt"
     not_py.write_text("hello")
-    out = run_agent(str(not_py), "say hi")
+    out = run_agent("say hi", str(not_py))
     assert out.startswith("Error: agent script")
     assert "is not a Python (.py) file" in out
 
@@ -594,7 +594,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
 
     script = tmp_path / "my_researcher.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
-    out = run_agent(str(script), "say hi", workspace="ignored-ws")
+    out = run_agent("say hi", str(script), workspace="ignored-ws")
     assert out.startswith(
         "Error: the my_researcher agent task could not run:"
     )
@@ -606,15 +606,82 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     assert not (tmp_path / "channel_work").exists()
 
 
+def test_default_agent_is_the_bundled_dummy_sea(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_agent(task)`` with no ``agent`` runs ``seas/dummy_sea.py`` in path mode.
+
+    The default is the installed file's absolute path (not a path
+    relative to the calling work directory), so it resolves from any
+    project; the sub-task runs in the calling task's work directory
+    like every other path-named agent script.
+    """
+    from kiss.agents.sorcar import daemon_client
+    from kiss.agents.sorcar.agent_dispatch import DEFAULT_AGENT_PATH
+
+    default = Path(DEFAULT_AGENT_PATH)
+    assert default.is_absolute() and default.is_file()
+    assert default.parts[-3:] == ("agents", "seas", "dummy_sea.py")
+    # The dummy SEA defines no getters: a plain Sorcar session.
+    cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
+    assert apply_agent_overrides(cmd) == set()
+    assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(
+            text="ok", success=True, cost=0.0, tokens=0, steps=0,
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    caller = tmp_path / "caller_project"
+    caller.mkdir()
+    tool = make_run_agent_tool(str(caller))
+    tool("say hi")
+    assert captured[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
+    assert captured[0]["work_dir"] == str(caller)
+    assert captured[0]["prompt"] == "say hi"
+    # Whitespace counts as "not given", like every other option.
+    captured.clear()
+    tool("say hi", agent="   ")
+    assert captured[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
+    # An explicit agent still wins over the default.
+    captured.clear()
+    tool("say hi", agent="ntfy")
+    assert captured[0]["extension_agent_path"].endswith("ntfy_sea.py")
+
+
+def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
+    # The standalone tool with no agent: path mode named after the
+    # dummy SEA's file stem, failing only at the unreachable daemon.
+    out = run_agent("say hi")
+    assert out.startswith("Error: the dummy_sea agent task could not run:")
+    assert "no-daemon.sock" in out
+
+
+def test_tool_schema_requires_only_task() -> None:
+    """The schema the LLM sees marks ``task`` required and ``agent`` optional."""
+    from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
+    from kiss.core.models.model_info import model
+
+    schema = model(DEFAULT_DECISIONS_MODEL)._function_to_openai_tool(run_agent)
+    params = schema["function"]["parameters"]
+    assert params["required"] == ["task"]
+    assert list(params["properties"])[:2] == ["task", "agent"]
+    assert "dummy_sea.py" in params["properties"]["agent"]["description"]
+
+
 def test_path_mode_detected_by_py_suffix_and_separator(
     tmp_path: Path,
 ) -> None:
     # ".py" suffix without a separator is path mode, not a channel.
-    out = run_agent("slack_sea.py", "say hi")
+    out = run_agent("say hi", "slack_sea.py")
     assert out.startswith("Error: agent script")
     # A separator without a ".py" suffix is path mode too — rejected
     # with the loader's .py diagnostic rather than "unknown agent".
-    out = run_agent(str(tmp_path / "somedir" / "agent"), "say hi")
+    out = run_agent("say hi", str(tmp_path / "somedir" / "agent"))
     assert out.startswith("Error: agent script")
     assert "is not a Python (.py) file" in out
 
@@ -633,13 +700,13 @@ def test_relative_path_resolves_against_captured_work_dir(
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     tool = make_run_agent_tool(str(project))
-    out = tool("agents/reviewer.py", "say hi")
+    out = tool("say hi", "agents/reviewer.py")
     # The script was found (under the project, not under the CWD) and
     # the dispatch failed only on the unreachable daemon.
     assert out.startswith("Error: the reviewer agent task could not run:")
     assert "no-daemon.sock" in out
     # A missing relative path names the project-anchored resolution.
-    out = tool("agents/nope.py", "say hi")
+    out = tool("say hi", "agents/nope.py")
     assert out.startswith("Error: agent script")
     assert str(project / "agents" / "nope.py") in out
     assert "does not exist" in out
@@ -652,7 +719,7 @@ def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
     project.mkdir()
     script = project / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
-    out = make_run_agent_tool(str(project))(str(script), "say hi")
+    out = make_run_agent_tool(str(project))("say hi", str(script))
     assert out.startswith("Error: the helper agent task could not run:")
     assert not (tmp_path / "agent_work").exists()
     assert not (tmp_path / "channel_work").exists()
@@ -666,7 +733,7 @@ def test_standalone_relative_path_resolves_against_cwd(
     script = tmp_path / "local_agent.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     monkeypatch.chdir(tmp_path)
-    out = run_agent("local_agent.py", "say hi")
+    out = run_agent("say hi", "local_agent.py")
     assert out.startswith("Error: the local_agent agent task could not run:")
 
 
@@ -692,14 +759,14 @@ def test_dispatch_uses_launcher_workspace_registry(
     monkeypatch.setattr(agent_dispatch, "WORKSPACE_WAIT_TIMEOUT_SECONDS", 0.2)
     assert _enter_workspace("other-ws")  # a concurrent dispatch is active
     try:
-        out = run_agent("ntfy", "say hi", workspace="my-ws")
+        out = run_agent("say hi", "ntfy", workspace="my-ws")
         assert out.startswith("Error: workspace 'my-ws' could not be activated")
         # The concurrent dispatch is still active; its workspace was
         # never overwritten.
         assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
         # A dispatch SHARING the active workspace proceeds normally
         # (and fails only at the unreachable daemon socket).
-        out = run_agent("ntfy", "say hi", workspace="other-ws")
+        out = run_agent("say hi", "ntfy", workspace="other-ws")
         assert out.startswith("Error: the ntfy agent task could not run:")
         assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
     finally:
@@ -716,11 +783,11 @@ def test_dispatch_uses_recorded_daemon_socket(
     recorded = tmp_path / "recorded-daemon.sock"
     monkeypatch.setattr(cron_agent, "_daemon_sock_path", str(recorded))
     assert _daemon_sock_path() == str(recorded)
-    out = run_agent("ntfy", "say hi")
+    out = run_agent("say hi", "ntfy")
     assert "recorded-daemon.sock" in out
     script = tmp_path / "probe_agent.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
-    out = run_agent(str(script), "say hi")
+    out = run_agent("say hi", str(script))
     assert "recorded-daemon.sock" in out
 
 

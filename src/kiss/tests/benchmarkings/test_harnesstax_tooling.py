@@ -11,9 +11,8 @@ ledger database with the real schema, then run the ``aggregate``, ``audit``,
 ``analyze`` and ``report`` command-line tools as subprocesses with
 ``HARNESSTAX_RESULTS_ROOT`` / ``HARNESSTAX_HOME`` pointing at the tree.
 
-Not covered here: the turn cap in ``sea_core.on_llm_call`` and the client
-timeout in ``harbor_agent`` need a live daemon, a model and a container; they
-were exercised by hand with ``HARNESSTAX_MAX_TURNS=3`` on a real trial.
+Not covered here: ``harbor_agent`` and the container attach need a live
+daemon, a model and a container; they were exercised by hand on a real trial.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -344,33 +344,6 @@ def test_aggregate_falls_back_to_trajectory_without_ledger(tree: dict[str, Path]
     assert rec["turns"] == 6 and rec["cost"] == pytest.approx(0.05) and rec["tokens"] == 5000
 
 
-def test_aggregate_counts_spend_only_through_the_turn_cap(tree: dict[str, Path]) -> None:
-    """An attempt that ran past the cap is billed through its cap-th call.
-
-    The ledger is preferred; the trajectory trailers are the fallback.
-    """
-    # Every synthetic trial has 4 calls; with a cap of 3 each is over the cap.  The SWE
-    # trials are not in the ledger (trajectory fallback: call 4's trailer = spend through
-    # call 3); the timed-out TB trial is (ledger: first 3 usage events).
-    proc = run_tool(tree, "aggregate", "--phase", PHASE, HARNESSTAX_MAX_TURNS="3")
-    assert proc.returncode == 0, proc.stderr
-    summary = json.loads((tree["root"] / PHASE / "summary.json").read_text())
-    swe = next(r for r in summary["records"] if r["benchmark"] == "swebench-lite")
-    assert swe["turns"] == 3 and swe["cost"] == pytest.approx(0.03) and swe["tokens"] == 3000
-    timed_out = next(r for r in summary["records"] if r["task"] == "train-fasttext")
-    assert timed_out["turns"] == 3 and timed_out["cost"] == pytest.approx(0.3)
-    # the same trials are flagged as overruns: tool calls ran after the cap
-    proc = run_tool(tree, "audit", "--phase", PHASE, HARNESSTAX_MAX_TURNS="3")
-    assert proc.returncode == 0, proc.stderr
-    assert (
-        proc.stdout.count("overrun") >= 5
-        and "1 tool call(s) executed after the 3-turn cap" in proc.stdout
-    )
-    # with the real cap nothing is an overrun
-    proc = run_tool(tree, "audit", "--phase", PHASE)
-    assert "overrun" not in proc.stdout
-
-
 def test_audit_flags_and_quarantines(tree: dict[str, Path]) -> None:
     """The audit lists incomplete and fallback-served trials and moves them out of the tree."""
     proc = run_tool(tree, "audit", "--phase", PHASE)
@@ -483,17 +456,6 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
         "cost_usd": 0.01,
         "tokens": 1000,
     }
-    # a cap of 2 counts two calls and the spend through call 2 (read from call 3's trailer)
-    assert trials.trajectory_metrics(tmp_path, max_turns=2) == {
-        "turns": 2,
-        "cost_usd": 0.02,
-        "tokens": 2000,
-    }
-    assert trials.trajectory_metrics(tmp_path, max_turns=9) == {
-        "turns": 5,
-        "cost_usd": 0.04,
-        "tokens": 4000,
-    }
     assert trials.count_turns(tmp_path) == 5
     assert trials.trajectory_metrics(tmp_path / "missing") == {
         "turns": 0,
@@ -502,25 +464,19 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
     }
 
 
-def test_harbor_agent_timeout_from_task_toml(tmp_path: Path) -> None:
-    """The client timeout is the task's agent limit minus the margin, with a floor and a default."""
-    from benchmarkings.harnesstax import harbor_agent
+def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
+    """A new job lifts Harbor's agent deadline; an existing job directory is resumed as is."""
+    from benchmarkings.harnesstax import tb2_runner
 
-    task_dir = tmp_path / "task"
-    (task_dir / "environment").mkdir(parents=True)
-    (task_dir / "task.toml").write_text("[agent]\ntimeout_sec = 1200.0\n")
-    env = task_dir / "environment"
-    assert harbor_agent.agent_timeout_seconds(env) == 1200 - harbor_agent.DEADLINE_MARGIN_SECONDS
-    (task_dir / "task.toml").write_text("[agent]\ntimeout_sec = 50\n")
-    assert harbor_agent.agent_timeout_seconds(env) == 60
-    (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 50\n")
-    assert harbor_agent.agent_timeout_seconds(env) == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    (task_dir / "task.toml").write_text("not = [toml\n")
-    assert harbor_agent.agent_timeout_seconds(env) == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    assert (
-        harbor_agent.agent_timeout_seconds(tmp_path / "nope" / "environment")
-        == harbor_agent.DEFAULT_TIMEOUT_SECONDS
-    )
+    tasks = ["regex-log", "train-fasttext"]
+    command = tb2_runner.harbor_command(tmp_path, "job", MODEL, tasks, 3, 6)
+    multiplier = command[command.index("--agent-timeout-multiplier") + 1]
+    assert float(multiplier) == tb2_runner.AGENT_TIMEOUT_MULTIPLIER >= 1000
+    assert command[command.index("-m") + 1] == MODEL and command[command.index("-k") + 1] == "3"
+    assert [command[i + 1] for i, a in enumerate(command) if a == "-i"] == tasks
+    (tmp_path / "job").mkdir()
+    resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 6)
+    assert resume[-3:] == ["resume", "-p", str(tmp_path / "job")] and "-i" not in resume
 
 
 def test_tb2_runner_job_finished(tmp_path: Path) -> None:
@@ -569,52 +525,70 @@ def test_daemon_pinned_catalog_drops_fallbacks(tmp_path: Path) -> None:
     assert json.loads(target.read_text()) == [{"name": "a"}, {"name": "b"}]
 
 
-def test_turn_cap_ends_the_run_before_the_extra_call(tmp_path: Path) -> None:
-    """Calls 1..N pass through and are logged; call N+1 raises the terminal error promptly."""
-    import threading
+def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
+    """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
+    import docker
 
     from benchmarkings.harnesstax import sea_core
-    from kiss.core.kiss_error import BudgetExceededError
 
+    # The hook ends the trial when its container is gone, so the test needs a
+    # live one; without a Docker daemon the liveness check is skipped.
+    container_name = "c"
+    live = None
+    try:
+        client = docker.from_env()
+        client.ping()
+        live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
+        container_name = live.id
+    except Exception:
+        pass
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(
             {
-                "container": "c",
+                "container": container_name,
+                "workdir": "/app",
                 "prompt": "p",
                 "model": MODEL,
-                "max_turns": 3,
                 "trajectory": str(tmp_path / "trajectory.jsonl"),
             }
         )
     )
     harness = sea_core.ContainerHarness(str(config))
-    for expected in (1, 2, 3):
-        assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
-            {"role": "user", "content": "x"}
-        ]
-        assert harness.turns == expected
-    outcome: list[BaseException | None] = []
-    worker = threading.Thread(target=lambda: outcome.append(_call_capped(harness)))
-    worker.start()
-    worker.join(timeout=5)
-    assert not worker.is_alive(), "the capped call deadlocked"
-    assert isinstance(outcome[0], BudgetExceededError)
+    try:
+        for expected in range(1, 202):
+            assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
+                {"role": "user", "content": "x"}
+            ]
+            assert harness.turns == expected
+        # no wall-clock limit: tool results carry no time note
+        tool_result = {"role": "tool", "content": "out"}
+        assert harness.on_llm_call([tool_result]) == [{"role": "tool", "content": "out"}]
+    finally:
+        if live is not None:
+            live.remove(force=True)
+    if live is not None:
+        # the container is gone: the next model call ends the trial
+        from kiss.core.kiss_error import BudgetExceededError
+
+        with pytest.raises(BudgetExceededError):
+            harness.on_llm_call([])
+    assert harness.on_tool_call("Bash", {"command": "ls"}) == "OK"
+    assert harness.on_tool_call("ask_user_question", {"question": "?"}) != "OK"
+    assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
+    assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
+    assert harness.docker_image() == f"container:{container_name}"
+    assert harness.if_append_basic_tools()
+    assert not harness.use_memory() and not harness.use_web_tools()
+    assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
-        json.loads(line)["event"]
+        json.loads(line)
         for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
     ]
-    assert events == ["llm_call", "llm_call", "llm_call", "turn_cap"]
-    assert harness.turns == 3
+    assert [e["event"] for e in events].count("llm_call") == 202 + (live is not None)
+    tool_events = [e for e in events if e["event"] == "tool_call"]
+    assert [e["blocked"] for e in tool_events] == [False, True, True, True]
 
-
-def _call_capped(harness: object) -> BaseException | None:
-    """Invoke the hook once more and return the exception it raised (or None)."""
-    try:
-        harness.on_llm_call([])  # type: ignore[attr-defined]
-    except BaseException as exc:  # noqa: BLE001 - the test inspects the type
-        return exc
-    return None
 
 
 def test_audit_agent_error_and_deadline_aware_contamination(tree: dict[str, Path]) -> None:
@@ -658,8 +632,250 @@ def test_audit_agent_error_and_deadline_aware_contamination(tree: dict[str, Path
     con.close()
     proc = run_tool(tree, "audit", "--phase", PHASE)
     assert proc.returncode == 0, proc.stderr
-    assert "ConnectionError: daemon died" in proc.stdout and "nginx-request-logging" in proc.stdout
-    assert (
-        "pypi-server" not in proc.stdout
-    )  # timed out, and the fallback call came after the deadline
+    assert "ConnectionError: daemon died" in proc.stdout
+    assert "nginx-request-logging" in proc.stdout
+    # timed out, and the fallback call came after the deadline
+    assert "pypi-server" not in proc.stdout
     assert "4 flagged trial(s)" in proc.stdout
+
+
+def test_append_to_last_tool_result_handles_every_message_shape() -> None:
+    """The note lands in tool results of every provider shape.
+
+    It is never appended to prompts or assistant turns.
+    """
+    from benchmarkings.harnesstax import sea_core
+
+    anthropic: dict[str, Any] = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "t", "content": "out"}],
+    }
+    anthropic_list: dict[str, Any] = {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "t",
+                "content": [{"type": "text", "text": "out"}],
+            }
+        ],
+    }
+    responses: dict[str, Any] = {"type": "function_call_output", "call_id": "c", "output": "out"}
+    chat: dict[str, Any] = {"role": "tool", "tool_call_id": "c", "content": "out"}
+    for message in (anthropic, anthropic_list, responses, chat):
+        assert sea_core.append_to_last_tool_result(message, "[note]")
+    assert anthropic["content"][0]["content"] == "out\n\n[note]"
+    assert anthropic_list["content"][0]["content"][-1]["text"] == "[note]"
+    assert responses["output"] == "out\n\n[note]"
+    assert chat["content"] == "out\n\n[note]"
+    prompt: dict[str, Any] = {"role": "user", "content": "task"}
+    assistant: dict[str, Any] = {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+    for other in (prompt, assistant, "not a dict"):
+        assert not sea_core.append_to_last_tool_result(other, "[note]")
+    assert prompt == {"role": "user", "content": "task"}
+    assert assistant["content"] == [{"type": "text", "text": "hi"}]
+
+
+def test_changed_definitions_and_test_paths() -> None:
+    """The edit locator names the enclosing definitions of a change.
+
+    The test-path heuristic covers common layouts; Python, Go receiver methods
+    and exported JS functions are recognised.
+    """
+    from benchmarkings.harnesstax import test_context
+
+    changed = test_context.changed_definitions
+    old = (
+        "class Field:\n    def check(self):\n        return 1\n\n"
+        "    def other(self):\n        pass\n"
+    )
+    new = (
+        "class Field:\n    def check(self):\n        if True:\n            return 2\n\n"
+        "    def other(self):\n        pass\n"
+    )
+    assert changed(old, new) == ["check", "Field"]
+    # a deleted line points at the definition that lost it; a new top-level function names itself
+    assert changed(new, old) == ["check", "Field"]
+    assert changed("x = 1\n", "x = 1\ndef helper():\n    return 3\n") == ["helper"]
+    # generic names are dropped, a change outside any definition yields nothing
+    assert changed("def main():\n    a\n", "def main():\n    b\n") == []
+    assert changed("a = 1\n", "a = 2\n") == []
+    # Go receiver methods and exported JS functions are recognised too
+    go_old = "func (s *Server) Start() {\n\treturn\n}\n"
+    assert changed(go_old, go_old.replace("return", "run()")) == ["Start"]
+    js_old = "export async function load() {\n  a\n}\n"
+    assert changed(js_old, js_old.replace("  a\n", "  b\n")) == ["load"]
+    for path in (
+        "tests/test_x.py",
+        "pkg/x_test.go",
+        "src/a.spec.ts",
+        "spec/a_spec.rb",
+        "src/__tests__/a.js",
+        "FooTests.cs",
+        "testing/util.py",
+    ):
+        assert test_context.is_test_path(path), path
+    for path in ("django/db/models/fields.py", "src/contest.py", "latest/run.py"):
+        assert not test_context.is_test_path(path), path
+    assert test_context.find_referencing_tests("c", "/w", [], "/w/a.py") == []
+
+
+def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
+    """Editing an existing source file appends the tests that mention the changed definitions."""
+    import docker
+
+    from benchmarkings.harnesstax import sea_core
+
+    try:
+        client = docker.from_env()
+        client.ping()
+    except Exception:
+        pytest.skip("Docker is not available")
+    live = client.containers.run("python:3.11-slim", "sleep infinity", detach=True)
+    try:
+        setup = (
+            "mkdir -p /repo/pkg /repo/tests && cd /repo && "
+            "printf 'class Field:\\n    def check(self):\\n        return 1\\n' > pkg/fields.py && "
+            "printf 'from pkg.fields import Field\\n\\ndef test_check():\\n"
+            "    assert Field().check() == 1\\n' > tests/test_fields.py && "
+            "printf 'def test_other():\\n    Field\\n    Field\\n    Field\\n' "
+            "> tests/test_other.py && "
+            "printf 'x = 1\\n' > tests/test_unrelated.py && printf 'Field\\n' > pkg/notes.txt"
+        )
+        assert live.exec_run(["sh", "-c", setup]).exit_code == 0
+        config = tmp_path / "config.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "container": live.id,
+                    "workdir": "/repo",
+                    "prompt": "p",
+                    "model": MODEL,
+                    "trajectory": str(tmp_path / "trajectory.jsonl"),
+                    "test_context": True,
+                }
+            )
+        )
+        harness = sea_core.ContainerHarness(str(config))
+        assert "tests that reference the changed definitions" in harness.system_prompt()
+        # an Edit of a source file: snapshot, then the change lands in the container
+        edit = {"file_path": "pkg/fields.py", "old_string": "1", "new_string": "2"}
+        assert harness.on_tool_call("Edit", edit) == "OK"
+        live.exec_run(["sh", "-c", "sed -i 's/return 1/return 2/' /repo/pkg/fields.py"])
+        # edits of test files, missing files and non-string paths are ignored
+        harness.on_tool_call("Write", {"file_path": "/repo/tests/test_new.py", "content": "x"})
+        harness.on_tool_call("Write", {"file_path": "/repo/pkg/new_module.py", "content": "x"})
+        harness.on_tool_call("Edit", {"file_path": 3})
+        message = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([message])
+        note = message["output"]
+        assert "code you changed in pkg/fields.py (check, Field" in note
+        assert "tests/test_other.py (3)" in note and "tests/test_fields.py (3)" in note
+        assert "test_unrelated" not in note and "notes.txt" not in note
+        # mentions both names: ranks first
+        assert note.index("test_fields.py") < note.index("test_other.py")
+        assert note.endswith("before you finish.]")  # nothing follows: no wall-clock note
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        ]
+        assert [e["tests"] for e in events if e["event"] == "test_context"] == [
+            [["tests/test_fields.py", 3], ["tests/test_other.py", 3]]
+        ]
+        # the same tests are not listed twice; an edit that changed nothing adds nothing
+        fields = "/repo/pkg/fields.py"
+        harness.on_tool_call("Edit", {"file_path": fields, "old_string": "2", "new_string": "3"})
+        live.exec_run(["sh", "-c", "sed -i 's/return 2/return 3/' /repo/pkg/fields.py"])
+        harness.on_tool_call("Edit", {"file_path": fields, "old_string": "q", "new_string": "r"})
+        again = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([again])
+        assert "Existing tests" not in again["output"]
+        # a file deleted between snapshot and model call is skipped
+        harness.on_tool_call("Edit", {"file_path": fields, "old_string": "3", "new_string": "4"})
+        live.exec_run(["rm", "/repo/pkg/fields.py"])
+        gone = {"type": "function_call_output", "call_id": "c", "output": "Edited"}
+        harness.on_llm_call([gone])
+        assert "Existing tests" not in gone["output"]
+        # the feature is off unless the trial config enables it
+        config.write_text(
+            json.dumps(
+                {
+                    "container": live.id,
+                    "workdir": "/repo",
+                    "prompt": "p",
+                    "model": MODEL,
+                    "trajectory": str(tmp_path / "t2.jsonl"),
+                }
+            )
+        )
+        off = sea_core.ContainerHarness(str(config))
+        off.on_tool_call("Edit", edit)
+        assert off.pending_edits == []
+    finally:
+        live.remove(force=True)
+
+
+def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:
+    """A trial runs the task, then a fresh-context verification pass on the same container.
+
+    Needs a running benchmark daemon (``HARNESSTAX_TEST_SOCK``) and Docker;
+    skipped otherwise, since the pass is only observable end to end.
+    """
+    import docker
+
+    from benchmarkings.harnesstax import trials
+
+    sock = os.environ.get("HARNESSTAX_TEST_SOCK", "")
+    if not sock or not Path(sock).exists():
+        pytest.skip("set HARNESSTAX_TEST_SOCK to a benchmark daemon socket")
+    client = docker.from_env()
+    live = client.containers.run(
+        "python:3.11-slim", "sleep infinity", detach=True, working_dir="/app"
+    )
+    model = os.environ.get("HARNESSTAX_TEST_MODEL", "gpt-5.6-luna")
+    assert live.id is not None
+    container_id = live.id
+    try:
+        live.exec_run(["mkdir", "-p", "/app"])
+        os.environ["HARNESSTAX_VERIFY_PASS"] = "1"
+        try:
+            metrics = trials.run_sea_trial(
+                tmp_path,
+                container_id,
+                "/app",
+                "Create the file /app/hello.txt containing exactly the line `hello` "
+                "and nothing else.",
+                model,
+                Path(sock),
+            )
+        finally:
+            del os.environ["HARNESSTAX_VERIFY_PASS"]
+        assert live.exec_run(["cat", "/app/hello.txt"]).output.decode().strip() == "hello"
+        second = metrics["verify_pass"]
+        assert second is not None and second["error"] == "" and second["agent_success"]
+        assert metrics["agent_success"] and metrics["cost_usd"] >= second["cost_usd"] > 0
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        ]
+        prompts = [
+            json.dumps(e["new_messages"])
+            for e in events
+            if e.get("event") == "llm_call" and e["turn"] == 1
+        ]
+        assert len(prompts) == 2
+        assert "Do not trust that report" in prompts[1] and "Do not trust" not in prompts[0]
+        assert metrics["turns"] == sum(1 for e in events if e.get("event") == "llm_call")
+        # the pass is off by default
+        again = trials.run_sea_trial(
+            tmp_path,
+            container_id,
+            "/app",
+            "Print the content of /app/hello.txt.",
+            model,
+            Path(sock),
+        )
+        assert again["verify_pass"] is None
+    finally:
+        live.remove(force=True)
+    assert trials.plain_text("<p>Did <b>x</b></p>\n<ul><li>y</li></ul>") == "Did x y"

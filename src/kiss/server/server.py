@@ -42,6 +42,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_frequent_tasks,
     _load_history,
+    _load_input_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
@@ -295,6 +296,31 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
     with agent_state.STATE_LOCK:
         state = agent_state.get(sub_task_id)
         return state is None or not (state.is_task_active or state.thread_alive())
+
+
+def _is_side_channel_row(row: dict[str, object]) -> bool:
+    """True when the persisted sub-agent *row* is a side channel.
+
+    A side channel is a sub-agent whose result is delivered into its
+    parent's transcript (the ``/ask`` answerer): its nested tab is
+    closed when the run ends and must not be re-opened by a replay.
+    The mark travels in the row's synthesized ``extra`` JSON as
+    ``subagent.side_channel`` (see ``persistence._row_to_extra_json``).
+
+    Args:
+        row: A sub-agent row as returned by
+            ``_load_subagent_rows_by_parent_task_id``.
+
+    Returns:
+        True when the row's ``subagent`` extra carries
+        ``side_channel: true``.
+    """
+    try:
+        extra = json.loads(str(row.get("extra", "") or "") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return False
+    sub = extra.get("subagent") if isinstance(extra, dict) else None
+    return isinstance(sub, dict) and bool(sub.get("side_channel"))
 
 
 def _cleanup_legacy_merge_artifacts() -> None:
@@ -1284,22 +1310,22 @@ class VSCodeServer(
         self._broadcast_to_conn(event, conn_id)
 
     def _get_input_history(self, conn_id: str = "") -> None:
-        """Send deduplicated task texts for arrow-key cycling.
+        """Send deduplicated composer texts for arrow-key cycling.
 
-        Loads the full persisted history so ArrowUp can traverse every
-        distinct task stored in ``sorcar.db``, not just an arbitrary
-        recent subset.  Stamped with the requesting connection's
-        ``conn_id`` (when non-empty) so the reply reaches only the
-        window that asked.
+        Loads the full persisted history — every task stored in
+        ``sorcar.db`` plus every message typed into a running task
+        (``steer_inputs``) — so ArrowUp can traverse each distinct
+        text, not just an arbitrary recent subset.  Stamped with the
+        requesting connection's ``conn_id`` (when non-empty) so the
+        reply reaches only the window that asked.
 
         Args:
             conn_id: Requesting connection id (``""`` for direct callers).
         """
-        entries = _load_history()
         seen: set[str] = set()
         tasks: list[str] = []
-        for e in entries:
-            task = str(e.get("task", "")).strip()
+        for raw in _load_input_history():
+            task = raw.strip()
             if task and task not in seen:
                 seen.add(task)
                 tasks.append(task)
@@ -1784,14 +1810,51 @@ class VSCodeServer(
                 id).
         """
         wt_agent = state.agent if state is not None else None
-        claim_retained = False
-        if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
-            try:
-                claim_retained = not wt_agent.retire_for_disposal()
-                wt_agent._flush_warnings(self.printer)
-            except Exception:  # pragma: no cover — git/printer failure
-                logger.debug("Worktree release on tab close failed", exc_info=True)
-                claim_retained = bool(getattr(wt_agent, "_wt_pending", False))
+        try:
+            if wt_agent is not None and getattr(wt_agent, "_wt_pending", False):
+                try:
+                    wt_agent.retire_for_disposal()
+                    wt_agent._flush_warnings(self.printer)
+                except Exception:  # pragma: no cover — git/printer failure
+                    logger.debug("Worktree release on tab close failed", exc_info=True)
+        finally:
+            # The claim is released whatever the retire did — a
+            # ``BaseException`` escaping it (the stop interrupt the
+            # model layer raises for a failed auto-commit message when
+            # the thread's stop signal is set) once left ``is_merging``
+            # stuck, and every later main-tree run on the repo was
+            # refused as "a worktree merge in progress".  The agent
+            # keeps ``_wt`` exactly while its claim is retained
+            # (``retire_for_disposal`` returns ``_wt is None``), so the
+            # keep/unregister decision reads that instead of a result
+            # the interrupted retire never returned.
+            self._finish_tab_teardown(tab_id, state, removal_token)
+
+    def _finish_tab_teardown(
+        self,
+        tab_id: str,
+        state: AgentState | None,
+        removal_token: int | None,
+    ) -> None:
+        """Release the disposal claim and drop the tab's server-side state.
+
+        The locked tail of :meth:`_teardown_tab_resources`; see there
+        for the ownership rules.  The state stays registered when its
+        agent still holds a worktree claim (the retire kept the
+        worktree but could not make that decision durable, or never
+        finished), so a later disposal attempt can retry.
+
+        Args:
+            tab_id: The frontend tab identifier being disposed.
+            state: The claimed agent state, or ``None`` when the tab
+                never ran a task.
+            removal_token: The registry observation taken at claim
+                time, or ``None`` for callers with no registry ordering.
+        """
+        wt_agent = state.agent if state is not None else None
+        claim_retained = bool(
+            wt_agent is not None and getattr(wt_agent, "_wt_pending", False)
+        )
         # ONE ``_state_lock`` section for every destructive step, with
         # ONE atomic ownership decision (``finalize_removal``: re-check
         # + rowless stamp retirement under a single registry lock
@@ -2061,6 +2124,17 @@ class VSCodeServer(
 
         if subagent_info is not None:
             is_done = _subagent_is_done(result.get("task_id"))
+            if is_done and subagent_info.get("side_channel"):
+                # A finished side channel (the /ask answerer) has
+                # nothing to show: its answer sits in the parent's
+                # transcript.  The client that asked for this replay
+                # opened the tab on ``new_tab`` before the run ended
+                # (or restored it from its saved state); tell it to
+                # close the tab instead of re-opening it finished.
+                self.printer.broadcast(
+                    {"type": "subagentDone", "tab_id": tab_id, "tabId": ""},
+                )
+                return
             parent_tid = _coerce_id(subagent_info.get("parent_task_id"))
             parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
                 parent_task_id=parent_tid,
@@ -2271,6 +2345,16 @@ class VSCodeServer(
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
+            if is_done and _is_side_channel_row(row):
+                # A finished side channel (the /ask answerer) delivered
+                # its answer into the parent's transcript; unlike a
+                # run_parallel child it has no fan-out panel that
+                # keeps its finished tab closed, so a re-announce
+                # would re-open it on every reconnect.  Close it.
+                self.printer.broadcast(
+                    {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
+                )
+                continue
             if not is_done:
                 self._reattach_running_chat(
                     str(row.get("chat_id", "") or ""),

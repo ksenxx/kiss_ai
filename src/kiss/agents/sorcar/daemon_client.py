@@ -357,6 +357,7 @@ def run(
     parent_task_id: str = "",
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
+    side_channel: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -373,6 +374,8 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
+    tool_profile: str = "",
+    docker_image: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
@@ -427,6 +430,13 @@ def run(
             refuses to spawn further reviewers.  Only meaningful with
             *parent_task_id*; no agent-script getter, for the same
             reason as *parent_task_id*.
+        side_channel: Whether the run is a side channel of the parent
+            — a sub-agent whose result is delivered into the PARENT's
+            transcript (the ``/ask`` answer panel), so its own nested
+            tab is scaffolding that is closed when the run ends and
+            never re-opened by a replay.  Persisted on the child's
+            history row; only meaningful with *parent_task_id*; no
+            agent-script getter.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -497,6 +507,7 @@ def run(
                 def classify_tasks() -> bool | None: ...
                 def use_memory() -> bool | None: ...
                 def is_parallel() -> bool: ...
+                def tool_profile() -> str: ...
 
             The script may also define two hook getters with no
             corresponding parameter on this function (a callable
@@ -636,6 +647,26 @@ def run(
             actually runs with, so it is also what the chat history
             records and what follow-up tasks of the same chat see as
             context.  Empty (default) appends nothing.
+        tool_profile: Name of the tool profile the task's built-in
+            toolset is cut down to — one of ``"full"``, ``"review"``,
+            ``"shell"``, ``"bash"`` (the keys of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`;
+            ``bash`` is the single-command runner of the bundled
+            ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the
+            default) keeps the daemon's usual choice (the full toolset).
+            An unknown name stops the task with a diagnostic error.
+            Ignored when *append_basic_tools* is False, which builds
+            no built-in toolset at all.
+        docker_image: Run the task's file and shell tools (``Bash``,
+            ``run_commands_parallel``, ``Read``, ``Edit``, ``Write``)
+            inside a Docker container instead of on the daemon's host.
+            An image name (``"python:3.12"``) starts a fresh container
+            that is removed when the task ends; ``container:<name-or-id>``
+            attaches to a container the caller already runs and leaves
+            it running.  ``run_parallel`` sub-agents share the task's
+            container.  ``bash_job`` and persistent memory are
+            unavailable in a Docker run.  Empty (default) runs the
+            tools on the host.
         timeout: Maximum seconds to wait for the task to finish;
             ``None`` waits indefinitely.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
@@ -760,6 +791,7 @@ def run(
             "parentTaskId": parent_task_id,
             "parentTabId": parent_tab_id,
             "parentReviewer": parent_reviewer,
+            "sideChannel": side_channel,
             "model": model,
             "systemPrompt": system_prompt,
             "toolsFile": tools_file,
@@ -775,6 +807,8 @@ def run(
             "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
+            "toolProfile": tool_profile,
+            "dockerImage": docker_image,
         }
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         # Newline-framed events are assembled by hand from ``recv``

@@ -190,7 +190,7 @@ class TestShareChatOverUds(_UdsServerTestCase):
         self.assertIn("#task-panel {", page)  # main.css
         self.assertIn(".collapse-preview", page)  # main.css
         self.assertIn(".hljs", page)  # highlight theme
-        self.assertIn("--vscode-editor-background: #1e1e1e", page)
+        self.assertIn("--vscode-editor-background: #1f1f1f", page)
         self.assertIn("window.toggleThink", page)  # share.js
         # share.js's click delegation — a marker that appears in the
         # script only, never in this test's transcript body.
@@ -210,7 +210,7 @@ class TestShareChatOverUds(_UdsServerTestCase):
         self.assertIn('<style id="hljs-style-dark">', page)
         self.assertIn('<style id="hljs-style-light" media="not all">', page)
         # Light Modern variable overrides keyed off the toggled class.
-        self.assertIn("html.light-theme {", page)
+        self.assertIn("html.light-theme,\n    body.remote-chat.light-theme {", page)
         self.assertIn("--vscode-editor-background: #ffffff", page)
         # share.js's toggle logic (markers that appear in the script
         # only, never in this test's transcript body).

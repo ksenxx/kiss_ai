@@ -5,8 +5,8 @@
 """E2E tests: the remote webapp keeps working on a flaky connection.
 
 The remote webapp must stay usable when the connection to the server is
-slow, flaky or gone, and reload itself entirely once the server is
-reachable again.  Three pieces cooperate:
+slow, flaky or gone, and pick up where it was — without reloading the
+page — once the server is reachable again.  Three pieces cooperate:
 
 * ``/sw.js`` (``media/sw.js`` rendered by ``_build_service_worker``) is
   a service worker that precaches the app shell — the page plus every
@@ -16,14 +16,19 @@ reachable again.  Three pieces cooperate:
   after the page was authenticated, posts ``daemonStatus
   {connected:false, reconnecting:true}``;
 * ``main.js`` then keeps ``#app`` on screen under a slim "Reconnecting
-  ..." banner instead of the full-screen overlay, and holds prompts
-  back so the reconnect reload cannot drop them.
+  ..." banner instead of the full-screen overlay, holds prompts back,
+  and on the re-authenticated socket sends ``ready`` again so the
+  server pushes what changed meanwhile into the page it kept.
+
+The one reload left is for a page the worker served from its cache
+while the server was down: its code may be older than the server's, so
+it reloads once when the server is back.
 
 The live test boots the production ``RemoteAccessServer`` + headless
 Chromium and really stops and restarts the server (Playwright's
 ``set_offline`` does not reach service-worker fetches) to observe the
-banner, the reload on reconnection, and the page served from the worker
-while the server is down.
+banner, the in-place resync on reconnection, and the page served from
+the worker while the server is down.
 """
 
 from __future__ import annotations
@@ -304,7 +309,7 @@ def _wait_for(page: Page, predicate: str, timeout_ms: int = 30_000) -> None:
 
 
 @pytest.mark.timeout(300)
-def test_live_app_survives_outage_and_reloads_on_reconnect(
+def test_live_app_survives_outage_and_resyncs_on_reconnect(
     live_server: _LiveServer,
 ) -> None:
     """Live remote page across a server outage:
@@ -312,10 +317,11 @@ def test_live_app_survives_outage_and_reloads_on_reconnect(
     1. the worker installs and precaches the whole shell;
     2. the socket drops -> ``#app`` stays visible under the reconnect
        banner, and a prompt sent meanwhile stays in the composer;
-    3. the server returns -> the page reloads itself (navigation type
-       ``reload``), shows the app again with the draft still in the
-       composer, and the server's keep-alive round delivers a
-       ``heartbeat`` frame to an authenticated client;
+    3. the server returns -> the page is NOT reloaded (same document,
+       same JS state, draft still in the composer), the banner goes,
+       the command issued during the outage has reached the server,
+       and the server's keep-alive round delivers a ``heartbeat``
+       frame to an authenticated client;
     4. with the server down, a fresh navigation is answered by the
        worker (page and assets from cache, tagged as the offline shell)
        and the page shows the full "Reconnecting ..." overlay, having
@@ -378,36 +384,59 @@ def test_live_app_survives_outage_and_reloads_on_reconnect(
                 + repr(rect)
             )
             # A command the page issues during the outage (here: a tab
-            # opened in the shared registry) is not lost to the reload:
-            # the shim flushes it on the new connection and reloads only
-            # once the server has taken it.
+            # opened in the shared registry) is queued and flushed on the
+            # new connection.
             page.evaluate(_OPEN_TAB_JS % ("opened-during-outage", "outage"))
 
-            # 3. Reconnection: the page reloads itself entirely.
+            # 3. Reconnection: the same document carries on; the banner
+            #    goes and the server's state comes in over the socket.
             live_server.start()
             _wait_for(
                 page,
-                "!window.__offline_shell_marker && "
-                "document.getElementById('app') && "
-                "document.getElementById('app').style.display === ''",
+                "!document.getElementById('kiss-server-loading')"
+                ".classList.contains('kiss-server-loading--banner') && "
+                "document.getElementById('kiss-server-loading')"
+                ".style.display === 'none'",
                 timeout_ms=60_000,
             )
             after = page.evaluate(_UI_STATE_JS)
-            assert after["navType"] == "reload", after
+            assert after["navType"] == "navigate", (
+                "a reconnect must not reload the page; " + repr(after)
+            )
+            assert after["marker"] == "before-outage", (
+                "JS state must survive the reconnect; " + repr(after)
+            )
             assert after["appShown"] and not after["overlayShown"], after
-            assert after["marker"] is None, after
             assert not after["offlineMeta"], after
+            # The tab opened during the outage reached the server (the
+            # resync's registry snapshot lists it) and the draft never
+            # left the composer.
             _wait_for(
                 page,
                 _CHAT_TAB_IDS_JS + ".includes('opened-during-outage')",
             )
-            # The draft is back in the tab it was typed into.
-            page.click('.chat-tab[data-tab-id="draft-tab"]')
             assert page.evaluate(_ACTIVE_TAB_ID_JS) == "draft-tab"
             assert page.input_value("#task-input") == "typed while offline", (
-                "the composer draft must survive the reconnect reload; "
+                "the composer draft must survive the reconnect; "
                 + repr(page.evaluate(_UI_STATE_JS))
             )
+            # A second outage on the very same document: still no reload.
+            live_server.stop()
+            _wait_for(
+                page,
+                "document.getElementById('kiss-server-loading')"
+                ".classList.contains('kiss-server-loading--banner')",
+            )
+            live_server.start()
+            _wait_for(
+                page,
+                "document.getElementById('kiss-server-loading')"
+                ".style.display === 'none'",
+                timeout_ms=60_000,
+            )
+            again = page.evaluate(_UI_STATE_JS)
+            assert again["navType"] == "navigate", again
+            assert again["marker"] == "before-outage", again
 
             # 3a. Keep-alive: a raw authenticated client gets the app-level
             #     heartbeat the shim uses to detect half-open sockets.

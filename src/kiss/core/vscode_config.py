@@ -327,6 +327,64 @@ def save_config(data: dict[str, Any]) -> None:
             unlock(lock_file)
 
 
+# How many recently opened working directories ``config.json`` keeps.
+MAX_RECENT_WORK_DIRS = 30
+
+
+def recent_work_dirs() -> list[dict[str, Any]]:
+    """Return the working directories opened so far, most recent first.
+
+    Read from the ``recent_work_dirs`` key of ``config.json`` (written
+    by :func:`record_recent_work_dir`).  Each entry is
+    ``{"path": str, "ts": float}`` where ``ts`` is the epoch second the
+    directory was last adopted as a working directory.  Entries whose
+    directory no longer exists, and malformed entries from a hand-edited
+    file, are skipped.
+    """
+    raw = _read_stored_config(_config_path()).get("recent_work_dirs")
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        path, ts = entry.get("path"), entry.get("ts")
+        if not isinstance(path, str) or not isinstance(ts, int | float):
+            continue
+        # A hand-edited ``1e309`` (inf) or ``10**1000`` (OverflowError on
+        # float()) must not poison every configData reply.
+        try:
+            stamp = float(ts)
+        except OverflowError:
+            continue
+        if isinstance(ts, bool) or not math.isfinite(stamp):
+            continue
+        if not os.path.isdir(path):
+            continue
+        result.append({"path": path, "ts": stamp})
+    result.sort(key=lambda e: e["ts"], reverse=True)
+    return result
+
+
+def record_recent_work_dir(path: str) -> None:
+    """Move *path* to the front of the recently opened working directories.
+
+    No-op when *path* is not an existing directory.  The list is
+    capped at :data:`MAX_RECENT_WORK_DIRS` entries and persisted through
+    :func:`save_config`, so the directories opened from any surface
+    (VS Code windows, the remote webapp) share one history.
+
+    Args:
+        path: The directory that was just adopted as a working directory.
+    """
+    if not os.path.isdir(path):
+        return
+    with _config_lock:
+        entries = [e for e in recent_work_dirs() if e["path"] != path]
+        entries.insert(0, {"path": path, "ts": time.time()})
+        save_config({"recent_work_dirs": entries[:MAX_RECENT_WORK_DIRS]})
+
+
 def _get_user_shell() -> str:
     """Detect the user's default shell.
 

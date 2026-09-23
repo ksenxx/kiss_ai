@@ -38,8 +38,8 @@ arguments (``model_name``, ``max_budget``, ``timeout``, ``chat_id``,
 ``system_prompt``, ``tools``, ``model_config``, ``use_worktree``,
 ``auto_commit``, ``use_web_tools``, ``classify_tasks``,
 ``use_memory``, ``is_parallel``, ``append_basic_tools``,
-``append_to_system_prompt``, ``append_to_prompt``) are the string
-form of that function's keyword options, parsed into a
+``append_to_system_prompt``, ``append_to_prompt``, ``tool_profile``)
+are the string form of that function's keyword options, parsed into a
 :class:`RunOptions` and forwarded as-is.  For a channel, the
 module's ``tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
@@ -105,6 +105,19 @@ stop-confirmation grace (``daemon_client._STOP_CONFIRM_GRACE_SECONDS``,
 20 s) — before returning.
 """
 
+DEFAULT_AGENT_PATH = str(
+    Path(__file__).resolve().parents[1] / "seas" / "dummy_sea.py"
+)
+"""Agent script run when the ``run_agent`` tool's ``agent`` is empty.
+
+The bundled ``src/kiss/agents/seas/dummy_sea.py`` — an SEA that defines
+no getters, so the sub-task is a plain Sorcar session on the given task
+in the calling task's work directory (path mode, with the standard
+worktree/auto-commit lifecycle).  Held as the absolute path of the
+installed file so the default works from any work directory, not only
+a checkout of this repository.
+"""
+
 DEFAULT_DISPATCH_TIMEOUT_SECONDS = 300.0
 """Default bound on the wait for a dispatched sub-task's result.
 
@@ -124,6 +137,36 @@ tools load — and a surviving path/cron sub-task would keep spending
 invisibly.  Work the sub-task completed before the stop (side
 effects, spend) is not reported back to the calling task.
 """
+
+
+
+def stop_unconfirmed_error(name: str, timeout: float) -> str:
+    """Return the ``run_agent`` error string for an unconfirmed stop.
+
+    Returned by the tool exactly when the dispatch timed out AND the
+    daemon never confirmed the requested stop
+    (``daemon_client.StopUnconfirmedTimeoutError``), so the sub-task may
+    still be running.  Programmatic callers of the tool
+    (``cron_agent._run_prompt_job``) compare the reply against this
+    exact string — never a substring, which unrelated text such as a
+    socket path in a connection error could contain — to keep the run's
+    scratch directory instead of deleting it under a possibly live task.
+
+    Args:
+        name: The dispatched agent's display name (the script's stem or
+            the channel name).
+        timeout: The wait bound in seconds that expired.
+
+    Returns:
+        The complete error string.
+    """
+    return (
+        f"Error: the {name} agent task did not finish within "
+        f"{timeout:g}s; a stop was requested but the daemon never "
+        f"confirmed it, so the task MAY STILL BE RUNNING (and "
+        f"spending) on the daemon. Check what it already did "
+        f"before retrying with a larger `timeout` argument."
+    )
 
 _NON_CHANNEL_MODULES = frozenset({"a2a_sea", "ask_sea", "oai_sea"})
 """Modules matching ``*_sea.py`` that are not user-facing channels.
@@ -167,6 +210,7 @@ class RunOptions:
     append_basic_tools: bool = True
     append_to_system_prompt: str = ""
     append_to_prompt: str = ""
+    tool_profile: str = ""
 
 
 def _parse_bool(name: str, value: str) -> bool | None:
@@ -206,6 +250,7 @@ def _parse_run_options(
     append_basic_tools: str,
     append_to_system_prompt: str,
     append_to_prompt: str,
+    tool_profile: str = "",
 ) -> RunOptions:
     """Parse the ``run_agent`` tool's optional string arguments.
 
@@ -234,15 +279,27 @@ def _parse_run_options(
             ``true``.
         append_to_system_prompt: Text appended to the system prompt.
         append_to_prompt: Text appended to the task prompt.
+        tool_profile: Name of the tool profile the sub-task's built-in
+            toolset is cut down to (a key of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`);
+            empty for the daemon's usual choice.
 
     Returns:
         The parsed options.
 
     Raises:
         ValueError: On a malformed boolean, a *model_config* that is
-            not a JSON object, or a *tools* path that is not an
-            existing ``.py`` file.
+            not a JSON object, a *tools* path that is not an existing
+            ``.py`` file, or an unknown *tool_profile* name.
     """
+    from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
+
+    profile = tool_profile.strip()
+    if profile and profile not in TOOL_PROFILES:
+        raise ValueError(
+            f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
+            f"got {tool_profile!r}."
+        )
     from kiss.agents.sorcar.daemon_client import resolve_tools_file
 
     tools_path = ""
@@ -279,6 +336,7 @@ def _parse_run_options(
         append_basic_tools=True if basic_tools is None else basic_tools,
         append_to_system_prompt=append_to_system_prompt,
         append_to_prompt=append_to_prompt,
+        tool_profile=profile,
     )
 
 
@@ -630,6 +688,18 @@ def _dispatch_reserved(
         resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
         if callable(resolve_tab):
             parent_tab_id = str(resolve_tab() or "")
+    # A sub-task of an unattended (cron) run inherits the no-questions
+    # rule: without it a channel agent asked the user for an approval
+    # nobody could give and blocked until the run_agent timeout.  It
+    # travels in ``append_to_prompt``, which the daemon adds after an
+    # agent script's ``prompt()`` override has replaced the prompt body.
+    from kiss.agents.sorcar import cron_agent
+
+    if cron_agent.is_unattended(parent_agent):
+        options = dataclasses.replace(
+            options,
+            append_to_prompt=cron_agent.unattended_child_suffix(options.append_to_prompt),
+        )
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /
@@ -668,18 +738,13 @@ def _dispatch_reserved(
             append_basic_tools=options.append_basic_tools,
             append_to_system_prompt=options.append_to_system_prompt,
             append_to_prompt=options.append_to_prompt,
+            tool_profile=options.tool_profile,
             timeout=timeout,
             stop_on_timeout=True,
             sock_path=_daemon_sock_path(),
         )
     except daemon_client.StopUnconfirmedTimeoutError:
-        return (
-            f"Error: the {name} agent task did not finish within "
-            f"{timeout:g}s; a stop was requested but the daemon never "
-            f"confirmed it, so the task MAY STILL BE RUNNING (and "
-            f"spending) on the daemon. Check what it already did "
-            f"before retrying with a larger `timeout` argument."
-        ), 0.0
+        return stop_unconfirmed_error(name, timeout), 0.0
     except TimeoutError:
         return (
             f"Error: the {name} agent task did not finish within "
@@ -721,6 +786,7 @@ def _run_agent(
     append_basic_tools: str = "",
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
+    tool_profile: str = "",
 ) -> str:
     """Run a channel agent or an agent script on a task immediately.
 
@@ -738,7 +804,9 @@ def _run_agent(
             loaded directly as a tools file) resolves relative paths
             against the process working directory and runs path-mode
             sub-tasks in ``~/.kiss/agent_work``.
-        agent: Channel name or agent-script path (see the tool doc).
+        agent: Channel name or agent-script path (see the tool doc);
+            empty or whitespace runs :data:`DEFAULT_AGENT_PATH`, the
+            bundled plain-session SEA, in path mode.
         task: The task for the agent.
         workspace: Workspace/account identifier for multi-account
             channels; ignored in path mode.
@@ -788,11 +856,11 @@ def _run_agent(
             parent_work_dir, chat_id, system_prompt, tools, model_config,
             use_worktree, auto_commit, use_web_tools, classify_tasks,
             use_memory, is_parallel, append_basic_tools,
-            append_to_system_prompt, append_to_prompt,
+            append_to_system_prompt, append_to_prompt, tool_profile,
         )
     except ValueError as e:
         return f"Error: {e}"
-    requested = agent.strip()
+    requested = agent.strip() or DEFAULT_AGENT_PATH
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         # Path mode: any agent-script file.  The task is passed through
         # unchanged — no channel preamble or workspace handling; the
@@ -862,7 +930,10 @@ def _run_agent(
         f"the authenticated {channel} API tools — use them directly and "
         "immediately, without exploring any source code.  Never call "
         "run_agent here: it would just recurse into another session "
-        "like this one.\n\n"
+        "like this one.  Act only through those tools: never edit "
+        "source files or run test suites — when a tool or the channel "
+        "CLI is broken, report the failure in your result so it is "
+        "fixed in a normal development task.\n\n"
     )
     workspace = workspace.strip() or "default"
     guidance = str(getattr(agent_cls, "channel_system_prompt", "")).strip()
@@ -966,8 +1037,8 @@ def make_run_agent_tool(
     """
 
     def run_agent(
-        agent: str,
         task: str,
+        agent: str = "",
         workspace: str = "default",
         model_name: str = "",
         max_budget: str = "",
@@ -985,6 +1056,7 @@ def make_run_agent_tool(
         append_basic_tools: str = "",
         append_to_system_prompt: str = "",
         append_to_prompt: str = "",
+        tool_profile: str = "",
     ) -> str:
         """Run an agent — a channel agent or any agent script — on a task now.
 
@@ -1037,8 +1109,12 @@ def make_run_agent_tool(
         before the sub-task starts.
 
         Args:
-            agent: WHICH agent to run — an installed channel name,
-                e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
+            task: The task for the agent, e.g. "Send 'hello' to the
+                #sorcar channel".  A path-named agent script's
+                ``prompt()``, if defined, replaces it.
+            agent: Optional; empty (default) runs a plain Sorcar sub-agent (dummy_sea.py).
+                Otherwise WHICH agent to run — an installed channel
+                name, e.g. ``"slack"``, ``"telegram"``, ``"discord"``,
                 ``"email"``, ``"whatsapp"`` (case, spaces, hyphens,
                 and underscores are ignored: "Home Assistant" resolves
                 to ``homeassistant``); or ``"cron"`` for the
@@ -1046,10 +1122,10 @@ def make_run_agent_tool(
                 agent-script file, e.g. ``"agents/researcher.py"``
                 (recognized by its ``.py`` suffix or a path separator;
                 must exist; a relative path is resolved against this
-                task's work directory).
-            task: The task for the agent, e.g. "Send 'hello' to the
-                #sorcar channel".  A path-named agent script's
-                ``prompt()``, if defined, replaces it.
+                task's work directory).  The default is the bundled
+                ``src/kiss/agents/seas/dummy_sea.py``, an SEA with no
+                getters: a plain Sorcar session with the standard
+                tools on ``task`` in this task's work directory.
             workspace: Workspace/account identifier for multi-account
                 channels (default ``"default"``).  Ignored for
                 path-named agent scripts.
@@ -1102,6 +1178,11 @@ def make_run_agent_tool(
                 inherited by the sub-task's ``run_parallel`` sub-agents.
             append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
                 Appended to each ``<task>`` when the task holds several.
+            tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
+                ``"full"`` (everything), ``"review"`` (read and run, no editing, browser
+                or dispatch), ``"shell"`` (Bash, bash_job, Read, run_commands_parallel)
+                or ``"bash"`` (Bash only); empty = the daemon's usual choice.  ``finish``
+                is always available.  An agent script's ``tool_profile()`` still wins.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
@@ -1113,7 +1194,7 @@ def make_run_agent_tool(
             timeout, parent_agent, chat_id, system_prompt, tools,
             model_config, use_worktree, auto_commit, use_web_tools,
             classify_tasks, use_memory, is_parallel, append_basic_tools,
-            append_to_system_prompt, append_to_prompt,
+            append_to_system_prompt, append_to_prompt, tool_profile,
         )
 
     run_agent.__doc__ = (run_agent.__doc__ or "").replace(

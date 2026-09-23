@@ -45,13 +45,18 @@ def test_is_long_running_call() -> None:
     assert not is_long_running_call("Read", {"file_path": "/x", "timeout": None})
 
 
+# How long ``slow_tool`` runs; a test that needs more pings than fit in a
+# second raises it through ``monkeypatch.setitem(globals(), ...)``.
+_SLOW_TOOL_SECONDS = 1.0
+
+
 def slow_tool(timeout_seconds: int) -> str:
-    """Sleep for one second (standing in for a long build) and report it.
+    """Sleep for ``_SLOW_TOOL_SECONDS`` (standing in for a long build) and report it.
 
     Args:
         timeout_seconds: Declared timeout; only its size matters to the keep-alive.
     """
-    time.sleep(1.0)
+    time.sleep(_SLOW_TOOL_SECONDS)
     return f"slept with timeout {timeout_seconds}"
 
 
@@ -253,8 +258,11 @@ def test_openai_compatible_model_sends_no_ping(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_keepalive_stops_at_max_pings(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A 0.05 s interval would fit ~20 pings into the 1 s tool call; the cap holds.
+    # Each ping is a full request to the local server, ~0.1 s on a busy
+    # machine, so give the tool 4 s: with a 0.05 s interval that fits ~25
+    # pings and the cap is what limits the count.
     monkeypatch.setattr(keepalive, "KEEP_ALIVE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setitem(globals(), "_SLOW_TOOL_SECONDS", 4.0)
     script = _script(600)
     with anthropic_server.serve(script) as (url, requests):
         _run_anthropic_agent(monkeypatch, url, len(script))

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
+    _record_steer_input,
 )
 from kiss.agents.sorcar.sea_commands import (
     list_commands as list_sea_commands,
@@ -438,6 +439,12 @@ class _CommandsMixin:
                 self._file_cache = {}
             if hasattr(self.printer, "work_dir"):
                 setattr(self.printer, "work_dir", new_dir)
+        # Every surface's "Working directory" panel lists the directories
+        # opened so far (most recent first); this is the one place every
+        # adopted directory passes through.
+        from kiss.core.vscode_config import record_recent_work_dir
+
+        record_recent_work_dir(new_dir)
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -471,6 +478,7 @@ class _CommandsMixin:
             return
         inject_prompt: str | None = None
         inject_task = ""
+        remember = True
         thread: threading.Thread | None = None
         state: AgentState | None = None
         chat_id = ""
@@ -491,7 +499,7 @@ class _CommandsMixin:
                 and not contains_task_tags(prompt)
             ):
                 asked = self._viewer_awaiting_answer(tab_id)
-            if prev is not None and prev.is_merging:
+            if prev is not None and prev.merge_in_progress():
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
                 # operation.  Refuse the run instead.  Both frontends
@@ -520,13 +528,13 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if typed:
-                    self._route_prompt_to_owner(prev, prompt, tab_id)
+                    remember = self._route_prompt_to_owner(prev, prompt, tab_id)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
                         prev.unattributed_prompt_echoes.append(prompt)
             elif asked is not None:
-                self._route_prompt_to_owner(asked, prompt, tab_id)
+                remember = self._route_prompt_to_owner(asked, prompt, tab_id)
                 inject_prompt = prompt
                 inject_task = _owner_task_id(asked)
             else:
@@ -575,7 +583,7 @@ class _CommandsMixin:
         if thread is None:
             if inject_prompt is not None:
                 self._echo_injected_prompt(
-                    tab_id, inject_prompt, inject_task,
+                    tab_id, inject_prompt, inject_task, remember,
                 )
             return
         # ``thread`` and ``state`` are created together above, so a
@@ -965,7 +973,7 @@ class _CommandsMixin:
 
     def _route_prompt_to_owner(
         self, owner: AgentState, prompt: str, tab_id: str,
-    ) -> None:
+    ) -> bool:
         """Queue a mid-run user *prompt* on the right list of *owner*.
 
         A plain message is appended to ``pending_user_messages`` — the
@@ -1009,6 +1017,14 @@ class _CommandsMixin:
             owner: The running-task state that accepted the prompt.
             prompt: The user's message (non-empty).
             tab_id: Frontend tab id the message was typed into.
+
+        Returns:
+            ``True`` when the text was queued as a prompt (steering
+            message or follow-up tasks) and so belongs in the composer's
+            autocomplete history; ``False`` when it was consumed as the
+            answer to a pending ``ask_user_question`` — an answer is not
+            prompt history (the frontend's ``userAnswer`` path never
+            records one either, and it may be a secret).
         """
         if (
             owner.server_owned
@@ -1016,12 +1032,14 @@ class _CommandsMixin:
             and contains_task_tags(prompt)
         ):
             owner.queued_followup_tasks.extend(parse_task_tags(prompt))
-        elif owner.pending_ask_question and owner.user_answer_queue is not None:
+            return True
+        if owner.pending_ask_question and owner.user_answer_queue is not None:
             self._deliver_user_answer(
                 owner, owner.user_answer_queue, prompt, tab_id,
             )
-        else:
-            owner.pending_user_messages.append(prompt)
+            return False
+        owner.pending_user_messages.append(prompt)
+        return True
 
     def _viewer_awaiting_answer(self, tab_id: str) -> AgentState | None:
         """Return the task *tab_id* views whose agent is blocked in ``ask_user_question``.
@@ -1140,7 +1158,7 @@ class _CommandsMixin:
         return None
 
     def _echo_injected_prompt(
-        self, tab_id: str, prompt: str, owner_task: str,
+        self, tab_id: str, prompt: str, owner_task: str, remember: bool = True,
     ) -> None:
         """Broadcast a queued follow-up prompt back to the tab's viewers.
 
@@ -1169,6 +1187,17 @@ class _CommandsMixin:
         actually consumed the message (a ``recordOnly`` broadcast — it
         is never re-sent live, so no duplicate panel appears).
 
+        This is also where the text is remembered for autocomplete
+        (:func:`_record_steer_input`): every accepted mid-run message
+        — ``appendUserMessage``, a ``run`` sent to a busy tab, or a
+        ``/ask`` line — passes through here, and unlike a fresh submit
+        it never gets a ``task_history`` row, so without this the
+        composer's prefix completions and ArrowUp history would forget
+        it on reload.  The caller passes ``remember=False`` when
+        :meth:`_route_prompt_to_owner` consumed the text as the answer
+        to a pending ``ask_user_question``: it is still echoed, but an
+        answer is not prompt history.
+
         Args:
             tab_id: The frontend tab id the user typed into.
             prompt: The queued follow-up text.
@@ -1176,7 +1205,13 @@ class _CommandsMixin:
                 ``_state_lock`` at queueing time (see
                 :func:`_owner_task_id`), or ``""`` when the task row
                 is not allocated yet.
+            remember: Whether to save *prompt* for autocomplete.
         """
+        if remember:
+            try:
+                _record_steer_input(prompt)
+            except Exception:
+                logger.warning("steer input not recorded", exc_info=True)
         echo: dict[str, Any] = {
             "type": "prompt",
             "text": prompt,
@@ -1201,8 +1236,12 @@ class _CommandsMixin:
         (possibly blocked) tool call.
 
         The nested tab is closed by the frontend the moment the
-        answering session ends, so the answer itself is delivered
-        separately: when :func:`daemon_client.run` returns (or
+        answering session ends (``subagentDone``), and the child is
+        dispatched as a *side channel* so replays of the parent (or of
+        the child itself) re-issue that close instead of re-opening a
+        finished tab — see :meth:`_announce_subagent_rows`.  The
+        answer itself is therefore delivered separately: when
+        :func:`daemon_client.run` returns (or
         raises), the worker broadcasts a persisted ``ask_answer``
         event into the OWNER task's transcript via
         :meth:`_broadcast_ask_answer`, and the running task's tab
@@ -1257,6 +1296,7 @@ class _CommandsMixin:
                     append_to_system_prompt=append_to_system_prompt,
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
+                    side_channel=True,
                     chat_id=chat_id,
                     use_worktree=False,
                     auto_commit=False,
@@ -1419,10 +1459,11 @@ class _CommandsMixin:
             # ``unattributed_prompt_echoes``.
             ask_question: str | None = None
             owner_chat_id = owner.chat_id
+            remember = True
             if question is not None and owner_task:
                 ask_question = question
             else:
-                self._route_prompt_to_owner(owner, prompt, tab_id)
+                remember = self._route_prompt_to_owner(owner, prompt, tab_id)
                 if not owner_task:
                     owner.unattributed_prompt_echoes.append(prompt)
         if ask_question is not None:
@@ -1439,7 +1480,7 @@ class _CommandsMixin:
                 question=ask_question,
             )
             return
-        self._echo_injected_prompt(tab_id, prompt, owner_task)
+        self._echo_injected_prompt(tab_id, prompt, owner_task, remember)
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
         """Replay a previous chat session.
@@ -1903,11 +1944,18 @@ class _CommandsMixin:
         directory that will actually be used by *this* instance, not
         whichever folder another instance persisted last.
         """
-        from kiss.core.vscode_config import get_current_api_keys, load_config
+        from kiss.core.vscode_config import (
+            get_current_api_keys,
+            load_config,
+            recent_work_dirs,
+        )
 
         cfg = load_config()
         if cmd.get("workDir"):
             cfg["work_dir"] = cmd["workDir"]
+        # Only directories that still exist, most recently opened first
+        # (the raw stored list may hold deleted or malformed entries).
+        cfg["recent_work_dirs"] = recent_work_dirs()
         api_keys = get_current_api_keys()
         event: dict[str, Any] = {
             "type": "configData", "config": cfg, "apiKeys": api_keys,

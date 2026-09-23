@@ -774,6 +774,9 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
             function renderStopButton() { uiCalls.push('renderStopButton'); }
             var statusText = { textContent: '' };
             var inp = { focus: function() {} };
+            // setReady() only refocuses the composer on desktop clients
+            // (main.js: `if (!isMobileRemote) inp.focus();`).
+            var isMobileRemote = false;
             """
             + set_tab_running_src
             + set_ready_src
@@ -1035,6 +1038,9 @@ class TestPerTabT0(unittest.TestCase):
             function renderStopButton() {}
             var statusText = { textContent: '' };
             var inp = { focus: function() {} };
+            // setReady() only refocuses the composer on desktop clients
+            // (main.js: `if (!isMobileRemote) inp.focus();`).
+            var isMobileRemote = false;
             """
             + set_tab_running_src
             + set_ready_src

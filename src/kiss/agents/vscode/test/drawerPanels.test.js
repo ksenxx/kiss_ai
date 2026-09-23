@@ -109,10 +109,10 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-function click(win, id) {
-  const el = win.document.getElementById(id);
-  assert.ok(el, `element #${id} must exist`);
-  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+function click(win, id, el) {
+  const target = el || win.document.getElementById(id);
+  assert.ok(target, `element #${id} must exist`);
+  target.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function cs(win, id) {
@@ -905,7 +905,110 @@ function testMalformedStateGracefulBoot() {
   }
 }
 
-function runTests() {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// On a phone a code-driven focus of the composer raises the software
+// keyboard over whatever the user was looking at. Touching a tab, closing
+// one, opening a new chat, the server's `focusInput` nudge (sent on every
+// reconnect) and a task finishing must all leave the focus alone there,
+// including the composer's deferred 100/300 ms re-focus timers. On a
+// desktop the same actions focus the composer as before.
+async function testMobileRemoteNeverFocusesComposerByCode() {
+  for (const [name, opts, focuses] of [
+    ['iPhone remote', {remote: true, userAgent: UA_IPHONE}, false],
+    ['Android remote', {remote: true, userAgent: UA_ANDROID}, false],
+    ['desktop remote', {remote: true, userAgent: UA_DESKTOP}, true],
+    ['VS Code webview', {remote: false, userAgent: UA_IPHONE}, true],
+  ]) {
+    persistedState = undefined;
+    const {win, posted} = makeWebview(opts);
+    const d = win.document;
+    const inp = d.getElementById('task-input');
+    let focusCalls = 0;
+    inp.addEventListener('focus', () => {
+      focusCalls++;
+    });
+    const bootTab = readyTabId(posted);
+    send(win, {
+      type: 'tabs_state',
+      tabs: [
+        {tabId: bootTab, chatId: 'chat-a', title: 'a', workDir: ''},
+        {tabId: 'tab-b', chatId: 'chat-b', title: 'b', workDir: ''},
+        {tabId: 'tab-c', chatId: 'chat-c', title: 'c', workDir: ''},
+      ],
+    });
+    const tabEl = id => d.querySelector(`.chat-tab[data-tab-id="${id}"]`);
+    const steps = [
+      ['touching a tab', () => click(win, null, tabEl('tab-b'))],
+      [
+        'closing the active tab',
+        () => click(win, null, tabEl('tab-b').querySelector('.chat-tab-close')),
+      ],
+      // A background tab whose agent is asking a question: touching it
+      // (and landing on it after closing its neighbour) puts the
+      // composer in answer mode, which is another focus path.
+      [
+        'touching a tab with a pending question',
+        () => {
+          send(win, {type: 'askUser', tabId: 'tab-c', question: 'Which one?'});
+          click(win, null, tabEl('tab-c'));
+        },
+      ],
+      [
+        'closing a tab next to an asking tab',
+        () => {
+          click(win, null, tabEl(bootTab));
+          click(win, null, tabEl(bootTab).querySelector('.chat-tab-close'));
+          assert.strictEqual(
+            win._testApi.getActiveTabId(),
+            'tab-c',
+            `${name}: the asking tab takes over after the close`,
+          );
+        },
+      ],
+      ['opening a new chat', () => click(win, 'new-chat-btn')],
+      ['the server focusInput nudge', () => send(win, {type: 'focusInput'})],
+      [
+        'a task finishing',
+        () =>
+          send(win, {
+            type: 'task_done',
+            tabId: win._testApi.getActiveTabId(),
+            startTs: 1000,
+            endTs: 2000,
+          }),
+      ],
+    ];
+    for (const [what, act] of steps) {
+      inp.blur();
+      focusCalls = 0;
+      act();
+      await sleep(350);
+      if (focuses) {
+        assert.ok(
+          focusCalls > 0,
+          `${name}: ${what} must focus the composer`,
+        );
+      } else {
+        assert.strictEqual(
+          focusCalls,
+          0,
+          `${name}: ${what} must not focus the composer (keyboard pops up)`,
+        );
+        assert.notStrictEqual(
+          d.activeElement,
+          inp,
+          `${name}: ${what} left the focus on the composer`,
+        );
+      }
+    }
+    win.close();
+  }
+}
+
+async function runTests() {
   const tests = [
     testDefaults,
     testInputDrawerToggle,
@@ -930,18 +1033,21 @@ function runTests() {
     testMobileUserChoicePersists,
     testLegacyStateDoesNotResurrectExpandedPanel,
     testMalformedStateGracefulBoot,
+    testMobileRemoteNeverFocusesComposerByCode,
   ];
   for (const t of tests) {
-    t();
+    await t();
     console.log('PASS', t.name);
   }
 }
 
-try {
-  runTests();
-  console.log('\nAll tests passed');
-  process.exit(0);
-} catch (err) {
-  console.error('FAIL:', err && err.message ? err.message : err);
-  process.exit(1);
-}
+runTests().then(
+  () => {
+    console.log('\nAll tests passed');
+    process.exit(0);
+  },
+  err => {
+    console.error('FAIL:', err && err.message ? err.message : err);
+    process.exit(1);
+  },
+);

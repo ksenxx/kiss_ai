@@ -254,18 +254,38 @@ class TestDirectMoonshotCachePricing:
         assert cost == pytest.approx(expected)
 
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
-        """openrouter.ai 2026-09: kimi-k3 $1.70 in, $0.17 cache read (0.1x), on every alias."""
+        """OpenRouter kimi-k3 charges cache reads at 0.1x input on the base entry and every alias.
+
+        The literal prices are not pinned: openrouter.ai repriced kimi-k3 from
+        $1.70 to $3.00 per 1M input tokens in 2026-09 and ``update_models.py``
+        tracks the live price.  What must hold is that no alias silently falls
+        back to the 0.25x Moonshot default for cache reads, and that the
+        thinking aliases bill exactly like the base model.
+        """
+        base = MODEL_INFO["openrouter/moonshotai/kimi-k3"]
+        assert base.input_price_per_1M > 0
+        assert base.cache_read_price_per_1M == pytest.approx(base.input_price_per_1M * 0.1)
         for name in (
-            "openrouter/moonshotai/kimi-k3",
             "openrouter/moonshotai/kimi-k3-low",
             "openrouter/moonshotai/kimi-k3-high",
             "openrouter/moonshotai/kimi-k3-max",
-            "openrouter/~moonshotai/kimi-latest",
         ):
             info = MODEL_INFO[name]
-            assert info.input_price_per_1M == pytest.approx(1.70), name
-            assert info.output_price_per_1M == pytest.approx(8.50), name
-            assert info.cache_read_price_per_1M == pytest.approx(0.17), name
+            assert info.input_price_per_1M == pytest.approx(base.input_price_per_1M), name
+            assert info.output_price_per_1M == pytest.approx(base.output_price_per_1M), name
+            assert info.cache_read_price_per_1M == pytest.approx(base.cache_read_price_per_1M), name
+        # ``~moonshotai/kimi-latest`` is OpenRouter's rolling alias.  Its
+        # ``prompt``/``completion`` prices are a blend that openrouter.ai
+        # publishes independently of kimi-k3 (about half the k3 input
+        # price), while ``input_cache_read`` is the upstream cache rate.
+        # The 0.1x ratio therefore does not hold for the alias; what must
+        # hold is that the explicit OpenRouter cache price was kept
+        # instead of the 0.25x Moonshot fallback.
+        latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
+        assert latest.input_price_per_1M > 0
+        cache_read = latest.cache_read_price_per_1M
+        assert cache_read is not None
+        assert 0 < cache_read < latest.input_price_per_1M * 0.25
 
 
 class TestDirectCatalogPricesMatchProviderPages:

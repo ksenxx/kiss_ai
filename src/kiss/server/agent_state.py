@@ -19,6 +19,7 @@ on :class:`kiss.server.json_printer.JsonPrinter`
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from pathlib import Path
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+logger = logging.getLogger(__name__)
 
 STATE_LOCK = threading.RLock()
 """Guards :data:`agent_states` and every :class:`AgentState` field."""
@@ -194,13 +197,49 @@ class AgentState:
         thread = self.task_thread
         return thread is not None and (thread.ident is None or thread.is_alive())
 
+    def merge_in_progress(self) -> bool:
+        """True while a merge, discard or tab-disposal claim is live.
+
+        Every ``is_merging`` claim records the claiming thread in
+        ``merge_thread`` and is released by that same thread in a
+        ``finally`` block.  A claim whose thread has died therefore
+        can never be released by its owner: it is a leak (the thread
+        escaped through a ``BaseException`` its cleanup did not catch)
+        that would refuse every later main-tree run on the repository
+        and keep a closed tab busy forever, until the daemon restarts.
+        Such an orphaned claim is released here, with a warning, so
+        the daemon heals itself instead of wedging.
+
+        The check and the release happen under :data:`STATE_LOCK` (a
+        re-entrant lock, so callers already holding it are fine): an
+        unlocked caller such as the shutdown-signal snapshot must not
+        clear a fresh claim that another thread installed between the
+        liveness check and the release.
+        """
+        with STATE_LOCK:
+            if not self.is_merging:
+                return False
+            thread = self.merge_thread
+            if thread is None or thread.ident is None or thread.is_alive():
+                return True
+            logger.warning(
+                "Releasing orphaned merge claim on tab %s (task %s): thread %s "
+                "died without releasing it",
+                self.tab_id, self.task_id, thread.name,
+            )
+            self.is_merging = False
+            self.merge_thread = None
+            return False
+
     def busy(self) -> bool:
         """True when the state is owned by a live task or merge/discard.
 
         Callers must hold :data:`STATE_LOCK` while acting on the
         result.
         """
-        return self.is_task_active or self.is_merging or self.thread_alive()
+        return (
+            self.is_task_active or self.merge_in_progress() or self.thread_alive()
+        )
 
 
 def register(state: AgentState) -> None:

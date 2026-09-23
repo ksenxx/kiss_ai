@@ -60,16 +60,25 @@
 #      anyway), ``tmp/``, build output.  A ``kiss/wt-*`` branch is never
 #      deployed: the agent treats such a branch as one of its own worktrees
 #      and reclaiming it would delete the deployment.
-#   4. Copy the ~/*rc file that holds the API keys (the one with the most
-#      ``FOO_API_KEY=`` style lines) into ~/.kiss/ — not into the remote's
-#      home directory, which has shell files of its own that a copy of this
-#      machine's would destroy — and distill those lines, overlaid with this
+#   4. Copy the API keys — only to a remote that has none.  A remote whose
+#      ~/.kiss/api_keys.env (or, on an older install, ~/.bashrc, ~/.zshrc or
+#      fish's config.fish) already holds a key — an earlier deploy, or keys
+#      saved in the settings panel of the web app running there — keeps its
+#      keys untouched: this machine's are not copied, so a re-deploy never
+#      rolls a rotated or added key back; a key file the probe
+#      (scripts/count-api-keys.sh, run on the remote) cannot read stops the
+#      deploy instead of passing for empty.  Otherwise the ~/*rc file that
+#      holds the API keys (the one with the most ``FOO_API_KEY=`` style
+#      lines) is copied into ~/.kiss/ — not into the remote's home
+#      directory, which has shell files of its own that a copy of this
+#      machine's would destroy — and those lines, overlaid with this
 #      machine's canonical ~/.kiss/api_keys.env (the store the settings panel
-#      writes), into the remote's ~/.kiss/api_keys.env.  That one file is the
-#      key store on every install: the kiss-web daemon parses it itself at
-#      startup, and scripts/install-api-keys.sh adds one delimited block to
-#      ~/.bashrc that sources it for interactive shells, keeping a copy of
-#      that file as it was and replacing it by an atomic rename.
+#      writes), are distilled into the remote's ~/.kiss/api_keys.env.  That
+#      one file is the key store on every install: the kiss-web daemon parses
+#      it itself at startup, and scripts/install-api-keys.sh adds one
+#      delimited block to ~/.bashrc that sources it for interactive shells,
+#      keeping a copy of that file as it was and replacing it by an atomic
+#      rename.  Either way, install-api-keys.sh runs.
 #   4b. Sync the task database (~/.kiss/sorcar.db) both ways on every run, so
 #      the History panel on *either* machine lists every task either machine
 #      ever ran, with the tasks that ran in one checkout re-pointed at the
@@ -192,7 +201,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
 for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh \
               scripts/check-remote-disk-space.sh scripts/move-home-to-disk.sh \
-              scripts/wait-for-public-url.sh \
+              scripts/wait-for-public-url.sh scripts/count-api-keys.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
@@ -409,67 +418,117 @@ SORCAR_GIT_EMAIL="$GIT_EMAIL" \
 info "Project synced ($REMOTE_DIR is on $GIT_BRANCH, at origin's commit for it)."
 
 # ---------------------------------------------------------------------------
-# 4. Copy the ~/*rc file that contains the API keys
+# 4. Copy the ~/*rc file that contains the API keys — unless the remote
+#    already has keys of its own
 # ---------------------------------------------------------------------------
 KEY_RE='^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*='
+# What makes a file one that holds API keys, here and on the remote: at least
+# one FOO_API_KEY= / FOO_TOKEN= assignment with a value.  Anchored, so a
+# commented-out line or a mention inside prose does not count, and the value
+# must start with something other than a blank, a comment sign or a closing
+# quote — an emptied assignment (FOO_API_KEY=, FOO_API_KEY='' as the settings
+# panel would write an empty value, FOO_API_KEY="") is not a key either.  The
+# second form is fish's ``set -gx FOO_API_KEY value``.
+KEY_VALUE_RE="([\"']?[^[:space:]\"'#]|[\"'][^\"'])"
+KEY_LINE_RE="^[[:space:]]*(export[[:space:]]+)?[A-Z0-9_]*(API_KEY|_TOKEN)[[:space:]]*=[[:space:]]*$KEY_VALUE_RE"
+FISH_KEY_LINE_RE="^[[:space:]]*set[[:space:]]+(-[A-Za-z]+[[:space:]]+)*[A-Z0-9_]*(API_KEY|_TOKEN)[[:space:]]+$KEY_VALUE_RE"
 find_rc_file() {
     local best="" best_n=0 candidate n
     for candidate in "$HOME"/.*rc; do
         [[ -f "$candidate" ]] || continue
         n="$(grep -cE "${KEY_RE}.*" "$candidate" 2>/dev/null || true)"
-        grep -qE '(API_KEY|_TOKEN)[[:space:]]*=' "$candidate" 2>/dev/null || continue
+        grep -qE "$KEY_LINE_RE" "$candidate" 2>/dev/null || continue
         if ((n > best_n)); then best="$candidate"; best_n="$n"; fi
     done
     printf '%s' "$best"
 }
-RC_FILE="$(find_rc_file)"
-# The canonical store lives under $KISS_HOME (default ~/.kiss) — the same
-# path resolution api_keys_env_path() uses — so keys saved in the settings
-# panel of an install running with a custom KISS_HOME are deployed too.
-LOCAL_KEYS_ENV="${KISS_HOME:-$HOME/.kiss}/api_keys.env"
-[[ -n "$RC_FILE" || -f "$LOCAL_KEYS_ENV" ]] \
-    || die "No API keys found — neither a ~/*rc file with keys nor $LOCAL_KEYS_ENV."
 
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-
-# Distil the credential lines into the remote's canonical key store,
+# Distil this machine's keys into the remote's canonical key store,
 # ~/.kiss/api_keys.env (bash syntax; the kiss-web daemon also parses it
-# itself at startup, so no systemd variant is needed).  The rc lines come
-# first and this machine's own ~/.kiss/api_keys.env — the store the settings
-# panel writes — second, then the last assignment of each variable wins: a
-# key saved in the panel beats a stale rc line, and a key deleted there
-# (which scrubs both files) is not shipped at all.
-: > "$TMP_DIR/keys.raw"
-for src in "$RC_FILE" "$LOCAL_KEYS_ENV"; do
-    [[ -n "$src" && -f "$src" ]] || continue
-    grep -E "$KEY_RE" "$src" \
-        | sed -E 's/^[[:space:]]*//; s/^export[[:space:]]+//' \
-        >> "$TMP_DIR/keys.raw" || true
-done
-awk -F= '{ line[$1] = $0; if (!seen[$1]++) order[++n] = $1 }
-         END { for (i = 1; i <= n; i++) print "export " line[order[i]] }' \
-    "$TMP_DIR/keys.raw" > "$TMP_DIR/api_keys.env"
-KEY_COUNT="$(wc -l < "$TMP_DIR/api_keys.env" | tr -d ' ')"
-[[ "$KEY_COUNT" != "0" ]] || die "No API keys found in ${RC_FILE:-<no rc file>} or $LOCAL_KEYS_ENV."
+# itself at startup, so no systemd variant is needed).  Runs only for a
+# remote that has no key yet — see below.
+copy_local_api_keys() {
+    local rc_file local_keys_env key_count src
+    rc_file="$(find_rc_file)"
+    # The canonical store lives under $KISS_HOME (default ~/.kiss) — the same
+    # path resolution api_keys_env_path() uses — so keys saved in the settings
+    # panel of an install running with a custom KISS_HOME are deployed too.
+    local_keys_env="${KISS_HOME:-$HOME/.kiss}/api_keys.env"
+    [[ -n "$rc_file" || -f "$local_keys_env" ]] \
+        || die "No API keys found — neither a ~/*rc file with keys nor $local_keys_env."
 
-step "Copying API keys ($KEY_COUNT exported variables) to $TARGET ..."
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
+    # The rc lines come first and this machine's own ~/.kiss/api_keys.env —
+    # the store the settings panel writes — second, then the last assignment
+    # of each variable wins: a key saved in the panel beats a stale rc line,
+    # and a key deleted there (which scrubs both files) is not shipped at all.
+    : > "$TMP_DIR/keys.raw"
+    for src in "$rc_file" "$local_keys_env"; do
+        [[ -n "$src" && -f "$src" ]] || continue
+        grep -E "$KEY_RE" "$src" \
+            | sed -E 's/^[[:space:]]*//; s/^export[[:space:]]+//' \
+            >> "$TMP_DIR/keys.raw" || true
+    done
+    awk -F= '{ line[$1] = $0; if (!seen[$1]++) order[++n] = $1 }
+             END { for (i = 1; i <= n; i++) print "export " line[order[i]] }' \
+        "$TMP_DIR/keys.raw" > "$TMP_DIR/api_keys.env"
+    key_count="$(wc -l < "$TMP_DIR/api_keys.env" | tr -d ' ')"
+    [[ "$key_count" != "0" ]] \
+        || die "No API keys found in ${rc_file:-<no rc file>} or $local_keys_env."
+
+    step "Copying API keys ($key_count exported variables) to $TARGET ..."
+    # The rc file goes into ~/.kiss, not into the remote's home: a home
+    # directory already holds a .bashrc or .zshrc of its own, and dropping
+    # this machine's copy on top of it destroys the shell configuration of
+    # the host (in the .bashrc case, the very file install-api-keys.sh
+    # edits).  It holds every API key, so it is also kept unreadable by
+    # anyone else — the copy in the home directory was world-readable.
+    if [[ -n "$rc_file" ]]; then
+        scp -q "$rc_file" "$TARGET:.kiss/$(basename "$rc_file")"
+        ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$rc_file")\""
+    fi
+    scp -q "$TMP_DIR/api_keys.env" "$TARGET:.kiss/"
+}
+
 # The stale api_keys.systemd.env of an older deploy is removed so nothing on
 # the remote can ever re-inject a key that a newer deploy or the settings
-# panel has deleted.
+# panel has deleted (step 6b regenerates it from ~/.kiss/api_keys.env for the
+# one branch that still needs it).
 ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss" \
     && rm -f "$HOME/.kiss/api_keys.systemd.env"'
-# The rc file goes into ~/.kiss, not into the remote's home: a home directory
-# already holds a .bashrc or .zshrc of its own, and dropping this machine's
-# copy on top of it destroys the shell configuration of the host (in the
-# .bashrc case, the very file the next step edits).  It holds every API key,
-# so it is also kept unreadable by anyone else — the copy in the home
-# directory was world-readable.
-if [[ -n "$RC_FILE" ]]; then
-    scp -q "$RC_FILE" "$TARGET:.kiss/$(basename "$RC_FILE")"
-    ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
+# The keys the remote already has — the ones an earlier deploy shipped, or
+# the ones saved in the settings panel of the web app running there — live in
+# its ~/.kiss/api_keys.env, the one key store every install shares; on an
+# install older than that store they are export lines in its shell rc
+# (~/.bashrc, ~/.zshrc, fish's config.fish — the files the kiss-web daemon
+# migrates into the store at startup, see _migrate_legacy_rc_keys in
+# src/kiss/core/vscode_config.py).  When any of those holds a key, this
+# machine's keys stay here: the remote is being re-deployed, not set up, and
+# its keys may well be newer than these (a key rotated in the remote's
+# settings panel, a provider added there) — a copy would silently roll them
+# back to whatever this machine has.  Only a remote without any key (a first
+# deploy, or a key store emptied on purpose) gets this machine's keys, and
+# only then does this machine need any.  A file that cannot be read stops the
+# deploy rather than passing for empty: the one case a copy must never
+# happen in is the one where the remote's keys cannot be seen.
+step "Checking whether $TARGET already has API keys ..."
+# scripts/count-api-keys.sh does the counting on the remote.  The two
+# patterns go ahead of it as the first lines of the probe, quoted by printf %q
+# (they hold both kinds of quote, so no shell quoting done by hand would
+# survive the trip).  The script is a file, not a here-document: bash 3.2,
+# the one macOS ships, expands a quoted here-document inside ``$( ... )`` on
+# this machine, which turned $FISH_RE into an unbound variable here.
+REMOTE_KEY_COUNT="$({ printf 'KEY_RE=%q\nFISH_RE=%q\n' "$KEY_LINE_RE" "$FISH_KEY_LINE_RE"
+                      cat "$SCRIPT_DIR/scripts/count-api-keys.sh"; } | ssh "$TARGET" 'bash -s')" \
+    || REMOTE_KEY_COUNT=""
+[[ "$REMOTE_KEY_COUNT" =~ ^[0-9]+$ ]] \
+    || die "Could not tell whether $TARGET already has API keys (its ~/.kiss/api_keys.env or a shell rc file is unreadable, or the probe failed); nothing was copied."
+if ((REMOTE_KEY_COUNT > 0)); then
+    info "$TARGET already has API keys ($REMOTE_KEY_COUNT found) — keeping them; this machine's are not copied."
+else
+    copy_local_api_keys
 fi
-scp -q "$TMP_DIR/api_keys.env" "$TARGET:.kiss/"
 # Steps 7a, 7c and 7d run these three on the remote.  They are shipped rather
 # than run out of the synced checkout, so that deploying a branch older than
 # they are still gets the version that keeps the rest of ~/.kiss/config.json,
@@ -479,8 +538,9 @@ scp -q "$SCRIPT_DIR/src/kiss/scripts/remote_config.py" \
        "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" \
        "$SCRIPT_DIR/scripts/wait-for-public-url.sh" "$TARGET:.kiss/"
 # Make interactive and non-interactive bash sessions (which is what the agent
-# and its tools run under) see the keys; see scripts/install-api-keys.sh for
-# how ~/.bashrc is edited without damaging what is in it.
+# and its tools run under) see the keys — the ones just copied or the remote's
+# own; see scripts/install-api-keys.sh for how ~/.bashrc is edited without
+# damaging what is in it.
 ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-api-keys.sh"
 info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
 

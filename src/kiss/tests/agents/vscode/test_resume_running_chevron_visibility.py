@@ -157,6 +157,9 @@ class TestApplyChevronStateInRunningBranchUnhidesPanels:
             "applyChevronState must remove chv-hidden from "
             "running-task panels (its `inRunning` arm)"
         )
+        # The condition is formatted across several lines; compare it
+        # with whitespace collapsed so a reflow cannot fail the test.
+        body = re.sub(r"\s+", " ", body)
         in_running_idx = body.find("inRunning || p.classList.contains('rc')")
         assert in_running_idx >= 0, (
             "applyChevronState must check inRunning (or .rc) before "
