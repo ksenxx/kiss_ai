@@ -1322,6 +1322,67 @@ class GitWorktreeOps:
         GitWorktreeOps._append_info_line(repo, "exclude", ".kiss-worktrees/")
 
     @staticmethod
+    def link_node_modules(repo: Path, wt_dir: Path) -> list[Path]:
+        """Symlink the main checkout's ``node_modules`` directories into *wt_dir*.
+
+        A fresh worktree checks out tracked files only, so every
+        git-ignored ``node_modules`` of the main checkout is missing and
+        JS tests, ``npm run compile`` and the extension lint fail until
+        the agent runs ``npm install`` (minutes, hundreds of MB) or links
+        the directory by hand — a 24-hour audit of ``sorcar.db`` found
+        seven worktree tasks reinstalling and several rerunning a
+        340-file suite after "compiled extension missing" failures.
+
+        Each ignored directory named ``node_modules`` reported by ``git
+        ls-files --ignored --directory`` in *repo* is linked at the same
+        relative path of *wt_dir* when that path is still free and its
+        parent exists.  ``.gitignore`` patterns ending in ``/``
+        (``node_modules/``) match directories only, not symlinks, so the
+        bare pattern ``node_modules`` is added to ``info/exclude`` (shared
+        by every worktree of the repository) to keep the link out of
+        ``git add -A`` and the squash merge.  Compiled output (``out/``)
+        is deliberately not linked: it must be rebuilt from the
+        worktree's own sources.
+
+        Args:
+            repo: Git repo root path (the main checkout).
+            wt_dir: The new worktree's root.
+
+        Returns:
+            The repo-relative paths that were linked (empty when the
+            main checkout has no ignored ``node_modules``).
+
+        Raises:
+            OSError: If ``info/exclude`` cannot be written (no link is
+                created then) or a symlink cannot be made.
+        """
+        result = _git(
+            "ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+            "--directory", cwd=repo,
+        )
+        if result.returncode != 0:
+            return []
+        wanted: list[Path] = []
+        for entry in result.stdout.split("\0"):
+            rel = Path(entry.rstrip("/"))
+            if rel.name != "node_modules":
+                continue
+            src = repo / rel
+            dst = wt_dir / rel
+            if not src.is_dir() or dst.is_symlink() or dst.exists() or not dst.parent.is_dir():
+                continue
+            wanted.append(rel)
+        if not wanted:
+            return []
+        # The exclusion goes in first: a link created before it would be a
+        # plain untracked symlink that ``git add -A`` stages, so when the
+        # exclude file cannot be written (OSError propagates) no link is made.
+        GitWorktreeOps._append_info_line(repo, "exclude", "node_modules")
+        for rel in wanted:
+            os.symlink((repo / rel).resolve(), wt_dir / rel)
+        return wanted
+
+    @staticmethod
     def ensure_scratch_merge_driver(repo: Path) -> None:
         """Install a merge driver that auto-resolves agent scratch files.
 

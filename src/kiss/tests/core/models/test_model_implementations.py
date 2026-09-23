@@ -260,7 +260,9 @@ class TestCachePricing:
         assert info.cache_write_price_per_1M == 0.0
 
     def test_openai_gpt41_and_o3_cache_read_is_quarter(self):
-        for name in ("gpt-4.1", "gpt-4.1-mini", "o3", "o4-mini", "o3-deep-research"):
+        # o3-deep-research left the catalog in the 2026-09-22 refresh (OpenAI
+        # no longer lists it), so it is no longer part of this set.
+        for name in ("gpt-4.1", "gpt-4.1-mini", "o3", "o4-mini"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
 

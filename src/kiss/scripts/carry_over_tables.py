@@ -6,16 +6,18 @@
 """Carry the counters of a replaced ``sorcar.db`` into its replacement.
 
 ``sync_db.py`` synchronizes the two tables that hold a machine's history
--- ``task_history`` and ``events``.  A ``sorcar.db`` holds three more
+-- ``task_history`` and ``events``.  A ``sorcar.db`` holds four more
 tables that no sync moves, each a tally the web app keeps so that its
 menus offer what you actually use:
 
 * ``model_usage``    -- how often each model was chosen;
 * ``file_usage``     -- how often each file was opened, and when last;
-* ``frequent_tasks`` -- how often each task text was run, and when last.
+* ``frequent_tasks`` -- how often each task text was run, and when last;
+* ``steer_inputs``   -- each message typed into a running task, and when
+  last (autocomplete history).
 
 When a deploy has to replace a database wholesale instead of merging
-into it, those three tables would be replaced along with it -- the
+into it, those four tables would be replaced along with it -- the
 deployment's own tallies gone, in a step that is supposed to lose
 nothing.  This script puts them back from the file the replacement kept:
 rows only the old database had are inserted, and where both have the
@@ -45,6 +47,7 @@ CARRIED_TABLES = {
     "model_usage": "model",
     "file_usage": "path",
     "frequent_tasks": "task",
+    "steer_inputs": "text",
 }
 NUMERIC_TYPES = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
 

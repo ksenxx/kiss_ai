@@ -1688,7 +1688,7 @@ class SorcarRunApiTest(unittest.TestCase):
         cron_agent._daemon_sock_path = self.sock_path
         try:
             tool = make_run_agent_tool(self.repo, parent)
-            return tool(str(script), "do nothing")
+            return tool("do nothing", str(script))
         finally:
             cron_agent._daemon_sock_path = saved_sock
 

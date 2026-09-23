@@ -70,7 +70,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
     assert "from kiss.agents.third_party_agents" not in source_text
     assert "import kiss.agents.third_party_agents" not in source_text
     # cron_job is NOT a built-in tool of the default Sorcar toolset:
-    # scheduling requests go through run_agent("cron", ...), which
+    # scheduling requests go through run_agent(agent="cron", ...), which
     # dispatches this module as an agent script.
     agent_source = Path(cron_agent.__file__).parent / "sorcar_agent.py"
     agent_text = agent_source.read_text(encoding="utf-8")
@@ -81,7 +81,7 @@ def test_get_tools_and_sorcar_wiring() -> None:
         "cron_agent.CRON_DISPATCH_PREAMBLE + task"
         in dispatch_source.read_text(encoding="utf-8")
     )
-    # The system prompt directs scheduling requests to run_agent("cron").
+    # The system prompt directs scheduling requests to run_agent(agent="cron").
     system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
     assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")
     # The kiss-cron CLI entry point is wired in pyproject.toml.

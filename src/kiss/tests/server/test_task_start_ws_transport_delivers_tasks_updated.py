@@ -131,10 +131,10 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         printer = self.printer
         original_send = printer._send_to_ws_clients
 
-        def _capture(data: str) -> None:
+        def _capture(data: str, tab_id: str = "") -> None:
             with self.captured_lock:
                 self.captured_frames.append(data)
-            original_send(data)
+            original_send(data, tab_id)
 
         printer._send_to_ws_clients = _capture  # type: ignore[method-assign]
 

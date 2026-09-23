@@ -9,7 +9,7 @@ Features on the remote webapp (served by ``RemoteAccessServer``):
 1. The pinned task panel (``#task-panel``) inherits main.css's
    thinking-panel look verbatim (same background and foreground as
    ``.think``, plus a thick cyan border; the remote page merely swaps
-   the palette variables), sized by the page's injected 16px
+   the palette variables), sized by the page's injected 14px
    ``--vscode-editor-font-size``.  The event panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
@@ -67,7 +67,8 @@ def _dark_palette(css: str) -> dict[str, str]:
 
     Returns:
         Mapping of custom-property name (e.g. ``--fg``) to its declared
-        value (e.g. ``#ececec``) in the dark theme.
+        value (e.g. ``var(--vscode-editor-foreground, #ccc)``): the
+        VS Code variable it maps to, with the Dark Modern fallback.
     """
     m = re.search(r"\nbody\.remote-chat\s*\{(.*?)\n\}", css, re.DOTALL)
     assert m, "body.remote-chat palette block missing from remote-codex.css"
@@ -208,19 +209,29 @@ def _alpha_of(rgba: str) -> float:
     return float(nums[3]) if len(nums) > 3 else 1.0
 
 
+# The remote palette's VS Code tokens (remote-codex.css maps every
+# semantic name onto a --vscode-* variable with its Dark Modern value
+# as the fallback).
+FG = "var(--vscode-editor-foreground, #ccc)"
+DIM = "var(--vscode-tab-inactiveForeground, #9d9d9d)"
+FAINT = "var(--vscode-input-placeholderForeground, #989898)"
+SELECTED = "var(--vscode-list-inactiveSelectionBackground, #37373d)"
+
+
 def test_remote_history_row_is_neutral() -> None:
     """On the remote page the row is neutral too: no per-chat left
-    border, a neutral dark background, light text."""
+    border, VS Code's inactive-selection background, the editor
+    foreground."""
     codex_css = CODEX_CSS.read_text(encoding="utf-8")
     rule = _find_rule(codex_css, ".running-item")
     assert "border-left" not in rule, (
         f"the per-chat left border is gone; got: {rule!r}"
     )
-    assert "background-color: rgb(255 255 255 / 4%)" in rule, (
-        f"the row background must be a neutral dark tint; got: {rule!r}"
+    assert f"background-color: {SELECTED}" in rule, (
+        f"the row background must be list.inactiveSelectionBackground; got: {rule!r}"
     )
-    assert "color: #ececec" in rule, (
-        f"the row text must be light on the dark background; got: {rule!r}"
+    assert f"color: {FG}" in rule, (
+        f"the row text must be the editor foreground; got: {rule!r}"
     )
     assert "--task-color" not in codex_css, (
         "remote-codex.css must not reference --task-color anywhere"
@@ -228,21 +239,21 @@ def test_remote_history_row_is_neutral() -> None:
 
 
 REMOTE_METADATA_COLOR_RULES = [
-    (".running-item-metrics", "color: #afafaf"),
-    (".running-item-workspace", "color: #8e8e8e"),
-    (".running-item-ids", "color: #8e8e8e"),
-    (".running-item .ids-copy-btn", "color: #ececec"),
-    (".running-item .sidebar-item-collapse", "color: #ececec"),
-    (".running-item .sidebar-item-copy", "color: #ececec"),
-    (".running-item .sidebar-item-favorite", "color: #ececec"),
+    (".running-item-metrics", f"color: {DIM}"),
+    (".running-item-workspace", f"color: {FAINT}"),
+    (".running-item-ids", f"color: {FAINT}"),
+    (".running-item .ids-copy-btn", f"color: {FG}"),
+    (".running-item .sidebar-item-collapse", f"color: {FG}"),
+    (".running-item .sidebar-item-copy", f"color: {FG}"),
+    (".running-item .sidebar-item-favorite", f"color: {FG}"),
 ]
 
 
 @pytest.mark.parametrize(("selector", "decl"), REMOTE_METADATA_COLOR_RULES)
 def test_remote_history_metadata_readable_on_dark(selector: str, decl: str) -> None:
     """main.css metadata/buttons colors are near-black (designed for
-    the pastel background); the remote's dark neutral rows need light
-    replacements."""
+    the pastel background); the remote's neutral rows take VS Code's
+    foregrounds instead."""
     rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
     assert decl in rule, f"{selector} must set {decl}; got: {rule!r}"
 
@@ -913,14 +924,15 @@ def test_live_task_panel_typography_and_history_rows(
                 # Park the mouse away from the row so the style probe
                 # below does not read the :hover background, and wait
                 # out the 0.15s background transition
-                # (body.remote-chat .sidebar-item in remote-codex.css).
+                # (body.remote-chat .sidebar-item in remote-codex.css)
+                # back to list.inactiveSelectionBackground (#37373d).
                 page.mouse.move(0, 0)
                 page.wait_for_function(
                     """() => getComputedStyle(
                         document.querySelector(
                             '#history-list .running-item'
                         )
-                    ).backgroundColor === 'rgba(255, 255, 255, 0.04)'
+                    ).backgroundColor === 'rgb(55, 55, 61)'
                     """,
                     timeout=10000,
                 )
@@ -972,8 +984,8 @@ def test_live_task_panel_typography_and_history_rows(
     if isinstance(thread_error, BaseException):
         raise AssertionError("RemoteAccessServer thread failed") from thread_error
 
-    assert probes["taskPanelFontSize"] == "16px", (
-        "the task panel must size itself from the injected 16px "
+    assert probes["taskPanelFontSize"] == "14px", (
+        "the task panel must size itself from the injected 14px "
         "--vscode-editor-font-size: " + repr(probes)
     )
     assert probes["thinkColor"] != "MISSING", (
@@ -1008,8 +1020,10 @@ def test_live_task_panel_typography_and_history_rows(
     assert row["backgroundColor"] != accent, (
         f"row background must not be the per-chat pastel; row: {row}"
     )
-    assert row["backgroundColor"] == "rgba(255, 255, 255, 0.04)", row
-    assert row["color"] == "rgb(236, 236, 236)", (
+    # Dark Modern: list.inactiveSelectionBackground #37373d and
+    # editor.foreground #cccccc.
+    assert row["backgroundColor"] == "rgb(55, 55, 61)", row
+    assert row["color"] == "rgb(204, 204, 204)", (
         f"row text must be light (not the old #1a1a1a); row: {row}"
     )
 

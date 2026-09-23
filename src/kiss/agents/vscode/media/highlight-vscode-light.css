@@ -1,0 +1,100 @@
+/*
+ * highlight.js theme: VS Code "Light Modern" token colours.
+ *
+ * Light Modern includes light_plus.json, which includes light_vs.json
+ * (extensions/theme-defaults/themes in microsoft/vscode); the values
+ * below are those files' tokenColors, mapped onto highlight.js's
+ * scope classes exactly like highlight-vscode-dark.css.  The block
+ * background is Light Modern's textCodeBlock.background.
+ */
+pre code.hljs { display: block; overflow-x: auto; padding: 1em; }
+
+code.hljs { padding: 3px 5px; }
+
+.hljs { color: #3b3b3b; background: #f8f8f8; }
+
+/* keyword, storage, constant.language, variable.language */
+.hljs-doctag,
+.hljs-keyword,
+.hljs-meta .hljs-keyword,
+.hljs-template-tag,
+.hljs-variable.language_,
+.hljs-literal,
+.hljs-meta { color: #00f; }
+
+/* keyword.control */
+.hljs-keyword.control_ { color: #af00db; }
+
+/* entity.name.function, support.function */
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.function_.invoke__ { color: #795e26; }
+
+/* entity.name.type, entity.name.class, support.type, support.class */
+.hljs-type,
+.hljs-title.class_,
+.hljs-title.class_.inherited__,
+.hljs-built_in { color: #267f99; }
+
+/* variable, support.type.property-name */
+.hljs-variable,
+.hljs-property,
+.hljs-selector-attr,
+.hljs-template-variable { color: #001080; }
+
+/* entity.other.attribute-name */
+.hljs-attr,
+.hljs-attribute { color: #e50000; }
+
+/* constant.numeric */
+.hljs-number { color: #098658; }
+
+/* string */
+.hljs-string,
+.hljs-meta .hljs-string { color: #a31515; }
+
+/* constant.character.escape */
+.hljs-char.escape_ { color: #e00; }
+
+/* string.regexp */
+.hljs-regexp { color: #811f3f; }
+
+/* variable.other.constant, variable.other.enummember */
+.hljs-symbol { color: #0070c1; }
+
+/* comment */
+.hljs-comment,
+.hljs-code,
+.hljs-formula,
+.hljs-quote { color: #008000; }
+
+/* entity.name.tag */
+.hljs-name,
+.hljs-selector-tag,
+.hljs-selector-pseudo { color: #800000; }
+
+/* entity.other.attribute-name.class.css, .id.css */
+.hljs-selector-class,
+.hljs-selector-id { color: #800000; }
+
+/* keyword.operator */
+.hljs-operator,
+.hljs-punctuation { color: #000; }
+
+.hljs-subst { color: #3b3b3b; }
+
+/* markup.heading */
+.hljs-section { color: #800000; font-weight: bold; }
+
+/* markdown list punctuation */
+.hljs-bullet { color: #0451a5; }
+
+/* markup.italic, markup.bold */
+.hljs-emphasis { color: #800080; font-style: italic; }
+
+.hljs-strong { color: #000080; font-weight: bold; }
+
+/* markup.inserted, markup.deleted */
+.hljs-addition { color: #098658; }
+
+.hljs-deletion { color: #a31515; }

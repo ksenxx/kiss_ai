@@ -25,8 +25,9 @@ WEB_SERVER_PY = Path(kiss.server.web_server.__file__)
 def test_remote_page_font_size_vars_match_task_panel() -> None:
     """The task panel sizes itself with --vscode-editor-font-size and
     the chat panels with rem units derived from --vscode-font-size;
-    the remote page must inject the SAME 16px for both so panel
-    contents and the task panel share one size."""
+    the remote page must inject the SAME size for both so panel
+    contents and the task panel share one size (14px, VS Code's default
+    editor font size)."""
     src = WEB_SERVER_PY.read_text(encoding="utf-8")
-    assert "--vscode-font-size: 16px" in src
-    assert "--vscode-editor-font-size: 16px" in src
+    assert "--vscode-font-size: 14px" in src
+    assert "--vscode-editor-font-size: 14px" in src

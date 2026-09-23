@@ -151,6 +151,7 @@ const calls = {
     openChat: [],
     watchEditorTabs: 0,
     ensureChatOpen: [],
+    refreshActiveTaskUpdate: 0,
   },
   controller: {
     focusChatInput: 0,
@@ -181,8 +182,8 @@ class FakeSidebarView {
     this.activeTasks = [];
     sidebarInstances.push(this);
   }
-  postMetaState(values, progressMd) {
-    this.metaStates.push({values, progressMd});
+  postMetaState(values, taskUpdate) {
+    this.metaStates.push({values, taskUpdate});
   }
   postActiveTask(chatId, taskId) {
     this.activeTasks.push({chatId, taskId});
@@ -357,6 +358,9 @@ class FakePanelManager {
   setMetaSink(sink) {
     calls.manager.metaSink = sink;
   }
+  refreshActiveTaskUpdate() {
+    calls.manager.refreshActiveTaskUpdate += 1;
+  }
   setActiveTaskSink(sink) {
     calls.manager.activeTaskSink = sink;
   }
@@ -470,11 +474,38 @@ async function runTest() {
     'the manager received a meta sink',
   );
   const relayValues = {tokens: '1.00K'};
-  calls.manager.metaSink(relayValues, '# progress');
+  const relayUpdate = {
+    content: '<p>half way</p>',
+    running: false,
+    updatedAt: 1700000000000,
+    cost: 0.02,
+    error: '',
+  };
+  calls.manager.metaSink(relayValues, relayUpdate);
   assert.deepStrictEqual(
     metaViewInstance.metaStates[metaViewInstance.metaStates.length - 1],
-    {values: relayValues, progressMd: '# progress'},
+    {values: relayValues, taskUpdate: relayUpdate},
     'the sink forwards the active panel state into the Task Info view',
+  );
+  calls.manager.metaSink(null, null);
+  assert.deepStrictEqual(
+    metaViewInstance.metaStates[metaViewInstance.metaStates.length - 1],
+    {values: null, taskUpdate: null},
+    'the placeholder state (no panel) reaches the Task Info view as (null, null)',
+  );
+  // The view's refresh button is wired to the manager's
+  // refreshActiveTaskUpdate (the ACTIVE chat editor panel repolls).
+  assert.strictEqual(
+    typeof metaViewInstance.onMetaRefresh,
+    'function',
+    'the Task Info view received an onMetaRefresh hook',
+  );
+  const refreshBefore = calls.manager.refreshActiveTaskUpdate;
+  metaViewInstance.onMetaRefresh();
+  assert.strictEqual(
+    calls.manager.refreshActiveTaskUpdate,
+    refreshBefore + 1,
+    'metaRefresh from the Task Info view asks the manager to refresh the active panel',
   );
 
   // --- sidebar mode (default) -----------------------------------------

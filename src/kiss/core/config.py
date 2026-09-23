@@ -214,8 +214,31 @@ class Config(BaseModel):
         default_factory=lambda: _env_flag("KISS_TOOL_OUTPUT_COMPACTION", True),
         description=(
             "Replace old, large tool outputs in the model conversation with "
-            "short stubs once the context grows past 100k tokens "
+            "short stubs once the context grows past compaction_start_tokens "
             "(KISS_TOOL_OUTPUT_COMPACTION=0 disables)."
+        ),
+    )
+    compaction_start_tokens: int = Field(
+        default_factory=lambda: _env_int("KISS_COMPACTION_START_TOKENS", 100_000),
+        description=(
+            "Context size (tokens) at which the first tool-output compaction is "
+            "considered; later ones follow every compaction_step_tokens "
+            "(KISS_COMPACTION_START_TOKENS)."
+        ),
+    )
+    compaction_step_tokens: int = Field(
+        default_factory=lambda: _env_int("KISS_COMPACTION_STEP_TOKENS", 100_000),
+        description=(
+            "Context growth (tokens) after a compaction before the next one is "
+            "considered (KISS_COMPACTION_STEP_TOKENS)."
+        ),
+    )
+    tool_output_max_chars: int = Field(
+        default_factory=lambda: _env_int("KISS_TOOL_OUTPUT_MAX_CHARS", 50_000),
+        description=(
+            "Default cap on the characters one Bash result keeps in the "
+            "conversation (head and tail are kept when truncating; the model "
+            "may pass a different max_output_chars) (KISS_TOOL_OUTPUT_MAX_CHARS)."
         ),
     )
     context_limit_fraction: float = Field(

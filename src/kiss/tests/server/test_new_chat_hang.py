@@ -244,27 +244,31 @@ class TestPeriodicEventFlush(unittest.TestCase):
             })
             import time
 
-            # The periodic flush runs on a timer; poll for its first save
-            # instead of sleeping a fixed 3 s, which a loaded machine
-            # (the whole suite in parallel on Windows) can overrun.  The
-            # task itself stays blocked on ``resume``, so any entry seen
-            # here was flushed BEFORE completion.
-            flush_entry = None
+            # The periodic flush runs on a timer; poll for a save that
+            # already carries the text_delta events instead of sleeping
+            # a fixed 3 s, which a loaded machine (the whole suite in
+            # parallel) can overrun.  The first save can land before
+            # the agent thread has broadcast anything, so the entry's
+            # mere existence is not enough.  The task itself stays
+            # blocked on ``resume``, so any events seen here were
+            # flushed BEFORE completion.
+            types: list[object] = []
             deadline = time.monotonic() + 15
-            while flush_entry is None and time.monotonic() < deadline:
+            while "text_delta" not in types and time.monotonic() < deadline:
                 time.sleep(0.25)
                 flush_entry = next(
                     (e for e in th._load_history() if e["task"] == "test periodic flush"),
                     None,
                 )
-            assert flush_entry is not None
-            flush_chat_id = flush_entry["chat_id"]
-            assert isinstance(flush_chat_id, str) and flush_chat_id
-            result = th._load_latest_chat_events_by_chat_id(flush_chat_id)
-            assert result is not None
-            flush_events = result["events"]
-            assert isinstance(flush_events, list)
-            types = [e.get("type") for e in flush_events]
+                if flush_entry is None:
+                    continue
+                flush_chat_id = flush_entry["chat_id"]
+                assert isinstance(flush_chat_id, str) and flush_chat_id
+                result = th._load_latest_chat_events_by_chat_id(flush_chat_id)
+                assert result is not None
+                flush_events = result["events"]
+                assert isinstance(flush_events, list)
+                types = [e.get("type") for e in flush_events]
             assert "text_delta" in types, f"Expected text_delta in {types}"
 
             entries = th._load_history()

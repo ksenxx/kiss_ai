@@ -24,6 +24,24 @@ export interface SessionInfo {
 }
 
 /**
+ * The task-update report a chat panel shows in its info subpanel and
+ * relays to the Task Info view: what the task-update agent reports the
+ * running task has done so far (see kiss.server.task_update).
+ */
+export interface TaskUpdateState {
+  /** The agent's report (HTML), '' before the first run completes. */
+  content: string;
+  /** Whether the daemon is running the agent now. */
+  running: boolean;
+  /** Epoch ms of the last completed run, 0 when none. */
+  updatedAt: number;
+  /** USD spent by the last run. */
+  cost: number;
+  /** The last run's failure, '' when it succeeded. */
+  error: string;
+}
+
+/**
  * The task-info values a chat editor panel mirrors to the secondary
  * sidebar's Task Info view (editor-tabs mode): the display strings of
  * the panel's own #meta-list items in media/chat.html. All values are
@@ -305,21 +323,37 @@ export type FromWebviewMessage =
   | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
   | {type: 'setEditorTabsMode'; enabled: boolean}
-  // The tmp/PROGRESS.md poll of the visible tab's RUNNING task
-  // (metainfo block in main.js): forwarded whole to the daemon, which
-  // answers with a direct `infoFile` reply.
+  // The "Working directory" panel ("..." menu): open `path` as this
+  // window's folder (vscode.openFolder) -- a VS Code window's working
+  // directory IS its workspace folder.  The host answers a path that
+  // is not a directory with `workDirError`.
+  | {type: 'openWorkDir'; path: string}
+  // The panel's folder button: the editor's own folder dialog, then
+  // the same open.
+  | {type: 'pickWorkDir'}
+  // The task-update poll of the visible tab's RUNNING task (metainfo
+  // block in main.js): forwarded whole to the daemon, which answers
+  // with a direct `taskUpdate` reply. `refresh` makes the daemon run
+  // the task-update agent now (the subpanel's refresh button).
   | {
-      type: 'getInfoFile';
-      workDir?: string;
+      type: 'getTaskUpdate';
       tabId?: string;
       knownSig?: string;
       token?: string;
+      refresh?: boolean;
     }
   // Editor-tabs mode (host-only): this panel's live task-info values —
   // the mirror the secondary sidebar's Task Info view renders for the
-  // ACTIVE panel. progressMd is the raw markdown of the running task's
-  // tmp/PROGRESS.md ('' when there is nothing to show).
-  | {type: 'metaUpdate'; values: MetaPanelValues; progressMd: string}
+  // ACTIVE panel. taskUpdate is the running task's task-update report
+  // state (null when there is nothing to show).
+  | {
+      type: 'metaUpdate';
+      values: MetaPanelValues;
+      taskUpdate: TaskUpdateState | null;
+    }
+  // Meta-panel mode (host-only): the Task Info view's refresh button;
+  // the host relays it to the ACTIVE chat panel as `refreshTaskUpdate`.
+  | {type: 'metaRefresh'}
   // Host-only: the raw chat id and task id of the task this chat
   // surface (editor panel or sidebar chat view) shows now — the task
   // its Task Info rows describe. The host relays the on-screen
@@ -710,6 +744,9 @@ type ToWebviewMessageBody =
       tunnelActive?: boolean;
       loopbackUrl?: string;
       lanUrls?: string[];
+      // True when the daemon serves its auto-generated, locally-signed
+      // certificate (so /ca.crt and `kiss-web --trust-ca` apply).
+      localCa?: boolean;
     }
   // A session replay (server.py): task_id is the history row id (None
   // for a task still running without a row), chat_id the chat's uuid
@@ -857,6 +894,9 @@ type ToWebviewMessageBody =
   // The window's workspace folder changed; the webview re-scopes its
   // workspace-filtered surfaces (tab bar, history) to this directory.
   | {type: 'workspaceWorkDir'; workDir: string}
+  // The "Working directory" panel's openWorkDir / pickWorkDir could not
+  // open the folder; shown inside the panel.
+  | {type: 'workDirError'; text: string}
   | {
       // Canonical shared-tab snapshot broadcast by the daemon after
       // every tab-registry mutation; clients reconcile against it.
@@ -920,23 +960,36 @@ type ToWebviewMessageBody =
       parent_tab_id?: string;
       taskId?: string;
     }
-  // The daemon's direct reply to `getInfoFile`: the polled task's
-  // tmp/PROGRESS.md. `unchanged` short-circuits a poll whose knownSig
-  // still matches; `token` echoes the request's generation token.
+  // The daemon's direct reply to `getTaskUpdate`: the polled task's
+  // task-update report state. `unchanged` short-circuits a poll whose
+  // knownSig still matches; `token` echoes the request's generation
+  // token.
   | {
-      type: 'infoFile';
+      type: 'taskUpdate';
       exists?: boolean;
       unchanged?: boolean;
       content?: string;
+      error?: string;
+      running?: boolean;
+      cost?: number;
+      updatedAt?: number;
       sig?: string;
-      workDir?: string;
+      tabId?: string;
+      taskId?: string;
       token?: string;
     }
   // Editor-tabs mode (host relay): the ACTIVE chat panel's task-info
   // values for the secondary sidebar's Task Info view. `values` is
   // null when no chat panel has reported yet (render the placeholder
   // dashes).
-  | {type: 'metaState'; values: MetaPanelValues | null; progressMd: string}
+  | {
+      type: 'metaState';
+      values: MetaPanelValues | null;
+      taskUpdate: TaskUpdateState | null;
+    }
+  // Host relay to the ACTIVE chat panel: the Task Info view's refresh
+  // button was pressed — poll `getTaskUpdate` with `refresh: true`.
+  | {type: 'refreshTaskUpdate'}
   // Host relay to the history panel (history-panel-mode): the chat id
   // and task id shown by the chat surface on screen, '' when none is.
   | {type: 'activeTask'; chatId: string; taskId: string};
@@ -981,7 +1034,7 @@ export interface AgentCommand {
     | 'shareChatTasks'
     | 'snoozeUpdate'
     | 'updateWhenIdle'
-    | 'getInfoFile';
+    | 'getTaskUpdate';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -1025,10 +1078,12 @@ export interface AgentCommand {
   originalName?: string;
   /** addTrick: the promptlet body to append. */
   text?: string;
-  /** getInfoFile: fingerprint of the file version the client holds. */
+  /** getTaskUpdate: fingerprint of the report state the client holds. */
   knownSig?: string;
-  /** getInfoFile: generation token echoed on the `infoFile` reply. */
+  /** getTaskUpdate: generation token echoed on the `taskUpdate` reply. */
   token?: string;
+  /** getTaskUpdate: run the task-update agent now. */
+  refresh?: boolean;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

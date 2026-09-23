@@ -193,6 +193,94 @@ test('empty remote_url clears both containers except local/LAN info', () => {
   win.close();
 });
 
+// With the daemon's auto-generated certificate (localCa: true) the
+// Local/LAN URLs are signed by the machine-local CA; both containers
+// must end with one hint telling the user how to trust that CA, linking
+// /ca.crt on the LAN URL (what a phone can reach).  An explicitly
+// configured certificate (no localCa) has no CA to offer: no hint.
+function hintIn(win, containerId) {
+  const hints = win.document
+    .getElementById(containerId)
+    .querySelectorAll('.remote-url-tls-hint');
+  return hints.length === 1 ? hints[0] : null;
+}
+
+test('a trust-the-CA hint linking /ca.crt on the LAN URL follows the bars', () => {
+  const {win} = makeWebview();
+  send(win, {
+    type: 'remote_url',
+    url: 'https://tunnel.trycloudflare.com',
+    tunnelActive: true,
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: ['https://192.168.0.5:8787/', 'https://10.0.0.7:8787'],
+    localCa: true,
+  });
+  for (const id of ['remote-url', 'welcome-remote-url']) {
+    const hint = hintIn(win, id);
+    assert.ok(hint, `#${id} shows exactly one TLS hint`);
+    assert.ok(hint.textContent.includes('kiss-web --trust-ca'));
+    assert.strictEqual(
+      hint.querySelector('a').getAttribute('href'),
+      'https://192.168.0.5:8787/ca.crt',
+    );
+    const container = win.document.getElementById(id);
+    assert.strictEqual(container.lastElementChild, hint, 'hint comes last');
+  }
+  win.close();
+});
+
+test('the hint falls back to the loopback URL when there is no LAN URL', () => {
+  const {win} = makeWebview();
+  send(win, {
+    type: 'remote_url',
+    url: '',
+    tunnelActive: false,
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: [],
+    localCa: true,
+  });
+  const hint = hintIn(win, 'remote-url');
+  assert.ok(hint);
+  assert.strictEqual(
+    hint.querySelector('a').getAttribute('href'),
+    'https://127.0.0.1:8787/ca.crt',
+  );
+  win.close();
+});
+
+test('no local/LAN URL means no TLS hint', () => {
+  const {win} = makeWebview();
+  send(win, {
+    type: 'remote_url',
+    url: 'https://legacy.trycloudflare.com',
+    tunnelActive: true,
+    localCa: true,
+  });
+  assert.strictEqual(hintIn(win, 'remote-url'), null);
+  assert.strictEqual(
+    win.document.querySelectorAll('.remote-url-tls-hint').length,
+    0,
+  );
+  win.close();
+});
+
+test('an explicitly configured certificate (no localCa) shows no TLS hint', () => {
+  const {win} = makeWebview();
+  send(win, {
+    type: 'remote_url',
+    url: 'https://tunnel.trycloudflare.com',
+    tunnelActive: true,
+    loopbackUrl: 'https://127.0.0.1:8787',
+    lanUrls: ['https://192.168.0.5:8787'],
+  });
+  assert.strictEqual(barsIn(win, 'remote-url').length, 3, 'bars still render');
+  assert.strictEqual(
+    win.document.querySelectorAll('.remote-url-tls-hint').length,
+    0,
+  );
+  win.close();
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
   for (const f of failures) {

@@ -23,6 +23,8 @@ dist/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
+# Scratch module written by secondarySidebarPerWorkspace.test.js while it runs.
+src/kiss/agents/vscode/test/_vscode-stub-*.js
 src/kiss/agents/vscode/README.md
 src/kiss/agents/vscode/LICENSE
 kiss_project/

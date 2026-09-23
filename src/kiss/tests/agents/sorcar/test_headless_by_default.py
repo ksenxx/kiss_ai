@@ -170,7 +170,12 @@ def test_headless_user_agent_is_not_advertised(tool, server):
     served = tool.get_page_content(text_only=True)
     assert "HeadlessChrome" not in served
     assert "Chrome/" in served
-    assert "HeadlessChrome" not in tool._page.evaluate("navigator.userAgent")
+    # Site scripts run in the page's main world, which is where the mask
+    # (an init script) applies.  Patchright's ``evaluate`` defaults to an
+    # isolated world that still sees Chromium's real user agent.
+    assert "HeadlessChrome" not in tool._page.evaluate(
+        "navigator.userAgent", isolated_context=False
+    )
 
 
 def test_show_browser_relaunches_and_restores_the_page(tool):

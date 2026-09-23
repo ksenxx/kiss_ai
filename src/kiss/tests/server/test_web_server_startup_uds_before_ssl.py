@@ -12,7 +12,7 @@ path (commit adf35874), users still observed a long delay between
 starting …" overlay clearing.  Timing showed ~0.5–2 s spent inside
 ``RemoteAccessServer.__init__`` in ``_create_ssl_context``
 (``ssl.SSLContext.load_cert_chain`` and, on near-expiry auto-generated
-certs, RSA keygen) BEFORE ``_setup_server`` bound either listener.
+certs, key generation) BEFORE ``_setup_server`` bound either listener.
 ``install.sh`` polls for ``~/.kiss/sorcar.sock`` and gives up after
 15 s, so any noticeable delay before UDS bind is user-visible.
 
@@ -28,7 +28,7 @@ work.
 
 This is an end-to-end test: it monkey-patches
 ``kiss.server.web_server._create_ssl_context`` to add a
-deterministic delay (mimicking a slow ``load_cert_chain`` or RSA
+deterministic delay (mimicking a slow ``load_cert_chain`` or key
 keygen), starts a real ``RemoteAccessServer``, and requires the UDS
 listener to accept a real Unix-domain-socket connection well before
 the SSL build would have finished on the old serialised code path.
@@ -41,6 +41,7 @@ import socket
 import ssl
 import tempfile
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
@@ -79,10 +80,11 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
         def slow_create_ssl_context(
             certfile: str | None = None,
             keyfile: str | None = None,
+            lan_ips: Iterable[str] | None = None,
         ) -> ssl.SSLContext:
             self._ssl_call_started_at = time.monotonic()
             time.sleep(_SSL_DELAY_SECS)
-            ctx = self._original_create_ssl(certfile, keyfile)
+            ctx = self._original_create_ssl(certfile, keyfile, lan_ips)
             self._ssl_call_returned_at = time.monotonic()
             return ctx
 

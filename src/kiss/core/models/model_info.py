@@ -1892,11 +1892,70 @@ def get_fallback_model(model_name: str) -> str | None:
 
     Returns:
         The fallback model name declared in ``MODEL_INFO.json`` (or
-        ``MY_MODELS.json``) via the ``"fallback"`` key, or ``None`` when
-        no fallback is registered or the model is unknown.
+        ``MY_MODELS.json``) via the ``"fallback"`` key; when none is
+        declared, the model's OpenRouter twin (see
+        :func:`openrouter_twin`) if the OpenRouter key is configured;
+        ``None`` when neither exists or the model is unknown.
+    """
+    declared = declared_fallback(model_name)
+    if declared or _lookup_model_info(model_name) is None:
+        return declared
+    if not getattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", ""):
+        return None
+    return openrouter_twin(model_name)
+
+
+def declared_fallback(model_name: str) -> str | None:
+    """Return the ``fallback`` the catalog declares for *model_name*, if any.
+
+    Unlike :func:`get_fallback_model` this never falls through to the
+    OpenRouter twin, so callers can tell a fallback the user chose (which
+    lives wherever the user's ``model_config`` points) from the implicit
+    cross-provider twin.
+
+    Args:
+        model_name: The model name reported by the agent.
+
+    Returns:
+        The declared fallback model name, or ``None`` when the entry
+        declares none or the model is unknown.
     """
     info = _lookup_model_info(model_name)
-    return info.fallback if info is not None else None
+    return info.fallback if info is not None and info.fallback else None
+
+
+def _twin_key(name: str) -> str:
+    """Normalise a model name for twin matching: ``claude-fable-5-1`` == ``claude-fable-5.1``."""
+    return name.lower().replace(".", "-")
+
+
+def openrouter_twin(model_name: str) -> str | None:
+    """Return the ``openrouter/<vendor>/<model>`` catalog entry serving the same model.
+
+    A direct-provider name (no ``/``, e.g. ``claude-fable-5-1``) is matched
+    against the last path segment of every ``openrouter/`` catalog key with
+    dots and dashes treated alike (``openrouter/anthropic/claude-fable-5.1``).
+    Used as the automatic fallback when the direct provider rejects the
+    request for a billing or availability reason: the same model keeps
+    running, only the billing route changes.
+
+    Args:
+        model_name: A model name from the catalog.
+
+    Returns:
+        The OpenRouter catalog key, or ``None`` when *model_name* already
+        names a routed model (contains ``/``) or has no twin.
+    """
+    bare = _strip_provider_prefix(model_name)
+    if "/" in bare:
+        return None
+    wanted = _twin_key(bare)
+    for key in MODEL_INFO:
+        if not key.startswith("openrouter/") or "/~" in key:
+            continue
+        if _twin_key(key.rsplit("/", 1)[-1]) == wanted:
+            return key
+    return None
 
 
 def get_max_context_length(model_name: str) -> int:

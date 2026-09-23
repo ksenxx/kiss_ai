@@ -12,6 +12,7 @@ import os
 import queue
 import shlex
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ from docker.models.containers import Container  # type: ignore[assignment]
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
 from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
+from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 #: Default cap on the characters a single command may return, matching
 #: ``UsefulTools.Bash``.  Without it an unbounded ``pip install`` log goes
 #: straight into the conversation and blows the model's context window.
-MAX_OUTPUT_CHARS = 50000
+MAX_OUTPUT_CHARS = DEFAULT_CONFIG.tool_output_max_chars
 
 #: Environment variable used to tag a streaming exec — and every process
 #: it spawns — so a timed-out command can be killed by matching
@@ -47,6 +49,23 @@ _EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
 #: indefinitely delayed start costs one inspect every few seconds.
 _REAP_POLL_INTERVAL_S = 0.2
 _REAP_POLL_MAX_INTERVAL_S = 5.0
+
+#: ``docker_image`` spelling that attaches to an already running container
+#: (``container:<name-or-id>``) instead of starting one from an image.
+ATTACH_PREFIX = "container:"
+
+#: Docker label stamped on every container ``open()`` starts, valued
+#: :func:`owner_label_value` of the starting process.  The daemon is shared
+#: with other work (benchmarks, concurrent test processes), so the image
+#: alone cannot tell a container of this process from a stranger's; the
+#: label lets bookkeeping and cleanup filter with
+#: ``containers.list(filters={"label": f"{OWNER_LABEL}={owner_label_value()}"})``.
+OWNER_LABEL = "kiss.owner"
+
+
+def owner_label_value() -> str:
+    """Return the :data:`OWNER_LABEL` value of the current process (``host:pid``)."""
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _new_utf8_decoder() -> Any:
@@ -137,7 +156,12 @@ class DockerManager:
         """Initialize the Docker client.
 
         Args:
-            image_name: The name of the Docker image (e.g., 'ubuntu', 'python')
+            image_name: The name of the Docker image (e.g., 'ubuntu', 'python'),
+                or ``container:<name-or-id>`` to attach to a container that
+                is already running.  An attached container is owned by the
+                caller: ``open()`` looks it up instead of starting one,
+                commands run in the container's own ``WorkingDir``, no shared
+                volume is mounted, and ``close()`` leaves it running.
             tag: The tag/version of the image (default: 'latest')
             workdir: The working directory inside the container
             mount_shared_volume: Whether to mount a shared volume. Set to False
@@ -165,7 +189,11 @@ class DockerManager:
         # ``run_commands_parallel`` kills its running execs on it.
         self.stop_event: threading.Event | None = None
 
-        if ":" in image_name:  # pragma: no branch
+        self.attached_container: str | None = None
+        if image_name.startswith(ATTACH_PREFIX):
+            self.attached_container = image_name[len(ATTACH_PREFIX):]
+            self.image, self.tag = "", ""
+        elif ":" in image_name:
             self.image, self.tag = image_name.rsplit(":", 1)
         else:
             self.image = image_name
@@ -203,6 +231,11 @@ class DockerManager:
                     f"{self.host_shared_path} could not be removed; "
                     "delete it and call open() again."
                 )
+        if self.attached_container is not None:
+            self.container = self.client.containers.get(self.attached_container)
+            self.workdir = self.container.attrs["Config"].get("WorkingDir") or "/"
+            print(f"Attached to running container {(self.container.id or '')[:12]}")
+            return
         image = self.image
         tag = self.tag
         full_image_name = f"{image}:{tag}"
@@ -218,6 +251,7 @@ class DockerManager:
             "tty": True,
             "stdin_open": True,
             "command": "/bin/bash",
+            "labels": {OWNER_LABEL: owner_label_value()},
         }
         if self.mount_shared_volume:
             self.host_shared_path = tempfile.mkdtemp()
@@ -547,14 +581,20 @@ class DockerManager:
             (stderr_parts if is_stderr else stdout_parts).append(text)
             self.stream_callback(text)
 
-        if not eof:
-            self._kill_exec(token)
-            return f"Error: command timed out after {timeout_seconds}s"
-
-        exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
         output = "\n".join(
             part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
         )
+        if not eof:
+            self._kill_exec(token)
+            # The output produced before the deadline is what tells the
+            # model whether the command was hung or merely slow, so it is
+            # returned with the error instead of being discarded.
+            message = f"Error: command timed out after {timeout_seconds}s"
+            if output:
+                message += f" and was killed. Output before the timeout:\n{output}"
+            return _truncate_output(message, max_output_chars)
+
+        exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
         return _truncate_output(_with_exit_code(output, exit_code), max_output_chars)
 
     def _reap_timed_out_exec(self, exec_id: str, token: str) -> None:
@@ -672,6 +712,10 @@ class DockerManager:
         if self.container is None:
             print("No container to close.")
             self._remove_shared_volume_dir()
+            return
+        if self.attached_container is not None:
+            # The caller owns an attached container: only drop the handle.
+            self.container = None
             return
 
         container_id = self.container.id[:12] if self.container.id else "unknown"

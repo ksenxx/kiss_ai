@@ -281,6 +281,36 @@ def is_implementation_task(task: str) -> bool:
     return _IMPLEMENTATION_WORDS.search(task) is not None
 
 
+# A ``\\`` pair, or a lone backslash before a character that is not a JSON
+# escape (``\|``, ``\(``, ``\.`` in grep/sed patterns).  Replacing every
+# match with a pair leaves valid pairs alone and repairs the lone ones.
+_LONE_BACKSLASH = re.compile(r'\\\\|\\(?![/"bfnrtu])')
+
+
+def _decode_json_leniently(text: str) -> object:
+    """Decode *text* as JSON, repairing two mistakes models keep making.
+
+    Shell commands inside JSON strings carry ``\\|`` / ``\\(`` escapes
+    that are invalid JSON, and heredocs carry raw newlines.  Strict
+    decoding failed 21 reviewer calls in one day, each a wasted step, so
+    the raw control characters are accepted (``strict=False``) and, when
+    that still fails, lone backslashes are doubled before a second try.
+
+    Args:
+        text: The raw JSON text.
+
+    Returns:
+        The decoded value.
+
+    Raises:
+        ValueError: If the text is not JSON even after the repair.
+    """
+    try:
+        return json.loads(text, strict=False)
+    except ValueError:
+        return json.loads(_LONE_BACKSLASH.sub(r"\\\\", text), strict=False)
+
+
 def parse_tasks_json(tasks: str, name: str = "tasks") -> list[str]:
     """Parse a JSON-array-of-strings tool argument strictly.
 
@@ -303,9 +333,12 @@ def parse_tasks_json(tasks: str, name: str = "tasks") -> list[str]:
     """
     stripped = tasks.strip()
     try:
-        parsed = json.loads(stripped)
+        parsed = _decode_json_leniently(stripped)
     except (ValueError, TypeError):
-        hint = ""
+        hint = (
+            " Inside a JSON string every backslash must be doubled (write "
+            '\\\\| for grep\'s \\|) and a newline written as \\n.'
+        )
         if stripped.startswith("$(") or stripped.startswith("`"):
             hint = (
                 " Shell substitutions are not expanded in tool arguments; "

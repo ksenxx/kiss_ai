@@ -74,7 +74,7 @@ class _CapturingWebPrinter(WebPrinter):
         self.sent: list[dict[str, Any]] = []
         self._sent_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str) -> None:
+    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
         """Record every JSON payload that would be sent to clients."""
         with self._sent_lock:
             self.sent.append(json.loads(data))

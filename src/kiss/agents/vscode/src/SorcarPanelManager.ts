@@ -15,7 +15,7 @@ import {
   clearWebviewNotificationPoster,
   setWebviewNotificationPoster,
 } from './WebviewNotifications';
-import {MetaPanelValues, ToWebviewMessage} from './types';
+import {MetaPanelValues, TaskUpdateState, ToWebviewMessage} from './types';
 
 /** The webview panel viewType of an editor-tab chat. */
 export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
@@ -81,8 +81,8 @@ interface ChatPanel {
    * without waiting for the panel's next report.
    */
   metaValues?: MetaPanelValues;
-  /** The tmp/PROGRESS.md markdown that came with metaValues. */
-  metaProgressMd?: string;
+  /** The task-update report state that came with metaValues. */
+  metaTaskUpdate?: TaskUpdateState | null;
   /**
    * The chat id and task id the panel last reported showing
    * (activeTask), cached so a panel switch can point the history
@@ -147,7 +147,7 @@ export class SorcarPanelManager {
   // sidebar's Task Info view (see extension.ts setMetaSink wiring).
   private _metaSink?: (
     values: MetaPanelValues | null,
-    progressMd: string,
+    taskUpdate: TaskUpdateState | null,
   ) => void;
   // Where the ACTIVE panel's chat / task ids go: the primary sidebar's
   // history panel (see extension.ts setActiveTaskSink wiring).
@@ -353,10 +353,25 @@ export class SorcarPanelManager {
    * registered after the panels never starts stale.
    */
   public setMetaSink(
-    sink: (values: MetaPanelValues | null, progressMd: string) => void,
+    sink: (
+      values: MetaPanelValues | null,
+      taskUpdate: TaskUpdateState | null,
+    ) => void,
   ): void {
     this._metaSink = sink;
     this._pushActiveMeta();
+  }
+
+  /**
+   * The Task Info view's refresh button: ask the ACTIVE chat editor
+   * panel to poll the daemon for its task update with `refresh: true`
+   * (the panel's metainfo block owns the poll; the Task Info view
+   * never polls).  No-op without an active panel.
+   */
+  public refreshActiveTaskUpdate(): void {
+    this._activePanel()?.panel.webview.postMessage({
+      type: 'refreshTaskUpdate',
+    } as ToWebviewMessage);
   }
 
   /**
@@ -384,7 +399,7 @@ export class SorcarPanelManager {
     this._pushActiveTask();
     if (!this._metaSink) return;
     const cp = this._activePanel();
-    this._metaSink(cp?.metaValues ?? null, cp?.metaProgressMd ?? '');
+    this._metaSink(cp?.metaValues ?? null, cp?.metaTaskUpdate ?? null);
   }
 
   /** Relay the ACTIVE panel's cached chat / task ids to its sink. */
@@ -762,7 +777,7 @@ export class SorcarPanelManager {
         break;
       case 'metaUpdate':
         cp.metaValues = event.values;
-        cp.metaProgressMd = event.progressMd;
+        cp.metaTaskUpdate = event.taskUpdate;
         if (this._activePanel() === cp) this._pushActiveMeta();
         break;
       case 'chatBound':

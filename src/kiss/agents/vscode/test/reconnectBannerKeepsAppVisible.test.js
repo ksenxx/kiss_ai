@@ -395,10 +395,11 @@ async function testSaveHeldBackWhileDaemonDown() {
   console.log('PASS file save is held back while the daemon is down');
 }
 
-// The draft typed before the reload comes back in the reloaded page:
-// shown at once in the boot tab and carried to the tab the registry
-// snapshot puts on screen (the restored active tab when it still
-// exists, the first visible tab otherwise).
+// The draft typed before the page goes away (the user reloads it, or
+// the phone's browser evicts and restores the tab) comes back in the
+// fresh page: shown at once in the boot tab and carried to the tab the
+// registry snapshot puts on screen (the restored active tab when it
+// still exists, the first visible tab otherwise).
 function testComposerDraftSurvivesReload() {
   const first = makeWebview();
   send(first.win, {type: 'daemonStatus', connected: true});
@@ -414,7 +415,7 @@ function testComposerDraftSurvivesReload() {
   activateTab(first.win, 't2');
   first.win.document.getElementById('task-input').value = 'half-written prompt';
   send(first.win, {type: 'daemonStatus', connected: false, reconnecting: true});
-  // The shim reloads on reconnect: the page goes down.
+  // The page goes down while the socket is out.
   first.win.dispatchEvent(new first.win.Event('pagehide'));
   const persisted = first.getState();
   assert.deepStrictEqual(draftsOf(first.getState), [
@@ -506,7 +507,7 @@ function testComposerDraftSurvivesReload() {
     '',
   );
   fourth.win.close();
-  console.log('PASS the composer draft survives the reconnect reload');
+  console.log('PASS the composer draft survives a page reload');
 }
 
 // A prompt sent into a connection that died silently: the composer is

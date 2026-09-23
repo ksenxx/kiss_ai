@@ -444,6 +444,10 @@ _MAX_FILE_USAGE_ENTRIES = 10000
 
 _MAX_FREQUENT_TASKS = 100
 
+# Cap on the ``steer_inputs`` table (messages typed into a running
+# task's composer, kept only so autocomplete can offer them again).
+_MAX_STEER_INPUTS = 1000
+
 _OWNER_DIR_NAME = "task-owners"
 
 _owner_state: tuple[str, str, IO[Any]] | None = None
@@ -899,11 +903,20 @@ _HISTORY_SELECT = (
     "SELECT id, timestamp, task, has_events, result, chat_id, "
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, is_worktree, auto_commit_mode, "
-    "start_ts, end_ts, is_favorite, parent_task_id, max_budget "
+    "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
+    "is_side_channel "
     "FROM task_history "
 )
 
 _HISTORY_NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
+
+# Row shape shared by the composer-history queries
+# (``_prefix_match_tasks``, ``_load_input_history``): task_history rows
+# are UNIONed with ``steer_inputs`` rows, whose ``rid`` is 0 so a
+# timestamp tie is broken in favour of the task_history row.
+_INPUT_TEXTS_SELECT = (
+    "SELECT task, timestamp, rowid AS rid FROM task_history "
+)
 
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
@@ -998,9 +1011,12 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["max_budget"] = _safe_float(row["max_budget"], 0.0)
         payload["is_favorite"] = bool(row["is_favorite"])
         if row["parent_task_id"]:
-            payload["subagent"] = {
+            sub: dict[str, object] = {
                 "parent_task_id": _safe_str(row["parent_task_id"]),
             }
+            if row["is_side_channel"]:
+                sub["side_channel"] = True
+            payload["subagent"] = sub
     except (KeyError, IndexError):
         return ""
     return _dumps_extra(payload) if payload else ""
@@ -1205,7 +1221,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             max_budget REAL DEFAULT 0.0,
             -- Token of the process that created the row; see
             -- _process_owner_token / _recover_orphaned_tasks.
-            owner TEXT DEFAULT ''
+            owner TEXT DEFAULT '',
+            -- 1 for a side-channel sub-agent (the /ask answerer): its
+            -- result lands in the parent's transcript, so replays close
+            -- its nested tab instead of re-opening it.
+            is_side_channel INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1235,6 +1255,14 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS frequent_tasks (
             task TEXT PRIMARY KEY,
             count INTEGER NOT NULL DEFAULT 0,
+            timestamp REAL NOT NULL DEFAULT 0
+        );
+        -- Text the user typed into a RUNNING task's composer (steer
+        -- mode).  Such a message never gets a task_history row, so it
+        -- is remembered here for the composer's autocomplete (prefix
+        -- completions, ghost text, ArrowUp history).
+        CREATE TABLE IF NOT EXISTS steer_inputs (
+            text TEXT PRIMARY KEY,
             timestamp REAL NOT NULL DEFAULT 0
         );
         -- Claimed failed-event journal snapshots whose rows have been
@@ -1271,6 +1299,7 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     added_columns = (
         ("owner", "TEXT DEFAULT ''"),
         ("max_budget", "REAL DEFAULT 0.0"),
+        ("is_side_channel", "INTEGER DEFAULT 0"),
     )
     for name, column_ddl in added_columns:
         if name in cols:
@@ -1772,6 +1801,11 @@ def _add_task(
     db = _get_db()
     payload = dict(extra) if extra else {}
     parent_task_id = _extract_parent_task_id(payload)
+    sub = payload.get("subagent")
+    is_side_channel = (
+        1 if parent_task_id and isinstance(sub, dict)
+        and sub.get("side_channel") else 0
+    )
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = _allocate_chat_id()
@@ -1780,8 +1814,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
-            "parent_task_id, max_budget, owner) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner, is_side_channel) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -1800,6 +1834,7 @@ def _add_task(
                 parent_task_id,
                 _safe_float(payload.get("max_budget"), 0.0),
                 _process_owner_token(),
+                is_side_channel,
             ),
         )
     _invalidate_chat_context_cache(chat_id)
@@ -1933,15 +1968,78 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+        pattern = escaped + "*"
         rows = db.execute(
-            "SELECT task FROM task_history "
-            "WHERE task GLOB ? AND LENGTH(task) > ? "
+            "SELECT task FROM ("
+            + _INPUT_TEXTS_SELECT
+            + f"WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rowid) DESC LIMIT ?",
-            (escaped + "*", len(query), limit),
+            "UNION ALL "
+            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs "
+            "WHERE text GLOB ? AND LENGTH(text) > ?"
+            ") GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC LIMIT ?",
+            (pattern, len(query), pattern, len(query), limit),
         ).fetchall()
     return [row["task"] for row in rows]
+
+
+def _load_input_history() -> list[str]:
+    """Return every distinct text the user ever typed into the composer.
+
+    Combines the listable ``task_history`` rows (sub-agent rows
+    excluded) with the ``steer_inputs`` table, most recent first —
+    a text's position is that of its most recent use in either
+    table.  Feeds the composer's ArrowUp history.  Thread-safe.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task FROM ("
+            + _INPUT_TEXTS_SELECT
+            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            "UNION ALL "
+            "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
+            ") GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC",
+        ).fetchall()
+    return [row["task"] for row in rows]
+
+
+def _record_steer_input(text: str) -> None:
+    """Remember *text* typed into a running task's composer.
+
+    Upserts the ``steer_inputs`` row so a repeated message only
+    refreshes its ``timestamp``.  The table is capped at
+    :data:`_MAX_STEER_INPUTS` rows: inserting a new text beyond the cap
+    first evicts the oldest row, inside the same ``BEGIN IMMEDIATE``
+    transaction (two processes could otherwise both see "under the
+    cap" and both insert).
+
+    Args:
+        text: The message as typed.  Blank strings are ignored.
+    """
+    if not text.strip():
+        return
+    db = _get_db()
+    now = time.time()
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        existing = db.execute(
+            "SELECT 1 FROM steer_inputs WHERE text = ?", (text,),
+        ).fetchone()
+        if existing is None:
+            row = db.execute("SELECT COUNT(*) FROM steer_inputs").fetchone()
+            if row[0] >= _MAX_STEER_INPUTS:
+                db.execute(
+                    "DELETE FROM steer_inputs WHERE text = "
+                    "(SELECT text FROM steer_inputs "
+                    "ORDER BY timestamp ASC LIMIT 1)"
+                )
+        db.execute(
+            "INSERT INTO steer_inputs (text, timestamp) VALUES (?, ?) "
+            "ON CONFLICT(text) DO UPDATE SET timestamp = ?",
+            (text, now, now),
+        )
 
 
 def _search_history(
@@ -2552,6 +2650,28 @@ def _add_task_usage(
             (task_id,),
         ).fetchone()
     return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
+
+
+def _task_is_finished(task_id: str) -> bool:
+    """Return whether *task_id*'s row carries its end timestamp.
+
+    The end timestamp is written by the run's final save
+    (:meth:`ChatSorcarAgent.run`), so a true result means the row's
+    ``tokens`` / ``cost`` / ``steps`` are final and later spend on the
+    task's behalf must be added with :func:`_add_task_usage` rather
+    than banked on the live agent.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+
+    Returns:
+        True when the row exists and its ``end_ts`` is set.
+    """
+    with _rw_lock.read_lock():
+        row = _get_db().execute(
+            "SELECT end_ts FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    return bool(row and _safe_int(row["end_ts"], 0))
 
 
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {

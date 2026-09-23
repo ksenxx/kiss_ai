@@ -1070,9 +1070,11 @@ guard_vsix_tracking() {
 # dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
 # defeating the trap fix above.  Ignored dispositions survive exec, so
 # tee inherits SIG_IGN and keeps draining until bash exits and closes
-# the pipe.  tee inherits the update-lock fd 9 as well, harmlessly: its
-# lifetime ends with the pipe, i.e. with this shell.
-exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
+# the pipe.  ``9>&-`` keeps the update-lock fd out of tee: tee outlives
+# this shell by the few milliseconds it takes to see EOF and exit, and
+# it closes its stdout first (coreutils ``close_stdout``), so a caller
+# that saw our output end would otherwise find the lock still held.
+exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
 
 {
     echo "=== KISS Sorcar Source Install ==="
