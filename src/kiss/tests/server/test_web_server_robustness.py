@@ -17,8 +17,8 @@ Coverage:
 * M2 — ``RemoteAccessServer.__init__`` does not mutate
   ``os.environ["KISS_WORKDIR"]``; per-instance ``work_dir`` is used.
 * M3 — the SSL context pins ``minimum_version >= TLSv1_2``.
-* M4 — ``_create_ssl_context`` regenerates a self-signed cert that is
-  expired or expiring within 30 days.
+* M4 — ``_create_ssl_context`` regenerates the auto-generated server
+  cert when it is expired or expiring within 30 days.
 * M5 — ``_spawn_cloudflared`` retries with a fresh metrics port when
   the subprocess exits immediately (TOCTOU bind collision).
 * M7 — ``restoredTabs`` and ``attachments`` lists are clamped, and
@@ -51,13 +51,14 @@ import pytest
 from websockets.asyncio.client import connect
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server import tls_certs
 from kiss.server import web_server as ws_mod
+from kiss.server.tls_certs import cert_needs_renewal
 from kiss.server.web_server import (
     RemoteAccessServer,
     WebPrinter,
     _create_ssl_context,
     _generate_self_signed_cert,
-    _self_signed_cert_needs_renewal,
 )
 
 
@@ -227,7 +228,7 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
         ws_mod._TLS_DIR = self._orig_tls_dir
 
     def test_default_cert_is_long_lived(self) -> None:
-        """Newly-generated cert validity is 10 years (M4 bump from 365d)."""
+        """The CA lives ~10 years; the server cert stays within Apple's 825-day cap."""
         from cryptography import x509
 
         cert_path = self._tmp / "cert.pem"
@@ -235,30 +236,39 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
         _generate_self_signed_cert(cert_path, key_path)
         cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
         lifetime = cert.not_valid_after_utc - cert.not_valid_before_utc
+        self.assertGreater(lifetime, datetime.timedelta(days=365 * 2))
+        self.assertLessEqual(
+            lifetime, datetime.timedelta(days=825),
+            f"Server cert lifetime {lifetime.days}d exceeds Apple's 825-day limit",
+        )
+        ca = x509.load_pem_x509_certificate(
+            (self._tmp / tls_certs.CA_CERT_FILE).read_bytes(),
+        )
+        ca_lifetime = ca.not_valid_after_utc - ca.not_valid_before_utc
         self.assertGreater(
-            lifetime, datetime.timedelta(days=365 * 9),
-            f"Cert lifetime {lifetime.days}d is too short; expected ~10y",
+            ca_lifetime, datetime.timedelta(days=365 * 9),
+            f"CA lifetime {ca_lifetime.days}d is too short; expected ~10y",
         )
 
     def test_needs_renewal_helper_detects_expired(self) -> None:
-        """``_self_signed_cert_needs_renewal`` returns True for an expired cert."""
+        """``cert_needs_renewal`` returns True for an expired cert."""
         cert_path = self._tmp / "cert.pem"
         key_path = self._tmp / "key.pem"
         _write_expired_cert(cert_path, key_path)
-        self.assertTrue(_self_signed_cert_needs_renewal(cert_path))
+        self.assertTrue(cert_needs_renewal(cert_path))
 
     def test_needs_renewal_helper_negative(self) -> None:
         """A freshly-issued cert does not need renewal."""
         cert_path = self._tmp / "cert.pem"
         key_path = self._tmp / "key.pem"
         _generate_self_signed_cert(cert_path, key_path)
-        self.assertFalse(_self_signed_cert_needs_renewal(cert_path))
+        self.assertFalse(cert_needs_renewal(cert_path))
 
     def test_needs_renewal_helper_handles_corrupt_cert(self) -> None:
         """A corrupt cert is treated as needing renewal."""
         cert_path = self._tmp / "cert.pem"
         cert_path.write_bytes(b"this is not a valid PEM certificate")
-        self.assertTrue(_self_signed_cert_needs_renewal(cert_path))
+        self.assertTrue(cert_needs_renewal(cert_path))
 
     def test_create_ssl_context_regenerates_expired_cert(self) -> None:
         """Calling ``_create_ssl_context`` on an expired cert regenerates it."""
@@ -275,7 +285,7 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
             old_bytes, new_bytes,
             "Expired cert should have been regenerated",
         )
-        self.assertFalse(_self_signed_cert_needs_renewal(cert_path))
+        self.assertFalse(cert_needs_renewal(cert_path))
 
 
 def _write_expired_cert(cert_path: Path, key_path: Path) -> None:

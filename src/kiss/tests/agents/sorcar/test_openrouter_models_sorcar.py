@@ -60,6 +60,12 @@ _FREE_TOOL_MODELS = [
     "openrouter/z-ai/glm-5.2:free",
 ]
 
+# Per-request cap for one ``:free`` candidate.  The free tier queues
+# requests for minutes when saturated; the production client waits 1800 s,
+# which would spend the whole test timeout on a single slow candidate
+# instead of moving on to the next one the way a 429 does.
+_FREE_TIER_REQUEST_TIMEOUT_S = 120.0
+
 
 def _expected_transport_class(name: str) -> type[OpenAICompatibleBase]:
     """Return the adapter class the factory must build for *name*.
@@ -176,6 +182,9 @@ class TestSorcarOpenRouterLive:
                 f"set_model built {type(agent.model).__name__} with "
                 f"base_url={agent.model.base_url!r} for an OpenRouter model"
             )
+            agent.model.client = agent.model.client.with_options(
+                timeout=_FREE_TIER_REQUEST_TIMEOUT_S
+            )
             try:
                 _run_tool_turn(
                     agent.model,
@@ -185,10 +194,15 @@ class TestSorcarOpenRouterLive:
                 )
                 hop2_done = True
                 break
-            except (openai.RateLimitError, openai.NotFoundError) as e:
+            except (
+                openai.RateLimitError, openai.NotFoundError, openai.APITimeoutError,
+                TimeoutError,
+            ) as e:
                 # 429: free tier saturated; 404: model dropped from the
-                # free tier since this list was last refreshed.  Either
-                # way, try the next candidate.
+                # free tier since this list was last refreshed; a timeout
+                # (the client's, or the stream stall watchdog's
+                # ``TimeoutError``): the candidate is queued behind the
+                # free-tier backlog.  Either way, try the next candidate.
                 candidate_errors.append(f"{name}: {e}")
         if not hop2_done:
             pytest.skip(

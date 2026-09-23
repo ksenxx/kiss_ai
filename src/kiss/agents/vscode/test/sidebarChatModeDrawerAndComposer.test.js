@@ -12,8 +12,10 @@
 //   hides the burger and the top status bar, and turns #meta-panel
 //   into a right-hand drawer — the mobile remote webapp's behavior;
 // * the drawer toggle/close/backdrop/Escape flows work, the closed
-//   drawer is inert, and the 1s getInfoFile poll runs only while the
-//   drawer is open and a task runs;
+//   drawer is inert, and the 5s getTaskUpdate poll runs only while the
+//   drawer is open and a task runs; the #meta-info refresh button posts
+//   a getTaskUpdate with refresh:true and mirrors the agent's running
+//   state;
 // * the host's `openChatFromHistory` message (a primary-sidebar
 //   history click in sidebar mode) mirrors the in-page history rows:
 //   switch to the chat's tab, resume the chat in a fresh tab, or show
@@ -30,6 +32,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
+const POLL_MS = 5000;
 
 let passed = 0;
 const failures = [];
@@ -44,6 +47,45 @@ async function test(name, fn) {
     console.log(`  \u2717 ${name}`);
     console.log(`      ${e.stack || e.message}`);
   }
+}
+
+/**
+ * Replace the window's setInterval/clearInterval with a fake clock so
+ * the 5s task-update poll can be advanced deterministically instead of
+ * waited out. setTimeout stays real (message handlers debounce with it).
+ *
+ * @param {Window} win The jsdom window, before main.js is evaluated.
+ * @returns {{tick: function(number), intervals: Array}} `tick(ms)`
+ *   advances the clock and fires every due interval callback;
+ *   `intervals` lists the live intervals as {cb, ms, next}.
+ */
+function installFakeIntervals(win) {
+  let now = 0;
+  let nextId = 1;
+  const intervals = [];
+  win.setInterval = function (cb, ms) {
+    const iv = {id: nextId++, cb, ms: Number(ms) || 0, next: now + (Number(ms) || 0)};
+    intervals.push(iv);
+    return iv.id;
+  };
+  win.clearInterval = function (id) {
+    const i = intervals.findIndex(iv => iv.id === id);
+    if (i >= 0) intervals.splice(i, 1);
+  };
+  function tick(ms) {
+    const target = now + ms;
+    for (;;) {
+      const due = intervals.filter(iv => iv.next <= target);
+      if (due.length === 0) break;
+      due.sort((a, b) => a.next - b.next);
+      const iv = due[0];
+      now = iv.next;
+      iv.next += iv.ms;
+      iv.cb();
+    }
+    now = target;
+  }
+  return {tick, intervals};
 }
 
 function makeWebview(bodyAttrs) {
@@ -72,6 +114,7 @@ function makeWebview(bodyAttrs) {
       },
     };
   };
+  const timers = installFakeIntervals(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
@@ -79,7 +122,7 @@ function makeWebview(bodyAttrs) {
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=sidebarchat-main.js',
   );
-  return {win, posted};
+  return {win, posted, tick: timers.tick, intervals: timers.intervals};
 }
 
 function injectMainCss(win) {
@@ -106,8 +149,40 @@ function drawerOpen(win) {
   return win.document.getElementById('meta-panel').classList.contains('open');
 }
 
+function polls(wv) {
+  return wv.posted.filter(m => m.type === 'getTaskUpdate');
+}
+
 function pollCount(wv) {
-  return wv.posted.filter(m => m.type === 'getInfoFile').length;
+  return polls(wv).length;
+}
+
+function lastPoll(wv) {
+  const all = polls(wv);
+  return all[all.length - 1];
+}
+
+/** A taskUpdate reply answering *poll*, with the given overrides. */
+function reply(win, poll, fields) {
+  send(
+    win,
+    Object.assign(
+      {
+        type: 'taskUpdate',
+        tabId: poll.tabId,
+        token: poll.token,
+        taskId: 'task-1',
+        exists: true,
+        sig: '',
+        content: '',
+        error: '',
+        running: false,
+        cost: 0,
+        updatedAt: 0,
+      },
+      fields,
+    ),
+  );
 }
 
 function chatTabs(win) {
@@ -218,8 +293,9 @@ async function main() {
   );
 
   await test(
-    'getInfoFile polls only while the drawer is open and a task runs',
-    async () => {
+    'getTaskUpdate polls every 5s only while the drawer is open and a ' +
+      'task runs, and the reply renders in the drawer',
+    () => {
       const wv = makeWebview('');
       const win = wv.win;
       send(win, {
@@ -227,22 +303,130 @@ async function main() {
         config: {work_dir: '/cfg/dir', max_budget: 42},
         apiKeys: {},
       });
+      wv.tick(POLL_MS * 2);
+      assert.strictEqual(pollCount(wv), 0, 'no task, no poll');
       send(win, {type: 'status', running: true});
-      await sleep(1300);
+      wv.tick(POLL_MS * 2);
       assert.strictEqual(pollCount(wv), 0, 'a closed drawer must not poll');
       click(win, 'meta-drawer-btn');
-      await sleep(1300);
-      const polls = wv.posted.filter(m => m.type === 'getInfoFile');
-      assert.ok(polls.length >= 1, 'opening the drawer starts the poll');
-      assert.strictEqual(polls[polls.length - 1].workDir, '/cfg/dir');
+      assert.strictEqual(pollCount(wv), 1, 'opening the drawer polls at once');
+      assert.ok(
+        wv.intervals.some(iv => iv.ms === POLL_MS),
+        'the poll timer ticks every 5000 ms',
+      );
+      const poll = lastPoll(wv);
+      assert.deepStrictEqual(Object.keys(poll).sort(), [
+        'knownSig',
+        'refresh',
+        'tabId',
+        'token',
+        'type',
+      ]);
+      assert.ok(!('workDir' in poll), 'the poll names a tab, not a workdir');
+      assert.ok(poll.tabId, 'the poll targets the visible chat tab');
+      assert.strictEqual(poll.knownSig, '');
+      assert.strictEqual(typeof poll.token, 'string');
+      assert.strictEqual(poll.refresh, false);
+      wv.tick(POLL_MS - 1);
+      assert.strictEqual(pollCount(wv), 1, 'no poll before the interval');
+      wv.tick(1);
+      assert.strictEqual(pollCount(wv), 2, 'the timer polls at 5000 ms');
+
+      reply(win, poll, {
+        sig: '5:9',
+        content: 'working on **it**\n',
+        updatedAt: Date.now(),
+        cost: 0.12,
+      });
+      const info = win.document.getElementById('meta-info');
+      const content = win.document.getElementById('meta-info-content');
+      assert.ok(info.classList.contains('visible'));
+      assert.ok(
+        content.innerHTML.includes('<strong>it</strong>'),
+        'markdown content goes through marked',
+      );
+      const status = win.document.getElementById('meta-info-status').textContent;
+      assert.ok(/^Updated \d/.test(status), status);
+      assert.ok(status.endsWith(' \u00b7 $0.12'), status);
+      wv.tick(POLL_MS);
+      assert.strictEqual(lastPoll(wv).knownSig, '5:9');
+      reply(win, lastPoll(wv), {unchanged: true});
+      assert.ok(content.innerHTML.includes('<strong>it</strong>'));
+      reply(win, lastPoll(wv), {
+        sig: '6:0',
+        content: '<p>Report <b>html</b></p><script>alert(1)</script>',
+        updatedAt: Date.now(),
+      });
+      assert.ok(content.innerHTML.includes('<b>html</b>'), 'HTML as-is');
+      assert.ok(!content.innerHTML.includes('<script'), 'scripts stripped');
+
       click(win, 'meta-close');
       const count = pollCount(wv);
-      await sleep(1500);
+      wv.tick(POLL_MS * 3);
       assert.strictEqual(
         pollCount(wv),
         count,
         'closing the drawer stops the poll',
       );
+      assert.ok(!wv.intervals.some(iv => iv.ms === POLL_MS));
+    },
+  );
+
+  await test(
+    'the refresh button posts getTaskUpdate refresh:true and mirrors ' +
+      'the agent\'s running state',
+    () => {
+      const wv = makeWebview('');
+      const win = wv.win;
+      send(win, {type: 'status', running: true});
+      click(win, 'meta-drawer-btn');
+      const btn = win.document.getElementById('meta-info-refresh');
+      const status = win.document.getElementById('meta-info-status');
+      const content = win.document.getElementById('meta-info-content');
+      assert.strictEqual(
+        btn.parentElement.parentElement.id,
+        'meta-info',
+        'the button belongs to the task-update subpanel',
+      );
+      const before = pollCount(wv);
+      click(win, 'meta-info-refresh');
+      assert.strictEqual(pollCount(wv), before + 1, 'the click polls at once');
+      const refresh = lastPoll(wv);
+      assert.strictEqual(refresh.type, 'getTaskUpdate');
+      assert.strictEqual(refresh.refresh, true, 'the click asks for a run');
+      assert.ok(!('workDir' in refresh));
+
+      reply(win, refresh, {sig: 'r1', running: true});
+      assert.strictEqual(btn.disabled, true, 'no second run while one runs');
+      assert.ok(btn.classList.contains('spinning'));
+      assert.strictEqual(status.textContent, 'Updating\u2026');
+      assert.ok(
+        win.document.getElementById('meta-info').classList.contains('visible'),
+      );
+      assert.ok(content.innerHTML.includes('Preparing the first update'));
+
+      wv.tick(POLL_MS);
+      assert.strictEqual(lastPoll(wv).refresh, false, 'timer polls are plain');
+      reply(win, lastPoll(wv), {
+        sig: 'r2',
+        running: false,
+        content: '<p>Half <em>done</em></p>',
+        updatedAt: Date.now(),
+        cost: 0.05,
+      });
+      assert.strictEqual(btn.disabled, false, 'the button is usable again');
+      assert.ok(!btn.classList.contains('spinning'));
+      assert.ok(/^Updated \d/.test(status.textContent), status.textContent);
+      assert.ok(status.textContent.endsWith(' \u00b7 $0.05'));
+      assert.ok(content.innerHTML.includes('<em>done</em>'));
+
+      send(win, {type: 'status', running: false});
+      assert.ok(
+        !win.document.getElementById('meta-info').classList.contains('visible'),
+        'the task ending empties the subpanel',
+      );
+      assert.strictEqual(status.textContent, '');
+      assert.strictEqual(btn.disabled, false);
     },
   );
 

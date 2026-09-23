@@ -3237,9 +3237,9 @@
     const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     const composer = document.getElementById('task-input');
     const active = getTab(activeTabId);
-    // Every tab's unsent prompt, keyed by tab id.  The remote webapp
-    // reloads itself when its connection comes back after an outage
-    // (web_server._WS_SHIM_JS) and a webview can be reloaded any time;
+    // Every tab's unsent prompt, keyed by tab id.  The user can reload
+    // the remote webapp any time (a phone's browser also evicts and
+    // restores background pages) and a webview can be reloaded too;
     // the `pagehide` handler below persists the drafts on the way out
     // and the first snapshot after the reload hands them back.  The
     // active tab's draft is what the composer shows, or, when that is
@@ -3957,17 +3957,21 @@
   }
 
   // metainfo-coverage:start
-  // The info subpanel of the docked task-info panel (#meta-info,
-  // remote desktop mode only) mirrors the ./tmp/PROGRESS.md of the task
-  // running in the visible tab (the daemon resolves the task's own
-  // work dir — its worktree for a worktree-mode run — and hides a file
-  // a previous task left behind).  The daemon owns the file, so the
-  // client polls getInfoFile every second — the panel refreshes as
-  // soon as the file changes; the reply's sig (path+mtime+size
-  // fingerprint) makes an unchanged file cost one stat per poll, and
-  // a missing file renders as an empty subpanel.
+  // The info subpanel of the task-info panel (#meta-info) shows the
+  // TASK UPDATE: what the task-update agent
+  // (src/kiss/agents/seas/task_update_sea.py) reports the task running
+  // in the visible tab has done so far and its partial results.  The
+  // daemon owns the report (kiss.server.task_update): it runs the agent
+  // when the tab's task has no report yet, again every 10 minutes while
+  // the panel keeps polling, and at once when the subpanel's refresh
+  // button is pressed.  So the client polls getTaskUpdate every
+  // META_INFO_POLL_MS while the task runs; the reply's sig makes an
+  // unchanged report cost one small message per poll, and a task
+  // without a report yet renders as the subpanel's "updating" state.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
+  const metaInfoStatus = document.getElementById('meta-info-status');
+  const metaInfoRefreshBtn = document.getElementById('meta-info-refresh');
   // The task-info panel and its mobile-drawer controls (the toggle at
   // the tab bar's right edge, the in-panel close button, the dimming
   // backdrop — all remote mobile only, see remote-codex.css).
@@ -3975,25 +3979,25 @@
   const metaOverlay = document.getElementById('meta-overlay');
   const metaDrawerBtn = document.getElementById('meta-drawer-btn');
   const metaCloseBtn = document.getElementById('meta-close');
+  const META_INFO_POLL_MS = 5000;
   let metaInfoSig = '';
-  // The raw markdown behind the info subpanel ('' when hidden): what a
-  // chat editor panel relays to the Task Info view (postMetaUpdate).
-  let metaInfoMd = '';
-  // The poll target: the visible tab and the workdir its panel shows.
-  let metaInfoWorkDir = '';
+  // The report behind the info subpanel (null when hidden): the last
+  // taskUpdate reply's {content, running, updatedAt, cost, error}.
+  // This is what a chat editor panel relays to the Task Info view
+  // (postMetaUpdate), which renders it exactly like this panel does.
+  let metaInfoState = null;
+  // The poll target: the visible chat tab.
   let metaInfoTabId = '';
   // Generation token, bumped on every target switch and echoed by the
-  // daemon: replies are matched against it rather than the workDir
-  // echo, because the server's dispatch may rewrite a degenerate
-  // workDir (root paths are blanked and re-pinned) and a rewritten
-  // echo would never string-match the poll target.
+  // daemon: replies are matched against it, so a late reply for a
+  // former target never paints over the current one.
   let metaInfoGen = 0;
 
   /**
    * Paint *html* into the info subpanel's content div.  The `visible`
    * class on #meta-info follows: while there is nothing to show the
-   * WHOLE subpanel — the tmp/PROGRESS.md header included — stays hidden,
-   * so an idle tab or a missing file leaves no trace in the panel.
+   * WHOLE subpanel — header and refresh button included — stays
+   * hidden, so an idle tab leaves no trace in the panel.
    *
    * @param {string} html Sanitized markup, '' to empty and hide.
    */
@@ -4004,7 +4008,80 @@
   }
 
   /**
-   * The chat tab whose task the info subpanel mirrors: the visible
+   * Render the agent's report body: the agent finishes with HTML, so a
+   * report starting with a tag is sanitized as-is; anything else (an
+   * error line, a model that answered in markdown) goes through marked.
+   *
+   * @param {string} text The report text.
+   * @returns {string} Sanitized markup.
+   */
+  function taskUpdateBodyHTML(text) {
+    if (/^\s*</.test(text)) return kissSanitize(text);
+    if (typeof marked !== 'undefined') return kissSanitize(marked.parse(text));
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  /**
+   * Paint one task-update state into the info subpanel: the report
+   * body, the status line under the header ("Updating…", or the time
+   * and cost of the last run, plus the last run's failure) and the
+   * refresh button's spinning / disabled state.  Shared by the polling
+   * surfaces and the Task Info view (renderMetaState).
+   *
+   * @param {object|null} state {content, running, updatedAt, cost,
+   *   error}, or null to empty and hide the subpanel.
+   */
+  function renderTaskUpdate(state) {
+    if (!metaInfoContent) return;
+    const content =
+      state && typeof state.content === 'string' ? state.content : '';
+    const running = !!(state && state.running);
+    const error = state && typeof state.error === 'string' ? state.error : '';
+    if (!content.trim() && !running && !error) {
+      setMetaInfoHTML('');
+      if (metaInfoStatus) metaInfoStatus.textContent = '';
+      if (metaInfoRefreshBtn) {
+        metaInfoRefreshBtn.disabled = false;
+        metaInfoRefreshBtn.classList.remove('spinning');
+      }
+      return;
+    }
+    if (content.trim()) {
+      setMetaInfoHTML(taskUpdateBodyHTML(content));
+    } else {
+      setMetaInfoHTML(
+        '<p class="meta-info-pending">' +
+          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
+          '</p>',
+      );
+    }
+    if (metaInfoStatus) {
+      let status = '';
+      if (running) {
+        status = 'Updating\u2026';
+      } else if (state.updatedAt) {
+        const d = new Date(Number(state.updatedAt));
+        status =
+          'Updated ' +
+          d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        const cost = Number(state.cost);
+        if (cost > 0) status += ' \u00b7 $' + cost.toFixed(2);
+      }
+      if (error) {
+        status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
+      }
+      metaInfoStatus.textContent = status;
+    }
+    if (metaInfoRefreshBtn) {
+      metaInfoRefreshBtn.disabled = running;
+      metaInfoRefreshBtn.classList.toggle('spinning', running);
+    }
+  }
+
+  /**
+   * The chat tab whose task the info subpanel reports on: the visible
    * tab, except that a content tab (a file or report view) has no
    * task of its own and leaves the task-info panel describing the
    * chat tab it was lent to — so the subpanel stays on that chat tab
@@ -4021,19 +4098,19 @@
   }
 
   /**
-   * Whether this surface currently mirrors tmp/PROGRESS.md at all:
-   * the docked desktop panel (always), the mobile drawer (only while
-   * it is open — a hidden drawer must not poll the phone's network
-   * every second), or an editor-tab chat panel (only while its task
-   * runs, so an idle panel holds no live timer). The two panel-shaped
-   * webviews (history, Task Info) never poll — the Task Info view gets
-   * the file relayed from the active chat panel.
+   * Whether this surface polls for the task update at all: the docked
+   * desktop panel (always), the mobile drawer (only while it is open —
+   * a hidden drawer must not poll the phone's network), or an
+   * editor-tab chat panel (only while its task runs, so an idle panel
+   * holds no live timer). The two panel-shaped webviews (history, Task
+   * Info) never poll — the Task Info view gets the report relayed from
+   * the active chat panel.
    */
   function metaInfoPollWanted() {
     if (document.body.classList.contains('remote-desktop')) return true;
     // An OPEN task-info drawer polls; a hidden one must not poll the
-    // network every second. Both drawer surfaces behave alike: the
-    // mobile remote page and the extension's sidebar chat view.
+    // network. Both drawer surfaces behave alike: the mobile remote
+    // page and the extension's sidebar chat view.
     if (
       (document.body.classList.contains('remote-chat') || SIDEBAR_CHAT_MODE) &&
       metaPanel &&
@@ -4044,17 +4121,22 @@
     return POST_META_UPDATES && isRunning;
   }
 
-  /** Ask the daemon for the visible tab's task's tmp/PROGRESS.md. */
-  function requestInfoFile() {
+  /**
+   * Ask the daemon for the visible tab's task update.
+   *
+   * @param {boolean} [refresh] Make the daemon run the agent now (the
+   *   refresh button) instead of waiting out its 10-minute interval.
+   */
+  function requestTaskUpdate(refresh) {
     if (!metaInfoContent) return;
-    // Only a RUNNING task has a live tmp/PROGRESS.md worth mirroring; an
-    // idle tab's subpanel stays empty and costs the daemon nothing.
-    // The POLLED tab's own flag decides, not the module-level
-    // isRunning: that one lags around tab switches (restoreTab
-    // retargets before the switch applies the destination's running
-    // state, which would fire one poll for an idle tab) and, while a
-    // CONTENT tab is visible, never learns that the owner chat's task
-    // ended (its `status running:false` is not the active tab's).
+    // Only a RUNNING task has an update worth showing; an idle tab's
+    // subpanel stays empty and costs the daemon nothing.  The POLLED
+    // tab's own flag decides, not the module-level isRunning: that one
+    // lags around tab switches (restoreTab retargets before the switch
+    // applies the destination's running state, which would fire one
+    // poll for an idle tab) and, while a CONTENT tab is visible, never
+    // learns that the owner chat's task ended (its `status
+    // running:false` is not the active tab's).
     const pollTab = getTab(metaInfoChatTabId());
     if (pollTab ? !pollTab.isRunning : !isRunning) return;
     if (!metaInfoPollWanted()) return;
@@ -4064,16 +4146,16 @@
     // here: retarget — which clears and repolls — instead of polling
     // the new tab under the old tab's signature and generation.
     if (metaInfoChatTabId() !== metaInfoTabId) {
-      setMetaInfoTarget(metaInfoWorkDir);
+      setMetaInfoTarget();
       return;
     }
     if (!metaInfoTabId) return;
     try {
-      api.getInfoFile({
-        workDir: metaInfoWorkDir,
+      api.getTaskUpdate({
         tabId: metaInfoTabId,
         knownSig: metaInfoSig,
         token: String(metaInfoGen),
+        refresh: !!refresh,
       });
     } catch (_e) {
       // Not connected yet; the next poll retries.
@@ -4081,27 +4163,23 @@
   }
 
   /**
-   * Adopt the visible tab and *wd* as the target the info subpanel
-   * mirrors — *wd* being the SAME workdir the panel's Workdir row
-   * shows (updateMetaTaskDetails drives both), so the subpanel can
-   * never read one directory while the row names another.  A change
-   * of either invalidates the held signature and clears the shown
-   * contents right away — another tab's or workdir's PROGRESS.md must
-   * not survive a tab or config switch, and a late reply for the
-   * former target no longer matches — then polls immediately instead
-   * of waiting out the interval.
+   * Adopt the visible chat tab as the target the info subpanel reports
+   * on.  A change of tab invalidates the held signature and clears the
+   * shown report right away — another tab's update must not survive a
+   * tab switch, and a late reply for the former target no longer
+   * matches — then polls immediately instead of waiting out the
+   * interval.
    */
-  function setMetaInfoTarget(wd) {
+  function setMetaInfoTarget() {
     const tabId = metaInfoChatTabId();
-    if (wd === metaInfoWorkDir && tabId === metaInfoTabId) return;
-    metaInfoWorkDir = wd;
+    if (tabId === metaInfoTabId) return;
     metaInfoTabId = tabId;
     metaInfoSig = '';
     metaInfoGen++;
-    metaInfoMd = '';
-    setMetaInfoHTML('');
+    metaInfoState = null;
+    renderTaskUpdate(null);
     postMetaUpdateSoon();
-    requestInfoFile();
+    requestTaskUpdate();
   }
 
   // Whether the last syncMetaInfoRunning call saw a running task, so
@@ -4114,7 +4192,7 @@
    * (or the user switches to an idle tab) the subpanel empties and
    * hides right away — a late reply for the finished task no longer
    * matches the bumped generation — and when one starts, the first
-   * poll fires immediately instead of waiting out the 1s interval.
+   * poll fires immediately instead of waiting out the interval.
    *
    * @param {boolean} running Whether the visible tab is now running.
    */
@@ -4129,63 +4207,72 @@
       // (remote desktop, an open drawer) needs the explicit one here.
       const hadTimer = metaInfoTimer !== null;
       syncMetaInfoPolling();
-      if (hadTimer) requestInfoFile();
+      if (hadTimer) requestTaskUpdate();
     } else {
       syncMetaInfoPolling();
       metaInfoSig = '';
       metaInfoGen++;
-      metaInfoMd = '';
-      setMetaInfoHTML('');
+      metaInfoState = null;
+      renderTaskUpdate(null);
       postMetaUpdateSoon();
     }
   }
 
-  /** Paint one infoFile reply into the info subpanel. */
-  function renderInfoFileEvent(ev) {
+  /** Paint one taskUpdate reply into the info subpanel. */
+  function renderTaskUpdateEvent(ev) {
     if (!metaInfoContent) return;
-    // A reply for a workdir the panel no longer shows (the poll moved
-    // on with a tab switch) must not overwrite the current one.  The
-    // echoed request token — not the workDir echo, which the server
-    // may have rewritten — names the generation the reply answers.
+    // A reply for a tab the panel no longer shows (the poll moved on
+    // with a tab switch) must not overwrite the current one.  The
+    // echoed request token names the generation the reply answers.
     if ((ev.token || '') !== String(metaInfoGen)) return;
     if (ev.unchanged) return;
     metaInfoSig = typeof ev.sig === 'string' ? ev.sig : '';
-    const text = ev.exists && typeof ev.content === 'string' ? ev.content : '';
-    if (!text.trim()) {
-      metaInfoMd = '';
-      setMetaInfoHTML('');
+    if (!ev.exists) {
+      metaInfoState = null;
+      renderTaskUpdate(null);
       postMetaUpdateSoon();
       return;
     }
-    metaInfoMd = text;
-    if (typeof marked !== 'undefined') {
-      setMetaInfoHTML(kissSanitize(marked.parse(text)));
-    } else {
-      metaInfoContent.textContent = text;
-      if (metaInfoEl) metaInfoEl.classList.add('visible');
-    }
+    metaInfoState = {
+      content: typeof ev.content === 'string' ? ev.content : '',
+      running: !!ev.running,
+      updatedAt: Number(ev.updatedAt) || 0,
+      cost: Number(ev.cost) || 0,
+      error: typeof ev.error === 'string' ? ev.error : '',
+    };
+    renderTaskUpdate(metaInfoState);
     postMetaUpdateSoon();
+  }
+
+  if (metaInfoRefreshBtn) {
+    // The refresh button runs the agent now.  The Task Info view (a
+    // panel-shaped webview that never polls) asks the host to relay
+    // the press to the active chat editor panel, which polls.
+    metaInfoRefreshBtn.addEventListener('click', () => {
+      if (META_PANEL_MODE) {
+        postToHost({type: 'metaRefresh'});
+        return;
+      }
+      requestTaskUpdate(true);
+    });
   }
 
   let metaInfoTimer = null;
 
   /**
-   * Start or stop the 1s info-file poll to match metaInfoPollWanted:
+   * Start or stop the task-update poll to match metaInfoPollWanted:
    * remote desktop mode, an open mobile task-info drawer, or a chat
-   * editor panel with a running task.  The short interval keeps the
-   * mirrored tmp/PROGRESS.md fresh — the panel repaints within a
-   * second of the file changing, and the sig check keeps an unchanged
-   * file at one stat per poll.  Called by applyRemoteDesktop, the
-   * drawer toggle and syncMetaInfoRunning whenever the answer may have
-   * changed.  A timer that ran unconditionally would tick forever in
-   * webviews that can never show the panel — and would keep every
+   * editor panel with a running task.  Called by applyRemoteDesktop,
+   * the drawer toggle and syncMetaInfoRunning whenever the answer may
+   * have changed.  A timer that ran unconditionally would tick forever
+   * in webviews that can never show the panel — and would keep every
    * jsdom-hosted webview's node process alive after its tests finish.
    */
   function syncMetaInfoPolling() {
     const want = metaInfoPollWanted();
     if (want && metaInfoTimer === null) {
-      metaInfoTimer = setInterval(requestInfoFile, 1000);
-      requestInfoFile();
+      metaInfoTimer = setInterval(requestTaskUpdate, META_INFO_POLL_MS);
+      requestTaskUpdate();
     } else if (!want && metaInfoTimer !== null) {
       clearInterval(metaInfoTimer);
       metaInfoTimer = null;
@@ -4195,7 +4282,7 @@
   /**
    * Open or close the mobile task-info drawer (remote < 900px): the
    * right-hand twin of the history drawer, showing the same task-info
-   * panel desktop mode docks. Opening starts the tmp/PROGRESS.md poll
+   * panel desktop mode docks. Opening starts the task-update poll
    * and repolls immediately so the drawer never shows stale contents.
    *
    * @param {boolean} open Whether the drawer should be open.
@@ -4253,7 +4340,7 @@
   // A chat editor panel keeps its (hidden) #meta-list current in every
   // mode — mirrorStatusIntoMetaPanel and updateMetaTaskDetails write it
   // unconditionally — so the panel simply reports those display strings
-  // (plus the raw tmp/PROGRESS.md) to the host whenever they change.
+  // (plus the task-update report) to the host whenever they change.
   // The host caches per panel and forwards the ACTIVE panel's report to
   // the secondary sidebar's Task Info view (see SorcarPanelManager).
   let metaPostTimer = null;
@@ -4301,7 +4388,7 @@
         taskId: metaValueText('meta-task-id'),
         parentTask: metaValueText('meta-parent-id'),
       },
-      progressMd: metaInfoMd,
+      taskUpdate: metaInfoState,
     });
   }
 
@@ -4340,7 +4427,7 @@
   /**
    * Paint one relayed metaState into the Task Info view (meta-panel
    * mode only): the active chat panel's display strings land in the
-   * bullet list, and its tmp/PROGRESS.md markdown renders in the info
+   * bullet list, and its task-update report renders in the info
    * subpanel exactly like the remote desktop panel renders its own.
    *
    * @param {object} ev The metaState message (values may be null: no
@@ -4364,15 +4451,8 @@
     setMetaValue('meta-chat-id', v('chatId'));
     setMetaValue('meta-task-id', v('taskId'));
     setMetaParentTask(v('parentTask') || '\u2014');
-    const md = ev && typeof ev.progressMd === 'string' ? ev.progressMd : '';
-    if (!md.trim()) {
-      setMetaInfoHTML('');
-    } else if (typeof marked !== 'undefined') {
-      setMetaInfoHTML(kissSanitize(marked.parse(md)));
-    } else if (metaInfoContent) {
-      metaInfoContent.textContent = md;
-      if (metaInfoEl) metaInfoEl.classList.add('visible');
-    }
+    const update = ev && ev.taskUpdate && typeof ev.taskUpdate === 'object';
+    renderTaskUpdate(update ? ev.taskUpdate : null);
   }
   // metarelay-coverage:end
 
@@ -7256,6 +7336,241 @@
     explorerRoot = '';
     scmWorkDir = '';
     refreshSidebarDataViews(true);
+    closeWorkDirPanel();
+  }
+
+  // ---- The "Working directory" panel ("..." menu) ----------------------
+  // The directories opened so far as the daemon reports them in
+  // configData.recent_work_dirs: {path, ts} rows, ts = epoch seconds of
+  // the last open, kept most recently opened first.
+  let recentWorkDirs = [];
+  // Sequence of the remote surface's pending listDir check (token
+  // 'workdir:<seq>') and the directory it is checking.
+  let workDirCheckSeq = 0;
+  let workDirCheckPath = '';
+
+  function openWorkDirPanel() {
+    const panel = document.getElementById('workdir-panel');
+    if (!panel) return;
+    setPanelOpen(panel, document.getElementById('workdir-overlay'), true);
+    // The closed sheet is only slid off-screen; `inert` keeps its
+    // controls out of the tab order and the accessibility tree.
+    panel.removeAttribute('inert');
+    panel.setAttribute('aria-hidden', 'false');
+    setWorkDirError('');
+    const input = document.getElementById('workdir-input');
+    if (input) {
+      input.value = '';
+      syncWorkDirOpenBtn();
+    }
+    renderRecentWorkDirs();
+    // Another window may have opened a folder since the last reply.
+    api.getConfig();
+    window.setTimeout(() => {
+      if (input && panel.classList.contains('open')) input.focus();
+    }, 0);
+  }
+
+  function closeWorkDirPanel() {
+    // A check still in flight belongs to the closed panel.
+    workDirCheckSeq++;
+    workDirCheckPath = '';
+    const panel = document.getElementById('workdir-panel');
+    if (!panel || !panel.classList.contains('open')) return;
+    // Focus must not be stranded inside the sheet that just went inert;
+    // it goes back to the "..." button the sheet was opened from.
+    if (panel.contains(document.activeElement)) {
+      const moreBtn = document.getElementById('more-btn');
+      try {
+        if (moreBtn) moreBtn.focus();
+        else document.activeElement.blur();
+      } catch (_e) {}
+    }
+    panel.setAttribute('inert', '');
+    panel.setAttribute('aria-hidden', 'true');
+    setPanelOpen(panel, document.getElementById('workdir-overlay'), false);
+  }
+
+  function setWorkDirError(text) {
+    const el = document.getElementById('workdir-error');
+    if (!el) return;
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  /** Enable the panel's Open button only while its box holds text. */
+  function syncWorkDirOpenBtn() {
+    const btn = document.getElementById('workdir-open-btn');
+    const input = document.getElementById('workdir-input');
+    if (btn && input) btn.disabled = !input.value.trim();
+  }
+
+  /**
+   * Remember the daemon's list of opened working directories and
+   * repaint the panel's list when it is on screen.
+   *
+   * @param {Array} rows configData.recent_work_dirs ({path, ts} rows).
+   */
+  function setRecentWorkDirs(rows) {
+    recentWorkDirs = (Array.isArray(rows) ? rows : [])
+      .filter(
+        r =>
+          r &&
+          typeof r.path === 'string' &&
+          r.path &&
+          Number.isFinite(Number(r.ts)),
+      )
+      .map(r => ({path: r.path, ts: Number(r.ts)}))
+      .sort((a, b) => b.ts - a.ts);
+    const panel = document.getElementById('workdir-panel');
+    if (panel && panel.classList.contains('open')) renderRecentWorkDirs();
+  }
+
+  function renderRecentWorkDirs() {
+    const list = document.getElementById('workdir-list');
+    if (!list) return;
+    list.textContent = '';
+    if (!recentWorkDirs.length) {
+      const empty = document.createElement('div');
+      empty.id = 'workdir-empty';
+      empty.textContent = 'No working directory opened yet.';
+      list.appendChild(empty);
+      return;
+    }
+    const now = Date.now();
+    recentWorkDirs.forEach(entry => {
+      const item = document.createElement('div');
+      item.className = 'workdir-item';
+      item.setAttribute('role', 'listitem');
+      item.tabIndex = 0;
+      item.dataset.path = entry.path;
+      item.title = 'Open ' + entry.path;
+      const pathEl = document.createElement('span');
+      pathEl.className = 'workdir-item-path';
+      pathEl.textContent = entry.path;
+      const ago = document.createElement('span');
+      ago.className = 'workdir-item-ago';
+      ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
+      item.appendChild(pathEl);
+      item.appendChild(ago);
+      list.appendChild(item);
+    });
+  }
+
+  /**
+   * Make *dir* the working directory.
+   *
+   * In a VS Code webview the working directory is the window's folder,
+   * so the host is asked to open *dir* there (openWorkDir ->
+   * vscode.openFolder; it answers workDirError when *dir* is not a
+   * folder).  On the remote webapp the daemon lists *dir* first
+   * (listDir with a 'workdir:' token): a real folder is adopted through
+   * applyPickedWorkDir, anything else is reported in the panel.
+   *
+   * @param {string} dir The typed, chosen or previously opened path.
+   */
+  function openWorkDir(dir) {
+    dir = String(dir || '').trim();
+    if (!dir) return;
+    if (isRootDir(dir)) {
+      setWorkDirError(
+        'A file-system root cannot be the working directory; pick a folder.',
+      );
+      return;
+    }
+    setWorkDirError('');
+    if (!document.body.classList.contains('remote-chat')) {
+      postToHost({type: 'openWorkDir', path: dir});
+      return;
+    }
+    workDirCheckSeq++;
+    workDirCheckPath = dir;
+    api.listDir({
+      path: dir,
+      workDir: dir,
+      tabId: activeTabId,
+      token: 'workdir:' + workDirCheckSeq,
+    });
+  }
+
+  /** The daemon's answer to openWorkDir's listDir check (remote). */
+  function handleWorkDirListing(ev) {
+    if (String(ev.token) !== 'workdir:' + workDirCheckSeq) return;
+    if (ev.error) {
+      setWorkDirError(String(ev.error));
+      return;
+    }
+    // The daemon listed the path, so it is a real folder; adopt its
+    // canonical spelling -- unless that spelling (say of "/tmp/..")
+    // turns out to be a root the lexical check above could not see.
+    const dir = ev.path || workDirCheckPath;
+    if (isRootDir(dir)) {
+      setWorkDirError(
+        'A file-system root cannot be the working directory; pick a folder.',
+      );
+      return;
+    }
+    applyPickedWorkDir(dir);
+  }
+
+  /** Wire the "Working directory" menu item and its panel. */
+  function setupWorkDirPanel() {
+    const btn = document.getElementById('workdir-btn');
+    const input = document.getElementById('workdir-input');
+    const openBtn = document.getElementById('workdir-open-btn');
+    const pickBtn = document.getElementById('workdir-pick-btn');
+    const list = document.getElementById('workdir-list');
+    if (btn) btn.addEventListener('click', openWorkDirPanel);
+    const close = document.getElementById('workdir-panel-close');
+    if (close) close.addEventListener('click', closeWorkDirPanel);
+    const overlay = document.getElementById('workdir-overlay');
+    if (overlay) overlay.addEventListener('click', closeWorkDirPanel);
+    document.addEventListener('keydown', e => {
+      // Escape closes the sheet -- unless the folder browser is open on
+      // top of it, in which case Escape is the browser's to handle.
+      const panel = document.getElementById('workdir-panel');
+      if (e.key !== 'Escape' || !panel || !panel.classList.contains('open'))
+        return;
+      if (folderPickerEl && !folderPickerEl.hidden) return;
+      closeWorkDirPanel();
+    });
+    if (input) {
+      input.addEventListener('input', syncWorkDirOpenBtn);
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          openWorkDir(input.value);
+        }
+      });
+    }
+    if (openBtn && input) {
+      openBtn.addEventListener('click', () => openWorkDir(input.value));
+    }
+    if (pickBtn) {
+      pickBtn.addEventListener('click', () => {
+        // The in-page folder browser lists folders through the daemon's
+        // listDir, which only the remote webapp's connection relays; a
+        // VS Code window uses the editor's own folder dialog.
+        if (document.body.classList.contains('remote-chat')) {
+          openFolderPicker('workdir');
+        } else {
+          postToHost({type: 'pickWorkDir'});
+        }
+      });
+    }
+    if (list) {
+      list.addEventListener('click', e => {
+        const item = e.target.closest('.workdir-item');
+        if (item) openWorkDir(item.dataset.path);
+      });
+      list.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const item = e.target.closest('.workdir-item');
+        if (!item) return;
+        e.preventDefault();
+        openWorkDir(item.dataset.path);
+      });
+    }
   }
 
   /** Wire the activity bar, the Explorer and the Source Control view. */
@@ -7556,9 +7871,9 @@
    * through, so the items always describe the task the static task
    * panel names.  A task without settings falls back to the tab's
    * pinned workdir and the configured default budget, and shows '—'
-   * for the rest.  The workdir shown here is also adopted as the info
-   * subpanel's poll target (setMetaInfoTarget), keeping the row and
-   * the mirrored tmp/PROGRESS.md in the same directory.
+   * for the rest.  The info subpanel's poll target follows the same
+   * tab (setMetaInfoTarget), keeping the rows and the task update on
+   * the same task.
    *
    * @param {object|null} s A task_settings event's settings payload.
    */
@@ -7613,7 +7928,7 @@
         : taskId,
     );
     setMetaParentTask(metaText(s ? s.parent_task_id : ''));
-    setMetaInfoTarget(wd);
+    setMetaInfoTarget();
   }
   updateMetaTaskDetails(null);
 
@@ -7641,7 +7956,12 @@
         ? adjacentContainer.dataset.task || ''
         : currentTaskName;
       if (taskName && panelTask !== taskName) continue;
-      if (inRunning || p.classList.contains('rc') || panelShowsImage(p)) {
+      if (
+        inRunning ||
+        p.classList.contains('rc') ||
+        panelShowsImage(p) ||
+        answerPanelStaysOpen(p)
+      ) {
         p.classList.remove('chv-hidden');
         continue;
       }
@@ -9444,6 +9764,23 @@
   }
   // imagepanel-coverage:end
 
+  /**
+   * True for the panel of a `/ask` answer (an `ask_answer` event).
+   *
+   * The answer is something the user asked for while the task ran, so
+   * no automatic pass ever folds or hides it: not the streaming sweep
+   * (collapseOlderPanels), not a replay or share export
+   * (collapseAllExceptResult), not the finished-task digest
+   * (applyChevronState), and a `summary` tool call leaves it out of
+   * the panels it adopts. Only the user folds it, by its header.
+   *
+   * @param {Element} panel A `.collapsible` panel.
+   * @returns {boolean} Whether *panel* is an answer panel.
+   */
+  function answerPanelStaysOpen(panel) {
+    return panel.classList.contains('ask-answer');
+  }
+
   function collapseAllExceptResult(container, ownerTabId) {
     const ownerId = rpOwnerTabIdForContainer(container, ownerTabId);
     const panels = container.querySelectorAll('.collapsible');
@@ -9451,6 +9788,10 @@
       const p = panels[i];
       if (p.classList.contains('rc')) continue;
       if (panelShowsImage(p)) continue;
+      // A `/ask` answer is never folded by the software (see
+      // answerPanelStaysOpen): a reloaded, shared or neighbouring
+      // transcript shows it exactly as the live one did.
+      if (answerPanelStaysOpen(p)) continue;
       if (p.classList.contains('tc-run-parallel')) {
         rpAdoptOpenSubagents(p, ownerId);
         // A fan-out still running when its task's own transcript is
@@ -9527,10 +9868,9 @@
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
-      // A `/ask` answer is something the user asked for and is reading
-      // while the task keeps streaming: the next event must not fold it
-      // away.  The user collapses it by hand (its header) when done.
-      if (p.classList.contains('ask-answer')) continue;
+      // A `/ask` answer the user is reading while the task keeps
+      // streaming: the next event must not fold it away.
+      if (answerPanelStaysOpen(p)) continue;
       // A question the user has not answered yet must stay readable.
       if (p.classList.contains('tc-question-pending')) continue;
       if (panelShowsImage(p)) continue;
@@ -10310,7 +10650,9 @@
               !sib.classList.contains('llm-panel')
             )
               break;
-            adopt.push(sib);
+            // A `/ask` answer stays on the transcript, in front of the
+            // summary that folds its neighbours (answerPanelStaysOpen).
+            if (!answerPanelStaysOpen(sib)) adopt.push(sib);
             sib = sib.previousElementSibling;
           }
           for (let ai = adopt.length - 1; ai >= 0; ai--)
@@ -11521,8 +11863,15 @@
   // the input again at 100 and 300 ms, when host-side focus churn has
   // settled).  They are dropped when something else claims the
   // keyboard meanwhile (the Explorer after a top-level folder action).
+  //
+  // On a phone the composer is never focused by code: focusing the
+  // textbox raises the software keyboard over the transcript the user
+  // just switched to (or over the tab strip while closing tabs), and
+  // every reconnect's `focusInput` nudge would do the same.  Only the
+  // user's own tap on the textbox opens the keyboard there.
   function focusInputWithRetry() {
     cancelInputFocusRetry();
+    if (isMobileRemote) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
@@ -11888,6 +12237,11 @@
   // Raised while the daemon is unreachable so the reconnect can
   // re-announce `ready` (tab-registry sync + transcript replay).
   let daemonWasDown = false;
+  // True while the outage keeps the chat on screen under the reconnect
+  // banner (the remote shim's `reconnecting` flag): the user could go on
+  // reading and tapping, so the reconnect is not a launch (see
+  // beginLaunch) and must not move them off their tab.
+  let chatStayedOnScreen = false;
 
   function handleEvent(ev) {
     const t = ev.type;
@@ -11916,18 +12270,24 @@
           removeAdjacentLoader();
           pendingSidebarRequests.clear();
           daemonWasDown = true;
+          chatStayedOnScreen = ev.reconnecting === true;
         }
         if (ev.connected) {
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
-          // starts here (see beginLaunch).
-          beginLaunch();
+          // starts here (see beginLaunch) -- unless the chat never left
+          // the screen, in which case whatever the user did meanwhile
+          // still counts.
+          if (!chatStayedOnScreen) beginLaunch();
+          chatStayedOnScreen = false;
           // A daemon that went away and came back is a fresh daemon as
           // far as this client is concerned (it may have restarted):
           // re-announce `ready` so it re-syncs the shared tab registry
           // and replays the transcripts this window shows. The remote
-          // web app reloads the whole page on reconnect instead, so
-          // only the VS Code webview takes this path in practice.
+          // web app takes the same path: its shim (web_server.
+          // _WS_SHIM_JS) re-authenticates the socket without reloading
+          // the page, so the tabs, drafts and scroll positions kept
+          // here survive and only the server's updates come in.
           if (daemonWasDown) {
             daemonWasDown = false;
             sendReady();
@@ -11997,6 +12357,10 @@
       case 'dirListing':
         if (String(ev.token || '').indexOf('picker:') === 0) {
           handleFolderPickerListing(ev);
+          return;
+        }
+        if (String(ev.token || '').indexOf('workdir:') === 0) {
+          handleWorkDirListing(ev);
           return;
         }
         handleDirListing(ev);
@@ -12097,7 +12461,7 @@
         // the panel was lent to (metaInfoChatTabId). A status flip of
         // THAT tab therefore applies here as if it were the active one
         // — otherwise a task ending behind a file view would leave the
-        // clock ticking and the mirrored tmp/PROGRESS.md stale until
+        // clock ticking and the task update stale until
         // the user switched back.
         const activeIsContent = (() => {
           const act = getTab(activeTabId);
@@ -12209,6 +12573,14 @@
           if (statusMachine) statusMachine.textContent = ev.machine;
         }
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        if (ev.config && Array.isArray(ev.config.recent_work_dirs)) {
+          setRecentWorkDirs(ev.config.recent_work_dirs);
+        }
+        break;
+      case 'workDirError':
+        // The VS Code host could not open the folder asked for by
+        // openWorkDir / pickWorkDir; the panel is still on screen.
+        setWorkDirError(String(ev.text || ''));
         break;
       case 'myModelsData':
         myModels = Array.isArray(ev.models) ? ev.models : [];
@@ -12230,13 +12602,18 @@
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         renderTricks(window.__TRICKS__);
         break;
-      case 'infoFile':
-        renderInfoFileEvent(ev);
+      case 'taskUpdate':
+        renderTaskUpdateEvent(ev);
         break;
       case 'metaState':
         // The host relays the ACTIVE chat editor panel's task-info
         // values; only the Task Info view renders them.
         if (META_PANEL_MODE) renderMetaState(ev);
+        break;
+      case 'refreshTaskUpdate':
+        // The host relays the Task Info view's refresh button to the
+        // ACTIVE chat editor panel: run the task-update agent now.
+        if (POST_META_UPDATES) requestTaskUpdate(true);
         break;
       case 'activeTask':
         // The host relays the chat / task ids of the chat surface on
@@ -12546,6 +12923,7 @@
           ev.tunnelActive,
           ev.loopbackUrl,
           ev.lanUrls,
+          ev.localCa === true,
         );
         break;
       case 'update_available':
@@ -13498,7 +13876,7 @@
     // step: a `status` event without a tabId (single-chat flows) would
     // otherwise flip only this flag and leave the tab marked idle —
     // and the info-file poll, which trusts the POLLED tab's flag
-    // (requestInfoFile), silenced for the whole task.
+    // (requestTaskUpdate), silenced for the whole task.
     {
       const activeTab = getTab(activeTabId);
       if (activeTab && !activeTab.isContentTab) {
@@ -13597,7 +13975,9 @@
       stopTimer();
       removeSpinner();
       statusText.textContent = label || 'Ready';
-      inp.focus();
+      // A finished task (or its replay after a reconnect) must not raise
+      // the phone's keyboard; see focusInputWithRetry.
+      if (!isMobileRemote) inp.focus();
     }
     renderTabBar();
   }
@@ -14198,7 +14578,32 @@
     return wrapper;
   }
 
-  function renderRemoteUrl(url, ntfyUrl, tunnelActive, loopbackUrl, lanUrls) {
+  function _buildTlsTrustHint(baseUrl) {
+    const hint = document.createElement('div');
+    hint.className = 'remote-url-tls-hint';
+    hint.append('Certificate warning on the Local/LAN URLs? Run ');
+    const cmd = document.createElement('code');
+    cmd.textContent = 'kiss-web --trust-ca';
+    hint.appendChild(cmd);
+    hint.append(' on this machine; on a phone install ');
+    const link = document.createElement('a');
+    link.href = baseUrl.replace(/\/+$/, '') + '/ca.crt';
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'ca.crt';
+    hint.appendChild(link);
+    hint.append(' and enable trust for it.');
+    return hint;
+  }
+
+  function renderRemoteUrl(
+    url,
+    ntfyUrl,
+    tunnelActive,
+    loopbackUrl,
+    lanUrls,
+    localCa,
+  ) {
     const displayUrl = ntfyUrl || url;
     // Alongside the Cloudflare (or ntfy) URL, always show how to
     // reach the webapp from this machine (127.0.0.1) and from other
@@ -14214,6 +14619,15 @@
         bars.push([lanUrl, false, 'LAN (local network)']);
       }
     }
+    // With the daemon's auto-generated certificate (localCa) the
+    // Local/LAN URLs are signed by the machine-local CA; a browser
+    // warns until it trusts that CA, so tell the user how to do it
+    // once per device (the LAN URL is the one a phone can reach for
+    // the /ca.crt download).  An explicitly configured certificate
+    // has no CA to offer, so no hint.
+    const caBaseUrl = localCa
+      ? (lanUrls || []).find(u => !!u) || loopbackUrl
+      : '';
     const containerIds = ['remote-url', 'welcome-remote-url'];
     for (const id of containerIds) {
       const container = document.getElementById(id);
@@ -14222,6 +14636,7 @@
       for (const [barUrl, isNtfy, labelText] of bars) {
         container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
       }
+      if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
     }
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {
@@ -14547,6 +14962,16 @@
   }
 
   function replayTaskEvents(events) {
+    // autoscroll-coverage:start
+    // A transcript rebuilt while the user is reading it — a reconnect
+    // replays the tab on screen — keeps the reading position: a view
+    // the user scrolled away from the bottom is put back where it was
+    // instead of jumping to the latest panel.  A replay into an empty
+    // or bottom-pinned transcript lands at the end as always.
+    const keepScroll =
+      userScrollLock && Array.from(O.children).some(el => el !== welcome);
+    const keptScrollTop = O.scrollTop;
+    // autoscroll-coverage:end
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
@@ -14564,9 +14989,16 @@
     saveLiveStreamCtx(rCtx);
     if (rCtx.stepCount > 0) updateStepCount(rCtx.stepCount);
     // autoscroll-coverage:start
-    // clearOutput() above released any user scroll lock: the replayed
-    // chat lands at the end of its latest event panel.
-    autoScrollLatestEventPanel(O.lastElementChild);
+    if (keepScroll) {
+      O.scrollTop = keptScrollTop;
+      // The lock follows the restored position (a shorter transcript
+      // may have put it at the bottom, where auto-scroll resumes).
+      updateUserScrollLock();
+    } else {
+      // clearOutput() above released any user scroll lock: the replayed
+      // chat lands at the end of its latest event panel.
+      autoScrollLatestEventPanel(O.lastElementChild);
+    }
     // autoscroll-coverage:end
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
@@ -15500,8 +15932,8 @@
         createNewTab();
       });
     }
-    // The "..." overflow menu: mic, share, attach, git commit, settings
-    // and (remote only) the theme toggle live here.
+    // The "..." overflow menu: working directory, mic, share, attach,
+    // git commit, settings and (remote only) the theme toggle live here.
     const moreBtn = document.getElementById('more-btn');
     const moreMenu = document.getElementById('more-menu');
     function closeMoreMenu() {
@@ -15594,6 +16026,7 @@
       });
     }
     setupActivityBar();
+    setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
     if (SIDEBAR_CHAT_MODE) {
       // The sidebar chat's task-info drawer starts closed AND inert:
@@ -16605,9 +17038,10 @@
     if (!prompt) return;
     // Daemon unreachable (the remote webapp shows the app under its
     // "Reconnecting ..." banner): a submit now would only sit in the
-    // shim's queue, and the page reload that follows the reconnect
-    // would drop it.  Keep the prompt in the composer instead of
-    // losing it silently; the user sends it once the banner is gone.
+    // shim's queue with no feedback, and the task's own transcript
+    // would arrive out of order with the reconnect's replay.  Keep the
+    // prompt in the composer instead; the user sends it once the
+    // banner is gone.
     if (daemonWasDown) return;
 
     // The agent is blocked in ask_user_question: the composer text is
@@ -16755,7 +17189,10 @@
       ? 'Type your answer and press Enter'
       : inp.dataset.defaultPlaceholder;
     updateInputDisabled();
-    if (answering) inp.focus();
+    // A phone shows the question and waits for the user's own tap on
+    // the answer box (see focusInputWithRetry): switching to, or being
+    // moved onto, an asking tab must not raise the keyboard.
+    if (answering && !isMobileRemote) inp.focus();
   }
 
   // The text in a tab's composer: the live textarea for the tab on
@@ -18934,8 +19371,12 @@
       div.className = 'sidebar-item frequent-item';
       const text = String(t.task || '');
       div.dataset.tooltip = text;
-      div.style.backgroundColor = chatIdBgColor(text);
-      div.style.color = '#1a1a1a';
+      if (!document.body.classList.contains('remote-chat')) {
+        // The per-task pastel tint is a webview-only cue: the remote
+        // page paints with VS Code theme colours alone (remote-codex.css).
+        div.style.backgroundColor = chatIdBgColor(text);
+        div.style.color = '#1a1a1a';
+      }
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
