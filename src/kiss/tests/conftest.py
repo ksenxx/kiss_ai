@@ -670,6 +670,22 @@ def _isolated_tab_registry() -> Iterator[None]:
 
 
 @pytest.fixture
+def uds_tmp_path() -> Iterator[Path]:
+    """A short-named temporary directory for Unix-domain socket files.
+
+    ``sun_path`` is capped at 104 bytes on macOS (108 on Linux) and
+    pytest's ``tmp_path`` already spends ~90 of them on
+    ``/private/var/folders/.../pytest-of-<user>/pytest-<n>/<test-name>0``,
+    so a ``tmp_path / "sorcar.sock"`` fails to bind with ``AF_UNIX path
+    too long``.  Tests that must actually bind or connect a socket put
+    it under this directory instead; everything else stays in
+    ``tmp_path``.
+    """
+    with tempfile.TemporaryDirectory(prefix="kiss-uds-") as directory:
+        yield Path(directory)
+
+
+@pytest.fixture
 def temp_dir(tmp_path):
     original_dir = os.getcwd()
     resolved_path = tmp_path.resolve()

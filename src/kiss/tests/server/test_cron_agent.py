@@ -66,7 +66,9 @@ def test_tools_file_loaded_run_now_uses_daemon_sock_path(
     finally:
         _stop_scheduler(stop_event)
 
-def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
+def test_kiss_web_daemon_runs_scheduler_thread(
+    tmp_path: Path, uds_tmp_path: Path,
+) -> None:
     """The kiss-web daemon starts the cron thread, the thread executes a
     due job, and shutdown stops the thread."""
     import asyncio
@@ -89,7 +91,7 @@ def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
             port=port,
             use_tunnel=False,
             work_dir=str(tmp_path),
-            uds_path=str(tmp_path / "sorcar.sock"),
+            uds_path=str(uds_tmp_path / "sorcar.sock"),
         )
         task = asyncio.ensure_future(server._serve_async())
         try:

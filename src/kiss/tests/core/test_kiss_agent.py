@@ -22,7 +22,17 @@ from openai import AuthenticationError as OpenAIAuthError
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model_info import MODEL_INFO
 from kiss.tests.conftest import requires_gemini_api_key, simple_calculator
+
+# A routed name has no OpenRouter twin; pinning ``fallback`` to ``None`` as
+# well makes "no fallback" hold even if ``~/.kiss/MY_MODELS.json`` declares
+# one, so the loop raises instead of swapping models.
+_NO_FALLBACK_MODEL = "openrouter/openai/gpt-4o-mini"
+
+
+def _pin_no_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(MODEL_INFO[_NO_FALLBACK_MODEL], "fallback", None)
 
 TEST_MODEL = "gemini-3-flash-preview"
 
@@ -85,6 +95,10 @@ class _RetryableErrorModel:
 
 
 class _NonRetryableErrorModel(_RetryableErrorModel):
+    def __init__(self, failures: int) -> None:
+        super().__init__(failures)
+        self.model_name = _NO_FALLBACK_MODEL
+
     def generate_and_process_with_tools(
         self, function_map: dict[str, Any], tools_schema: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], str, Any]:
@@ -213,6 +227,15 @@ class TestAgenticLoopAuthError(unittest.TestCase):
         "base_url": "https://api.openai.com/v1",
         "api_key": "sk-invalid-key-for-testing",
     }
+    # ``gpt-4o-mini`` would fall back to its OpenRouter twin (with the
+    # real key) whenever ``OPENROUTER_API_KEY`` is configured; the auth
+    # error must be final for the step bound below to mean anything.
+    MODEL = _NO_FALLBACK_MODEL
+
+    def setUp(self) -> None:
+        monkeypatch = pytest.MonkeyPatch()
+        self.addCleanup(monkeypatch.undo)
+        _pin_no_fallback(monkeypatch)
 
     def test_auth_error_raises_kiss_error_fast(self) -> None:
         agent = KISSAgent("Auth Error Test")
@@ -223,7 +246,7 @@ class TestAgenticLoopAuthError(unittest.TestCase):
 
         with self.assertRaises(KISSError) as ctx:
             agent.run(
-                model_name="gpt-4o-mini",
+                model_name=self.MODEL,
                 prompt_template="Call dummy_tool then finish.",
                 tools=[dummy_tool],
                 is_agentic=True,
@@ -247,7 +270,10 @@ class TestAgenticLoopAuthError(unittest.TestCase):
             )
 
 
-def test_run_agentic_loop_raises_immediately_for_non_retryable_error() -> None:
+def test_run_agentic_loop_raises_immediately_for_non_retryable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_no_fallback(monkeypatch)
     agent = _make_agent(_NonRetryableErrorModel(failures=0))
 
     with pytest.raises(

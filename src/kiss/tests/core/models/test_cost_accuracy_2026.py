@@ -274,9 +274,18 @@ class TestDirectMoonshotCachePricing:
             assert info.input_price_per_1M == pytest.approx(base.input_price_per_1M), name
             assert info.output_price_per_1M == pytest.approx(base.output_price_per_1M), name
             assert info.cache_read_price_per_1M == pytest.approx(base.cache_read_price_per_1M), name
+        # ``~moonshotai/kimi-latest`` is OpenRouter's rolling alias.  Its
+        # ``prompt``/``completion`` prices are a blend that openrouter.ai
+        # publishes independently of kimi-k3 (about half the k3 input
+        # price), while ``input_cache_read`` is the upstream cache rate.
+        # The 0.1x ratio therefore does not hold for the alias; what must
+        # hold is that the explicit OpenRouter cache price was kept
+        # instead of the 0.25x Moonshot fallback.
         latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
         assert latest.input_price_per_1M > 0
-        assert latest.cache_read_price_per_1M == pytest.approx(latest.input_price_per_1M * 0.1)
+        cache_read = latest.cache_read_price_per_1M
+        assert cache_read is not None
+        assert 0 < cache_read < latest.input_price_per_1M * 0.25
 
 
 class TestDirectCatalogPricesMatchProviderPages:
