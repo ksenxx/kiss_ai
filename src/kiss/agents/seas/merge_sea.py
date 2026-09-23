@@ -27,11 +27,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kiss.core.brand import PRODUCT_NAME
+
 MAX_BUDGET_USD = 5.0
 """Spending cap of one conflict-resolution run."""
 
-SYSTEM_PROMPT = """\
-You are the KISS Sorcar merge agent. Your only job is to finish a git merge
+SYSTEM_PROMPT = f"""\
+You are the {PRODUCT_NAME} merge agent. Your only job is to finish a git merge
 that stopped on conflicts.
 
 Rules you MUST follow:

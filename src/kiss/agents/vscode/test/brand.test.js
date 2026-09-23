@@ -17,7 +17,7 @@ const path = require('path');
 const {execFileSync} = require('child_process');
 
 const EXT_ROOT = path.resolve(__dirname, '..');
-const {BRAND, BRAND_FILE, PRODUCT_NAME, SHORT_NAME, loadBrand} = require('../out/brand.js');
+const {BRAND, BRAND_FILE, PRODUCT_NAME, SHORT_NAME, loadBrand, renderBrand} = require('../out/brand.js');
 const {brandManifest, brandText} = require('../scripts/apply-brand.js');
 
 const CHECKOUT_BRAND = JSON.parse(fs.readFileSync(path.join(EXT_ROOT, 'media', 'brand.json'), 'utf-8'));
@@ -91,12 +91,23 @@ withTempDir(dir => {
     shortName: 'KISS',
     tagline: STOCK_BRAND.tagline,
   });
+  // Broken or missing files fall back to the STOCK names (not to whatever
+  // brand this checkout carries).
+  const stock = {productName: 'KISS Sorcar', shortName: 'KISS', tagline: STOCK_BRAND.tagline};
   fs.writeFileSync(file, '{oops');
-  assert.deepStrictEqual(loadBrand(file), BRAND, 'malformed JSON falls back to stock');
+  assert.deepStrictEqual(loadBrand(file), stock, 'malformed JSON falls back to stock');
   fs.writeFileSync(file, '[1,2]');
-  assert.deepStrictEqual(loadBrand(file), BRAND, 'non-object JSON falls back to stock');
-  assert.deepStrictEqual(loadBrand(path.join(dir, 'missing.json')), BRAND, 'missing file falls back');
+  assert.deepStrictEqual(loadBrand(file), stock, 'non-object JSON falls back to stock');
+  assert.deepStrictEqual(loadBrand(path.join(dir, 'missing.json')), stock, 'missing file falls back');
 });
+
+// renderBrand fills the three text placeholders and leaves other tokens alone.
+const s10sBrand = {productName: 'Seamless Loop', shortName: 's10s', tagline: 'Hi there'};
+assert.strictEqual(
+  renderBrand('{{PRODUCT_NAME}}/{{SHORT_NAME}}: {{TAGLINE}} {{MODEL_NAME}}', s10sBrand),
+  'Seamless Loop/s10s: Hi there {{MODEL_NAME}}',
+);
+assert.strictEqual(renderBrand('# Tip\n{{PRODUCT_NAME}} rocks'), `# Tip\n${PRODUCT_NAME} rocks`);
 
 // --- scripts/apply-brand.js --------------------------------------------------
 

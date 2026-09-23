@@ -3643,7 +3643,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
-    page_title = html.escape(title.strip()) or f"{PRODUCT_NAME} chat"
+    page_title = html.escape(title.strip() or f"{PRODUCT_NAME} chat")
     # Both highlight.js themes ship inline; share.js's theme toggle
     # flips which one applies through the style elements' media
     # attribute (dark is the default).
@@ -3796,7 +3796,32 @@ def _app_shell_urls() -> list[str]:
     keeps running across an in-place upgrade.
     """
     urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
-    return ["/", *urls]
+    return ["/", *urls, *_brand_css_asset_urls()]
+
+
+_CSS_URL_RE = re.compile(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", re.IGNORECASE)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _brand_css_asset_names() -> list[str]:
+    """Return the media files ``brand.css`` references through relative ``url()``.
+
+    A skin's ``url("kiss-icon.png")`` resolves next to the stylesheet, so
+    the browser requests the plain ``/media/<name>`` (no ``?v=``); those
+    files are precached under exactly that URL.  Comments are ignored and
+    names that do not exist in the media directory are skipped.
+    """
+    try:
+        css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    names = sorted(set(_CSS_URL_RE.findall(_CSS_COMMENT_RE.sub("", css))))
+    return [name for name in names if (MEDIA_DIR / name).is_file()]
+
+
+def _brand_css_asset_urls() -> list[str]:
+    """Return the plain ``/media/<name>`` URLs of the assets ``brand.css`` references."""
+    return [f"/media/{name}" for name in _brand_css_asset_names()]
 
 
 def _build_service_worker() -> str:
@@ -3814,8 +3839,12 @@ def _build_service_worker() -> str:
         The complete service-worker script.
     """
     urls = _app_shell_urls()
+    # The brand.css assets are listed without ``?v=`` (see
+    # _brand_css_asset_urls), so fold their content hashes into the
+    # version separately: a swapped logo must still roll the worker.
+    version_input = urls + [_media_url(name) for name in _brand_css_asset_names()]
     shell = {
-        "version": hashlib.sha256("\n".join(urls).encode("utf-8")).hexdigest()[:16],
+        "version": hashlib.sha256("\n".join(version_input).encode("utf-8")).hexdigest()[:16],
         "urls": urls,
     }
     tpl = (MEDIA_DIR / "sw.js").read_text(encoding="utf-8")

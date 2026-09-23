@@ -66,3 +66,20 @@ function pickString(
 export const BRAND: Brand = loadBrand();
 export const PRODUCT_NAME = BRAND.productName;
 export const SHORT_NAME = BRAND.shortName;
+
+/**
+ * Fill the `{{PRODUCT_NAME}}`, `{{SHORT_NAME}}` and `{{TAGLINE}}` placeholders
+ * in `text` (the twin of `kiss.core.brand.render_brand`, used on TIPS.md).
+ * Other `{{...}}` tokens are left untouched.
+ */
+export function renderBrand(text: string, brand: Brand = BRAND): string {
+  return text.replace(
+    /\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE)\}\}/g,
+    (_m, key: string) =>
+      key === 'PRODUCT_NAME'
+        ? brand.productName
+        : key === 'SHORT_NAME'
+          ? brand.shortName
+          : brand.tagline,
+  );
+}

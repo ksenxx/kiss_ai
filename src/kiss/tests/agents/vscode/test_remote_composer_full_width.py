@@ -92,7 +92,11 @@ def _build_test_page(body_class: str) -> str:
     (desktop remote), or ``""`` (VS Code webview).
     """
     src = _HTML.read_text(encoding="utf-8")
-    output = _extract_div_block(src, "output")
+    output = (
+        _extract_div_block(src, "output")
+        .replace("{{PRODUCT_NAME}}", "KISS Sorcar")
+        .replace("{{TAGLINE}}", "Your AI assistant.")
+    )
     input_area = (
         _extract_div_block(src, "input-area")
         .replace("{{INPUT_PLACEHOLDER}}", "Ask anything")

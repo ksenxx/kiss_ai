@@ -219,7 +219,16 @@ def test_sw_script_precaches_exactly_the_page_assets(
     assert page_status == 200
     page_urls = set(MEDIA_URL_RE.findall(page_body.decode("utf-8")))
     assert page_urls, "the page references no /media assets?"
-    assert set(shell["urls"][1:]) == page_urls
+    # ... plus the plain /media/<name> files the brand skin (brand.css)
+    # pulls in through relative url() outside comments, which the browser
+    # requests un-hashed.
+    _, _, brand_css = live_server.get("/media/brand.css")
+    css_no_comments = re.sub(r"/\*.*?\*/", "", brand_css.decode(), flags=re.DOTALL)
+    css_assets = {
+        f"/media/{name}"
+        for name in re.findall(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", css_no_comments)
+    }
+    assert set(shell["urls"][1:]) == page_urls | css_assets
     assert any(u.startswith("/media/main.js?v=") for u in page_urls)
 
     # Every manifest URL is servable, so the install-time addAll succeeds.

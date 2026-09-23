@@ -10,7 +10,7 @@ import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
 import {ensureUserAssetFromDefault, kissHomeDir} from './userAssets';
 import {readVersionPy} from './UpdateChecker';
-import {BRAND} from './brand';
+import {BRAND, renderBrand} from './brand';
 
 export const MY_INJECTION_DEFAULT_BODY =
   'Write end-to-end 100% coverage tests for the feature first.' +
@@ -102,7 +102,7 @@ export function getTips(): string[] {
   } catch {
     return [];
   }
-  return parseTipSections(text);
+  return parseTipSections(renderBrand(text));
 }
 
 export function consumeTipsFirstRun(): boolean {
