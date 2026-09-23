@@ -203,6 +203,7 @@ import {
   Attachment,
   AgentCommand,
   MetaPanelValues,
+  TaskUpdateState,
 } from './types';
 import {
   clearWebviewNotificationPoster,
@@ -263,10 +264,14 @@ export type PanelEvent =
   // chat claim is void.
   | {kind: 'registrationDropped'}
   // The panel's live task-info values changed (tokens, cost, steps,
-  // time, machine, workdir, max budget, tmp/PROGRESS.md): the panel
+  // time, machine, workdir, max budget, task update): the panel
   // manager caches them and, when this is the ACTIVE panel, relays
   // them to the secondary sidebar's Task Info view.
-  | {kind: 'metaUpdate'; values: MetaPanelValues; progressMd: string};
+  | {
+      kind: 'metaUpdate';
+      values: MetaPanelValues;
+      taskUpdate: TaskUpdateState | null;
+    };
 
 /** One tab of the daemon's canonical `tabs_state` registry snapshot. */
 export interface RegistryTabEntry {
@@ -367,10 +372,11 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // poller that runs install.sh once no task is in flight, and
   // rebroadcasts update_available with `pendingIdle`.
   updateWhenIdle: ['cancel'],
-  // The 1s tmp/PROGRESS.md poll of a RUNNING task (metainfo block in
-  // main.js): the daemon resolves the tab's task and answers with a
-  // direct `infoFile` that the client-listener relay passes back.
-  getInfoFile: ['workDir', 'tabId', 'knownSig', 'token'],
+  // The task-update poll of a RUNNING task (metainfo block in
+  // main.js): the daemon resolves the tab's task, runs the task-update
+  // agent when due (or when `refresh` is set) and answers with a
+  // direct `taskUpdate` that the client-listener relay passes back.
+  getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings
@@ -452,6 +458,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * on screen reach the primary-sidebar history panel (postActiveTask).
    */
   public onActiveTask?: (chatId: string, taskId: string) => void;
+  /**
+   * Task Info view only (meta-panel-mode): called when the view's
+   * task-update refresh button is pressed (its `metaRefresh` message).
+   * extension.ts relays it to the active chat editor panel, which
+   * polls the daemon with `refresh: true`.
+   */
+  public onMetaRefresh?: () => void;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
@@ -1856,8 +1869,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._panelHooks?.onEvent({
           kind: 'metaUpdate',
           values: message.values,
-          progressMd: message.progressMd,
+          taskUpdate: message.taskUpdate,
         });
+        break;
+
+      case 'metaRefresh':
+        this.onMetaRefresh?.();
         break;
 
       case 'activeTask':
@@ -2304,14 +2321,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    *
    * @param values The panel's #meta-list display strings, or null to
    *     show the placeholder dashes (no chat panel is reporting).
-   * @param progressMd Raw markdown of the running task's
-   *     tmp/PROGRESS.md, '' to hide the info subpanel.
+   * @param taskUpdate The running task's task-update report state,
+   *     null to hide the info subpanel.
    */
   public postMetaState(
     values: MetaPanelValues | null,
-    progressMd: string,
+    taskUpdate: TaskUpdateState | null,
   ): void {
-    this._lastMetaState = {type: 'metaState', values, progressMd};
+    this._lastMetaState = {type: 'metaState', values, taskUpdate};
     this._sendToWebview(this._lastMetaState);
   }
 

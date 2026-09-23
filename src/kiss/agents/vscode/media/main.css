@@ -1737,6 +1737,59 @@ body.remote-chat #theme-btn { display: flex; }
 #meta-drawer-btn,
 #meta-close { display: none; }
 
+/* The info subpanel's header row (every task-info surface): the
+   "Task update" title on the left, the refresh button at the top
+   right.  The button turns while the daemon runs the task-update
+   agent and is disabled meanwhile (a second press cannot start a
+   second run). */
+.meta-info-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#meta-info-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+#meta-info-refresh:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  color: var(--fg);
+}
+
+#meta-info-refresh:disabled { cursor: default; }
+
+#meta-info-refresh.spinning svg { animation: status-spin 1s linear infinite; }
+
+/* The line under the header: "Updating…", or when and at what cost
+   the shown report was produced, and the last run's failure. */
+.meta-info-status {
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  margin: -6px 0 6px;
+  min-height: 0;
+  overflow-wrap: anywhere;
+}
+
+.meta-info-status:empty { display: none; }
+
+.meta-info-pending {
+  font-style: italic;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
 /* Every VS Code webview drops the burger — the history panel lives in
    the PRIMARY sidebar in both editor-tabs and sidebar mode. Only the
    remote webapp keeps its own in-page history drawer. */

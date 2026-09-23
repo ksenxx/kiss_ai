@@ -2652,6 +2652,28 @@ def _add_task_usage(
     return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
 
 
+def _task_is_finished(task_id: str) -> bool:
+    """Return whether *task_id*'s row carries its end timestamp.
+
+    The end timestamp is written by the run's final save
+    (:meth:`ChatSorcarAgent.run`), so a true result means the row's
+    ``tokens`` / ``cost`` / ``steps`` are final and later spend on the
+    task's behalf must be added with :func:`_add_task_usage` rather
+    than banked on the live agent.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row.
+
+    Returns:
+        True when the row exists and its ``end_ts`` is set.
+    """
+    with _rw_lock.read_lock():
+        row = _get_db().execute(
+            "SELECT end_ts FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    return bool(row and _safe_int(row["end_ts"], 0))
+
+
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "model": ("model", str, ""),
     "work_dir": ("work_dir", str, ""),

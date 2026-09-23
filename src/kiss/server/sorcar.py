@@ -278,7 +278,7 @@ API: dict[str, ApiCommand] = _catalog(
         "saveFile", required=("path", "content"), handler="save_file"
     ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
-    ApiCommand("getInfoFile", handler="get_info_file"),
+    ApiCommand("getTaskUpdate", handler="get_task_update"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
@@ -488,7 +488,7 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
-    async def _handle_get_info_file(
+    async def _handle_get_task_update(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -1074,27 +1074,28 @@ class ServerApi:
             return
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
-    async def get_info_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Report the contents of ``tmp/PROGRESS.md`` to a task-info panel.
+    async def get_task_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report the task-update agent's progress report to a task-info panel.
 
         The remote webapp's task-info panel (docked on desktop, a
         drawer on mobile) and the VS Code extension's chat editor
         panels (editor-tabs mode, whose reports fill the secondary
-        sidebar's Task Info view) poll this command so the info
-        subpanel can mirror the ``tmp/PROGRESS.md`` of the task running
-        in the active tab: the file is read from that task's own work
-        dir (its worktree for a worktree-mode run), a copy left behind
-        by a previous task (older than the run's start) counts as
-        missing, and the panel is empty when there is nothing to show.
-        Served on BOTH transports — the direct ``infoFile`` reply goes
-        back to whichever endpoint (WSS or UDS) asked.
+        sidebar's Task Info view) poll this command while the visible
+        tab's task runs: the info subpanel shows what the
+        :mod:`~kiss.agents.seas.task_update_sea` agent reports about that
+        task.  The first poll for a task runs the agent (as a sub-agent
+        of the task, in the task's chat; its cost counts towards the
+        task), later polls re-run it every 10 minutes, and a poll with
+        ``refresh: true`` (the panel's refresh button) re-runs it at
+        once.  Served on BOTH transports — the direct ``taskUpdate``
+        reply goes back to whichever endpoint (WSS or UDS) asked.
 
         Args:
-            cmd: The ``getInfoFile`` command (optional ``workDir``,
-                ``tabId``, ``knownSig``).
+            cmd: The ``getTaskUpdate`` command (``tabId``, optional
+                ``knownSig``, ``token``, ``refresh``).
             ctx: The transport context of the current call.
         """
-        await self._backend._handle_get_info_file(cmd, ctx.endpoint)
+        await self._backend._handle_get_task_update(cmd, ctx.endpoint)
 
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """List a directory for the remote webapp's Explorer view.
