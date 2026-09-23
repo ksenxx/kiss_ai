@@ -948,6 +948,24 @@ run_local_install() {
     print_info "Local install completed"
 }
 
+# PyPI rejects any file over 100 MiB (https://docs.pypi.org/project-management/storage-limits/).
+# uv publish uploads the wheel before the sdist and a rejected sdist leaves a
+# wheel-only release behind that can never be completed (PyPI refuses to
+# re-upload a version), so the size of every file is checked before the first
+# upload starts. $1...: the built distribution files.
+PYPI_FILE_SIZE_LIMIT=$((100 * 1024 * 1024))
+check_pypi_file_sizes() {
+    local file size
+    for file in "$@"; do
+        size=$(wc -c < "$file")
+        if (( size > PYPI_FILE_SIZE_LIMIT )); then
+            print_error "$file is $(( size / 1024 / 1024 )) MiB; PyPI rejects files over $(( PYPI_FILE_SIZE_LIMIT / 1024 / 1024 )) MiB"
+            print_info "Nothing was uploaded. Trim [tool.hatch.build.targets.sdist] in pyproject.toml and rerun"
+            return 1
+        fi
+    done
+}
+
 publish_to_pypi() {
     local version="$1"
     
@@ -962,6 +980,7 @@ publish_to_pypi() {
     
     print_info "Built packages:"
     ls -la dist/*.tar.gz dist/*.whl
+    check_pypi_file_sizes dist/*.tar.gz dist/*.whl || return 1
     
     print_step "Uploading to PyPI..."
     if [[ -z "${UV_PUBLISH_TOKEN:-}" ]]; then
