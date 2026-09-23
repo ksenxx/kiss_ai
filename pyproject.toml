@@ -88,25 +88,19 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 path = "src/kiss/core/_version.py"
 
+[tool.hatch.build]
+# node_modules/ is gitignored, but in an agent worktree it is a symlink to the
+# main checkout's directory, which the directory-only gitignore rule does not
+# match; without this rule a build from a worktree ships 147 MB of npm packages.
+exclude = ["src/kiss/agents/vscode/node_modules"]
+
 [tool.hatch.build.targets.sdist]
-# Keep the sdist small enough for PyPI's 100 MB per-file limit. The directories
-# below are demo media (assets/), academic write-ups (papers/), local dev state
-# (sorcar.db, sorcar_reported_frauds/, jobs/), agent worktrees (.kiss-worktrees/,
-# full repo copies that once ballooned the sdist past the limit), and the built
-# VSIX (which is uploaded separately to the GitHub release). Stripping these
-# keeps the sdist well under the limit without affecting `pip install` users —
-# none of this content is imported by the Python package and the README's
-# relative asset links wouldn't render on PyPI anyway.
-exclude = [
-    "bin/",
-    "assets/",
-    "papers/",
-    "jobs/",
-    "sorcar.db",
-    "sorcar_reported_frauds/",
-    "src/kiss/agents/vscode/kiss-sorcar.vsix",
-    ".kiss-worktrees/",
-]
+# PyPI rejects files over 100 MiB. The sdist only has to build the wheel, so it
+# ships exactly the wheel's packages (plus pyproject.toml, README.md and LICENSE,
+# which hatchling always adds) instead of the whole repository. An exclude list
+# was tried before and kept falling behind: benchmark results, demo media,
+# papers and reports grew the sdist to 350 MB.
+only-include = ["src/kiss", "projects/swedefend"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kiss", "projects/swedefend"]
