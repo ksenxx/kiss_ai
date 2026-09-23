@@ -68,6 +68,7 @@ from typing import Any
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.agents.sorcar.useful_tools import _file_lock
+from kiss.core.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -543,7 +544,7 @@ def build_oauth_provider(cfg: MCPServerConfig) -> Any:
     from mcp.shared.auth import OAuthClientMetadata
 
     metadata = OAuthClientMetadata.model_validate({
-        "client_name": "KISS Sorcar",
+        "client_name": PRODUCT_NAME,
         "redirect_uris": ["http://localhost:0/callback"],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],

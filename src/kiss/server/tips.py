@@ -21,6 +21,8 @@ import os
 import re
 from pathlib import Path
 
+from kiss.core.brand import render_brand
+
 _TIP_DELIMITER = re.compile(r"^# Tip.*$", re.MULTILINE)
 
 
@@ -44,11 +46,12 @@ def read_tips() -> list[str]:
     Text before the first ``# Tip`` line and tips with empty bodies
     are skipped.  Returns ``[]`` when the file is missing or
     unreadable (graceful degradation — the chat webview simply shows
-    no tips window).
+    no tips window).  Brand placeholders such as ``{{PRODUCT_NAME}}``
+    are filled from ``kiss.core.brand`` first.
     """
     try:
         text = _bundled_tips_path().read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    sections = _TIP_DELIMITER.split(text)
+    sections = _TIP_DELIMITER.split(render_brand(text))
     return [body.strip() for body in sections[1:] if body.strip()]

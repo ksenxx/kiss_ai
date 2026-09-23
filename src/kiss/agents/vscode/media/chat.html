@@ -6,14 +6,15 @@
   {{CSP_META}}
   <link href="{{STYLE_HREF}}" rel="stylesheet">
   <link id="hljs-theme" href="{{HLJS_CSS_HREF}}" rel="stylesheet">
-  <title>KISS Sorcar</title>
+  <link href="{{BRAND_STYLE_HREF}}" rel="stylesheet">
+  <title>{{PRODUCT_NAME}}</title>
   {{HEAD_STYLE}}
 </head>
 <body{{BODY_CLASS_ATTR}}>
   <div id="kiss-server-loading" role="status" aria-live="polite">
     <div class="kiss-server-loading-inner">
       <div class="kiss-server-loading-spinner" aria-hidden="true"></div>
-      <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">KISS Sorcar Server is starting ...</div>
+      <div id="kiss-server-loading-msg" class="kiss-server-loading-msg">{{PRODUCT_NAME}} Server is starting ...</div>
     </div>
   </div>
   <div id="app" style="display:none;">
@@ -44,8 +45,8 @@
          reference via aria-controls="output". -->
     <div id="output" role="tabpanel" aria-label="Chat">
       <div id="welcome">
-        <h2>Welcome to KISS Sorcar</h2>
-        <p>Your AI assistant. Ask me anything!</p>
+        <h2>Welcome to {{PRODUCT_NAME}}</h2>
+        <p>{{TAGLINE}}</p>
         <div id="welcome-config" class="welcome-config" style="display:none;">
           <div id="welcome-remote-url"></div>
           <label class="config-label welcome-config-label">Remote password
@@ -91,7 +92,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
-                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: open another folder">
+                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: the folder the next task runs in">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                   <span class="more-item-label">Working directory</span>
                 </button>
@@ -329,11 +330,14 @@
 
     <!-- The "Working directory" panel ("..." menu): type a directory or
          choose one with the folder button, or reopen one of the
-         directories opened so far (most recently opened first). -->
+         directories opened so far (most recently opened first).  In a
+         VS Code window the pick only changes the active chat's working
+         directory (the window keeps its folder). -->
     <div id="workdir-panel" role="dialog" aria-labelledby="workdir-panel-hdr" aria-hidden="true" inert>
       <button id="workdir-panel-close" aria-label="Close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
         <div class="sidebar-hdr" id="workdir-panel-hdr">Working directory</div>
+        <div id="workdir-current" hidden></div>
         <div id="workdir-open-row">
           <input type="text" id="workdir-input" placeholder="Path of a working directory..." aria-label="Working directory path" autocomplete="off" spellcheck="false">
           <button type="button" id="workdir-open-btn" class="config-update-btn" disabled>Open</button>
@@ -351,7 +355,7 @@
     <div id="settings-panel">
       <button id="settings-panel-close">&times;</button>
       <div class="sidebar-section">
-        <div class="sidebar-hdr">Sorcar Configuration{{VERSION_SUFFIX}}</div>
+        <div class="sidebar-hdr">{{PRODUCT_NAME}} Configuration{{VERSION_SUFFIX}}</div>
         <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Remote password
@@ -527,6 +531,7 @@
 
   <script{{NONCE_ATTR}} src="{{HLJS_SRC}}"></script>
   <script{{NONCE_ATTR}} src="{{MARKED_SRC}}"></script>
+  <script{{NONCE_ATTR}}>window.__BRAND__ = {{BRAND_JSON}};</script>
   {{SHIM_SCRIPT}}<script{{NONCE_ATTR}}>window.__TRICKS__ = {{TRICKS_JSON}};</script>
   <script{{NONCE_ATTR}}>window.__TIPS__ = {{TIPS_JSON}};</script>
   <script{{NONCE_ATTR}} src="{{TIPS_SRC}}"></script>

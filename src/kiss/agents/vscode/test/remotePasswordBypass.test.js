@@ -23,6 +23,9 @@ function readShimJs() {
 }
 
 function evalShim(window, shimJs) {
+  // chat.html defines the brand before the shim script; the overlay text
+  // is built from it (the bare-window fallback is exercised separately).
+  window.__BRAND__ = {productName: 'KISS Sorcar', shortName: 'KISS'};
   window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
   // The shim defers app-bound dispatches until the parser finishes
   // (DOMContentLoaded) so none are lost while main.js is still being

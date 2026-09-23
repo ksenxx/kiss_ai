@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kiss.core.brand import render_brand
+
 # ``src/kiss/agents/third_party_agents/ask_sea.py`` → repo root is
 # ``parents[4]`` (third_party_agents → agents → kiss → src → repo).
 # The authoritative SYSTEM_LITE ablation prompt lives under
@@ -62,7 +64,7 @@ def system_prompt() -> str:
     install without the ``papers/`` tree still works.
     """
     src = _SYSTEM_LITE_PATH if _SYSTEM_LITE_PATH.is_file() else _BUNDLED_SYSTEM_LITE_PATH
-    return src.read_text(encoding="utf-8")
+    return render_brand(src.read_text(encoding="utf-8"))
 
 
 def append_to_system_prompt() -> str:

@@ -55,6 +55,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.file_lock import lock_exclusive
 from kiss.server import tls_certs, tls_trust
 from kiss.server import web_server as ws
@@ -122,7 +123,7 @@ class TestTlsCerts(TestCase):
         self.assertTrue(
             ca.extensions.get_extension_for_class(x509.KeyUsage).value.key_cert_sign,
         )
-        self.assertTrue(tls_certs.ca_common_name(self.ca).startswith("KISS Sorcar Local CA"))
+        self.assertTrue(tls_certs.ca_common_name(self.ca).startswith(f"{PRODUCT_NAME} Local CA"))
         self.assertGreater(
             ca.not_valid_after_utc - ca.not_valid_before_utc,
             datetime.timedelta(days=3600),
@@ -285,7 +286,7 @@ class TestTlsCerts(TestCase):
             x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "x")]),
             days=100, ca=True,
         )
-        self.assertEqual(tls_certs.ca_common_name(nocn), "KISS Sorcar Local CA")
+        self.assertEqual(tls_certs.ca_common_name(nocn), f"{PRODUCT_NAME} Local CA")
 
 
 class TestCreateSslContext(TestCase):

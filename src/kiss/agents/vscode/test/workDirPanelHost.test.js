@@ -6,10 +6,14 @@
 // The extension-host half of the "Working directory" panel: the webview
 // posts `openWorkDir {path}` (typed path or a row of the opened-so-far
 // list) or `pickWorkDir` (the folder button), and the compiled
-// SorcarSidebarView either runs `vscode.openFolder` on the folder or
-// answers `workDirError` -- for a path that is not a directory, a
-// file-system root (also one reached through `..` or a symlink), the
-// folder this window already shows, or an open VS Code rejects.
+// SorcarSidebarView answers `workDirPicked {path}` with the folder's
+// real path (and records it in the daemon's opened-so-far list through
+// `recordWorkDir`) -- or `workDirError` for a path that is not a
+// directory or a file-system root (also one reached through `..` or a
+// symlink).  The host never opens the folder as the window's workspace:
+// `vscode.openFolder` must not run, and the window's own folder is as
+// valid a pick as any other.  A `submit` carrying the webview's
+// `tabScopeWorkDir` passes it on to the daemon's `run`.
 //
 // Runs the compiled extension (out/SorcarSidebarView.js) against a
 // minimal `vscode` stub; run `npm run compile` first.
@@ -45,15 +49,17 @@ fs.mkdirSync(wsRoot, {recursive: true});
 fs.mkdirSync(other, {recursive: true});
 fs.writeFileSync(path.join(tmp, 'a-file.txt'), 'not a folder\n');
 const rootLink = path.join(tmp, 'root-link');
-const wsLink = path.join(tmp, 'ws-link');
+const otherLink = path.join(tmp, 'other-link');
 if (process.platform !== 'win32') {
   fs.symlinkSync('/', rootLink);
-  fs.symlinkSync(wsRoot, wsLink);
+  fs.symlinkSync(other, otherLink);
 }
+// The realpath of the temp dir (macOS puts it under a /private symlink).
+const realOther = fs.realpathSync(other);
+const realWsRoot = fs.realpathSync(wsRoot);
 
 const executed = [];
 let dialogAnswer = undefined;
-let rejectOpen = false;
 
 const vscodeStub = {
   Uri: {
@@ -106,9 +112,6 @@ const vscodeStub = {
   commands: {
     executeCommand: (cmd, ...args) => {
       executed.push({cmd, args});
-      if (cmd === 'vscode.openFolder' && rejectOpen) {
-        return Promise.reject(new Error('refused by the editor'));
-      }
       return Promise.resolve();
     },
   },
@@ -130,8 +133,11 @@ const {SorcarSidebarView} = require(path.join(outDir, 'SorcarSidebarView.js'));
 
 function makeView() {
   const view = new SorcarSidebarView({fsPath: path.join(tmp, 'ext')});
+  const forwarded = [];
+  const runs = [];
   view._api = {
-    forward: () => {},
+    forward: cmd => forwarded.push(cmd),
+    run: fields => runs.push(fields),
     getConfig: () => {},
     setWorkDir: () => {},
   };
@@ -142,56 +148,112 @@ function makeView() {
     show() {},
   };
   view._disposed = false;
-  return {view, posted};
+  return {view, posted, forwarded, runs};
 }
 
 function opens() {
-  return executed
-    .filter(e => e.cmd === 'vscode.openFolder')
-    .map(e => e.args[0].fsPath);
+  return executed.filter(e => e.cmd === 'vscode.openFolder');
 }
 
 function errors(posted) {
   return posted.filter(m => m.type === 'workDirError').map(m => m.text);
 }
 
-async function testOpenWorkDirOpensAFolder() {
-  const {view, posted} = makeView();
+function picks(posted) {
+  return posted.filter(m => m.type === 'workDirPicked').map(m => m.path);
+}
+
+/** The tab named by every workDirPicked reply (must echo the request). */
+function pickTabs(posted) {
+  return posted.filter(m => m.type === 'workDirPicked').map(m => m.tabId);
+}
+
+function recorded(forwarded) {
+  return forwarded.filter(c => c.type === 'recordWorkDir').map(c => c.path);
+}
+
+async function testOpenWorkDirPicksAFolderForTheTab() {
+  const {view, posted, forwarded} = makeView();
   executed.length = 0;
-  await view._handleMessage({type: 'openWorkDir', path: other});
-  assert.deepStrictEqual(opens(), [other], 'a real folder is opened');
+  await view._handleMessage({type: 'openWorkDir', path: other, tabId: 'tab-a'});
+  // The window's own folder is a legitimate pick too (the tab may be
+  // brought back from another folder), in any spelling.
+  await view._handleMessage({
+    type: 'openWorkDir',
+    path: wsRoot + path.sep + '.',
+    tabId: 'tab-a',
+  });
+  if (process.platform !== 'win32') {
+    await view._handleMessage({
+      type: 'openWorkDir',
+      path: otherLink,
+      tabId: 'tab-a',
+    });
+  }
+  assert.deepStrictEqual(
+    opens(),
+    [],
+    'the folder is never opened as the workspace',
+  );
   assert.deepStrictEqual(errors(posted), [], 'and nothing is reported');
+  const expected = [realOther, realWsRoot];
+  if (process.platform !== 'win32') expected.push(realOther);
+  assert.deepStrictEqual(
+    picks(posted),
+    expected,
+    'each pick is answered with the real path',
+  );
+  assert.deepStrictEqual(
+    pickTabs(posted),
+    expected.map(() => 'tab-a'),
+    'each reply names the tab that asked',
+  );
+  assert.deepStrictEqual(
+    recorded(forwarded),
+    expected,
+    'each pick lands in the daemon opened-so-far list',
+  );
+  assert.ok(
+    !forwarded.some(c => c.type === 'setWorkDir'),
+    'the connection pin is left alone',
+  );
   view.dispose();
 }
 
 async function testOpenWorkDirRefusals() {
-  const {view, posted} = makeView();
+  const {view, posted, forwarded} = makeView();
   executed.length = 0;
   const missing = path.join(tmp, 'missing');
-  await view._handleMessage({type: 'openWorkDir', path: missing});
+  await view._handleMessage({
+    type: 'openWorkDir',
+    path: missing,
+    tabId: 'tab-a',
+  });
   await view._handleMessage({
     type: 'openWorkDir',
     path: path.join(tmp, 'a-file.txt'),
+    tabId: 'tab-a',
   });
-  await view._handleMessage({type: 'openWorkDir', path: '   '});
-  await view._handleMessage({type: 'openWorkDir', path: '/'});
+  await view._handleMessage({type: 'openWorkDir', path: '   ', tabId: 'tab-a'});
+  await view._handleMessage({type: 'openWorkDir', path: '/', tabId: 'tab-a'});
   // A root reached through ".." segments.
   await view._handleMessage({
     type: 'openWorkDir',
     path: tmp + '/..'.repeat(12),
-  });
-  // The folder this window already shows, in another spelling.
-  await view._handleMessage({
-    type: 'openWorkDir',
-    path: wsRoot + path.sep + '.',
+    tabId: 'tab-a',
   });
   if (process.platform !== 'win32') {
-    await view._handleMessage({type: 'openWorkDir', path: rootLink});
-    await view._handleMessage({type: 'openWorkDir', path: wsLink});
+    await view._handleMessage({
+      type: 'openWorkDir',
+      path: rootLink,
+      tabId: 'tab-a',
+    });
   }
-  assert.deepStrictEqual(opens(), [], 'none of these opens a folder');
+  assert.deepStrictEqual(opens(), [], 'nothing is opened');
+  assert.deepStrictEqual(picks(posted), [], 'none of these is picked');
+  assert.deepStrictEqual(recorded(forwarded), [], 'nor recorded');
   const texts = errors(posted);
-  assert.strictEqual(texts.length, process.platform !== 'win32' ? 8 : 6);
+  assert.strictEqual(texts.length, process.platform !== 'win32' ? 6 : 5);
   assert.strictEqual(texts[0], 'Not a directory: ' + missing);
   assert.strictEqual(
     texts[1],
@@ -200,64 +262,87 @@ async function testOpenWorkDirRefusals() {
   assert.strictEqual(texts[2], 'Not a directory: (empty path)');
   assert.ok(/root/.test(texts[3]), 'a literal root is refused');
   assert.ok(/root/.test(texts[4]), 'a root spelled with .. is refused');
-  assert.ok(/already the working directory/.test(texts[5]));
   if (process.platform !== 'win32') {
-    assert.ok(/root/.test(texts[6]), 'a symlink to the root is refused');
-    assert.ok(
-      /already the working directory/.test(texts[7]),
-      'a symlink to the open folder is recognised',
-    );
+    assert.ok(/root/.test(texts[5]), 'a symlink to the root is refused');
   }
-  view.dispose();
-}
-
-async function testRejectedOpenIsReported() {
-  const {view, posted} = makeView();
-  executed.length = 0;
-  rejectOpen = true;
-  try {
-    await view._handleMessage({type: 'openWorkDir', path: other});
-  } finally {
-    rejectOpen = false;
-  }
-  assert.deepStrictEqual(opens(), [other], 'the open was attempted');
-  const texts = errors(posted);
-  assert.strictEqual(texts.length, 1);
-  assert.ok(/Could not open .*refused by the editor/.test(texts[0]));
   view.dispose();
 }
 
 async function testPickWorkDirUsesTheEditorDialog() {
-  const {view, posted} = makeView();
+  const {view, posted, forwarded} = makeView();
   executed.length = 0;
   // Cancelled dialog: nothing happens.
   dialogAnswer = undefined;
-  await view._handleMessage({type: 'pickWorkDir'});
+  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
   const dialog = executed.find(e => e.dialog).dialog;
   assert.strictEqual(dialog.canSelectFolders, true);
   assert.strictEqual(dialog.canSelectFiles, false);
   assert.strictEqual(dialog.canSelectMany, false);
   assert.strictEqual(dialog.defaultUri.fsPath, wsRoot);
-  assert.deepStrictEqual(opens(), []);
+  assert.ok(
+    !/open/i.test(dialog.openLabel),
+    'the button does not promise to open the folder: ' + dialog.openLabel,
+  );
+  assert.deepStrictEqual(picks(posted), []);
   assert.deepStrictEqual(errors(posted), []);
 
   // A picked folder goes through the same checks as a typed one.
   dialogAnswer = [{fsPath: other}];
-  await view._handleMessage({type: 'pickWorkDir'});
-  assert.deepStrictEqual(opens(), [other]);
+  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
+  assert.deepStrictEqual(picks(posted), [realOther]);
+  assert.deepStrictEqual(pickTabs(posted), ['tab-b']);
+  assert.deepStrictEqual(recorded(forwarded), [realOther]);
   dialogAnswer = [{fsPath: '/'}];
-  await view._handleMessage({type: 'pickWorkDir'});
-  assert.deepStrictEqual(opens(), [other], 'a picked root is not opened');
+  await view._handleMessage({type: 'pickWorkDir', tabId: 'tab-b'});
+  assert.deepStrictEqual(picks(posted), [realOther], 'a root is not picked');
   assert.ok(/root/.test(errors(posted)[0]));
+  assert.deepStrictEqual(opens(), [], 'no vscode.openFolder either way');
+  view.dispose();
+}
+
+async function testSubmitPassesTheTabScope() {
+  const {view, runs} = makeView();
+  await view._handleMessage({
+    type: 'submit',
+    prompt: 'list files',
+    model: 'm',
+    attachments: [],
+    tabId: 'tab-1',
+    workDir: other,
+    tabScopeWorkDir: wsRoot,
+  });
+  await view._handleMessage({
+    type: 'submit',
+    prompt: 'list files',
+    model: 'm',
+    attachments: [],
+    tabId: 'tab-2',
+  });
+  assert.strictEqual(runs.length, 2);
+  assert.strictEqual(runs[0].workDir, other, 'the tab dir is the run dir');
+  assert.strictEqual(
+    runs[0].tabScopeWorkDir,
+    wsRoot,
+    'the tab stays scoped to the window workspace',
+  );
+  assert.strictEqual(runs[1].workDir, wsRoot, 'no tab dir: the workspace');
+  assert.strictEqual(
+    runs[1].tabScopeWorkDir,
+    undefined,
+    'no scope override for an ordinary run',
+  );
   view.dispose();
 }
 
 async function main() {
   const tests = [
-    ['openWorkDir opens a real folder', testOpenWorkDirOpensAFolder],
+    [
+      'openWorkDir answers workDirPicked without opening a workspace',
+      testOpenWorkDirPicksAFolderForTheTab,
+    ],
     ['openWorkDir refusals are reported to the panel', testOpenWorkDirRefusals],
-    ['a rejected vscode.openFolder is reported', testRejectedOpenIsReported],
     ['pickWorkDir uses the editor dialog', testPickWorkDirUsesTheEditorDialog],
+    ['submit passes tabScopeWorkDir to run', testSubmitPassesTheTabScope],
   ];
   let failed = 0;
   for (const [name, fn] of tests) {

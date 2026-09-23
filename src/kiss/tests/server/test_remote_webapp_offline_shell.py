@@ -48,6 +48,8 @@ from typing import Any
 import pytest
 from playwright.sync_api import Page, sync_playwright
 
+from kiss.core.brand import PRODUCT_NAME
+
 MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
 
 
@@ -217,7 +219,16 @@ def test_sw_script_precaches_exactly_the_page_assets(
     assert page_status == 200
     page_urls = set(MEDIA_URL_RE.findall(page_body.decode("utf-8")))
     assert page_urls, "the page references no /media assets?"
-    assert set(shell["urls"][1:]) == page_urls
+    # ... plus the plain /media/<name> files the brand skin (brand.css)
+    # pulls in through relative url() outside comments, which the browser
+    # requests un-hashed.
+    _, _, brand_css = live_server.get("/media/brand.css")
+    css_no_comments = re.sub(r"/\*.*?\*/", "", brand_css.decode(), flags=re.DOTALL)
+    css_assets = {
+        f"/media/{name}"
+        for name in re.findall(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", css_no_comments)
+    }
+    assert set(shell["urls"][1:]) == page_urls | css_assets
     assert any(u.startswith("/media/main.js?v=") for u in page_urls)
 
     # Every manifest URL is servable, so the install-time addAll succeeds.
@@ -375,7 +386,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             during = page.evaluate(_UI_STATE_JS)
             assert during["appShown"], during
             assert during["overlayShown"] and during["banner"], during
-            assert during["msg"] == "Reconnecting to KISS Sorcar Server ...", during
+            assert during["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", during
             assert during["input"] == "typed while offline", during
             assert during["marker"] == "before-outage", during
             rect = during["overlayRect"]
@@ -494,7 +505,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             offline = page.evaluate(_UI_STATE_JS)
             assert offline["overlayShown"] and not offline["banner"], offline
             assert not offline["appShown"], offline
-            assert offline["msg"] == "Reconnecting to KISS Sorcar Server ...", offline
+            assert offline["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", offline
             assert offline["offlineMeta"], offline
             # The one reload an offline copy gets is recorded when it
             # happens, not when the copy is parsed.
