@@ -7,6 +7,9 @@
   // @ts-ignore - vscode is injected by the webview
   const vscode = acquireVsCodeApi();
   const api = createSorcarApi(msg => vscode.postMessage(msg));
+  // Product name from media/brand.json, injected by the chat.html renderer.
+  const PRODUCT_NAME =
+    (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
 
   // Editor-tabs mode: this webview is hosted in a VS Code EDITOR TAB
   // (WebviewPanel) pinned to a single root chat tab, instead of the
@@ -434,7 +437,7 @@
       container = document.createElement('section');
       container.id = 'kiss-notification-container';
       container.className = 'kiss-notification-container';
-      container.setAttribute('aria-label', 'KISS Sorcar notifications');
+      container.setAttribute('aria-label', PRODUCT_NAME + ' notifications');
       document.body.appendChild(container);
     }
     let liveRegion = document.getElementById('kiss-notification-live-region');
@@ -14491,7 +14494,7 @@
     api.shareChat({
       tabId: activeTabId,
       chatId: chatId,
-      title: (tab && tab.title) || 'KISS Sorcar chat',
+      title: (tab && tab.title) || PRODUCT_NAME + ' chat',
       html: htmlStr,
       workDir: workDirForTab(activeTabId) || undefined,
     });
@@ -14724,13 +14727,13 @@
     }
     const release =
       latest && current
-        ? `KISS Sorcar ${latest} is available (you have ${current}).`
-        : 'A new KISS Sorcar release is available.';
+        ? `${PRODUCT_NAME} ${latest} is available (you have ${current}).`
+        : `A new ${PRODUCT_NAME} release is available.`;
     const updateNow = {
       label: pendingIdle ? 'Update now' : 'Update',
       ariaLabel: latest
-        ? `Update KISS Sorcar to ${latest}`
-        : 'Update KISS Sorcar',
+        ? `Update ${PRODUCT_NAME} to ${latest}`
+        : `Update ${PRODUCT_NAME}`,
       svg: UPDATE_DOWNLOAD_SVG,
       onClick: () => {
         // In VS Code, runUpdate runs the installer in the extension host

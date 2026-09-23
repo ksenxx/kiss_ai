@@ -50,6 +50,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from kiss.core.brand import PRODUCT_NAME
+
 logger = logging.getLogger(__name__)
 
 CA_CERT_FILE = "ca.pem"
@@ -63,8 +65,8 @@ CA_VALIDITY_DAYS = 3650
 SERVER_CERT_VALIDITY_DAYS = 820
 RENEWAL_THRESHOLD_DAYS = 30
 
-_ORGANIZATION = "KISS Sorcar"
-_CA_COMMON_NAME_PREFIX = "KISS Sorcar Local CA"
+_ORGANIZATION = PRODUCT_NAME
+_CA_COMMON_NAME_PREFIX = f"{PRODUCT_NAME} Local CA"
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$")
 
 

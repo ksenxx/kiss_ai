@@ -75,7 +75,7 @@
     "commands": [
       {
         "command": "kissSorcar.openPanel",
-        "title": "KISS: Open Sorcar Chat",
+        "title": "KISS: Open Chat",
         "icon": {
           "light": "media/kiss-icon.svg",
           "dark": "media/kiss-icon.svg"
@@ -88,7 +88,7 @@
       },
       {
         "command": "kissSorcar.openSettings",
-        "title": "KISS: Open Sorcar Settings",
+        "title": "KISS: Open Settings",
         "icon": "$(settings-gear)"
       },
       {

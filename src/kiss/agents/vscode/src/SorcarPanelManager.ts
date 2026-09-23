@@ -16,11 +16,12 @@ import {
   setWebviewNotificationPoster,
 } from './WebviewNotifications';
 import {MetaPanelValues, TaskUpdateState, ToWebviewMessage} from './types';
+import {PRODUCT_NAME} from './brand';
 
 /** The webview panel viewType of an editor-tab chat. */
 export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
 
-const DEFAULT_PANEL_TITLE = 'KISS Sorcar';
+const DEFAULT_PANEL_TITLE = PRODUCT_NAME;
 
 // Editor-tab status — the editor-tab analogue of the sidebar tab
 // strip's status icon (.chat-tab-spinner / .chat-tab-ok / .chat-tab-fail

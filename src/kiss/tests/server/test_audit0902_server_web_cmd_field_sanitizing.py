@@ -28,6 +28,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.core.vscode_config as vc
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 
 
@@ -180,4 +181,4 @@ class TestCommandFieldSanitizing(IsolatedAsyncioTestCase):
         self.assertEqual(reply["tabId"], "")
         out = Path(reply["path"])
         self.assertEqual(out.parent, self.work_dir / "reports")
-        self.assertIn("<title>KISS Sorcar chat</title>", out.read_text())
+        self.assertIn(f"<title>{PRODUCT_NAME} chat</title>", out.read_text())
