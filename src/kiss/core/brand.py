@@ -20,7 +20,8 @@ import json
 import re
 from pathlib import Path
 
-BRAND_FILE = Path(__file__).resolve().parents[1] / "agents" / "vscode" / "media" / "brand.json"
+_MEDIA_DIR = Path(__file__).resolve().parents[1] / "agents" / "vscode" / "media"
+BRAND_FILE = _MEDIA_DIR / "brand.json"
 
 DEFAULT_BRAND: dict[str, str] = {
     "product_name": "KISS Sorcar",
@@ -70,7 +71,8 @@ def render_brand(text: str, brand: dict[str, str] = BRAND) -> str:
     """Fill the brand placeholders in *text*.
 
     Recognised tokens: ``{{PRODUCT_NAME}}``, ``{{SHORT_NAME}}``,
-    ``{{TAGLINE}}`` and ``{{IDENTITY}}``.  Used on the prompt files (``SYSTEM.md``, ``SYSTEM_LITE.md``) whose
+    ``{{TAGLINE}}`` and ``{{IDENTITY}}``.  Used on the prompt files
+    (``SYSTEM.md``, ``SYSTEM_LITE.md``) whose
     identity sentence is brand-specific.  Unknown ``{{...}}`` tokens are
     left untouched so other templating in the same file is unaffected.
     """

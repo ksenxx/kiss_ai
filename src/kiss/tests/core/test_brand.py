@@ -12,6 +12,7 @@ the real files and renderers: no mocks.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import subprocess
@@ -21,10 +22,19 @@ from pathlib import Path
 from kiss.agents.third_party_agents import ask_sea
 from kiss.core import brand as brand_module
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
-from kiss.core.brand import BRAND, BRAND_FILE, DEFAULT_BRAND, PRODUCT_NAME, load_brand, render_brand
+from kiss.core.brand import (
+    BRAND,
+    BRAND_FILE,
+    DEFAULT_BRAND,
+    PRODUCT_NAME,
+    load_brand,
+    render_brand,
+)
 from kiss.server import web_server
 
-_PLACEHOLDER = re.compile(r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|BRAND_JSON|BRAND_STYLE_HREF)\}\}")
+_PLACEHOLDER = re.compile(
+    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|BRAND_JSON|BRAND_STYLE_HREF)\}\}",
+)
 
 
 def test_brand_module_reads_the_media_brand_file() -> None:
@@ -96,10 +106,10 @@ def test_prompt_files_carry_placeholder_and_prompts_are_rendered() -> None:
 def test_remote_webapp_page_is_branded() -> None:
     """The remote chat page carries the name, tagline, skin link and brand JSON."""
     page = web_server._build_html()
-    assert f"<title>{PRODUCT_NAME}</title>" in page
+    assert f"<title>{html.escape(PRODUCT_NAME)}</title>" in page
     assert f"{PRODUCT_NAME} Server is starting ..." in page
     assert f"<h2>Welcome to {PRODUCT_NAME}</h2>" in page
-    assert f"<p>{BRAND['tagline']}</p>" in page
+    assert f"<p>{html.escape(BRAND['tagline'])}</p>" in page
     assert re.search(r'<link href="/media/brand\.css\?v=[0-9a-f]+" rel="stylesheet">', page)
     brand_json = re.search(r"window\.__BRAND__ = (\{.*?\});</script>", page)
     assert brand_json is not None
@@ -113,14 +123,29 @@ def test_remote_webapp_page_is_branded() -> None:
 
 
 def test_share_page_inlines_brand_css_and_default_title() -> None:
-    """The exported share page inlines brand.css and uses the branded default title."""
+    """The exported share page inlines brand.css and uses the escaped branded default title."""
     brand_css = (web_server.MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
     page = web_server._build_share_page("", "<div>x</div>")
-    assert f"<title>{PRODUCT_NAME} chat</title>" in page
+    assert f"<title>{html.escape(PRODUCT_NAME)} chat</title>" in page
     assert brand_css.strip() in page
 
 
-def test_custom_brand_json_rebrands_prompt_and_page_in_a_fresh_process(tmp_path: Path) -> None:
+def test_tips_and_brand_css_assets_are_branded() -> None:
+    """TIPS.md placeholders are rendered and brand.css url() assets are precached."""
+    from kiss.server import tips
+
+    raw = tips._bundled_tips_path().read_text(encoding="utf-8")
+    assert "{{PRODUCT_NAME}}" in raw
+    rendered = tips.read_tips()
+    assert rendered and all("{{" not in tip for tip in rendered)
+    assert any(PRODUCT_NAME in tip for tip in rendered)
+    shell = web_server._app_shell_urls()
+    for name in web_server._brand_css_asset_names():
+        assert f"/media/{name}" in shell
+        assert (web_server.MEDIA_DIR / name).is_file()
+
+
+def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
     """Swapping brand.json (the customization patch) re-brands a fresh interpreter.
 
     Runs in a subprocess against a copy of the kiss package so the
@@ -151,7 +176,8 @@ def test_custom_brand_json_rebrands_prompt_and_page_in_a_fresh_process(tmp_path:
         "print(SYSTEM_PROMPT_LITE.splitlines()[2][:63])\n"
         "page = web_server._build_html()\n"
         "print('<title>Seamless Loop</title>' in page)\n"
-        "print('Welcome to Seamless Loop</h2>' in page and 'SeamlessLabs&#x27; assistant.' in page)\n"
+        "print('Welcome to Seamless Loop</h2>' in page\n"
+        "      and 'SeamlessLabs&#x27; assistant.' in page)\n"
         "print(tls_certs._CA_COMMON_NAME_PREFIX)\n"
     )
     result = subprocess.run(
