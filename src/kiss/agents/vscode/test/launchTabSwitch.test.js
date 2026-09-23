@@ -509,6 +509,37 @@ function testBackendHiccupDoesNotRelaunch() {
   console.log('  ok - a backend hiccup does not relaunch');
 }
 
+// The remote web app keeps the chat on screen under a banner while its socket
+// is down (`reconnecting: true`), so the user may well have tapped a tab
+// before the news of a running task ever arrived. The reconnect that follows
+// is not a launch: it must not hand the switch a fresh window and move them.
+function testBannerOutageKeepsTheUsersGesture() {
+  const {win} = makeWebview({remote: true, state: {chatId: 'tab-here'}});
+  tabsState(win, [
+    {tabId: 'tab-here', chatId: 'chat-here', title: 'reading'},
+    {tabId: 'tab-bg', chatId: 'chat-bg', title: 'background'},
+  ]);
+  // No running task yet, so the launch has seen no news; the user taps.
+  win.document.dispatchEvent(
+    new win.MouseEvent('pointerdown', {bubbles: true}),
+  );
+  // The phone drops the socket and gets it back, chat on screen throughout.
+  send(win, {type: 'daemonStatus', connected: false, reconnecting: true});
+  send(win, {type: 'daemonStatus', connected: true});
+  tabsState(win, [
+    {tabId: 'tab-here', chatId: 'chat-here', title: 'reading'},
+    {tabId: 'tab-bg', chatId: 'chat-bg', title: 'background'},
+  ]);
+  statusRunning(win, 'tab-bg', 9);
+  assert.strictEqual(
+    activeTabId(win),
+    'tab-here',
+    'a reconnect under the banner must not relaunch and move the user',
+  );
+  win.close();
+  console.log('  ok - a banner outage keeps the user\'s gesture');
+}
+
 // A window left untouched is not launching forever: a task that starts much
 // later must not steal a tab from a screen somebody may be watching.
 function testLaunchWindowExpires() {
@@ -577,6 +608,7 @@ function runTests() {
     testPointerDownEndsTheLaunch,
     testKeyDownEndsTheLaunch,
     testBackendHiccupDoesNotRelaunch,
+    testBannerOutageKeepsTheUsersGesture,
     testLaunchWindowExpires,
     testSubagentTabIsNotALaunchTarget,
   ];

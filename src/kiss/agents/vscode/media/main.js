@@ -3237,9 +3237,9 @@
     const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     const composer = document.getElementById('task-input');
     const active = getTab(activeTabId);
-    // Every tab's unsent prompt, keyed by tab id.  The remote webapp
-    // reloads itself when its connection comes back after an outage
-    // (web_server._WS_SHIM_JS) and a webview can be reloaded any time;
+    // Every tab's unsent prompt, keyed by tab id.  The user can reload
+    // the remote webapp any time (a phone's browser also evicts and
+    // restores background pages) and a webview can be reloaded too;
     // the `pagehide` handler below persists the drafts on the way out
     // and the first snapshot after the reload hands them back.  The
     // active tab's draft is what the composer shows, or, when that is
@@ -11783,8 +11783,15 @@
   // the input again at 100 and 300 ms, when host-side focus churn has
   // settled).  They are dropped when something else claims the
   // keyboard meanwhile (the Explorer after a top-level folder action).
+  //
+  // On a phone the composer is never focused by code: focusing the
+  // textbox raises the software keyboard over the transcript the user
+  // just switched to (or over the tab strip while closing tabs), and
+  // every reconnect's `focusInput` nudge would do the same.  Only the
+  // user's own tap on the textbox opens the keyboard there.
   function focusInputWithRetry() {
     cancelInputFocusRetry();
+    if (isMobileRemote) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
@@ -12150,6 +12157,11 @@
   // Raised while the daemon is unreachable so the reconnect can
   // re-announce `ready` (tab-registry sync + transcript replay).
   let daemonWasDown = false;
+  // True while the outage keeps the chat on screen under the reconnect
+  // banner (the remote shim's `reconnecting` flag): the user could go on
+  // reading and tapping, so the reconnect is not a launch (see
+  // beginLaunch) and must not move them off their tab.
+  let chatStayedOnScreen = false;
 
   function handleEvent(ev) {
     const t = ev.type;
@@ -12178,18 +12190,24 @@
           removeAdjacentLoader();
           pendingSidebarRequests.clear();
           daemonWasDown = true;
+          chatStayedOnScreen = ev.reconnecting === true;
         }
         if (ev.connected) {
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
-          // starts here (see beginLaunch).
-          beginLaunch();
+          // starts here (see beginLaunch) -- unless the chat never left
+          // the screen, in which case whatever the user did meanwhile
+          // still counts.
+          if (!chatStayedOnScreen) beginLaunch();
+          chatStayedOnScreen = false;
           // A daemon that went away and came back is a fresh daemon as
           // far as this client is concerned (it may have restarted):
           // re-announce `ready` so it re-syncs the shared tab registry
           // and replays the transcripts this window shows. The remote
-          // web app reloads the whole page on reconnect instead, so
-          // only the VS Code webview takes this path in practice.
+          // web app takes the same path: its shim (web_server.
+          // _WS_SHIM_JS) re-authenticates the socket without reloading
+          // the page, so the tabs, drafts and scroll positions kept
+          // here survive and only the server's updates come in.
           if (daemonWasDown) {
             daemonWasDown = false;
             sendReady();
@@ -13871,7 +13889,9 @@
       stopTimer();
       removeSpinner();
       statusText.textContent = label || 'Ready';
-      inp.focus();
+      // A finished task (or its replay after a reconnect) must not raise
+      // the phone's keyboard; see focusInputWithRetry.
+      if (!isMobileRemote) inp.focus();
     }
     renderTabBar();
   }
@@ -14821,6 +14841,16 @@
   }
 
   function replayTaskEvents(events) {
+    // autoscroll-coverage:start
+    // A transcript rebuilt while the user is reading it — a reconnect
+    // replays the tab on screen — keeps the reading position: a view
+    // the user scrolled away from the bottom is put back where it was
+    // instead of jumping to the latest panel.  A replay into an empty
+    // or bottom-pinned transcript lands at the end as always.
+    const keepScroll =
+      userScrollLock && Array.from(O.children).some(el => el !== welcome);
+    const keptScrollTop = O.scrollTop;
+    // autoscroll-coverage:end
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
@@ -14838,9 +14868,16 @@
     saveLiveStreamCtx(rCtx);
     if (rCtx.stepCount > 0) updateStepCount(rCtx.stepCount);
     // autoscroll-coverage:start
-    // clearOutput() above released any user scroll lock: the replayed
-    // chat lands at the end of its latest event panel.
-    autoScrollLatestEventPanel(O.lastElementChild);
+    if (keepScroll) {
+      O.scrollTop = keptScrollTop;
+      // The lock follows the restored position (a shorter transcript
+      // may have put it at the bottom, where auto-scroll resumes).
+      updateUserScrollLock();
+    } else {
+      // clearOutput() above released any user scroll lock: the replayed
+      // chat lands at the end of its latest event panel.
+      autoScrollLatestEventPanel(O.lastElementChild);
+    }
     // autoscroll-coverage:end
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
@@ -16880,9 +16917,10 @@
     if (!prompt) return;
     // Daemon unreachable (the remote webapp shows the app under its
     // "Reconnecting ..." banner): a submit now would only sit in the
-    // shim's queue, and the page reload that follows the reconnect
-    // would drop it.  Keep the prompt in the composer instead of
-    // losing it silently; the user sends it once the banner is gone.
+    // shim's queue with no feedback, and the task's own transcript
+    // would arrive out of order with the reconnect's replay.  Keep the
+    // prompt in the composer instead; the user sends it once the
+    // banner is gone.
     if (daemonWasDown) return;
 
     // The agent is blocked in ask_user_question: the composer text is
@@ -17030,7 +17068,10 @@
       ? 'Type your answer and press Enter'
       : inp.dataset.defaultPlaceholder;
     updateInputDisabled();
-    if (answering) inp.focus();
+    // A phone shows the question and waits for the user's own tap on
+    // the answer box (see focusInputWithRetry): switching to, or being
+    // moved onto, an asking tab must not raise the keyboard.
+    if (answering && !isMobileRemote) inp.focus();
   }
 
   // The text in a tab's composer: the live textarea for the tab on

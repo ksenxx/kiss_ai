@@ -349,17 +349,6 @@ async function run() {
 
     sock.fireClose();
 
-    try {
-      assert.strictEqual(
-        window.sessionStorage.getItem('sorcar-reconnect-pending'),
-        '1',
-        'onclose after auth must set sorcar-reconnect-pending=1',
-      );
-      ok('onclose latches sessionStorage["sorcar-reconnect-pending"]="1"');
-    } catch (err) {
-      fail('onclose must persist the reconnect-pending flag', err);
-    }
-
     const msg = window.document.getElementById('kiss-server-loading-msg');
     try {
       assert.ok(msg, 'overlay must have a #kiss-server-loading-msg node');
@@ -380,13 +369,17 @@ async function run() {
   }
 
   {
+    // A page the service worker served from its cache (the server was
+    // unreachable) is a reconnect from the user's point of view: the
+    // worker only has the copy because the server was up before.
     const dom = buildDom();
     const {window} = dom;
     const sockets = [];
     installFakeWebSocket(window, sockets);
     setupSimulatedSetServerLoading(window);
-
-    window.sessionStorage.setItem('sorcar-reconnect-pending', '1');
+    const meta = window.document.createElement('meta');
+    meta.setAttribute('name', 'kiss-offline-shell');
+    window.document.head.appendChild(meta);
 
     window.eval(shimJs);
     // The shim defers app-bound dispatches until the parser finishes
@@ -403,13 +396,12 @@ async function run() {
       assert.strictEqual(
         msg.textContent,
         'Reconnecting to KISS Sorcar Server ...',
-        'overlay must say "Reconnecting ..." on load when the flag is set',
+        'overlay must say "Reconnecting ..." on a page served from the worker cache',
       );
-      ok('reload with pending flag shows "Reconnecting ..." immediately');
+      ok('offline-cached page shows "Reconnecting ..." immediately');
     } catch (err) {
       fail(
-        'shim must update overlay text on script start when ' +
-          'sessionStorage["sorcar-reconnect-pending"]=="1"',
+        'shim must label the overlay a reconnect on an offline-shell page',
         err,
       );
     }

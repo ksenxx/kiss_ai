@@ -3885,15 +3885,17 @@ _WS_SHIM_JS = r"""
   var _ws = null;
   var _pending = [];
   var _authenticated = false;
-  // Tracks whether this client has previously completed a full
-  // auth handshake.  Once true, the next successful ``auth_ok``
-  // after an ``onclose`` (i.e. a server restart or network blip)
-  // means the page state is stale relative to the freshly booted
-  // backend and we must reload the page so the normal load
-  // pipeline replays history, restored tabs, etc.  Without
-  // this the page only re-binds the socket and the
-  // user is left staring at the "KISS Sorcar Server is starting
-  // ..." overlay (or stale UI) until they manually refresh.
+  // True once an authenticated session has lost its socket (a server
+  // restart, a network blip, the phone's browser sleeping the tab).
+  // The page is NOT reloaded when the socket comes back: main.js keeps
+  // every tab, transcript and draft in memory, and on the
+  // ``daemonStatus`` ``connected: true`` that follows the re-auth it
+  // sends ``ready`` again, which makes the server push what changed
+  // meanwhile (tab registry, transcript replays, tasks, settings).  A
+  // reload would repaint the whole app from a blank page on every
+  // blip — visible as flicker on a phone that drops the connection
+  // each time the browser is backgrounded.  This flag only picks the
+  // wording of the status surface ("Reconnecting" vs "starting").
   var _hadAuthThenClosed = false;
   // Reconnect backoff attempt count — reset to 0 after a successful
   // ``auth_ok`` so a fresh disconnect tries again almost immediately.
@@ -3901,24 +3903,6 @@ _WS_SHIM_JS = r"""
   // Pending reconnect timer id, used so visibilitychange / pageshow /
   // online wake-ups can short-circuit the scheduled delay.
   var _reconnectTimer = null;
-
-  // ``sessionStorage`` persists across the ``window.location.reload()``
-  // performed inside the ``_hadAuthThenClosed`` branch of ``auth_ok``,
-  // which lets the freshly-loaded page detect "this load is actually
-  // a reconnect from a previously-authenticated session" and label the
-  // loading overlay accordingly.
-  var _RECONNECT_FLAG = 'sorcar-reconnect-pending';
-
-  function _readReconnectingFlag() {
-    try { return sessionStorage.getItem(_RECONNECT_FLAG) === '1'; }
-    catch (e) { return false; }
-  }
-  function _setReconnectingFlag(on) {
-    try {
-      if (on) sessionStorage.setItem(_RECONNECT_FLAG, '1');
-      else sessionStorage.removeItem(_RECONNECT_FLAG);
-    } catch (e) {}
-  }
 
   /**
    * Replace the overlay text so the user sees an accurate status.
@@ -3961,36 +3945,30 @@ _WS_SHIM_JS = r"""
       'Asking for the password again in ' + secs + 's ...';
   }
 
-  // Apply the reconnect label immediately on script start when the
-  // sessionStorage flag survives from the prior page instance.  Without
-  // this the user would briefly see "Server is starting ..." after
-  // backgrounding Safari and returning, even though we know the server
-  // is up and we are merely re-establishing the WebSocket.
-  if (_readReconnectingFlag()) {
-    _updateLoadingMsg(true);
-  }
-
   // A page the service worker answered from its cache because the
   // server was unreachable carries the ``kiss-offline-shell`` meta
   // (see media/sw.js).  Its code may be older than what the server
-  // now runs, so the first successful handshake reloads it — exactly
-  // as a reconnect after an outage does.  The sessionStorage flag
-  // survives that reload and stops a loop when the page fetch keeps
-  // timing out (slow link) while the WebSocket still comes up: the
-  // second cached load is kept.  A page the server itself served
-  // clears the flag.
+  // now runs, so the first successful handshake reloads it — the one
+  // reload the shim still performs, and only on a page that was never
+  // live.  The sessionStorage flag survives that reload and stops a
+  // loop when the page fetch keeps timing out (slow link) while the
+  // WebSocket still comes up: the second cached load is kept.  A page
+  // the server itself served clears the flag.
+  //
+  // The worker only holds a copy because the server was reachable
+  // earlier, so a cached page is a reconnect from the user's point of
+  // view and its overlay says so from the start (and keeps saying so
+  // while the connection attempts fail).
   var _OFFLINE_RELOADED_FLAG = 'sorcar-offline-reloaded';
+  var _offlineShell =
+    !!document.querySelector('meta[name="kiss-offline-shell"]');
   var _reloadOnFirstAuth = false;
-  // Set when a lost session (or an offline-cached page) has been
-  // re-authenticated and the page waits for the server's ``pong``
-  // before reloading itself; ``_inflight`` holds the commands flushed
-  // on that connection until the pong confirms them, so a connection
-  // that dies first re-queues them for the next one (at-least-once:
-  // a settings save may be applied twice, never silently lost).
-  var _reloadOnPong = false;
+  if (_offlineShell) _updateLoadingMsg(true);
+  // The commands flushed on a reconnected socket, kept until the
+  // server's ``pong`` confirms it has taken them (see ``auth_ok``).
   var _inflight = [];
   try {
-    if (document.querySelector('meta[name="kiss-offline-shell"]')) {
+    if (_offlineShell) {
       _reloadOnFirstAuth =
         sessionStorage.getItem(_OFFLINE_RELOADED_FLAG) !== '1';
     } else {
@@ -4006,7 +3984,7 @@ _WS_SHIM_JS = r"""
   // right after each of its own keep-alive pings (every 15 s, see
   // ``RemoteAccessServer._ping_one_ws``); a socket that has been
   // silent for ``_STALE_AFTER_MS`` is therefore dead and is dropped
-  // here so the regular reconnect path (banner, backoff, reload on
+  // here so the regular reconnect path (banner, backoff, resync on
   // re-auth) takes over.  Any frame counts as life, so a slow server
   // command cannot cause a false alarm.
   var _STALE_CHECK_MS = 15000;
@@ -4048,8 +4026,8 @@ _WS_SHIM_JS = r"""
   // Offline app shell: the service worker served at ``/sw.js`` (see
   // ``_build_service_worker``) caches this page and its ``/media``
   // assets, so the app still opens — and stays on screen — when the
-  // connection is slow, flaky or gone, and a reload after a
-  // reconnect is served network-first.  Best effort: browsers refuse
+  // connection is slow, flaky or gone; a page load is served
+  // network-first.  Best effort: browsers refuse
   // a worker fetched over a self-signed certificate (the LAN URL),
   // and the app must keep working without one.
   if (typeof navigator !== 'undefined' && navigator.serviceWorker &&
@@ -4190,32 +4168,21 @@ _WS_SHIM_JS = r"""
   // proves nothing about the batch flushed on it: the next connection
   // sends the batch again, ahead of whatever has been queued since.
   function _requeueUnconfirmed() {
-    if (!_reloadOnPong) return;
+    if (_inflight.length === 0) return;
     _pending = _inflight.concat(_pending);
     _inflight = [];
-    _reloadOnPong = false;
   }
 
   // Shared by the socket's ``onclose`` and the stale-socket check
   // (``_checkStale``), which drops a half-open socket that will never
   // fire ``onclose`` on its own.
   function _onSocketClosed() {
-    // Latch "we had a real session and then lost it" so the next
-    // successful ``auth_ok`` reloads the page.  We only set the
-    // flag when the prior socket had completed its auth handshake
-    // — a fresh page that has not yet authenticated must NOT
-    // trigger a reload on its first ``auth_ok``.
-    if (_authenticated) {
-      _hadAuthThenClosed = true;
-      // Persist the reconnect-state across the ``location.reload()``
-      // that ``auth_ok`` will trigger so the freshly-loaded page
-      // labels its overlay "Reconnecting ..." instead of the
-      // misleading "KISS Sorcar Server is starting ...".  Mobile
-      // Safari frequently kills the WebSocket whenever the user
-      // switches apps, so this is the common case, not an edge
-      // case.
-      _setReconnectingFlag(true);
-    }
+    // Latch "we had a real session and then lost it": the status
+    // surface below says "Reconnecting" rather than "starting", and
+    // main.js keeps the app on screen under a banner.  Only a socket
+    // that had completed its auth handshake counts — a fresh page
+    // that never authenticated has nothing on screen to keep.
+    if (_authenticated) _hadAuthThenClosed = true;
     _authenticated = false;
     _requeueUnconfirmed();
     _stopStaleCheck();
@@ -4238,11 +4205,11 @@ _WS_SHIM_JS = r"""
       }, lockedDelay);
       return;
     }
-    // Switch the overlay text BEFORE re-revealing it: once we have
-    // had at least one successful handshake (current page or any
-    // previous one, latched via sessionStorage) every overlay
-    // appearance is a reconnect from the user's perspective.
-    _updateLoadingMsg(_hadAuthThenClosed || _readReconnectingFlag());
+    // Switch the overlay text BEFORE re-revealing it: once this page
+    // has had a successful handshake (or came from the worker's cache,
+    // which only exists because the server was reachable before) every
+    // overlay appearance is a reconnect from the user's perspective.
+    _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
     // Tell the app the socket is down.  Symmetric to the ``auth_ok``
     // dispatch above and to ``SorcarSidebarView.ts``'s disconnect
     // handler in the VS Code path.  ``reconnecting: true`` — the
@@ -4253,8 +4220,8 @@ _WS_SHIM_JS = r"""
     // seconds.  A page that never authenticated has nothing to show
     // and keeps the full overlay.  The banner also tells the user
     // that sending is on hold (``main.js`` holds prompts back while
-    // the daemon is down); the reload on the next ``auth_ok``
-    // resyncs everything.
+    // the daemon is down); on the next ``auth_ok`` main.js sends
+    // ``ready`` again and the server resyncs everything in place.
     _dispatchToApp({
       type: 'daemonStatus', connected: false,
       reconnecting: _hadAuthThenClosed,
@@ -4280,12 +4247,18 @@ _WS_SHIM_JS = r"""
       // have taken: when the wake-up listeners win the race against
       // the dead socket's queued ``onclose`` (the common mobile Safari
       // case), an authenticated session is being replaced right here,
-      // so record the loss now — otherwise the new socket's
-      // ``auth_ok`` would skip the reload and leave the page on stale
-      // pre-restart state.
+      // so record the loss now and tell the app, exactly as the
+      // ``onclose`` would have: without the ``connected: false`` the
+      // app never learns the session dropped, so it would not send
+      // ``ready`` again on the replacement's ``auth_ok`` and miss the
+      // resync.  (No reconnect is scheduled here: this IS the
+      // reconnect.)
       if (_authenticated) {
         _hadAuthThenClosed = true;
-        _setReconnectingFlag(true);
+        _updateLoadingMsg(true);
+        _dispatchToApp({
+          type: 'daemonStatus', connected: false, reconnecting: true,
+        });
       }
       _requeueUnconfirmed();
       _dropSocket(_ws);
@@ -4305,30 +4278,26 @@ _WS_SHIM_JS = r"""
       _lastFrameAt = Date.now();
       if (msg.type === 'heartbeat') return;
       if (msg.type === 'auth_ok') {
-        // Recover from a server restart / network blip: if we had
-        // already authenticated at least once and the WS later
-        // closed, the page JS state is stale relative to the
-        // freshly booted backend.  Reload so the normal page-load
-        // pipeline (history replay, restored tabs, ...) runs
-        // against the new server state.  A page the service worker
-        // served from its offline cache reloads on its first
-        // handshake for the same reason (``_reloadOnFirstAuth``).
-        // The reload is gated by ``_hadAuthThenClosed`` so the
-        // very first authentication on a fresh page load does NOT
-        // reload (otherwise we would loop forever).
-        var reloading = _hadAuthThenClosed || _reloadOnFirstAuth;
+        if (_reloadOnFirstAuth) {
+          // A page the service worker served from its offline cache
+          // may run code older than the server's: reload it once, now
+          // that the server is reachable.  Nothing posted so far
+          // matters — the overlay kept the app off screen, so the
+          // queue holds only the boot commands the fresh page repeats.
+          _reloadOnFirstAuth = false;
+          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
+          try { window.location.reload(); } catch (e) {}
+          return;
+        }
+        // Recover from a server restart / network blip in place: the
+        // page keeps its state and main.js, on the ``daemonStatus``
+        // dispatched below, sends ``ready`` again so the server pushes
+        // what changed while the socket was down.  No reload — that
+        // would repaint the whole app on every blip.
         _hadAuthThenClosed = false;
         _authenticated = true;
         _stopStaleCheck();
         _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
-        // We have a live, authenticated socket — any future
-        // disconnect IS a reconnect, but the just-completed
-        // handshake is not.  Drop the sessionStorage flag so a
-        // subsequent fresh tab (different browsing session, same
-        // device) doesn't mislabel its first overlay.  A reload
-        // keeps the flag intact so the next page labels its overlay
-        // "Reconnecting".
-        _setReconnectingFlag(reloading);
         _reconnectAttempt = 0;
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
@@ -4344,21 +4313,19 @@ _WS_SHIM_JS = r"""
         }
         // Everything the page posted while the connection was down
         // (a settings save, a model change, a closed tab, ...) goes
-        // out now, on the new connection, so none of it is lost to
-        // the reload below.
+        // out now, on the new connection, in the order it was posted.
+        // The server handles a connection's commands one at a time, so
+        // its ``pong`` proves it has taken every command sent before
+        // the ``ping``; until then the batch stays in ``_inflight`` and
+        // a connection that dies first re-sends it on the next one
+        // (at-least-once: a settings save may be applied twice, never
+        // silently lost).  main.js holds prompts back while the daemon
+        // is down, so a ``runTask`` is never in such a batch.
         var batch = _pending;
         _pending = [];
         for (var i = 0; i < batch.length; i++) _ws.send(batch[i]);
-        if (reloading) {
-          // The server handles a connection's commands one at a
-          // time, so its ``pong`` proves it has taken every command
-          // flushed above; the page reloads when it arrives (see the
-          // ``pong`` branch).  Until then — and if the reload never
-          // happens because the user cancels the browser's "unsaved
-          // changes" dialog a dirty editor tab raises — this is a
-          // working, authenticated page, not a wedged one.
+        if (batch.length > 0) {
           _inflight = batch;
-          _reloadOnPong = true;
           _ws.send(JSON.stringify({type: 'ping'}));
         }
         // Hide the "KISS Sorcar Server is starting ..." overlay now
@@ -4368,21 +4335,17 @@ _WS_SHIM_JS = r"""
         // same window ``message`` event ``media/main.js`` listens for.
         // Without this the overlay covers ``#app`` forever and the
         // user only ever sees "KISS Sorcar Server is starting ...".
+        // On a reconnect main.js answers this with a fresh ``ready``
+        // (its ``daemonWasDown`` path), which is what resyncs the
+        // page: it goes out after the batch above, so a queued change
+        // is applied before the server replays state to this client.
         _dispatchToApp({type: 'daemonStatus', connected: true});
         return;
       }
       if (msg.type === 'pong') {
-        if (!_reloadOnPong) return;
-        _reloadOnPong = false;
+        // The server has taken the whole batch flushed on this
+        // connection; nothing is owed any more.
         _inflight = [];
-        if (_reloadOnFirstAuth) {
-          // Record the offline-cached page's one reload only now that
-          // it really happens; a cached page that went away before
-          // this point (auth never completed) has not used it up.
-          _reloadOnFirstAuth = false;
-          try { sessionStorage.setItem(_OFFLINE_RELOADED_FLAG, '1'); } catch (e) {}
-        }
-        try { window.location.reload(); } catch (e) {}
         return;
       }
       if (msg.type === 'auth_required') {

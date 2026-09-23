@@ -1479,10 +1479,10 @@ class ServerApi:
         the ``pong`` reaches the sender only once every command it sent
         before the ``ping`` has been taken.  The remote webapp's
         WebSocket shim (``kiss.server.web_server._WS_SHIM_JS``) relies
-        on that: after a lost session it flushes the commands the user
-        issued during the outage, sends ``ping`` and reloads the page
-        only when ``pong`` arrives, so nothing the reload discards was
-        still owed to the server.
+        on that: after a (re)connect it flushes the commands queued
+        while the socket was down, sends ``ping`` and keeps the batch
+        until ``pong`` arrives, re-sending it on the next connection if
+        this one dies first.
 
         Args:
             cmd: The ``ping`` command (no fields are used).
