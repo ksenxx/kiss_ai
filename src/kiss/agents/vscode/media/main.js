@@ -12923,6 +12923,7 @@
           ev.tunnelActive,
           ev.loopbackUrl,
           ev.lanUrls,
+          ev.localCa === true,
         );
         break;
       case 'update_available':
@@ -14577,7 +14578,32 @@
     return wrapper;
   }
 
-  function renderRemoteUrl(url, ntfyUrl, tunnelActive, loopbackUrl, lanUrls) {
+  function _buildTlsTrustHint(baseUrl) {
+    const hint = document.createElement('div');
+    hint.className = 'remote-url-tls-hint';
+    hint.append('Certificate warning on the Local/LAN URLs? Run ');
+    const cmd = document.createElement('code');
+    cmd.textContent = 'kiss-web --trust-ca';
+    hint.appendChild(cmd);
+    hint.append(' on this machine; on a phone install ');
+    const link = document.createElement('a');
+    link.href = baseUrl.replace(/\/+$/, '') + '/ca.crt';
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'ca.crt';
+    hint.appendChild(link);
+    hint.append(' and enable trust for it.');
+    return hint;
+  }
+
+  function renderRemoteUrl(
+    url,
+    ntfyUrl,
+    tunnelActive,
+    loopbackUrl,
+    lanUrls,
+    localCa,
+  ) {
     const displayUrl = ntfyUrl || url;
     // Alongside the Cloudflare (or ntfy) URL, always show how to
     // reach the webapp from this machine (127.0.0.1) and from other
@@ -14593,6 +14619,15 @@
         bars.push([lanUrl, false, 'LAN (local network)']);
       }
     }
+    // With the daemon's auto-generated certificate (localCa) the
+    // Local/LAN URLs are signed by the machine-local CA; a browser
+    // warns until it trusts that CA, so tell the user how to do it
+    // once per device (the LAN URL is the one a phone can reach for
+    // the /ca.crt download).  An explicitly configured certificate
+    // has no CA to offer, so no hint.
+    const caBaseUrl = localCa
+      ? (lanUrls || []).find(u => !!u) || loopbackUrl
+      : '';
     const containerIds = ['remote-url', 'welcome-remote-url'];
     for (const id of containerIds) {
       const container = document.getElementById(id);
@@ -14601,6 +14636,7 @@
       for (const [barUrl, isNtfy, labelText] of bars) {
         container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
       }
+      if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
     }
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {

@@ -744,6 +744,9 @@ type ToWebviewMessageBody =
       tunnelActive?: boolean;
       loopbackUrl?: string;
       lanUrls?: string[];
+      // True when the daemon serves its auto-generated, locally-signed
+      // certificate (so /ca.crt and `kiss-web --trust-ca` apply).
+      localCa?: boolean;
     }
   // A session replay (server.py): task_id is the history row id (None
   // for a task still running without a row), chat_id the chat's uuid
