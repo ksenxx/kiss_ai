@@ -418,7 +418,8 @@ def test_analyze_and_report(tree: dict[str, Path]) -> None:
     proc = run_tool(tree, "report", "--phase", PHASE, "--out", str(out), "--allow-incomplete")
     assert proc.returncode == 0, proc.stderr
     html = out.read_text()
-    assert html.count("<svg") == 8 and "GPT-5.6 Luna · KISS Sorcar" in html
+    # 8 comparison charts + cap curves (turns and dollars per benchmark, wall clock for TB2)
+    assert html.count("<svg") == 13 and "GPT-5.6 Luna · KISS Sorcar" in html
     assert "Incomplete run" in html and "gpt-5.6-luna 87 slot(s) off" in html
     assert "n/a</text>" not in html  # the blog has per-task Pi data for luna on both benchmarks
     assert "1/2 · 0/3</text>" in html  # astropy: KISS solved one of two attempts, Pi none
@@ -440,7 +441,7 @@ def test_report_prose_on_the_recorded_study() -> None:
         or "fall inside the blog's confidence interval" in html
     )
     assert "Incomplete run" not in html
-    assert html.count("<svg") == 8
+    assert html.count("<svg") == 13
 
 
 def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
@@ -538,7 +539,7 @@ def test_daemon_server_waits_an_hour_for_benchmark_clients(tmp_path: Path) -> No
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    assert server._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
+    assert server._printer._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
     assert (tmp_path / "home" / "config.json").is_file()
 
 
@@ -828,12 +829,22 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         off = sea_core.ContainerHarness(str(config))
         off.on_tool_call("Edit", edit)
         assert off.pending_edits == []
+        # a path the shell cannot take, a huge file and a binary file never raise out of the hook
+        nul = {"file_path": "pkg/\x00bad.py", "old_string": "x", "new_string": "y"}
+        assert harness.on_tool_call("Edit", nul) == "OK"
+        assert harness.read_container_file("/repo/pkg/\x00bad.py") is None
+        live.exec_run(["sh", "-c", "head -c 500000 /dev/zero | tr '\0' 'a' > /repo/pkg/big.py; "
+                      "printf 'a\0b' > /repo/pkg/bin.py"])
+        assert harness.read_container_file("/repo/pkg/big.py") is None
+        assert harness.read_container_file("/repo/pkg/bin.py") is None
+        text = harness.read_container_file("/repo/tests/test_fields.py") or ""
+        assert text.startswith("from pkg.fields")
     finally:
         live.remove(force=True)
 
 
 def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
-    """Destructive commands are blocked, install timeouts lifted, and the gate answers one finish."""
+    """Destructive commands are blocked, install timeouts lifted, the gate answers one finish."""
     from benchmarkings.harnesstax import sea_core, trials
 
     def harness(**extra: object) -> sea_core.ContainerHarness:
@@ -854,12 +865,14 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
                     "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
                     "FOO=1 kill -9 -1"):
         assert plain.on_tool_call("Bash", {"command": command}) == blocked, command
-    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "kill -9 -1"]'}) == blocked
+    parallel = {"commands": '["ls", "kill -9 -1"]'}
+    assert plain.on_tool_call("run_commands_parallel", parallel) == blocked
     assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == blocked
     for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
                     "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
                     "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
-                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md", "echo ok # rm -rf /app"):
+                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md",
+                    "echo ok # rm -rf /app"):
         assert plain.on_tool_call("Bash", {"command": command}) == "OK", command
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
@@ -877,13 +890,18 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
         args = {"command": command, "timeout_seconds": 30}
         assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 30, command
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
     args = {"commands": '["npm install"]'}  # the tool's own default (1800 s) is already long enough
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
-    args = {"commands": "not json; make", "timeout_seconds": 60}  # unparsable list: treated as one command
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
+    # an unparsable list is treated as one command
+    args = {"commands": "not json; make", "timeout_seconds": 60}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
     args = {"commands": '{"a": 1}'}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
     assert plain.on_tool_call("Bash", {"command": 42}) == "OK"
     assert plain.on_tool_call("Bash", {}) == "OK"
     # no gate by default: every finish passes
@@ -903,19 +921,34 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == blocked
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == "OK"
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
-    gate_events = [e for e in events if e["tool"] == "finish" and e["args"] == {"success": True}]
+    gate_events = [e for e in events
+                   if e.get("tool") == "finish" and e["args"] == {"success": True}]
     assert [e["blocked"] for e in gate_events] == [False, False, True, False]
     # the prompt carries the new rules and the trial config takes the gate from the environment
     prompt = plain.system_prompt()
-    assert "Leave the container as verified" in prompt and "let the existing" not in prompt
+    assert "The container as you leave it is the deliverable" in prompt
+    assert "byte for byte" not in prompt
+    assert "no internet" not in prompt.lower()
     assert trials.trial_config("c", "/app", MODEL)["finish_gate"] is False
+    assert plain.model_config() is None
     os.environ["HARNESSTAX_FINISH_GATE"] = "1"
+    os.environ["HARNESSTAX_MODEL_CONFIG"] = json.dumps(
+        {MODEL: {"reasoning_effort": "medium"}, "other": {"x": 1}})
     try:
         assert trials.trial_config("c", "/app", MODEL) == {
-            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False, "finish_gate": True,
+            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False,
+            "finish_gate": True,
+            "model_config": {"reasoning_effort": "medium"},
         }
+        assert trials.trial_config("c", "/app", "unlisted")["model_config"] == {}
     finally:
-        del os.environ["HARNESSTAX_FINISH_GATE"]
+        for name in ("HARNESSTAX_FINISH_GATE", "HARNESSTAX_MODEL_CONFIG"):
+            del os.environ[name]
+    tuned = harness(model_config={"output_config": {"effort": "medium"}})
+    assert tuned.model_config() == {"output_config": {"effort": "medium"}}
+    trial = {"container": "c", "workdir": "/app", "prompt": "p", "model": MODEL}
+    sea = sea_core.write_trial_sea(tmp_path / "sea-trial", trial)
+    assert "model_config = _harness.model_config" in sea.read_text()
 
 
 def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:
