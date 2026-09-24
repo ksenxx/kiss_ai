@@ -81,6 +81,7 @@ from kiss.server.task_runner import (
     _TaskRunnerMixin,
     parse_task_tags,
 )
+from kiss.server.task_update import mark_legacy_updates_as_side_channels
 
 __all__ = [
     "VSCodeServer",
@@ -612,6 +613,14 @@ class VSCodeServer(
         cut-off scopes the sweep to rows created strictly before this
         server instance was constructed.
 
+        The same thread then stamps ``is_side_channel`` on task-update
+        child rows persisted by releases that predate the flag (see
+        :func:`mark_legacy_updates_as_side_channels`); without the stamp
+        every chat reload re-opens each finished periodic update as a
+        dead sub-agent tab.  It is another ``UPDATE`` behind the
+        persistence write lock, so it must live here and never on the
+        listener-binding path.
+
         Args:
             still_running: Task-history row ids owned by worker
                 threads still alive in this process; exempt from the
@@ -629,6 +638,14 @@ class VSCodeServer(
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
             )
+        try:
+            stamped = mark_legacy_updates_as_side_channels()
+            if stamped:
+                logger.info(
+                    "Stamped %d legacy task-update rows as side channels", stamped,
+                )
+        except Exception:
+            logger.warning("could not stamp legacy task-update rows", exc_info=True)
         finally:
             _close_thread_db()
 

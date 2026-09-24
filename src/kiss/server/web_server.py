@@ -106,8 +106,8 @@ from kiss.core.vscode_config import (
     load_config,
     save_config,
 )
+from kiss.server import agent_state, tls_certs
 from kiss.server import sorcar as sorcar_api
-from kiss.server import tls_certs
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
@@ -115,10 +115,7 @@ from kiss.server.json_printer import (
 )
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
-from kiss.server.task_update import (
-    TaskUpdateRunner,
-    mark_legacy_updates_as_side_channels,
-)
+from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
@@ -2123,24 +2120,6 @@ def _rss_mb() -> float:
         return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
     except Exception:
         return -1.0
-
-
-def _stamp_legacy_side_channels() -> None:
-    """Stamp task-update rows persisted before the side-channel flag.
-
-    Without the stamp every chat reload re-opens each finished periodic
-    update as a dead sub-agent tab.  Best effort: a failure is logged
-    and never blocks startup.
-    """
-    try:
-        stamped = mark_legacy_updates_as_side_channels()
-    except Exception:
-        logger.warning("could not stamp legacy task-update rows", exc_info=True)
-        return
-    if stamped:
-        logger.info(
-            "Stamped %d legacy task-update rows as side channels", stamped,
-        )
 
 
 def _raise_open_file_limit() -> None:
@@ -5622,35 +5601,91 @@ class RemoteAccessServer:
             }, conn_id)
             return
         self._update_starting = True
+        # From here on the daemon is about to be restarted by the
+        # installer: refuse NEW task submits (running ones are the
+        # user's explicit choice).  The idle poller has already raised
+        # the barrier under the registry lock together with its "no
+        # active tasks" verdict; a direct click raises it here.  Every
+        # path on which no installer ends up running lowers it again.
+        self._set_update_barrier(True)
         # A direct "Update" supersedes an armed "Update when idle": the
         # idle poller must not launch a second installer later.  The
         # poller itself disarms before calling here, so this never
         # cancels the running task.
-        if self._cancel_update_when_idle():
-            await self._broadcast_update_available()
-        # When the clone (or its install.sh) is missing — the extension
-        # was installed from a .vsix, or ~/.kiss/kiss_ai was deleted —
-        # fall back to the public curl bootstrap, which recreates the
-        # clone and hands over to its install.sh, instead of refusing
-        # with "install.sh not found".  The extension's runUpdate() does
-        # the same in its terminal.
-        script = await loop.run_in_executor(
-            None, _find_install_script, self._install_root,
-        )
-        self._broadcast_to_conn({
-            "type": "notice",
-            "text": (
-                f"An update of {PRODUCT_NAME} is getting installed… "
-                f"(output: {self._update_log_path})"
-            ),
-        }, conn_id)
-        spawned = await loop.run_in_executor(
-            None, self._spawn_update_script, script, conn_id,
-        )
-        if spawned is not None:
-            self._update_watch_task = asyncio.create_task(
-                self._watch_update_exit(*spawned, conn_id),
+        spawned = None
+        try:
+            if self._cancel_update_when_idle():
+                await self._broadcast_update_available()
+            # When the clone (or its install.sh) is missing — the
+            # extension was installed from a .vsix, or ~/.kiss/kiss_ai
+            # was deleted — fall back to the public curl bootstrap,
+            # which recreates the clone and hands over to its
+            # install.sh, instead of refusing with "install.sh not
+            # found".  The extension's runUpdate() does the same in its
+            # terminal.
+            script = await loop.run_in_executor(
+                None, _find_install_script, self._install_root,
             )
+            self._broadcast_to_conn({
+                "type": "notice",
+                "text": (
+                    f"An update of {PRODUCT_NAME} is getting installed… "
+                    f"(output: {self._update_log_path})"
+                ),
+            }, conn_id)
+            spawned = await loop.run_in_executor(
+                None, self._spawn_update_script, script, conn_id,
+            )
+        finally:
+            if spawned is None:
+                # No installer owns the barrier (spawn failure, or a
+                # raise/cancellation before the spawn): admit runs
+                # again and let a later Update click start over.
+                self._set_update_barrier(False)
+                self._update_starting = False
+        if spawned is None:
+            return
+        self._update_watch_task = asyncio.create_task(
+            self._watch_update_exit(*spawned, conn_id),
+        )
+
+    def _set_update_barrier(self, up: bool) -> None:
+        """Raise or lower the run-admission barrier of the self-update.
+
+        Writes ``VSCodeServer._update_installing`` under
+        :data:`agent_state.STATE_LOCK` — the lock ``_cmd_run`` holds
+        while admitting a run — so a submit observes either the barrier
+        or its absence, never a torn state.  Cheap enough to call from
+        the event loop (the lock is held only for short critical
+        sections).
+
+        Args:
+            up: ``True`` to refuse new task submits, ``False`` to
+                admit them again.
+        """
+        with agent_state.STATE_LOCK:
+            self._vscode_server._update_installing = up
+
+    def _arm_update_barrier_if_idle(self) -> bool:
+        """Raise the run-admission barrier when no task is in flight.
+
+        The idle verdict (:func:`_snapshot_active_tabs`) and the arming
+        happen in ONE :data:`agent_state.STATE_LOCK` critical section
+        — the lock ``_cmd_run`` holds while it admits a run — so a
+        ``run`` submitted between the poller's "no active tasks"
+        observation and the installer spawn is either counted as
+        active (and defers the update) or refused by the barrier.
+        Blocks on the lock: call it off the event loop.
+
+        Returns:
+            ``True`` when the barrier was raised (idle), ``False`` when
+            a task is still live and the poller must wait.
+        """
+        with agent_state.STATE_LOCK:
+            if _snapshot_active_tabs():
+                return False
+            self._vscode_server._update_installing = True
+            return True
 
     def _spawn_update_script(
         self, script: Path | None, conn_id: str = "",
@@ -5761,7 +5796,10 @@ class RemoteAccessServer:
         refusal line when this run's slice of the update log holds one
         (``install.sh`` lost the cross-process update lock to another
         installer), otherwise a generic failure pointing at the log.
-        A clean exit reports nothing more.
+        A clean exit reports nothing more.  Either way the installer
+        is gone once this returns, so the run-admission barrier raised
+        for it is lowered: a daemon the installer did not restart (a
+        failed or no-op update) must accept tasks again.
 
         Args:
             proc: The installer started by :meth:`_spawn_update_script`.
@@ -5771,6 +5809,7 @@ class RemoteAccessServer:
         """
         while proc.poll() is None:
             await asyncio.sleep(0.2)
+        self._set_update_barrier(False)
         if proc.returncode == 0:
             return
         try:
@@ -7568,10 +7607,13 @@ class RemoteAccessServer:
     async def _run_update_when_idle(self) -> None:
         """Wait until no task is in flight, then launch the installer.
 
-        Polls :func:`_snapshot_active_tabs` (off-thread: it takes the
-        registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.  Once
-        idle it disarms itself and, without yielding to the loop in
-        between, runs :meth:`_handle_run_update` for every window
+        Polls :meth:`_arm_update_barrier_if_idle` (off-thread: it takes
+        the registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.
+        The idle verdict and the run-admission barrier are one atomic
+        step, so no ``run`` can start between "no active tasks" and the
+        installer spawn (the barrier makes ``_cmd_run`` refuse it).
+        Once armed it disarms itself and, without yielding to the loop
+        in between, runs :meth:`_handle_run_update` for every window
         (``conn_id=""``): the click that armed it may be long gone by
         the time the update starts, so its notices must not be confined
         to one connection.  The task stays tracked on
@@ -7579,11 +7621,20 @@ class RemoteAccessServer:
         :meth:`stop_async` can cancel it mid-handoff too.
         """
         try:
-            while await asyncio.to_thread(_snapshot_active_tabs):
+            while not await asyncio.to_thread(self._arm_update_barrier_if_idle):
                 await asyncio.sleep(_IDLE_UPDATE_POLL_S)
             self._update_when_idle_armed = False
             await self._handle_run_update("")
             await self._broadcast_update_available()
+        except asyncio.CancelledError:
+            # Cancelled (toast "Cancel", a direct Update click, or
+            # shutdown) after the barrier went up but before an
+            # installer owned it: lower it, or the daemon would refuse
+            # every task until restart.  With an installer running,
+            # its exit watcher lowers the barrier instead.
+            if not self._update_in_progress():
+                self._set_update_barrier(False)
+            raise
         finally:
             if self._update_when_idle_task is asyncio.current_task():
                 self._update_when_idle_task = None
@@ -8973,9 +9024,9 @@ class RemoteAccessServer:
         """
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
-        # Before any listener accepts a client: a replay must never see
-        # a legacy row unstamped.
-        _stamp_legacy_side_channels()
+        # No database write may run here: the legacy side-channel stamp
+        # and the orphan sweep live on VSCodeServer's background thread
+        # so a locked sorcar.db never delays binding the listeners.
 
         if not _unix_sockets_supported():
             # CPython on Windows has no AF_UNIX, so the daemon's local

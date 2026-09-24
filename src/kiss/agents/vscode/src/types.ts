@@ -901,8 +901,9 @@ type ToWebviewMessageBody =
   // workspace-filtered surfaces (tab bar, history) to this directory.
   | {type: 'workspaceWorkDir'; workDir: string}
   // The "Working directory" panel's openWorkDir / pickWorkDir named
-  // something that is not a folder; shown inside the panel.
-  | {type: 'workDirError'; text: string}
+  // something that is not a folder; shown inside the panel of the chat
+  // tab `tabId` that asked (absent only in replies from older hosts).
+  | {type: 'workDirError'; text: string; tabId?: string}
   // The folder asked for by openWorkDir / pickWorkDir exists: `path`
   // (symlinks and `..` resolved) becomes the working directory of chat
   // tab `tabId`'s next task; the window's folder is untouched.

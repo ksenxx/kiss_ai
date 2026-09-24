@@ -31,6 +31,13 @@ proactively by a background polling watcher (see
 :func:`start_registry_watcher`) so edits to ``SEAS.md`` — or the
 appearance/removal of ``*_sea.py`` files in any of its folders — take
 effect while the daemon is running.
+
+Locking: two module locks, always acquired in the order
+``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
+subscriber list; ``_notify_lock`` wraps the publish-and-notify section
+of :func:`refresh_registry` so subscribers see snapshots in the order
+they were published.  Nothing calls :func:`refresh_registry` while
+holding ``_lock``.
 """
 
 from __future__ import annotations
@@ -68,7 +75,22 @@ _registry: dict[str, Path] = {}
 # callback that itself calls :func:`list_commands` cannot deadlock).
 _lock = threading.RLock()
 
-# Callbacks invoked (outside the lock) whenever the registry changes.
+# Serialises the publish-and-notify section of :func:`refresh_registry`
+# so subscribers receive snapshots in the order they were published:
+# without it two concurrent rescans could deliver snapshot B before A
+# and leave every subscriber on the stale list A for good (the
+# ``_last_broadcast`` dedupe then suppresses the correcting rescan).
+#
+# LOCK ORDER: ``_notify_lock`` -> ``_lock``.  ``_notify_lock`` is taken
+# first and held through the callback loop; ``_lock`` is only ever
+# taken inside it or on its own.  No function may call
+# :func:`refresh_registry` while holding ``_lock``.  RLock so a
+# subscriber that re-enters :func:`refresh_registry` (e.g. through
+# :func:`get_command` on a miss) does not self-deadlock.
+_notify_lock = threading.RLock()
+
+# Callbacks invoked (under ``_notify_lock`` but outside ``_lock``)
+# whenever the registry changes.
 _subscribers: list[Callable[[list[str]], None]] = []
 
 # Last snapshot broadcast to subscribers.  Deduplicates identical
@@ -223,8 +245,9 @@ def refresh_registry() -> list[str]:
 
     Returns:
         The sorted list of command names now installed.  Subscribers
-        registered via :func:`subscribe` are invoked (outside the
-        lock) when the list differs from the previous broadcast.
+        registered via :func:`subscribe` are invoked (under
+        ``_notify_lock``, outside ``_lock``) when the list differs
+        from the previous broadcast, in publish order.
     """
     global _last_broadcast
 
@@ -246,26 +269,30 @@ def refresh_registry() -> list[str]:
     for src in sources:
         merged.update(src)
 
-    # Compare-and-swap under the lock so two concurrent rescans can
+    # Compare-and-swap under ``_lock`` so two concurrent rescans can
     # never both observe the old ``_last_broadcast`` and fire the
-    # same notification twice.  Subscribers are invoked OUTSIDE the
-    # lock (below) so a subscriber that itself calls back into the
-    # module — for example :func:`list_commands` — cannot deadlock.
-    with _lock:
-        _registry.clear()
-        _registry.update(merged)
-        snapshot = sorted(_registry)
-        snapshot_tuple = tuple(snapshot)
-        if snapshot_tuple == _last_broadcast:
-            return snapshot
-        _last_broadcast = snapshot_tuple
-        callbacks = list(_subscribers)
+    # same notification twice.  The whole publish-and-notify section
+    # runs under ``_notify_lock`` (order: ``_notify_lock`` -> ``_lock``)
+    # so snapshots reach subscribers in publish order; ``_lock`` itself
+    # is released before the callbacks run so a subscriber that calls
+    # back into the module — e.g. :func:`list_commands` — cannot
+    # deadlock.
+    with _notify_lock:
+        with _lock:
+            _registry.clear()
+            _registry.update(merged)
+            snapshot = sorted(_registry)
+            snapshot_tuple = tuple(snapshot)
+            if snapshot_tuple == _last_broadcast:
+                return snapshot
+            _last_broadcast = snapshot_tuple
+            callbacks = list(_subscribers)
 
-    for cb in callbacks:
-        try:
-            cb(list(snapshot))
-        except Exception:  # pragma: no cover - subscribers own errors
-            logger.debug("SEA registry subscriber failed", exc_info=True)
+        for cb in callbacks:
+            try:
+                cb(list(snapshot))
+            except Exception:  # pragma: no cover - subscribers own errors
+                logger.debug("SEA registry subscriber failed", exc_info=True)
     return snapshot
 
 

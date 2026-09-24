@@ -7358,6 +7358,13 @@
   // 'workdir:<seq>') and the directory it is checking.
   let workDirCheckSeq = 0;
   let workDirCheckPath = '';
+  // The tab whose openWorkDir / pickWorkDir request the open panel is
+  // waiting on (VS Code); '' when the panel asked nothing or was closed.
+  // The host's reply names its tab, and only a reply to this request
+  // may close the panel or report into it: the reply to a request made
+  // from a panel the user has since closed still pins its own tab but
+  // leaves a panel reopened for another tab alone.
+  let workDirRequestTabId = '';
 
   function openWorkDirPanel() {
     const panel = document.getElementById('workdir-panel');
@@ -7386,6 +7393,7 @@
     // A check still in flight belongs to the closed panel.
     workDirCheckSeq++;
     workDirCheckPath = '';
+    workDirRequestTabId = '';
     const panel = document.getElementById('workdir-panel');
     if (!panel || !panel.classList.contains('open')) return;
     // Focus must not be stranded inside the sheet that just went inert;
@@ -7507,8 +7515,12 @@
     setWorkDirError('');
     if (!document.body.classList.contains('remote-chat')) {
       const error = tabWorkDirError(activeTabId);
-      if (error) setWorkDirError(error);
-      else postToHost({type: 'openWorkDir', path: dir, tabId: activeTabId});
+      if (error) {
+        setWorkDirError(error);
+        return;
+      }
+      workDirRequestTabId = activeTabId;
+      postToHost({type: 'openWorkDir', path: dir, tabId: activeTabId});
       return;
     }
     workDirCheckSeq++;
@@ -7568,6 +7580,11 @@
    * workspace, `tab.workDir` (what the tab bar scopes by) is untouched
    * -- so only the tab's pin and the views browsing it change.
    *
+   * The panel is only closed (or told why the pin was refused) when it
+   * is still waiting on this very request: the user may have closed it
+   * and reopened it for another tab while the host's folder dialog was
+   * up, and that tab's panel, with whatever was typed into it, stays.
+   *
    * @param {string} dir The folder in the host's canonical spelling.
    * @param {string} tabId The tab that asked (the active one when the
    *   request was made; it may no longer be active).
@@ -7576,9 +7593,10 @@
     dir = String(dir || '').trim();
     if (!dir || isRootDir(dir)) return;
     if (!getTab(tabId)) return;
+    const ownsPanel = tabId === workDirRequestTabId;
     const error = tabWorkDirError(tabId);
     if (error) {
-      setWorkDirError(error);
+      if (ownsPanel) setWorkDirError(error);
       return;
     }
     getTab(tabId).pinnedWorkDir = dir;
@@ -7587,7 +7605,7 @@
       scmWorkDir = '';
       refreshSidebarDataViews(true);
     }
-    closeWorkDirPanel();
+    if (ownsPanel) closeWorkDirPanel();
   }
 
   /** Wire the "Working directory" menu item and its panel. */
@@ -7634,8 +7652,12 @@
           return;
         }
         const error = tabWorkDirError(activeTabId);
-        if (error) setWorkDirError(error);
-        else postToHost({type: 'pickWorkDir', tabId: activeTabId});
+        if (error) {
+          setWorkDirError(error);
+          return;
+        }
+        workDirRequestTabId = activeTabId;
+        postToHost({type: 'pickWorkDir', tabId: activeTabId});
       });
     }
     if (list) {
@@ -12659,7 +12681,11 @@
         break;
       case 'workDirError':
         // The VS Code host found no folder at the path asked for by
-        // openWorkDir / pickWorkDir; the panel is still on screen.
+        // openWorkDir / pickWorkDir.  It is reported into the panel
+        // only while the panel still waits on that tab's request (a
+        // panel reopened for another tab is not told); a reply from an
+        // older host build names no tab and is shown as before.
+        if (ev.tabId && String(ev.tabId) !== workDirRequestTabId) break;
         setWorkDirError(String(ev.text || ''));
         break;
       case 'workDirPicked':

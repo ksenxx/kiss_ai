@@ -418,7 +418,9 @@ def test_analyze_and_report(tree: dict[str, Path]) -> None:
     proc = run_tool(tree, "report", "--phase", PHASE, "--out", str(out), "--allow-incomplete")
     assert proc.returncode == 0, proc.stderr
     html = out.read_text()
-    assert html.count("<svg") == 8 and "GPT-5.6 Luna · KISS Sorcar" in html
+    # per benchmark: scatter, success bars, cost bars, task grid, turn-cap and spend-cap
+    # curves (6 x 2), plus the wall-clock cap curve that only Terminal-Bench gets
+    assert html.count("<svg") == EXPECTED_SVG_COUNT and "GPT-5.6 Luna · KISS Sorcar" in html
     assert "Incomplete run" in html and "gpt-5.6-luna 87 slot(s) off" in html
     assert "n/a</text>" not in html  # the blog has per-task Pi data for luna on both benchmarks
     assert "1/2 · 0/3</text>" in html  # astropy: KISS solved one of two attempts, Pi none
@@ -427,6 +429,7 @@ def test_analyze_and_report(tree: dict[str, Path]) -> None:
 RECORDED_SUMMARY = (
     REPO_ROOT / "benchmarkings" / "harnesstax" / "results" / "baseline" / "summary.json"
 )
+EXPECTED_SVG_COUNT = 6 * 2 + 1
 
 
 @pytest.mark.skipif(not RECORDED_SUMMARY.is_file(), reason="recorded baseline results not present")
@@ -440,7 +443,7 @@ def test_report_prose_on_the_recorded_study() -> None:
         or "fall inside the blog's confidence interval" in html
     )
     assert "Incomplete run" not in html
-    assert html.count("<svg") == 8
+    assert html.count("<svg") == EXPECTED_SVG_COUNT
 
 
 def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
@@ -465,7 +468,7 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
 
 
 def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
-    """A new job lifts Harbor's agent deadline; an existing job directory is resumed as is."""
+    """A new job lifts Harbor's agent deadline; an existing (moved) job is repointed and resumed."""
     from benchmarkings.harnesstax import tb2_runner
 
     tasks = ["regex-log", "train-fasttext"]
@@ -474,9 +477,18 @@ def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
     assert float(multiplier) == tb2_runner.AGENT_TIMEOUT_MULTIPLIER >= 1000
     assert command[command.index("-m") + 1] == MODEL and command[command.index("-k") + 1] == "3"
     assert [command[i + 1] for i, a in enumerate(command) if a == "-i"] == tasks
-    (tmp_path / "job").mkdir()
+    job = tmp_path / "job"
+    trial_config = job / "regex-log__abc" / "config.json"
+    trial_config.parent.mkdir(parents=True)
+    (job / "config.json").write_text(json.dumps({"jobs_dir": "/old/tree/tb2", "n_attempts": 3}))
+    trial_config.write_text(json.dumps({"trials_dir": "/old/tree/tb2/job"}))
     resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 6)
-    assert resume[-3:] == ["resume", "-p", str(tmp_path / "job")] and "-i" not in resume
+    assert resume[-3:] == ["resume", "-p", str(job)] and "-i" not in resume
+    assert json.loads((job / "config.json").read_text()) == {
+        "jobs_dir": str(tmp_path), "n_attempts": 3,
+    }
+    assert json.loads(trial_config.read_text()) == {"trials_dir": str(job)}
+    assert tb2_runner.repoint_job(job) == 0  # already pointing here: nothing rewritten
 
 
 def test_tb2_runner_job_finished(tmp_path: Path) -> None:
@@ -833,7 +845,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
 
 
 def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
-    """Destructive commands are blocked, install timeouts lifted, and the gate answers one finish."""
+    """Destructive commands are blocked, install timeouts lifted, the gate answers one finish."""
     from benchmarkings.harnesstax import sea_core, trials
 
     def harness(**extra: object) -> sea_core.ContainerHarness:
@@ -854,12 +866,14 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
                     "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
                     "FOO=1 kill -9 -1"):
         assert plain.on_tool_call("Bash", {"command": command}) == blocked, command
-    assert plain.on_tool_call("run_commands_parallel", {"commands": '["ls", "kill -9 -1"]'}) == blocked
+    parallel = {"commands": '["ls", "kill -9 -1"]'}
+    assert plain.on_tool_call("run_commands_parallel", parallel) == blocked
     assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == blocked
     for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
                     "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
                     "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
-                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md", "echo ok # rm -rf /app"):
+                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md",
+                    "echo ok # rm -rf /app"):
         assert plain.on_tool_call("Bash", {"command": command}) == "OK", command
     # installs and builds get a long timeout in place; other commands keep theirs
     args: dict[str, object] = {"command": "apt-get install -y gcc"}
@@ -877,13 +891,19 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
         args = {"command": command, "timeout_seconds": 30}
         assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 30, command
     args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
-    args = {"commands": '["npm install"]'}  # the tool's own default (1800 s) is already long enough
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
-    args = {"commands": "not json; make", "timeout_seconds": 60}  # unparsable list: treated as one command
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and args["timeout_seconds"] == 900
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
+    # The tool's own default (1800 s) is already long enough.
+    args = {"commands": '["npm install"]'}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
+    # An unparsable list is treated as one command.
+    args = {"commands": "not json; make", "timeout_seconds": 60}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
     args = {"commands": '{"a": 1}'}
-    assert plain.on_tool_call("run_commands_parallel", args) == "OK" and "timeout_seconds" not in args
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
     assert plain.on_tool_call("Bash", {"command": 42}) == "OK"
     assert plain.on_tool_call("Bash", {}) == "OK"
     # no gate by default: every finish passes
@@ -912,7 +932,8 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     os.environ["HARNESSTAX_FINISH_GATE"] = "1"
     try:
         assert trials.trial_config("c", "/app", MODEL) == {
-            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False, "finish_gate": True,
+            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False,
+            "finish_gate": True,
         }
     finally:
         del os.environ["HARNESSTAX_FINISH_GATE"]

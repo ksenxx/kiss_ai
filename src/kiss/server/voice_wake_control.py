@@ -38,6 +38,8 @@ import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from kiss.server.talk_player import _signal_group
+
 logger = logging.getLogger(__name__)
 
 _STDERR_TAIL_CHARS = 2000
@@ -1073,30 +1075,6 @@ class VoiceWakeController:
             # pump joins this before composing the exit diagnostic.
             listener.stderr_done.set()
 
-    @staticmethod
-    def _signal_group(pid: int, sig: signal.Signals) -> bool:
-        """Best-effort signal to *pid*'s process group.
-
-        Args:
-            pid: The group leader's pid (the child was spawned with
-                ``start_new_session=True`` on POSIX).
-            sig: The signal to deliver.
-
-        Returns:
-            ``True`` when the group was signalled; ``False`` when the
-            platform has no ``os.killpg`` (Windows) or the call failed
-            — the caller then falls back to signalling the process
-            alone.
-        """
-        killpg = getattr(os, "killpg", None)
-        if killpg is None:
-            return False
-        try:
-            killpg(pid, sig)
-            return True
-        except (ProcessLookupError, PermissionError, OSError):
-            return False
-
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
         """SIGTERM the child's process group, escalating to SIGKILL.
 
@@ -1112,7 +1090,7 @@ class VoiceWakeController:
         if proc.returncode is not None:
             return
         pid = proc.pid
-        if not self._signal_group(pid, signal.SIGTERM):
+        if not _signal_group(pid, signal.SIGTERM):
             try:
                 proc.terminate()
             except ProcessLookupError:
@@ -1120,9 +1098,7 @@ class VoiceWakeController:
         try:
             await asyncio.wait_for(proc.wait(), _TERM_GRACE_SECONDS)
         except TimeoutError:
-            if not self._signal_group(
-                pid, getattr(signal, "SIGKILL", signal.SIGTERM)
-            ):
+            if not _signal_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM)):
                 try:
                     proc.kill()
                 except ProcessLookupError:

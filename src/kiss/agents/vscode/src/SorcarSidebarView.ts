@@ -1966,7 +1966,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * is answered with `workDirPicked` carrying its real path (`..` and
    * symlinks resolved) and recorded in the daemon's opened-so-far list;
    * a path that is not a directory or is a file-system root is reported
-   * back to the panel as `workDirError` instead.
+   * back as `workDirError`, which names the same `tabId` so the webview
+   * shows it only in the panel that asked.
    */
   private _openWorkDir(dir: string, tabId: string): void {
     const target = String(dir || '').trim();
@@ -1975,6 +1976,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._sendToWebview({
         type: 'workDirError',
         text: 'Not a directory: ' + (target || '(empty path)'),
+        tabId,
       });
       return;
     }
@@ -1983,6 +1985,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._sendToWebview({
         type: 'workDirError',
         text: 'A file-system root cannot be the working directory; pick a folder.',
+        tabId,
       });
       return;
     }

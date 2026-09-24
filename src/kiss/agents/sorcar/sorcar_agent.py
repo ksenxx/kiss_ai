@@ -455,6 +455,36 @@ def _broadcast_subagent_done(
             pass
 
 
+def _notify_subagent_done(
+    printer: Any, sub_task_id: str | None, sub_tab_id: str, model: str = "",
+) -> None:
+    """Broadcast ``subagentDone`` to every tab watching a finished sub-agent.
+
+    The targets are the tabs subscribed to *sub_task_id* through the
+    printer's fan-out registry plus the sub-agent's own synthetic
+    *sub_tab_id*.  An empty *sub_task_id* (no ``task_history`` row was
+    allocated, so no ``new_tab`` was ever broadcast) fans out to the
+    synthetic tab only.  Shared by ``run_parallel`` children, ``run_agent``
+    dispatches, the merge agent and the task-update agent.
+
+    Args:
+        printer: The parent task's printer.
+        sub_task_id: The sub-agent's persisted task id, or ``None``.
+        sub_tab_id: The sub-agent's synthetic tab id (may be empty).
+        model: The model the sub-agent was launched with, restored into
+            the watching tabs' pickers.
+    """
+    viewer_ids: list[str] = []
+    fanout = getattr(printer, "_fanout_targets", None)
+    if callable(fanout) and sub_task_id:
+        found = fanout(sub_task_id)
+        if isinstance(found, list):
+            viewer_ids = [v for v in found if v]
+    if sub_tab_id and sub_tab_id not in viewer_ids:
+        viewer_ids.append(sub_tab_id)
+    _broadcast_subagent_done(printer, viewer_ids, model)
+
+
 # How long the parent may sit in one wait() before re-reading its stop
 # event.  A completed child wakes the wait immediately, so this only
 # bounds flag-checking: the abandon path below allows 15s anyway, and
@@ -3215,17 +3245,9 @@ def run_tasks_parallel(
                 # sub-agent's task stream via the printer's fan-out
                 # registry.
                 try:
-                    viewer_ids: list[str] = []
-                    fanout = getattr(printer, "_fanout_targets", None)
-                    sub_task_id = _persisted_task_id(agent) or None
-                    if callable(fanout) and sub_task_id is not None:
-                        found = fanout(sub_task_id)
-                        if isinstance(found, list):
-                            viewer_ids = [v for v in found if v]
-                    if sub_tab_id not in viewer_ids:
-                        viewer_ids.append(sub_tab_id)
-                    _broadcast_subagent_done(
-                        printer, viewer_ids, model_name or "",
+                    _notify_subagent_done(
+                        printer, _persisted_task_id(agent), sub_tab_id,
+                        model_name or "",
                     )
                 except Exception:
                     logger.debug(

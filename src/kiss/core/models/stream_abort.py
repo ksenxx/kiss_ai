@@ -243,8 +243,13 @@ def _stop_requested(
     return stop_event is not None and stop_event.is_set()
 
 
-def _stall_error(stall_timeout: float | None) -> TimeoutError:
+def stall_error(stall_timeout: float | None) -> TimeoutError:
     """Build the retryable error for a stream the watchdog aborted as stalled.
+
+    Public so an adapter that runs its own :class:`StreamAbortWatchdog`
+    loop instead of :func:`stop_aware_events`
+    (``AnthropicModel._create_message``) raises the same error for the
+    same condition; the wording lives here once.
 
     Args:
         stall_timeout: The tolerated silence, for the message.
@@ -260,16 +265,6 @@ def _stall_error(stall_timeout: float | None) -> TimeoutError:
         f"(model_config 'stream_stall_timeout'). The request was aborted "
         f"instead of hanging; it will be retried."
     )
-
-
-stall_error = _stall_error
-"""Public name for :func:`_stall_error`.
-
-An adapter that runs its own :class:`StreamAbortWatchdog` loop instead of
-:func:`stop_aware_events` (``AnthropicModel._create_message``) still has
-to raise the same error for the same condition, so the wording lives
-here once rather than being restated per transport.
-"""
 
 
 def _close_stream(stream: Any) -> None:
@@ -349,7 +344,7 @@ def stop_aware_events(
         if watchdog.stalled:
             if on_abort is not None:
                 on_abort()
-            raise _stall_error(stall_timeout) from None
+            raise stall_error(stall_timeout) from None
         raise
     finally:
         watchdog.stop()
@@ -365,4 +360,4 @@ def stop_aware_events(
         # partial text it accumulated and report it as a completion.
         if on_abort is not None:
             on_abort()
-        raise _stall_error(stall_timeout)
+        raise stall_error(stall_timeout)

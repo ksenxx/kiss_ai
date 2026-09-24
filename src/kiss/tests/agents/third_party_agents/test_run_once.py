@@ -23,7 +23,6 @@ from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.slack_sea import (
     SlackChannelBackend,
     _save_token,
-    _token_path,
     main,
 )
 
@@ -52,32 +51,8 @@ class _InvalidAuthHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-def _backup_and_clear() -> str | None:
-    path = _token_path()
-    backup = None
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-    return backup
-
-
-def _restore(backup: str | None) -> None:
-    path = _token_path()
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
-
-
 class TestRunOnceConnectFailure:
     """Tests for run_once() when backend connection fails."""
-
-    def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._backup)
 
     def test_run_once_raises_on_connect_failure(self) -> None:
         """run_once() raises RuntimeError when backend.connect() returns False."""
@@ -160,12 +135,6 @@ class TestHasBotReply:
 
 class TestCLIOneShotMode:
     """Tests for CLI integration of one-shot poll mode."""
-
-    def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._backup)
 
     def test_channel_without_token_exits(
         self, capsys: pytest.CaptureFixture[str]

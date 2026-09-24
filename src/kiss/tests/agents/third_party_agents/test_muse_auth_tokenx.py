@@ -1715,8 +1715,11 @@ def test_concurrent_scratch_validation_is_isolated(
     bad = threading.Thread(target=authenticate, args=("bad", "1:concurrent-bad-token"))
     good.start()
     bad.start()
-    good.join()
-    bad.join()
+    # Bounded: pytest-timeout is disabled repo-wide, so an authd hang
+    # must fail this test instead of stalling the whole run.
+    good.join(timeout=60)
+    bad.join(timeout=60)
+    assert not good.is_alive() and not bad.is_alive(), "authenticate did not finish"
     # The bad candidate is always rejected; the good one always wins.
     assert results["bad"]["ok"] is False
     assert results["good"]["ok"] is True
