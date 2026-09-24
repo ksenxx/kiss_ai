@@ -260,6 +260,42 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertEqual(there["L1"], f"{_SERVER}/.kiss-worktrees/w")
         self.assertEqual(there["R1"], _SERVER, "the remote's own row was rewritten")
 
+    def test_project_paths_with_an_apostrophe_are_relocated_both_ways(
+        self,
+    ) -> None:
+        """A user name such as ``o'brien`` puts an apostrophe into the path.
+
+        The remote's rows are re-pointed on the remote, so both project
+        directories travel there as arguments on an ssh command line.
+        Quoted wrongly, the apostrophe ends the quoting early: the remote
+        shell chokes on the rest of the path (or runs it), the relocation
+        is skipped, and the remote's tasks never arrive here.
+        """
+        laptop = "/Users/o'brien/ksen's work/kiss"
+        server = "/home/o'brien/kiss"
+        _make_db(self.local_db, ["L1"], work_dir=f"{laptop}/.kiss-worktrees/w")
+        _make_db(self.remote_db, ["R1"], work_dir=server)
+        con = sqlite3.connect(self.remote_db)
+        con.execute(
+            "INSERT INTO task_history(id, timestamp, task, work_dir)"
+            " VALUES ('R2', 1.0, 'elsewhere', ?)",
+            ("/home/o'brien/other",),
+        )
+        con.commit()
+        con.close()
+
+        result = self._sync(laptop, server)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Could not re-point", result.stdout + result.stderr)
+        here = _tasks(self.local_db)
+        self.assertEqual(here["R1"], laptop)
+        self.assertEqual(here["R2"], "/home/o'brien/other")
+        self.assertEqual(here["L1"], f"{laptop}/.kiss-worktrees/w")
+        there = _tasks(self.remote_db)
+        self.assertEqual(there["L1"], f"{server}/.kiss-worktrees/w")
+        self.assertEqual(there["R1"], server, "the remote's own row was rewritten")
+
     def test_the_events_of_the_remotes_tasks_travel_back(self) -> None:
         """A task without its events replays as an empty transcript."""
         _make_db(self.local_db, ["L1"], events=2)
