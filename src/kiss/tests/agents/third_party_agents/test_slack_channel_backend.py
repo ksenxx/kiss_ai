@@ -26,26 +26,7 @@ from slack_sdk.errors import SlackApiError
 from kiss.agents.third_party_agents.slack_sea import (
     SlackChannelBackend,
     _save_token,
-    _token_path,
 )
-
-
-def _backup_and_clear() -> str | None:
-    path = _token_path()
-    backup = None
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-    return backup
-
-
-def _restore(backup: str | None) -> None:
-    path = _token_path()
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
 
 
 class _InvalidAuthHandler(BaseHTTPRequestHandler):
@@ -113,7 +94,6 @@ class TestSlackChannelBackendMethods:
         cls.thread.join(timeout=5)
 
     def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
         self.server.requests.clear()  # type: ignore[attr-defined]
         _save_token("xoxb-invalid-test-token-for-methods")
         port = self.server.server_address[1]
@@ -124,9 +104,6 @@ class TestSlackChannelBackendMethods:
             retry_handlers=[],
         )
         self.backend._bot_user_id = "U_BOT_TEST"
-
-    def teardown_method(self) -> None:
-        _restore(self._backup)
 
     def test_find_channel_returns_none_on_api_error(self) -> None:
         """find_channel raises SlackApiError with invalid token."""

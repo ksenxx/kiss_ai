@@ -167,8 +167,17 @@ def _sweep_injection_points(acquire_name: str) -> None:
     pytest.fail("sweep never reached an uninterrupted acquisition")
 
 
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
 class TestRWLockAsyncInterrupt:
-    """Finding 2: no interrupt boundary may strand _RWLock state."""
+    """Finding 2: no interrupt boundary may strand _RWLock state.
+
+    The ``filterwarnings`` marker also fails the test when a token's
+    weakref callback (``_drop_reader_ref`` / ``_drop_writer_ref``) raises
+    after an injected stop: a stop landing before the ``set.add`` left
+    the weakref's hash uncached, so ``set.discard`` on the dead ref
+    raised ``TypeError: weak object has gone away`` as an unraisable
+    exception.
+    """
 
     def test_read_lock_survives_interrupt_at_every_boundary(self) -> None:
         """A reader stopped at any line boundary leaks no reader count."""
@@ -212,6 +221,27 @@ class TestRWLockAsyncInterrupt:
             if not injected:
                 return
         pytest.fail("sweep never reached an uninterrupted acquisition")
+
+    def test_token_refs_compare_by_identity_for_ne_too(self) -> None:
+        """``!=`` on the lock's token refs agrees with ``==`` (identity).
+
+        ``_TokenRef`` overrides ``__hash__``/``__eq__`` with identity
+        semantics but used to inherit ``weakref.ref.__ne__``, which
+        compares REFERENTS: two distinct refs to one live token were
+        neither ``==`` nor ``!=``.  The refs come from two real nested
+        readers so the lock's own registration path is exercised.
+        """
+        lock = persistence._RWLock()
+        with lock.read_lock(), lock.read_lock():
+            first, second = lock._reader_refs
+            assert first != second and not (first == second)
+            assert first == first and not (first != first)
+            token = first()
+            assert token is not None
+            twin = persistence._TokenRef(token)
+            assert twin() is token
+            assert twin != first and not (twin == first)
+            assert twin not in lock._reader_refs
 
 
 # ---------------------------------------------------------------------------

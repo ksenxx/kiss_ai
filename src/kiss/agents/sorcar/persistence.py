@@ -113,6 +113,27 @@ class _Token:
         self.owner: threading.Thread = threading.current_thread()
 
 
+class _TokenRef(weakref.ref):  # type: ignore[type-arg]
+    """Weak reference to a :class:`_Token`, hashed and compared by identity.
+
+    A plain ``weakref.ref`` derives its hash from the referent and caches
+    it on first use; ``set.discard`` on a DEAD ref whose hash was never
+    computed raises ``TypeError: weak object has gone away``.  An
+    injected stop landing between the ref's creation and its ``set.add``
+    produces exactly that ref, and its callback — the lock's healing
+    path — would then die as an unraisable exception.  Identity hashing
+    never touches the referent, so the callback is safe at every
+    boundary.  ``__ne__`` is overridden too: ``weakref.ref.__ne__``
+    compares referents, so without it two distinct refs to one live
+    token would be neither ``==`` nor ``!=``.
+    """
+
+    __slots__ = ()
+    __hash__ = object.__hash__
+    __eq__ = object.__eq__
+    __ne__ = object.__ne__
+
+
 class _RWLock:
     """Writer-preferring read-write lock, safe against injected stops.
 
@@ -299,7 +320,7 @@ class _RWLock:
         token = _Token()
         gen = box[0] if box else None
         token.gen = weakref.ref(gen) if gen is not None else None
-        ref = weakref.ref(token, self._drop_reader_ref)
+        ref = _TokenRef(token, self._drop_reader_ref)
         try:
             self._cond.acquire()
             while self._writer_alive() or self._any_alive(self._pending_refs):
@@ -336,7 +357,7 @@ class _RWLock:
         token = _Token()
         gen = box[0] if box else None
         token.gen = weakref.ref(gen) if gen is not None else None
-        ref = weakref.ref(token, self._drop_writer_ref)
+        ref = _TokenRef(token, self._drop_writer_ref)
         try:
             self._cond.acquire()
             self._pending_refs.add(ref)

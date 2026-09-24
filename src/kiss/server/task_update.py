@@ -141,8 +141,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     from kiss.agents.sorcar.persistence import _add_task_usage, _task_is_finished
     from kiss.agents.sorcar.sorcar_agent import (
         _attribute_sub_usage,
-        _broadcast_subagent_done,
         _live_agent_usage,
+        _notify_subagent_done,
         _persisted_task_id,
     )
 
@@ -202,15 +202,9 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         else:
             _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
         if printer is not None:
-            viewer_ids: list[str] = []
-            fanout = getattr(printer, "_fanout_targets", None)
-            sub_task_id = _persisted_task_id(agent)
-            found = fanout(sub_task_id) if callable(fanout) and sub_task_id else None
-            if isinstance(found, list):
-                viewer_ids = [v for v in found if v]
-            if sub_tab_id not in viewer_ids:
-                viewer_ids.append(sub_tab_id)
-            _broadcast_subagent_done(printer, viewer_ids, model_name)
+            _notify_subagent_done(
+                printer, _persisted_task_id(agent), sub_tab_id, model_name,
+            )
     return _extract_result_summary(result), budget
 
 

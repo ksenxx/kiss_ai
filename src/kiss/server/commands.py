@@ -95,9 +95,10 @@ def _owner_task_id(state: AgentState) -> str:
       the user was looking at when they typed.
     * If the whole task tears down between queueing and the echo
       broadcast, the stamped echo may find its recording/persistence
-      already cleaned up and stay transient — in that interleaving the
-      queued message is never consumed by any agent either (teardown
-      clears ``pending_user_messages``), matching pre-fix semantics.
+      already cleaned up and stay transient.  The queued message
+      itself is not lost: ``TaskRunner._run_task``'s cleanup
+      re-submits whatever is left in ``pending_user_messages`` as the
+      tab's next run (see :func:`_reruns_after_teardown`).
 
     Args:
         state: The running-agent state whose task id to resolve.
@@ -107,6 +108,33 @@ def _owner_task_id(state: AgentState) -> str:
     """
     agent = state.agent
     return str(getattr(agent, "last_task_id", "") or "")
+
+
+def _reruns_after_teardown(owner: AgentState) -> bool:
+    """True when a prompt queued on *owner* now can only run as the tab's next run.
+
+    ``followup_queue_closed`` is raised once the run's subtask loop is
+    over — after the agent's last step, so no pre-step drain will ever
+    consume ``pending_user_messages`` again.  Whatever is queued from
+    then on is picked up by ``TaskRunner._run_task``'s cleanup and
+    re-submitted through ``_cmd_run`` as a fresh run on the same tab,
+    which echoes the text as its own prompt; the caller therefore
+    skips the steering echo (the message would otherwise appear
+    twice).  Sub-agent runs (``parentTaskId``) and tabs the user has
+    closed are not re-run, so their late prompts keep the plain
+    steering echo.
+
+    MUST be called while holding :data:`agent_state.STATE_LOCK`.
+
+    Args:
+        owner: The running-task state that just queued the prompt.
+    """
+    return (
+        owner.server_owned
+        and owner.followup_queue_closed
+        and not owner.is_subagent
+        and not owner.frontend_closed
+    )
 
 
 def _task_accepts_input(state: AgentState | None) -> bool:
@@ -281,6 +309,15 @@ class _CommandsMixin:
 
     _save_config_lock = threading.Lock()
 
+    # Admission barrier for the self-update: ``True`` from the moment
+    # the web server decides to spawn ``install.sh`` (the idle poller's
+    # "no active tasks" verdict, or an explicit Update click) until the
+    # installer exits.  ``_cmd_run`` refuses to start a NEW task while
+    # it is up; it is read and written only under ``_state_lock``
+    # (:data:`agent_state.STATE_LOCK`).  A class-level default keeps
+    # it valid on every ``VSCodeServer`` instance.
+    _update_installing: bool = False
+
     if TYPE_CHECKING:
         printer: JsonPrinter
         work_dir: str
@@ -393,6 +430,7 @@ class _CommandsMixin:
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
             resolve_conflicts: bool = False,
+            deferred_branch: str | None = None,
         ) -> dict[str, Any]: ...
         def _handle_main_tree_action(
             self, action: str, work_dir: str,
@@ -445,6 +483,26 @@ class _CommandsMixin:
         from kiss.core.vscode_config import record_recent_work_dir
 
         record_recent_work_dir(new_dir)
+
+    def _refuse_run(self, tab_id: str, text: str) -> None:
+        """Turn down a ``run`` on *tab_id* with an ``error`` broadcast.
+
+        Both frontends raise the tab's running state optimistically
+        the moment the user hits Enter and only a ``status
+        running:false`` ever lowers it again, so the refusal MUST
+        clear it first or the tab's composer stays disabled forever
+        (F08-1).
+
+        Args:
+            tab_id: The tab whose submit is refused.
+            text: The user-facing reason.
+        """
+        self.printer.broadcast(
+            {"type": "status", "running": False, "tabId": tab_id},
+        )
+        self.printer.broadcast(
+            {"type": "error", "text": text, "tabId": tab_id},
+        )
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -502,22 +560,11 @@ class _CommandsMixin:
             if prev is not None and prev.merge_in_progress():
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
-                # operation.  Refuse the run instead.  Both frontends
-                # raise the tab's running state optimistically the
-                # moment the user hits Enter and only a
-                # ``status running:false`` ever lowers it again, so the
-                # refusal MUST clear it first or the tab's composer
-                # stays disabled forever (F08-1).
-                self.printer.broadcast(
-                    {"type": "status", "running": False, "tabId": tab_id},
-                )
-                self.printer.broadcast(
-                    {
-                        "type": "error",
-                        "text": "Cannot run a task while a merge is"
-                        " in progress. Wait for it to finish first.",
-                        "tabId": tab_id,
-                    }
+                # operation.  Refuse the run instead.
+                self._refuse_run(
+                    tab_id,
+                    "Cannot run a task while a merge is in progress."
+                    " Wait for it to finish first.",
                 )
                 return
             if prev is not None and prev.task_thread is not None:
@@ -529,6 +576,12 @@ class _CommandsMixin:
                 # thread was alive but the flag not yet raised.
                 if typed:
                     remember = self._route_prompt_to_owner(prev, prompt, tab_id)
+                    if _reruns_after_teardown(prev):
+                        # Queued after the agent loop ended: no drain
+                        # will consume it, so ``_run_task``'s cleanup
+                        # re-submits it as the tab's next run, whose
+                        # own prompt echo replaces the steering echo.
+                        return
                     inject_prompt = prompt
                     inject_task = _owner_task_id(prev)
                     if not inject_task:
@@ -537,6 +590,20 @@ class _CommandsMixin:
                 remember = self._route_prompt_to_owner(asked, prompt, tab_id)
                 inject_prompt = prompt
                 inject_task = _owner_task_id(asked)
+            elif self._update_installing:
+                # The self-update installer is (about to be) running
+                # and will restart this daemon: a task started now
+                # would be killed mid-flight.  Checked under the same
+                # lock the idle poller arms the flag under, so a
+                # submit can never slip between its "no active tasks"
+                # observation and the installer spawn.  Already-running
+                # tasks are untouched (steering above still works).
+                self._refuse_run(
+                    tab_id,
+                    "An update is being installed; wait for the daemon"
+                    " to restart.",
+                )
+                return
             else:
                 requested_chat_id = cmd.get("chatId", "")
                 resumed_chat_id = self._tab_chat_views.get(tab_id, "")
@@ -1004,12 +1071,15 @@ class _CommandsMixin:
         forever — it falls back to live steering injection instead.  The
         same fallback applies once the run's ``followup_queue_closed``
         flag is up (the loop passed its final drain, a subtask failed, or
-        the run is finalizing): a task queued then would be echoed to the
-        user and silently discarded by the end-of-run cleanup.  The flag
-        is raised under the same :data:`agent_state.STATE_LOCK` this
-        helper runs under, so a message either lands in the queue before
-        the final drain (and runs) or takes the steering path — never the
-        accepted-then-dropped middle ground.
+        the run is finalizing): a task queued then would never be
+        drained.  The flag is raised under the same
+        :data:`agent_state.STATE_LOCK` this helper runs under, so a
+        message either lands in the queue before the final drain (and
+        runs) or takes the steering path — never the
+        accepted-then-dropped middle ground.  A steering message queued
+        after the flag is not lost either: ``TaskRunner._run_task``'s
+        cleanup re-submits the leftover ``pending_user_messages`` as the
+        tab's next run (see :func:`_reruns_after_teardown`).
 
         MUST be called while holding :data:`agent_state.STATE_LOCK`.
 
@@ -1464,6 +1534,13 @@ class _CommandsMixin:
                 ask_question = question
             else:
                 remember = self._route_prompt_to_owner(owner, prompt, tab_id)
+                if _reruns_after_teardown(owner):
+                    # The agent loop is over: nothing drains the queue
+                    # any more and ``_run_task``'s cleanup re-submits
+                    # the text as the tab's next run, which echoes it
+                    # as its own prompt — a steering echo here would
+                    # show the message twice.
+                    return
                 if not owner_task:
                     owner.unattributed_prompt_echoes.append(prompt)
         if ask_question is not None:
