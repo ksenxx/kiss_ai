@@ -77,6 +77,9 @@ EOF
     # no-ops, the rest only need to exist (they travel to the "remote").
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-repo.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/sync-task-db.sh"
+    # The memory sync (step 4c) records what it was asked to sync with.
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/sync-memory-args.txt"\nexit 0\n' "$fix" \
+        > "$dir/scripts/sync-memory.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
     # Steps 1a, 1c and 4 feed these three to the remote's ``bash -s``; the ssh
     # stub runs what it is fed, so the real scripts run (against this machine,
@@ -93,6 +96,7 @@ EOF
                   src/kiss/scripts/carry_over_tables.py \
                   src/kiss/scripts/db_fingerprint.py \
                   src/kiss/scripts/running_tasks.py \
+                  src/kiss/scripts/merge_memory_pages.py \
                   src/kiss/scripts/remote_config.py; do
         : > "$dir/$helper"
     done
@@ -236,6 +240,17 @@ echo "$OUT" | grep -q "Removed ~/.kiss/sorcar.db.incoming (3.0 KiB)" \
 $OUT"
 [[ ! -e "$WORK/ok/rhome/.kiss/sorcar.db.incoming" ]] || fail "the stale sorcar.db.incoming is still on the remote"
 pass "the room check runs on the remote before anything of size travels, and removes a stale upload"
+
+grep -qx 'user@fakehost' "$WORK/ok/sync-memory-args.txt" 2>/dev/null \
+    || fail "scripts/sync-memory.sh was not run with the target: $(cat "$WORK/ok/sync-memory-args.txt" 2>/dev/null)"
+DB_SYNC_LINE=$(echo "$OUT" | grep -n "Syncing the task database with user@fakehost" | cut -d: -f1 | head -1)
+MEM_SYNC_LINE=$(echo "$OUT" | grep -n "Syncing the agent's memory with user@fakehost" | cut -d: -f1 | head -1)
+INSTALL_LINE=$(echo "$OUT" | grep -n "Installing KISS Sorcar on user@fakehost" | cut -d: -f1 | head -1)
+[[ -n "$DB_SYNC_LINE" && -n "$MEM_SYNC_LINE" && -n "$INSTALL_LINE" ]] \
+    || fail "a sync step is missing from the output (lines $DB_SYNC_LINE / $MEM_SYNC_LINE / $INSTALL_LINE)"
+[[ "$DB_SYNC_LINE" -lt "$MEM_SYNC_LINE" && "$MEM_SYNC_LINE" -lt "$INSTALL_LINE" ]] \
+    || fail "the memory sync does not run after the task database sync and before the remote install (lines $DB_SYNC_LINE / $MEM_SYNC_LINE / $INSTALL_LINE)"
+pass "the agent's memory is synced with the remote, after the task database and before the remote install"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
 STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)
