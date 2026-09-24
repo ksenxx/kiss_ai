@@ -37,6 +37,7 @@ and the success lines of the macOS keychain / Windows store installers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import ipaddress
 import json
@@ -46,6 +47,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase, skipUnless
 
@@ -60,6 +62,25 @@ from kiss.core.file_lock import lock_exclusive
 from kiss.server import tls_certs, tls_trust
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+
+
+@contextlib.contextmanager
+def _env(**overrides: str | None) -> Iterator[None]:
+    """Set (or, with ``None``, unset) environment variables for the block."""
+    saved = {name: os.environ.get(name) for name in overrides}
+    try:
+        for name, value in overrides.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _load(path: Path) -> x509.Certificate:
@@ -603,15 +624,29 @@ class TestTrustLocalCa(TestCase):
         self.assertIn("/ca.crt", text)
 
         self._nss_dir(".pki/nssdb")
-        saved_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = str(self.tmp / "empty-bin")
-        try:
+        # Hide certutil from PATH *and* from the Homebrew keg probe (this
+        # machine may have Homebrew nss installed outside PATH).
+        empty = self.tmp / "empty-bin"
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=str(empty)):
             lines = tls_trust.trust_local_ca(self.ca, home=self.home, platform="linux")
-        finally:
-            os.environ["PATH"] = saved_path
         self.assertTrue(
             any(line.startswith("certutil not found") for line in lines), lines,
         )
+
+    def test_certutil_is_found_in_the_homebrew_keg(self) -> None:
+        empty = self.tmp / "empty-bin"
+        keg_certutil = self.tmp / "brew" / "opt" / "nss" / "bin" / "certutil"
+        keg_certutil.parent.mkdir(parents=True)
+        keg_certutil.write_text("#!/bin/sh\nexit 0\n")
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=str(self.tmp / "brew")):
+            self.assertEqual(tls_trust._find_certutil(), str(keg_certutil))
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=None):
+            found = tls_trust._find_certutil()
+        defaults = [
+            p for p in ("/opt/homebrew/opt/nss/bin/certutil", "/usr/local/opt/nss/bin/certutil")
+            if Path(p).is_file()
+        ]
+        self.assertEqual(found, defaults[0] if defaults else None)
 
     @skipUnless(shutil.which("certutil"), "needs libnss3-tools (certutil)")
     def test_nss_install_is_verified_by_certutil(self) -> None:  # pragma: no cover
