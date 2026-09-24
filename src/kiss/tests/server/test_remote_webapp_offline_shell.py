@@ -47,6 +47,7 @@ from typing import Any
 
 import pytest
 from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.core.brand import PRODUCT_NAME
 
@@ -303,6 +304,28 @@ _CACHE_KEYS_JS = r"""
 })()
 """
 
+# The worker registration's lifecycle, for the failure message when the
+# worker never takes control of the page: which worker slots are filled
+# and in what state at the timeout (``found``), and what a fresh
+# ``register()`` yields (``retried``) or throws.
+_SW_REGISTRATION_STATE_JS = r"""
+(async () => {
+  const slots = reg => (reg
+    ? {installing: reg.installing && reg.installing.state,
+       waiting: reg.waiting && reg.waiting.state,
+       active: reg.active && reg.active.state}
+    : null);
+  const found = slots(await navigator.serviceWorker.getRegistration());
+  try {
+    const reg = await navigator.serviceWorker.register(
+      '/sw.js', {updateViaCache: 'none'});
+    return {found, retried: slots(reg)};
+  } catch (e) {
+    return {found, registerError: String(e)};
+  }
+})()
+"""
+
 
 # True on a page that is the server's own copy (not the worker's cached
 # one), reached by a reload, with the app on screen.
@@ -356,10 +379,21 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 page,
                 "document.getElementById('app').style.display === ''",
             )
-            _wait_for(
-                page,
-                "navigator.serviceWorker && !!navigator.serviceWorker.controller",
-            )
+            try:
+                _wait_for(
+                    page,
+                    "navigator.serviceWorker && !!navigator.serviceWorker.controller",
+                )
+            except PlaywrightTimeoutError as exc:
+                # Registration is best effort in the page (the shim
+                # swallows failures), so name the worker's state: an
+                # install aborted by a host network change (Docker
+                # veth churn -> ERR_NETWORK_CHANGED) leaves the
+                # registration without an active worker.
+                state = page.evaluate(_SW_REGISTRATION_STATE_JS)
+                raise AssertionError(
+                    f"worker never took control of the page: {state!r}"
+                ) from exc
             _, _, sw_body = live_server.get("/sw.js")
             manifest = re.search(r"const SHELL = (\{.*?\});", sw_body.decode())
             assert manifest, sw_body[:400]
@@ -476,7 +510,15 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             #     well before the server would have replied.
             live_server.stall_page.set()
             started = time.monotonic()
-            response = page.goto(url, wait_until="domcontentloaded")
+            # ``commit``: the clock stops when the cached response is
+            # committed.  Waiting for ``domcontentloaded`` measured the
+            # wrong navigation whenever the cached page's socket
+            # authenticated before its parser finished: the page then
+            # reloads itself (below) before DCL, ``goto`` follows the
+            # reload, and Chromium queues that second request for the
+            # same URL behind the still-stalled first one, so the
+            # measured time was the full stall.
+            response = page.goto(url, wait_until="commit")
             elapsed = time.monotonic() - started
             assert response is not None and response.from_service_worker
             assert elapsed < live_server.PAGE_STALL_S - 1, (
