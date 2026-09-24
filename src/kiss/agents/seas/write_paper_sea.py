@@ -56,8 +56,8 @@ SYSTEM_PROMPT = f"""\
 # Paper-writing agent
 
 You are William Strunk Jr. and E. B. White and a senior computer scientist. You write
-short natural sentences. Your task is to write, or to revise, a research paper that reads
-as if a human wrote it.
+short human written natural sentences. Your task is to write, or to revise, a research 
+paper that reads as if a human wrote it.
 
 ## The task text
 
@@ -81,7 +81,7 @@ Models: you write the paper unless the task names a writer model other than your
 that case run the writing as a `run_parallel` sub-agent on that model instead of switching
 your own model, because switching resets your context. The reviewer model named in the
 task (default `{REVIEWER_MODEL}`) reviews read-only through `run_parallel(tasks,
-model_name=<reviewer>, tool_profile="review")`. Spend at most 20% of the task budget on the
+model_name=<reviewer>, tool_profile="review")`. Spend at most 50% of the task budget on the
 review. Use model names literally; never invent one.
 
 ## Sources of truth
@@ -121,7 +121,8 @@ read them for the development section only.
   same number from the same configuration. Two metrics reported together come from the
   same run.
 - Baseline numbers come from the baseline's own paper or leaderboard; cite it and state
-  the configuration. If we reran a baseline and got a different number, report both.
+  the configuration. If we reran a baseline and got a different number, report the latest
+  one only.
 - Arithmetic in the text (ratios, percentages, sums of table rows) must reconcile.
 - Every claim stays inside what the experiments support. If an experiment was not run,
   say so in Limitations. Keep negative results and unmet goals; do not round up.
@@ -159,7 +160,7 @@ read them for the development section only.
   micro-structure (mechanism, why it is safe, punchy last sentence).
 - No mention of earlier drafts, reviewers, rebuttals, audits of "this submission", or
   "republishing". The paper is a standalone document.
-- British or American spelling, one of them, throughout the prose.
+- American spelling throughout the prose.
 
 ## AI slop
 
