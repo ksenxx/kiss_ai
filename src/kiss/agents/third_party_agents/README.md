@@ -340,9 +340,10 @@ prompt with a no-internet, answer-quickly suffix, and returns `False` from
 `is_parallel()` and `use_web_tools()`, so the answering session has no browser tools and
 no parallel sub-agents and is instructed to answer only from the local event log. Typed
 into a tab whose task is still running, the question is instead dispatched directly to
-the daemon through a background side channel that does not interrupt the running agent,
-and the reply appears in that task's transcript. No configuration or credentials are
-involved.
+the daemon through a background side channel that does not interrupt the running agent:
+the answering session shows as a nested sub-agent tab under the running task's tab only
+while it works (the tab closes when it finishes and does not reappear on reload), and the
+reply lands in that task's transcript. No configuration or credentials are involved.
 
 > /ask Which files has this task modified so far, and why did the last test run fail?
 
