@@ -482,13 +482,16 @@ def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
     trial_config.parent.mkdir(parents=True)
     (job / "config.json").write_text(json.dumps({"jobs_dir": "/old/tree/tb2", "n_attempts": 3}))
     trial_config.write_text(json.dumps({"trials_dir": "/old/tree/tb2/job"}))
-    resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 6)
+    resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 18)
     assert resume[-3:] == ["resume", "-p", str(job)] and "-i" not in resume
+    # ``harbor jobs resume`` has no ``-n``: the requested concurrency lands in the job config.
     assert json.loads((job / "config.json").read_text()) == {
-        "jobs_dir": str(tmp_path), "n_attempts": 3,
+        "jobs_dir": str(tmp_path), "n_attempts": 3, "n_concurrent_trials": 18,
     }
     assert json.loads(trial_config.read_text()) == {"trials_dir": str(job)}
-    assert tb2_runner.repoint_job(job) == 0  # already pointing here: nothing rewritten
+    assert tb2_runner.repoint_job(job, 18) == 0  # already pointing here: nothing rewritten
+    assert tb2_runner.repoint_job(job, 72) == 1  # only the concurrency changes
+    assert json.loads((job / "config.json").read_text())["n_concurrent_trials"] == 72
 
 
 def test_tb2_runner_job_finished(tmp_path: Path) -> None:
