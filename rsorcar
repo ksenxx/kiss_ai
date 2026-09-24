@@ -93,6 +93,17 @@
 #      remote web app for the swap, keeps the database it replaces as
 #      sorcar.db.replaced (with the usage counters of that database carried
 #      into the new one), and starts the web app again before returning.
+#   4c. Sync the agent's memory (~/.kiss/memories, or the ``memory_dir`` of
+#      ~/.kiss/config.json) both ways on every run, so the agent on either
+#      machine remembers what the agent on the other learned.
+#      scripts/sync-memory.sh does the work: the remote's pages come here
+#      first as a tar stream over ssh, then this machine's go there, and on
+#      each side src/kiss/scripts/merge_memory_pages.py folds them in -- a
+#      page one machine lacks is added, a page both have keeps whichever copy
+#      was updated last, a page changed on both in the same second is named
+#      and left as each machine has it, and no page is ever deleted.  The
+#      vector index next to the pages is a cache and does not travel; the
+#      next agent to open the memory rebuilds it from the pages.
 #   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
 #      build).  A ``code`` CLI is required by install.sh, so code-server is
 #      installed (standalone, no sudo) when the host has no editor CLI.
@@ -203,6 +214,7 @@ for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh 
               scripts/check-remote-disk-space.sh scripts/move-home-to-disk.sh \
               scripts/wait-for-public-url.sh scripts/count-api-keys.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
+              scripts/sync-memory.sh src/kiss/scripts/merge_memory_pages.py \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
@@ -561,6 +573,20 @@ info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
 step "Syncing the task database with $TARGET (both ways) ..."
 bash "$SCRIPT_DIR/scripts/sync-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" \
     || warn "The task databases are not in sync (see above); continuing the deploy."
+
+# ---------------------------------------------------------------------------
+# 4c. Sync the agent's memory both ways, so the agent on either machine
+#     remembers what the agent on the other learned.  scripts/sync-memory.sh
+#     brings the remote's pages here first and then sends this machine's
+#     there; on each side src/kiss/scripts/merge_memory_pages.py adds the
+#     pages that are missing and keeps, for a page both have, the copy
+#     updated last.  No page is deleted anywhere, the vector index is left
+#     to rebuild itself, and a memory that could not be synced is -- like the
+#     task database above -- a warning, not a failed deploy.
+# ---------------------------------------------------------------------------
+step "Syncing the agent's memory with $TARGET (both ways) ..."
+bash "$SCRIPT_DIR/scripts/sync-memory.sh" "$TARGET" \
+    || warn "The memories are not in sync (see above); continuing the deploy."
 
 # ---------------------------------------------------------------------------
 # 5-7. Remote bootstrap: install.sh, uv sync, kiss-web service, public URL.
