@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 687 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 688 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -289,7 +289,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **687 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`, plus the upstream provider's charge under BYOK) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **688 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`, plus the upstream provider's charge under BYOK) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -299,14 +299,14 @@ KISS Sorcar ships a catalog of **687 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 400 |
+| OpenRouter | 401 |
 | Claude Code CLI (`cc/*`) | 15 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **669** generation-capable models
-- **502** function-calling-capable models
+- **670** generation-capable models
+- **504** function-calling-capable models
 - **7** embedding models
 - **2** decision models
 
@@ -611,7 +611,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (400)</strong></summary>
+<summary><strong>OpenRouter (401)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -670,6 +670,7 @@ Full model list:
 - `openrouter/deepseek/deepseek-v4-pro`
 - `openrouter/deepseek/deepseek-v4-pro-0813`
 - `openrouter/deepseek/deepseek-v4.1-flash`
+- `openrouter/fireworks/ember-1`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
 - `openrouter/google/gemini-2.5-flash-lite`
@@ -754,8 +755,6 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
-- `openrouter/nex-agi/nex-n2.5-mini`
-- `openrouter/nex-agi/nex-n2.5-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
@@ -911,6 +910,7 @@ Full model list:
 - `openrouter/qwen/qwen3.8-27b`
 - `openrouter/qwen/qwen3.8-flash`
 - `openrouter/qwen/qwen3.8-max-0902`
+- `openrouter/qwen/qwen3.8-max-prime`
 - `openrouter/qwen/qwen3.8-omni-flash`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
@@ -977,6 +977,7 @@ Full model list:
 - `openrouter/z-ai/glm-5.3`
 - `openrouter/z-ai/glm-5.3-flash`
 - `openrouter/z-ai/glm-5.3-flashx`
+- `openrouter/z-ai/glm-5.3-prime`
 - `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
 - `openrouter/~anthropic/claude-haiku-latest`
