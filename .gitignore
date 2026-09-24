@@ -29,6 +29,9 @@ src/kiss/agents/vscode/README.md
 src/kiss/agents/vscode/LICENSE
 kiss_project/
 tmp/
+# White-label brand overlay applied by install.sh during the extension build
+# (see "Brand overlay" in install.sh); the checked-in brand stays KISS Sorcar.
+/.brand/
 src/kiss/benchmarks/results/
 !src/kiss/benchmarks/results/.gitkeep
 src/kiss/benchmarks/swebench_pro/vendor/

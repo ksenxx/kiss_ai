@@ -11,7 +11,10 @@ extension's ``media/`` directory because that is the single location
 reachable by all three consumers: this Python package, the extension
 host (``src/brand.ts``) and the shared ``chat.html`` template.  A custom
 distribution re-brands the product by replacing that file (and the icon
-files next to it) instead of editing source code.
+files next to it) instead of editing source code: it drops its copies
+into the git-ignored ``.brand/`` directory at the checkout root and
+``install.sh`` swaps them in for the extension build (see "Brand
+overlay" there), so the checked-in files always carry the stock brand.
 """
 
 from __future__ import annotations
