@@ -838,15 +838,6 @@
     "gen": true,
     "comment": "NEW"
   },
-  "gemini-3.5-transcribe": {
-    "context_length": 98304,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
   "gemini-3.6-flash": {
     "context_length": 500000,
     "input_price_per_1M": 0.75,
@@ -874,24 +865,6 @@
     "gen": true,
     "comment": "NEW"
   },
-  "gemini-3.8-flash-lite-tts": {
-    "context_length": 8192,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
-  "gemini-3.8-flash-tts": {
-    "context_length": 8192,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
   "gemini-embedding-001": {
     "context_length": 2048,
     "input_price_per_1M": 0.15,
@@ -915,24 +888,6 @@
     "fc": false,
     "emb": true,
     "gen": false
-  },
-  "gemini-omni-1.1-flash": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
-  "gemini-omni-flash-preview": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
   },
   "glm-4-32b-0414-128k": {
     "context_length": 131072,
