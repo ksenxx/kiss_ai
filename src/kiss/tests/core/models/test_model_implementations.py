@@ -258,7 +258,13 @@ class TestCachePricing:
         for name, info in MODEL_INFO.items():
             if not name.startswith("claude-"):
                 continue
-            read_mult = 0.025 if name.startswith(("claude-fable-5-1", "claude-mythos-5-1")) else 0.1
+            # platform.claude.com pricing: Fable/Mythos 5.1 $0.25 on $10 (0.025x),
+            # Opus 5.5 $0.20 on $4 (0.05x), every other Claude 0.1x.
+            read_mult = 0.1
+            if name.startswith(("claude-fable-5-1", "claude-mythos-5-1")):
+                read_mult = 0.025
+            elif name.startswith("claude-opus-5-5"):
+                read_mult = 0.05
             assert info.cache_read_price_per_1M == pytest.approx(
                 info.input_price_per_1M * read_mult
             ), name
