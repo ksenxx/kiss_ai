@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -130,12 +131,41 @@ class TestAnthropicTokenExtraction:
 class TestGeminiModel:
     @pytest.mark.timeout(60)
     def test_get_embedding(self):
-        m = model("gemini-3-flash-preview")
+        m = model("gemini-embedding-001")
         m.initialize("test")
         embedding = m.get_embedding("Hello world")
         assert isinstance(embedding, list)
         assert len(embedding) > 0
         assert isinstance(embedding[0], float)
+
+    @pytest.mark.timeout(60)
+    def test_get_embedding_explicit_model_overrides_instance(self):
+        """``embedding_model`` wins over the instance's own model name."""
+        m = model("gemini-3-flash-preview")
+        m.initialize("test")
+        embedding = m.get_embedding("Hello world", embedding_model="gemini-embedding-001")
+        assert len(embedding) > 0
+
+    @pytest.mark.timeout(60)
+    def test_get_embedding_non_embedding_model_fails(self):
+        """A chat model embeds under its own name and is rejected by the API.
+
+        Regression: the old fallback to ``gemini-embedding-001`` made every
+        Gemini model look like an embedder, so ``update_models.py`` flagged
+        TTS and transcription models ``emb: true``.
+        """
+        m = model("gemini-3-flash-preview")
+        m.initialize("test")
+        with pytest.raises(KISSError, match="gemini-3-flash-preview"):
+            m.get_embedding("Hello world")
+
+    @pytest.mark.timeout(120)
+    def test_update_models_embedding_probe(self):
+        """The catalog probe passes only for a real Gemini embedding model."""
+        from kiss.scripts.update_models import test_embedding as probe
+
+        assert probe("gemini-embedding-001") is True
+        assert probe("gemini-3-flash-preview") is False
 
 
 @requires_openai_api_key

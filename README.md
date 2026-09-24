@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 692 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 687 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -287,13 +287,13 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **692 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **687 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 106 |
 | Anthropic | 15 |
-| Gemini | 25 |
+| Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
@@ -305,7 +305,7 @@ Current catalog capability totals:
 
 - **669** generation-capable models
 - **502** function-calling-capable models
-- **12** embedding models
+- **7** embedding models
 - **2** decision models
 
 Full model list:
@@ -444,7 +444,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (25)</strong></summary>
+<summary><strong>Gemini (20)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -460,17 +460,12 @@ Full model list:
 - `gemini-3.1-pro-preview`
 - `gemini-3.5-flash`
 - `gemini-3.5-flash-lite`
-- `gemini-3.5-transcribe`
 - `gemini-3.6-flash`
 - `gemini-3.7-flash`
 - `gemini-3.8-flash`
-- `gemini-3.8-flash-lite-tts`
-- `gemini-3.8-flash-tts`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
-- `gemini-omni-1.1-flash`
-- `gemini-omni-flash-preview`
 
 </details>
 
