@@ -1,26 +1,12 @@
 /*
- * Seamless Loop (s10s) skin for KISS Sorcar.
+ * Brand skin.  Loaded after main.css by both the VS Code webview and the
+ * remote web app, so rules here override the stock KISS Sorcar look.
  *
- * Installed as media/brand.css and loaded after main.css by the VS Code
- * webview and the remote web app.  main.css derives every highlight,
- * focus ring, active tab, spinner and link colour from --accent, so one
- * variable re-tints the whole UI; the rule below puts the SeamlessLabs
- * logo on the welcome page.
+ * The stock build ships this file empty.  A custom distribution (see
+ * brand.json for the name strings) replaces it to re-skin the UI, e.g.
+ *
+ *   :root { --accent: #14b8a6; }
+ *   #welcome h2::before { content: url("kiss-icon.svg"); display: block; }
+ *
+ * Relative url() values resolve next to this file in both hosts.
  */
-
-:root {
-  --accent: #14b8a6; /* SeamlessLabs teal */
-}
-
-/* Welcome page: the SeamlessLabs S mark (kiss-icon.png, the logo on a white
-   rounded tile so it reads on dark and light themes) above the greeting.
-   The url() is relative to this stylesheet, so it resolves to
-   media/kiss-icon.png in both hosts. */
-#welcome h2::before {
-  content: "";
-  display: block;
-  width: 72px;
-  height: 72px;
-  margin: 0 auto 12px;
-  background: url("kiss-icon.png") center / contain no-repeat;
-}

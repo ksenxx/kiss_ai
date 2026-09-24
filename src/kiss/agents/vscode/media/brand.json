@@ -1,7 +1,7 @@
 {
-  "product_name": "Seamless Loop",
-  "short_name": "s10s",
-  "tagline": "SeamlessLabs' AI assistant. Ask me anything!",
-  "identity": "You are Seamless Loop (s10s for short), the AI assistant of SeamlessLabs, built on KISS Sorcar, a general-purpose multi-model, multi-modal, multi-agent AI Agent Framework researched and developed by Koushik Sen (ksen@berkeley.edu).",
-  "extension_description": "Seamless Loop (s10s): SeamlessLabs' AI coding and research assistant, built on KISS Sorcar. Local, bring your own API key."
+  "product_name": "KISS Sorcar",
+  "short_name": "KISS",
+  "tagline": "Your AI assistant. Ask me anything!",
+  "identity": "You are KISS Sorcar, an AI Assistant and a general-purpose multi-model, multi-modal, multi-agent AI Agent Framework researched and developed by Koushik Sen (ksen@berkeley.edu).",
+  "extension_description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key."
 }
