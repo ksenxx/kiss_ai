@@ -4507,8 +4507,9 @@
 
   function sidebarWorkDir() {
     // A folder picked with the Explorer's folder picker wins for as
-    // long as it is the workspace (a later settings-panel save of a
-    // different work dir ends the override).
+    // long as it is the workspace (a later change to a different work
+    // dir -- the "Working directory" panel, or the VS Code window's
+    // folder -- ends the override).
     if (pickedWorkDir && pickedWorkDir === configWorkDir) return pickedWorkDir;
     let tab = getTab(activeTabId);
     for (let i = 0; tab && tab.isContentTab && i < tabs.length; i++) {
@@ -7063,8 +7064,9 @@
   //
   // A modal browser of the host's folders: the path box and the list
   // navigate (listDir with a `picker:` token), "Select Folder" makes the
-  // folder the workspace — the same pin the settings' work dir sets —
-  // so the Explorer, the Source Control view and new tasks follow it.
+  // folder the workspace — the same pin the "Working directory" panel
+  // sets — so the Explorer, the Source Control view and new tasks
+  // follow it.
   let folderPickerEl = null;
   let folderPickerDir = '';
   let folderPickerSeq = 0;
@@ -7321,15 +7323,12 @@
   }
 
   /**
-   * Make *dir* the workspace: the settings' work dir box, the daemon's
-   * connection pin (setWorkDir) and the saved config all follow, and
-   * the client re-scopes to the new workspace right away exactly as a
-   * settings-panel save does (saveSettingsIfPopulated).
+   * Make *dir* the workspace: the daemon's connection pin (setWorkDir)
+   * and the saved config both follow, and the client re-scopes to the
+   * new workspace right away.
    */
   function applyPickedWorkDir(dir) {
     closeFolderPicker();
-    const wdInput = document.getElementById('cfg-work-dir');
-    if (wdInput) wdInput.value = dir;
     api.saveConfig({config: {work_dir: dir}});
     api.setWorkDir({workDir: dir});
     if (dir !== configWorkDir) {
@@ -7576,8 +7575,8 @@
   /**
    * The VS Code host verified *dir* is a folder (workDirPicked): the
    * next task of the tab that asked runs there.  Nothing else moves --
-   * the window keeps its folder, the settings' work dir stays the
-   * workspace, `tab.workDir` (what the tab bar scopes by) is untouched
+   * the window keeps its folder, `configWorkDir` stays the workspace,
+   * `tab.workDir` (what the tab bar scopes by) is untouched
    * -- so only the tab's pin and the views browsing it change.
    *
    * The panel is only closed (or told why the pin was refused) when it
@@ -19319,27 +19318,6 @@
       ? collectConfigForm()
       : collectConfigForm(edited);
     api.saveConfig({...data});
-    if (
-      document.body.classList.contains('remote-chat') &&
-      typeof data.config.work_dir === 'string' &&
-      data.config.work_dir
-    ) {
-      api.setWorkDir({workDir: data.config.work_dir});
-      // The pin changed this web app instance's workspace right now;
-      // don't wait for a `configData` round-trip to re-scope the
-      // history rows and the workspace-scoped tab bar.
-      if (data.config.work_dir !== configWorkDir) {
-        configWorkDir = data.config.work_dir;
-        applyWorkspaceScope();
-      }
-      // The user chose this folder: the sidebar views browse it even
-      // when the active chat (or a content tab's owner) had pinned
-      // another one -- exactly like the Explorer's folder picker.
-      pickedWorkDir = data.config.work_dir;
-      explorerRoot = '';
-      scmWorkDir = '';
-      refreshSidebarDataViews(true);
-    }
   }
 
   function closeSidebar(force) {
@@ -19949,26 +19927,28 @@
       if (!node || settingsEditedFields.has(node.id)) return;
       node.checked = checked;
     };
+    // The working directory is not a settings field: in VS Code it is
+    // the workspace folder open in the window, on the remote web app it
+    // is chosen in the "Working directory" panel.  The config reply
+    // still decides which history rows and shared tabs this client
+    // shows.
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
-    const wdInp = el('cfg-work-dir');
-    if (wdInp) {
-      setValue('cfg-work-dir', cfg.work_dir || '');
-      if (!document.body.classList.contains('remote-chat')) {
-        wdInp.readOnly = true;
-        wdInp.title = 'Set by the workspace folder open in this window';
-      } else {
-        let pinned = '';
-        try {
-          // eslint-disable-next-line no-undef -- sessionStorage is a browser global
-          pinned = sessionStorage.getItem('sorcar-work-dir') || '';
-        } catch (_e) {}
-        if (pinned) {
-          setValue('cfg-work-dir', pinned);
-          configWorkDir = pinned;
-        } else if (cfg.work_dir) {
-          api.setWorkDir({workDir: cfg.work_dir});
-        }
+    if (document.body.classList.contains('remote-chat')) {
+      // A browser tab that already pinned its own working directory
+      // (the WS shim writes sessionStorage `sorcar-work-dir` when the
+      // page posts setWorkDir) keeps it, so a second tab pointed
+      // elsewhere does not drag this one along; a fresh, unpinned tab
+      // adopts the stored value as its own.
+      let pinned = '';
+      try {
+        // eslint-disable-next-line no-undef -- sessionStorage is a browser global
+        pinned = sessionStorage.getItem('sorcar-work-dir') || '';
+      } catch (_e) {}
+      if (pinned) {
+        configWorkDir = pinned;
+      } else if (cfg.work_dir) {
+        api.setWorkDir({workDir: cfg.work_dir});
       }
     }
     // Compared AFTER the pinned override above so the web app's
@@ -20004,7 +19984,6 @@
       cfg.classify_with_decisions !== false,
     );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
-    setValue('cfg-memory-dir', cfg.memory_dir || '');
     // Recorded even while an edit is active (the boxes themselves are
     // skipped below), so cancelling the edit restores the latest
     // authoritative values — see cancelCustomModelEdit.
@@ -20082,9 +20061,6 @@
     if (want('cfg-use-memory')) {
       cfg.use_memory = !!(memoryToggleBtn && memoryToggleBtn.checked);
     }
-    if (want('cfg-memory-dir')) {
-      cfg.memory_dir = el('cfg-memory-dir').value.trim();
-    }
     if (want('cfg-custom-endpoint')) {
       cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();
     }
@@ -20096,10 +20072,6 @@
     }
     if (want('cfg-remote-password')) {
       cfg.remote_password = el('cfg-remote-password').value.trim();
-    }
-    const wdInp = el('cfg-work-dir');
-    if (wdInp && !wdInp.readOnly && want('cfg-work-dir')) {
-      cfg.work_dir = wdInp.value.trim();
     }
     const apiKeys = {};
     FIRST_PARTY_KEY_IDS.forEach(k => {

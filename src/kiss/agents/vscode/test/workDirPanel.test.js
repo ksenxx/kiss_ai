@@ -11,7 +11,7 @@
 // The panel means something different on each surface:
 //   * remote webapp (body.remote-chat): a typed / listed directory is
 //     checked through the daemon's listDir ('workdir:<n>' token) and then
-//     adopted exactly like the settings field (saveConfig + setWorkDir);
+//     adopted as the instance's workspace (saveConfig + setWorkDir);
 //     the folder button opens the in-page folder browser.
 //   * VS Code webview: the pick goes to the extension host (openWorkDir /
 //     pickWorkDir), which only checks the folder exists -- it answers
@@ -20,7 +20,7 @@
 //     ACTIVE CHAT TAB's working directory: its next task runs there
 //     (submit.workDir, plus submit.tabScopeWorkDir = the workspace when
 //     the folder lies outside it so the tab stays in this window); the
-//     window, the settings field and the other tabs are untouched.
+//     window, the workspace and the other tabs are untouched.
 
 /* global require, __dirname, console, process */
 
@@ -278,7 +278,7 @@ function testRemoteTypedPathIsCheckedThenAdopted() {
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
 
   // Second try through the Open button: the daemon lists it (with its
-  // canonical spelling), so it is adopted like the settings field.
+  // canonical spelling), so it is adopted as the workspace.
   typeInto(win, 'workdir-input', '/srv/project2/');
   click(win, byId(win, 'workdir-open-btn'));
   listDirs = msgs(posted, 'listDir');
@@ -297,11 +297,6 @@ function testRemoteTypedPathIsCheckedThenAdopted() {
   assert.strictEqual(pins[pins.length - 1].workDir, '/srv/project2');
   assert.ok(!panelOpen(win), 'a successful open closes the panel');
   assert.ok(byId(win, 'workdir-error').hidden, 'the old error is gone');
-  assert.strictEqual(
-    byId(win, 'cfg-work-dir').value,
-    '/srv/project2',
-    'the settings field follows',
-  );
 
   // Nothing is posted to the VS Code host on the remote surface.
   assert.strictEqual(msgs(posted, 'openWorkDir').length, 0);
@@ -496,11 +491,6 @@ function testVsCodePickChangesOnlyTheTab() {
   const firstTab = pickForActiveTab(win, posted, '/elsewhere/repo');
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
   assert.strictEqual(msgs(posted, 'setWorkDir').length, 0);
-  assert.strictEqual(
-    byId(win, 'cfg-work-dir').value,
-    '/work/ws',
-    'the settings field still shows the workspace',
-  );
   openPanelViaMenu(win);
   assert.strictEqual(
     byId(win, 'workdir-current').textContent,
