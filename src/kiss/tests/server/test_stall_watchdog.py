@@ -30,11 +30,37 @@ def hog_the_gil():
     quadratic = re.compile(r"[^\\s\\"'`<>|:;,()\\[\\]{{}}]+\\.(?:png|jpe?g)")
     quadratic.search("A" * {chars})
 
-thread = start_stall_watchdog(timeout={timeout}, interval=0.05)
-assert thread is not None and thread.daemon
+watchdog = start_stall_watchdog(timeout={timeout}, interval=0.05)
+assert watchdog is not None and watchdog.thread.daemon
 time.sleep(0.2)  # let the heartbeat arm the watchdog at least once
 hog_the_gil()
 print("done", flush=True)
+"""
+
+# Same stall, but the watchdog is disarmed first: ``stop()`` must cancel
+# the pending C-level dump, not just end the heartbeat thread.
+_STOP_SCRIPT = _HOG_SCRIPT.replace(
+    "hog_the_gil()\n",
+    "watchdog.stop()\nassert not watchdog.thread.is_alive()\nhog_the_gil()\n",
+)
+
+# The dump target is closed while the watchdog is armed (pytest closes
+# its captured stderr at session end while in-process servers' watchdogs
+# are still running).  The heartbeat must end quietly instead of dying
+# with "ValueError: I/O operation on closed file" on the real stderr.
+_CLOSED_TARGET_SCRIPT = """
+import sys, tempfile, time
+from kiss.server.stall_watchdog import start_stall_watchdog
+
+target = tempfile.TemporaryFile("w+")
+watchdog = start_stall_watchdog(timeout=0.3, interval=0.05)
+closed = start_stall_watchdog(timeout=600, interval=0.05, file=target)
+assert watchdog is not None and closed is not None
+time.sleep(0.2)
+target.close()
+closed.thread.join(timeout=5)
+print("alive" if closed.thread.is_alive() else "ended", flush=True)
+watchdog.stop()
 """
 
 _NO_FD_SCRIPT = """
@@ -76,6 +102,23 @@ def test_short_gil_stall_below_timeout_stays_silent():
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "done"
     assert "Timeout (" not in proc.stderr
+
+
+def test_stop_cancels_the_pending_dump():
+    """After ``stop()`` a stall longer than the old timeout stays silent."""
+    proc = _run(_STOP_SCRIPT.format(chars=_HOG_TOKEN_CHARS, timeout=0.5))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "done"
+    assert "Timeout (" not in proc.stderr
+
+
+def test_closed_target_ends_the_heartbeat_quietly():
+    """Closing the dump target stops that heartbeat without a traceback."""
+    proc = _run(_CLOSED_TARGET_SCRIPT)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ended"
+    assert "Exception in thread stall-watchdog" not in proc.stderr
+    assert "closed file" not in proc.stderr
 
 
 def test_output_without_file_descriptor_is_not_armed():
