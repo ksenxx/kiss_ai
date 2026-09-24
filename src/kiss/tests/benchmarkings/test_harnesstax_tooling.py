@@ -550,7 +550,8 @@ def test_daemon_server_waits_an_hour_for_benchmark_clients(tmp_path: Path) -> No
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    assert server._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
+    # The timeout is read by WebPrinter._uds_send, so it must land on the printer.
+    assert server._printer._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
     assert (tmp_path / "home" / "config.json").is_file()
 
 
