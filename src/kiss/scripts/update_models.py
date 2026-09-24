@@ -178,6 +178,7 @@ def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DECISIONS_MODELS_URL = f"{OPENROUTER_MODELS_URL}?output_modalities=decisions"
+TOGETHER_MODELS_URL = "https://api.together.xyz/v1/models"
 
 
 _OPENROUTER_CACHE_PRICE_FIELDS = (
@@ -281,7 +282,7 @@ def fetch_together(verbose: bool = False) -> dict[str, dict]:
     if verbose:  # pragma: no branch
         print("  Fetching Together AI models...")
     data = api_get(
-        "https://api.together.xyz/v1/models",
+        TOGETHER_MODELS_URL,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
@@ -303,10 +304,16 @@ def fetch_together(verbose: bool = False) -> dict[str, dict]:
         if model_type not in ("chat", "embedding", "language"):  # pragma: no branch
             continue
         is_emb = model_type == "embedding"
+        # Together reports ``prompt_tokens_details.cached_tokens`` and bills
+        # them at ``pricing.cached_input`` (per 1M, e.g. Kimi-K3 $0.30 on a
+        # $3.00 input); without the catalog price ``calculate_cost`` would
+        # bill cache hits at the full input rate.
+        cached = float(pricing.get("cached_input", 0) or 0)
         models[model_id] = {
             "context_length": ctx,
             "input_price_per_1M": round(inp, 3),
             "output_price_per_1M": round(out, 3),
+            "cache_read_price_per_1M": round(cached, 6) if cached > 0 else None,
             "source": "together",
             "is_embedding": is_emb,
             "type": model_type,
@@ -1530,6 +1537,7 @@ def compute_changes(
                 changed["input_price_per_1M"] = fetched["input_price_per_1M"]
             if out_diff > 0.005 and not cur["emb"]:  # pragma: no branch
                 changed["output_price_per_1M"] = fetched["output_price_per_1M"]
+            changed.update(_cache_price_changes(cur, fetched))
             if changed:  # pragma: no branch
                 updates.append({"name": name, "changes": changed, "source": "together"})
         else:
@@ -1549,6 +1557,7 @@ def compute_changes(
                         "source": "together",
                         "is_embedding": fetched.get("is_embedding", False),
                         "needs_pricing": not has_pricing,
+                        **_cache_price_changes({}, fetched),
                     }
                 )
 

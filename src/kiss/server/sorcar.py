@@ -271,6 +271,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("voiceWakeStart", handler="voice_wake_start"),
     ApiCommand("voiceWakeStop", handler="voice_wake_stop"),
     ApiCommand("setWorkDir", required=("workDir",)),
+    ApiCommand("recordWorkDir", required=("path",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),

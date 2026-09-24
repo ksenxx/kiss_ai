@@ -8,6 +8,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const net = require('net');
+const {PRODUCT_NAME} = require(require('path').join(__dirname, '..', 'out', 'brand.js'));
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -226,8 +227,8 @@ async function runTests() {
       'chat.html must render the loading overlay element',
     );
     assert.ok(
-      /KISS Sorcar Server is starting \.\.\./.test(html),
-      'overlay must contain the "KISS Sorcar Server is starting ..." message',
+      html.includes(`${PRODUCT_NAME} Server is starting ...`),
+      'overlay must contain the "<product> Server is starting ..." message',
     );
     assert.ok(
       /<div id="app" style="display:none;?"/.test(html),

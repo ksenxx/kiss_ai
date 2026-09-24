@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from kiss.core import config as config_module
+from kiss.core.brand import render_brand
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.printer import Printer
 from kiss.core.utils import atomic_write_text, config_to_dict, dump_yaml
@@ -22,8 +23,12 @@ from kiss.core.utils import atomic_write_text, config_to_dict, dump_yaml
 logger = logging.getLogger(__name__)
 
 _kiss_pkg_dir = Path(__file__).parent.parent
-SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text(encoding="utf-8")
-SYSTEM_PROMPT_LITE = (_kiss_pkg_dir / "SYSTEM_LITE.md").read_text(encoding="utf-8")
+# The prompt files carry the brand-specific identity sentence as a
+# ``{{IDENTITY}}`` placeholder (see ``kiss.core.brand``).
+SYSTEM_PROMPT = render_brand((_kiss_pkg_dir / "SYSTEM.md").read_text(encoding="utf-8"))
+SYSTEM_PROMPT_LITE = render_brand(
+    (_kiss_pkg_dir / "SYSTEM_LITE.md").read_text(encoding="utf-8")
+)
 """Reduced system prompt used for tasks the pre-run classifier deems simple.
 
 Same identity and output contract as ``SYSTEM.md`` without the software

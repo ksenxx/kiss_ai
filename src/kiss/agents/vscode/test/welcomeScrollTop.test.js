@@ -25,6 +25,7 @@ function makeWebview(opts) {
   opts = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
+  html = html.replace(/\{\{PRODUCT_NAME\}\}/g, 'KISS Sorcar');
   if (opts.remote) {
     html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
   }

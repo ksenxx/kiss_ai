@@ -355,6 +355,22 @@ class TestTokenExtraction:
         assert cr == 70
         assert cw == 0
 
+    def test_extract_splits_cache_writes_out_of_input(self) -> None:
+        """``turn.completed`` usage: input 100 = cached 40 + written 60 (codex-rs
+        ``responses.rs`` test); the written subset is billed at the cache-write rate,
+        not as uncached input."""
+        m = CodexModel("codex/default")
+        response = {
+            "usage": {
+                "input_tokens": 100,
+                "cached_input_tokens": 40,
+                "cache_write_input_tokens": 60,
+                "output_tokens": 30,
+                "reasoning_output_tokens": 10,
+            }
+        }
+        assert m.extract_input_output_token_counts_from_response(response) == (0, 30, 40, 60)
+
     def test_extract_handles_missing_usage(self) -> None:
         m = CodexModel("codex/default")
         assert m.extract_input_output_token_counts_from_response({}) == (0, 0, 0, 0)

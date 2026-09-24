@@ -31,6 +31,7 @@ import {
   showInformationNotification,
   showWarningNotification,
 } from './WebviewNotifications';
+import {PRODUCT_NAME} from './brand';
 
 let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
@@ -875,7 +876,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[KISS Sorcar] Dependency setup error:', err);
     showErrorNotification(
-      `KISS Sorcar: Setup failed — ${msg}. ` +
+      `${PRODUCT_NAME}: Setup failed — ${msg}. ` +
         `Check ${path.join(kissHomeDir(), 'install.log')} for details.`,
     );
   });
@@ -884,7 +885,7 @@ export function activate(context: vscode.ExtensionContext): void {
     kissProjectPath: findKissProject() || undefined,
     notify: ({latest, current}: {latest: string; current: string}) => {
       void showInformationNotification(
-        `KISS Sorcar: a new release (${latest}) is available. ` +
+        `${PRODUCT_NAME}: a new release (${latest}) is available. ` +
           `You are on ${current}.`,
         'Update now',
         'Update when idle',

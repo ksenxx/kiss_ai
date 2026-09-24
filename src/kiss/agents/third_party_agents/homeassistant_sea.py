@@ -51,6 +51,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +321,7 @@ class HomeAssistantChannelBackend(ToolMethodBackend):
         Raises:
             RuntimeError: If the notification service call fails.
         """
-        payload = {"message": text, "title": channel_id or "KISS Sorcar"}
+        payload = {"message": text, "title": channel_id or PRODUCT_NAME}
         result = json.loads(
             self._request("POST", "/api/services/persistent_notification/create", payload)
         )

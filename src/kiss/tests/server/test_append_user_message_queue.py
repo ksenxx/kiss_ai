@@ -33,6 +33,7 @@ role of ``model`` for the drain (it just records each
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -633,7 +634,12 @@ class TestPendingMessagesClearedOnTaskFinish:
         ``state.agent.run`` that queues two follow-ups mid-flight (the
         same path the frontend would take while a task is running).
         After ``_run_task`` returns, the ``finally`` block must have
-        cleared the queue so the next task starts fresh.
+        cleared the queue so the next task starts fresh.  The two
+        undrained prompts are not dropped: the runner re-submits them
+        as the tab's next run, which exits at the runner's own "No
+        model available" check (the stub renames the command's model
+        to an unknown one) and leaves the tab idle with those prompts
+        as its last prompt.
         """
         import os
         import queue
@@ -657,32 +663,50 @@ class TestPendingMessagesClearedOnTaskFinish:
         st.is_task_active = True
         agent_state.register(st)
 
+        cmd: dict[str, Any] = {
+            "type": "run",
+            "prompt": "test prompt",
+            "tabId": tab_id,
+            "workDir": "/tmp",
+            "useParallel": False,
+            "useWorktree": False,
+            "autoCommit": False,
+            "_state_key": "task-clear-after-run",
+        }
+
         def fake_run(**_kwargs: Any) -> None:
             st.pending_user_messages.append("queued during task")
             st.pending_user_messages.append("also queued")
+            # The re-dispatched follow-up inherits this command; an
+            # unknown model makes it exit at the runner's model check
+            # instead of calling a model (or this stub again).
+            cmd["model"] = "kiss-clear-after-run-no-such-model"
 
         agent.run = fake_run  # type: ignore[method-assign, assignment]
 
         task_thread = threading.Thread(
-            target=server._run_task,
-            args=({
-                "type": "run",
-                "prompt": "test prompt",
-                "tabId": tab_id,
-                "workDir": "/tmp",
-                "useParallel": False,
-                "useWorktree": False,
-                "autoCommit": False,
-                "_state_key": "task-clear-after-run",
-            },),
-            daemon=True,
+            target=server._run_task, args=(cmd,), daemon=True,
         )
         st.task_thread = task_thread
         task_thread.start()
         task_thread.join(timeout=15)
         assert not task_thread.is_alive()
 
-        post = agent_state.get("task-clear-after-run")
-        assert post is not None
-        assert post.pending_user_messages == []
-        assert post.is_task_active is False
+        assert st.pending_user_messages == []
+        assert st.is_task_active is False
+
+        # The re-dispatched follow-up run replaces the tab's state
+        # (``_cmd_run`` unregisters the finished one).
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            with server._state_lock:
+                nxt = agent_state.find_by_tab(tab_id)
+                thread = nxt.task_thread if nxt is not None else None
+            if thread is not None:
+                thread.join(timeout=max(0.0, deadline - time.time()))
+                break
+            time.sleep(0.02)
+        nxt = agent_state.find_by_tab(tab_id)
+        assert nxt is not None and nxt.task_thread is None
+        assert nxt.last_user_prompt == "queued during task\n\nalso queued"
+        assert nxt.pending_user_messages == []

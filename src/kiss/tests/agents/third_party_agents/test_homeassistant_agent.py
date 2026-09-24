@@ -37,6 +37,7 @@ from kiss.agents.third_party_agents.homeassistant_sea import (
     HomeAssistantChannelBackend,
     _config,
 )
+from kiss.core.brand import PRODUCT_NAME
 
 _TOKEN = "test-ha-token"
 
@@ -423,7 +424,7 @@ def test_send_message_default_title(backend) -> None:
     """send_message uses the 'KISS Sorcar' title when channel_id is empty."""
     b, server = backend
     b.send_message("", "hello", thread_ts="ignored")
-    assert server.requests[-1]["body"] == {"message": "hello", "title": "KISS Sorcar"}
+    assert server.requests[-1]["body"] == {"message": "hello", "title": PRODUCT_NAME}
 
 
 def test_unauthorized_token_returns_ok_false(ha_server) -> None:

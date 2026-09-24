@@ -1080,14 +1080,14 @@ _ANTHROPIC_CACHE_PREFIXES = (
     "openrouter/anthropic/",
     "openrouter/~anthropic/",
 )
-# Anthropic bills cache hits at 0.1x the base input price, except on these
-# families where the published rate is 0.025x ($0.25/MTok on a $10 base):
-# https://platform.claude.com/docs/en/about-claude/pricing
-_ANTHROPIC_LOW_CACHE_READ_FAMILIES = (
-    "claude-fable-5-1",
-    "claude-fable-5.1",
-    "claude-mythos-5-1",
-    "claude-mythos-5.1",
+# Anthropic bills cache hits at 0.1x the base input price, except on the
+# families below: Fable 5.1 / Mythos 5.1 read at 0.025x ($0.25/MTok on a
+# $10 base) and Opus 5.5 at 0.05x ($0.20/MTok on a $4 base).  Fable 5
+# (without the .1) is a plain 0.1x model, so the prefixes carry the minor
+# version: https://platform.claude.com/docs/en/about-claude/pricing
+_ANTHROPIC_CACHE_READ_MULTIPLIERS = (
+    (("claude-fable-5-1", "claude-fable-5.1", "claude-mythos-5-1", "claude-mythos-5.1"), 0.025),
+    (("claude-opus-5-5", "claude-opus-5.5"), 0.05),
 )
 _OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
 _GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
@@ -1273,7 +1273,10 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
     """
     if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
         claude = name.rsplit("/", 1)[-1]
-        read_mult = 0.025 if claude.startswith(_ANTHROPIC_LOW_CACHE_READ_FAMILIES) else 0.1
+        read_mult = 0.1
+        for families, multiplier in _ANTHROPIC_CACHE_READ_MULTIPLIERS:
+            if claude.startswith(families):
+                read_mult = multiplier
         return inp * read_mult, inp * 1.25, inp * 2.0
     bare = _openai_bare_name(name)
     if bare is not None:
@@ -1284,7 +1287,12 @@ def _provider_cache_defaults(name: str, inp: float) -> tuple[float, float, float
         # (e.g. google/gemini-3.1-pro-preview: $2.00 input, $0.20 cache read).
         return inp * 0.1, 0.0, None
     if name.startswith(("kimi-", "moonshot-")):
-        return inp * 0.25, 0.0, None
+        # Moonshot bills a 5-minute cache write at the uncached input rate
+        # (kimi-k3: $3.00 input, $3.00 write, $0.30 read); it is reported in
+        # ``prompt_tokens_details.cache_write_tokens`` and excluded from the
+        # uncached remainder, so a 0.0 write price would give those tokens
+        # away: https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api
+        return inp * 0.25, inp, None
     return None
 
 
@@ -1731,7 +1739,9 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
 
     Verified against the OpenAI pricing page
     (https://developers.openai.com/api/docs/pricing: gpt-6-astra
-    $10/$1/$12.50/$50 -> $20/$2/$25/$75, gpt-5.6-sol $4/$0.40/$5/$20 ->
+    $10/$1/$12.50/$50 -> $20/$2/$25/$75, gpt-6-sol $2/$0.20/$2.50/$10 ->
+    $4/$0.40/$5/$15, gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
+    $0.20/$0.02/$0.25/$0.75, gpt-5.6-sol $4/$0.40/$5/$20 ->
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
     2x/1.5x) and https://ai.google.dev/gemini-api/docs/pricing
     (gemini-3-pro $2/$12 -> $4/$18, gemini-2.5-pro $1.25/$10 ->
@@ -1758,8 +1768,7 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
     if bare.startswith(
-        ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
-        + _OPENAI_ROLLING_LATEST
+        ("gpt-6-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna") + _OPENAI_ROLLING_LATEST
     ):
         return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.5") and "-pro" not in bare:

@@ -38,9 +38,10 @@ from urllib.parse import urlsplit
 import requests
 
 from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
+from kiss.core.brand import PRODUCT_NAME
 
 DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
-USER_AGENT = "KISS Sorcar"
+USER_AGENT = PRODUCT_NAME
 
 # Poll-loop bounds.  Providers announce their own ``expires_in`` and
 # ``interval``; these caps keep a hostile or buggy answer from creating

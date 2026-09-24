@@ -56,6 +56,7 @@ from kiss.agents.third_party_agents._device_auth import (
     connect_prompt,
     consent_required,
 )
+from kiss.core.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ _config = ChannelConfig(
 # (``token_endpoint_auth_method: none``) and uses only the device and
 # refresh grants, so no redirect URI is registered.
 _CLIENT_METADATA: dict[str, Any] = {
-    "client_name": "KISS Sorcar",
+    "client_name": PRODUCT_NAME,
     "client_uri": "https://kisssorcar.github.io/",
     "application_type": "native",
     "token_endpoint_auth_method": "none",

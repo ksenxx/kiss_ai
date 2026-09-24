@@ -80,7 +80,8 @@ The section shows a 20-panel carousel, one panel per entry from:
 - `./src/kiss/SAMPLE_TASKS.md` — **12 sample tasks** (rendered with a
   `Task` badge), and
 - `./src/kiss/INJECTIONS.md` — **8 promptlet tricks** (rendered with a
-  `Trick` badge).
+  `Trick` badge; the file has since grown to 10 tricks, and the deck still
+  shows the original 8).
 
 Each panel has:
 

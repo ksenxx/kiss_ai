@@ -58,6 +58,7 @@ from kiss.agents.third_party_agents.signal_sea import SignalAgent, SignalLinkSes
 from kiss.agents.third_party_agents.signal_sea import _config as sg_config
 from kiss.agents.third_party_agents.twitch_sea import TwitchAgent
 from kiss.agents.third_party_agents.twitch_sea import _config as tw_config
+from kiss.core.brand import PRODUCT_NAME
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
@@ -1077,7 +1078,7 @@ def test_nextcloud_login_flow_v2_enrolls_app_password(
     assert started["verification_uri"] == f"{nextcloud_server.base()}/login/v2/flow/poll-1"
     assert started["user_code"] == ""
     assert "enter the code" not in started["instructions"]
-    assert nextcloud_server.requests[0]["headers"]["User-Agent"] == "KISS Sorcar"
+    assert nextcloud_server.requests[0]["headers"]["User-Agent"] == PRODUCT_NAME
     pending = json.loads(tools["finish_nextcloud_auth"]())
     assert pending["status"] == "pending"
     nextcloud_server.grant()
@@ -2077,7 +2078,7 @@ def test_signal_link_flow_renders_qr_and_records_linked_account(
     assert started["status"] == "consent_required"
     uri = "sgnl://linkdevice?uuid=abc-123&pub_key=BQ%2Fkey"
     assert started["verification_uri"] == uri
-    assert (fake_signal_cli.parent / "device-name").read_text().strip() == "KISS Sorcar"
+    assert (fake_signal_cli.parent / "device-name").read_text().strip() == PRODUCT_NAME
     # The QR is rendered as half-block text and as an SVG page (0600).
     qr_text = started["qr_text"]
     assert len(qr_text.splitlines()) >= 10 and set(qr_text) <= set(" \u2580\u2584\u2588\n")

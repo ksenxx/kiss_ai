@@ -39,6 +39,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -209,7 +210,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             notice, seen = await self._drain_until(reader, "notice")
             self._assert_no_unknown_command(seen)
             self.assertIn(
-                "An update of KISS Sorcar is getting installed",
+                f"An update of {PRODUCT_NAME} is getting installed",
                 str(notice.get("text", "")),
             )
             # Poll for the marker *content*, not mere existence: the
@@ -256,7 +257,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             notice, seen = await self._drain_until(reader, "notice")
             self._assert_no_unknown_command(seen)
             self.assertIn(
-                "An update of KISS Sorcar is getting installed",
+                f"An update of {PRODUCT_NAME} is getting installed",
                 str(notice.get("text", "")),
             )
             # Poll for the marker *content*, not mere existence: the
@@ -461,6 +462,96 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     seen_kwargs.get("web_tools"),
                     False,
                     "webTools was dropped on the submit → run path",
+                )
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        finally:
+            keys.ANTHROPIC_API_KEY = saved_key
+            await asyncio.to_thread(_join_task_threads)
+            agent_state.agent_states.clear()
+
+    async def test_submit_forwards_tab_scope_work_dir_to_run(self) -> None:
+        """A webapp ``submit`` with ``tabScopeWorkDir`` keeps the tab scoped.
+
+        The "Working directory" panel pins one tab to a folder outside
+        the client's workspace; the webview then sends the workspace as
+        ``tabScopeWorkDir`` so the tab does not vanish from that tab bar
+        once the run publishes its work dir.  The submit → run
+        translation must forward it to the tab registry's scope while
+        the run's ``workDir`` stays the picked folder.
+        """
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+        from kiss.core import config as config_module
+        from kiss.core.models.model_info import get_available_models
+        from kiss.server import agent_state
+
+        keys = config_module.DEFAULT_CONFIG
+        saved_key = keys.ANTHROPIC_API_KEY
+        keys.ANTHROPIC_API_KEY = "test-anthropic-key"
+        try:
+            available = get_available_models()
+            self.assertTrue(available, "no model available with fake key")
+            model = next(m for m in available if m.startswith("claude-"))
+
+            tab_id = "tab-parity-scope"
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            ran = threading.Event()
+            seen_kwargs: dict[str, Any] = {}
+
+            def fake_run(**kwargs: Any) -> None:
+                seen_kwargs.update(kwargs)
+                ran.set()
+
+            agent.run = fake_run  # type: ignore[assignment]
+            seed = agent_state.AgentState(
+                "parity-scope-seed",
+                agent=agent,
+                tab_id=tab_id,
+                server_owned=True,
+            )
+            agent_state.register(seed)
+
+            workspace = Path(self.tmpdir) / "workspace"
+            picked = Path(self.tmpdir) / "picked"
+            workspace.mkdir(parents=True, exist_ok=True)
+            picked.mkdir(parents=True, exist_ok=True)
+
+            reader, writer = await self._connect()
+            try:
+                await self._send(writer, {
+                    "type": "submit",
+                    "tabId": tab_id,
+                    "prompt": "run in the picked folder",
+                    "model": model,
+                    "workDir": str(picked),
+                    "tabScopeWorkDir": str(workspace),
+                    "attachments": [],
+                    "useWorktree": False,
+                    "useParallel": False,
+                    "autoCommit": True,
+                })
+                _, seen = await self._drain_until(reader, "setTaskText")
+                self._assert_no_unknown_command(seen)
+                self.assertTrue(
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, ran.wait, 10.0,
+                    ),
+                    "stub agent.run never started",
+                )
+                self.assertEqual(seen_kwargs.get("work_dir"), str(picked))
+                entry = next(
+                    e for e in self.server._vscode_server.tab_registry.snapshot()
+                    if e["tabId"] == tab_id
+                )
+                self.assertEqual(entry["workDir"], str(picked))
+                self.assertEqual(
+                    entry["scopeWorkDir"],
+                    str(workspace),
+                    "tabScopeWorkDir was dropped on the submit → run path",
                 )
             finally:
                 writer.close()

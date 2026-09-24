@@ -10,6 +10,9 @@ export interface RunFields {
   prompt: string;
   model: string;
   workDir?: string;
+  // The client workspace a tab stays scoped to when `workDir` lies
+  // outside it (see the daemon's `tabScopeWorkDir`).
+  tabScopeWorkDir?: string;
   activeFile?: string;
   attachments?: Attachment[];
   useWorktree?: boolean;

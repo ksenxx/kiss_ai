@@ -2217,10 +2217,18 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 #workdir-empty,
+#workdir-current,
 #workdir-error {
   padding: 8px 10px;
   font-size: var(--fs-sm);
   color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+#workdir-current {
+  padding-top: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #workdir-error { color: var(--red, #f14c4c); margin-bottom: 6px; }

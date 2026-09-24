@@ -54,6 +54,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.conftest import requires_unix_sockets
 
@@ -383,7 +384,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "runUpdate"})
         err = await self._drain_until(reader_a, _has_type("error"))
-        self.assertIn("KISS Sorcar update failed", str(err.get("text", "")))
+        self.assertIn(f"{PRODUCT_NAME} update failed", str(err.get("text", "")))
         self.assertNotIn("connId", err)
         await _assert_no_banner_on_b()
 
@@ -392,7 +393,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         await self._send(writer_a, {"type": "runUpdate"})
         notice = await self._drain_until(reader_a, _has_type("notice"))
         self.assertIn(
-            "An update of KISS Sorcar is getting installed",
+            f"An update of {PRODUCT_NAME} is getting installed",
             str(notice.get("text", "")),
         )
         self.assertNotIn("connId", notice)

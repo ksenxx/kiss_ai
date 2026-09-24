@@ -65,7 +65,6 @@ from kiss.server.autocomplete import (
     ranked_function_calling_models,
 )
 from kiss.server.commands import _CommandsMixin
-from kiss.server.diff_merge import _git
 from kiss.server.helpers import (
     generate_commit_message_from_diff,
     model_vendor,
@@ -82,6 +81,7 @@ from kiss.server.task_runner import (
     _TaskRunnerMixin,
     parse_task_tags,
 )
+from kiss.server.task_update import mark_legacy_updates_as_side_channels
 
 __all__ = [
     "VSCodeServer",
@@ -613,6 +613,14 @@ class VSCodeServer(
         cut-off scopes the sweep to rows created strictly before this
         server instance was constructed.
 
+        The same thread then stamps ``is_side_channel`` on task-update
+        child rows persisted by releases that predate the flag (see
+        :func:`mark_legacy_updates_as_side_channels`); without the stamp
+        every chat reload re-opens each finished periodic update as a
+        dead sub-agent tab.  It is another ``UPDATE`` behind the
+        persistence write lock, so it must live here and never on the
+        listener-binding path.
+
         Args:
             still_running: Task-history row ids owned by worker
                 threads still alive in this process; exempt from the
@@ -630,6 +638,14 @@ class VSCodeServer(
             logger.exception(
                 "orphan-task recovery sweep failed; continuing startup",
             )
+        try:
+            stamped = mark_legacy_updates_as_side_channels()
+            if stamped:
+                logger.info(
+                    "Stamped %d legacy task-update rows as side channels", stamped,
+                )
+        except Exception:
+            logger.warning("could not stamp legacy task-update rows", exc_info=True)
         finally:
             _close_thread_db()
 
@@ -2800,8 +2816,7 @@ class VSCodeServer(
                     }
                 )
                 return
-            cached_result = _git(work_dir, "diff", "--cached")
-            diff_text = cached_result.stdout.strip()
+            diff_text = GitWorktreeOps.staged_diff(Path(work_dir))
             if not diff_text:  # pragma: no branch — LLM API required for else
                 self.printer.broadcast(
                     {

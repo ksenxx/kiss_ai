@@ -90,17 +90,16 @@ class TestRunStartRace(unittest.TestCase):
         assert self.first_clear_entered.wait(timeout=30), (
             "first _cmd_run never reached its clear broadcast"
         )
+        with self.server._state_lock:
+            first_state = agent_state.find_by_tab(tab_id)
+            assert first_state is not None
+            first_thread = first_state.task_thread
+            first_stop = first_state.stop_event
         self.server._cmd_run(dict(cmd))
-        self.release.set()
-        t1.join(timeout=30)
-
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            st = agent_state.find_by_tab(tab_id)
-            if st is None or st.task_thread is None or not st.task_thread.is_alive():
-                break
-            time.sleep(0.02)
-
+        with self.server._state_lock:
+            racing_state = agent_state.find_by_tab(tab_id)
+            assert racing_state is not None
+            queued = list(racing_state.pending_user_messages)
         with self._events_lock:
             clears = [e for e in self.events if e.get("type") == "clear"]
         assert len(clears) == 1, (
@@ -109,6 +108,31 @@ class TestRunStartRace(unittest.TestCase):
             "clobbered the first task's stop_event/user_answer_queue/"
             "task_thread"
         )
+        assert racing_state is first_state
+        assert racing_state.task_thread is first_thread
+        assert racing_state.stop_event is first_stop
+        assert queued == ["bughunt3 race task"], (
+            "the racing submit must be queued as steering, not dropped"
+        )
+        self.release.set()
+        t1.join(timeout=30)
+
+        # The stubbed first run never drains the queued prompt, so the
+        # runner re-submits it as the tab's next run once the first
+        # worker has torn down; wait for that sequential second run.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            with self.server._state_lock:
+                st = agent_state.find_by_tab(tab_id)
+                thread = st.task_thread if st is not None else None
+            if thread is not None:
+                thread.join(timeout=max(0.0, deadline - time.time()))
+                continue
+            time.sleep(0.2)
+            with self.server._state_lock:
+                st = agent_state.find_by_tab(tab_id)
+                if st is None or st.task_thread is None:
+                    break
 
 
 if __name__ == "__main__":
