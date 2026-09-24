@@ -9,8 +9,8 @@ The routing tools are exercised against the real model catalog
 (``get_available_models``); the agent run uses the scripted local
 chat-completions server (:mod:`kiss.tests.agents.sorcar.local_model_server`)
 configured exactly the way the daemon configures the SEA, so the tools
-offered, the system prompt and the ledger written under the task's work
-directory are the real ones.
+offered, the system prompt and the ledger written to the KISS home with the
+task's persisted id are the real ones.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def _runnable_candidates(tier: str) -> list[str]:
 
 
 def test_sea_getters_follow_the_contract() -> None:
-    """The getters pin the run: protocol prompt, four tools, run_parallel on, no extras."""
+    """The getters pin the run: protocol prompt, four tools, run_parallel off, no extras."""
     prompt = autoroute_sea.system_prompt()
     assert prompt == autoroute_sea.SYSTEM_PROMPT
     flat = " ".join(prompt.split())
@@ -188,12 +188,21 @@ def test_estimate_cost_uses_catalog_prices_and_rejects_unknown_models() -> None:
     )
 
 
-def test_log_decision_writes_a_table_under_the_current_directory_outside_a_task(
+def test_log_decision_writes_a_table_in_the_kiss_home_with_a_dash_task_id_outside_a_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Outside a registered task the ledger goes to ``./tmp/MODEL_DECISIONS.md``; rows append."""
+    """The ledger is ``$KISS_HOME/MODEL_DECISIONS.md``; rows append; no task means ``-``.
+
+    The KISS home is pointed at a fresh directory that does not exist yet,
+    so the test also covers the directory creation and the header write.
+    ``chdir`` into another directory proves the path no longer depends on
+    the current directory.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("KISS_HOME", str(home))
     monkeypatch.chdir(tmp_path)
-    ledger = tmp_path / "tmp" / "MODEL_DECISIONS.md"
+    ledger = home / "MODEL_DECISIONS.md"
+    assert autoroute_sea.ledger_path() == ledger
     assert (
         autoroute_sea.log_decision("read logs", "small", "gpt-6-luna", "tier=small 0.9")
         == f"logged to {ledger}"
@@ -210,21 +219,23 @@ def test_log_decision_writes_a_table_under_the_current_directory_outside_a_task(
     )
     lines = ledger.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# Model routing decisions"
-    assert lines[2] == "| time (UTC) | unit | tier | model | reason | outcome |"
-    assert lines[3] == "|---|---|---|---|---|---|"
-    assert lines[4].endswith("| read logs | small | gpt-6-luna | tier=small 0.9 | pending |")
+    assert lines[2] == "| time (UTC) | task_id | unit | tier | model | reason | outcome |"
+    assert lines[3] == "|---|---|---|---|---|---|---|"
+    assert lines[4].endswith("| - | read logs | small | gpt-6-luna | tier=small 0.9 | pending |")
     assert lines[5].endswith(
-        "| fix / bug in parser | medium | gemini-3.8-flash | escalated from small | tests pass |"
+        "| - | fix / bug in parser | medium | gemini-3.8-flash "
+        "| escalated from small | tests pass |"
     )
     assert len(lines) == 6
+    assert not (tmp_path / "tmp").exists()
     assert autoroute_sea.log_decision("x", "huge", "m", "r") == (
         "Error: unknown tier 'huge'; use one of small, medium, frontier."
     )
     assert len(ledger.read_text(encoding="utf-8").splitlines()) == 6
 
 
-def test_agent_run_offers_routing_and_dispatch_tools_and_logs_under_the_work_dir(
-    tmp_path: Path,
+def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With the SEA's configuration the model gets the four tools plus dispatch tools.
 
@@ -234,9 +245,12 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_under_the_work_dir
     ``run_parallel``, browser or memory tools), the system prompt, the real
     pick — or the real "no runnable model" error on an installation without
     a medium-tier credential — in the tool-result message, and that the
-    ledger landed under the task's work directory because the task is
-    registered in the agent registry.
+    ledger row landed in ``$KISS_HOME/MODEL_DECISIONS.md`` (not under the
+    task's work directory) stamped with the task's persisted id, found
+    through the agent registry because the task thread is registered.
     """
+    home = tmp_path / "home"
+    monkeypatch.setenv("KISS_HOME", str(home))
     runnable = _runnable_candidates("medium")
     model = runnable[0] if runnable else autoroute_sea.TIERS["medium"][0][0]
     script = [
@@ -301,8 +315,13 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_under_the_work_dir
         assert json.loads(pick_text)["model"] == model
     else:
         assert pick_text.startswith("Error: no runnable model in tier 'medium'")
-    ledger = tmp_path / "tmp" / "MODEL_DECISIONS.md"
+    ledger = home / "MODEL_DECISIONS.md"
     log_result = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
     assert str(log_result[-1]["content"]).split("\n\nSteps:")[0] == f"logged to {ledger}"
+    task_id = agent.last_task_id
+    assert task_id
     rows = ledger.read_text(encoding="utf-8").splitlines()
-    assert rows[-1].endswith(f"| implement flag | medium | {model} | tier=medium 0.8 | pending |")
+    assert rows[-1].endswith(
+        f"| {task_id} | implement flag | medium | {model} | tier=medium 0.8 | pending |"
+    )
+    assert not (tmp_path / "tmp" / "MODEL_DECISIONS.md").exists()
