@@ -418,7 +418,9 @@ def test_analyze_and_report(tree: dict[str, Path]) -> None:
     proc = run_tool(tree, "report", "--phase", PHASE, "--out", str(out), "--allow-incomplete")
     assert proc.returncode == 0, proc.stderr
     html = out.read_text()
-    assert html.count("<svg") == 8 and "GPT-5.6 Luna · KISS Sorcar" in html
+    # per benchmark: scatter, success bars, cost bars, task grid, turn-cap and spend-cap
+    # curves (6 x 2), plus the wall-clock cap curve that only Terminal-Bench gets
+    assert html.count("<svg") == EXPECTED_SVG_COUNT and "GPT-5.6 Luna · KISS Sorcar" in html
     assert "Incomplete run" in html and "gpt-5.6-luna 87 slot(s) off" in html
     assert "n/a</text>" not in html  # the blog has per-task Pi data for luna on both benchmarks
     assert "1/2 · 0/3</text>" in html  # astropy: KISS solved one of two attempts, Pi none
@@ -427,6 +429,7 @@ def test_analyze_and_report(tree: dict[str, Path]) -> None:
 RECORDED_SUMMARY = (
     REPO_ROOT / "benchmarkings" / "harnesstax" / "results" / "baseline" / "summary.json"
 )
+EXPECTED_SVG_COUNT = 6 * 2 + 1
 
 
 @pytest.mark.skipif(not RECORDED_SUMMARY.is_file(), reason="recorded baseline results not present")
@@ -440,7 +443,7 @@ def test_report_prose_on_the_recorded_study() -> None:
         or "fall inside the blog's confidence interval" in html
     )
     assert "Incomplete run" not in html
-    assert html.count("<svg") == 8
+    assert html.count("<svg") == EXPECTED_SVG_COUNT
 
 
 def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
@@ -465,7 +468,7 @@ def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
 
 
 def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
-    """A new job lifts Harbor's agent deadline; an existing job directory is resumed as is."""
+    """A new job lifts Harbor's agent deadline; an existing (moved) job is repointed and resumed."""
     from benchmarkings.harnesstax import tb2_runner
 
     tasks = ["regex-log", "train-fasttext"]
@@ -474,9 +477,18 @@ def test_tb2_runner_lifts_harbor_agent_deadline(tmp_path: Path) -> None:
     assert float(multiplier) == tb2_runner.AGENT_TIMEOUT_MULTIPLIER >= 1000
     assert command[command.index("-m") + 1] == MODEL and command[command.index("-k") + 1] == "3"
     assert [command[i + 1] for i, a in enumerate(command) if a == "-i"] == tasks
-    (tmp_path / "job").mkdir()
+    job = tmp_path / "job"
+    trial_config = job / "regex-log__abc" / "config.json"
+    trial_config.parent.mkdir(parents=True)
+    (job / "config.json").write_text(json.dumps({"jobs_dir": "/old/tree/tb2", "n_attempts": 3}))
+    trial_config.write_text(json.dumps({"trials_dir": "/old/tree/tb2/job"}))
     resume = tb2_runner.harbor_command(tmp_path, "job", MODEL, ["regex-log"], 3, 6)
-    assert resume[-3:] == ["resume", "-p", str(tmp_path / "job")] and "-i" not in resume
+    assert resume[-3:] == ["resume", "-p", str(job)] and "-i" not in resume
+    assert json.loads((job / "config.json").read_text()) == {
+        "jobs_dir": str(tmp_path), "n_attempts": 3,
+    }
+    assert json.loads(trial_config.read_text()) == {"trials_dir": str(job)}
+    assert tb2_runner.repoint_job(job) == 0  # already pointing here: nothing rewritten
 
 
 def test_tb2_runner_job_finished(tmp_path: Path) -> None:
@@ -523,6 +535,24 @@ def test_daemon_pinned_catalog_drops_fallbacks(tmp_path: Path) -> None:
     source.write_text(json.dumps([{"name": "a", "fallback": "b"}, {"name": "b"}]))
     daemon.write_pinned_catalog(source, target)
     assert json.loads(target.read_text()) == [{"name": "a"}, {"name": "b"}]
+
+
+def test_daemon_server_waits_an_hour_for_benchmark_clients(tmp_path: Path) -> None:
+    """The private daemon's UDS drain timeout is the benchmark value, not the interactive 30 s."""
+    from benchmarkings.harnesstax import daemon
+
+    saved = {k: os.environ.get(k) for k in ("KISS_HOME", "KISS_SORCAR_SOCK")}
+    try:
+        server = daemon.build_server(tmp_path / "home", 8999)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # The timeout is read by WebPrinter._uds_send, so it must land on the printer.
+    assert server._printer._uds_drain_timeout == daemon.UDS_DRAIN_TIMEOUT_SECONDS == 3600.0
+    assert (tmp_path / "home" / "config.json").is_file()
 
 
 def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> None:
@@ -811,8 +841,127 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         off = sea_core.ContainerHarness(str(config))
         off.on_tool_call("Edit", edit)
         assert off.pending_edits == []
+        # a path the shell cannot take, a huge file and a binary file never raise out of the hook
+        nul = {"file_path": "pkg/\x00bad.py", "old_string": "x", "new_string": "y"}
+        assert harness.on_tool_call("Edit", nul) == "OK"
+        assert harness.read_container_file("/repo/pkg/\x00bad.py") is None
+        live.exec_run(["sh", "-c", "head -c 500000 /dev/zero | tr '\0' 'a' > /repo/pkg/big.py; "
+                      "printf 'a\0b' > /repo/pkg/bin.py"])
+        assert harness.read_container_file("/repo/pkg/big.py") is None
+        assert harness.read_container_file("/repo/pkg/bin.py") is None
+        text = harness.read_container_file("/repo/tests/test_fields.py") or ""
+        assert text.startswith("from pkg.fields")
     finally:
         live.remove(force=True)
+
+
+def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
+    """Destructive commands are blocked, install timeouts lifted, the gate answers one finish."""
+    from benchmarkings.harnesstax import sea_core, trials
+
+    def harness(**extra: object) -> sea_core.ContainerHarness:
+        config = tmp_path / f"config-{len(extra)}.json"
+        config.write_text(json.dumps({
+            "container": "c", "workdir": "/app/", "prompt": "p", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"), **extra,
+        }))
+        return sea_core.ContainerHarness(str(config))
+
+    plain = harness()
+    blocked = sea_core.DESTRUCTIVE_VERDICT
+    for command in ("kill -9 -1", "sleep 1; kill -1", "pkill -9 -f .", "pkill -f '.' && ls",
+                    "rm -rf /app", "cd /tmp && rm -rf /app/*", "rm -rf /", "(rm -r /app)",
+                    "/bin/kill -9 -1", "kill -9 -1 >/dev/null", "kill -9 -1 # stop all",
+                    "kill -s KILL -1", "/usr/bin/pkill -f .", "pkill -f . 2>/dev/null",
+                    "pkill --full .", "pkill -f '.*'", "rm -rf '/app'", "/bin/rm -rf /app",
+                    "rm -rf /app >/dev/null", "rm -rf /app /tmp/x", "sudo rm -rf /app/",
+                    "FOO=1 kill -9 -1"):
+        assert plain.on_tool_call("Bash", {"command": command}) == blocked, command
+    parallel = {"commands": '["ls", "kill -9 -1"]'}
+    assert plain.on_tool_call("run_commands_parallel", parallel) == blocked
+    assert plain.on_tool_call("run_commands_parallel", {"commands": "kill -9 -1"}) == blocked
+    for command in ("kill -9 1234", "kill -1 1234", "kill -1 $(cat /tmp/pid)", "kill -1 %1",
+                    "pkill -f myserver", "pkill -f python3", "rm -rf /app/build", "rm -rf /app/*.o",
+                    "rm -rf /tmp/x", "rm -rf /apps", "ls /app", "printf '%s\\n' 'kill -9 -1'",
+                    "echo \"pkill -f .\"", "grep -F 'rm -rf /app' README.md",
+                    "echo ok # rm -rf /app"):
+        assert plain.on_tool_call("Bash", {"command": command}) == "OK", command
+    # installs and builds get a long timeout in place; other commands keep theirs
+    args: dict[str, object] = {"command": "apt-get install -y gcc"}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    args = {"command": "pip install numpy", "timeout_seconds": 1800}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 1800
+    args = {"command": "make -j4", "timeout_seconds": "bad"}
+    assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900
+    for command in ("cd /x && make", "sudo apt-get update", "python3 -m pip install x",
+                    "DEBIAN_FRONTEND=noninteractive apt-get -y install x", "cmake .. && make"):
+        args = {"command": command, "timeout_seconds": 60}
+        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 900, command
+    for command in ("ls -la", "grep -R make .", "python3 -c \"print('cmake')\"", "npm get registry",
+                    "echo make", "cat Makefile"):
+        args = {"command": command, "timeout_seconds": 30}
+        assert plain.on_tool_call("Bash", args) == "OK" and args["timeout_seconds"] == 30, command
+    args = {"commands": '["npm install", "cargo build"]', "timeout_seconds": 120}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
+    # The tool's own default (1800 s) is already long enough.
+    args = {"commands": '["npm install"]'}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
+    # An unparsable list is treated as one command.
+    args = {"commands": "not json; make", "timeout_seconds": 60}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert args["timeout_seconds"] == 900
+    args = {"commands": '{"a": 1}'}
+    assert plain.on_tool_call("run_commands_parallel", args) == "OK"
+    assert "timeout_seconds" not in args
+    assert plain.on_tool_call("Bash", {"command": 42}) == "OK"
+    assert plain.on_tool_call("Bash", {}) == "OK"
+    # no gate by default: every finish passes
+    assert plain.on_tool_call("finish", {"success": True}) == "OK"
+    assert plain.on_tool_call("finish", {}) == "OK"
+    gated = harness(finish_gate=True)
+    assert gated.on_tool_call("finish", {"success": False}) == "OK"
+    # an implicit (text-only) finish is vetoed once, without spending the gate
+    assert gated.on_tool_call("finish", {}) == sea_core.FINISH_GATE_VERDICT
+    assert gated.on_tool_call("finish", {}) == "OK"
+    assert gated.on_tool_call("finish", {"success": "true"}) == sea_core.FINISH_GATE_VERDICT
+    assert gated.on_tool_call("finish", {"success": True}) == "OK"
+    assert gated.on_tool_call("finish", {}) == "OK"
+    gated2 = harness(finish_gate=True, workdir="/testbed")
+    assert gated2.on_tool_call("finish", {"success": True}) == sea_core.FINISH_GATE_VERDICT
+    assert gated2.on_tool_call("finish", {"success": True}) == "OK"
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == blocked
+    assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == "OK"
+    events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    gate_events = [e for e in events
+                   if e.get("tool") == "finish" and e["args"] == {"success": True}]
+    assert [e["blocked"] for e in gate_events] == [False, False, True, False]
+    # the prompt carries the new rules and the trial config takes the gate from the environment
+    prompt = plain.system_prompt()
+    assert "The container as you leave it is the deliverable" in prompt
+    assert "byte for byte" not in prompt
+    assert "no internet" not in prompt.lower()
+    assert trials.trial_config("c", "/app", MODEL)["finish_gate"] is False
+    assert plain.model_config() is None
+    os.environ["HARNESSTAX_FINISH_GATE"] = "1"
+    os.environ["HARNESSTAX_MODEL_CONFIG"] = json.dumps(
+        {MODEL: {"reasoning_effort": "medium"}, "other": {"x": 1}})
+    try:
+        assert trials.trial_config("c", "/app", MODEL) == {
+            "container": "c", "workdir": "/app", "model": MODEL, "test_context": False,
+            "finish_gate": True,
+            "model_config": {"reasoning_effort": "medium"},
+        }
+        assert trials.trial_config("c", "/app", "unlisted")["model_config"] == {}
+    finally:
+        for name in ("HARNESSTAX_FINISH_GATE", "HARNESSTAX_MODEL_CONFIG"):
+            del os.environ[name]
+    tuned = harness(model_config={"output_config": {"effort": "medium"}})
+    assert tuned.model_config() == {"output_config": {"effort": "medium"}}
+    trial = {"container": "c", "workdir": "/app", "prompt": "p", "model": MODEL}
+    sea = sea_core.write_trial_sea(tmp_path / "sea-trial", trial)
+    assert "model_config = _harness.model_config" in sea.read_text()
 
 
 def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:

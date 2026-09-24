@@ -1,0 +1,12 @@
+/*
+ * Brand skin.  Loaded after main.css by both the VS Code webview and the
+ * remote web app, so rules here override the stock KISS Sorcar look.
+ *
+ * The stock build ships this file empty.  A custom distribution (see
+ * brand.json for the name strings) replaces it to re-skin the UI, e.g.
+ *
+ *   :root { --accent: #14b8a6; }
+ *   #welcome h2::before { content: url("kiss-icon.svg"); display: block; }
+ *
+ * Relative url() values resolve next to this file in both hosts.
+ */

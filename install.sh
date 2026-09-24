@@ -1042,6 +1042,88 @@ guard_vsix_tracking() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# Brand overlay: ``$PROJECT_DIR/.brand/``
+# ---------------------------------------------------------------------------
+# A white-label distribution re-brands KISS Sorcar by replacing the data
+# files under src/kiss/agents/vscode/media/ (brand.json, brand.css,
+# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg; see kiss.core.brand and
+# scripts/apply-brand.js).  Editing those tracked files in place would
+# make the Update button's pre-flight (``git stash`` / ``git reset --hard
+# @{upstream}`` / ``git stash pop``) conflict on every release, because
+# the branded display strings in package.json sit right next to the
+# version line every release bumps.  The customization therefore lives in
+# the git-ignored ``.brand/`` directory next to the checkout:
+#
+#   * apply_brand_overlay saves the checkout's own copies of package.json
+#     and of every media file ``.brand/`` overrides into a temporary
+#     snapshot, then copies the overlay over media/ right before the
+#     extension build (copy-kiss.sh then rewrites package.json's display
+#     strings from media/brand.json and bundles the branded media into
+#     kiss_project);
+#   * restore_brand_overlay copies the snapshot back once the VSIX has
+#     been packaged, or the build failed.  package.json gets its pre-build
+#     content plus the version copy-kiss.sh synced, which is the only
+#     change a stock build makes to the manifest.
+#
+# The snapshot (not ``git checkout``) is what goes back, so unrelated local
+# edits survive and a plain directory copy works too.  The checkout ends
+# up exactly as a stock build leaves it, the installed extension carries
+# the brand, and every later update rebuilds with the same overlay.
+# Without a ``.brand/`` directory both functions do nothing (stock KISS
+# Sorcar), so a development checkout is never re-branded by accident.
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg)
+BRAND_MEDIA_REL="src/kiss/agents/vscode/media"
+BRAND_MANIFEST_REL="src/kiss/agents/vscode/package.json"
+# Snapshot directory while the overlay is applied; empty otherwise.
+BRAND_OVERLAY_BACKUP=""
+
+apply_brand_overlay() {
+    local project_dir="$1"
+    local overlay="$project_dir/.brand"
+    local f
+    [ -d "$overlay" ] || return 0
+    echo "   Applying brand overlay from $overlay..."
+    BRAND_OVERLAY_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/kiss-brand-backup.XXXXXX")" || return 1
+    cp -f "$project_dir/$BRAND_MANIFEST_REL" "$BRAND_OVERLAY_BACKUP/package.json" || return 1
+    for f in "${BRAND_OVERLAY_FILES[@]}"; do
+        [ -f "$overlay/$f" ] || continue
+        cp -f "$project_dir/$BRAND_MEDIA_REL/$f" "$BRAND_OVERLAY_BACKUP/$f" || return 1
+        cp -f "$overlay/$f" "$project_dir/$BRAND_MEDIA_REL/$f" || return 1
+        echo "      $BRAND_MEDIA_REL/$f"
+    done
+}
+
+restore_brand_overlay() {
+    local project_dir="$1"
+    local f
+    [ -n "$BRAND_OVERLAY_BACKUP" ] || return 0
+    for f in "${BRAND_OVERLAY_FILES[@]}"; do
+        [ -f "$BRAND_OVERLAY_BACKUP/$f" ] || continue
+        cp -f "$BRAND_OVERLAY_BACKUP/$f" "$project_dir/$BRAND_MEDIA_REL/$f"
+    done
+    # No manifest snapshot means apply failed on its very first copy and
+    # nothing was changed yet.
+    if [ -f "$BRAND_OVERLAY_BACKUP/package.json" ] &&
+        ! python3 - "$BRAND_OVERLAY_BACKUP/package.json" "$project_dir/$BRAND_MANIFEST_REL" <<'EOF'
+import json, pathlib, sys
+saved, manifest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+before = json.loads(saved.read_text())
+version = json.loads(manifest.read_text()).get("version")
+if before.get("version") == version:
+    manifest.write_bytes(saved.read_bytes())
+else:
+    before["version"] = version
+    manifest.write_text(json.dumps(before, indent=2) + "\n")
+EOF
+    then
+        cp -f "$BRAND_OVERLAY_BACKUP/package.json" "$project_dir/$BRAND_MANIFEST_REL"
+    fi
+    rm -rf "$BRAND_OVERLAY_BACKUP"
+    BRAND_OVERLAY_BACKUP=""
+    echo "   Restored the checkout's own brand files (the built VSIX keeps the overlay)."
+}
+
 # Tee stdout+stderr to the install log AND the terminal.  We use ``exec``
 # process substitution rather than wrapping the install body in
 # ``{ ... } 2>&1 | tee "$LOG_FILE"`` because the latter forks a subshell
@@ -1201,10 +1283,24 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     fi
     echo "   Compiling extension TypeScript..."
     run_with_heartbeat "tsc" npm run compile
-    echo "   Copying bundled KISS runtime..."
-    run_with_heartbeat "copy-kiss" npm run copy-kiss
-    echo "   Packaging VSIX..."
-    run_with_heartbeat "vsce package" npm run package
+    # The build runs between apply_brand_overlay and restore_brand_overlay,
+    # so a failing step is recorded instead of exiting under ``set -e``
+    # and the checkout is restored either way.
+    build_rc=0
+    apply_brand_overlay "$PROJECT_DIR" || build_rc=$?
+    if [ "$build_rc" = 0 ]; then
+        echo "   Copying bundled KISS runtime..."
+        run_with_heartbeat "copy-kiss" npm run copy-kiss || build_rc=$?
+    fi
+    if [ "$build_rc" = 0 ]; then
+        echo "   Packaging VSIX..."
+        run_with_heartbeat "vsce package" npm run package || build_rc=$?
+    fi
+    restore_brand_overlay "$PROJECT_DIR"
+    if [ "$build_rc" != 0 ]; then
+        echo "   ERROR: extension build failed (exit $build_rc)"
+        exit "$build_rc"
+    fi
     cd "$PROJECT_DIR"
     if [ ! -f "$VSIX" ]; then
         echo "   ERROR: Failed to build VSIX"

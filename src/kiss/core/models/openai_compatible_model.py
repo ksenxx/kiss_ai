@@ -224,6 +224,28 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     return reasoning, "".join(answer_parts).strip()
 
 
+def _usage_field(obj: Any, name: str) -> Any:
+    """Read field *name* from a usage-like object or its dict form.
+
+    OpenRouter's extra usage fields (``cost``, ``cost_details``) are not
+    declared on the SDK's ``CompletionUsage`` / ``ResponseUsage`` models,
+    which keep them as pydantic extras readable by attribute; the
+    Responses-delegate path hands over plain dicts instead.
+
+    Args:
+        obj: A pydantic response/usage object, a dict, or ``None``.
+        name: The field to read.
+
+    Returns:
+        The field value, or ``None`` when *obj* is ``None`` or lacks it.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
 def _delta_reasoning_text(delta: Any) -> str | None:
     """Extract reasoning text from a Chat Completions streaming delta.
 
@@ -569,6 +591,40 @@ class OpenAICompatibleBase(Model):
     def _is_openrouter_anthropic(self) -> bool:
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
+
+    def extract_cost_from_response(self, response: Any) -> float | None:
+        """Return the USD amount OpenRouter reports it charged for *response*.
+
+        OpenRouter attaches ``usage.cost`` (credits charged, in USD) and
+        ``usage.cost_details.upstream_inference_cost`` (the upstream
+        provider's charge, billed to the user directly under BYOK and
+        zero otherwise) to every response and to the final usage chunk
+        of a stream:
+        https://openrouter.ai/docs/cookbook/administration/usage-accounting.
+        The same model id is billed at different rates depending on the
+        upstream OpenRouter routes to, so this figure is the actual bill
+        while the catalog rate is only the headline estimate.  Other
+        OpenAI-compatible providers report no cost field.
+
+        Args:
+            response: A chat completion, Responses object, final stream
+                chunk, or the dict form of any of them.
+
+        Returns:
+            ``cost + upstream_inference_cost`` for an ``openrouter/``
+            model whose response carries a numeric ``usage.cost``, else
+            ``None`` so the agent falls back to ``calculate_cost``.
+        """
+        if not self.model_name.startswith("openrouter/"):
+            return None
+        usage = _usage_field(response, "usage")
+        cost = _usage_field(usage, "cost")
+        if isinstance(cost, bool) or not isinstance(cost, int | float):
+            return None
+        upstream = _usage_field(_usage_field(usage, "cost_details"), "upstream_inference_cost")
+        if isinstance(upstream, bool) or not isinstance(upstream, int | float):
+            upstream = 0.0
+        return float(cost) + float(upstream)
 
     def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
         """Add top-level cache_control for OpenRouter Anthropic prompt caching.

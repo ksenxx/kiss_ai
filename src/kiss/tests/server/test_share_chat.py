@@ -40,6 +40,7 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
@@ -277,7 +278,7 @@ class TestShareChatOverUds(_UdsServerTestCase):
         event = self._share(chatId="esc2", html=self.BODY, title=17)
         self.assertTrue(event["ok"], event)
         page = Path(event["path"]).read_text(encoding="utf-8")
-        self.assertIn("<title>KISS Sorcar chat</title>", page)
+        self.assertIn(f"<title>{PRODUCT_NAME} chat</title>", page)
 
     def test_non_string_tab_id_is_normalized(self) -> None:
         event = self._share(chatId="tabless", html=self.BODY, tabId=99)

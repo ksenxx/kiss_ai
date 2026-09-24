@@ -57,8 +57,8 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
     from kiss.agents.sorcar.sorcar_agent import (
         _attribute_sub_usage,
-        _broadcast_subagent_done,
         _live_agent_usage,
+        _notify_subagent_done,
         _persisted_task_id,
     )
 
@@ -97,17 +97,9 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         budget, tokens, steps = _live_agent_usage(agent)
         _attribute_sub_usage(parent_agent, budget, tokens, steps)
         if printer is not None:
-            # Every tab watching the merge agent's task, plus its own
-            # synthetic id, exactly like a ``run_parallel`` child.
-            viewer_ids: list[str] = []
-            fanout = getattr(printer, "_fanout_targets", None)
-            sub_task_id = _persisted_task_id(agent)
-            found = fanout(sub_task_id) if callable(fanout) and sub_task_id else None
-            if isinstance(found, list):
-                viewer_ids = [v for v in found if v]
-            if sub_tab_id not in viewer_ids:
-                viewer_ids.append(sub_tab_id)
-            _broadcast_subagent_done(printer, viewer_ids, model_name)
+            _notify_subagent_done(
+                printer, _persisted_task_id(agent), sub_tab_id, model_name,
+            )
 
 
 def resolve_merge_conflict(

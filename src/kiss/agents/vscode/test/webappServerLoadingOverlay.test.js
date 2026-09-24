@@ -117,8 +117,8 @@ async function run() {
       'chat.html must render the loading overlay element',
     );
     assert.ok(
-      /KISS Sorcar Server is starting \.\.\./.test(tpl),
-      'overlay must contain the "KISS Sorcar Server is starting ..." message',
+      /\{\{PRODUCT_NAME\}\} Server is starting \.\.\./.test(tpl),
+      'overlay must contain the "<product> Server is starting ..." message',
     );
     assert.ok(
       /<div id="app" style="display:none;?"/.test(tpl),

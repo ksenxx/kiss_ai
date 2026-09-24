@@ -65,7 +65,9 @@ exactly what interactive authentication and write-approval flows need.
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
 `run_agent` tool with the channel name and your request; the dispatched sub-session
 already carries that channel's authenticated tools and is instructed to use them
-directly, without exploring source code.
+directly, without exploring source code. The `agent` argument is optional: omitting it
+(or passing it blank) runs the bundled `src/kiss/agents/seas/dummy_sea.py`, a plain
+Sorcar sub-session with the standard toolset, on the task in the caller's work directory.
 
 > Send "dinner at 7" to Telegram chat 123456789.
 
@@ -338,9 +340,10 @@ prompt with a no-internet, answer-quickly suffix, and returns `False` from
 `is_parallel()` and `use_web_tools()`, so the answering session has no browser tools and
 no parallel sub-agents and is instructed to answer only from the local event log. Typed
 into a tab whose task is still running, the question is instead dispatched directly to
-the daemon through a background side channel that does not interrupt the running agent,
-and the reply appears in that task's transcript. No configuration or credentials are
-involved.
+the daemon through a background side channel that does not interrupt the running agent:
+the answering session shows as a nested sub-agent tab under the running task's tab only
+while it works (the tab closes when it finishes and does not reappear on reload), and the
+reply lands in that task's transcript. No configuration or credentials are involved.
 
 > /ask Which files has this task modified so far, and why did the last test run fail?
 
@@ -534,7 +537,16 @@ gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_RE
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
 ends); the daemon's scheduler tick never waits for a long job, and a job whose previous
-run is still in progress in that scheduler is not started again until it finishes.
+run is still in progress in that scheduler is not started again until it finishes. A
+job that must work inside a specific project ("run the tests in ~/proj every night and
+fix them") names that directory instead; a prompt job in a Git repository can
+additionally ask for a worktree and auto-commit like a chat task. A run is stopped
+once it exceeds the job's timeout (default one hour for a prompt job, ten minutes for a
+command). Creating a job whose prompt or command, directory, schedule, and delivery
+targets match a scheduled or paused one is refused with a pointer to the existing job.
+Prompt jobs are unattended: every `run_agent` or `run_parallel` child they start
+inherits the rule never to ask questions or wait for approval; when blocked, the child
+reports the blocker in its summary and finishes.
 
 **16. Scheduled brief delivered where you already read** (Muse tips 6 and 7):
 
@@ -576,9 +588,12 @@ starts no LLM session and costs no tokens.
 (Send any message in the bot's group first so a recent update exists to read the ID
 from.) On the four adapters whose `find_channel` resolves names through the platform
 API, even that lookup is unnecessary — the tick's `--channel` value can be the name
-itself, so nothing in the setup ever mentions a number: Slack takes a public channel
-name (without the `#`), Discord a channel name (searched across your guilds), Matrix a
-`#room:server` alias, and Google Chat a space display name:
+itself, so nothing in the setup ever mentions a number: Slack takes the name (without
+the `#`) of any public or private channel the bot can see — or a conversation ID
+(`C…`, `G…`, or `D…`), verified with `conversations.info`; a `D…` ID is how you address
+a DM —
+Discord a channel name (searched across your guilds), Matrix a `#room:server` alias,
+and Google Chat a space display name:
 
 > Every 2 minutes, run a gateway tick on the Slack channel eng, with pairing.
 
@@ -587,7 +602,8 @@ Sorcar, and Sorcar answers in the same chat. With pairing enabled, unknown sende
 a one-time approval code in-channel; you approve them from a terminal with
 `kiss-<channel> --channel=<chat> --approve CODE` and can review the queue with
 `--list-pending` (a sender allowlist, `--allow-users user1,user2`, is the stricter
-alternative); on adapters that implement thread polling (Slack), follow-ups in the same thread
+alternative; each value is resolved through the adapter's `find_user`, so on Slack a
+username, real name, or an already-resolved `U…`/`W…` user ID all work); on adapters that implement thread polling (Slack), follow-ups in the same thread
 resume the same daemon chat. Gateway state — per-thread chat continuity, an
 at-least-once delivery ledger with `(recovered reply)` redelivery, and a circuit
 breaker that pauses the channel after repeated tick crashes (only errors that escape a

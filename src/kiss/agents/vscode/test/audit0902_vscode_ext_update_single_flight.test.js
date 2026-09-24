@@ -161,6 +161,7 @@ fs.mkdirSync(installRoot, {recursive: true});
 fs.writeFileSync(path.join(installRoot, 'install.sh'), '#!/bin/sh\nexit 0\n');
 
 const {SorcarSidebarView} = require(OUT_SIDEBAR);
+const {PRODUCT_NAME} = require(path.join(__dirname, '..', 'out', 'brand.js'));
 
 function makeSidebar() {
   const view = new SorcarSidebarView({
@@ -258,7 +259,7 @@ async function testSecondClickRunsTheInstallerAgain() {
   const {view, posted, fire} = makeSidebar();
   view.runUpdate();
   assert.strictEqual(terminals.length, 1, 'first click opened no terminal');
-  assert.strictEqual(terminals[0].name, 'KISS Sorcar Update');
+  assert.strictEqual(terminals[0].name, `${PRODUCT_NAME} Update`);
   assert.strictEqual(terminals[0].cwd, installRoot);
   const firstCmd = installerCommandOf(terminals[0]);
   assert.ok(
@@ -345,7 +346,7 @@ async function testMissingInstallScriptRunsCurlBootstrap() {
       'missing install.sh must still open an update terminal',
     );
     const term = terminals[terminals.length - 1];
-    assert.strictEqual(term.name, 'KISS Sorcar Update');
+    assert.strictEqual(term.name, `${PRODUCT_NAME} Update`);
     assert.strictEqual(term.cwd, os.homedir());
     assert.strictEqual(term.shows, 1);
     const cmd = installerCommandOf(term);

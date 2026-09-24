@@ -80,11 +80,26 @@ _LONG_SELECTED = "claude-opus-4-5-20260114-thinking"
 _INJECT_MODELS_JS = f"""
 () => {{
   const names = {_MODEL_NAMES!r};
-  window.postMessage({{type: 'models',
+  window.postMessage({{type: 'models', kissTestInjected: true,
     models: names.map(n => ({{name: n, vendor: 'Anthropic', inp: 1,
                               out: 5, uses: 0}})),
     selected: {_LONG_SELECTED!r}}}, '*');
 }}
+"""
+
+# The live server answers the page's ``ready`` with its own ``models``
+# event built from this machine's real ~/.kiss/MODEL_INFO.json (hundreds
+# of rows). Under load that reply lands AFTER the injected list above
+# and replaces it. Both reach main.js as window ``message`` events, so a
+# capture-phase listener installed before main.js loads drops every
+# ``models`` event the test did not send itself.
+_DROP_DAEMON_MODELS_JS = """
+window.addEventListener('message', (e) => {
+  const d = e.data;
+  if (d && d.type === 'models' && !d.kissTestInjected) {
+    e.stopImmediatePropagation();
+  }
+}, true);
 """
 
 _DROPDOWN_GEOMETRY_JS = """
@@ -218,6 +233,18 @@ def _start_live_server(
     asyncio.run(scenario())
 
 
+def _open_page(browser, port: int, width: int, height: int):
+    """Open the served webapp in a fresh page that ignores the daemon's
+    own ``models`` push, so only the test-injected list ever renders."""
+    page = browser.new_page(
+        ignore_https_errors=True,
+        viewport={"width": width, "height": height},
+    )
+    page.add_init_script(_DROP_DAEMON_MODELS_JS)
+    page.goto(f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
+    return page
+
+
 def _open_dropdown(page) -> None:
     """Deliver the model list and open the dropdown via the real pill."""
     page.wait_for_selector("#model-btn", state="attached")
@@ -270,19 +297,13 @@ def test_mobile_model_dropdown_fully_visible(tmp_path: Path) -> None:
                 "RemoteAccessServer startup failed"
             ) from startup_error
         port = state["port"]
+        assert isinstance(port, int)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--ignore-certificate-errors"])
             try:
                 for width, height in [(390, 844), (320, 700)]:
-                    page = browser.new_page(
-                        ignore_https_errors=True,
-                        viewport={"width": width, "height": height},
-                    )
-                    page.goto(
-                        f"https://127.0.0.1:{port}/",
-                        wait_until="domcontentloaded",
-                    )
+                    page = _open_page(browser, port, width, height)
                     _open_dropdown(page)
                     geos[f"{width}px"] = page.evaluate(_DROPDOWN_GEOMETRY_JS)
                     # A search re-renders (and re-fits) the open list.
@@ -331,18 +352,12 @@ def test_model_pill_truncates_from_start(tmp_path: Path) -> None:
                 "RemoteAccessServer startup failed"
             ) from startup_error
         port = state["port"]
+        assert isinstance(port, int)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--ignore-certificate-errors"])
             try:
-                page = browser.new_page(
-                    ignore_https_errors=True,
-                    viewport={"width": 390, "height": 844},
-                )
-                page.goto(
-                    f"https://127.0.0.1:{port}/",
-                    wait_until="domcontentloaded",
-                )
+                page = _open_page(browser, port, 390, 844)
                 page.wait_for_selector("#model-btn", state="attached")
                 page.evaluate(_REVEAL_APP_JS)
                 page.wait_for_timeout(200)
@@ -422,19 +437,13 @@ def test_mobile_model_list_never_scrolls_horizontally(
                 "RemoteAccessServer startup failed"
             ) from startup_error
         port = state["port"]
+        assert isinstance(port, int)
 
         with sync_playwright() as p:
             browser = p.chromium.launch(args=["--ignore-certificate-errors"])
             try:
                 for width, height in [(390, 844), (320, 700)]:
-                    page = browser.new_page(
-                        ignore_https_errors=True,
-                        viewport={"width": width, "height": height},
-                    )
-                    page.goto(
-                        f"https://127.0.0.1:{port}/",
-                        wait_until="domcontentloaded",
-                    )
+                    page = _open_page(browser, port, width, height)
                     _open_dropdown(page)
                     geos[f"{width}px"] = page.evaluate(_LIST_GEOMETRY_JS)
                     page.close()

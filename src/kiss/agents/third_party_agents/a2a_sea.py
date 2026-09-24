@@ -55,12 +55,13 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BIND_HOST = "127.0.0.1"
 _DEFAULT_PORT = "18091"
-_DEFAULT_AGENT_NAME = "KISS Sorcar"
+_DEFAULT_AGENT_NAME = PRODUCT_NAME
 _CARD_PATHS = ("/.well-known/agent-card.json", "/.well-known/agent.json")
 _MAX_BODY_BYTES = 1024 * 1024
 _TURN_LIMIT = 20

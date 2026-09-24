@@ -43,13 +43,14 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     write_private_file,
 )
 from kiss.agents.third_party_agents._device_auth import ConsentSession
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
 _SIGNAL_DIR = Path.home() / ".kiss" / "third_party_agents" / "signal"
 _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
-_LINK_DEVICE_NAME = "KISS Sorcar"
+_LINK_DEVICE_NAME = PRODUCT_NAME
 # ``signal-cli link`` prints the provisioning URI first; once the phone
 # has scanned it the command exits, newer versions announcing the account.
 _LINK_URI_RE = re.compile(r"(sgnl://linkdevice\S+|tsdevice:/\S+)")
