@@ -98,7 +98,6 @@ import shutil
 import string
 import subprocess
 import tempfile
-import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -973,14 +972,10 @@ def _chunks(items: list[Any], size: int) -> list[list[Any]]:
 def _calling_agent() -> Any:
     """Return the Sorcar agent whose task thread is running this code, or ``None``."""
     try:
-        from kiss.server import agent_state
+        from kiss.server.agent_state import current_agent
     except Exception:  # noqa: BLE001 - not running inside the daemon
         return None
-    me = threading.current_thread()
-    for state in agent_state.snapshot():
-        if state.task_thread is me and state.agent is not None:
-            return state.agent
-    return None
+    return current_agent()
 
 
 def _attribute(parent: Any, cost: float, tokens: int, steps: int) -> None:
