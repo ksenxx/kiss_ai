@@ -11,8 +11,12 @@ auto-commit worktree merge runs when a squash merge conflicts, or
 :mod:`kiss.agents.seas.sh_sea`, which runs the shell command in its
 prompt with the ``Bash`` tool alone and returns the output, or
 :mod:`kiss.agents.seas.skillopt_sea`, which optimizes the prompt text of
-a skill or of another SEA against an eval set (SkillOpt).
+a skill or of another SEA against an eval set (SkillOpt), or
+:mod:`kiss.agents.seas.write_paper_sea`, which writes or revises a
+research paper under the rules of ``templates/write_paper_prompt.md``
+with tools for the AI-slop gates and the LaTeX build.
 Every ``*_sea.py`` module in this package is also exposed as a chat
-slash command (``/merge``, ``/sh``, ``/skillopt``, ...) by
+slash command (``/merge``, ``/sh``, ``/skillopt``, ``/write_paper``,
+...) by
 :mod:`kiss.agents.sorcar.sea_commands`.
 """
