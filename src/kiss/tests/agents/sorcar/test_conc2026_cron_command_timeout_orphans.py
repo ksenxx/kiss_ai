@@ -33,13 +33,17 @@ import pytest
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar._concurrency import pid_alive
-from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 # The pid the tests record and probe must be an OS pid.  Under Git bash on
 # Windows ``$!`` is the MSYS-internal pid, which differs from the Windows
 # pid; ``/proc/<pid>/winpid`` maps it.  Probing (or killing) an MSYS pid
 # as if it were a Windows pid targets an unrelated process.
 _BG_PID = "$(cat /proc/$!/winpid)" if IS_WINDOWS else "$!"
+# The job timeout that must fire while the command sits in ``sleep 300``.
+# Git bash on Windows needs well over a second to start and fork its
+# subshells on a loaded machine, so 1 s expired before ``echo`` ran there.
+_JOB_TIMEOUT = 5.0 if IS_WINDOWS else 1.0
 
 
 def _wait_pid_dead(pid: int, timeout_s: float = 5.0) -> bool:
@@ -77,13 +81,14 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
     # blocks in a foreground sleep so the job genuinely times out.
     # The background child would prove it survived by touching the
     # marker after the timeout window.
+    late_write_delay = int(_JOB_TIMEOUT) + 1
     command = (
-        f"(sleep 2; touch {pid_file.with_name('late-write').as_posix()}) & "
+        f"(sleep {late_write_delay}; touch {pid_file.with_name('late-write').as_posix()}) & "
         f"echo {_BG_PID} > {pid_file.as_posix()}; sleep 300"
     )
     job = {"id": "t1", "command": command}
     start = time.monotonic()
-    status, text = cron_agent._run_command_job(job, timeout_seconds=1.0)
+    status, text = cron_agent._run_command_job(job, timeout_seconds=_JOB_TIMEOUT)
     elapsed = time.monotonic() - start
     assert status == "error"
     assert text is not None and "timed out" in text
@@ -101,7 +106,7 @@ def test_timed_out_command_job_kills_descendants(tmp_path: Path) -> None:
             f"survived the timeout (orphaned process tree)"
         )
         # And it must not have kept acting after the timeout.
-        time.sleep(2.2)
+        time.sleep(late_write_delay + 0.2)
         assert not pid_file.with_name("late-write").exists(), (
             "the orphaned child kept running and wrote after the timeout"
         )
@@ -198,7 +203,7 @@ def test_timed_out_command_reports_error_via_execute_job(
     the command genuinely times out and its background child dies.
     """
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    monkeypatch.setattr(cron_agent, "COMMAND_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(cron_agent, "COMMAND_TIMEOUT_SECONDS", _JOB_TIMEOUT)
     pid_file = tmp_path / "child.pid"
     job = {
         "id": "t-exec",
@@ -215,10 +220,10 @@ def test_timed_out_command_reports_error_via_execute_job(
     assert time.monotonic() - start < 30
     stored = {j["id"]: j for j in cron_agent.load_jobs()}["t-exec"]
     assert stored["last_status"] == "error"
-    assert "timed out after 1s" in stored["last_summary"]
+    assert f"timed out after {_JOB_TIMEOUT:g}s" in stored["last_summary"]
     # The error was delivered to the job's local output log.
     log = tmp_path / "cron" / "output" / "t-exec.md"
-    assert log.exists() and "timed out after 1s" in log.read_text()
+    assert log.exists() and f"timed out after {_JOB_TIMEOUT:g}s" in log.read_text()
     # And the command's background child died with the tree.
     assert pid_file.exists(), "the command never ran"
     child_pid = int(pid_file.read_text().strip())
@@ -232,6 +237,10 @@ def test_timed_out_command_reports_error_via_execute_job(
                 pass
 
 
+@posix_only(
+    "the /proc parent-chain walk, sh subshells and os.killpg; Windows kills the "
+    "tree through the Job Object (covered by the timeout tests above)",
+)
 def test_proc_descendants_sees_multi_level_tree() -> None:
     """The /proc walk finds grandchildren, not only direct children.
 
