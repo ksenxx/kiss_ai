@@ -14,8 +14,10 @@ tier from the local catalog, dispatches the unit to that model through the
 built-in ``run_agent`` tool (or switches its own model with ``set_model`` at
 a phase boundary), verifies the result through the
 acceptance check, escalates one tier up on a verified failure, and logs every
-decision to ``tmp/MODEL_DECISIONS.md`` in the work directory.  The objective
-is cost per accepted task, not cost per token.
+decision to the ledger ``~/.kiss/MODEL_DECISIONS.md`` (``$KISS_HOME`` when
+set), which is shared by every task so it accumulates the routing history of
+the installation; each row carries the task id of the run that wrote it.  The
+objective is cost per accepted task, not cost per token.
 
 Two ways to run it::
 
@@ -42,7 +44,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.core.config import kiss_home
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.server.agent_state import current_agent
 
 TIER_NAMES = ("small", "medium", "frontier")
 """The routing tiers, cheapest first."""
@@ -89,8 +93,15 @@ DEFAULT_TOKENS_IN = 200_000
 DEFAULT_TOKENS_OUT = 20_000
 """Completion tokens such a sub-agent produces."""
 
-LEDGER = Path("tmp") / "MODEL_DECISIONS.md"
-"""Routing ledger, relative to the task's work directory."""
+LEDGER_NAME = "MODEL_DECISIONS.md"
+"""File name of the routing ledger inside the KISS home directory (``~/.kiss``)."""
+
+LEDGER_HEADER = (
+    "# Model routing decisions\n\n"
+    "| time (UTC) | task_id | unit | tier | model | reason | outcome |\n"
+    "|---|---|---|---|---|---|---|\n"
+)
+"""Title and table header written when the ledger is created."""
 
 SYSTEM_PROMPT = """\
 You are the autoroute agent. You receive a task and finish it at the lowest cost per
@@ -173,8 +184,10 @@ name or a price.
    the same unit; on the third failure stop and report.
 
 7. Log every decision with `log_decision(unit, tier, model, reason, outcome)` when you
-   dispatch, and again with the outcome once the check has run. The ledger is what shows
-   whether a tier fails too often for a kind of unit.
+   dispatch, and again with the outcome once the check has run. The ledger
+   (`~/.kiss/MODEL_DECISIONS.md`) is shared by every task and every row carries the
+   task id, so it is what shows, across tasks, whether a tier fails too often for a
+   kind of unit.
 
 ## Hard rules
 
@@ -294,23 +307,35 @@ def estimate_cost(
     )
 
 
-def _ledger_path() -> Path:
-    """Return the ledger path under the running task's work directory (cwd outside a task)."""
-    try:
-        from kiss.server.agent_state import current_agent
-    except Exception:  # noqa: BLE001 - not running inside the daemon
-        agent = None
-    else:
-        agent = current_agent()
-    work_dir = str(getattr(agent, "work_dir", "") or "")
-    return (Path(work_dir) if work_dir else Path.cwd()) / LEDGER
+def ledger_path() -> Path:
+    """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
+
+    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss``, the same
+    directory as ``sorcar.db``, so the ledger outlives the task's work
+    directory and worktree and every task appends to the same file.
+    """
+    return kiss_home() / LEDGER_NAME
+
+
+def _current_task_id() -> str:
+    """Return the persisted task id of the task calling this tool, or ``""`` outside a task.
+
+    The id is the ``task_history`` row id in ``sorcar.db`` (the one
+    ``/task_update <task_id>`` takes), read off the agent whose task thread
+    is the calling thread (``None`` outside a registered task).
+    """
+    agent = current_agent()
+    return agent.last_task_id if agent is not None else ""
 
 
 def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "pending") -> str:
-    """Append one routing decision to the ledger ``tmp/MODEL_DECISIONS.md``.
+    """Append one routing decision to the shared ledger ``~/.kiss/MODEL_DECISIONS.md``.
 
     Call it when a unit is dispatched (outcome ``pending``) and again once its
-    acceptance check has run, with the outcome.
+    acceptance check has run, with the outcome.  Every row carries the id of
+    the task that wrote it (``-`` outside a task), so the rows of one run can
+    be told apart from the rest of the installation's routing history and
+    traced back to the task in ``sorcar.db``.
 
     Args:
         unit: Short description of the unit of work.
@@ -325,19 +350,14 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     """
     if tier not in TIER_NAMES:
         return f"Error: unknown tier {tier!r}; use one of {', '.join(TIER_NAMES)}."
-    path = _ledger_path()
+    path = ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
-        path.write_text(
-            "# Model routing decisions\n\n"
-            "| time (UTC) | unit | tier | model | reason | outcome |\n"
-            "|---|---|---|---|---|---|\n",
-            encoding="utf-8",
-        )
+        path.write_text(LEDGER_HEADER, encoding="utf-8")
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     cells = [
         " ".join(cell.replace("|", "/").split())
-        for cell in (stamp, unit, tier, model, reason, outcome)
+        for cell in (stamp, _current_task_id() or "-", unit, tier, model, reason, outcome)
     ]
     with path.open("a", encoding="utf-8") as handle:
         handle.write("| " + " | ".join(cells) + " |\n")
@@ -376,5 +396,5 @@ def use_web_tools() -> bool:
 
 
 def use_memory() -> bool:
-    """No persistent memory: the ledger in the work directory is the record."""
+    """No persistent memory: the shared ledger in the KISS home is the record."""
     return False
