@@ -847,15 +847,6 @@
     "gen": false,
     "comment": "NEW: needs pricing"
   },
-  "gemini-3.5-transcribe-live": {
-    "context_length": 131072,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
-    "fc": false,
-    "emb": true,
-    "gen": false,
-    "comment": "NEW: needs pricing"
-  },
   "gemini-3.6-flash": {
     "context_length": 500000,
     "input_price_per_1M": 0.75,
@@ -882,6 +873,24 @@
     "emb": false,
     "gen": true,
     "comment": "NEW"
+  },
+  "gemini-3.8-flash-lite-tts": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false,
+    "comment": "NEW: needs pricing"
+  },
+  "gemini-3.8-flash-tts": {
+    "context_length": 8192,
+    "input_price_per_1M": 0.0,
+    "output_price_per_1M": 0.0,
+    "fc": false,
+    "emb": true,
+    "gen": false,
+    "comment": "NEW: needs pricing"
   },
   "gemini-embedding-001": {
     "context_length": 2048,
@@ -2568,6 +2577,28 @@
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.18
   },
+  "openrouter/aion-labs/aion-3.5": {
+    "context_length": 262144,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 6.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.75
+  },
+  "openrouter/aion-labs/aion-3.5-mini": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.7,
+    "output_price_per_1M": 1.4,
+    "fc": false,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.18
+  },
   "openrouter/aion-labs/aion-rp-llama-3.1-8b": {
     "context_length": 32768,
     "input_price_per_1M": 0.8,
@@ -3056,35 +3087,35 @@
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "context_length": 500000,
-    "input_price_per_1M": 0.955,
-    "output_price_per_1M": 1.911,
+    "input_price_per_1M": 0.94,
+    "output_price_per_1M": 1.879,
     "fc": false,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.079605
+    "cache_read_price_per_1M": 0.0783
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 1.32,
-    "output_price_per_1M": 3.96,
+    "input_price_per_1M": 0.462,
+    "output_price_per_1M": 1.386,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.044
+    "cache_read_price_per_1M": 0.0154
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.5,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.42,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.01
+    "cache_read_price_per_1M": 0.0042
   },
   "openrouter/google/gemini-2.5-flash": {
     "context_length": 500000,
@@ -3447,7 +3478,7 @@
     "cache_read_price_per_1M": 0.012
   },
   "openrouter/inclusionai/ling-3.0-flash-vl": {
-    "context_length": 131072,
+    "context_length": 262144,
     "input_price_per_1M": 0.06,
     "output_price_per_1M": 0.18,
     "fc": true,
@@ -3651,17 +3682,6 @@
     "gen": true,
     "use_responses_api": true,
     "cache_read_price_per_1M": 0.03
-  },
-  "openrouter/mistralai/devstral-2512": {
-    "context_length": 262144,
-    "input_price_per_1M": 0.4,
-    "output_price_per_1M": 2.0,
-    "fc": true,
-    "emb": false,
-    "gen": true,
-    "comment": "NEW",
-    "use_responses_api": true,
-    "cache_read_price_per_1M": 0.04
   },
   "openrouter/mistralai/ministral-14b-2512": {
     "context_length": 262144,
@@ -3945,6 +3965,17 @@
     "gen": true,
     "use_responses_api": true
   },
+  "openrouter/nex-agi/nex-n2.5-mini": {
+    "context_length": 262144,
+    "input_price_per_1M": 0.025,
+    "output_price_per_1M": 0.1,
+    "fc": false,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.0025
+  },
   "openrouter/nex-agi/nex-n2.5-pro": {
     "context_length": 262144,
     "input_price_per_1M": 0.075,
@@ -4022,7 +4053,7 @@
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "context_length": 262144,
-    "input_price_per_1M": 0.07,
+    "input_price_per_1M": 0.08,
     "output_price_per_1M": 0.2,
     "fc": false,
     "emb": false,
@@ -5323,12 +5354,13 @@
   },
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "context_length": 262144,
-    "input_price_per_1M": 0.09,
+    "input_price_per_1M": 0.1,
     "output_price_per_1M": 1.1,
     "fc": true,
     "emb": false,
     "gen": true,
-    "use_responses_api": true
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.07
   },
   "openrouter/qwen/qwen3-next-80b-a3b-thinking": {
     "context_length": 262144,
@@ -5878,6 +5910,17 @@
     "gen": true,
     "use_responses_api": true
   },
+  "openrouter/upstage/solar-mini4": {
+    "context_length": 524288,
+    "input_price_per_1M": 0.05,
+    "output_price_per_1M": 0.2,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW",
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.005
+  },
   "openrouter/upstage/solar-pro-3": {
     "context_length": 131072,
     "input_price_per_1M": 0.15,
@@ -6275,7 +6318,7 @@
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.075
+    "cache_read_price_per_1M": 0.09
   },
   "openrouter/z-ai/glm-5v-turbo": {
     "context_length": 202752,
@@ -6335,35 +6378,35 @@
   "openrouter/~deepseek/deepseek-flash-latest": {
     "context_length": 500000,
     "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.5,
+    "output_price_per_1M": 0.6,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.01
+    "cache_read_price_per_1M": 0.06
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.4,
-    "output_price_per_1M": 4.3,
+    "input_price_per_1M": 0.387,
+    "output_price_per_1M": 2.9,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.033
+    "cache_read_price_per_1M": 0.25
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.03,
-    "output_price_per_1M": 0.8,
+    "input_price_per_1M": 0.038,
+    "output_price_per_1M": 0.55,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.008
+    "cache_read_price_per_1M": 0.0228
   },
   "openrouter/~google/gemini-flash-latest": {
     "context_length": 500000,
@@ -6389,13 +6432,13 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 1.45,
-    "output_price_per_1M": 11.7,
+    "input_price_per_1M": 0.91,
+    "output_price_per_1M": 6.987,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.3
+    "cache_read_price_per_1M": 0.195
   },
   "openrouter/~openai/gpt-astra-latest": {
     "context_length": 500000,

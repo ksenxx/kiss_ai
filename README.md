@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 688 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 692 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -287,25 +287,25 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **688 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **692 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 106 |
 | Anthropic | 15 |
-| Gemini | 24 |
+| Gemini | 25 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 397 |
+| OpenRouter | 400 |
 | Claude Code CLI (`cc/*`) | 15 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **666** generation-capable models
-- **501** function-calling-capable models
-- **11** embedding models
+- **669** generation-capable models
+- **502** function-calling-capable models
+- **12** embedding models
 - **2** decision models
 
 Full model list:
@@ -444,7 +444,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini (24)</strong></summary>
+<summary><strong>Gemini (25)</strong></summary>
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -461,10 +461,11 @@ Full model list:
 - `gemini-3.5-flash`
 - `gemini-3.5-flash-lite`
 - `gemini-3.5-transcribe`
-- `gemini-3.5-transcribe-live`
 - `gemini-3.6-flash`
 - `gemini-3.7-flash`
 - `gemini-3.8-flash`
+- `gemini-3.8-flash-lite-tts`
+- `gemini-3.8-flash-tts`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -613,11 +614,13 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (397)</strong></summary>
+<summary><strong>OpenRouter (400)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
 - `openrouter/aion-labs/aion-3.0-mini`
+- `openrouter/aion-labs/aion-3.5`
+- `openrouter/aion-labs/aion-3.5-mini`
 - `openrouter/aion-labs/aion-rp-llama-3.1-8b`
 - `openrouter/amazon/nova-2-lite-v1`
 - `openrouter/amazon/nova-lite-v1`
@@ -726,7 +729,6 @@ Full model list:
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
-- `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
 - `openrouter/mistralai/ministral-3b-2512`
 - `openrouter/mistralai/ministral-8b-2512`
@@ -755,6 +757,7 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nex-agi/nex-n2.5-mini`
 - `openrouter/nex-agi/nex-n2.5-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
@@ -939,6 +942,7 @@ Full model list:
 - `openrouter/typesafe/jev-1.13`
 - `openrouter/unbiased/pareto`
 - `openrouter/undi95/remm-slerp-l2-13b`
+- `openrouter/upstage/solar-mini4`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/upstage/solar-pro4`
 - `openrouter/writer/palmyra-x5`
