@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The daemon side of the settings panel's "Working directory" option.
+"""The daemon side of the "Working directory" panel ("..." menu).
 
 Tested against a real ``RemoteAccessServer`` over its UDS socket:
 
@@ -11,14 +11,15 @@ Tested against a real ``RemoteAccessServer`` over its UDS socket:
   work_dir another client persisted globally;
 * a remote ``saveConfig`` carrying ``config.work_dir`` persists it to
   ``config.json`` and moves the daemon-wide fallback;
-* a ``saveConfig`` that omits ``work_dir`` -- which is what a VS Code
-  window sends, since its field is read-only -- leaves the persisted
-  value alone.
+* a ``saveConfig`` that omits ``work_dir`` -- which is what the
+  Settings panel sends on every surface, since it has no working
+  directory field -- leaves the persisted value alone.
 
-The webview half of the field (read-only and never saved in VS Code,
-editable, saved and re-pinned in the standalone web client) is covered
-by the real DOM tests in
-``agents/vscode/test/settingsWorkDirField.test.js``.
+The webview half (the Settings form never carries ``work_dir``; the
+standalone web client saves and re-pins through the "Working
+directory" panel) is covered by the real DOM tests in
+``agents/vscode/test/settingsWorkDirField.test.js`` and
+``agents/vscode/test/workDirPanel.test.js``.
 """
 
 from __future__ import annotations
@@ -152,8 +153,8 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """With no persisted work_dir, ``getConfig`` fills it from the
-        requesting connection's own work_dir — so each VS Code window's
-        settings panel can show its own workspace folder."""
+        requesting connection's own work_dir — so each VS Code window
+        scopes its history and tabs by its own workspace folder."""
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
         await self._send(
@@ -217,7 +218,7 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A ``saveConfig`` carrying ``config.work_dir`` (sent by the
-        standalone web client's editable settings field) persists the
+        standalone web client's "Working directory" panel) persists the
         value and moves the daemon-wide fallback work_dir."""
         reader, writer = await self._connect()
         await self._send(
@@ -237,9 +238,9 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
     async def test_save_config_without_work_dir_keeps_persisted_value(
         self,
     ) -> None:
-        """A VS Code window's ``saveConfig`` (which omits ``work_dir``
-        because its field is read-only) must not clobber a previously
-        persisted work_dir."""
+        """A Settings-panel ``saveConfig`` (which omits ``work_dir``:
+        the form has no working directory field) must not clobber a
+        previously persisted work_dir."""
         vc.save_config({"work_dir": str(self.dir_a)})
         reader, writer = await self._connect()
         await self._send(
