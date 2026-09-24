@@ -841,6 +841,16 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
         off = sea_core.ContainerHarness(str(config))
         off.on_tool_call("Edit", edit)
         assert off.pending_edits == []
+        # a path the shell cannot take, a huge file and a binary file never raise out of the hook
+        nul = {"file_path": "pkg/\x00bad.py", "old_string": "x", "new_string": "y"}
+        assert harness.on_tool_call("Edit", nul) == "OK"
+        assert harness.read_container_file("/repo/pkg/\x00bad.py") is None
+        live.exec_run(["sh", "-c", "head -c 500000 /dev/zero | tr '\0' 'a' > /repo/pkg/big.py; "
+                      "printf 'a\0b' > /repo/pkg/bin.py"])
+        assert harness.read_container_file("/repo/pkg/big.py") is None
+        assert harness.read_container_file("/repo/pkg/bin.py") is None
+        text = harness.read_container_file("/repo/tests/test_fields.py") or ""
+        assert text.startswith("from pkg.fields")
     finally:
         live.remove(force=True)
 
@@ -924,20 +934,34 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /testbed"}) == blocked
     assert gated2.on_tool_call("Bash", {"command": "rm -rf /app"}) == "OK"
     events = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
-    gate_events = [e for e in events if e["tool"] == "finish" and e["args"] == {"success": True}]
+    gate_events = [e for e in events
+                   if e.get("tool") == "finish" and e["args"] == {"success": True}]
     assert [e["blocked"] for e in gate_events] == [False, False, True, False]
     # the prompt carries the new rules and the trial config takes the gate from the environment
     prompt = plain.system_prompt()
-    assert "Leave the container as verified" in prompt and "let the existing" not in prompt
+    assert "The container as you leave it is the deliverable" in prompt
+    assert "byte for byte" not in prompt
+    assert "no internet" not in prompt.lower()
     assert trials.trial_config("c", "/app", MODEL)["finish_gate"] is False
+    assert plain.model_config() is None
     os.environ["HARNESSTAX_FINISH_GATE"] = "1"
+    os.environ["HARNESSTAX_MODEL_CONFIG"] = json.dumps(
+        {MODEL: {"reasoning_effort": "medium"}, "other": {"x": 1}})
     try:
         assert trials.trial_config("c", "/app", MODEL) == {
             "container": "c", "workdir": "/app", "model": MODEL, "test_context": False,
             "finish_gate": True,
+            "model_config": {"reasoning_effort": "medium"},
         }
+        assert trials.trial_config("c", "/app", "unlisted")["model_config"] == {}
     finally:
-        del os.environ["HARNESSTAX_FINISH_GATE"]
+        for name in ("HARNESSTAX_FINISH_GATE", "HARNESSTAX_MODEL_CONFIG"):
+            del os.environ[name]
+    tuned = harness(model_config={"output_config": {"effort": "medium"}})
+    assert tuned.model_config() == {"output_config": {"effort": "medium"}}
+    trial = {"container": "c", "workdir": "/app", "prompt": "p", "model": MODEL}
+    sea = sea_core.write_trial_sea(tmp_path / "sea-trial", trial)
+    assert "model_config = _harness.model_config" in sea.read_text()
 
 
 def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) -> None:
