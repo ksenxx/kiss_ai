@@ -1124,8 +1124,10 @@ class RelentlessAgent(Base):
 
         Each sub-session is a fresh :class:`KISSAgent`; one that returns
         ``finish(is_continue=True, ...)`` hands its summary to the next.
-        The ``IMPORTANT_INSTRUCTIONS`` suffix names the host work dir
-        only when the tools run on the host (no ``docker_image``).
+        The ``IMPORTANT_INSTRUCTIONS`` suffix names the work dir when the
+        tools can reach it: on the host, or in a container that bind-mounts
+        it (every container kiss starts from an image does; see
+        :data:`WORK_DIR_LINE`).
 
         Args:
             tools: List of callable tools available to the agent during execution.
