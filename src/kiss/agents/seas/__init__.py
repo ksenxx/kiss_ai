@@ -10,6 +10,9 @@ services, the SEAs here drive Sorcar's own workflows — for example
 auto-commit worktree merge runs when a squash merge conflicts, or
 :mod:`kiss.agents.seas.sh_sea`, which runs the shell command in its
 prompt with the ``Bash`` tool alone and returns the output, or
+:mod:`kiss.agents.seas.autoroute_sea`, which finishes a task at the lowest
+cost per accepted result by routing each unit of work to the cheapest
+model tier that passes its acceptance check, or
 :mod:`kiss.agents.seas.skillopt_sea`, which optimizes the prompt text of
 a skill or of another SEA against an eval set (SkillOpt), or
 :mod:`kiss.agents.seas.write_paper_sea`, which writes or revises a
@@ -19,7 +22,7 @@ with tools for the AI-slop gates and the LaTeX build, or
 venue with tools that read the PDF page by page and check the review's
 structure and AI-slop gates.
 Every ``*_sea.py`` module in this package is also exposed as a chat
-slash command (``/merge``, ``/sh``, ``/skillopt``, ``/write_paper``,
+slash command (``/merge``, ``/sh``, ``/autoroute``, ``/skillopt``, ``/write_paper``,
 ``/review_paper``, ...) by
 :mod:`kiss.agents.sorcar.sea_commands`.
 """
