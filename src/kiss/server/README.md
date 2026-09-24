@@ -178,8 +178,11 @@ The parameters without getters:
   (so the child's `run_parallel` spawns no further reviewers), which a
   dispatched script must not be able to forge.
 - **`side_channel`** — marks the run as a side channel of its parent
-  (the `/ask` sub-agent whose answer is delivered into the PARENT's
-  transcript, so its own tab closes when the run ends); only
+  (a sub-agent whose result is shown outside its own tab: the `/ask`
+  answerer delivers its answer into the PARENT's transcript, and the
+  periodic `/task_update` child fills the parent task's task-info
+  panel; so its own tab closes when the run ends and is not re-opened
+  when the chat is reloaded); only
   meaningful with `parent_task_id`, and not forgeable for the same
   reason.
 - **`extension_agent_path`** — the script cannot override its own path.
@@ -194,8 +197,12 @@ The parameters without getters:
 - **`system_prompt()`** — an empty or blank string leaves the base
   prompt to the daemon: with task classification enabled (the
   default) a task classified as simple runs on the reduced
-  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  A
-  non-empty string replaces that base prompt.  A
+  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  Both
+  files are loaded with their `{{IDENTITY}}` brand placeholder filled
+  in (`kiss.core.brand.render_brand`); a
+  string returned by `system_prompt()` or
+  `append_to_system_prompt()` is used verbatim, with no placeholder
+  rendering.  A non-empty string replaces that base prompt.  A
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
   `setdefault`s it).
