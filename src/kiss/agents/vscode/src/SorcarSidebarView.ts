@@ -817,7 +817,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'configData' && msg.config) {
-        // Show this window's workspace folder in the settings panel.
+        // Report this window's workspace folder as the config's work_dir
+        // (the webview scopes its history and tabs by it).
         // When the window has none (and the host cwd is a filesystem
         // root, so _getWorkDir reports nothing), keep the daemon's own
         // work_dir: that is where the window's tasks will actually run.

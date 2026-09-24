@@ -4,12 +4,13 @@
 // add your name here
 
 // End-to-end (JSDOM) tests for the "Use persistent memory" settings
-// toggle (#cfg-use-memory, config key ``use_memory``) and the "Memory
-// directory" field (#cfg-memory-dir, config key ``memory_dir``): they
-// must be INITIALIZED from the server's ``configData`` instead of the
-// hardcoded state shipped in chat.html, PERSISTED back through
-// ``saveConfig`` when the settings panel closes, and a field the user
-// is editing must never be repainted by a late ``configData`` poll.
+// toggle (#cfg-use-memory, config key ``use_memory``): it must be
+// INITIALIZED from the server's ``configData`` instead of the hardcoded
+// state shipped in chat.html, PERSISTED back through ``saveConfig``
+// when the settings panel closes, and a toggle the user has flipped
+// must never be repainted by a late ``configData`` poll.  The memory
+// directory (config key ``memory_dir``) has no settings field: the
+// panel never shows it and ``saveConfig`` never carries it.
 
 'use strict';
 
@@ -82,19 +83,19 @@ function testMemoryInitializedFromConfigData() {
       '(was left at the hardcoded checked state from chat.html)',
   );
   assert.strictEqual(
-    win.document.getElementById('cfg-memory-dir').value,
-    '/data/agent-memories',
-    'configData memory_dir must populate #cfg-memory-dir',
+    win.document.getElementById('cfg-memory-dir'),
+    null,
+    'the memory directory is not a settings field any more: memory_dir ' +
+      'stays a config.json key without a box in the panel',
   );
   win.close();
-  console.log('  ok - configData initializes the memory toggle and directory');
+  console.log('  ok - configData initializes the memory toggle');
 }
 
 function testMemoryInitializedTrueFromConfigData() {
   const {win} = makeWebview();
   // Start from the opposite state so a no-op would be caught.
   win.document.getElementById('cfg-use-memory').checked = false;
-  win.document.getElementById('cfg-memory-dir').value = '/stale';
 
   send(win, {
     type: 'configData',
@@ -107,14 +108,8 @@ function testMemoryInitializedTrueFromConfigData() {
     true,
     'configData {use_memory:true} must check #cfg-use-memory',
   );
-  assert.strictEqual(
-    win.document.getElementById('cfg-memory-dir').value,
-    '',
-    'configData {memory_dir:""} must clear #cfg-memory-dir ' +
-      '(empty means the ~/.kiss/memories default)',
-  );
   win.close();
-  console.log('  ok - configData true/empty values re-apply to the fields');
+  console.log('  ok - configData true value re-applies to the toggle');
 }
 
 function testMissingKeysDefaultToOn() {
@@ -130,11 +125,6 @@ function testMissingKeysDefaultToOn() {
     true,
     'missing use_memory must default #cfg-use-memory to checked',
   );
-  assert.strictEqual(
-    win.document.getElementById('cfg-memory-dir').value,
-    '',
-    'missing memory_dir must leave #cfg-memory-dir empty',
-  );
   win.close();
   console.log('  ok - missing config keys default the memory toggle to on');
 }
@@ -145,18 +135,14 @@ function testMemoryStatePersistedOnSettingsClose() {
   // settings-close flush.
   send(win, {
     type: 'configData',
-    config: {use_memory: true, memory_dir: ''},
+    config: {use_memory: true, memory_dir: '~/notes/memories'},
     apiKeys: {},
   });
 
-  // The user turns memory off and points it at a custom directory,
-  // then closes the settings panel.
+  // The user turns memory off, then closes the settings panel.
   const toggle = win.document.getElementById('cfg-use-memory');
   toggle.checked = false;
   toggle.dispatchEvent(new win.Event('change', {bubbles: true}));
-  const dir = win.document.getElementById('cfg-memory-dir');
-  dir.value = '  ~/notes/memories  ';
-  dir.dispatchEvent(new win.Event('input', {bubbles: true}));
 
   win.document
     .getElementById('settings-panel-close')
@@ -170,56 +156,51 @@ function testMemoryStatePersistedOnSettingsClose() {
     'saveConfig must persist use_memory from #cfg-use-memory',
   );
   assert.strictEqual(
-    save.config.memory_dir,
-    '~/notes/memories',
-    'saveConfig must persist the trimmed memory_dir from #cfg-memory-dir',
+    'memory_dir' in save.config,
+    false,
+    'a full-form save must not carry memory_dir: the daemon merges the ' +
+      'payload, and a blank invented here would wipe the stored directory',
   );
 
   // Round-trip: the server echoes the saved config back; a fresh
   // populate must land on the persisted state.  The panel close
   // cleared settingsEditedFields, so the repaint is allowed again.
   toggle.checked = true;
-  dir.value = '';
   send(win, {
     type: 'configData',
     config: {use_memory: false, memory_dir: '~/notes/memories'},
     apiKeys: {},
   });
   assert.strictEqual(toggle.checked, false, 'echoed configData must re-apply');
-  assert.strictEqual(
-    dir.value,
-    '~/notes/memories',
-    'echoed configData must re-apply the directory',
-  );
   win.close();
   console.log('  ok - settings close persists memory state via saveConfig');
 }
 
-function testEditedDirNotRepaintedByPoll() {
+function testEditedToggleNotRepaintedByPoll() {
   const {win} = makeWebview();
   send(win, {
     type: 'configData',
-    config: {use_memory: true, memory_dir: '/old'},
+    config: {use_memory: true},
     apiKeys: {},
   });
 
-  // The user is typing a new directory; the 2-second configData poll
-  // re-pushes the stored value and must NOT clobber the in-progress
-  // edit (settingsEditedFields guard).
-  const dir = win.document.getElementById('cfg-memory-dir');
-  dir.value = '/half-typed/new-pl';
-  dir.dispatchEvent(new win.Event('input', {bubbles: true}));
+  // The user flipped the toggle; the 2-second configData poll re-pushes
+  // the stored value and must NOT clobber the edit (settingsEditedFields
+  // guard).
+  const toggle = win.document.getElementById('cfg-use-memory');
+  toggle.checked = false;
+  toggle.dispatchEvent(new win.Event('change', {bubbles: true}));
 
   send(win, {
     type: 'configData',
-    config: {use_memory: true, memory_dir: '/old'},
+    config: {use_memory: true},
     apiKeys: {},
   });
 
   assert.strictEqual(
-    dir.value,
-    '/half-typed/new-pl',
-    'a configData poll must not repaint #cfg-memory-dir mid-edit',
+    toggle.checked,
+    false,
+    'a configData poll must not repaint #cfg-use-memory mid-edit',
   );
   win.close();
   console.log('  ok - configData poll never clobbers an in-progress edit');
@@ -229,13 +210,13 @@ function testPartialSaveWhenPanelClosedBeforeConfigData() {
   const {win, posted} = makeWebview();
 
   // No configData ever arrived (configFormPopulated is false).  The
-  // user edits ONLY the memory directory and closes the panel: the
-  // partial payload must carry just that field — sending the untouched
+  // user edits ONLY the budget and closes the panel: the partial
+  // payload must carry just that field — sending the untouched
   // checkbox too would flush chat.html's hardcoded checked state over
   // whatever use_memory value is stored on the server.
-  const dir = win.document.getElementById('cfg-memory-dir');
-  dir.value = '/only/this/field';
-  dir.dispatchEvent(new win.Event('input', {bubbles: true}));
+  const budget = win.document.getElementById('cfg-max-budget');
+  budget.value = '77';
+  budget.dispatchEvent(new win.Event('input', {bubbles: true}));
 
   win.document
     .getElementById('settings-panel-close')
@@ -244,9 +225,9 @@ function testPartialSaveWhenPanelClosedBeforeConfigData() {
   const save = lastMsg(posted, 'saveConfig');
   assert.ok(save, 'closing the settings panel must post saveConfig');
   assert.strictEqual(
-    save.config.memory_dir,
-    '/only/this/field',
-    'the edited memory_dir must be saved even before any configData',
+    save.config.max_budget,
+    77,
+    'the edited max_budget must be saved even before any configData',
   );
   assert.strictEqual(
     'use_memory' in save.config,
@@ -254,6 +235,11 @@ function testPartialSaveWhenPanelClosedBeforeConfigData() {
     'an untouched #cfg-use-memory must be omitted from a partial save ' +
       '(the daemon merges the payload; an invented value would clobber ' +
       'the stored toggle)',
+  );
+  assert.strictEqual(
+    'memory_dir' in save.config,
+    false,
+    'and memory_dir is never part of the payload',
   );
   win.close();
   console.log('  ok - a panel closed before configData saves only edits');
@@ -264,7 +250,7 @@ function main() {
   testMemoryInitializedTrueFromConfigData();
   testMissingKeysDefaultToOn();
   testMemoryStatePersistedOnSettingsClose();
-  testEditedDirNotRepaintedByPoll();
+  testEditedToggleNotRepaintedByPoll();
   testPartialSaveWhenPanelClosedBeforeConfigData();
   console.log('configMemoryToggle.test.js: all tests passed');
 }

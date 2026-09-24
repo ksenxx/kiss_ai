@@ -394,7 +394,6 @@ async function main() {
     );
     const pinned = after.find(m => m.type === 'setWorkDir');
     assert.ok(pinned && pinned.workDir === OTHER, 'setWorkDir OTHER');
-    assert.strictEqual(byId(win, 'cfg-work-dir').value, OTHER);
     // The tree: OTHER first (working directory), the old work dir kept.
     const roots = rootRows(win);
     assert.deepStrictEqual(
