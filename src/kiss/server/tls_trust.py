@@ -85,12 +85,19 @@ def nss_databases(home: Path) -> list[str]:
 
 
 def _find_certutil() -> str | None:
-    """Return the NSS ``certutil`` binary, looking in Homebrew's ``nss`` too."""
+    """Return the NSS ``certutil`` binary, looking in Homebrew's ``nss`` too.
+
+    Homebrew's ``nss`` is keg-only (not linked into ``PATH``), so the keg is
+    probed under ``$HOMEBREW_PREFIX`` (exported by ``brew shellenv``) or,
+    when that is unset, under the default macOS prefixes.
+    """
     found = shutil.which("certutil")
     if found:
         return found
-    for prefix in ("/opt/homebrew/opt/nss", "/usr/local/opt/nss"):
-        candidate = Path(prefix) / "bin" / "certutil"
+    brew_prefix = os.environ.get("HOMEBREW_PREFIX")
+    prefixes = [brew_prefix] if brew_prefix else ["/opt/homebrew", "/usr/local"]
+    for prefix in prefixes:
+        candidate = Path(prefix) / "opt" / "nss" / "bin" / "certutil"
         if candidate.is_file():
             return str(candidate)
     return None

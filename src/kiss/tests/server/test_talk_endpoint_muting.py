@@ -540,7 +540,19 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         writer.close()
         await writer.wait_closed()
-        await asyncio.sleep(0.2)
+        # The server runs the disconnect cleanup on its own task once it
+        # reads EOF; under load that lands well after ``wait_closed``.
+        # ``unregister_local_uds_tabs`` drops the webview mark and the
+        # interest set in one locked step, so the placeholder tab
+        # leaving the shown set proves the mark is gone too.
+        printer = self.server._printer
+        deadline = asyncio.get_event_loop().time() + 5.0
+        while printer.shown_local_uds_tabs(["placeholder-tab"]):
+            self.assertLess(
+                asyncio.get_event_loop().time(), deadline,
+                "daemon never ran the UDS disconnect cleanup",
+            )
+            await asyncio.sleep(0.01)
 
         self.server._printer.subscribe_tab(self.task_id, bg_tab)
         self.server._printer.broadcast(

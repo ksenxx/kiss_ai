@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer, _build_html
 from kiss.tests.server.test_web_server import _find_free_port, _no_verify_ssl
@@ -33,7 +34,7 @@ class TestBuildHtml(unittest.TestCase):
     def test_html_contains_key_elements(self) -> None:
         """The generated HTML includes all essential chat UI components."""
         html = _build_html()
-        self.assertIn("<title>KISS Sorcar</title>", html)
+        self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
         self.assertIn('id="tab-bar"', html)
         self.assertIn('id="output"', html)
         self.assertIn('id="task-input"', html)
@@ -78,7 +79,7 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         """
         html = _build_html()
         self.assertIn('id="kiss-server-loading"', html)
-        self.assertIn("KISS Sorcar Server is starting ...", html)
+        self.assertIn(f"{PRODUCT_NAME} Server is starting ...", html)
         self.assertIn('id="app" style="display:none;"', html)
 
     def test_webapp_e2e_with_jsdom(self) -> None:

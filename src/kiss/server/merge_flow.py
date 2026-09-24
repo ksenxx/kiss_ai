@@ -18,9 +18,11 @@ import enum
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _porcelain_entries,
@@ -322,6 +324,15 @@ class _PendingOutcome(enum.Enum):
     """Another owner holds the worktree; the caller must not touch it."""
 
 
+#: Result of a deferred-merge retry whose deferral another claimant
+#: already took (see ``_handle_worktree_action``'s ``deferred_branch``).
+#: Compared by identity; never broadcast.
+_DEFERRAL_SUPERSEDED: dict[str, Any] = {
+    "success": False,
+    "message": "The deferred merge was taken over by another action.",
+}
+
+
 class _MergeFlowMixin:
     """Merge-view, worktree-action, and autocommit methods."""
 
@@ -587,8 +598,8 @@ class _MergeFlowMixin:
                         manual=manual, work_dir=requested_dir,
                     )
                     return
-                diff = _git(work_dir, "diff", "--cached")
-                if not diff.stdout.strip():
+                diff_text = GitWorktreeOps.staged_diff(Path(work_dir))
+                if not diff_text:
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
                         message="Nothing to commit.", manual=manual, work_dir=requested_dir,
@@ -624,7 +635,7 @@ class _MergeFlowMixin:
                     ) or None
                 msg = (
                     generate_commit_message_from_diff(
-                        diff.stdout,
+                        diff_text,
                         user_prompt=user_prompt,
                         task_result=task_result,
                     )
@@ -912,15 +923,18 @@ class _MergeFlowMixin:
                     message=f"Staging failed in {repo.name}: {first_line}",
                 )
                 return
-            diff = _git(str(repo), lit, "diff", "--cached", "--", *changed)
-            if diff.returncode != 0:
+            # ``--quiet`` exits 1 when the paths differ, 0 when they do
+            # not, and anything else on failure.
+            diff = _git(str(repo), lit, "diff", "--cached", "--quiet", "--", *changed)
+            if diff.returncode not in (0, 1):
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
                     message=f"git diff failed in {repo.name}.",
                 )
                 return
-            if not diff.stdout.strip():
+            if diff.returncode == 0:
                 return
+            diff_text = GitWorktreeOps.staged_diff(repo, pathspecs=changed)
             self.printer.broadcast({
                 "type": "autocommit_progress",
                 "message": f"Committing changes in {repo.name}…",
@@ -937,7 +951,7 @@ class _MergeFlowMixin:
             try:
                 msg = (
                     generate_commit_message_from_diff(
-                        diff.stdout,
+                        diff_text,
                         user_prompt=user_prompt,
                         task_result=task_result,
                     )
@@ -1630,6 +1644,7 @@ class _MergeFlowMixin:
             candidates = [
                 (
                     state,
+                    state.wt_merge_deferred_branch,
                     state.auto_commit_mode
                     and not state.agent._pending_review,
                 )
@@ -1641,7 +1656,8 @@ class _MergeFlowMixin:
                 and state.agent._wt_branch == state.wt_merge_deferred_branch
                 and _same_repo(repo, state.agent._repo_root)
             ]
-        for state, auto_commit in candidates:
+        _race_delay()  # test hook: widens the snapshot-to-claim window
+        for state, branch, auto_commit in candidates:
             # This retry IS the automatic post-task merge, only delayed:
             # when the finalize path would have merged the branch
             # unattended (auto-commit on, task not left for review) a
@@ -1649,15 +1665,21 @@ class _MergeFlowMixin:
             # ``_finalize_pending_worktree`` does.
             result = self._handle_worktree_action(
                 "merge", state.tab_id, resolve_conflicts=auto_commit,
+                deferred_branch=branch,
             )
             with self._state_lock:
                 # ``_handle_worktree_action`` clears the marker only
                 # once it owns the worktree; a marker still set means a
                 # guard refused before anything ran (the tab started a
                 # new task, or the main tree got busy again) and the
-                # deferral simply stands until the next trigger.
+                # deferral simply stands until the next trigger.  A
+                # marker cleared by SOMEONE ELSE between the snapshot
+                # above and this call's own claim (a concurrent trigger,
+                # the user's Merge click) is reported as superseded: the
+                # winner reports its own outcome, and this call's refusal
+                # must not reach the tab as a failed merge.
                 still_deferred = state.wt_merge_deferred_branch is not None
-            if still_deferred:
+            if still_deferred or result is _DEFERRAL_SUPERSEDED:
                 continue
             self.printer.broadcast(
                 {"type": "worktree_result", "tabId": state.tab_id, **result}
@@ -1671,6 +1693,7 @@ class _MergeFlowMixin:
         internal: bool = False,
         already_claimed: bool = False,
         resolve_conflicts: bool = False,
+        deferred_branch: str | None = None,
     ) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
@@ -1706,6 +1729,14 @@ class _MergeFlowMixin:
                 the merge (:meth:`WorktreeSorcarAgent.merge`), and add
                 its spend to the persisted usage of the task whose
                 merge it fixed (:meth:`_persist_merge_agent_usage`).
+            deferred_branch: For :meth:`_merge_deferred_worktrees`'s
+                retry of a merge deferred by :meth:`_defer_worktree_merge`:
+                the branch the deferral was recorded for.  When the
+                tab's ``wt_merge_deferred_branch`` no longer equals it
+                by the time this call takes ``_state_lock``, another
+                claimant took the worktree since the retry's snapshot
+                and :data:`_DEFERRAL_SUPERSEDED` is returned without
+                touching anything.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -1721,6 +1752,11 @@ class _MergeFlowMixin:
         # the other path's disposal of the same worktree.
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
+            if deferred_branch is not None and (
+                state is None
+                or state.wt_merge_deferred_branch != deferred_branch
+            ):
+                return _DEFERRAL_SUPERSEDED
             if state is None or not state.use_worktree:
                 return {
                     "success": False,
@@ -1844,6 +1880,11 @@ class _MergeFlowMixin:
                     if tab_id:
                         progress_event["tabId"] = tab_id
                     self.printer.broadcast(progress_event)
+                    logger.info(
+                        "Worktree merge started: tab=%s worktree=%s thread=%s",
+                        tab_id, wt._wt_dir, threading.current_thread().name,
+                    )
+                    started = time.monotonic()
                     if resolve_conflicts:
                         usage_before = _agent_usage(wt)
                         try:
@@ -1856,6 +1897,10 @@ class _MergeFlowMixin:
                     else:
                         msg = wt.merge()
                     success = "Successfully merged" in msg
+                    logger.info(
+                        "Worktree merge finished: tab=%s success=%s elapsed=%.1fs",
+                        tab_id, success, time.monotonic() - started,
+                    )
                     return {"success": success, "message": msg}
                 # Only the AUTOMATIC discard (post-task finalize /
                 # session-resume, internal=True) rescues git-ignored

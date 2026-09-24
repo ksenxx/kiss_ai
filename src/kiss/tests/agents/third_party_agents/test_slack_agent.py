@@ -32,34 +32,8 @@ from kiss.agents.third_party_agents.slack_sea import (
 )
 
 
-def _backup_and_clear() -> str | None:
-    """Back up existing token file and remove it."""
-    path = _token_path()
-    backup = None
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-    return backup
-
-
-def _restore(backup: str | None) -> None:
-    """Restore a previously backed-up token file."""
-    path = _token_path()
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
-
-
 class TestTokenPersistence:
     """Tests for _load_token, _save_token, _clear_token."""
-
-    def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._backup)
 
     def test_load_corrupt_json(self) -> None:
         path = _token_path()
@@ -78,13 +52,11 @@ class TestWorkspaceTokenPaths:
     """Tests for workspace-keyed token storage and legacy migration."""
 
     def setup_method(self) -> None:
-        self._default_backup = _backup_and_clear()
         self._created_dirs: list[Path] = []
 
     def teardown_method(self) -> None:
         for d in self._created_dirs:
             shutil.rmtree(d, ignore_errors=True)
-        _restore(self._default_backup)
 
     def test_migrate_legacy_token(self) -> None:
         """Legacy token at _SLACK_DIR/token.json migrates to default/."""
@@ -104,13 +76,11 @@ class TestWorkspaceSlackAgent:
     """Tests for SlackAgent and SlackChannelBackend with workspace parameter."""
 
     def setup_method(self) -> None:
-        self._default_backup = _backup_and_clear()
         self._created_dirs: list[Path] = []
 
     def teardown_method(self) -> None:
         for d in self._created_dirs:
             shutil.rmtree(d, ignore_errors=True)
-        _restore(self._default_backup)
 
     def test_clear_auth_uses_workspace(self) -> None:
         """clear_slack_auth clears only the agent's workspace token."""
@@ -148,13 +118,11 @@ class TestListWorkspaces:
     """Tests for _list_workspaces() and --list-workspaces CLI flag."""
 
     def setup_method(self) -> None:
-        self._default_backup = _backup_and_clear()
         self._created_dirs: list[Path] = []
 
     def teardown_method(self) -> None:
         for d in self._created_dirs:
             shutil.rmtree(d, ignore_errors=True)
-        _restore(self._default_backup)
 
     def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
@@ -220,13 +188,11 @@ class TestDeleteWorkspace:
     """Tests for _delete_workspace() and --delete-workspace CLI flag."""
 
     def setup_method(self) -> None:
-        self._default_backup = _backup_and_clear()
         self._created_dirs: list[Path] = []
 
     def teardown_method(self) -> None:
         for d in self._created_dirs:
             shutil.rmtree(d, ignore_errors=True)
-        _restore(self._default_backup)
 
     def test_delete_nonexistent_workspace(self) -> None:
         """_delete_workspace() exits with code 1 for missing workspace."""
@@ -306,12 +272,6 @@ class TestSlackTools:
 
 class TestSlackAgent:
     """Tests for SlackAgent construction and tool integration."""
-
-    def setup_method(self) -> None:
-        self._backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._backup)
 
     def test_check_auth_unauthenticated(self) -> None:
         agent = SlackAgent()

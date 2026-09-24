@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 import weakref
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -352,10 +352,7 @@ def _git(
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as exc:
         logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        with contextlib.suppress(OSError):  # group already gone
-            kill_process_group(proc.pid, SIGKILL)
-        if proc.poll() is None:
-            proc.kill()
+        _kill_git(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive
@@ -380,6 +377,97 @@ def _git(
             or f"git {args[0] if args else ''} timed out"
             f" after {_GIT_TIMEOUT_SECONDS}s",
         )
+
+
+def _kill_git(proc: subprocess.Popen[Any]) -> None:
+    """Stop a running git process and its whole process group."""
+    with contextlib.suppress(OSError):  # group already gone
+        kill_process_group(proc.pid, SIGKILL)
+    if proc.poll() is None:
+        proc.kill()
+
+
+def _kill_git_on_timeout(
+    proc: subprocess.Popen[Any], args: tuple[str, ...], timed_out: threading.Event,
+) -> None:
+    """Watchdog callback of :func:`_git_stdout_head`: record and kill."""
+    timed_out.set()
+    logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
+    _kill_git(proc)
+
+
+def _git_stdout_head(
+    *args: str,
+    cwd: str | Path,
+    max_bytes: int,
+    timeout: float = _GIT_TIMEOUT_SECONDS,
+) -> tuple[str, bool]:
+    """Run a git command and return at most *max_bytes* of its stdout.
+
+    Stdout is streamed and the process is killed as soon as the cap is
+    reached, so a command whose output is unbounded costs at most
+    *max_bytes* of memory.  ``git diff --cached`` over a worktree that
+    had copied in 38,081 benchmark result files (38.5 million lines)
+    used to be read whole into a string by the commit-message step:
+    the daemon grew to 45 GB and the merge thread, which held the
+    tab's ``is_merging`` claim, never finished, so every main-tree task
+    was refused with "A worktree merge is in progress" until a restart
+    (``~/.kiss/kiss-web-stderr.log``, 2026-09-23 15:11 UTC).
+
+    Args:
+        *args: Git sub-command and arguments (without the leading ``git``).
+        cwd: Working directory for the git command (required).
+        max_bytes: Maximum number of stdout bytes to read.
+        timeout: Seconds after which a git that is still running is
+            killed and its partial output reported as truncated.
+
+    Returns:
+        ``(text, truncated)``: the decoded stdout (cut back to the last
+        complete line when truncated) and whether it is incomplete,
+        either because more output existed or because git was killed
+        by the timeout.
+    """
+    cmd = ["git", "-c", "core.quotepath=false", "-C", str(cwd), *args]
+    env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
+    proc = popen_process_group(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
+    )
+    timed_out = threading.Event()
+    timer = threading.Timer(timeout, _kill_git_on_timeout, args=(proc, args, timed_out))
+    timer.daemon = True
+    timer.start()
+    stdout = proc.stdout
+    assert stdout is not None
+    chunks: list[bytes] = []
+    size = 0
+    truncated = False
+    try:
+        while size < max_bytes:
+            chunk = stdout.read(min(65536, max_bytes - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        else:
+            truncated = bool(stdout.read(1))
+    finally:
+        timer.cancel()
+        _kill_git(proc)
+        stdout.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
+    truncated = truncated or timed_out.is_set()
+    text = b"".join(chunks).decode("utf-8", "replace")
+    if truncated and "\n" in text:
+        text = text[: text.rfind("\n")]
+    return text, truncated
+
+
+COMMIT_MESSAGE_DIFF_LIMIT_BYTES: int = 200_000
+"""Largest staged patch handed to the commit-message LLM.
+
+See :meth:`GitWorktreeOps.staged_diff`.
+"""
 
 
 @dataclass(frozen=True)
@@ -898,8 +986,7 @@ class GitWorktreeOps:
             True if a commit was created, False if nothing was staged
             or the commit failed (e.g. pre-commit hook rejection).
         """
-        diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
-        if diff.returncode == 0:
+        if not GitWorktreeOps.has_staged_changes(wt_dir):
             return False
         cmd = ["commit", "-m", message]
         if no_verify:
@@ -955,17 +1042,73 @@ class GitWorktreeOps:
         return _git("status", "--porcelain", cwd=wt_dir).stdout.strip()
 
     @staticmethod
-    def staged_diff(wt_dir: Path) -> str:
-        """Return the staged diff text for the worktree.
+    def has_staged_changes(wt_dir: Path) -> bool:
+        """Report whether the index differs from ``HEAD``.
+
+        Uses ``git diff --cached --quiet``, which produces no output, so
+        the check costs nothing however large the staged changes are.
+        Its exit status is 0 for no difference and 1 for a difference;
+        any other status is a git failure (corrupt index, timeout, ...),
+        which is logged and reported as "staged" so the caller's commit
+        attempt surfaces git's own error instead of silently dropping
+        the work.
+
+        Args:
+            wt_dir: Worktree directory to inspect.
+
+        Returns:
+            True if anything is staged (or git could not tell).
+        """
+        result = _git("diff", "--cached", "--quiet", cwd=wt_dir)
+        if result.returncode not in (0, 1):
+            logger.warning(
+                "git diff --cached --quiet failed in %s (rc=%s): %s; treating as staged",
+                wt_dir, result.returncode, result.stderr.strip(),
+            )
+        return result.returncode != 0
+
+    @staticmethod
+    def staged_diff(
+        wt_dir: Path,
+        max_bytes: int = COMMIT_MESSAGE_DIFF_LIMIT_BYTES,
+        pathspecs: Sequence[str] = (),
+    ) -> str:
+        """Return the staged diff text, bounded for use in an LLM prompt.
+
+        At most *max_bytes* of the patch are ever read (see
+        :func:`_git_stdout_head`).  When the patch is larger, the result
+        starts with a truncation note carrying the ``--shortstat``
+        totals (files changed, insertions, deletions over ALL changes),
+        then the head of the ``--stat`` file list (bounded to a quarter
+        of *max_bytes*), then the head of the patch.  The model thus
+        always sees the full scope even when the file list itself is
+        too long to enumerate.
 
         Args:
             wt_dir: Worktree directory (must have staged changes).
+            max_bytes: Cap on the patch text.
+            pathspecs: Literal paths to restrict the diff to (all staged
+                changes when empty).
 
         Returns:
             The diff text, or empty string if no staged changes.
         """
-        result = _git("diff", "--cached", cwd=wt_dir)
-        return result.stdout.strip()
+        head = ("--literal-pathspecs", "diff", "--cached") if pathspecs else ("diff", "--cached")
+        tail = ("--", *pathspecs) if pathspecs else ()
+        patch, truncated = _git_stdout_head(
+            *head, *tail, cwd=wt_dir, max_bytes=max_bytes,
+        )
+        if not truncated:
+            return patch.strip()
+        totals = _git(*head, "--shortstat", *tail, cwd=wt_dir).stdout.strip()
+        stat, _ = _git_stdout_head(
+            *head, "--stat", *tail, cwd=wt_dir, max_bytes=max_bytes // 4,
+        )
+        return (
+            f"[Patch truncated to its first {max_bytes:,} bytes; "
+            f"the summary below covers all changes: {totals}]\n\n"
+            f"{stat.strip()}\n\n{patch.strip()}"
+        )
 
     @staticmethod
     def checkout(repo: Path, branch: str) -> tuple[bool, str]:

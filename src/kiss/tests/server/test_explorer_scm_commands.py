@@ -24,6 +24,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Coroutine
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,11 @@ from kiss.server.explorer import (
     parse_git_log,
     parse_porcelain_status,
 )
-from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.server.web_server import (
+    _PYPI_FETCH_TIMEOUT,
+    RemoteAccessServer,
+    _generate_self_signed_cert,
+)
 from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 
@@ -211,6 +216,18 @@ class ExplorerHarness:
         asyncio.run_coroutine_threadsafe(
             self.server.start_async(), self.loop,
         ).result(60)
+        # Let the daemon's startup PyPI check cache the latest release
+        # before any client connects, so Playwright tests can tell from
+        # ``server._latest_version`` whether an update toast is due on
+        # every page they open (it then arrives in the connection's
+        # welcome sequence, right behind the config reply).  Bounded by
+        # the fetch timeout; with PyPI unreachable no toast ever comes.
+        deadline = time.monotonic() + _PYPI_FETCH_TIMEOUT + 1
+        while (
+            self.server._latest_version is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
 
     def run(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Run *coro* on the server loop and return its result."""

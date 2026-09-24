@@ -19,6 +19,7 @@ import ssl
 import urllib.request
 from unittest import IsolatedAsyncioTestCase
 
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import (
     _URL_FILE,
     RemoteAccessServer,
@@ -134,7 +135,7 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
                 ),
             )
             html = resp.read().decode()
-            self.assertIn("<title>KISS Sorcar</title>", html)
+            self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
             self.assertEqual(resp.status, 200)
         finally:
             await server.stop_async()
@@ -211,7 +212,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
                 ),
             )
             html = resp2.read().decode()
-            self.assertIn("<title>KISS Sorcar</title>", html)
+            self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
             self.assertEqual(resp2.status, 200)
 
             self.assertTrue(_URL_FILE.is_file())

@@ -1238,16 +1238,24 @@ class KISSAgent(Base):
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
             self.last_cache_read_tokens = cache_read
-            cost = calculate_cost(
-                self.model.model_name,
-                input_tokens,
-                output_tokens,
-                cache_read,
-                cache_write,
-                cache_write_1h,
-                num_audio_input_tokens=audio_input,
-                num_audio_output_tokens=audio_output,
-            )
+            # A provider that states what it charged for the call
+            # (OpenRouter's ``usage.cost``) is authoritative: the catalog
+            # rate is only an estimate of the routed upstream's price.
+            # Duck-typed model stand-ins may predate the hook.
+            extract_cost = getattr(self.model, "extract_cost_from_response", None)
+            reported = extract_cost(response) if callable(extract_cost) else None
+            cost = float(reported) if isinstance(reported, int | float) else None
+            if cost is None:
+                cost = calculate_cost(
+                    self.model.model_name,
+                    input_tokens,
+                    output_tokens,
+                    cache_read,
+                    cache_write,
+                    cache_write_1h,
+                    num_audio_input_tokens=audio_input,
+                    num_audio_output_tokens=audio_output,
+                )
             # ONE store publishes tokens and cost together (see the
             # docstring): a stop injected anywhere in this method now
             # leaves either the previous complete triple (the response

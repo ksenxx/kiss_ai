@@ -29,6 +29,7 @@ from kiss.agents.third_party_agents.a2a_sea import (
     A2AChannelBackend,
     _config,
 )
+from kiss.core.brand import PRODUCT_NAME
 
 _AUTH_TRIO = {"check_a2a_auth", "authenticate_a2a", "clear_a2a_auth"}
 _BACKEND_TOOLS = {"a2a_discover", "a2a_call", "a2a_get_task"}
@@ -184,7 +185,7 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
         # Agent card is served on both well-known paths.
         for path in ("/.well-known/agent-card.json", "/.well-known/agent.json"):
             card = requests.get(base + path, timeout=10).json()
-            assert card["name"] == "KISS Sorcar"
+            assert card["name"] == PRODUCT_NAME
             assert card["url"] == base + "/"
             assert card["protocolVersion"] == "0.2"
             assert card["capabilities"] == {"streaming": False}
@@ -269,7 +270,7 @@ def test_inbound_outbound_end_to_end(refusing_port: int) -> None:
         peer = A2AChannelBackend()
         card_result = json.loads(peer.a2a_discover(base))
         assert card_result["ok"] is True
-        assert card_result["card"]["name"] == "KISS Sorcar"
+        assert card_result["card"]["name"] == PRODUCT_NAME
 
         denied = json.loads(peer.a2a_call(base, "hi"))
         assert denied == {"ok": False, "error": "HTTP 401"}

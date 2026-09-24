@@ -30,6 +30,7 @@ from unittest import IsolatedAsyncioTestCase
 import pytest
 from websockets.asyncio.client import connect
 
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
@@ -344,7 +345,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         """GET / returns the chat HTML page."""
         status, body = await self._http_get("/")
         self.assertEqual(status, 200)
-        self.assertIn("<title>KISS Sorcar</title>", body)
+        self.assertIn(f"<title>{PRODUCT_NAME}</title>", body)
         self.assertIn('id="task-input"', body)
 
 
@@ -1903,7 +1904,7 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             _fetch,
         )
         self.assertEqual(status, 200)
-        self.assertIn("<title>KISS Sorcar</title>", body)
+        self.assertIn(f"<title>{PRODUCT_NAME}</title>", body)
 
     async def test_plain_ws_rejected(self) -> None:
         """Plain ws:// connection to the TLS server should fail."""
@@ -3525,7 +3526,7 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
         try:
             await server._setup_server()
             print(
-                f"KISS Sorcar remote access: {server._local_url}",
+                f"{PRODUCT_NAME} remote access: {server._local_url}",
                 file=sys.stderr,
             )
             if server.use_tunnel and server._active_url != server._local_url:
@@ -3542,7 +3543,7 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
             sys.stderr = old_stderr
             await server.stop_async()
         output = buf.getvalue()
-        self.assertIn("KISS Sorcar remote access:", output)
+        self.assertIn(f"{PRODUCT_NAME} remote access:", output)
 
 
 class TestAutoGenCertInCreateSslContext(unittest.TestCase):
@@ -4270,7 +4271,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
         sys.stderr = buf
         try:
             print(
-                f"KISS Sorcar remote access: {server._local_url}",
+                f"{PRODUCT_NAME} remote access: {server._local_url}",
                 file=sys.stderr,
             )
             if server.use_tunnel and server._active_url != server._local_url:
@@ -4312,7 +4313,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
         sys.stderr = buf
         try:
             print(
-                f"KISS Sorcar remote access: {server._local_url}",
+                f"{PRODUCT_NAME} remote access: {server._local_url}",
                 file=sys.stderr,
             )
             if server.use_tunnel and server._active_url != server._local_url:

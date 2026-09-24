@@ -24,7 +24,6 @@ import faulthandler
 import logging
 import sys
 import threading
-import time
 from typing import TextIO
 
 logger = logging.getLogger(__name__)
@@ -33,11 +32,50 @@ _DEFAULT_TIMEOUT_SECS = 60.0
 _DEFAULT_INTERVAL_SECS = 5.0
 
 
+class StallWatchdog:
+    """A running stall watchdog: the heartbeat thread plus its off switch.
+
+    Attributes:
+        thread: The daemon heartbeat thread.
+    """
+
+    def __init__(self, timeout: float, interval: float, target: TextIO) -> None:
+        self._timeout = timeout
+        self._interval = interval
+        self._target = target
+        self._stopped = threading.Event()
+        self.thread = threading.Thread(
+            target=self._heartbeat, name="stall-watchdog", daemon=True,
+        )
+
+    def _heartbeat(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                faulthandler.dump_traceback_later(
+                    self._timeout, repeat=True, file=self._target,
+                )
+            except ValueError:
+                # The target was closed under us (a test harness closing
+                # its captured stderr); nothing is left to dump into.
+                break
+            self._stopped.wait(self._interval)
+        faulthandler.cancel_dump_traceback_later()
+
+    def stop(self) -> None:
+        """Disarm the watchdog: cancel the pending dump and end the heartbeat.
+
+        Blocks until the heartbeat thread has exited (at most about one
+        heartbeat interval).  Calling it more than once is harmless.
+        """
+        self._stopped.set()
+        self.thread.join(timeout=self._interval + 5.0)
+
+
 def start_stall_watchdog(
     timeout: float = _DEFAULT_TIMEOUT_SECS,
     interval: float = _DEFAULT_INTERVAL_SECS,
     file: TextIO | None = None,
-) -> threading.Thread | None:
+) -> StallWatchdog | None:
     """Arm a watchdog that dumps all thread stacks when Python stalls.
 
     Args:
@@ -53,9 +91,10 @@ def start_stall_watchdog(
             (and the GIL).
 
     Returns:
-        The daemon heartbeat thread, or ``None`` when *file* has no
-        usable file descriptor (e.g. stderr replaced by a ``StringIO``
-        under some test harnesses), in which case nothing is armed.
+        The armed :class:`StallWatchdog` (call :meth:`StallWatchdog.stop`
+        to disarm it), or ``None`` when *file* has no usable file
+        descriptor (e.g. stderr replaced by a ``StringIO`` under some
+        test harnesses), in which case nothing is armed.
     """
     target = sys.stderr if file is None else file
     try:
@@ -64,16 +103,11 @@ def start_stall_watchdog(
         logger.info("Stall watchdog not armed: output has no file descriptor")
         return None
 
-    def _heartbeat() -> None:
-        while True:
-            faulthandler.dump_traceback_later(timeout, repeat=True, file=target)
-            time.sleep(interval)
-
-    thread = threading.Thread(target=_heartbeat, name="stall-watchdog", daemon=True)
-    thread.start()
+    watchdog = StallWatchdog(timeout, interval, target)
+    watchdog.thread.start()
     logger.info(
         "Stall watchdog armed: all thread stacks are dumped to stderr if the "
         "interpreter is unresponsive for %.0fs",
         timeout,
     )
-    return thread
+    return watchdog

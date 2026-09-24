@@ -46,7 +46,11 @@ from kiss.agents.sorcar.sorcar_agent import _agent_usage
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import agent_state, task_update
-from kiss.server.task_update import TaskUpdateRunner, run_task_update_sea
+from kiss.server.task_update import (
+    TaskUpdateRunner,
+    mark_legacy_updates_as_side_channels,
+    run_task_update_sea,
+)
 from kiss.server.web_server import RemoteAccessServer
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -195,10 +199,11 @@ class TestTaskUpdateRunner(unittest.TestCase):
 
 
 def _chat_rows(chat_id: str) -> list[dict[str, Any]]:
-    """Return ``(id, task, parent_task_id, cost)`` of every row in *chat_id*."""
+    """Return ``(id, task, parent_task_id, cost, is_side_channel)`` of every row in *chat_id*."""
     with _rw_lock.read_lock():
         rows = _get_db().execute(
-            "SELECT id, task, parent_task_id, cost FROM task_history "
+            "SELECT id, task, parent_task_id, cost, is_side_channel "
+            "FROM task_history "
             "WHERE chat_id = ? ORDER BY timestamp ASC, rowid ASC",
             (chat_id,),
         ).fetchall()
@@ -243,6 +248,10 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     ]
     assert rows[1]["parent_task_id"] == task_id
     assert rows[1]["cost"] == pytest.approx(cost)
+    # A side channel: the daemon replays the finished child as
+    # ``subagentDone`` rather than re-opening its tab on every reload.
+    assert rows[1]["is_side_channel"] == 1
+    assert rows[0]["is_side_channel"] == 0
     # The parent is still running: its row keeps the totals its own
     # final save will write (from the live counters charged above).
     assert rows[0]["cost"] == 0.0
@@ -261,6 +270,36 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert f"Task id: {task_id}" in digest
     assert "Task prompt: Parent task prompt" in digest
     assert "(no transcript entries yet)" in digest
+
+
+def test_mark_legacy_updates_as_side_channels_stamps_only_update_children() -> None:
+    """Pre-flag task-update rows get stamped; other children and stamped rows are untouched."""
+    parent_id, chat_id = _add_task("Parent task prompt", chat_id="")
+    child: dict[str, Any] = {"subagent": {"parent_task_id": parent_id}}
+    legacy_update, _ = _add_task(
+        task_update_sea.build_prompt(parent_id), chat_id=chat_id, extra=child,
+    )
+    other_child, _ = _add_task("Review the diff", chat_id=chat_id, extra=child)
+    already_stamped, _ = _add_task(
+        task_update_sea.build_prompt(parent_id), chat_id=chat_id,
+        extra={"subagent": {"parent_task_id": parent_id, "side_channel": True}},
+    )
+    # An update prompt naming ANOTHER task is not this parent's update.
+    foreign_update, _ = _add_task(
+        task_update_sea.build_prompt("0" * 32), chat_id=chat_id, extra=child,
+    )
+
+    assert mark_legacy_updates_as_side_channels() == 1
+    flags = {r["id"]: r["is_side_channel"] for r in _chat_rows(chat_id)}
+    assert flags == {
+        parent_id: 0,
+        legacy_update: 1,
+        other_child: 0,
+        already_stamped: 1,
+        foreign_update: 0,
+    }
+    # Idempotent: a second daemon start stamps nothing.
+    assert mark_legacy_updates_as_side_channels() == 0
 
 
 def test_run_task_update_sea_adds_its_spend_to_a_finished_parents_row(

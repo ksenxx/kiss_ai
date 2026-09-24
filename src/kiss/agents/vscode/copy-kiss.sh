@@ -25,6 +25,10 @@ p.write_text(json.dumps(d, indent=2) + '\n')
     echo "Synced extension version to $VERSION"
 fi
 
+# Re-brand the manifest's display strings from media/brand.json (a no-op
+# for the stock brand; see scripts/apply-brand.js).
+node "$SCRIPT_DIR/scripts/apply-brand.js"
+
 echo "Preparing kiss_project directory..."
 rm -rf "$DEST"
 mkdir -p "$DEST"

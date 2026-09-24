@@ -889,7 +889,10 @@ class GeminiModel(Model):
 
         Args:
             text: The text to generate an embedding for.
-            embedding_model: Optional model name. Defaults to "gemini-embedding-001".
+            embedding_model: Optional model name. Defaults to this instance's
+                own model name, so a non-embedding model (a chat, TTS or
+                transcription model) fails instead of silently embedding
+                through ``gemini-embedding-001``.
 
         Returns:
             list[float]: The embedding vector as a list of floats.
@@ -897,7 +900,7 @@ class GeminiModel(Model):
         Raises:
             KISSError: If embedding generation fails.
         """
-        model_to_use = embedding_model or "gemini-embedding-001"
+        model_to_use = embedding_model or self.model_name
         try:
             response = self.client.models.embed_content(model=model_to_use, contents=text)
             return list(response.embeddings[0].values)

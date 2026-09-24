@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
-from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import kill_process_group, popen_process_group
 from kiss.core.utils import atomic_write_text
 
@@ -299,32 +299,23 @@ def save_config(data: dict[str, Any]) -> None:
         data: Configuration dict.
     """
     data = sanitize_config(data)
-    cfg_dir = _config_dir()
     cfg_path = _config_path()
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    with (
-        _config_lock,
-        open(cfg_dir / ".config.lock", "w", encoding="utf-8") as lock_file,
-    ):
-        lock_exclusive(lock_file)
-        try:
-            existing = _read_stored_config(cfg_path)
-            for k, v in data.items():
-                if k not in API_KEY_ENV_VARS:
-                    existing[k] = v
-            for k in RETIRED_KEYS:
-                existing.pop(k, None)
-            # atomic_write_text stages the payload in a sibling temp file
-            # through a buffered file object (a bare ``os.write`` may
-            # legally write fewer bytes than asked and the truncated file
-            # would be published) and ``os.replace``-s it into position.
-            # mode=0o600 is FORCED (not just the new-file default): the
-            # config stores ``remote_password`` and ``tunnel_token``, so
-            # it must never be group/world-readable — and forcing it also
-            # repairs a config.json a prior release published as 0644.
-            atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
-        finally:
-            unlock(lock_file)
+    with _config_lock, exclusive_file_lock(_config_dir() / ".config.lock"):
+        existing = _read_stored_config(cfg_path)
+        for k, v in data.items():
+            if k not in API_KEY_ENV_VARS:
+                existing[k] = v
+        for k in RETIRED_KEYS:
+            existing.pop(k, None)
+        # atomic_write_text stages the payload in a sibling temp file
+        # through a buffered file object (a bare ``os.write`` may
+        # legally write fewer bytes than asked and the truncated file
+        # would be published) and ``os.replace``-s it into position.
+        # mode=0o600 is FORCED (not just the new-file default): the
+        # config stores ``remote_password`` and ``tunnel_token``, so
+        # it must never be group/world-readable — and forcing it also
+        # repairs a config.json a prior release published as 0644.
+        atomic_write_text(cfg_path, json.dumps(existing, indent=2), mode=0o600)
 
 
 # How many recently opened working directories ``config.json`` keeps.
@@ -633,14 +624,8 @@ def _api_keys_store_flock() -> Iterator[None]:
     already holding it.
     """
     env_path = api_keys_env_path()
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = env_path.with_name("." + env_path.name + ".kiss.lock")
-    with open(lock_path, "w", encoding="utf-8") as lock_file:
-        lock_exclusive(lock_file)
-        try:
-            yield
-        finally:
-            unlock(lock_file)
+    with exclusive_file_lock(env_path.with_name("." + env_path.name + ".kiss.lock")):
+        yield
 
 
 def _edit_api_keys_env_file_locked(mutations: dict[str, str | None]) -> None:
@@ -791,16 +776,8 @@ def save_api_key(key_name: str, key_value: str) -> None:
             install_hook = bool(key_value) and shell == user_shell
             if not rc.exists() and not install_hook:
                 continue
-            rc.parent.mkdir(parents=True, exist_ok=True)
-            rc_lock = rc.with_name(rc.name + ".kiss.lock")
-            with open(rc_lock, "w", encoding="utf-8") as lock_file:
-                lock_exclusive(lock_file)
-                try:
-                    _update_rc_for_key(
-                        rc, shell, key_name, install_hook=install_hook,
-                    )
-                finally:
-                    unlock(lock_file)
+            with exclusive_file_lock(rc.with_name(rc.name + ".kiss.lock")):
+                _update_rc_for_key(rc, shell, key_name, install_hook=install_hook)
         if key_value:
             os.environ[key_name] = key_value
         else:
