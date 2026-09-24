@@ -83,3 +83,30 @@ export function renderBrand(text: string, brand: Brand = BRAND): string {
           : brand.tagline,
   );
 }
+
+/**
+ * Extension-relative path of the icon `media/<name>` as the installed
+ * extension ships it.
+ *
+ * The VSIX build copies the icons to content-hashed names and records the
+ * mapping in `media/hashed/index.json` (`scripts/hash-icons.js`) so that a
+ * changed icon gets a fresh URL instead of the client's year-long cached
+ * copy.  Icons shown at runtime (the editor-tab icon of a chat panel) go
+ * through the same mapping; without the index (running from source) the
+ * plain path is returned.
+ */
+export function mediaIconPath(extensionRoot: string, name: string): string {
+  const plain = `media/${name}`;
+  try {
+    const index = JSON.parse(
+      fs.readFileSync(
+        path.join(extensionRoot, 'media', 'hashed', 'index.json'),
+        'utf-8',
+      ),
+    );
+    const hashed = index[plain];
+    return typeof hashed === 'string' && hashed ? hashed : plain;
+  } catch {
+    return plain;
+  }
+}

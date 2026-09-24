@@ -16,7 +16,7 @@ import {
   setWebviewNotificationPoster,
 } from './WebviewNotifications';
 import {MetaPanelValues, TaskUpdateState, ToWebviewMessage} from './types';
-import {PRODUCT_NAME} from './brand';
+import {PRODUCT_NAME, mediaIconPath} from './brand';
 
 /** The webview panel viewType of an editor-tab chat. */
 export const CHAT_PANEL_VIEW_TYPE = 'kissSorcar.chatTab';
@@ -192,9 +192,15 @@ export class SorcarPanelManager {
     private readonly _retireTab?: (tabId: string) => void,
     private readonly _recordPanelTab?: (tabId: string, open: boolean) => void,
   ) {
-    const media = vscode.Uri.joinPath(_extensionUri, 'media');
-    this._kissIcon = vscode.Uri.joinPath(media, 'kiss-icon.svg');
-    this._spinnerIcon = vscode.Uri.joinPath(media, 'spinner-running.svg');
+    const root = _extensionUri.fsPath;
+    this._kissIcon = vscode.Uri.joinPath(
+      _extensionUri,
+      mediaIconPath(root, 'kiss-icon.svg'),
+    );
+    this._spinnerIcon = vscode.Uri.joinPath(
+      _extensionUri,
+      mediaIconPath(root, 'spinner-running.svg'),
+    );
   }
 
   /** Whether editor-tabs mode is currently switched on. */
