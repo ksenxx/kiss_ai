@@ -9906,7 +9906,9 @@ class RemoteAccessServer:
         # A GIL-holding stall (2026-09-12: a quadratic regex over a
         # 5.8 MB tool result) freezes every thread, including logging;
         # the C-level watchdog still dumps all thread stacks to stderr.
-        start_stall_watchdog()
+        # Disarmed at the end of the ``finally`` below so an in-process
+        # restart (or a test) does not leave a heartbeat thread behind.
+        stall_watchdog = start_stall_watchdog()
 
         self._install_signal_handlers()
 
@@ -9949,6 +9951,8 @@ class RemoteAccessServer:
                 self._sea_command_subscriber = None
             self._sea_command_watcher_started = False
             sea_commands.stop_registry_watcher()
+            if stall_watchdog is not None:
+                stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)
 
     async def start_async(self) -> None:
