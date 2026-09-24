@@ -35,6 +35,7 @@ from kiss.core.models.decisions_model import (
     DecisionsModel,
     choice,
     noul,
+    reported_cost,
     score,
 )
 from kiss.core.models.model_info import MODEL_INFO, calculate_cost, model
@@ -155,21 +156,25 @@ def format_decision(model_name: str, response: dict[str, Any]) -> tuple[str, flo
     """Render a decisions response for the agent and price it.
 
     Args:
-        model_name: The catalog name the request was made with (prices come
-            from its catalog entry).
+        model_name: The catalog name the request was made with (its catalog
+            prices are used only when the response carries no ``usage.cost``).
         response: The dict returned by :meth:`DecisionsModel.decide`.
 
     Returns:
         ``(text, cost_usd, total_tokens)`` where *text* is the JSON the tool
         returns: ``{"answers": ..., "model": <served id>, "usage":
-        {"input_tokens", "output_tokens", "cost_usd"}}``.
+        {"input_tokens", "output_tokens", "cost_usd"}}``.  *cost_usd* is
+        OpenRouter's reported ``usage.cost`` when present (the served
+        model's actual bill), else the catalog estimate.
     """
     usage: dict[str, Any] = {}
     if isinstance(response.get("usage"), dict):
         usage = response["usage"]
     input_tokens = int(usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("output_tokens") or 0)
-    cost = calculate_cost(model_name, input_tokens, output_tokens)
+    cost = reported_cost(response)
+    if cost is None:
+        cost = calculate_cost(model_name, input_tokens, output_tokens)
     text = json.dumps(
         {
             "answers": response["answers"],

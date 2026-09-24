@@ -585,10 +585,20 @@ class ChatSorcarAgent(SorcarAgent):
         # wiring, frequent-task recording, ...) must run inside the try
         # below: an exception in any of them would otherwise bypass the
         # cleanup and leave a permanently "running" task behind (F-14).
+        # The calling thread's previous task binding is restored on exit:
+        # a side-channel task (``/update``, merge conflict resolution)
+        # runs on a worker thread that then attributes the child's spend
+        # to the PARENT agent, and that write lands under whatever
+        # ``task_id`` the thread carries.  Resetting to ``""`` instead of
+        # the previous value stored the parent's budget offset under an
+        # orphan key, so the parent's tab under-counted until its own
+        # thread rewrote the offset.
+        previous_task_id = ""
         try:
             if printer is not None:
                 tl = getattr(printer, "_thread_local", None)
                 if tl is not None:
+                    previous_task_id = getattr(tl, "task_id", "") or ""
                     tl.task_id = task_key
                 allocated = getattr(printer, "agent_task_allocated", None)
                 if allocated is not None:
@@ -689,7 +699,7 @@ class ChatSorcarAgent(SorcarAgent):
                         pass
                 tl = getattr(printer, "_thread_local", None)
                 if tl is not None and getattr(tl, "task_id", "") == task_key:
-                    tl.task_id = ""
+                    tl.task_id = previous_task_id
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 # Once ``super().run`` started, the live agent state is

@@ -1128,6 +1128,15 @@ class _LiveUsageMonitor:
         )
 
 
+# Serializes "snapshot the parent's totals, publish them as printer
+# offsets" in ``_attribute_sub_usage``: two concurrent attributions each
+# read the ledger and publish later, so without ordering an older, smaller
+# snapshot could land after a newer one and leave the tab under-counting
+# until the next attribution.  Only ledger reads and the printer's own
+# lock are taken under it, so no caller can deadlock on it.
+_OFFSET_PUBLISH_LOCK = threading.Lock()
+
+
 def _attribute_sub_usage(
     agent: Any,
     budget: float,
@@ -1193,12 +1202,23 @@ def _attribute_sub_usage(
         agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
     if agent.printer is not None:
         try:
-            # One coherent triple (see _agent_usage): separate property
-            # reads could tear across a concurrent snapshot publish.
-            budget_total, tokens_total, steps_total = _agent_usage(agent)
-            agent.printer.budget_offset = budget_total
-            agent.printer.tokens_offset = tokens_total
-            agent.printer.steps_offset = steps_total
+            with _OFFSET_PUBLISH_LOCK:
+                # One coherent triple (see _agent_usage): separate property
+                # reads could tear across a concurrent snapshot publish.
+                budget_total, tokens_total, steps_total = _agent_usage(agent)
+                # The offsets belong to the PARENT's task.  This runs on
+                # whatever thread finished the child (a fan-out's tool
+                # thread, but also the ``/update`` worker or a server
+                # thread), so a thread-keyed setter would file them under
+                # that thread's task; name the parent's task when it has one.
+                task_id = str(getattr(agent, "last_task_id", "") or "")
+                set_offsets = getattr(agent.printer, "set_usage_offsets", None)
+                if task_id and callable(set_offsets):
+                    set_offsets(task_id, budget_total, tokens_total, steps_total)
+                else:
+                    agent.printer.budget_offset = budget_total
+                    agent.printer.tokens_offset = tokens_total
+                    agent.printer.steps_offset = steps_total
         except Exception:
             pass
 

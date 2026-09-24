@@ -1122,6 +1122,24 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def extract_cost_from_response(self, response: Any) -> float | None:
+        """Return the USD cost the provider itself reported for *response*.
+
+        Providers that state what they charged for a call (OpenRouter's
+        ``usage.cost``) override this; the agent bills that figure instead
+        of the catalog estimate from
+        :func:`kiss.core.models.model_info.calculate_cost`.  The base
+        implementation knows of no such field.
+
+        Args:
+            response: The raw API response object.
+
+        Returns:
+            The billed cost in USD, or ``None`` when the response carries
+            no provider-reported cost.
+        """
+        return None
+
     def take_partial_usage_response(self) -> Any:
         """Return (and consume) usage for a generation that raised, if known.
 

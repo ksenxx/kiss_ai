@@ -1156,6 +1156,36 @@ class JsonPrinter(Printer):
                 return
             offsets[key] = value
 
+    def set_usage_offsets(
+        self, task_id: Any, budget: float, tokens: int, steps: int,
+    ) -> None:
+        """Store all three usage offsets of an explicitly named task.
+
+        The ``budget_offset`` / ``tokens_offset`` / ``steps_offset``
+        setters key on the CALLING thread's task, which is right for the
+        task's own agent thread but not for a server or side-channel
+        thread folding a child's spend into a parent it does not run:
+        ``task_update`` runs the ``/update`` child on a worker thread, and
+        its attribution to the parent landed under the worker's (empty)
+        key, so the parent's tab under-counted until the parent's own
+        thread rewrote its offset.  Naming the task writes it where the
+        parent's ``usage_info`` reads.  Dropped for a cleaned-up task,
+        like :meth:`_write_offset`.
+
+        Args:
+            task_id: The parent task whose offsets change.
+            budget: The parent's banked USD total.
+            tokens: The parent's banked token total.
+            steps: The parent's banked step total.
+        """
+        key = self._coerce_task_id(task_id)
+        with self._lock:
+            if key in self._closed_tasks:
+                return
+            self._budget_offsets[key] = budget
+            self._tokens_offsets[key] = tokens
+            self._steps_offsets[key] = steps
+
     @property
     def tokens_offset(self) -> int:
         """Per-task token-count offset used when broadcasting ``usage_info``.

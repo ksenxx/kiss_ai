@@ -70,6 +70,7 @@ _BASE_URL_ENV = "KISS_DECISIONS_BASE_URL"
 SERVED_MODEL = "typesafe/jev-1.13-20260917"
 INPUT_TOKENS = 612
 OUTPUT_TOKENS = 5
+REPORTED_COST = 3.1e-05  # what the scripted endpoint says it charged (not the catalog rate)
 
 
 def _choice_answer(kind: str) -> dict[str, Any]:
@@ -105,7 +106,11 @@ class _JevHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         _JevHandler.requests.append({"path": self.path, "body": body})
         state = body.get("state", "")
-        usage = {"input_tokens": INPUT_TOKENS, "output_tokens": OUTPUT_TOKENS, "cost": 2.57e-05}
+        usage = {
+            "input_tokens": INPUT_TOKENS,
+            "output_tokens": OUTPUT_TOKENS,
+            "cost": REPORTED_COST,
+        }
         if state.startswith("http-400"):
             self._send(400, {"error": {"message": "Model x does not exist", "code": 400}})
         elif state.startswith("unknown-kind"):
@@ -188,7 +193,9 @@ def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKissHome]:
 
 
 def _expected_cost() -> float:
-    return calculate_cost(DEFAULT_DECISIONS_MODEL, INPUT_TOKENS, OUTPUT_TOKENS)
+    """The endpoint's ``usage.cost`` is the bill; the catalog rate is a fallback only."""
+    assert REPORTED_COST != calculate_cost(DEFAULT_DECISIONS_MODEL, INPUT_TOKENS, OUTPUT_TOKENS)
+    return REPORTED_COST
 
 
 # ---------------------------------------------------------------------------

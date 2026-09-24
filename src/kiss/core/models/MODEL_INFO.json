@@ -149,7 +149,8 @@
     "output_price_per_1M": 3.6,
     "fc": false,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.35
   },
   "Qwen/Qwen3.5-9B": {
     "context_length": 262144,
@@ -174,7 +175,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.3
   },
   "Qwen/Qwen3.7-Plus": {
     "context_length": 500000,
@@ -193,7 +195,8 @@
     "emb": false,
     "gen": true,
     "comment": "NEW",
-    "use_responses_api": true
+    "use_responses_api": true,
+    "cache_read_price_per_1M": 0.25
   },
   "Qwen/Qwen3.8-Flash": {
     "context_length": 500000,
@@ -680,7 +683,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.03
   },
   "deepseek-ai/DeepSeek-V4-Pro": {
     "context_length": 512000,
@@ -697,7 +701,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.13
   },
   "deepseek-ai/DeepSeek-V4.1-Flash": {
     "context_length": 500000,
@@ -706,7 +711,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.006
   },
   "deepseek-ai/deepseek-coder-33b-instruct": {
     "context_length": 16384,
@@ -1952,7 +1958,7 @@
     "input_price_per_1M": 0.6,
     "output_price_per_1M": 3.0,
     "cache_read_price_per_1M": 0.1,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 0.6,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -1963,7 +1969,7 @@
     "input_price_per_1M": 0.95,
     "output_price_per_1M": 4.0,
     "cache_read_price_per_1M": 0.16,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 0.95,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -1974,7 +1980,7 @@
     "input_price_per_1M": 0.95,
     "output_price_per_1M": 4.0,
     "cache_read_price_per_1M": 0.19,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 0.95,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -1985,7 +1991,7 @@
     "input_price_per_1M": 3.0,
     "output_price_per_1M": 15.0,
     "cache_read_price_per_1M": 0.3,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -1997,7 +2003,7 @@
     "input_price_per_1M": 3.0,
     "output_price_per_1M": 15.0,
     "cache_read_price_per_1M": 0.3,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2010,7 +2016,7 @@
     "input_price_per_1M": 3.0,
     "output_price_per_1M": 15.0,
     "cache_read_price_per_1M": 0.3,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2023,7 +2029,7 @@
     "input_price_per_1M": 3.0,
     "output_price_per_1M": 15.0,
     "cache_read_price_per_1M": 0.3,
-    "cache_write_price_per_1M": 0.0,
+    "cache_write_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -2269,7 +2275,8 @@
     "output_price_per_1M": 4.5,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.2
   },
   "moonshotai/Kimi-K2.7-Code": {
     "context_length": 262144,
@@ -2277,7 +2284,8 @@
     "output_price_per_1M": 4.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.19
   },
   "moonshotai/Kimi-K3": {
     "context_length": 500000,
@@ -2287,7 +2295,8 @@
     "emb": false,
     "gen": true,
     "comment": "NEW",
-    "thinking": "high"
+    "thinking": "high",
+    "cache_read_price_per_1M": 0.3
   },
   "moonshotai/Kimi-K3-high": {
     "context_length": 500000,
@@ -2298,6 +2307,7 @@
     "gen": true,
     "comment": "NEW",
     "thinking": "high",
+    "cache_read_price_per_1M": 0.3,
     "alias_of": "moonshotai/Kimi-K3"
   },
   "moonshotai/Kimi-K3-low": {
@@ -2309,6 +2319,7 @@
     "gen": true,
     "comment": "NEW",
     "thinking": "low",
+    "cache_read_price_per_1M": 0.3,
     "alias_of": "moonshotai/Kimi-K3"
   },
   "moonshotai/Kimi-K3-max": {
@@ -2320,6 +2331,7 @@
     "gen": true,
     "comment": "NEW",
     "thinking": "max",
+    "cache_read_price_per_1M": 0.3,
     "alias_of": "moonshotai/Kimi-K3"
   },
   "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": {
@@ -2344,7 +2356,8 @@
     "output_price_per_1M": 3.6,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.2
   },
   "o1": {
     "context_length": 200000,
@@ -6786,7 +6799,8 @@
     "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "cache_read_price_per_1M": 0.26
   },
   "zai-org/GLM-5.2": {
     "context_length": 500000,
@@ -6795,7 +6809,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "thinking": "high"
+    "thinking": "high",
+    "cache_read_price_per_1M": 0.26
   },
   "zai-org/GLM-5.2-high": {
     "context_length": 500000,
@@ -6805,6 +6820,7 @@
     "emb": false,
     "gen": true,
     "thinking": "high",
+    "cache_read_price_per_1M": 0.26,
     "alias_of": "zai-org/GLM-5.2"
   },
   "zai-org/GLM-5.2-max": {
@@ -6815,6 +6831,7 @@
     "emb": false,
     "gen": true,
     "thinking": "max",
+    "cache_read_price_per_1M": 0.26,
     "alias_of": "zai-org/GLM-5.2"
   },
   "zai-org/GLM-5.3": {
@@ -6824,7 +6841,8 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.26
   },
   "zai-org/GLM-5.3-Flash": {
     "context_length": 500000,
@@ -6833,6 +6851,7 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "cache_read_price_per_1M": 0.03
   }
 }
