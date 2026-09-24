@@ -378,8 +378,58 @@ async function runTest() {
 
   manager.dispose();
 }
+/**
+ * An installed (packaged) extension names its icons through
+ * media/hashed/index.json (scripts/hash-icons.js); the tab icons must
+ * follow that mapping so a same-version rebuild gets uncached URLs.
+ */
+async function runHashedIconsTest() {
+  const packaged = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'kiss-edstatus-packaged-'),
+  );
+  fs.cpSync(path.join(EXT_ROOT, 'media'), path.join(packaged, 'media'), {
+    recursive: true,
+  });
+  const hashedKiss = 'media/hashed/kiss-icon-deadbeef.svg';
+  const hashedSpinner = 'media/hashed/spinner-running-0badf00d.svg';
+  fs.mkdirSync(path.join(packaged, 'media', 'hashed'));
+  fs.copyFileSync(KISS_ICON, path.join(packaged, hashedKiss));
+  fs.copyFileSync(SPINNER_ICON, path.join(packaged, hashedSpinner));
+  fs.writeFileSync(
+    path.join(packaged, 'media', 'hashed', 'index.json'),
+    JSON.stringify({
+      'media/kiss-icon.svg': hashedKiss,
+      'media/spinner-running.svg': hashedSpinner,
+    }),
+  );
+  const manager = new SorcarPanelManager(vscodeStub.Uri.file(packaged));
+  const before = createdPanels.length;
+  manager.openNewChat();
+  const panel = createdPanels[before];
+  const tabId = /data-kiss-tab-id="([^"]+)"/.exec(panel.webview.html)[1];
+  panel._recv.fire({type: 'panelTitle', title: 'hashed', tabId, state: ''});
+  await waitFor(() => panel.title === 'hashed');
+  assert.strictEqual(
+    panel.iconPath.fsPath,
+    path.join(packaged, hashedKiss),
+    'idle icon follows index.json',
+  );
+  panel._recv.fire({
+    type: 'panelTitle',
+    title: 'hashed',
+    tabId,
+    state: 'running',
+  });
+  await waitFor(
+    () => panel.iconPath.fsPath === path.join(packaged, hashedSpinner),
+    'spinner follows index.json',
+  );
+  manager.dispose();
+  fs.rmSync(packaged, {recursive: true, force: true});
+}
 
 runTest()
+  .then(runHashedIconsTest)
   .then(() => {
     console.log('editorTabsPanelStatus: all tests passed');
     server.close();

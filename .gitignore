@@ -23,6 +23,8 @@ dist/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
+# Content-hashed icon copies created around `vsce pack` (scripts/hash-icons.js).
+src/kiss/agents/vscode/media/hashed/
 # Scratch module written by secondarySidebarPerWorkspace.test.js while it runs.
 src/kiss/agents/vscode/test/_vscode-stub-*.js
 src/kiss/agents/vscode/README.md
