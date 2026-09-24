@@ -1,10 +1,6 @@
 ## Trick
 
-Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
-
-## Trick
-
-Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
+Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 
 ## Trick
 
@@ -16,15 +12,11 @@ Can you git pull origin/<current-branch>, merge with <current-branch>, and push?
 
 ## Trick
 
-Can you use the instructions in the file @ to perform the task?
-
-## Trick
-
-Can you check the following message for a merge conflict and help me fix it?
-
-## Trick
-
 Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. The channel's authentication tools open the sign-in page or developer portal in my default browser when they can and return its URL (and code): always show me that URL and code with ask_user_question so I can finish in my OWN browser if no window appeared. Never drive sign-in pages or developer portals with your own browser tools, do not retry or relaunch the browser, and never ask for or type my password or 2FA code. When I paste back a token or redirect URL, finish the authentication with the channel's tools and verify with its check tool.
+
+## Trick
+
+Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 
 ## Trick
 
