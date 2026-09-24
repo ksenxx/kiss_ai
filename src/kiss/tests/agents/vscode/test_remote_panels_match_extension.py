@@ -46,7 +46,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from playwright.sync_api import Page, ViewportSize, sync_playwright
+from playwright.sync_api import (
+    Error,
+    Page,
+    Request,
+    ViewportSize,
+    sync_playwright,
+)
 
 from kiss.tests.server.test_remote_panels_match_extension import VSCODE_VARS
 
@@ -515,12 +521,83 @@ def _start_remote_server(
     asyncio.run(scenario())
 
 
+class _PageDiagnostics:
+    """Collects the failed requests and script errors of one page load."""
+
+    def __init__(self) -> None:
+        self.failed_requests: list[str] = []
+        self.page_errors: list[str] = []
+
+    def on_request_failed(self, request: Request) -> None:
+        """Record a request Chromium gave up on (``requestfailed``)."""
+        self.failed_requests.append(f"{request.url}: {request.failure}")
+
+    def on_page_error(self, error: Error) -> None:
+        """Record an uncaught exception thrown by the page's scripts."""
+        self.page_errors.append(str(error))
+
+    def clear(self) -> None:
+        """Forget everything recorded for the previous load attempt."""
+        self.failed_requests.clear()
+        self.page_errors.clear()
+
+
+_PAGE_LOAD_ATTEMPTS = 3
+_TEST_API_READY_JS = (
+    "typeof (window._testApi && window._testApi.processEvent) === 'function'"
+)
+
+
+def _load_page(page: Page, url: str) -> None:
+    """Load *url* until ``main.js`` has installed its test hooks.
+
+    ``main.js`` is a classic ``<script src>`` at the end of the body, so
+    after ``domcontentloaded`` its ``window._testApi`` can only be
+    missing when the script failed to load or threw.  The load is
+    retried only when Chromium reported an aborted request: on this
+    host other jobs' Docker containers add and remove veth links, and
+    each one is a network change that aborts in-flight requests
+    (``net::ERR_NETWORK_CHANGED``), the document and ``main.js``
+    included.  An aborted document request surfaces as ``page.goto``
+    raising; it is recorded as a failed request and retried the same
+    way.  Any other cause (a startup exception, a missing hook) fails
+    immediately with the recorded diagnostics.
+    """
+    diag = _PageDiagnostics()
+    page.on("requestfailed", diag.on_request_failed)
+    page.on("pageerror", diag.on_page_error)
+    try:
+        for attempt in range(1, _PAGE_LOAD_ATTEMPTS + 1):
+            diag.clear()
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+            except Error as exc:
+                diag.failed_requests.append(f"{url}: {exc.message}")
+                # ``goto`` raises as soon as the request fails, tens of
+                # milliseconds before Chromium commits its error page;
+                # a retry started in that window is interrupted by that
+                # commit, so wait for the error page first.
+                page.wait_for_url("chrome-error://**", wait_until="commit")
+            else:
+                page.wait_for_selector("#output", state="attached")
+                if page.evaluate(_TEST_API_READY_JS):
+                    return
+            if not diag.failed_requests or attempt == _PAGE_LOAD_ATTEMPTS:
+                raise AssertionError(
+                    f"main.js did not initialise at {url} "
+                    f"(attempt {attempt}): failed requests "
+                    f"{diag.failed_requests}, page errors {diag.page_errors}"
+                )
+    finally:
+        page.remove_listener("requestfailed", diag.on_request_failed)
+        page.remove_listener("pageerror", diag.on_page_error)
+
+
 def _capture_page(
     page: Page, url: str, screenshot: Path
 ) -> dict[str, Any]:
     """Load *url*, inject the transcript, screenshot, return probes."""
-    page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_selector("#output", state="attached")
+    _load_page(page, url)
     count = page.evaluate(_INJECT_PAGE_JS)
     assert count >= 16, "transcript injection failed"
     page.wait_for_selector(".rc", state="attached")
@@ -676,3 +753,124 @@ def test_live_remote_panels_match_extension(tmp_path: Path) -> None:
         _assert_probe_parity(
             probes[label]["extension"], probes[label]["remote"], label
         )
+
+
+# --------------------------------------------------------------------------
+# _load_page: every branch, against a real Chromium and a real HTTP server
+# --------------------------------------------------------------------------
+
+_TINY_PAGE_HTML = (
+    b"<!doctype html><html><body><div id='output'></div>"
+    b"<script src='/main.js'></script></body></html>"
+)
+_TINY_MAIN_JS_OK = b"window._testApi = { processEvent: function () {} };"
+_TINY_MAIN_JS_THROWS = b"throw new Error('boot failed before _testApi');"
+
+
+class _FlakyScriptHandler(http.server.BaseHTTPRequestHandler):
+    """Serve the tiny page, aborting the first N requests for some paths.
+
+    Class attributes are the per-test configuration: ``aborts`` maps a
+    path to how many of its requests to abort, ``requests`` counts the
+    requests seen per path.  An aborted request closes the socket before
+    any bytes go out, which Chromium reports as a failed request
+    (``net::ERR_EMPTY_RESPONSE``), the same shape as a request aborted
+    by a host network change.
+    """
+
+    aborts: dict[str, int] = {}
+    requests: dict[str, int] = {}
+    main_js = _TINY_MAIN_JS_OK
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        """Serve ``/`` and ``/main.js``; abort while aborts remain."""
+        cls = type(self)
+        cls.requests[self.path] = cls.requests.get(self.path, 0) + 1
+        if cls.aborts.get(self.path, 0) > 0:
+            cls.aborts[self.path] -= 1
+            self.close_connection = True
+            return
+        if self.path == "/main.js":
+            body = cls.main_js
+            ctype = "text/javascript"
+        else:
+            body = _TINY_PAGE_HTML
+            ctype = "text/html; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        """Silence request logging."""
+
+
+def _run_load_page(
+    aborts: dict[str, int], main_js: bytes = _TINY_MAIN_JS_OK
+) -> tuple[str, dict[str, int]]:
+    """Serve the tiny page with the given per-path *aborts*, run
+    :func:`_load_page` once and return ``(error message, requests seen
+    per path)``; the message is empty when the load succeeded."""
+    _FlakyScriptHandler.aborts = dict(aborts)
+    _FlakyScriptHandler.requests = {}
+    _FlakyScriptHandler.main_js = main_js
+    httpd = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _FlakyScriptHandler
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    message = ""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page()
+                try:
+                    _load_page(
+                        page, f"http://127.0.0.1:{httpd.server_address[1]}/"
+                    )
+                except AssertionError as exc:
+                    message = str(exc)
+                assert page.evaluate("window.__probe = 1") == 1, (
+                    "listeners removed, page still usable"
+                )
+            finally:
+                browser.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=10)
+    return message, _FlakyScriptHandler.requests
+
+
+def test_load_page_retries_after_an_aborted_script_request() -> None:
+    """One aborted ``main.js`` load is retried and the second load wins."""
+    message, requests = _run_load_page({"/main.js": 1})
+    assert message == ""
+    assert requests == {"/": 2, "/main.js": 2}
+
+
+def test_load_page_retries_after_an_aborted_document_request() -> None:
+    """An aborted document request makes ``page.goto`` raise; that is
+    recorded as a failed request and the reload wins."""
+    message, requests = _run_load_page({"/": 1})
+    assert message == ""
+    assert requests == {"/": 2, "/main.js": 1}
+
+
+def test_load_page_fails_fast_on_a_script_error() -> None:
+    """A script that throws before installing the hook is a real failure:
+    no retry, and the page error is in the message."""
+    message, requests = _run_load_page({}, main_js=_TINY_MAIN_JS_THROWS)
+    assert "(attempt 1)" in message
+    assert "boot failed before _testApi" in message
+    assert requests == {"/": 1, "/main.js": 1}
+
+
+def test_load_page_gives_up_after_the_last_aborted_attempt() -> None:
+    """Every attempt aborted: the last one raises with the failed request."""
+    message, requests = _run_load_page({"/main.js": _PAGE_LOAD_ATTEMPTS + 1})
+    assert f"(attempt {_PAGE_LOAD_ATTEMPTS})" in message
+    assert "/main.js: net::ERR_EMPTY_RESPONSE" in message
+    assert requests == {"/": _PAGE_LOAD_ATTEMPTS, "/main.js": _PAGE_LOAD_ATTEMPTS}
