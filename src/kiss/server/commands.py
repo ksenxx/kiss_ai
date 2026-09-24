@@ -2017,7 +2017,7 @@ class _CommandsMixin:
         that never announced a folder.  Each connection (one per
         VS Code window, one per webapp instance) runs its commands in
         its own stamped work_dir (``task_runner`` resolves
-        ``cmd["workDir"]`` first), so the settings panel must show the
+        ``cmd["workDir"]`` first), so the client must be told the
         directory that will actually be used by *this* instance, not
         whichever folder another instance persisted last.
         """

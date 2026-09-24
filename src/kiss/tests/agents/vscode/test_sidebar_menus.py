@@ -760,12 +760,11 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.wait_for_selector(
             _explorer_row_sel("/plain/only.txt"), timeout=15000,
         )
-        # The daemon was told: setWorkDir + saved config; the settings
-        # box follows; the Source Control view reports no repository.
+        # The daemon was told: setWorkDir + saved config; the Source
+        # Control view reports no repository.
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.plain_dir)
         saved = _sent(frames, "saveConfig")
         assert saved and saved[-1]["config"]["work_dir"] == str(harness.plain_dir)
-        assert page.locator("#cfg-work-dir").input_value() == str(harness.plain_dir)
         page.click("#activity-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes').innerText.includes('Not a git repository')",
@@ -777,7 +776,7 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
         page.keyboard.press("Escape")
         page.wait_for_selector("#folder-picker", state="hidden")
-        assert page.locator("#cfg-work-dir").input_value() == str(harness.plain_dir)
+        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.plain_dir)
         # Highlighting a folder in the list and pressing Select picks it:
         # back to the repo (restoring the saved workspace for the other
         # tests too).
@@ -936,7 +935,6 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         assert _root_paths(page) == [plain, repo]
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
         assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == plain
-        assert page.locator("#cfg-work-dir").input_value() == plain
         assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain
         page.wait_for_selector(
             _row_at(os.path.join(plain, "only.txt")), timeout=15000,
