@@ -54,10 +54,13 @@ Eval set JSON::
 A task passes when every ``expect`` substring appears in the rollout's
 result (HTML tags stripped), ``expect_regex`` matches it, and ``check`` (a
 shell command run in the rollout's scratch directory with the result in
-``$RESULT``) exits 0.  A task without any of the three passes when the
-rollout finished successfully.  ``split`` is ``train``, ``select`` or
-absent (both).  Rollouts run in-process with :class:`SorcarAgent`, so the
-loop needs no daemon and its spend is folded into the calling task.
+``$RESULT``) exits 0.  ``setup`` and ``check`` run under the same shell as
+the rollout's ``Bash`` tool (``sh`` on POSIX, Git bash on Windows), so
+``touch f`` / ``test -f f`` work everywhere.  A task without any of the
+three passes when the rollout finished successfully.  ``split`` is
+``train``, ``select`` or absent (both).  Rollouts run in-process with
+:class:`SorcarAgent`, so the loop needs no daemon and its spend is folded
+into the calling task.
 
 Two optional eval-set entries plug a benchmark in:
 
@@ -107,6 +110,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import flatten_content_to_text
 from kiss.core.utils import substitute_prompt_args
@@ -555,8 +559,7 @@ def verify(task: EvalTask, result: str, success: bool, work_dir: Path) -> tuple[
     if task.check:
         env = {**os.environ, "RESULT": text, "SUCCESS": "1" if success else "0"}
         proc = subprocess.run(
-            task.check,
-            shell=True,
+            **_popen_kwargs(task.check),
             cwd=work_dir,
             env=env,
             capture_output=True,
@@ -692,7 +695,11 @@ def run_rollout(
     work_dir.mkdir(parents=True, exist_ok=True)
     if task.setup:
         subprocess.run(
-            task.setup, shell=True, cwd=work_dir, check=True, capture_output=True, timeout=120
+            **_popen_kwargs(task.setup),
+            cwd=work_dir,
+            check=True,
+            capture_output=True,
+            timeout=120,
         )
     kwargs: dict[str, Any] = {"web_tools": False, "is_parallel": False, "use_memory": False}
     kwargs.update(defaults or {})

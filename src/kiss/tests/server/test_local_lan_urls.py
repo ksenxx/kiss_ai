@@ -317,12 +317,16 @@ class TestLanCapableServer(_LiveServerCase):
 
         Points the server at an unwritable location and re-runs the
         republish path; the broadcast must still go out and no
-        exception may surface.
+        exception may surface.  The location is a path *under a regular
+        file*, which no OS lets ``mkdir`` create (a POSIX-only ``/proc``
+        path is just ``C:\\proc`` on Windows, where it gets created).
         """
         old_url_file = self.server._url_file
         self.server._last_ips = frozenset()
+        not_a_dir = Path(self.server.work_dir) / "not-a-dir"
+        not_a_dir.write_text("")
         try:
-            self.server._url_file = Path("/proc/kiss-no-such/remote-url.json")
+            self.server._url_file = not_a_dir / "remote-url.json"
             with self.assertLogs(
                 "kiss.server.web_server", level="WARNING"
             ) as logs:

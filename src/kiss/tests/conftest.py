@@ -183,6 +183,18 @@ TRANSIENT_REPLACE_READ_ERRORS: tuple[type[OSError], ...] = (
     (PermissionError,) if IS_WINDOWS else ()
 )
 
+# Pause (seconds) between two reads of a hot reader polling a file that
+# writers atomically replace.  Python's ``open`` takes no
+# ``FILE_SHARE_DELETE``, so on Windows a reader that reopens the file
+# back to back holds a handle ~90 % of the time (measured: 87 us per
+# read, 12 us between reads) and every ``os.replace`` of the writer
+# fails until it lands in the gap -- on a loaded machine that starves
+# the writer for seconds.  No real consumer (an editor, the VS Code
+# extension, a poller) reopens a file thousands of times per second; a
+# 2 ms pause keeps the reader hot enough to catch a torn write while
+# letting the writer publish.
+HOT_READER_PAUSE = 0.002
+
 
 def install_cli_script(script: Path, source: str) -> None:
     """Write the Python program *source* to *script* as a stand-in CLI.

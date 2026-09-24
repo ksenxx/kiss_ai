@@ -40,6 +40,7 @@ from kiss.agents.sorcar.cron_agent import (
     start_scheduler_thread,
     tick,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 
 @pytest.fixture(autouse=True)
@@ -582,9 +583,16 @@ def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None
     assert tick(2.0) == 1
     stored = load_jobs()[0]
     assert stored["last_status"] == "error"
-    # The error explains what is missing instead of a bare traceback.
+    # The error explains what is missing instead of a bare traceback:
+    # on POSIX the remedy (start kiss-web); on Windows the reason there
+    # is none — CPython has no Unix-domain sockets, so kiss-web serves
+    # WebSocket clients only and never binds the daemon socket that
+    # run_agent dispatch needs (daemon_client.run_agent_via_daemon).
     assert "Cannot connect to the sorcar daemon" in stored["last_summary"]
-    assert "kiss-web" in stored["last_summary"]
+    if IS_WINDOWS:
+        assert "Unix-domain sockets are unavailable" in stored["last_summary"]
+    else:
+        assert "kiss-web" in stored["last_summary"]
 
 
 def test_cli_usage_exits_without_args(
@@ -816,13 +824,17 @@ def test_command_job_honours_work_dir_and_timeout(tmp_path: Path) -> None:
     """A command job runs in its work_dir and is stopped after its own timeout."""
     project = tmp_path / "project"
     project.mkdir()
+    # The command prints its cwd through Python, not the shell's ``pwd``:
+    # on Windows the job runs under Git bash, whose ``pwd`` reports the
+    # MSYS translation (``/tmp/...``) of the native ``C:\...`` work dir.
+    python = Path(sys.executable).as_posix()
     job = _create(cron_job(
-        "create", name="pwd", command="pwd", schedule="every 1m",
-        work_dir=str(project),
+        "create", name="pwd", schedule="every 1m", work_dir=str(project),
+        command=f'"{python}" -c "import os; print(os.getcwd())"',
     ))
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
-    assert load_jobs()[0]["last_summary"] == str(project.resolve())
+    assert Path(load_jobs()[0]["last_summary"]).resolve() == project.resolve()
     slow = _create(cron_job(
         "create", name="slow", command="sleep 30", schedule="every 1m",
         timeout="0.5",

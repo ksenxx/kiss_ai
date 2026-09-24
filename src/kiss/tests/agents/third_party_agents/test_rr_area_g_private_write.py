@@ -21,6 +21,7 @@ import os
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     save_json_config,
     write_private_file,
 )
-from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
+from kiss.tests.conftest import HOT_READER_PAUSE, TRANSIENT_REPLACE_READ_ERRORS
 
 _IS_POSIX = sys.platform != "win32"
 
@@ -99,6 +100,7 @@ class TestWritePrivateFile:
 
         def reader() -> None:
             while not stop.is_set():
+                time.sleep(HOT_READER_PAUSE)
                 try:
                     data = json.loads(target.read_text(encoding="utf-8"))
                 except TRANSIENT_REPLACE_READ_ERRORS:

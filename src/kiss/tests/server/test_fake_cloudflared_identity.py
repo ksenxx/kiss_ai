@@ -36,7 +36,13 @@ class TestFakeCloudflaredIdentity(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
-        self.env = dict(os.environ, PATH=f"{self.dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        # The fake goes on *this* process's PATH, as the product spawns
+        # ``cloudflared`` without ``env=``: on Windows ``CreateProcess``
+        # resolves a bare name against the parent's PATH, never the
+        # child's ``env`` (only POSIX ``execvpe`` honours ``env["PATH"]``).
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{self.dir}{os.pathsep}{old_path}"
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
 
     def test_long_lived_fake_is_recognised_by_bare_name_spawn(self) -> None:
         """A running fake matches ``_looks_like_cloudflared``; a plain python does not."""
@@ -49,7 +55,7 @@ class TestFakeCloudflaredIdentity(unittest.TestCase):
         )
         proc = subprocess.Popen(
             ["cloudflared", "tunnel", "--url", "http://localhost:1"],
-            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.addCleanup(proc.wait)
         self.addCleanup(proc.kill)
@@ -67,7 +73,7 @@ class TestFakeCloudflaredIdentity(unittest.TestCase):
             "import sys\nsys.stderr.write('ERR rate limited\\n')\nsys.exit(3)\n",
         )
         result = subprocess.run(
-            ["cloudflared", "tunnel"], env=self.env, capture_output=True, text=True, timeout=60,
+            ["cloudflared", "tunnel"], capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stderr, "ERR rate limited\n")

@@ -83,6 +83,41 @@ def _launch_commands(url: str) -> list[list[str]]:
     return commands
 
 
+def _popen_args(command: list[str]) -> list[str] | str:
+    """Return *command* in the form ``subprocess.Popen`` must receive it.
+
+    A batch-file opener (``BROWSER=chrome.cmd``, the shape of every npm
+    shim) is run by ``cmd.exe``, which parses the argument line itself
+    and treats ``&``, ``|``, ``^`` and ``%`` as operators -- and
+    ``Popen`` only quotes arguments containing whitespace, so an OAuth
+    URL would be cut at its first ``&``.  Every argument of a batch
+    file is therefore wrapped in double quotes, which ``cmd.exe`` and
+    the script's ``%*`` pass through verbatim.
+
+    Args:
+        command: The opener command line.
+
+    Returns:
+        *command* itself, or the quoted command-line string for a
+        ``.bat`` / ``.cmd`` opener on Windows.
+
+    Raises:
+        ValueError: If an argument for a batch file contains a double
+            quote or a line break.  ``cmd.exe`` has no escape for a
+            quote inside a quoted argument, so such an argument could
+            end the quote and run the rest as commands; a URL never
+            legitimately contains either (they are ``%22`` / ``%0A``).
+    """
+    if os.name != "nt" or not command[0].lower().endswith((".bat", ".cmd")):
+        return command
+    for arg in command[1:]:  # pragma: no cover
+        if '"' in arg or "\r" in arg or "\n" in arg:
+            raise ValueError(f"unsafe argument for a batch-file opener: {arg!r}")
+    return " ".join(  # pragma: no cover
+        [subprocess.list2cmdline(command[:1]), *(f'"{arg}"' for arg in command[1:])]
+    )
+
+
 def _launch(command: list[str]) -> bool:
     """Start *command* detached and report whether it looks successful.
 
@@ -97,13 +132,13 @@ def _launch(command: list[str]) -> bool:
     """
     try:
         proc = subprocess.Popen(
-            command,
+            _popen_args(command),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except OSError:
+    except (OSError, ValueError):
         return False
     try:
         return proc.wait(timeout=_LAUNCH_GRACE) == 0

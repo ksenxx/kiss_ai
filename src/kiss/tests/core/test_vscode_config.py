@@ -34,7 +34,7 @@ from kiss.core.vscode_config import (
     save_api_key,
     save_config,
 )
-from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, posix_only
 
 
 @pytest.fixture(autouse=True)
@@ -1021,6 +1021,7 @@ class TestSaveConfigAtomicity:
         set — never an empty file, partial bytes, or ``JSONDecodeError``.
         """
         import threading
+        import time
 
         from kiss.core import vscode_config as vc
 
@@ -1032,6 +1033,7 @@ class TestSaveConfigAtomicity:
 
         def reader() -> None:
             while not stop.is_set():
+                time.sleep(HOT_READER_PAUSE)
                 try:
                     raw = vc.CONFIG_PATH.read_bytes()
                 except FileNotFoundError:

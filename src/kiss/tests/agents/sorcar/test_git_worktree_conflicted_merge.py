@@ -17,7 +17,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
+from kiss.tests.conftest import posix_only
 
 
 def _run(repo: Path, *args: str) -> str:
@@ -200,8 +203,15 @@ class TestFinishConflictedMerge:
             self.repo, self.branch, ["f.txt"], head,
         ) == MergeResult.CONFLICT
 
-    def test_path_with_pathspec_magic_is_checked_literally(self) -> None:
-        odd = ":(odd).txt"
+    # ``:(odd)`` is long-form pathspec magic (and ``:`` is illegal in NTFS
+    # file names); ``[odd]`` is a glob that matches ``o.txt``/``d.txt`` but
+    # never the file itself, so both silently miss the file unless the
+    # product queries it as a literal pathspec.
+    @pytest.mark.parametrize("odd", [
+        pytest.param(":(odd).txt", marks=posix_only("':' is illegal in NTFS file names")),
+        "[odd].txt",
+    ])
+    def test_path_with_pathspec_magic_is_checked_literally(self, odd: str) -> None:
         (self.repo / odd).write_text("<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> theirs\n")
         _run(self.repo, "add", "--", f":(literal){odd}")
 

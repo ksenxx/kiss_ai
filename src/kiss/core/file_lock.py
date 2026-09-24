@@ -70,13 +70,16 @@ def lock_exclusive(target: int | IO[str] | IO[bytes], blocking: bool = True) -> 
             return False
         return True
     if msvcrt is not None:  # pragma: no cover — Windows-only branch
-        # ``LK_LOCK`` itself gives up after ten one-second attempts, so
-        # the blocking case retries until the lock is actually held.
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK  # pyright: ignore[reportAttributeAccessIssue]
+        # Always the non-blocking ``LK_NBLCK`` probe: ``LK_LOCK`` sleeps a
+        # full second between each of its ten internal attempts, so a
+        # holder that keeps the lock for a millisecond still cost every
+        # waiter one second (two cron jobs finishing together took over
+        # 2 s to record their results).  The blocking case polls at
+        # ``_WINDOWS_RETRY_INTERVAL`` until the lock is held.
         while True:
             os.lseek(fd, 0, os.SEEK_SET)
             try:
-                msvcrt.locking(fd, mode, _WINDOWS_LOCK_BYTES)  # pyright: ignore[reportAttributeAccessIssue]
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, _WINDOWS_LOCK_BYTES)  # pyright: ignore[reportAttributeAccessIssue]
                 return True
             except OSError:
                 if not blocking:
