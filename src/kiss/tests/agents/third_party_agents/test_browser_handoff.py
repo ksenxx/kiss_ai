@@ -182,7 +182,8 @@ def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "open_in_default_browser did not return"
     assert results == [True, True]
     assert _opened(fake_browser) == [[url]]
 

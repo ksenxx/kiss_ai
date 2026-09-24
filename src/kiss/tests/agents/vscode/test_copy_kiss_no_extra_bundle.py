@@ -40,7 +40,14 @@ def _make_checkout(tmp_path: Path) -> Path:
     vscode_dir = checkout / "src" / "kiss" / "agents" / "vscode"
     vscode_dir.mkdir(parents=True)
     shutil.copy(COPY_KISS_SH, vscode_dir / "copy-kiss.sh")
-    (vscode_dir / "package.json").write_text(json.dumps({"version": "0.0.0"}) + "\n")
+    # copy-kiss.sh re-brands package.json from media/brand.json via
+    # scripts/apply-brand.js before bundling.
+    shutil.copytree(COPY_KISS_SH.parent / "scripts", vscode_dir / "scripts")
+    (vscode_dir / "media").mkdir()
+    shutil.copy(COPY_KISS_SH.parent / "media" / "brand.json", vscode_dir / "media" / "brand.json")
+    (vscode_dir / "package.json").write_text(
+        json.dumps({"version": "0.0.0", "displayName": "KISS Sorcar"}) + "\n"
+    )
     (checkout / "src" / "kiss" / "core").mkdir()
     (checkout / "src" / "kiss" / "core" / "_version.py").write_text('__version__ = "1.2.3"\n')
     (checkout / "src" / "kiss" / "agents" / "sorcar").mkdir()

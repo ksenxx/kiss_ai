@@ -38,6 +38,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import requires_unix_sockets
 
@@ -296,7 +297,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         await self._send(writer_a, {"type": "runUpdate"})
         await self._drain_until(reader_a, _has_type("notice"))
         err = await self._drain_until(reader_a, _has_type("error"))
-        self.assertIn("Failed to start KISS Sorcar update", str(err.get("text", "")))
+        self.assertIn(f"Failed to start {PRODUCT_NAME} update", str(err.get("text", "")))
         # Commands on one connection are dispatched sequentially, so a
         # probe round-trip proves _handle_run_update has finished.
         self.assertEqual(await self._banners_before_probe(reader_a, writer_a), [])

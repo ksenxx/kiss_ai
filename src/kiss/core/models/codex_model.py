@@ -361,11 +361,13 @@ class CodexModel(CLITextModel):
         """Extract token counts from the Codex CLI response dict.
 
         Codex reports ``input_tokens`` (total prompt tokens, including
-        cached), ``cached_input_tokens`` (subset that was cache-served),
-        and ``output_tokens`` (which already includes
+        cached and cache-written), ``cached_input_tokens`` (subset that
+        was cache-served), ``cache_write_input_tokens`` (subset written
+        to the prompt cache, mirrored from the Responses API's
+        ``input_tokens_details.cache_write_tokens``; absent on older
+        CLIs) and ``output_tokens`` (which already includes
         ``reasoning_output_tokens``).  KISS expects ``input_tokens`` to
-        exclude cache-read tokens, so we subtract.  Codex provides no
-        cache-write count.
+        exclude both cache buckets, so we subtract them.
 
         Args:
             response: The dict returned by :meth:`generate`.
@@ -378,10 +380,11 @@ class CodexModel(CLITextModel):
         usage = response.get("usage") or {}
         total_input = usage.get("input_tokens") or 0
         cache_read = usage.get("cached_input_tokens") or 0
-        non_cached_input = max(total_input - cache_read, 0)
+        cache_write = usage.get("cache_write_input_tokens") or 0
+        non_cached_input = max(total_input - cache_read - cache_write, 0)
         return (
             non_cached_input,
             usage.get("output_tokens") or 0,
             cache_read,
-            0,
+            cache_write,
         )

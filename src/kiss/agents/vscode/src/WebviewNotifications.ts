@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import {ToWebviewMessage} from './types';
+import {PRODUCT_NAME} from './brand';
 
 type Severity = 'info' | 'warning' | 'error';
 // The toast protocol is part of ToWebviewMessage, so a field renamed here
@@ -153,7 +154,7 @@ export function withWebviewNotificationProgress<R>(
     return vscode.window.withProgress(options, task);
   }
   const id = String(nextId++);
-  const title = options.title || 'KISS Sorcar';
+  const title = options.title || PRODUCT_NAME;
   poster({
     type: 'notification',
     id,

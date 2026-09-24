@@ -9,6 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 const vscePackage = require('@vscode/vsce/out/package');
+const {applyHashedIcons} = require('./hash-icons');
 
 function parseArgs(argv) {
   const options = {
@@ -51,9 +52,31 @@ function printHelp() {
   console.log(`Usage: node scripts/package-vsix.js [options]\n\nOptions:\n  -o, --out <path>              Output VSIX path\n  --no-dependencies             Do not include node dependencies\n  --dependencies                Include node dependencies\n  --allow-missing-repository    Match vsce package flag\n  --allow-package-all-secrets   Match vsce package flag\n  --skip-license                Match vsce package flag`);
 }
 
+/**
+ * Run `vsce pack` with the manifest's icons renamed to content-hashed copies
+ * (see scripts/hash-icons.js) and put the original package.json back
+ * afterwards, also when packaging fails or the process is interrupted.
+ */
+async function packWithHashedIcons(options) {
+  const restoreManifest = applyHashedIcons(options.cwd);
+  function restoreAndExit() {
+    restoreManifest();
+    process.exit(1);
+  }
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+    process.on(signal, restoreAndExit);
+  try {
+    return await vscePackage.pack(options);
+  } finally {
+    restoreManifest();
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+      process.off(signal, restoreAndExit);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const result = await vscePackage.pack(options);
+  const result = await packWithHashedIcons(options);
   const packagePath = path.resolve(options.cwd, result.packagePath);
   const stats = fs.statSync(packagePath);
   console.log(

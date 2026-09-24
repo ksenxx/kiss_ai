@@ -17,8 +17,15 @@ published pricing pages:
 * Gemini 3 Pro / 3.1 Pro have a long-context (prompts >200k) pricing tier.
 * Gemini server-side tool-use prompt tokens count as input tokens.
 * Direct Moonshot (kimi-*) models carry their published per-family
-  cache-hit prices (0.10x-0.20x input) and free cache writes.
+  cache-hit prices (0.10x-0.20x input) and bill 5-minute cache writes at
+  the uncached input rate.
 * Z.AI GLM models carry their published cached-input prices.
+* Anthropic Opus 5.5 reads its cache at 0.05x input ($0.20 on $4.00),
+  Fable/Mythos 5.1 at 0.025x, every other Claude at 0.1x.
+* OpenAI gpt-6-sol / gpt-6-luna share gpt-6-astra's long-context tier.
+* Together publishes cached-input prices that the catalog carries, so a
+  cache hit reported in ``prompt_tokens_details.cached_tokens`` is not
+  billed at the full input rate.
 """
 
 from types import SimpleNamespace
@@ -235,14 +242,23 @@ class TestDirectMoonshotCachePricing:
             assert info.cache_read_price_per_1M == pytest.approx(hit), name
             assert info.input_price_per_1M == pytest.approx(miss), name
             assert info.output_price_per_1M == pytest.approx(out), name
-            assert info.cache_write_price_per_1M == 0.0, name
-            assert calculate_cost(name, 0, 0, 0, 1_000_000) == 0.0, name
+            # A 5-minute cache write is billed at the uncached input rate
+            # (kimi-k3: $3.00 write on $3.00 input) and reported in
+            # ``prompt_tokens_details.cache_write_tokens``, which the
+            # adapter removes from the uncached remainder:
+            # https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api
+            assert info.cache_write_price_per_1M == pytest.approx(miss), name
+            assert calculate_cost(name, 0, 0, 0, 1_000_000) == pytest.approx(miss), name
+
+    def test_kimi_k3_aliases_bill_cache_writes_like_the_base_model(self):
+        for name in ("kimi-k3-low", "kimi-k3-high", "kimi-k3-max"):
+            assert MODEL_INFO[name].cache_write_price_per_1M == pytest.approx(3.0), name
 
     def test_moonshot_v1_fallback_cache_read_quarter(self):
-        """Entries without an explicit cache-read price fall back to 0.25x."""
+        """Entries without explicit cache prices fall back to 0.25x read / 1x write."""
         info = MODEL_INFO["moonshot-v1-8k"]
         assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
-        assert info.cache_write_price_per_1M == 0.0
+        assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M)
 
     def test_kimi_k25_cache_hit_cost(self):
         cost = calculate_cost("kimi-k2.5", 100_000, 0, 1_000_000, 0)
@@ -346,3 +362,89 @@ class TestGlmCachePricing:
     def test_glm45_cache_hit_cost(self):
         cost = calculate_cost("glm-4.5", 10_000, 5_000, 100_000, 0)
         assert cost == pytest.approx((10_000 * 0.6 + 5_000 * 2.2 + 100_000 * 0.11) / 1e6)
+
+
+class TestAnthropicCacheReadFamilies:
+    """https://platform.claude.com/docs/en/about-claude/pricing (2026-09)."""
+
+    def test_opus_55_cache_read_is_five_percent_of_input(self):
+        info = MODEL_INFO["claude-opus-5-5"]
+        assert info.input_price_per_1M == pytest.approx(4.0)
+        assert info.cache_read_price_per_1M == pytest.approx(0.20)
+        assert info.cache_write_price_per_1M == pytest.approx(5.0)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(8.0)
+        cost = calculate_cost("claude-opus-5-5", 10_000, 1_000, 1_000_000, 0)
+        assert cost == pytest.approx((10_000 * 4.0 + 1_000 * 20.0 + 1_000_000 * 0.20) / 1e6)
+
+    def test_fable_51_reads_at_two_and_a_half_percent(self):
+        info = MODEL_INFO["claude-fable-5-1"]
+        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.025)
+
+    def test_fable_5_and_older_opus_keep_ten_percent(self):
+        for name in ("claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(
+                info.input_price_per_1M * 0.1
+            ), name
+
+    def test_openrouter_opus_55_passthrough_carries_the_same_rate(self):
+        info = MODEL_INFO["openrouter/anthropic/claude-opus-5.5"]
+        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.05)
+
+
+class TestGpt6LongContextTier:
+    """gpt-6-sol $2/$0.20/$2.50/$10 -> $4/$0.40/$5/$15 above 272k prompt tokens;
+    gpt-6-luna $0.10/$0.01/$0.125/$0.50 -> $0.20/$0.02/$0.25/$0.75
+    (https://developers.openai.com/api/docs/pricing)."""
+
+    def test_gpt6_sol_long_context_doubles_input_and_cache_and_uplifts_output(self):
+        cost = calculate_cost("gpt-6-sol", 100_000, 10_000, 150_000, 50_000)
+        expected = (100_000 * 4.0 + 150_000 * 0.40 + 50_000 * 5.0 + 10_000 * 15.0) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_gpt6_sol_short_context_unchanged(self):
+        cost = calculate_cost("gpt-6-sol", 100_000, 10_000, 50_000, 50_000)
+        expected = (100_000 * 2.0 + 50_000 * 0.20 + 50_000 * 2.5 + 10_000 * 10.0) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_gpt6_luna_long_context(self):
+        cost = calculate_cost("gpt-6-luna", 300_000, 10_000)
+        assert cost == pytest.approx((300_000 * 0.20 + 10_000 * 0.75) / 1e6)
+
+    def test_thinking_aliases_and_openrouter_twins_inherit_the_tier(self):
+        base = calculate_cost("gpt-6-sol", 300_000, 5_000, 10_000, 10_000)
+        alias = calculate_cost("gpt-6-sol-high", 300_000, 5_000, 10_000, 10_000)
+        assert alias == pytest.approx(base)
+        twin = MODEL_INFO["openrouter/openai/gpt-6-sol"]
+        twin_cost = calculate_cost("openrouter/openai/gpt-6-sol", 300_000, 5_000)
+        expected = (
+            300_000 * twin.input_price_per_1M * 2.0 + 5_000 * twin.output_price_per_1M * 1.5
+        ) / 1e6
+        assert twin_cost == pytest.approx(expected)
+
+
+class TestTogetherCachedInputPrices:
+    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input`` (2026-09)."""
+
+    def test_together_models_carry_published_cache_read_prices(self):
+        expected = {
+            "moonshotai/Kimi-K3": 0.30,
+            "zai-org/GLM-5.3": 0.26,
+            "zai-org/GLM-5.3-Flash": 0.03,
+            "deepseek-ai/DeepSeek-V4-Pro-0813": 0.13,
+            "deepseek-ai/DeepSeek-V4.1-Flash": 0.006,
+            "Qwen/Qwen3.5-397B-A17B": 0.35,
+        }
+        for name, price in expected.items():
+            assert MODEL_INFO[name].cache_read_price_per_1M == pytest.approx(price), name
+
+    def test_together_kimi_k3_cache_hit_is_not_billed_as_input(self):
+        cost = calculate_cost("moonshotai/Kimi-K3", 90, 20, 3_012, 0)
+        assert cost == pytest.approx((90 * 3.0 + 20 * 15.0 + 3_012 * 0.30) / 1e6)
+
+    def test_together_models_without_a_published_cache_price_bill_hits_as_input(self):
+        info = MODEL_INFO["meta-llama/Llama-3.3-70B-Instruct-Turbo"]
+        assert info.cache_read_price_per_1M is None
+        assert calculate_cost("meta-llama/Llama-3.3-70B-Instruct-Turbo", 0, 0, 1_000_000, 0) == (
+            pytest.approx(info.input_price_per_1M)
+        )
