@@ -476,17 +476,48 @@ class TestWorkDirLine(unittest.TestCase):
 
     @pytest.mark.slow
     @unittest.skipUnless(_docker_available(), "Docker daemon not available")
-    def test_container_run_omits_the_work_dir(self) -> None:
-        """With docker_image set the host work dir is not mentioned at all.
+    def test_container_run_names_the_mounted_work_dir(self) -> None:
+        """A container started from an image names the work dir: it is bind-mounted there.
 
-        The tools execute inside the container, so the host path would
-        point the model at a directory its Bash/Read/Write cannot see.
+        The container's tools see ``work_dir`` at its host path (and start
+        in it), so the line points the model at files it can reach.
         """
         requests: list[dict] = []
-        _run_scripted([_succeed("done")], docker_image="ubuntu:latest", requests=requests)
+        with tempfile.TemporaryDirectory() as td:
+            _run_scripted(
+                [_succeed("done")], work_dir=td, docker_image="ubuntu:latest",
+                requests=requests,
+            )
+            expected = WORK_DIR_LINE.format(work_dir=Path(td).resolve())
         prompt = _system_prompt(requests[0])
-        self.assertNotIn("Work dir", prompt)
+        self.assertIn(expected, prompt)
         self.assertIn("- Current process PID:", prompt)
+
+    @pytest.mark.slow
+    @unittest.skipUnless(_docker_available(), "Docker daemon not available")
+    def test_attached_container_without_the_mount_omits_the_work_dir(self) -> None:
+        """An attached ``container:<id>`` that does not mount the work dir hides the line.
+
+        The caller owns that container; naming a host path its Bash/Read
+        cannot see would mislead the model.
+        """
+        import docker
+
+        container = docker.from_env().containers.run(
+            "ubuntu:latest", command="sleep infinity", detach=True,
+        )
+        try:
+            requests: list[dict] = []
+            with tempfile.TemporaryDirectory() as td:
+                _run_scripted(
+                    [_succeed("done")], work_dir=td,
+                    docker_image=f"container:{container.id}", requests=requests,
+                )
+            prompt = _system_prompt(requests[0])
+            self.assertNotIn("Work dir", prompt)
+            self.assertIn("- Current process PID:", prompt)
+        finally:
+            container.remove(force=True)
 
 
 class TestNonRetryableModelErrors(unittest.TestCase):

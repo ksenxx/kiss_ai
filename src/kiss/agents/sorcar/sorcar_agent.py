@@ -91,6 +91,13 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     }),
     # Shell runner: just enough to run commands and read their output.
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    # Shell runner that also talks with the user: ``shell`` plus asking
+    # and speaking, decide, summary and switching its own model (no file
+    # editing, browser, memory, agent dispatch or fan-out).
+    "assistant": frozenset({
+        "Bash", "bash_job", "Read", "run_commands_parallel", "ask_user_question",
+        "talk", "decide", "summary", "set_model",
+    }),
     # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
     "bash": frozenset({"Bash"}),
 }
@@ -111,8 +118,8 @@ RESTRICTED_PROFILE_NOTE = """
 
 # Restricted tool profile: {profile}
 This sub-agent has only these tools plus finish: {tools}. Rules above that
-require other tools (Write/Edit files, tmp/PROGRESS.md, browser research,
-memory writes, run_parallel, run_agent, talk) do not apply here: do not attempt
+require any other tool (Write/Edit files, tmp/PROGRESS.md, browser research,
+memory writes, run_parallel, run_agent, ...) do not apply here: do not attempt
 them. Report everything in finish(summary_in_html=...).
 """
 
@@ -1924,6 +1931,9 @@ class SorcarAgent(RelentlessAgent):
             ) -> str:
                 """Runs a bash command in the task's Docker container and returns its output.
 
+                The command starts in the container's working directory;
+                in a container kiss started that is the task's work dir,
+                bind-mounted at its host path.
                 Background jobs (``background=True``) are not available in
                 Docker mode: start long commands yourself with
                 ``nohup cmd > /tmp/out.log 2>&1 < /dev/null &`` and poll
@@ -2041,9 +2051,10 @@ class SorcarAgent(RelentlessAgent):
                     read-only toolset (Bash, bash_job, Read,
                     run_commands_parallel, memory reads, decide, summary);
                     ``"shell"`` just Bash, bash_job, Read and
-                    run_commands_parallel.  Empty
-                    (default): review tasks get ``"review"``, others
-                    the full toolset.
+                    run_commands_parallel; ``"assistant"`` the shell set
+                    plus ask_user_question, talk, decide, summary and
+                    set_model.  Empty (default): review tasks get
+                    ``"review"``, others the full toolset.
 
             Returns:
                 A YAML-formatted string containing a list of result
@@ -2265,8 +2276,9 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(self._memory_tools.tools())
         if allowed is not None:
             # Restricted profile: no skills, MCP servers, channel
-            # dispatch, user interaction, model switching or fan-out.
-            tools.append(summary)
+            # dispatch or fan-out; user interaction and model switching
+            # only where the profile names them (``assistant``).
+            tools.extend([ask_user_question, talk, set_model, summary])
             if decisions_tool_available():
                 tools.append(make_decide_tool(self))
             return [tool for tool in tools if tool.__name__ in allowed]
@@ -2722,7 +2734,8 @@ class SorcarAgent(RelentlessAgent):
                 governs the whole task tree.
             tool_profile: Name of the tool profile this run's built-in
                 toolset is cut down to — a key of :data:`TOOL_PROFILES`
-                (``"full"``, ``"review"``, ``"shell"``, ``"bash"``) —
+                (``"full"``, ``"review"``, ``"shell"``, ``"assistant"``,
+                ``"bash"``) —
                 or ``""`` (the default) to let :meth:`_tool_profile`
                 decide (``full`` for a top-level task, ``review`` for a
                 reviewer sub-agent).  Applies to this agent only:

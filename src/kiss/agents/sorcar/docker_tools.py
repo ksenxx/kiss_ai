@@ -41,7 +41,8 @@ class DockerTools:
         """Read file contents.
 
         Args:
-            file_path: Absolute path to file.
+            file_path: Path to the file; a relative path resolves against
+                the container's working directory (the task's work dir).
             max_lines: Maximum number of lines to return.
             start_line: 1-indexed line at which to begin the returned
                 window.  ``start_line=1`` (the default) reads from the
@@ -110,7 +111,8 @@ class DockerTools:
         """Performs precise string replacements in files with exact matching.
 
         Args:
-            file_path: Absolute path to the file to modify.
+            file_path: Path to the file to modify; a relative path resolves
+                against the container's working directory (the task's work dir).
             old_string: Exact text to find and replace.
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
