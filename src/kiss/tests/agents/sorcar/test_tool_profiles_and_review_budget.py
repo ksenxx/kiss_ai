@@ -155,6 +155,19 @@ class TestToolProfiles:
             "Bash", "bash_job", "Read", "run_commands_parallel",
         }
 
+    def test_assistant_profile_adds_user_interaction(self, tmp_path: Path) -> None:
+        """``assistant`` is the shell set plus the user-facing tools; still no editing."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="assistant")
+        names = _names(agent._get_tools())
+        expected = {
+            "Bash", "bash_job", "Read", "run_commands_parallel",
+            "ask_user_question", "talk", "summary", "set_model",
+        }
+        # ``decide`` needs an OpenRouter key; it is offered only when it can run.
+        assert names - {"decide"} == expected
+        assert names <= set(TOOL_PROFILES["assistant"])  # type: ignore[arg-type]
+        assert not names & {"Edit", "Write", "run_agent", "run_parallel", "memory_search"}
+
     def test_reviewer_subagent_defaults_to_review(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

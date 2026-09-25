@@ -171,7 +171,11 @@ def _run_and_wait(
     assert state is not None, f"no agent state registered for tab {tab_id}"
     t = state.task_thread
     assert t is not None
-    t.join(timeout=10)
+    # A hang guard, not a latency bound: even with the agent faked, the
+    # run spawns ~60 git processes (worktree create, baseline commit,
+    # discard) -- ~0.3 s on Linux, ~3 s on an idle Windows VM and
+    # 15-30 s there with a dozen other test processes running.
+    t.join(timeout=60)
     assert not t.is_alive()
 
 

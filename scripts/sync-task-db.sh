@@ -108,7 +108,11 @@ die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
 
 # Quote a value for the remote shell: a project path may hold a space or an
 # apostrophe, which would otherwise break — or extend — the command line.
-shquote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+# Everything is wrapped in single quotes, and a single quote inside ends the
+# quoting, escapes itself and starts it again.
+shquote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 TARGET="${1:-}"
 LOCAL_DIR="${2:-}"

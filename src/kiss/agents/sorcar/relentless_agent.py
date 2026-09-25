@@ -333,10 +333,12 @@ as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 {work_dir_line}- Current process PID: {current_pid} — NEVER kill this process.
 """
 
-#: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  Omitted for container
-#: runs (``docker_image`` set): the tools then execute inside the
-#: container, whose working directory is not the host ``work_dir``, so
-#: naming the host path would point the model at files it cannot reach.
+#: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  A container run from an
+#: image bind-mounts ``work_dir`` at the same path and starts the
+#: container there, so the line holds inside the container too.  It is
+#: omitted only when the tools run in a container that does not mount
+#: ``work_dir`` (an attached ``container:<id>`` owned by the caller):
+#: naming the host path would then point the model at files it cannot reach.
 WORK_DIR_LINE = "- Work dir: {work_dir}\n"
 
 TASK_SETTINGS_HEADER = "\n# Task Settings\n"
@@ -1122,8 +1124,10 @@ class RelentlessAgent(Base):
 
         Each sub-session is a fresh :class:`KISSAgent`; one that returns
         ``finish(is_continue=True, ...)`` hands its summary to the next.
-        The ``IMPORTANT_INSTRUCTIONS`` suffix names the host work dir
-        only when the tools run on the host (no ``docker_image``).
+        The ``IMPORTANT_INSTRUCTIONS`` suffix names the work dir when the
+        tools can reach it: on the host, or in a container that bind-mounts
+        it (every container kiss starts from an image does; see
+        :data:`WORK_DIR_LINE`).
 
         Args:
             tools: List of callable tools available to the agent during execution.
@@ -1156,9 +1160,12 @@ class RelentlessAgent(Base):
         previous_summary: str | None = None  # the last continuation's, even if empty
         zero_progress_streak = 0
         current_pid = str(os.getpid())
+        work_dir_visible = (
+            self.docker_manager is None or self.work_dir in self.docker_manager.volumes
+        )
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             work_dir_line=(
-                "" if self.docker_image else WORK_DIR_LINE.format(work_dir=self.work_dir)
+                WORK_DIR_LINE.format(work_dir=self.work_dir) if work_dir_visible else ""
             ),
             current_pid=current_pid,
         )
@@ -1650,7 +1657,15 @@ class RelentlessAgent(Base):
         if self.docker_image:
             from kiss.agents.sorcar.docker_manager import DockerManager
 
-            with DockerManager(self.docker_image) as docker_mgr:
+            # The work dir is bind-mounted at its host path and is the
+            # container's working directory, so relative paths and the
+            # ``Work dir`` prompt line mean the same thing inside and out.
+            # An attached ``container:<id>`` ignores both (see DockerManager).
+            with DockerManager(
+                self.docker_image,
+                workdir=self.work_dir,
+                volumes={self.work_dir: self.work_dir},
+            ) as docker_mgr:
                 self.docker_manager = docker_mgr
                 if self.printer:
                     _printer = self.printer

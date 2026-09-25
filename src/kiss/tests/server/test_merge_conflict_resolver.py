@@ -380,10 +380,13 @@ class TestMergeSea:
         assert merge_sea.max_budget() == merge_sea.MAX_BUDGET_USD
 
     def test_prompt_lists_files_and_task(self) -> None:
+        # The prompt names the repo in the OS's native form (``/r`` on
+        # POSIX, ``\r`` on Windows), as the agent's tools expect it.
+        repo = Path("/r")
         prompt = merge_sea.build_prompt(
-            Path("/r"), "kiss/wt-x", "main", ["a.py", "b.md"], "  do X  ",
+            repo, "kiss/wt-x", "main", ["a.py", "b.md"], "  do X  ",
         )
-        assert "Repository: /r" in prompt
+        assert f"Repository: {repo}\n" in prompt
         assert "(ours, HEAD): main" in prompt
         assert "(theirs): kiss/wt-x" in prompt
         assert "- a.py\n- b.md" in prompt

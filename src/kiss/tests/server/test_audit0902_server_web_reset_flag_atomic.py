@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import HOT_READER_PAUSE
 
 
 def _free_port() -> int:
@@ -86,6 +87,8 @@ def test_concurrent_writers_never_expose_a_torn_flag() -> None:
 
     def _reader() -> None:
         while not stop.is_set():
+            # Lets the writers' os.replace land on Windows (see conftest).
+            time.sleep(HOT_READER_PAUSE)
             try:
                 raw = flag.read_text(encoding="utf-8")
             except FileNotFoundError:

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import kill_process_group, popen_process_group
-from kiss.core.utils import atomic_write_text
+from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
 
@@ -238,30 +238,13 @@ def _read_stored_config(cfg_path: Path) -> dict[str, Any]:
     if not cfg_path.exists():
         return {}
     try:
-        stored = json.loads(_read_text_waiting_for_replace(cfg_path))
+        # Waits out a concurrent ``save_config`` replace on Windows, so
+        # the reader does not fall back to an empty config mid-swap.
+        stored = json.loads(read_bytes_waiting_for_writer(cfg_path).decode("utf-8"))
     except (ValueError, OSError):
         logger.debug("Failed to read config %s", cfg_path, exc_info=True)
         return {}
     return stored if isinstance(stored, dict) else {}
-
-
-def _read_text_waiting_for_replace(path: Path) -> str:
-    """Read *path* as UTF-8, waiting out a concurrent Windows ``os.replace``.
-
-    On Windows a file being replaced by another writer is briefly
-    inaccessible (``PermissionError``) while the rename swaps it out;
-    POSIX readers never see that window.  A few short retries keep a
-    concurrent :func:`save_config` from making the reader fall back to
-    an empty config.  Any other error, or a persistent denial, propagates.
-    """
-    for attempt in range(20):
-        try:
-            return path.read_text(encoding="utf-8")
-        except PermissionError:
-            if os.name != "nt" or attempt == 19:
-                raise
-            time.sleep(0.005)
-    raise AssertionError("unreachable")
 
 
 def load_config() -> dict[str, Any]:

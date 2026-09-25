@@ -36,10 +36,16 @@ from kiss.agents.sorcar.sorcar_agent import auto_commit_changes
 
 
 def _git(cwd: Path, *args: str) -> str:
-    """Run git in *cwd* and return its stdout."""
+    """Run git in *cwd* and return its stdout, byte for byte.
+
+    Decoded from bytes rather than read in text mode: the product
+    returns git's output verbatim, and on Windows the files written
+    here contain ``\\r\\n`` (text-mode writes), so a reference read
+    with universal newlines would drop the ``\\r`` the patch contains.
+    """
     return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True,
-    ).stdout
+        ["git", *args], cwd=str(cwd), capture_output=True, check=True,
+    ).stdout.decode("utf-8")
 
 
 @pytest.fixture
@@ -145,12 +151,16 @@ def test_stdout_head_watchdog_kills_a_hung_git_and_reports_truncation(
     (repo / "README.md").write_text("hello\nworld\n", encoding="utf-8")
     _git(repo, "add", "README.md")
     hang = tmp_path / "hang.sh"
-    hang.write_text("#!/bin/sh\necho PARTIAL-LINE\necho more\nsleep 30\n", encoding="utf-8")
+    hang.write_text(
+        "#!/bin/sh\necho PARTIAL-LINE\necho more\nsleep 30\n", encoding="utf-8", newline="\n",
+    )
     hang.chmod(0o755)
     started = time.monotonic()
+    # git hands diff.external to its POSIX shell (Git bash on Windows), where
+    # a native ``C:\...`` path loses its backslashes: use forward slashes.
     with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.git_worktree"):
         text, truncated = _git_stdout_head(
-            "-c", f"diff.external={hang}", "diff", "--cached",
+            "-c", f"diff.external={hang.as_posix()}", "diff", "--cached",
             cwd=repo, max_bytes=10_000, timeout=0.5,
         )
     assert time.monotonic() - started < 10

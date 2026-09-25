@@ -18,6 +18,7 @@ the tool's result to ``finish``.  The Bash test kills a real ``sleep``.
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -432,8 +433,16 @@ class TestRegistry:
                     try:
                         try:
                             tool_interrupt.register_tool_call(token)
-                            for _ in range(200):
-                                pass
+                            # The call blocks like a real tool (I/O,
+                            # sleep) for a random 0-2 ms.  A busy spin
+                            # instead never let the watchdog thread take
+                            # the GIL on Windows before the call closed
+                            # (0 injections in 350k calls), so the race
+                            # was never exercised there; with a blocking
+                            # body both outcomes -- injected, and
+                            # returned first -- occur on every platform
+                            # (measured: hundreds of each per run).
+                            time.sleep(random.uniform(0, 0.002))
                             end_tool_call(token)
                         except ToolCallInterrupted:
                             outcome["interrupted"] += 1
@@ -450,6 +459,9 @@ class TestRegistry:
             while time.monotonic() < deadline and thread.ident is not None:
                 interrupt_tool_call(thread.ident, "racer")
                 clicks += 1
+                # Paced like a human: a tight loop would keep the GIL
+                # from the tool thread and turn the race into a stall.
+                time.sleep(0.001)
             stop.set()
             thread.join(10)
         finally:

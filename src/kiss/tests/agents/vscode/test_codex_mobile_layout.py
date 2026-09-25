@@ -134,7 +134,6 @@ CONTROL_IDS = [
     "config-form",
     "cfg-remote-password",
     "cfg-remote-password-toggle",
-    "cfg-work-dir",
     "cfg-max-budget",
     "cfg-auto-commit",
     "cfg-use-worktree",

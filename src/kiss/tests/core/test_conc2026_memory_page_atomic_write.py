@@ -31,7 +31,7 @@ import pytest
 
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
-from kiss.tests.conftest import IS_WINDOWS, posix_only
+from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, posix_only
 
 # Windows has no umask-derived mode bits and its chmod only toggles the
 # read-only flag (S_IMODE is always 0o666 or 0o444), so the permission
@@ -65,6 +65,7 @@ def test_concurrent_reader_never_sees_torn_page(tmp_path: Path) -> None:
 
     def read_loop() -> None:
         while not stop.is_set():
+            time.sleep(HOT_READER_PAUSE)
             raw = memory.read("shared-page").raw
             if not (raw.endswith("END-A\n") or raw.endswith("END-B\n")):
                 anomalies.append(f"torn read: {len(raw)} bytes, tail={raw[-40:]!r}")
@@ -87,13 +88,15 @@ def test_concurrent_reader_never_sees_torn_page(tmp_path: Path) -> None:
 
 
 def test_page_reader_gives_up_on_a_real_permission_error(tmp_path: Path) -> None:
-    """The reader's wait for an in-flight replace is bounded.
+    """A genuine denial raises promptly instead of burning the retry budget.
 
     ``read_bytes_waiting_for_writer`` retries ``PermissionError`` only on
-    Windows and only for a second, so a path that is genuinely denied
-    still raises instead of hanging.  On POSIX a ``0o000`` file is denied
-    on the first attempt; on Windows opening a directory is denied on
-    every attempt, so it is the one-second deadline that gives up.
+    Windows, where it can mean a replace in flight.  On POSIX a ``0o000``
+    file is denied on the first attempt.  On Windows opening a directory
+    is denied on every attempt, and a directory can never be a replace in
+    progress, so the reader must not spend its (multi-second) budget on
+    it -- ``load_config`` on a ``config.json`` that is a directory would
+    otherwise stall every caller.
     """
     if IS_WINDOWS:
         unreadable = tmp_path
@@ -104,8 +107,7 @@ def test_page_reader_gives_up_on_a_real_permission_error(tmp_path: Path) -> None
     started = time.monotonic()
     with pytest.raises(PermissionError):
         read_bytes_waiting_for_writer(unreadable)
-    if IS_WINDOWS:
-        assert time.monotonic() - started >= 1.0, "gave up before the deadline"
+    assert time.monotonic() - started < 1.0, "a directory is not a transient denial"
 
 
 def test_atomic_write_keeps_create_and_update_semantics(tmp_path: Path) -> None:

@@ -34,6 +34,11 @@ import sys
 
 import pytest
 
+# Terminate the subprocesses a test, a shared fixture or the session
+# leaves running (see kiss/tests/subprocess_reaper.py).  Registered from
+# the root conftest because ``pytest_plugins`` is only honoured here.
+pytest_plugins = ["kiss.tests.subprocess_reaper"]
+
 # Background spare-worktree refills (kiss.agents.sorcar.worktree_pool)
 # must not run during the test suite: they would write worktrees into
 # temporary repositories that tests assert on and tear down.  Set

@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -520,7 +521,12 @@ class ChatSorcarAgent(SorcarAgent):
         self._last_user_prompt = history_prompt
         self._last_result_summary = ""
 
-        agent_prompt = self.build_chat_prompt(prompt_template)
+        # A task that is only a filesystem path means "open it"; the
+        # directive is added here, AFTER ``history_prompt`` was taken,
+        # so history and the tab keep the raw path the user typed.
+        agent_prompt = self.build_chat_prompt(
+            with_open_directive(prompt_template, kwargs.get("work_dir") or "."),
+        )
 
         # Consumed, never believed: ``SorcarAgent.run`` has no such
         # parameter, and whether a worktree EXISTS is the only honest

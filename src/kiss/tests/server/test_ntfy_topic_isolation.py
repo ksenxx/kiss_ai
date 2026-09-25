@@ -36,7 +36,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, mock
 
 from kiss.core.vscode_config import save_config
 from kiss.server.web_server import RemoteAccessServer, _get_machine_topic
@@ -110,16 +110,11 @@ class TestTopicIsolationPerKissHome(unittest.TestCase):
         fake_home = tempfile.mkdtemp(prefix="kiss-ntfy-fakehome-")
         self._tmp_homes.append(fake_home)
         (Path(fake_home) / ".kiss").mkdir()
-        old_home = os.environ.get("HOME")
         os.environ.pop("KISS_HOME", None)
-        os.environ["HOME"] = fake_home
-        try:
+        # ``Path.home()`` reads ``USERPROFILE`` on Windows and ``HOME``
+        # elsewhere; faking only one would read the real ``~/.kiss``.
+        with mock.patch.dict(os.environ, {"HOME": fake_home, "USERPROFILE": fake_home}):
             topic = _get_machine_topic()
-        finally:
-            if old_home is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = old_home
         self.assertEqual(topic, _production_default_home_topic())
 
 
