@@ -67,6 +67,7 @@ Git clone (`git clone --depth 1`, no ref) and the separately installed `gh` /
 | `notion` | Notion pages and databases | `NOTION_TOKEN` (internal integration) |
 | `postgres` | Your PostgreSQL databases (restricted mode) | `DATABASE_URI` |
 | `firecrawl` | Crawling/scraping via Firecrawl cloud | `FIRECRAWL_API_KEY` |
+| `you-search` | You.com web search + URL content extraction (keyless free tier) | none — free profile; see setup for the optional key upgrade |
 | `playwright` | Second isolated browser (Sorcar has one natively) | none |
 
 `enable.py` refuses to enable a connector whose executables or env vars are
