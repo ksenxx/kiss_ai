@@ -75,7 +75,6 @@ TIERS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
     "frontier": (
         ("claude-opus-5-5", "Anthropic frontier; cheapest frontier per token"),
-        ("claude-opus-5", "Anthropic frontier, previous release"),
         ("gpt-6-astra", "OpenAI frontier"),
         ("claude-fable-5-1", "Anthropic top model; longest and hardest tasks only"),
     ),
