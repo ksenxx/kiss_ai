@@ -665,9 +665,22 @@ body.remote-chat .running-item-ids::before {
   content: " • ";
 }
 
-/* The task-info panel's INNER layout, shared by the desktop docking
-   below and the mobile drawer: the live-metadata bullet list on top,
-   the task-update subpanel filling the rest. */
+/* The task-info panel's INNER content, shared by the desktop docking
+   below and the mobile drawer.  The sections' collapse / scroll /
+   resize layout is the generic .meta-section machinery in main.css;
+   the rules here only restate the remote theme's colours and
+   spacing.  The bodies scroll themselves (not #meta-panel, whose own
+   scrolling would carry the resizer away). */
+body.remote-chat .meta-section-resizer::after {
+  border-top-color: var(--border-soft);
+}
+
+body.remote-chat .meta-section-resizer:not(.static):hover::after,
+body.remote-chat .meta-section-resizer:not(.static):active::after,
+body.remote-chat .meta-section-resizer:not(.static):focus-visible::after {
+  border-top-color: var(--accent);
+}
+
 body.remote-chat #meta-list {
   list-style: disc outside;
   margin: 0;
@@ -675,15 +688,6 @@ body.remote-chat #meta-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-
-  /* The list keeps its natural height so every row stays visible —
-     the info subpanel below takes ALL the remaining space — but it
-     may still shrink and scroll (here, not on #meta-panel, whose own
-     scrolling would carry the resizer away) when the list ALONE is
-     taller than the window. */
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 body.remote-chat .meta-item {
@@ -702,31 +706,11 @@ body.remote-chat .meta-item .meta-value {
   color: var(--dim);
 }
 
-/* The info subpanel below the task-info list shows the running
-   task's task update (getTaskUpdate poll in main.js).  Its flex
-   basis is 0 so its own content never squeezes the list above:
-   it grows into exactly the space the list leaves free — the rest
-   of the panel — and scrolls inside.  While there is nothing to
-   show (no running task) main.js drops the `visible` class and the
-   WHOLE subpanel disappears, header included. */
-body.remote-chat #meta-info {
-  display: none;
-  flex-direction: column;
-  flex: 1 1 0;
-  min-height: 0;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-soft);
-}
-
-body.remote-chat #meta-info.visible {
-  display: flex;
-}
-
+/* The Task update section below the task-info list shows the running
+   task's task update (getTaskUpdate poll in main.js).  While there is
+   nothing to show (no running task) main.js drops the `visible`
+   class and the WHOLE section disappears, header included. */
 body.remote-chat #meta-info-content {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
   font-size: var(--fs-sm);
   color: var(--dim);
   overflow-wrap: anywhere;
@@ -802,6 +786,12 @@ body.remote-chat #meta-info-content {
   body.remote-chat #meta-close:hover {
     color: var(--fg);
     background: var(--hover);
+  }
+
+  /* The close button sits over the first section's header row: keep
+     the header's text clear of it. */
+  body.remote-chat #meta-panel > .meta-section:first-of-type > .meta-section-hdr {
+    padding-right: 40px;
   }
 }
 

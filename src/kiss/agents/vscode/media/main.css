@@ -1748,17 +1748,123 @@ body.remote-chat #theme-btn { display: flex; }
 #meta-drawer-btn,
 #meta-close { display: none; }
 
-/* The info subpanel's header row (every task-info surface): the
-   "Task update" title on the left, the refresh button at the top
-   right.  The button turns while the daemon runs the task-update
-   agent and is disabled meanwhile (a second press cannot start a
-   second run). */
-.meta-info-hdr {
+/* Task-info panel sections (every surface).  #meta-panel is a flex
+   column; each <section class="meta-section"> is `display: contents`,
+   so its header row and its body are the PANEL's flex items: the
+   header keeps its natural height whatever happens and only the body
+   flexes.  A body scrolls inside its share of the panel; main.js
+   (metasections block) gives the last expanded section's body
+   `flex: 1 1 0` to fill the leftover height, a dragged body
+   `flex: 0 1 <px>`, and every other body the natural `0 1 auto`
+   below.  A collapsed section shows its header only.  The resizer
+   after a section is the separator line between it and the next
+   shown section; it drags the boundary while both sides are expanded
+   (`static` otherwise: still a separator, no longer a handle). */
+.meta-section { display: contents; }
+
+.meta-section[hidden],
+#meta-info:not(.visible) { display: none; }
+
+.meta-section.collapsed > :not(.meta-section-hdr) { display: none !important; }
+
+/* Everything in a section except its body (the header, the Task
+   update status line) keeps its own height; only bodies flex. */
+.meta-section > :not(.meta-section-body) { flex: 0 0 auto; }
+
+.meta-section-hdr {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
+
+.meta-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.meta-section-toggle:hover { color: var(--fg); }
+
+.meta-section-toggle > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-section-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.12s ease;
+}
+
+.meta-section-toggle[aria-expanded="true"] .meta-section-chevron { transform: rotate(90deg); }
+
+/* A body at its natural height.  The large shrink factor makes
+   natural bodies give up space long before a dragged body
+   (`flex: 0 1 <px>`, set by main.js) does when the panel is too short
+   for everything: the height the user chose holds until nothing else
+   can shrink. */
+.meta-section-body {
+  flex: 0 1000 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The separator between two shown sections: a 1px line inside a 9px
+   grab area.  main.js hides the one after the last shown section. */
+.meta-section-resizer {
+  position: relative;
+  flex: 0 0 auto;
+  height: 9px;
+  margin: 2px 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.meta-section-resizer[hidden] { display: none; }
+
+.meta-section-resizer::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.meta-section-resizer.static { cursor: default; }
+
+.meta-section-resizer:not(.static):hover::after,
+.meta-section-resizer:not(.static):active::after,
+.meta-section-resizer:not(.static):focus-visible::after {
+  border-top-color: var(--accent);
+}
+
+.meta-section-resizer:focus-visible { outline: none; }
+
+/* Set by main.js while a section boundary is being dragged. */
+body.meta-section-resizing {
+  user-select: none;
+  cursor: row-resize;
+}
+
+/* The Task update section's header row: the toggle on the left, the
+   refresh button at the right.  The button turns while the daemon
+   runs the task-update agent and is disabled meanwhile (a second
+   press cannot start a second run). */
+.meta-info-hdr { justify-content: space-between; }
 
 #meta-info-refresh {
   display: inline-flex;
@@ -1785,12 +1891,15 @@ body.remote-chat #theme-btn { display: flex; }
 #meta-info-refresh.spinning svg { animation: status-spin 1s linear infinite; }
 
 /* The line under the header: "Updating…", or when and at what cost
-   the shown report was produced, and the last run's failure. */
+   the shown report was produced, and the last run's failure.  Capped
+   so a long error never pushes the report below it out of a short
+   panel: past a few lines the status scrolls instead. */
 .meta-info-status {
   font-size: var(--fs-xs);
   color: color-mix(in srgb, var(--fg) 55%, transparent);
   margin: -6px 0 6px;
-  min-height: 0;
+  max-height: 5.5em;
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 
@@ -1853,6 +1962,8 @@ body.meta-panel-mode #meta-panel {
 body.meta-panel-mode #meta-close,
 body.meta-panel-mode #meta-resizer { display: none !important; }
 
+/* Section bodies flex and scroll per the generic .meta-section-body
+   rules above; the per-mode rules here only style the content. */
 body.meta-panel-mode #meta-list {
   list-style: disc outside;
   margin: 0;
@@ -1860,13 +1971,6 @@ body.meta-panel-mode #meta-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-
-  /* The list keeps its natural height (the info subpanel below takes
-     the rest) but may still shrink and scroll when it alone is taller
-     than the view. */
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 /* Every surface's task-info list: a hidden row (the Parent task row
@@ -1892,22 +1996,7 @@ body.meta-panel-mode .meta-item .meta-value {
   color: var(--fg);
 }
 
-body.meta-panel-mode #meta-info {
-  display: none;
-  flex-direction: column;
-  flex: 1 1 0;
-  min-height: 0;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
-body.meta-panel-mode #meta-info.visible { display: flex; }
-
 body.meta-panel-mode #meta-info-content {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
   font-size: var(--fs-sm);
   color: var(--fg);
   overflow-wrap: anywhere;
@@ -1984,6 +2073,12 @@ body.sidebar-chat-mode #meta-close:hover {
 /* The drawer is never resizable (like the mobile one). */
 body.sidebar-chat-mode #meta-resizer { display: none; }
 
+/* The drawer's close button sits at the top right, over the first
+   section's header row: keep the header's text clear of it. */
+body.sidebar-chat-mode #meta-panel > .meta-section:first-of-type > .meta-section-hdr {
+  padding-right: 40px;
+}
+
 body.sidebar-chat-mode #meta-list {
   list-style: disc outside;
   margin: 0;
@@ -1991,9 +2086,6 @@ body.sidebar-chat-mode #meta-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 0 1 auto;
-  min-height: 0;
-  overflow-y: auto;
 }
 
 body.sidebar-chat-mode .meta-item {
@@ -2012,22 +2104,7 @@ body.sidebar-chat-mode .meta-item .meta-value {
   color: var(--fg);
 }
 
-body.sidebar-chat-mode #meta-info {
-  display: none;
-  flex-direction: column;
-  flex: 1 1 0;
-  min-height: 0;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-
-body.sidebar-chat-mode #meta-info.visible { display: flex; }
-
 body.sidebar-chat-mode #meta-info-content {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
   font-size: var(--fs-sm);
   color: var(--fg);
   overflow-wrap: anywhere;

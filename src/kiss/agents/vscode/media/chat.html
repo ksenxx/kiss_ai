@@ -254,43 +254,60 @@
          replaces the status bar at the top of the chat. -->
     <div id="meta-panel" aria-label="Task info">
       <button id="meta-close" aria-label="Close task info">&times;</button>
-      <div class="sidebar-hdr">Task Info</div>
-      <ul id="meta-list">
-        <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
-        <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
-        <!-- The task's own settings (a task_settings event), which
-             used to sit at the bottom of the static task panel. -->
-        <li class="meta-item"><span class="meta-label">Date:</span><span id="meta-date" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Base model:</span><span id="meta-model" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Worktree mode:</span><span id="meta-worktree" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Parallel mode:</span><span id="meta-parallel" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
-        <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
-        <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
-      </ul>
-      <!-- Info subpanel: the RUNNING task's task update — the report of
-           the task-update agent (src/kiss/agents/seas/task_update_sea.py)
-           on what the task has done so far and its partial results.
-           main.js polls getTaskUpdate while the task runs; the daemon
-           runs the agent on the first poll, every 10 minutes after that,
-           and when the refresh button (top right) is pressed.  The
-           subpanel fills all the panel space the list above leaves free.
-           While there is nothing to show — no running task — main.js
-           keeps the `visible` class off and the whole subpanel, header
-           included, stays hidden. -->
-      <div id="meta-info" aria-label="Task update">
-        <div class="sidebar-hdr meta-info-hdr">
-          <span>Task update</span>
+      <!-- The panel stacks SECTIONS (see "Task-info panel sections" in
+           main.css and the metasections block of main.js): each is a
+           header row whose chevron button collapses it, followed by a
+           scrolling body; the .meta-section-resizer after a section
+           separates it from the next one and, while both sides are
+           expanded, drags the boundary between them.  The last
+           expanded section fills whatever height the others leave.
+           Every section starts expanded.  To add a panel, append one
+           more <section class="meta-section"> (a unique id, a header
+           with a .meta-section-toggle, a .meta-section-body) followed
+           by its .meta-section-resizer. -->
+      <section class="meta-section" id="meta-section-info">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
+        </div>
+        <ul id="meta-list" class="meta-section-body">
+          <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
+          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
+          <!-- The task's own settings (a task_settings event), which
+               used to sit at the bottom of the static task panel. -->
+          <li class="meta-item"><span class="meta-label">Date:</span><span id="meta-date" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Base model:</span><span id="meta-model" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Worktree mode:</span><span id="meta-worktree" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Parallel mode:</span><span id="meta-parallel" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Chat id:</span><span id="meta-chat-id" class="meta-value">&mdash;</span></li>
+          <li class="meta-item"><span class="meta-label">Task id:</span><span id="meta-task-id" class="meta-value">&mdash;</span></li>
+          <li class="meta-item" id="meta-parent-item" hidden><span class="meta-label">Parent task:</span><span id="meta-parent-id" class="meta-value">&mdash;</span></li>
+        </ul>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task Info section" aria-controls="meta-list" tabindex="0"></div>
+      <!-- Task update section: the RUNNING task's task update — the
+           report of the task-update agent
+           (src/kiss/agents/seas/task_update_sea.py) on what the task
+           has done so far and its partial results.  main.js polls
+           getTaskUpdate while the task runs; the daemon runs the agent
+           on the first poll, every 10 minutes after that, and when the
+           refresh button (header, right) is pressed.  While there is
+           nothing to show — no running task — main.js keeps the
+           `visible` class off and the whole section, header included,
+           stays hidden. -->
+      <section class="meta-section" id="meta-info" aria-label="Task update">
+        <div class="sidebar-hdr meta-section-hdr meta-info-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-info-content"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task update</span></button>
           <button type="button" id="meta-info-refresh" title="Run the task update now" aria-label="Refresh task update"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-info-status" class="meta-info-status" aria-live="polite"></div>
-        <div id="meta-info-content" class="md-body"></div>
-      </div>
+        <div id="meta-info-content" class="md-body meta-section-body"></div>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task update section" aria-controls="meta-info-content" tabindex="0"></div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
     <div id="meta-overlay"></div>

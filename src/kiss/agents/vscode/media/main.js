@@ -3966,6 +3966,253 @@
     mirrorStatusIntoMetaPanel('status-machine', 'meta-machine', false);
   }
 
+  // metasections-coverage:start
+  // ---- Task-info panel sections: collapse, scroll, vertical resize ----
+  //
+  // #meta-panel stacks <section class="meta-section"> elements (Task
+  // Info, Task update, whatever comes next).  Each is a header row with
+  // a chevron toggle button (.meta-section-toggle) and a scrolling body
+  // (.meta-section-body); the section wrappers are `display: contents`,
+  // so headers and bodies are the panel's own flex items and a header
+  // is never squeezed.  The .meta-section-resizer after a section is the
+  // separator line before the next shown section; while both sides are
+  // expanded it drags the boundary: the body above takes a fixed height
+  // (flex: 0 1 <px>), the bodies below share the rest.  The LAST
+  // expanded section's body always fills the leftover height.  Collapse
+  // state and dragged heights persist in localStorage; every section
+  // starts expanded.  Adding a panel is one more <section> plus its
+  // resizer in chat.html: nothing here names a particular section.
+  const META_SECTION_COLLAPSED_KEY = 'kiss-meta-section-collapsed:';
+  const META_SECTION_HEIGHT_KEY = 'kiss-meta-section-h:';
+  const META_SECTION_KEY_STEP = 16;
+  /** Dragged body heights (px) by section id; absent = natural height. */
+  const metaSectionHeights = {};
+
+  function metaSections() {
+    return Array.from(document.querySelectorAll('#meta-panel > .meta-section'));
+  }
+
+  function metaSectionBody(section) {
+    return section.querySelector('.meta-section-body');
+  }
+
+  /** The separator right after a section (null when the markup has none). */
+  function metaSectionResizer(section) {
+    const next = section.nextElementSibling;
+    return next && next.classList.contains('meta-section-resizer')
+      ? next
+      : null;
+  }
+
+  /**
+   * Whether a section is currently displayed at all: not `hidden`, and,
+   * for the Task update section (which hides while it has nothing to
+   * show, see setMetaInfoHTML), carrying `visible`.
+   */
+  function metaSectionShown(section) {
+    if (section.hidden) return false;
+    return section.id !== 'meta-info' || section.classList.contains('visible');
+  }
+
+  function metaSectionExpanded(section) {
+    return (
+      metaSectionShown(section) && !section.classList.contains('collapsed')
+    );
+  }
+
+  /**
+   * Re-apply the flex layout of every section body and the state of
+   * every resizer.  Called after anything that changes which sections
+   * are shown or expanded, and during a drag.
+   */
+  function applyMetaSectionLayout() {
+    const sections = metaSections();
+    const expanded = sections.filter(metaSectionExpanded);
+    const last = expanded[expanded.length - 1];
+    for (const section of sections) {
+      const body = metaSectionBody(section);
+      if (body) {
+        const h = metaSectionHeights[section.id];
+        if (section === last) body.style.flex = '1 1 0px';
+        else if (h !== undefined) body.style.flex = '0 1 ' + h + 'px';
+        else body.style.flex = '';
+      }
+      const resizer = metaSectionResizer(section);
+      if (!resizer) continue;
+      const below = sections.slice(sections.indexOf(section) + 1);
+      resizer.hidden =
+        !metaSectionShown(section) || !below.some(metaSectionShown);
+      const draggable =
+        !resizer.hidden &&
+        metaSectionExpanded(section) &&
+        below.some(metaSectionExpanded);
+      resizer.classList.toggle('static', !draggable);
+      resizer.setAttribute('aria-disabled', draggable ? 'false' : 'true');
+      resizer.tabIndex = draggable ? 0 : -1;
+    }
+  }
+
+  /**
+   * Collapse or expand a section, persisting the choice.
+   *
+   * @param {Element} section The .meta-section element.
+   * @param {boolean} collapsed True to show only its header.
+   */
+  function setMetaSectionCollapsed(section, collapsed) {
+    section.classList.toggle('collapsed', collapsed);
+    const toggle = section.querySelector('.meta-section-toggle');
+    if (toggle)
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    try {
+      if (collapsed)
+        localStorage.setItem(META_SECTION_COLLAPSED_KEY + section.id, '1');
+      else localStorage.removeItem(META_SECTION_COLLAPSED_KEY + section.id);
+    } catch (_e) {
+      /* storage unavailable: the choice lasts for this page only */
+    }
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * Fix a section's body height (px) and persist it.  Pass undefined to
+   * return the body to its natural height.
+   */
+  function setMetaSectionHeight(section, height) {
+    if (height === undefined) delete metaSectionHeights[section.id];
+    else metaSectionHeights[section.id] = height;
+    try {
+      if (height === undefined)
+        localStorage.removeItem(META_SECTION_HEIGHT_KEY + section.id);
+      else
+        localStorage.setItem(
+          META_SECTION_HEIGHT_KEY + section.id,
+          String(height),
+        );
+    } catch (_e) {
+      /* storage unavailable: the height lasts for this page only */
+    }
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * Wire the separator after a section: a pointer drag or the Up/Down
+   * arrow keys move the boundary between that section's body and the
+   * expanded bodies below it (which can shrink to nothing: their
+   * headers stay); a double-click restores the natural height.
+   */
+  function setupMetaSectionResizer(resizer) {
+    const section = resizer.previousElementSibling;
+    if (!section || !section.classList.contains('meta-section')) return;
+    const body = metaSectionBody(section);
+    if (!body) return;
+    let startY = 0;
+    let startH = 0;
+    let maxH = 0;
+    let dragging = false;
+
+    function measure() {
+      startH = body.getBoundingClientRect().height;
+      maxH = startH;
+      for (const other of metaSections().slice(
+        metaSections().indexOf(section) + 1,
+      )) {
+        const otherBody = metaSectionBody(other);
+        if (otherBody && metaSectionExpanded(other))
+          maxH += otherBody.getBoundingClientRect().height;
+      }
+    }
+
+    function resizeTo(height) {
+      const requested = Math.round(Math.max(0, Math.min(maxH, height)));
+      setMetaSectionHeight(section, requested);
+      // When the panel is too short for everything, the body renders
+      // shorter than asked: keep the height that actually shows, so the
+      // stored value, aria-valuenow and the next drag all agree.
+      const h = Math.min(
+        requested,
+        Math.round(body.getBoundingClientRect().height),
+      );
+      if (h !== requested) setMetaSectionHeight(section, h);
+      resizer.setAttribute('aria-valuenow', String(h));
+      resizer.setAttribute('aria-valuemax', String(Math.round(maxH)));
+    }
+
+    function endDrag() {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove('meta-section-resizing');
+    }
+
+    resizer.addEventListener('pointerdown', e => {
+      if (e.button !== 0 || resizer.classList.contains('static')) return;
+      e.preventDefault();
+      dragging = true;
+      startY = e.clientY;
+      measure();
+      document.body.classList.add('meta-section-resizing');
+      if (resizer.setPointerCapture) resizer.setPointerCapture(e.pointerId);
+    });
+    resizer.addEventListener('pointermove', e => {
+      if (dragging) resizeTo(startH + e.clientY - startY);
+    });
+    resizer.addEventListener('pointerup', endDrag);
+    resizer.addEventListener('pointercancel', endDrag);
+    resizer.addEventListener('dblclick', () => {
+      if (!resizer.classList.contains('static'))
+        setMetaSectionHeight(section, undefined);
+    });
+    resizer.addEventListener('keydown', e => {
+      if (resizer.classList.contains('static')) return;
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      e.preventDefault();
+      measure();
+      resizeTo(
+        startH +
+          (e.key === 'ArrowDown'
+            ? META_SECTION_KEY_STEP
+            : -META_SECTION_KEY_STEP),
+      );
+    });
+  }
+
+  function setupMetaSections() {
+    for (const section of metaSections()) {
+      const toggle = section.querySelector('.meta-section-toggle');
+      if (toggle) {
+        toggle.addEventListener('click', () => {
+          setMetaSectionCollapsed(
+            section,
+            !section.classList.contains('collapsed'),
+          );
+        });
+      }
+      let collapsed = null;
+      let height = null;
+      try {
+        collapsed = localStorage.getItem(
+          META_SECTION_COLLAPSED_KEY + section.id,
+        );
+        height = localStorage.getItem(META_SECTION_HEIGHT_KEY + section.id);
+      } catch (_e) {
+        /* storage unavailable: every section starts expanded, natural height */
+      }
+      if (collapsed === '1') {
+        section.classList.add('collapsed');
+        if (toggle) toggle.setAttribute('aria-expanded', 'false');
+      }
+      if (height !== null && /^\d+$/.test(height))
+        metaSectionHeights[section.id] = parseInt(height, 10);
+    }
+    for (const resizer of document.querySelectorAll(
+      '#meta-panel > .meta-section-resizer',
+    )) {
+      setupMetaSectionResizer(resizer);
+    }
+    applyMetaSectionLayout();
+  }
+  setupMetaSections();
+  // metasections-coverage:end
+
   // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
   // TASK UPDATE: what the task-update agent
@@ -4015,6 +4262,7 @@
     if (!metaInfoContent) return;
     metaInfoContent.innerHTML = html;
     if (metaInfoEl) metaInfoEl.classList.toggle('visible', html !== '');
+    applyMetaSectionLayout();
   }
 
   /**
