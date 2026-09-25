@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for tool profiles (WP1b), the review budget cap and
+"""End-to-end tests for tool profiles (WP1b),
 ``run_parallel(model_name=..., tool_profile=...)`` (WP3), and the cost-lever
 config toggles (WP0).
 
@@ -25,19 +25,10 @@ import yaml
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import sorcar_agent as sa
-from kiss.agents.sorcar.agent_dispatch import _dispatch
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.fanout_guard import (
-    REVIEW_BUDGET_REFUSAL,
-    REVIEW_CAP_REFUSAL,
-    ReviewQuota,
-    is_implementation_task,
-    review_budget_for,
-    review_budget_from_prompt,
-)
+from kiss.agents.sorcar.fanout_guard import is_implementation_task
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, SorcarAgent
 from kiss.core.config import DEFAULT_CONFIG, Config
-from kiss.core.kiss_error import BudgetExceededError
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
 
@@ -73,7 +64,6 @@ class TestConfigToggles:
         monkeypatch.setenv("KISS_TOOL_OUTPUT_COMPACTION", "off")
         monkeypatch.setenv("KISS_TOOL_PROFILES", "yes")
         monkeypatch.setenv("KISS_CONTEXT_LIMIT_FRACTION", "0.85")
-        monkeypatch.setenv("KISS_REVIEW_BUDGET_FRACTION", "junk")
         monkeypatch.setenv("KISS_READ_OUTLINE_LINES", "1500")
         monkeypatch.setenv("KISS_CHAT_HISTORY_DIGEST", "")
         cfg = Config()
@@ -81,7 +71,6 @@ class TestConfigToggles:
         assert cfg.tool_output_compaction is False
         assert cfg.tool_profiles is True
         assert cfg.context_limit_fraction == 0.85
-        assert cfg.review_budget_fraction == 0.0  # junk falls back to the default
         assert cfg.read_outline_lines == 1500
         assert cfg.chat_history_digest is True  # empty = default
         assert cfg.dispatch_path_rewrite is True
@@ -104,7 +93,6 @@ class TestConfigToggles:
         ):
             assert getattr(DEFAULT_CONFIG, name) is True, name
         assert DEFAULT_CONFIG.context_limit_fraction == 0.7
-        assert DEFAULT_CONFIG.review_budget_fraction == 0.0  # prompt-derived by default
         assert DEFAULT_CONFIG.tool_output_max_chars == 50000
         assert DEFAULT_CONFIG.compaction_start_tokens == 100_000
         assert DEFAULT_CONFIG.compaction_step_tokens == 100_000
@@ -191,86 +179,6 @@ class TestToolProfiles:
         assert out.startswith("Error: tool_profile must be one of full, review, shell")
 
 
-class TestReviewQuotaBudget:
-    def test_reserve_and_release(self) -> None:
-        quota = ReviewQuota(budget=1.0)
-        assert quota.budget_left == 1.0
-        assert quota.reserve_budget(0.6) == 0.6
-        assert quota.reserve_budget(0.6) == pytest.approx(0.4)
-        assert quota.reserve_budget(0.1) == 0.0
-        quota.release(0.5)
-        assert quota.budget_left == pytest.approx(0.5)
-        quota.release(-3)  # negative unspent is ignored
-        assert quota.budget_left == pytest.approx(0.5)
-        quota.release(99)  # cannot go above the cap
-        assert quota.budget_left == 1.0
-
-    def test_unlimited_quota(self) -> None:
-        quota = ReviewQuota()
-        assert quota.budget_left is None
-        assert quota.reserve_budget(123.0) == 123.0
-        quota.release(123.0)
-        assert quota.budget_left is None
-
-    def test_review_budget_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # No allowance in the prompt and no fallback fraction: no cap.
-        assert review_budget_for(40.0) is None
-        assert review_budget_for(40.0, "Implement the feature and test it.") is None
-        monkeypatch.setattr(DEFAULT_CONFIG, "review_budget_fraction", 0.5)
-        assert review_budget_for(40.0) == 20.0
-        # The prompt wins over the fallback.
-        assert review_budget_for(40.0, "Use at most 25% of the budget for reviewing.") == 10.0
-        monkeypatch.setattr(DEFAULT_CONFIG, "review_budget_fraction", 1.0)
-        assert review_budget_for(40.0) is None
-
-    @pytest.mark.parametrize(
-        ("prompt", "expected"),
-        [
-            ("Use at most 50% of the task budget in gpt-5.6-sol for reviewing.", 500.0),
-            ("Keep review spend to 30 percent of the budget.", 300.0),
-            ("Spend no more than $40 on the review.", 40.0),
-            ("Reviewers may cost 25 dollars in total.", 25.0),
-            ("The review may cost 5000 USD.", 1000.0),  # clipped to the task budget
-            ("Keep the reviewers under a third of the budget.", 1000.0 / 3),
-            ("Give the audit half the budget.", 500.0),
-            ("Implement the feature; the whole budget is $1000.", None),  # no review
-            ("Review the code for 100% coverage of the budget.", None),  # not a share
-            (
-                "## Previous tasks\nUse at most 20% of the budget for reviewing.\n"
-                "# Task (work on it now)\n\nJust implement it.",
-                None,  # earlier tasks' instructions are not the current task's
-            ),
-            (
-                "# Task (work on it now)\n\nImplement X. Use 'gpt-5.6-sol' for review; "
-                "keep its spend under $12.",
-                12.0,
-            ),
-        ],
-    )
-    def test_review_budget_from_prompt(self, prompt: str, expected: float | None) -> None:
-        got = review_budget_from_prompt(prompt, 1000.0)
-        assert got == (pytest.approx(expected) if expected is not None else None)
-
-    def test_run_parallel_refuses_exhausted_review_budget(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, max_budget=10.0, budget_used=0.0)
-        agent._review_quota = ReviewQuota(budget=0.9)
-        agent._review_quota.reserve_budget(0.5)  # an earlier round took most of it
-        run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel('["Review the diff for bugs"]')
-        assert out == f"Error: {REVIEW_BUDGET_REFUSAL}"
-        # The failed attempt did not keep a reservation or burn a round.
-        assert agent._review_quota.budget_left == pytest.approx(0.4)
-        assert agent._review_quota.used == 0
-
-    def test_run_parallel_releases_budget_when_round_cap_refuses(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, max_budget=10.0, budget_used=0.0)
-        agent._review_quota = ReviewQuota(limit=0, budget=5.0)
-        run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel('["Audit the module"]')
-        assert out == f"Error: {REVIEW_CAP_REFUSAL}"
-        assert agent._review_quota.budget_left == 5.0
-
-
 def _child_rows(parent_agent: ChatSorcarAgent) -> list[tuple[str, float, str]]:
     """Return ``(model, max_budget, task)`` of the persisted children of *parent_agent*."""
     parent_id = str(getattr(parent_agent, "_last_task_id", "") or "")
@@ -291,13 +199,12 @@ class TestFanoutPropagation:
     """Real fan-outs: the children run against the scripted server and are
     observed through the server's requests and their persisted rows."""
 
-    def test_children_get_profile_model_and_clipped_budget(self, tmp_path: Path) -> None:
+    def test_children_get_profile_model_and_plain_budget_share(self, tmp_path: Path) -> None:
         script = [finish_body("<p>reviewed</p>", prompt_tokens=1000)]
         with serve(script) as (url, requests):
             agent = _bare_agent(tmp_path, max_budget=4.0, budget_used=0.0)
             agent.model_name = MODEL
             agent.model_config = {"base_url": url, "api_key": "local"}
-            agent._review_quota = ReviewQuota(budget=0.75)
             agent._chat_id = ""
             agent._last_task_id = uuid.uuid4().hex
             run_parallel = _tool(agent, "run_parallel")
@@ -314,19 +221,15 @@ class TestFanoutPropagation:
         sent_tools = {t["function"]["name"] for t in requests[0]["tools"]}
         assert "Edit" not in sent_tools and "run_parallel" not in sent_tools
         assert {"Bash", "Read", "finish"} <= sent_tools
-        # Persisted child row: the model named at dispatch and a budget
-        # clipped from the plain share (4.0 / 2 = 2.0) to the 0.75 review
-        # allowance.
+        # Persisted child row: the model named at dispatch and the plain
+        # remaining-budget share (4.0 / (1 + 1) = 2.0); a review task is
+        # not clipped below it.
         rows = _child_rows(agent)
         assert len(rows) == 1
         model, max_budget, task = rows[0]
         assert model == MODEL and task == "Review module A for bugs"
-        assert max_budget == pytest.approx(0.75)
-        # The unspent reservation went back to the quota.
-        spent = float(getattr(agent, "budget_used", 0.0))
-        assert spent > 0
-        assert agent._review_quota.budget_left == pytest.approx(0.75 - spent, abs=1e-6)
-        assert agent._review_quota.used == 1
+        assert max_budget == pytest.approx(2.0)
+        assert float(getattr(agent, "budget_used", 0.0)) > 0
 
     def test_different_model_is_dispatched_with_default_routing(self, tmp_path: Path) -> None:
         # A different model gets default provider routing, not the parent's
@@ -346,6 +249,24 @@ class TestFanoutPropagation:
         assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is False
         rows = _child_rows(agent)
         assert rows and rows[0][0] == "no-such-model-cost-levers"
+
+    def test_reviewer_and_plain_children_get_the_same_share(self, tmp_path: Path) -> None:
+        """A mixed fan-out hands every child the plain share: the review
+        child is neither clipped nor charged against a separate allowance."""
+        script = [finish_body("<p>done</p>", prompt_tokens=1000)]
+        with serve(script) as (url, requests):
+            agent = _bare_agent(tmp_path, max_budget=6.0, budget_used=0.0)
+            agent.model_name = MODEL
+            agent.model_config = {"base_url": url, "api_key": "local"}
+            agent._chat_id = ""
+            agent._last_task_id = uuid.uuid4().hex
+            run_parallel = _tool(agent, "run_parallel")
+            out = run_parallel('["Review module A for bugs", "Summarize module B"]')
+        assert len(yaml.safe_load(out)) == 2 and len(requests) == 2
+        rows = {task: budget for _model, budget, task in _child_rows(agent)}
+        # Plain share is 6.0 / (2 + 1) = 2.0 for both children.
+        assert rows["Review module A for bugs"] == pytest.approx(2.0)
+        assert rows["Summarize module B"] == pytest.approx(2.0)
 
 
 def test_child_profile_is_stamped_by_engine(tmp_path: Path) -> None:
@@ -407,102 +328,39 @@ class TestImplementationTasksKeepFullToolset:
         assert "Edit" not in by_task["review"] and "run_parallel" not in by_task["review"]
 
 
-class TestMixedFanoutBudgets:
-    def test_only_reviewer_children_are_clipped_and_charged(self, tmp_path: Path) -> None:
-        script = [finish_body("<p>done</p>", prompt_tokens=1000)]
-        with serve(script) as (url, requests):
-            agent = _bare_agent(tmp_path, max_budget=6.0, budget_used=0.0)
-            agent.model_name = MODEL
-            agent.model_config = {"base_url": url, "api_key": "local"}
-            agent._review_quota = ReviewQuota(budget=0.8)
-            agent._chat_id = ""
-            agent._last_task_id = uuid.uuid4().hex
-            run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel('["Review module A for bugs", "Summarize module B"]')
-        assert len(yaml.safe_load(out)) == 2 and len(requests) == 2
-        rows = {task: budget for _model, budget, task in _child_rows(agent)}
-        # Plain share is 6.0 / 3 = 2.0; the reviewer is clipped to the 0.8
-        # allowance, its non-review sibling keeps the plain share.
-        assert rows["Review module A for bugs"] == pytest.approx(0.8)
-        assert rows["Summarize module B"] == pytest.approx(2.0)
-        # Only the reviewer's spend stays charged against the quota.
-        spent_total = float(agent.budget_used)
-        left = agent._review_quota.budget_left
-        assert left is not None and 0 < 0.8 - left < spent_total
-
-    def test_reservation_released_when_fanout_raises(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, max_budget=6.0, budget_used=0.0)
-        agent._review_quota = ReviewQuota(budget=1.0)
-        agent._review_quota.reserve_budget(0.5)
-        # The budget is gone between the reservation and the fan-out: the
-        # inner budget-share computation raises, the reservation comes back.
-        agent.budget_used = 6.5
-        with pytest.raises(BudgetExceededError):
-            agent._run_tasks_parallel(
-                ["Review x"], review_budget=0.5, review_flags=[True],
-            )
-        assert agent._review_quota.budget_left == pytest.approx(1.0)
-
-    def test_explicit_review_profile_counts_as_review(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, max_budget=10.0, budget_used=0.0)
-        agent._review_quota = ReviewQuota(limit=0, budget=5.0)
-        run_parallel = _tool(agent, "run_parallel")
-        out = run_parallel('["Summarize module B"]', tool_profile="review")
-        assert out == f"Error: {REVIEW_CAP_REFUSAL}"
-        assert agent._review_quota.budget_left == 5.0
-
-
-class TestRunAgentReviewBudget:
-    def test_dispatch_reserves_and_releases_review_budget(self, tmp_path: Path) -> None:
-        parent = _bare_agent(tmp_path, max_budget=10.0, budget_used=0.0)
-        parent._review_quota = ReviewQuota(budget=0.3)
-        # Below the minimum a child can use: refused, nothing kept.
-        out = _dispatch(
-            name="helper", prompt="Review the diff for regressions",
-            agent_path="/nonexistent/agent.py", work_dir=str(tmp_path),
-            model_name="", budget=None, timeout=1.0, parent_agent=parent,
-        )
-        assert out == f"Error: {REVIEW_BUDGET_REFUSAL}"
-        assert parent._review_quota.budget_left == pytest.approx(0.3)
-        assert parent._review_quota.used == 0
-        # Enough budget: the round is reserved, the (daemonless) dispatch
-        # fails, and the whole reservation comes back.
-        parent._review_quota = ReviewQuota(budget=2.0)
-        out = _dispatch(
-            name="helper", prompt="Review the diff for regressions",
-            agent_path="/nonexistent/agent.py", work_dir=str(tmp_path),
-            model_name="", budget=5.0, timeout=1.0, parent_agent=parent,
-        )
-        assert out.startswith("Error:") and "Review-" not in out
-        assert parent._review_quota.used == 1
-        assert parent._review_quota.budget_left == pytest.approx(2.0)
-
-
 def test_env_float_rejects_non_finite(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KISS_REVIEW_BUDGET_FRACTION", "nan")
-    assert Config().review_budget_fraction == 0.0
-    monkeypatch.setenv("KISS_REVIEW_BUDGET_FRACTION", "inf")
-    assert Config().review_budget_fraction == 0.0
+    monkeypatch.setenv("KISS_CONTEXT_LIMIT_FRACTION", "nan")
+    assert Config().context_limit_fraction == 0.7
+    monkeypatch.setenv("KISS_CONTEXT_LIMIT_FRACTION", "inf")
+    assert Config().context_limit_fraction == 0.7
 
 
-def test_run_creates_quota_from_the_prompt_allowance(tmp_path: Path) -> None:
-    """A real run: the quota's budget is what the user's prompt allows reviewers."""
-    script = [finish_body("<p>done</p>", prompt_tokens=500)]
-    with serve(script) as (url, _requests):
-        agent = ChatSorcarAgent("quota-from-prompt")
+def test_review_share_in_prompt_leaves_reviewers_uncapped(tmp_path: Path) -> None:
+    """A real run whose prompt names a review share ("at most 10% of the
+    budget for reviewing") creates no reviewer allowance: a review fan-out
+    issued by that agent afterwards hands its child the plain share of the
+    remaining budget, not 10% of the task budget."""
+    script = [
+        finish_body("<p>done</p>", prompt_tokens=500),
+        finish_body("<p>reviewed</p>", prompt_tokens=500),
+    ]
+    with serve(script) as (url, requests):
+        agent = ChatSorcarAgent("share-in-prompt")
         agent.run(
             prompt_template="Say done. Use at most 10% of the budget for reviewing.",
             model_name=MODEL, work_dir=str(tmp_path), max_steps=3, max_budget=8.0,
             model_config={"base_url": url, "api_key": "local"},
             web_tools=False, use_memory=False, verbose=False,
         )
-    assert agent._review_quota is not None
-    assert agent._review_quota.budget_left == pytest.approx(0.8)
-    with serve(script) as (url, _requests):
-        plain = ChatSorcarAgent("quota-uncapped")
-        plain.run(
-            prompt_template="Say done.", model_name=MODEL, work_dir=str(tmp_path),
-            max_steps=3, max_budget=8.0, model_config={"base_url": url, "api_key": "local"},
-            web_tools=False, use_memory=False, verbose=False,
-        )
-    assert plain._review_quota is not None and plain._review_quota.budget_left is None
+        assert not hasattr(agent, "_review_quota")
+        spent_before_fanout = float(agent.budget_used)
+        run_parallel = _tool(agent, "run_parallel")
+        out = run_parallel('["Review module A for bugs"]')
+    assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is True
+    assert len(requests) == 2
+    rows = _child_rows(agent)
+    assert len(rows) == 1
+    # The removed allowance would have been 0.8; the plain share of the
+    # remainder is (8.0 - parent spend so far) / 2.
+    assert rows[0][1] > 0.8
+    assert rows[0][1] == pytest.approx((8.0 - spent_before_fanout) / 2)

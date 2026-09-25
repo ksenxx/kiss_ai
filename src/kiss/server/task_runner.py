@@ -1436,11 +1436,11 @@ class _TaskRunnerMixin:
                 "parent_task_id": parent_task_id,
                 "parent_tab_id": parent_tab_id,
                 # Reviewer sub-tree marker (see fanout_guard): a
-                # daemon-dispatched child of a reviewer must not be
-                # able to spawn reviewers via run_parallel either.
-                # The EFFECTIVE prompt is re-checked here because an
-                # agent script's ``prompt()`` override (applied above
-                # by ``apply_agent_overrides``) can turn an innocuous
+                # daemon-dispatched child of a reviewer gets the same
+                # read-only ``review`` tool profile.  The EFFECTIVE
+                # prompt is re-checked here because an agent script's
+                # ``prompt()`` override (applied above by
+                # ``apply_agent_overrides``) can turn an innocuous
                 # dispatch into a review task after the caller-side
                 # check in ``agent_dispatch._dispatch`` already passed.
                 "reviewer": bool(cmd.get("parentReviewer"))

@@ -519,7 +519,7 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         # arguments must reach ``run_agent`` unchanged.  ``<task_id>``
         # is left as a literal placeholder here — the calling task's
         # id is not known until the daemon dispatch allocates one, so
-        # ``_dispatch_reserved`` substitutes it into
+        # ``_dispatch`` substitutes it into
         # ``append_to_prompt`` right before the daemon round trip.
         # The system-prompt suffix is owned by ``ask_sea.py`` (its
         # ``append_to_system_prompt()`` getter also overrides the

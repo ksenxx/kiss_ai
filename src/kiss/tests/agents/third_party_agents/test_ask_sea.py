@@ -18,7 +18,7 @@ dispatch code:
    LLM to call ``run_agent`` with the fixed ``append_to_prompt`` (with
    the ``<task_id>`` placeholder still intact) and
    ``append_to_system_prompt`` this command carries.
-3. The dispatch layer ``_dispatch_reserved`` MUST substitute the
+3. The dispatch layer ``_dispatch`` MUST substitute the
    literal ``<task_id>`` in ``options.append_to_prompt`` with the
    calling task's ``last_task_id`` before the daemon round trip,
    and MUST leave the substitution untouched for any other agent
@@ -255,7 +255,7 @@ class _DispatchCaptured(BaseException):
 
     Inherits :class:`BaseException` (not :class:`Exception`) so it is
     NOT caught by the generic ``except Exception`` in
-    :func:`_dispatch_reserved` that turns any daemon failure into an
+    :func:`_dispatch` that turns any daemon failure into an
     "Error:" string — the test needs the exception to propagate up so
     it can read the captured kwargs.
     """
@@ -280,11 +280,11 @@ def _run_dispatch(
     agent_path: str, options: RunOptions, parent_task_id: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> dict[str, Any]:
-    """Drive :func:`_dispatch_reserved` and return the captured kwargs."""
+    """Drive :func:`_dispatch` and return the captured kwargs."""
     _install_daemon_capture(monkeypatch)
     parent = _StubAgent(parent_task_id)
     try:
-        agent_dispatch._dispatch_reserved(
+        agent_dispatch._dispatch(
             name="ask",
             prompt="why did the last step fail?",
             agent_path=agent_path,
@@ -296,7 +296,6 @@ def _run_dispatch(
             scope_work_dir="",
             git_lifecycle=False,
             classify=True,
-            parent_reviewer=False,
             options=options,
         )
     except _DispatchCaptured as captured:

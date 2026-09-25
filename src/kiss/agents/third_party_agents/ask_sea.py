@@ -13,7 +13,7 @@ this script:
 * ``append_to_prompt`` = ``"Read the events of the task <task_id>
   from ~/.kiss/sorcar.db and answer the user question above."`` — the
   literal ``<task_id>`` placeholder is substituted with the calling
-  (parent) task's id inside :func:`_dispatch_reserved` before the
+  (parent) task's id inside :func:`_dispatch` before the
   daemon round trip, so the answering agent reads the events of the
   task the user is asking about,
 * ``append_to_system_prompt`` = :func:`append_to_system_prompt` — the

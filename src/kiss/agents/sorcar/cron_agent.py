@@ -716,7 +716,7 @@ def _run_prompt_job(
 
     The run has no parent task (the tool is built without a parent
     agent), so the daemon treats it as a top-level task: no reviewer
-    sub-tree marking, no shared budget or task-tree quota.
+    sub-tree marking, no shared budget.
 
     Args:
         job: The job dict (uses ``id``, ``name``, ``prompt``,
