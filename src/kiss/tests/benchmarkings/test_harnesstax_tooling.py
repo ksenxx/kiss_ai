@@ -22,6 +22,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1031,3 +1032,214 @@ def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) ->
     finally:
         live.remove(force=True)
     assert trials.plain_text("<p>Did <b>x</b></p>\n<ul><li>y</li></ul>") == "Did x y"
+
+
+def _live_container(image: str, setup: str) -> Any:
+    """A running container of *image* after *setup* ran in it, or ``None`` without Docker."""
+    import docker
+
+    try:
+        client = docker.from_env()
+        client.ping()
+    except Exception:
+        return None
+    live = client.containers.run(image, "sleep infinity", detach=True)
+    exit_code, out = live.exec_run(["sh", "-c", setup])
+    assert exit_code == 0, out
+    return live
+
+
+def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None:
+    """Shell results name the processes a call left running and the pre-existing files it changed.
+
+    The notes are facts the model cannot otherwise see (optQ analysis tb2-03,
+    tb2-04): a ``nohup ... &`` survivor, a kill that missed, an input file
+    rewritten in place.  Files the agent edits with Edit/Write are its own and
+    are not reported; each changed file is reported once.
+    """
+    from benchmarkings.harnesstax import sea_core
+
+    live = _live_container(
+        "python:3.11-slim",
+        "mkdir -p /app/sub && printf 'a,b\\n1,2\\n' > /app/data.csv && echo x > /app/sub/keep.txt "
+        "&& echo y > /app/gone.txt && echo z > /app/mine.py && echo r > /app/real.txt "
+        "&& ln -s real.txt /app/link.txt && echo e > /app/extra.txt && echo l > /app/last.txt",
+    )
+    if live is None:
+        pytest.skip("Docker is not available")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "container": live.id, "workdir": "/app", "prompt": "Do the task.", "model": MODEL,
+        "trajectory": str(tmp_path / "trajectory.jsonl"),
+    }))
+    try:
+        harness = sea_core.ContainerHarness(str(config))
+        # The task statement carries the workdir listing; the model cannot be switched.
+        prompt = harness.prompt()
+        assert prompt.startswith("Do the task.") and "data.csv" in prompt
+        assert "ls -la /app" in prompt
+        assert harness.on_tool_call("set_model", {"model_name": "x"}) != "OK"
+        # First model call: baseline of the workdir; no shell ran, so no notes.
+        user = {"role": "user", "content": "Do the task."}
+        assert harness.on_llm_call([user]) == [user]
+        assert set(harness.file_baseline or {}) == {
+            "/app/data.csv", "/app/sub/keep.txt", "/app/gone.txt", "/app/mine.py",
+            "/app/real.txt", "/app/extra.txt", "/app/last.txt"}
+
+        def shell(command: str) -> dict[str, Any]:
+            assert harness.on_tool_call("Bash", {"command": command}) == "OK"
+            live.exec_run(["sh", "-c", command])
+            result = {"role": "tool", "content": "ran"}
+            harness.on_llm_call([result])
+            return result
+
+        # A background process that outlives its call is reported once, with its pid.
+        result = shell("cd /app && nohup sleep 300 >/dev/null 2>&1 &")
+        assert "started by your last shell command(s) are still running" in result["content"]
+        assert "sleep 300" in result["content"]
+        # An unrelated command: no repeat.
+        assert shell("echo hi")["content"] == "ran"
+        # A kill that misses keeps the survivor alive: the note comes back.
+        result = shell("kill 999999 2>/dev/null; true")
+        assert "still running after your last shell" in result["content"]
+        assert "sleep 300" in result["content"]
+        # A kill that lands: nothing left to report.
+        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
+                       "| grep -q '^sleep 300' && echo ${d#/proc/}; done); sleep 0.2")
+        assert "still running" not in result["content"] and harness.tracked_pids == set()
+        # Children a reported process spawns later (a build's compiler steps) are tracked
+        # silently: no note per turn, but a missed kill lists them with their parent.
+        result = shell("cd /app && nohup sh -c 'sleep 1; sleep 301' >/dev/null 2>&1 &")
+        assert "started by your last shell command(s)" in result["content"]
+        assert "sleep 1; sleep 301" in result["content"]
+        assert shell("sleep 1.5")["content"] == "ran"
+        assert any(cmd.startswith("sleep 301") for _pid, cmd in harness.process_snapshot().values())
+        result = shell("kill 999999 2>/dev/null; true")
+        assert "still running after your last shell" in result["content"]
+        assert "sleep 301" in result["content"]
+        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
+                       "| grep -q 'sleep 301' && echo ${d#/proc/}; done) 2>/dev/null; sleep 0.2")
+        assert "still running" not in result["content"] and harness.tracked_pids == set()
+        # A child born between turns is adopted at the next call's start, so it stays
+        # tracked when its parent exits during that call and is orphaned to pid 1; a
+        # tracked shell that exec()s the program keeps its (pid, start time) identity.
+        result = shell("cd /app && nohup sh -c 'sleep 0.5; exec sleep 302' >/dev/null 2>&1 & "
+                       "cd /app && nohup sh -c 'sleep 0.5; sleep 303 & sleep 2' >/dev/null 2>&1 &")
+        assert "started by your last shell command(s)" in result["content"]
+        assert not [cmd for _pid, cmd in harness.process_snapshot().values()
+                    if cmd.startswith("sleep 303")]
+        time.sleep(1.0)
+        assert shell("sleep 1.5")["content"] == "ran"
+        assert [cmd for _pid, cmd in harness.process_snapshot().values()
+                if cmd.startswith("sleep 303")]
+        result = shell("kill 999999 2>/dev/null; true")
+        assert "still running after your last shell" in result["content"]
+        assert "sleep 303 (parent 1)" in result["content"]
+        assert "sleep 302 (parent 1)" in result["content"]
+        result = shell("kill $(for d in /proc/[0-9]*; do tr '\\0' ' ' < $d/cmdline 2>/dev/null "
+                       "| grep -q 'sleep 30[23]' && echo ${d#/proc/}; done) 2>/dev/null; sleep 0.2")
+        assert "still running" not in result["content"] and harness.tracked_pids == set()
+        # Pre-existing files changed or deleted by the shell are named once, with the size change.
+        result = shell("printf '1,2\\n3,4\\n5,6\\n' > /app/data.csv && rm /app/gone.txt")
+        assert "changed pre-existing files under /app" in result["content"]
+        assert "/app/data.csv (size 8 -> 12)" in result["content"]
+        assert "/app/gone.txt (deleted)" in result["content"]
+        assert "keep.txt" not in result["content"]
+        assert "changed pre-existing" not in shell("echo again >> /app/data.csv")["content"]
+        # A file the agent edits itself is its own business.
+        edit = {"file_path": "mine.py", "old_string": "z", "new_string": "w"}
+        assert harness.on_tool_call("Edit", edit) == "OK"
+        assert "changed pre-existing" not in shell("echo w > /app/mine.py")["content"]
+        # New files are not inputs; a same-content rewrite counts as modified (mtime moved).
+        result = shell("echo new > /app/new.txt && touch /app/sub/keep.txt")
+        assert "new.txt" not in result["content"]
+        assert "/app/sub/keep.txt (modified)" in result["content"]
+        # An edit through a symlink owns the target too.
+        assert harness.on_tool_call("Write", {"file_path": "link.txt", "content": "q"}) == "OK"
+        assert {"/app/link.txt", "/app/real.txt"} <= harness.owned_files
+        assert "changed pre-existing" not in shell("echo q > /app/link.txt")["content"]
+        # A note that finds no tool result waits for the next one instead of vanishing.
+        assert harness.on_tool_call("Bash", {"command": "rm /app/extra.txt"}) == "OK"
+        live.exec_run(["sh", "-c", "rm /app/extra.txt"])
+        text_only = {"role": "assistant", "content": "thinking"}
+        harness.on_llm_call([text_only])
+        assert text_only == {"role": "assistant", "content": "thinking"} and harness.pending_notes
+        assert "/app/extra.txt (deleted)" in shell("true")["content"] and not harness.pending_notes
+        # Deleting every tracked file is still a deletion, not "tracking unavailable".
+        result = shell("rm /app/data.csv /app/mine.py /app/real.txt /app/new.txt "
+                       "/app/sub/keep.txt /app/last.txt")
+        assert "/app/last.txt (deleted)" in result["content"] and harness.file_snapshot() == {}
+        lines = (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        events = [json.loads(line) for line in lines]
+        assert [e["event"] for e in events].count("shell_note") == 10
+    finally:
+        live.remove(force=True)
+
+
+def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
+    """A dead container or the root workdir disables the notes without disturbing the run."""
+    from benchmarkings.harnesstax import sea_core
+
+    for workdir in ("/app", "/"):
+        config = tmp_path / f"config-{len(workdir)}.json"
+        config.write_text(json.dumps({
+            "container": "no-such-container", "workdir": workdir, "prompt": "p", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"),
+        }))
+        harness = sea_core.ContainerHarness(str(config))
+        assert harness.prompt() == "p"
+        assert harness.on_tool_call("Bash", {"command": "nohup sleep 5 &"}) == "OK"
+        result = {"role": "tool", "content": "ran"}
+        # the liveness check is what ends the trial; the notes must not raise first
+        from kiss.core.kiss_error import BudgetExceededError
+
+        with pytest.raises(BudgetExceededError):
+            harness.on_llm_call([result])
+        assert result["content"] == "ran" and harness.file_baseline == {}
+        assert harness.file_snapshot() is None
+
+
+def test_edit_falls_back_to_perl_without_python(tmp_path: Path) -> None:
+    """Edit works in an image without Python (Perl does the replacement), same messages."""
+    from kiss.agents.sorcar.docker_tools import DockerTools
+
+    live = _live_container("debian:13", "! command -v python3 && ! command -v python && "
+                           "printf 'alpha\\nbeta $x \\\\n\\nalpha\\n' > /work.txt")
+    if live is None:
+        pytest.skip("Docker is not available")
+    try:
+        def bash(command: str, description: str) -> str:
+            exit_code, out = live.exec_run(["bash", "-c", command])
+            return str(out.decode())
+
+        tools = DockerTools(bash)
+        assert "not unique" in tools.Edit("/work.txt", "alpha", "gamma")
+        assert "not found" in tools.Edit("/work.txt", "delta", "gamma")
+        assert "File not found" in tools.Edit("/missing.txt", "alpha", "gamma")
+        assert "must be different" in tools.Edit("/work.txt", "alpha", "alpha")
+        assert "Successfully replaced 1" in tools.Edit("/work.txt", "beta $x \\n", "b\\1 $y 'q'")
+        assert "Successfully replaced 2" in tools.Edit("/work.txt", "alpha", "ok", replace_all=True)
+        assert bash("cat /work.txt", "") == "ok\nb\\1 $y 'q'\nok\n"
+        assert "NUL" in tools.Edit("/work.txt", "ok", "a\0b")
+        # long strings travel in environment variables, not in the command line twice
+        long_old, long_new = "ok\nb" + "x" * 40_000, "y" * 40_000
+        assert "Successfully replaced 1" in tools.Edit("/work.txt", "ok\nb", long_old)
+        assert "Successfully replaced 1" in tools.Edit("/work.txt", long_old, long_new)
+        assert bash("head -c 5 /work.txt", "") == "yyyyy"
+    finally:
+        live.remove(force=True)
+
+
+def test_carriage_return_progress_is_collapsed() -> None:
+    """A progress bar redrawn with ``\\r`` keeps only its final state; other lines are untouched."""
+    from kiss.agents.sorcar.docker_manager import _collapse_progress, _with_exit_code
+
+    bar = "\r".join(f"Progress: {i}%" for i in range(0, 101))
+    assert _collapse_progress(f"{bar}\ndone") == "Progress: 100%\ndone"
+    assert _collapse_progress("plain\ntext") == "plain\ntext"
+    # terminal semantics: a shorter redraw leaves the tail of the longer one; CRLF is just a newline
+    assert _collapse_progress("abcdef\rXY\n") == "XYcdef\n"
+    assert _collapse_progress("one\r\ntwo\r\n") == "one\ntwo\n"
+    assert _collapse_progress("a\r\rb\r   \r\n") == "   \n"
+    assert _with_exit_code(f"{bar}", 2) == "Progress: 100%\n[exit code: 2]"
+    assert _with_exit_code(f"{bar}\nok", 0) == "Progress: 100%\nok"
