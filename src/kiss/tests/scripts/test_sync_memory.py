@@ -500,11 +500,14 @@ def test_merge_leaves_no_scratch_file_when_a_page_cannot_be_replaced(tmp_path: P
     dst.mkdir()
     write(src, "locked", "new", "2026-09-20T10:00:00Z")
     write(dst, "locked", "old", "2020-01-01T00:00:00Z")
-    os.chflags(dst / "locked.md", stat.UF_IMMUTABLE)
+    # ``os.chflags`` exists on BSD/macOS only: looked up by name so the type
+    # checkers pass on every platform without a platform-dependent ignore.
+    chflags = getattr(os, "chflags")
+    chflags(dst / "locked.md", stat.UF_IMMUTABLE)
     try:
         result = merge(src, dst)
     finally:
-        os.chflags(dst / "locked.md", 0)
+        chflags(dst / "locked.md", 0)
     assert result.returncode != 0
     assert "locked.md" in result.stderr
     assert sorted(p.name for p in dst.iterdir()) == ["locked.md"]

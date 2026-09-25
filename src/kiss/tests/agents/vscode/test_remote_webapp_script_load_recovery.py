@@ -1,0 +1,149 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+# ruff: noqa: F811  (the `harness` module fixture is imported from
+#   kiss.tests.server.test_explorer_scm_commands and is intentionally
+#   shadowed by test parameters of the same name)
+"""E2E: the remote webapp recovers from a page script that failed to load.
+
+Chromium aborts every in-flight request with ``ERR_NETWORK_CHANGED``
+when the network path changes during a page load (a phone's
+Wi-Fi/cellular hand-over; on a busy CI host, container network churn).
+Before the fix a page whose ``api.js`` never arrived stayed at the
+"Server is starting" overlay for good: ``main.js`` threw
+``createSorcarApi is not defined`` while the WebSocket shim happily
+authenticated.  The shim (``_WS_SHIM_JS`` in ``web_server.py``) now
+reloads the page once when a ``<script src>`` fails to load, and
+``chat.html`` runs the shim before every external script so hljs and
+marked are covered as well.
+
+Driven against the production ``RemoteAccessServer`` + daemon of
+``test_explorer_scm_commands.harness`` and a real headless Chromium.
+The failing load is injected with ``page.route`` (a single aborted
+request, or every request for the loop-guard test).
+
+Not covered here: the shim's "no reload when ``sessionStorage`` throws"
+branch (a browser with site storage blocked).  Playwright has no switch
+for that, and replacing ``window.sessionStorage`` from an init script
+would test a stand-in rather than the browser.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+from playwright.sync_api import Browser, Page, sync_playwright
+
+from kiss.tests.server.test_explorer_scm_commands import (
+    ExplorerHarness,
+    harness,  # noqa: F401  (module fixture)
+)
+
+RELOADED_AT_KEY = "sorcar-script-reloaded-at"
+
+
+@pytest.fixture(scope="module")
+def browser():
+    """One shared headless Chromium for every test in this module."""
+    with sync_playwright() as p:
+        b = p.chromium.launch(headless=True)
+        yield b
+        b.close()
+
+
+class _Loads:
+    """Counts document navigations and the aborted asset's requests."""
+
+    def __init__(self, asset: str, abort_first_n: int) -> None:
+        self.asset = asset
+        self.abort_first_n = abort_first_n
+        self.documents = 0
+        self.asset_requests = 0
+        self.aborted = 0
+
+    def on_request(self, request) -> None:
+        if request.is_navigation_request() and request.resource_type == "document":
+            self.documents += 1
+
+    def route(self, route) -> None:
+        self.asset_requests += 1
+        if self.aborted < self.abort_first_n:
+            self.aborted += 1
+            route.abort("connectionaborted")
+        else:
+            route.continue_()
+
+
+def _open(browser: Browser, harness: ExplorerHarness, loads: _Loads) -> tuple:
+    # Service workers are blocked so every ``/media/`` request reaches
+    # the route handler (a worker installed by the first load would
+    # otherwise answer the reload from its cache and bypass ``route``).
+    context = browser.new_context(
+        ignore_https_errors=True,
+        viewport={"width": 1400, "height": 900},
+        service_workers="block",
+    )
+    page = context.new_page()
+    page.on("request", loads.on_request)
+    page.route(f"**/media/{loads.asset}*", loads.route)
+    # The self-reload interrupts the first navigation's ``load`` event,
+    # so wait for the commit only and let the assertions drive the rest.
+    page.goto(harness.base_url + "/", wait_until="commit")
+    return context, page
+
+
+def _reloaded_at(page: Page) -> float:
+    return float(page.evaluate(f"Number(sessionStorage.getItem('{RELOADED_AT_KEY}')) || 0"))
+
+
+@pytest.mark.parametrize("asset", ["api.js", "highlight.min.js"])
+def test_page_reloads_itself_once_when_a_script_fails_to_load(browser, harness, asset):
+    loads = _Loads(asset, abort_first_n=1)
+    context, page = _open(browser, harness, loads)
+    try:
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        assert loads.aborted == 1
+        assert loads.asset_requests == 2, loads.asset_requests
+        assert loads.documents == 2, loads.documents
+        assert _reloaded_at(page) > 0
+        # The recovered page is fully live: the config reply landed.
+        page.wait_for_function(
+            "document.getElementById('meta-workdir').textContent.length > 1",
+            timeout=30000,
+        )
+    finally:
+        context.close()
+
+
+def test_a_script_that_keeps_failing_reloads_once_then_stays(browser, harness):
+    # A really broken asset (every fetch fails) must not put the page in
+    # a reload loop: the timestamp guard allows one reload per 30 s.
+    loads = _Loads("api.js", abort_first_n=10**6)
+    context, page = _open(browser, harness, loads)
+    try:
+        # ``wait_for_timeout`` (not ``time.sleep``): the sync API runs
+        # route handlers only while a Playwright call is in progress.
+        deadline = time.monotonic() + 15
+        while loads.documents < 2 and time.monotonic() < deadline:
+            page.wait_for_timeout(50)
+        assert loads.documents == 2, loads.documents
+        page.wait_for_load_state("load")
+        stamp = _reloaded_at(page)
+        assert stamp > 0
+        page.wait_for_timeout(3000)
+        assert loads.documents == 2, loads.documents
+        assert loads.aborted == 2, loads.aborted
+        assert _reloaded_at(page) == stamp
+        # The failure stays visible instead of a blank flicker loop.
+        assert page.evaluate(
+            "getComputedStyle(document.getElementById('app')).display"
+        ) == "none"
+        assert page.evaluate(
+            "getComputedStyle(document.getElementById('kiss-server-loading')).display"
+        ) != "none"
+    finally:
+        context.close()
+

@@ -275,9 +275,11 @@ acquire_update_lock() {
     exec 9>>"$_kiss_lock_file"
     if ! perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)'; then
         # The winner writes its pid right after locking; give it a moment.
+        # Until then the file still names the previous run's (dead) holder:
+        # the kernel released that lock on exit but nothing clears the pid.
         for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             holder=$(cat "$_kiss_lock_file" 2>/dev/null || true)
-            [ -n "$holder" ] && break
+            [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null && break
             sleep 0.05
         done
         echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2

@@ -4104,6 +4104,47 @@ _WS_SHIM_JS = r"""
 // kiss.server.sorcar.ServerApi.authenticate before the daemon starts
 // dispatching this connection's commands.
 (function() {
+  // A page script that never arrives leaves the app half-booted: with
+  // api.js missing, main.js throws at ``createSorcarApi`` and the
+  // loading overlay covers #app for good while the socket below
+  // authenticates happily.  Chromium aborts every in-flight request
+  // with ERR_NETWORK_CHANGED when the network path changes during the
+  // load (a Wi-Fi/cellular hand-over on a phone), so this is a
+  // transient a reload fixes.  Load errors do not bubble, but a
+  // capture-phase listener on window still sees them.  The timestamp
+  // in sessionStorage stops a reload loop when an asset is really
+  // broken: one reload per 30 s, then the failure stays visible.  This
+  // shim runs before every ``<script src>`` of the page (see
+  // media/chat.html; a script's load error fires when the parser
+  // reaches it, in document order) so a failed hljs/marked load is
+  // caught too.
+  //
+  // Only the page's own scripts count: same-origin ``<script src>``
+  // that fail while the document is still parsing.  Scripts main.js
+  // adds later on demand (the Monaco editor from its CDN, the voice
+  // model) have their own fallbacks and must not restart the app.
+  var _SCRIPT_RELOADED_AT = 'sorcar-script-reloaded-at';
+  function _reloadOnScriptLoadError(ev) {
+    var target = ev.target;
+    if (!target || target.tagName !== 'SCRIPT' || !target.src) return;
+    if (document.readyState !== 'loading') return;
+    if (target.src.indexOf(window.location.origin + '/') !== 0) return;
+    try {
+      var last = Number(sessionStorage.getItem(_SCRIPT_RELOADED_AT)) || 0;
+      if (Date.now() - last < 30000) return;
+      sessionStorage.setItem(_SCRIPT_RELOADED_AT, String(Date.now()));
+    } catch(e) {
+      // No storage means no loop guard: leave the failure visible.
+      return;
+    }
+    window.location.reload();
+  }
+  // Guarded like the wake-up listeners below: the DOM-less node
+  // harnesses of the tests load this shim with a bare window object.
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('error', _reloadOnScriptLoadError, true);
+  }
+
   var _state = null;
   try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
   var _ws = null;

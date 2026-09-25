@@ -523,10 +523,10 @@
 
 {{AUTH_MODAL}}  </div>
 
-  <script {{NONCE_ATTR}} src="{{HLJS_SRC}}"></script>
-  <script {{NONCE_ATTR}} src="{{MARKED_SRC}}"></script>
   <script {{NONCE_ATTR}}>window.__BRAND__ = {{BRAND_JSON}};</script>
-  {{SHIM_SCRIPT}}<script {{NONCE_ATTR}}>window.__TRICKS__ = {{TRICKS_JSON}};</script>
+  {{SHIM_SCRIPT}}<script {{NONCE_ATTR}} src="{{HLJS_SRC}}"></script>
+  <script {{NONCE_ATTR}} src="{{MARKED_SRC}}"></script>
+  <script {{NONCE_ATTR}}>window.__TRICKS__ = {{TRICKS_JSON}};</script>
   <script {{NONCE_ATTR}}>window.__TIPS__ = {{TIPS_JSON}};</script>
   <script {{NONCE_ATTR}} src="{{TIPS_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{API_SRC}}"></script>
