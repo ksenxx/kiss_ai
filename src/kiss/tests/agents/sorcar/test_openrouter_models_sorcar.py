@@ -63,7 +63,11 @@ _FREE_TOOL_MODELS = [
 # Per-request cap for one ``:free`` candidate.  The free tier queues
 # requests for minutes when saturated; the production client waits 1800 s,
 # which would spend the whole test timeout on a single slow candidate
-# instead of moving on to the next one the way a 429 does.
+# instead of moving on to the next one the way a 429 does.  The SDK's
+# automatic retry is disabled along with it: with the production
+# ``max_retries=1`` a timed-out request is silently re-sent and the cap
+# doubles (a full-suite run under ``--timeout=300`` caught one ``create``
+# call sitting in ``ssl.read`` for over five minutes).
 _FREE_TIER_REQUEST_TIMEOUT_S = 120.0
 
 
@@ -175,6 +179,7 @@ class TestSorcarOpenRouterLive:
 
         hop2_done = False
         candidate_errors: list[str] = []
+        ignored_tool: list[str] = []
         for name in _FREE_TOOL_MODELS:
             self._switch(agent, set_model, name)
             assert isinstance(agent.model, _expected_transport_class(name))
@@ -183,7 +188,7 @@ class TestSorcarOpenRouterLive:
                 f"base_url={agent.model.base_url!r} for an OpenRouter model"
             )
             agent.model.client = agent.model.client.with_options(
-                timeout=_FREE_TIER_REQUEST_TIMEOUT_S
+                timeout=_FREE_TIER_REQUEST_TIMEOUT_S, max_retries=0
             )
             try:
                 _run_tool_turn(
@@ -203,11 +208,27 @@ class TestSorcarOpenRouterLive:
                 # (the client's, or the stream stall watchdog's
                 # ``TimeoutError``): the candidate is queued behind the
                 # free-tier backlog.  Either way, try the next candidate.
+                # Other connection errors (DNS, TLS, resets) stay loud: they
+                # mean the environment is broken, not that a candidate is
+                # busy.
                 candidate_errors.append(f"{name}: {e}")
+            except AssertionError as e:
+                # The candidate answered but never called the tool.  Free
+                # models do this sporadically (nemotron-3.5-lightning:free
+                # did in one full-suite run), so try the next one; the
+                # tally below turns it into a failure when no candidate
+                # was merely unavailable.
+                ignored_tool.append(f"{name}: {e}")
         if not hop2_done:
+            if ignored_tool and not candidate_errors:
+                pytest.fail(
+                    "Every free OpenRouter candidate responded without "
+                    f"calling reveal_secret: {ignored_tool}"
+                )
             pytest.skip(
-                "All free OpenRouter tool-capable models are rate-limited "
-                f"or unavailable upstream: {candidate_errors}"
+                "All free OpenRouter tool-capable models are rate-limited, "
+                f"unavailable upstream or ignored the tool: "
+                f"{candidate_errors + ignored_tool}"
             )
 
         self._switch(agent, set_model, "gpt-4o")
