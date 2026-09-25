@@ -178,9 +178,16 @@ def thread_start_can_be_starved() -> bool:
 # must retry rather than report as a torn read.  Windows refuses to open
 # the target for the instant ``os.replace`` swaps it in (sharing
 # violation -> ``PermissionError``); the next read sees one complete
-# file.  POSIX renames never do this, so there nothing is tolerated.
+# file.  NTFS also implements a superseding rename as "unlink the old
+# name, link the new one", so with several writers racing on one target
+# a lookup can land between the two steps and see no file at all
+# (``FileNotFoundError``): measured on Windows Server 2022, 0 in 25k
+# reads with 1-4 idle writers, ~1 % with 8 writers or a loaded machine;
+# the ``FILE_RENAME_FLAG_POSIX_SEMANTICS`` rename shows the same window.
+# Neither error is a torn file.  POSIX renames never do either, so there
+# nothing is tolerated.
 TRANSIENT_REPLACE_READ_ERRORS: tuple[type[OSError], ...] = (
-    (PermissionError,) if IS_WINDOWS else ()
+    (PermissionError, FileNotFoundError) if IS_WINDOWS else ()
 )
 
 # Pause (seconds) between two reads of a hot reader polling a file that

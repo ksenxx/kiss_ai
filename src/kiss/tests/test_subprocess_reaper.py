@@ -40,29 +40,24 @@ def test_leak():
     Path(__file__).with_name("leaked.pid").write_text(str(proc.pid))
 """
 
+# ``pid_alive`` rather than ``os.kill(pid, 0)``: on Windows the latter is
+# not a probe but ``TerminateProcess`` (and raises ``WinError 87`` for a
+# pid that is gone).
 _ASSERT_DEAD = """
-import os
 from pathlib import Path
-
-def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+from kiss.core.processes import pid_alive
 
 def test_earlier_process_is_gone():
-    pid = int(Path(__file__).with_name("leaked.pid").read_text())
-    assert not _alive(pid)
+    assert not pid_alive(int(Path(__file__).with_name("leaked.pid").read_text()))
 """
 
 
 _ASSERT_ALIVE = """
-import os
 from pathlib import Path
+from kiss.core.processes import pid_alive
 
 def test_earlier_process_is_still_running():
-    os.kill(int(Path(__file__).with_name("leaked.pid").read_text()), 0)
+    assert pid_alive(int(Path(__file__).with_name("leaked.pid").read_text()))
 """
 
 
