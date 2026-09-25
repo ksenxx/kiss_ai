@@ -36,10 +36,11 @@ const WORKER_SRC = `
 const uc = require(process.argv[1]);
 const cachePath = process.argv[2];
 const tag = process.argv[3];
-const untilMs = Number(process.argv[4]);
+const stopPath = process.argv[4];
+// One byte on stdout per write, so the parent can watch progress live and
+// stop the race only once every side has done enough work.
 (async () => {
-  let writes = 0;
-  while (Date.now() < untilMs) {
+  while (!require('fs').existsSync(stopPath)) {
     const r = await uc.checkForExtensionUpdate({
       cacheFilePath: cachePath,
       currentVersion: '1.0.0',
@@ -47,30 +48,38 @@ const untilMs = Number(process.argv[4]);
       fetchLatest: async () => tag,
       notify: () => {},
     });
-    if (r.checked) writes++;
+    if (r.checked) process.stdout.write('w');
   }
-  process.stdout.write(String(writes));
 })();
 `;
 
-function runWorker(cachePath, tag, untilMs) {
+// A worker's write count is read live from ``progress.writes`` and settles
+// when the returned promise resolves.
+function runWorker(cachePath, tag, stopPath, progress) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ['-e', WORKER_SRC, UPDATE_CHECKER, cachePath, tag, String(untilMs)],
+      ['-e', WORKER_SRC, UPDATE_CHECKER, cachePath, tag, stopPath],
       {stdio: ['ignore', 'pipe', 'inherit']},
     );
-    let out = '';
     child.stdout.on('data', d => {
-      out += d;
+      progress.writes += d.length;
     });
     child.on('error', reject);
     child.on('exit', code => {
       if (code !== 0) reject(new Error(`worker ${tag} exited ${code}`));
-      else resolve(Number(out));
+      else resolve(progress.writes);
     });
   });
 }
+
+// The race runs for at least MIN_RACE_MS, and longer (up to MAX_RACE_MS) on
+// a machine whose file system is slow or busy, until the reader and both
+// writers have each done MIN_OPS operations: a fixed 2.5 s window produced
+// only 43 reads on a loaded Windows VM, which says nothing about atomicity.
+const MIN_RACE_MS = 2500;
+const MAX_RACE_MS = 30000;
+const MIN_OPS = 50;
 
 async function main() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-audit-uc-'));
@@ -91,16 +100,29 @@ async function main() {
     assert.strictEqual(seed.reason, 'update-available');
     assert.ok(fs.existsSync(cachePath), 'seed write left no cache file');
 
-    const untilMs = Date.now() + 2500;
+    const stopPath = path.join(home, 'stop');
+    const startMs = Date.now();
+    const progressA = {writes: 0};
+    const progressB = {writes: 0};
     const workers = Promise.all([
-      runWorker(cachePath, tagA, untilMs),
-      runWorker(cachePath, tagB, untilMs),
+      runWorker(cachePath, tagA, stopPath, progressA),
+      runWorker(cachePath, tagB, stopPath, progressB),
     ]);
 
     let reads = 0;
     let corrupt = 0;
     const samples = [];
-    while (Date.now() < untilMs) {
+    const raceDone = () => {
+      const elapsed = Date.now() - startMs;
+      if (elapsed >= MAX_RACE_MS) return true;
+      return (
+        elapsed >= MIN_RACE_MS &&
+        reads >= MIN_OPS &&
+        progressA.writes >= MIN_OPS &&
+        progressB.writes >= MIN_OPS
+      );
+    };
+    while (!raceDone()) {
       let text;
       try {
         text = fs.readFileSync(cachePath, 'utf-8');
@@ -135,12 +157,14 @@ async function main() {
       // Yield so the workers are not starved of the CPU.
       await new Promise(resolve => setImmediate(resolve));
     }
+    fs.writeFileSync(stopPath, '');
     const [writesA, writesB] = await workers;
+    fs.rmSync(stopPath);
     console.log(
       `  reads=${reads} corrupt=${corrupt} writesA=${writesA} writesB=${writesB}`,
     );
-    assert.ok(writesA > 50 && writesB > 50, 'workers barely ran');
-    assert.ok(reads > 50, 'reader barely ran');
+    assert.ok(writesA >= MIN_OPS && writesB >= MIN_OPS, 'workers barely ran');
+    assert.ok(reads >= MIN_OPS, 'reader barely ran');
     assert.strictEqual(
       corrupt,
       0,

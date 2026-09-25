@@ -23,7 +23,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const {execFileSync, spawn, spawnSync} = require('child_process');
+const zlib = require('zlib');
+const {spawn, spawnSync} = require('child_process');
 
 const EXT_ROOT = path.resolve(__dirname, '..');
 const PACKAGE_VSIX = path.join(EXT_ROOT, 'scripts', 'package-vsix.js');
@@ -112,20 +113,51 @@ const SVG_TARGET = `media/hashed/kiss-icon-${md5(SVG)}.svg`;
 const PNG_TARGET = `media/hashed/thumb-${md5(PNG)}.png`;
 const SPINNER_TARGET = `media/hashed/spinner-${md5(FILES['media/spinner.svg'])}.svg`;
 
+// A .vsix is a plain ZIP.  Read its central directory here rather than
+// shelling out to `python3`, which is not on PATH on Windows (and is `python`
+// or `py` there).  The archives packaged below are far below the zip64
+// thresholds, so 32-bit sizes and offsets are all that appears.
+function zipEntries(file) {
+  const buf = fs.readFileSync(file);
+  let eocd = buf.length - 22;
+  while (eocd >= 0 && buf.readUInt32LE(eocd) !== 0x06054b50) eocd--;
+  assert.ok(eocd >= 0, `${file}: no end-of-central-directory record`);
+  const count = buf.readUInt16LE(eocd + 10);
+  let off = buf.readUInt32LE(eocd + 16);
+  const entries = new Map();
+  for (let i = 0; i < count; i++) {
+    assert.strictEqual(buf.readUInt32LE(off), 0x02014b50, 'central dir');
+    const method = buf.readUInt16LE(off + 10);
+    const crc32 = buf.readUInt32LE(off + 16);
+    const compressedSize = buf.readUInt32LE(off + 20);
+    const nameLen = buf.readUInt16LE(off + 28);
+    const extraLen = buf.readUInt16LE(off + 30);
+    const commentLen = buf.readUInt16LE(off + 32);
+    const localHeader = buf.readUInt32LE(off + 42);
+    const name = buf.toString('utf8', off + 46, off + 46 + nameLen);
+    entries.set(name, {method, crc32, compressedSize, localHeader});
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  return {buf, entries};
+}
+
 function listVsix(vsix) {
-  const script =
-    'import sys,zipfile; print("\\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))';
-  return execFileSync('python3', ['-c', script, vsix], {encoding: 'utf-8'})
-    .trim()
-    .split('\n');
+  return [...zipEntries(vsix).entries.keys()];
 }
 
 function readVsixEntry(vsix, name) {
-  const script =
-    'import sys,zipfile; sys.stdout.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]).decode())';
-  return execFileSync('python3', ['-c', script, vsix, name], {
-    encoding: 'utf-8',
-  });
+  const {buf, entries} = zipEntries(vsix);
+  const entry = entries.get(name);
+  assert.ok(entry, `${vsix} has no entry ${name}`);
+  const nameLen = buf.readUInt16LE(entry.localHeader + 26);
+  const extraLen = buf.readUInt16LE(entry.localHeader + 28);
+  const start = entry.localHeader + 30 + nameLen + extraLen;
+  const data = buf.subarray(start, start + entry.compressedSize);
+  assert.ok(entry.method === 0 || entry.method === 8, `method ${entry.method}`);
+  const bytes = entry.method === 8 ? zlib.inflateRawSync(data) : data;
+  // The same integrity check zipfile.ZipFile.read() made ("Bad CRC-32").
+  assert.strictEqual(zlib.crc32(bytes), entry.crc32, `${name}: CRC-32 mismatch`);
+  return bytes.toString('utf8');
 }
 
 function readManifest(root) {
@@ -500,7 +532,14 @@ async function main() {
   testPackagedVsix();
   testRetryAfterKilledBuild();
   testFailedPackagingRestoresManifest();
-  await testInterruptedPackagingRestoresManifest();
+  if (process.platform === 'win32') {
+    // child.kill() is TerminateProcess on Windows: no signal handler runs
+    // in the child, so the restore-on-signal path cannot be exercised
+    // (testRetryAfterKilledBuild covers recovery from a killed build).
+    console.log('  skipped on win32: no POSIX signal delivery to the child');
+  } else {
+    await testInterruptedPackagingRestoresManifest();
+  }
   console.log('hashIcons.test.js: all tests passed');
 }
 

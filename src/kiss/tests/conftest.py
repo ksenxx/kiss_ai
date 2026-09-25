@@ -178,10 +178,29 @@ def thread_start_can_be_starved() -> bool:
 # must retry rather than report as a torn read.  Windows refuses to open
 # the target for the instant ``os.replace`` swaps it in (sharing
 # violation -> ``PermissionError``); the next read sees one complete
-# file.  POSIX renames never do this, so there nothing is tolerated.
+# file.  NTFS also implements a superseding rename as "unlink the old
+# name, link the new one", so with several writers racing on one target
+# a lookup can land between the two steps and see no file at all
+# (``FileNotFoundError``): measured on Windows Server 2022, 0 in 25k
+# reads with 1-4 idle writers, ~1 % with 8 writers or a loaded machine;
+# the ``FILE_RENAME_FLAG_POSIX_SEMANTICS`` rename shows the same window.
+# Neither error is a torn file.  POSIX renames never do either, so there
+# nothing is tolerated.
 TRANSIENT_REPLACE_READ_ERRORS: tuple[type[OSError], ...] = (
-    (PermissionError,) if IS_WINDOWS else ()
+    (PermissionError, FileNotFoundError) if IS_WINDOWS else ()
 )
+
+# Pause (seconds) between two reads of a hot reader polling a file that
+# writers atomically replace.  Python's ``open`` takes no
+# ``FILE_SHARE_DELETE``, so on Windows a reader that reopens the file
+# back to back holds a handle ~90 % of the time (measured: 87 us per
+# read, 12 us between reads) and every ``os.replace`` of the writer
+# fails until it lands in the gap -- on a loaded machine that starves
+# the writer for seconds.  No real consumer (an editor, the VS Code
+# extension, a poller) reopens a file thousands of times per second; a
+# 2 ms pause keeps the reader hot enough to catch a torn write while
+# letting the writer publish.
+HOT_READER_PAUSE = 0.002
 
 
 def install_cli_script(script: Path, source: str) -> None:

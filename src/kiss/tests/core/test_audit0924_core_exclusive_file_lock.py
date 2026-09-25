@@ -116,4 +116,10 @@ def test_lock_released_after_block_and_after_exception() -> None:
         waiter_thread.join(10)
         holder_thread.join(10)
         assert acquired_at and acquired_at[0] >= released_at
+        # The handover is prompt on every platform: Windows used to wait
+        # in ``msvcrt.locking(LK_LOCK)``, which sleeps a whole second
+        # between its attempts, so every contended acquisition cost ~1 s.
+        assert acquired_at[0] - released_at < 0.5, (
+            f"waiter took {acquired_at[0] - released_at:.2f}s to acquire the released lock"
+        )
         assert lock_path.exists(), "the lock file must never be deleted"

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -153,9 +155,8 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
     """
     src_root = Path(brand_module.__file__).resolve().parents[2]
     copy = tmp_path / "src"
-    subprocess.run(
-        ["cp", "-r", "--", str(src_root), str(copy)],
-        check=True,
+    shutil.copytree(
+        src_root, copy, ignore=shutil.ignore_patterns("node_modules", "__pycache__")
     )
     brand_file = copy / "kiss" / "agents" / "vscode" / "media" / "brand.json"
     brand_file.write_text(
@@ -180,13 +181,23 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
         "      and 'SeamlessLabs&#x27; assistant.' in page)\n"
         "print(tls_certs._CA_COMMON_NAME_PREFIX)\n"
     )
+    # A minimal environment so no KISS_* variable or ~/.kiss of the test
+    # runner leaks in.  ``USERPROFILE`` is ``Path.home()`` on Windows, and
+    # python.exe cannot start without ``SYSTEMROOT``.
+    env = {
+        "PYTHONPATH": str(copy),
+        "PATH": os.defpath,
+        "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
+        **{name: os.environ[name] for name in ("SYSTEMROOT",) if name in os.environ},
+    }
     result = subprocess.run(
         [sys.executable, "-c", probe],
         cwd=copy,
         capture_output=True,
         text=True,
         check=True,
-        env={"PYTHONPATH": str(copy), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        env=env,
     )
     assert result.stdout.splitlines() == [
         "Seamless Loop",

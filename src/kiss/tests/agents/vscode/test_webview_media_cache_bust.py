@@ -31,6 +31,7 @@ from websockets.http11 import Request
 
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
 
 
 def _asset_hash(name: str) -> str:
@@ -161,7 +162,9 @@ class TestMediaVersionFollowsFileChanges(unittest.TestCase):
         self.assertEqual(web_server._media_url("main.css"), url_before)
 
         rule = "\n#workdir-panel { outline: 1px solid red; }\n"
-        css.write_text(css.read_text(encoding="utf-8") + rule, encoding="utf-8")
+        # newline="\n": a text-mode write would turn the rule's LF into
+        # CRLF on Windows and the served bytes would not contain it.
+        css.write_text(css.read_text(encoding="utf-8") + rule, encoding="utf-8", newline="\n")
         self._bump_mtime(css)
 
         html_after = web_server._build_html()
@@ -175,6 +178,10 @@ class TestMediaVersionFollowsFileChanges(unittest.TestCase):
         self.assertNotEqual(_sw_version(sw_before), _sw_version(sw_after))
         self.assertIn(rule.encode("utf-8"), self._serve(url_after))
 
+    @posix_only(
+        "st_ctime is the file's creation time on Windows (CPython 3.13), which an "
+        "in-place rewrite keeps, so the stat fingerprint cannot see this change there"
+    )
     def test_same_size_replacement_with_preserved_mtime_yields_new_url(self) -> None:
         # `cp -p` / archive extraction keep the source's mtime and a
         # same-size edit keeps st_size: the fingerprint must still move

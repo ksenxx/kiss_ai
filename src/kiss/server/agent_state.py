@@ -340,6 +340,22 @@ def find_by_agent(agent: object) -> AgentState | None:
     return None
 
 
+def current_agent() -> WorktreeSorcarAgent | None:
+    """Return the agent whose task thread is the calling thread, or ``None``.
+
+    Lets code that runs on a task's worker thread without a handle to
+    its agent — a SEA's tool, for example — find the agent (and thus
+    its ``work_dir``, model and usage counters).  ``None`` when the
+    calling thread is not a registered task thread.
+    """
+    me = threading.current_thread()
+    with STATE_LOCK:
+        for state in agent_states.values():
+            if state.task_thread is me and state.agent is not None:
+                return state.agent
+    return None
+
+
 def snapshot() -> list[AgentState]:
     """Return a stable snapshot of every registered state.
 

@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from kiss.server.tab_registry import OpenTabOutcome, TabRegistry
+from kiss.tests.conftest import HOT_READER_PAUSE
 
 _WRITERS = 8
 _ROUNDS = 150
@@ -52,6 +54,7 @@ def test_two_registry_instances_never_publish_a_torn_file(tmp_path: Path) -> Non
     def _reader() -> None:
         start.wait()
         while not stop.is_set():
+            time.sleep(HOT_READER_PAUSE)
             try:
                 raw = path.read_text(encoding="utf-8")
             except (FileNotFoundError, PermissionError):

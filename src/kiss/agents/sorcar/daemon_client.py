@@ -649,7 +649,7 @@ def run(
             context.  Empty (default) appends nothing.
         tool_profile: Name of the tool profile the task's built-in
             toolset is cut down to — one of ``"full"``, ``"review"``,
-            ``"shell"``, ``"bash"`` (the keys of
+            ``"shell"``, ``"assistant"``, ``"bash"`` (the keys of
             :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`;
             ``bash`` is the single-command runner of the bundled
             ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the

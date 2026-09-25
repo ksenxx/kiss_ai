@@ -305,8 +305,8 @@ function testPendingLocalTabSurvivesForeignSnapshot() {
 }
 
 function testRemoteWorkDirSaveRescopesImmediately() {
-  // Remote web app: pinning a new work_dir from the settings panel
-  // re-scopes the tab bar right away (no configData round-trip).
+  // Remote web app: pinning a new work_dir from the "Working directory"
+  // panel re-scopes the tab bar right away (no configData round-trip).
   const {win, posted} = makeWebview({remote: true});
   setWorkspace(win, '/ws/a');
   send(win, {
@@ -315,19 +315,28 @@ function testRemoteWorkDirSaveRescopesImmediately() {
   });
   assert.deepStrictEqual(tabBarIds(win), ['a1']);
 
-  const settingsBtn = win.document.querySelector('#settings-btn');
-  assert.ok(settingsBtn, 'the settings button must exist');
-  clickEl(win, settingsBtn);
-  // The daemon answers the panel's getConfig with the current config.
-  setWorkspace(win, '/ws/a');
-
-  const wdInp = win.document.getElementById('cfg-work-dir');
+  // The "..." menu's "Working directory" panel: type the folder, open
+  // it, and the daemon's listing confirms it is a real directory.
+  clickEl(win, win.document.getElementById('more-btn'));
+  clickEl(win, win.document.getElementById('workdir-btn'));
+  const wdInp = win.document.getElementById('workdir-input');
   wdInp.value = '/ws/b';
   wdInp.dispatchEvent(new win.Event('input', {bubbles: true}));
-  clickEl(win, win.document.getElementById('settings-panel-close'));
+  clickEl(win, win.document.getElementById('workdir-open-btn'));
+  const checks = posted.filter(
+    m => m && m.type === 'listDir' && String(m.token).startsWith('workdir:'),
+  );
+  assert.strictEqual(checks.length, 1, 'the typed folder is listed first');
+  send(win, {
+    type: 'dirListing',
+    token: checks[0].token,
+    path: '/ws/b',
+    root: '/ws/b',
+    entries: [],
+  });
 
   const pins = posted.filter(m => m && m.type === 'setWorkDir');
-  assert.ok(pins.length >= 1, 'closing settings must pin the new dir');
+  assert.ok(pins.length >= 1, 'opening the folder must pin the new dir');
   assert.strictEqual(pins[pins.length - 1].workDir, '/ws/b');
   assert.deepStrictEqual(
     tabBarIds(win),

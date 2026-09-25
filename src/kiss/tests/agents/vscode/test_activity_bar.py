@@ -758,9 +758,12 @@ def _open_page_mobile(browser, harness):
     page.wait_for_function(
         "!document.body.classList.contains('remote-desktop')", timeout=15000,
     )
-    # The config reply (workspace) has landed once the model name shows.
+    # The config reply (workspace) has landed once the docked task-info
+    # panel names a working directory instead of its placeholder dash.
     page.wait_for_function(
-        "document.getElementById('cfg-work-dir') !== null", timeout=15000,
+        "(() => { const t = document.getElementById('meta-workdir').textContent;"
+        " return t !== '' && t !== '\\u2014'; })()",
+        timeout=15000,
     )
     page.wait_for_timeout(500)
     return context, page, sent_frames
@@ -771,8 +774,8 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
     Explorer; Source Control says so instead of failing silently."""
     context, page, _ = _open_page(browser, harness)
     try:
-        # Re-point the workspace through the settings panel, the way a
-        # user does: closing the panel saves the form and re-scopes.
+        # Re-point the workspace through the "Working directory" panel,
+        # the way a user does: opening a folder saves it and re-scopes.
         _set_work_dir(page, harness, str(harness.plain_dir))
         page.click("#activity-explorer")
         page.wait_for_selector(
@@ -817,19 +820,17 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
 
 
 def _set_work_dir(page, harness: ExplorerHarness, work_dir: str) -> None:
-    """Change the workspace through the settings panel and wait for the
-    docked task-info panel to show it."""
+    """Change the workspace through the "Working directory" panel of the
+    "..." menu and wait for the docked task-info panel to show it."""
     page.click("#more-btn")
-    page.click("#settings-btn")
-    page.wait_for_selector("#settings-panel.open", timeout=15000)
-    page.wait_for_function(
-        "document.getElementById('cfg-work-dir').value.length > 0", timeout=15000,
-    )
-    page.fill("#cfg-work-dir", work_dir)
-    # The top-right notification container covers the panel's close
-    # button when the daemon's PyPI check has raised an update toast.
+    page.click("#workdir-btn")
+    page.wait_for_selector("#workdir-panel.open", timeout=15000)
+    page.fill("#workdir-input", work_dir)
+    # The top-right notification container may cover the panel's
+    # controls when the daemon's PyPI check has raised an update toast.
     _dismiss_update_toast(page, harness)
-    page.click("#settings-panel-close")
+    page.click("#workdir-open-btn")
+    page.wait_for_selector("#workdir-panel:not(.open)", timeout=15000)
     page.wait_for_function(
         "wd => document.getElementById('meta-workdir').textContent === wd",
         arg=work_dir,

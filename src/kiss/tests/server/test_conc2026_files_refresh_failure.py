@@ -7,9 +7,9 @@
 
 ``_refresh_file_cache._do_refresh`` runs on a daemon thread and used
 to call ``_load_file_usage()`` (a raw SQLite read) unguarded: a
-database failure — here made real by replacing the redirected
-``sorcar.db`` path with a **directory**, so ``sqlite3`` cannot open it
-— killed the thread through the silent default excepthook.  The
+database failure — here made real by redirecting the ``sorcar.db``
+path to a **directory**, so ``sqlite3`` cannot open it — killed the
+thread through the silent default excepthook.  The
 populated ``files`` reply was never emitted (picker stuck on its
 ``loading`` placeholder) and the connection's ``_files_latest_request``
 token was never popped, violating the map's short-lived contract.
@@ -104,8 +104,9 @@ class TestFilesRefreshFailure(unittest.TestCase):
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
+        self.db_path = kiss_dir / "sorcar.db"
         _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "sorcar.db"
+        _persistence._DB_PATH = self.db_path
         _persistence._db_conn = None
 
         self.printer = MemoryPrinter()
@@ -129,17 +130,21 @@ class TestFilesRefreshFailure(unittest.TestCase):
 
         A directory where the database file belongs is a real,
         durable open failure (``sqlite3.OperationalError: unable to
-        open database file``) that needs no mocking.
+        open database file``) that needs no mocking.  The database
+        path is redirected to a sibling directory rather than the
+        healthy ``sorcar.db`` being replaced in place: ``_get_db``
+        treats the path change exactly like an on-disk replacement
+        (every thread's cached connection is stale and the reconnect
+        fails), while unlinking the file is refused on Windows
+        (``PermissionError`` WinError 32) for as long as any thread's
+        SQLite connection still holds it open.
         """
-        db = Path(str(_persistence._DB_PATH))
-        if db.is_file():
-            db.unlink()
-        db.mkdir(parents=True, exist_ok=True)
+        broken = self.db_path.with_name("broken-sorcar.db")
+        broken.mkdir(exist_ok=True)
+        _persistence._DB_PATH = broken
 
     def _heal_database(self) -> None:
-        db = Path(str(_persistence._DB_PATH))
-        if db.is_dir():
-            shutil.rmtree(db)
+        _persistence._DB_PATH = self.db_path
 
     def _token_map(self) -> dict[str, object]:
         with self.server._state_lock:

@@ -150,25 +150,59 @@ def atomic_write_text(
         raise
 
 
+# Budget for waiting out a transient Windows sharing violation.  Measured
+# on a loaded 16-vCPU Windows Server 2022 VM with Defender's real-time
+# scanning on: a single ``os.replace`` can stall for over 2 s while the
+# filter driver scans the file, and with a 1 s budget eight concurrent
+# writers lost up to 5 % of their writes with no reader on the file at
+# all (17 % with a hot reader).  Ten seconds covers a chain of such
+# stalls; a handle that is never released still surfaces as the
+# original ``PermissionError``.
+SHARING_RETRY_SECONDS = 10.0
+_SHARING_RETRY_INTERVAL = 0.005
+
+
+def _sharing_violation_may_clear(path: Path, deadline: float) -> bool:
+    """Whether a ``PermissionError`` on *path* is worth another attempt.
+
+    Only Windows raises ``PermissionError`` for a transient condition (a
+    handle open without ``FILE_SHARE_DELETE``, a rename in flight, an
+    antivirus scan).  A directory at *path* is denied forever, so it is
+    reported at once instead of after the full budget -- ``load_config``
+    on a ``config.json`` that is a directory otherwise costs the whole
+    budget on every call.
+
+    Args:
+        path: The file the failed operation targeted.
+        deadline: ``time.monotonic()`` value after which to give up.
+
+    Returns:
+        ``True`` when the caller should sleep briefly and retry.
+    """
+    return os.name == "nt" and time.monotonic() < deadline and not path.is_dir()
+
+
 def replace_waiting_for_readers(tmp: str | Path, target: Path) -> None:
     """``os.replace`` that, on Windows, waits out a reader holding *target*.
 
     Windows refuses to replace a file while another handle opened without
     ``FILE_SHARE_DELETE`` is on it -- and Python's ``open`` never sets
-    that flag -- so a concurrent ``read_bytes`` of the target makes
-    ``os.replace`` raise ``PermissionError`` for the few milliseconds the
-    read lasts.  Retrying for up to a second gives callers the POSIX
-    semantics they rely on; a holder that never lets go still raises.
+    that flag -- so a concurrent ``read_bytes`` of the target, another
+    writer's rename of the same target, or the antivirus filter scanning
+    the file makes ``os.replace`` raise ``PermissionError`` for the
+    duration.  Retrying for :data:`SHARING_RETRY_SECONDS` gives callers
+    the POSIX semantics they rely on; a holder that never lets go still
+    raises, and a directory at *target* raises immediately.
     """
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SHARING_RETRY_SECONDS
     while True:
         try:
             os.replace(tmp, target)
             return
         except PermissionError:
-            if os.name != "nt" or time.monotonic() >= deadline:
+            if not _sharing_violation_may_clear(target, deadline):
                 raise
-            time.sleep(0.005)
+            time.sleep(_SHARING_RETRY_INTERVAL)
 
 
 def read_bytes_waiting_for_writer(path: Path) -> bytes:
@@ -189,18 +223,19 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
         The file's bytes.
 
     Raises:
-        PermissionError: If the file stays unopenable for a second (a
-            real permission problem, not a replace in progress).
+        PermissionError: If *path* is a directory, or stays unopenable
+            for :data:`SHARING_RETRY_SECONDS` (a real permission
+            problem, not a replace in progress).
         OSError: Any other read failure, unchanged.
     """
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SHARING_RETRY_SECONDS
     while True:
         try:
             return path.read_bytes()
         except PermissionError:
-            if os.name != "nt" or time.monotonic() >= deadline:
+            if not _sharing_violation_may_clear(path, deadline):
                 raise
-            time.sleep(0.005)
+            time.sleep(_SHARING_RETRY_INTERVAL)
 
 
 def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:

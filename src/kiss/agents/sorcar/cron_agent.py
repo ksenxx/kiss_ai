@@ -99,6 +99,7 @@ import yaml
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.config import kiss_home
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
+from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ def load_jobs() -> list[dict[str, Any]]:
         exist or is unreadable.
     """
     try:
-        data = json.loads(_jobs_path().read_text(encoding="utf-8"))
+        data = json.loads(read_bytes_waiting_for_writer(_jobs_path()).decode("utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
@@ -230,23 +231,19 @@ def load_jobs() -> list[dict[str, Any]]:
 def save_jobs(jobs: list[dict[str, Any]]) -> None:
     """Atomically persist the full job list to the JSON store.
 
-    Writes to a temporary sibling file and renames it over the store so
-    readers never observe a partially written file.
+    Staged in a sibling temp file and renamed over the store, so readers
+    never observe a partially written file.  The shared helper also waits
+    out a concurrent reader on Windows, where a plain ``os.replace`` is
+    refused while any handle is open on the store: a scheduler tick that
+    raced a ``load_jobs()`` used to fail with ``PermissionError`` and drop
+    the job's result.
 
     Args:
         jobs: The complete list of job dicts to write.
     """
-    path = _jobs_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fp:
-            fp.write(json.dumps(jobs, indent=2))
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_name)
-        raise
+    # Jobs carry prompts and commands: private on every save, as the
+    # ``mkstemp``-staged file it replaced always was.
+    atomic_write_text(_jobs_path(), json.dumps(jobs, indent=2), mode=0o600)
 
 
 def _parse_cron_field(field: str, low: int, high: int) -> set[int] | None:

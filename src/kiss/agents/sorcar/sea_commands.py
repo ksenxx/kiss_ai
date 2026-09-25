@@ -42,12 +42,15 @@ holding ``_lock``.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import os
 import re
+import sys
 import threading
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -389,7 +392,8 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
     return command, rest.strip()
 
 
-def _load_sea_module(sea_path: Path) -> ModuleType:
+@contextlib.contextmanager
+def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
     """Import the SEA script at *sea_path* as a standalone module.
 
     Mirrors the daemon, which executes the agent file named by
@@ -399,17 +403,35 @@ def _load_sea_module(sea_path: Path) -> ModuleType:
     dependency on ``kiss.agents.third_party_agents``, which the
     layering invariants forbid.
 
+    The module is registered in ``sys.modules`` before it executes,
+    exactly as ``import`` does: ``@dataclass`` under ``from __future__
+    import annotations`` (and ``typing.get_type_hints`` later on)
+    resolve string annotations through
+    ``sys.modules[cls.__module__].__dict__``, so an unregistered module
+    makes every dataclass-bearing SEA fail with ``AttributeError:
+    'NoneType' object has no attribute '__dict__'``.  The name is
+    unique per load (``_kiss_sea_<stem>_<uuid>``): task threads load
+    SEAs concurrently, and two same-stem files (or two loads of one
+    file) sharing a name would overwrite each other's entry mid-use.
+    The entry is removed when the ``with`` block ends, so a long-lived
+    daemon does not accumulate one module per relay.
+
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
 
-    Returns:
-        The freshly executed module.
+    Yields:
+        The freshly executed module, registered for the block's duration.
     """
-    spec = importlib.util.spec_from_file_location(f"_kiss_sea_{sea_path.stem}", sea_path)
+    name = f"_kiss_sea_{sea_path.stem}_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(name, sea_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop(name, None)
 
 
 class SeaScriptError(RuntimeError):
@@ -450,8 +472,9 @@ def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
             diagnostic instead of running against a broken SEA.
     """
     try:
-        fn = getattr(_load_sea_module(sea_path), getter, None)
-        return callable(fn) and fn() is False
+        with _load_sea_module(sea_path) as module:
+            fn = getattr(module, getter, None)
+            return callable(fn) and fn() is False
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
             f"SEA {sea_path} failed while evaluating {getter}(): "
@@ -506,7 +529,8 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
             "Read the events of the task <task_id> from "
             "~/.kiss/sorcar.db and answer the user question above."
         )
-        append_to_system_prompt = _load_sea_module(sea_path).append_to_system_prompt()
+        with _load_sea_module(sea_path) as module:
+            append_to_system_prompt = module.append_to_system_prompt()
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "
