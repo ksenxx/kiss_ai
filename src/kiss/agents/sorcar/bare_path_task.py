@@ -19,6 +19,7 @@ those before the directive is added.
 from __future__ import annotations
 
 import shlex
+import sys
 from pathlib import Path
 
 
@@ -54,6 +55,32 @@ def bare_path(prompt: str, work_dir: str) -> Path | None:
         return None
 
 
+def opener_command(path: Path) -> str:
+    """Return the Bash-tool command that opens *path* with its default application.
+
+    The agent's Bash tool runs ``bash`` (Git bash on Windows, where it
+    is installed), so the path is quoted for bash and nothing else.  On
+    Windows the opener is ``rundll32 url.dll,FileProtocolHandler``,
+    which hands the single argument to ``ShellExecute`` as-is; the
+    ``cmd.exe`` builtin ``start`` would parse the path a second time,
+    so ``&`` would split the command and ``%NAME%`` would expand.
+
+    Args:
+        path: The file or directory to open.
+
+    Returns:
+        ``open`` on macOS, ``rundll32.exe url.dll,FileProtocolHandler``
+        on Windows and ``xdg-open`` elsewhere, followed by the
+        shell-quoted path.
+    """
+    quoted = shlex.quote(str(path))
+    if sys.platform == "darwin":
+        return f"open {quoted}"
+    if sys.platform == "win32":
+        return f"rundll32.exe url.dll,FileProtocolHandler {quoted}"
+    return f"xdg-open {quoted}"
+
+
 def with_open_directive(prompt: str, work_dir: str) -> str:
     """Append the "open this path" instruction when *prompt* is a bare path.
 
@@ -64,20 +91,18 @@ def with_open_directive(prompt: str, work_dir: str) -> str:
     Returns:
         *prompt* unchanged unless :func:`bare_path` recognises it, in
         which case the prompt followed by the directive to open the
-        path with the platform opener (``open`` on macOS, ``xdg-open``
-        elsewhere) and finish without reading, editing or asking about
-        it.
+        path with this platform's opener (:func:`opener_command`) and
+        finish without reading, editing or asking about it.
     """
     path = bare_path(prompt, work_dir)
     if path is None:
         return prompt
     kind = "directory" if path.is_dir() else "file"
-    quoted = shlex.quote(str(path))
     return (
         f"{prompt}\n\n"
         f"The task is nothing but the path of an existing {kind}, so open it "
-        f"for the user with the platform opener: run `open {quoted}` on macOS "
-        f"or `xdg-open {quoted}` on Linux through the Bash tool, then finish "
-        f"with a one-sentence summary saying the {kind} was opened. Do not "
-        f"read, summarize or edit it, and do not ask what to do with it."
+        f"for the user with the platform opener: run `{opener_command(path)}` "
+        f"through the Bash tool, then finish with a one-sentence summary "
+        f"saying the {kind} was opened. Do not read, summarize or edit it, "
+        f"and do not ask what to do with it."
     )

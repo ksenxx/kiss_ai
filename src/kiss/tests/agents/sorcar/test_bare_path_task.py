@@ -18,6 +18,7 @@ actually received.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.sorcar.bare_path_task import bare_path, with_open_directive
+from kiss.agents.sorcar.bare_path_task import bare_path, opener_command, with_open_directive
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
@@ -68,8 +69,9 @@ class TestBarePath:
     def test_tilde_expands_to_home(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``~/x`` is resolved through ``$HOME``."""
+        """``~/x`` is resolved through ``$HOME`` (``USERPROFILE`` on Windows)."""
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         target = tmp_path / "Downloads" / "ROUTING.md"
         target.parent.mkdir()
         target.write_text("x")
@@ -109,6 +111,35 @@ class TestBarePath:
         assert bare_path("x" * 5000, str(tmp_path)) is None
 
 
+class TestOpenerCommand:
+    """The command is this platform's opener plus the bash-quoted path."""
+
+    def test_names_this_platforms_opener(self) -> None:
+        """macOS ``open``, Windows ``rundll32 FileProtocolHandler``, else ``xdg-open``.
+
+        A path with spaces or ``&`` is single-quoted for bash; on
+        Windows every path is, because backslashes are not safe shell
+        characters, and the opener takes one argument with no second
+        round of parsing, so ``&`` and ``%NAME%`` stay literal.  The
+        paths are fixed literals (the command does not touch the disk)
+        so the expectation does not depend on where pytest puts its
+        temporary directory.
+        """
+        if sys.platform == "win32":
+            assert opener_command(Path(r"C:\kiss\ROUTING.md")) == (
+                "rundll32.exe url.dll,FileProtocolHandler 'C:\\kiss\\ROUTING.md'"
+            )
+            assert opener_command(Path(r"C:\kiss\My Docs & %USERNAME%")) == (
+                "rundll32.exe url.dll,FileProtocolHandler 'C:\\kiss\\My Docs & %USERNAME%'"
+            )
+        else:
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            assert opener_command(Path("/opt/kiss/ROUTING.md")) == f"{opener} /opt/kiss/ROUTING.md"
+            assert opener_command(Path("/opt/kiss/My Docs & %USERNAME%")) == (
+                f"{opener} '/opt/kiss/My Docs & %USERNAME%'"
+            )
+
+
 class TestWithOpenDirective:
     """The directive names the resolved path and the kind of entry."""
 
@@ -118,17 +149,16 @@ class TestWithOpenDirective:
         target.write_text("x")
         out = with_open_directive(f" {target} ", "/")
         assert out.startswith(f" {target} \n\n{DIRECTIVE} file")
-        assert f"`open {target.resolve()}`" in out
-        assert f"`xdg-open {target.resolve()}`" in out
+        assert f"run `{opener_command(target.resolve())}` through the Bash tool" in out
         assert "do not ask what to do with it" in out
 
-    def test_directory_directive_quotes_spaces(self, tmp_path: Path) -> None:
-        """A directory is called one, and a path with spaces is shell-quoted."""
+    def test_directory_directive(self, tmp_path: Path) -> None:
+        """A directory is called one and its (quoted) path is the one opened."""
         target = tmp_path / "My Docs"
         target.mkdir()
         out = with_open_directive(str(target), "/")
         assert f"{DIRECTIVE} directory" in out
-        assert f"`open '{target.resolve()}'`" in out
+        assert f"`{opener_command(target.resolve())}`" in out
         assert "the directory was opened" in out
 
     def test_other_prompts_unchanged(self, tmp_path: Path) -> None:
@@ -190,7 +220,7 @@ class TestChatSorcarAgentRun:
         assert model.prompts, "the model was never called"
         sent = model.prompts[0]
         assert f"# Task\n{raw}\n\n{DIRECTIVE} file" in sent
-        assert f"`open {target.resolve()}`" in sent
+        assert f"`{opener_command(target.resolve())}`" in sent
         rows = history_rows()
         assert [row["task"] for row in rows] == [raw]
 
@@ -198,7 +228,7 @@ class TestChatSorcarAgentRun:
         """A relative path is resolved against the run's ``work_dir``."""
         (env.repo / "notes.txt").write_text("n")
         _, model = _run(env, "notes.txt")
-        assert f"`open {(env.repo / 'notes.txt').resolve()}`" in model.prompts[0]
+        assert f"`{opener_command((env.repo / 'notes.txt').resolve())}`" in model.prompts[0]
 
     def test_ordinary_prompt_unchanged(self, env: IsolatedKissHome) -> None:
         """A prompt that is not a path is sent exactly as before."""
