@@ -448,8 +448,9 @@ def _release_worktree_without_merging(
 
     Used when a new task starts on a tab that still holds a pending
     worktree while another tab runs a task directly on the main
-    working tree.  Auto-merging is unsafe then (it would stash,
-    checkout and merge the tree that other task is writing), but
+    working tree and has already changed tracked files there.
+    Auto-merging is unsafe then (it would stash, checkout and merge
+    the tree that other task is writing), but
     simply dropping ``agent._wt`` is worse: that handle is the only
     in-memory reference to the worktree, so the directory, the
     ``kiss/wt-*`` branch and its ``branch.<name>.*`` config section
@@ -501,7 +502,8 @@ def _release_worktree_without_merging(
         return
     reason = (
         f"Could not auto-merge branch '{branch}' because another task "
-        "is running on the main working tree."
+        "is running on the main working tree and has uncommitted "
+        "changes to tracked files."
     )
     if agent._last_preserve_outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED:
         agent._set_warnings(merge=(
@@ -682,6 +684,7 @@ class _TaskRunnerMixin:
         def _main_tree_claim_reason(
             self, repo_root: Path | None,
         ) -> str | None: ...
+        def _main_tree_blocks_merge(self, repo_root: Path | None) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _user_answer_clear_tabs(
@@ -1655,12 +1658,20 @@ class _TaskRunnerMixin:
             # release for those runs orphaned the worktree with no
             # owner and no preserve marker, which let a later reclaim
             # sweep publish work the user declined to merge (R09-1).
+            # "Busy" blocks the merge only once the occupant has
+            # changed a tracked file of the main tree: an occupant
+            # that has left every tracked file untouched (this run
+            # itself, which has not started writing yet, or another
+            # tab's read-only task) does not stand in the way.
             with self._state_lock:
                 main_tree_busy = self._any_non_wt_running(
                     getattr(agent, "_repo_root", None),
                 )
                 wt_occupied = self._any_non_wt_running(
                     getattr(agent, "_wt_dir", None),
+                )
+                merge_blocked = self._main_tree_blocks_merge(
+                    getattr(agent, "_repo_root", None),
                 )
             if main_tree_busy and wt_occupied:
                 # A task on another tab is running INSIDE the pending
@@ -1680,9 +1691,19 @@ class _TaskRunnerMixin:
                 # attribute for every cleanup that happens later, but
                 # this release runs before it.
                 agent.auto_commit_enabled = state.auto_commit_mode
-                _release_worktree_without_merging(
-                    agent, bool(self._get_worktree_changed_files(tab_id)),
-                )
+                if merge_blocked:
+                    _release_worktree_without_merging(
+                        agent, bool(self._get_worktree_changed_files(tab_id)),
+                    )
+                elif not use_worktree:
+                    # The main tree is occupied but untouched, so the
+                    # carried-over worktree can still be merged — and
+                    # it must be merged NOW, before this direct run
+                    # starts writing the tree.  A worktree run needs
+                    # nothing here: its own ``_try_setup_worktree``
+                    # retires the previous worktree under the repo
+                    # lock as it always did.
+                    agent._retire_previous_worktree()
 
         with self._state_lock:
             opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")
@@ -2135,6 +2156,20 @@ class _TaskRunnerMixin:
             # over and its changes are committed (mandatory finally).
             freed_repo: Path | None = None
             try:
+                # Warnings left by the pre-run retirement of a
+                # carried-over worktree (``_retire_previous_worktree``
+                # / ``_release_worktree_without_merging`` above) are
+                # normally broadcast by ``agent.run``.  A failure
+                # BEFORE the first ``agent.run`` (tool profile, config,
+                # tools file) would otherwise swallow them and the user
+                # would never learn where that worktree's work went.
+                # The flush is a take-and-clear, so it never
+                # re-delivers what ``run`` already broadcast; it sits
+                # inside this guarded block so a stop interrupt landing
+                # in the broadcast cannot skip the mandatory cleanup.
+                _flush_warnings = getattr(agent, "_flush_warnings", None)
+                if _flush_warnings is not None:
+                    _flush_warnings(self.printer)
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
                     _agent_parsed and _agent_parsed.get("success") is False
