@@ -14,6 +14,42 @@ from collections.abc import Callable
 #: ``[exit code:`` marker, so sniffing for that marker reported a write
 #: that never happened as a success.
 _WRITE_OK = "__KISS_WRITE_OK__"
+#: Marker the Edit script prints when the container has no Python interpreter.
+_NO_PYTHON = "Error: Python required for Edit"
+
+
+def _perl_edit_command(file_path: str, old_string: str, new_string: str, replace_all: bool) -> str:
+    """The Edit replacement as a Perl one-liner, for containers without Python.
+
+    Args:
+        file_path: Absolute path to the file to modify.
+        old_string: Exact text to find and replace.
+        new_string: Replacement text.
+        replace_all: If True, replace all occurrences.
+
+    Returns:
+        A bash command whose output matches the Python implementation's messages.
+    """
+    ra = "1" if replace_all else "0"
+    return (
+        f"KISS_OLD={shlex.quote(old_string)} KISS_NEW={shlex.quote(new_string)} perl -e '\n"
+        f"my $old = $ENV{{KISS_OLD}}; my $new = $ENV{{KISS_NEW}};\n"
+        f"my $path = $ARGV[0];\n"
+        f"open(my $fh, \"<:raw\", $path)\n"
+        f"  or do {{ print \"Error: File not found: $path\\n\"; exit 1 }};\n"
+        f"local $/; my $content = <$fh>; close $fh;\n"
+        f"my $count = () = $content =~ /\\Q$old\\E/g;\n"
+        f"if ($count == 0) {{ print \"Error: String not found in file\\n\"; exit 1 }}\n"
+        f"if (!{ra} && $count > 1) {{ print \"Error: String appears $count times (not unique). "
+        f"Use replace_all=True to replace all occurrences.\\n\"; exit 1 }}\n"
+        f"if ({ra}) {{ $content =~ s/\\Q$old\\E/$new/g }}\n"
+        f"else {{ $content =~ s/\\Q$old\\E/$new/ }}\n"
+        f"open($fh, \">:raw\", $path) or do {{ print \"Error: cannot write $path\\n\"; exit 1 }};\n"
+        f"print $fh $content; close $fh;\n"
+        f"my $replaced = {ra} ? $count : 1;\n"
+        f"print \"Successfully replaced $replaced occurrence(s) in $path\\n\";\n"
+        f"' {shlex.quote(file_path)}"
+    )
 
 
 class DockerTools:
@@ -124,6 +160,8 @@ class DockerTools:
                 "Error: old_string must not be empty. "
                 "Use the Write tool to create or overwrite a file."
             )
+        if old_string == new_string:
+            return "Error: new_string must be different from old_string"
         b64_old = base64.b64encode(old_string.encode()).decode()
         b64_new = base64.b64encode(new_string.encode()).decode()
         path = shlex.quote(file_path)
@@ -131,7 +169,7 @@ class DockerTools:
 
         cmd = (
             f'PYTHON=$(command -v python3 || command -v python) || '
-            f'{{ echo "Error: Python required for Edit"; exit 1; }}; '
+            f'{{ echo "{_NO_PYTHON}"; exit 1; }}; '
             f'"$PYTHON" -c "\n'
             f"import base64, sys\n"
             f"old = base64.b64decode('{b64_old}').decode()\n"
@@ -156,4 +194,14 @@ class DockerTools:
             f"print(f'Successfully replaced {{replaced}} occurrence(s) in {{path}}')\n"
             f'" {path}'
         )
-        return self.bash(cmd, f"Edit {file_path}")
+        result = self.bash(cmd, f"Edit {file_path}")
+        if _NO_PYTHON not in result:
+            return result
+        # Images without Python (Rust, R, C toolchains) still have perl-base, so
+        # the same replacement is done in Perl.  The strings travel in
+        # environment variables (perl-base has no MIME::Base64), which cannot
+        # carry NUL bytes.
+        if "\0" in old_string or "\0" in new_string:
+            return "Error: Edit needs Python in this container for strings containing NUL bytes"
+        command = _perl_edit_command(file_path, old_string, new_string, replace_all)
+        return self.bash(command, f"Edit {file_path}")
