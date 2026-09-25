@@ -3,25 +3,24 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (JSDOM) tests for the "Working directory" field of the
-// Settings panel.
+// End-to-end (JSDOM) tests for the Settings panel having NO "Working
+// directory" (and no "Memory directory") field, and for what the config
+// reply still does without it.
 //
-// The same media/ files are served to two very different clients, and the
-// field means something different in each:
+// The same media/ files are served to two very different clients:
 //
-//   * In a VS Code webview the working directory is not a preference --
-//     it IS the workspace folder open in that window. The field is there
-//     to be read, so it is read-only, and it is left out of the
-//     `saveConfig` payload entirely: three windows open on three
-//     projects must not take turns overwriting one another's stored
-//     work_dir.
-//   * In the standalone web client there is no workspace folder, so the
-//     field is the only way to say where tasks should run. It is
-//     editable, it is saved, and saving it also re-pins THIS browser tab
-//     (sessionStorage `sorcar-work-dir`, written by the WS shim when the
-//     page posts `setWorkDir`) so a second browser tab pointed elsewhere
-//     does not drag this one along. A fresh tab with no pin yet adopts
-//     the stored value as its own.
+//   * In a VS Code webview the working directory IS the workspace folder
+//     open in that window, so a settings box for it had nothing to edit;
+//     the form leaves `work_dir` out of the `saveConfig` payload so three
+//     windows open on three projects never overwrite one another's stored
+//     value.
+//   * In the standalone web client the folder is chosen in the "Working
+//     directory" panel of the "..." menu, which saves it AND re-pins THIS
+//     browser tab (sessionStorage `sorcar-work-dir`, written by the WS
+//     shim when the page posts `setWorkDir`).  The config reply still
+//     honours that pin -- a second browser tab pointed elsewhere does not
+//     drag this one along -- and a fresh tab with no pin yet adopts the
+//     stored value as its own.
 
 'use strict';
 
@@ -103,10 +102,38 @@ function typeInto(win, id, value) {
   node.dispatchEvent(new win.Event('input', {bubbles: true}));
 }
 
-function workDirField(win) {
-  const node = win.document.getElementById('cfg-work-dir');
-  assert.ok(node, 'the settings panel must have a working-directory field');
-  return node;
+function assertNoDirectoryFields(win) {
+  assert.strictEqual(
+    win.document.getElementById('cfg-work-dir'),
+    null,
+    'the settings panel must not have a working-directory field',
+  );
+  assert.strictEqual(
+    win.document.getElementById('cfg-memory-dir'),
+    null,
+    'the settings panel must not have a memory-directory field',
+  );
+  const labels = Array.from(
+    win.document.querySelectorAll('#config-form .config-label'),
+  ).map(l => l.textContent.trim());
+  assert.ok(
+    !labels.some(t => /^(Working|Memory) directory/.test(t)),
+    'no settings label may read "Working directory" or "Memory directory"',
+  );
+}
+
+function tabBarIds(win) {
+  return Array.from(win.document.querySelectorAll('.chat-tab'))
+    .filter(el => !!el.dataset.tabId)
+    .map(el => el.dataset.tabId);
+}
+
+function tabEntry(tabId, workDir) {
+  return {tabId, chatId: '', title: tabId, workDir};
+}
+
+function click(win, el) {
+  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
 function lastMsg(posted, type) {
@@ -122,65 +149,43 @@ function setWorkDirs(posted) {
 
 // --- the standalone web client -------------------------------------------
 
-function testRemoteFieldIsEditableAndSaved() {
+function testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
   const {win, posted} = makeWebview({remote: true});
   openSettings(win);
   send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
+  assertNoDirectoryFields(win);
 
-  const field = workDirField(win);
-  assert.strictEqual(
-    field.value,
-    '/srv/project',
-    'the field shows the stored working directory',
-  );
-  assert.strictEqual(
-    field.readOnly,
-    false,
-    'the web client has no workspace folder, so the field is the only way ' +
-      'to set the working directory and must stay editable',
-  );
-
-  typeInto(win, 'cfg-work-dir', '  /srv/elsewhere  ');
+  typeInto(win, 'cfg-max-budget', '77');
   closeSettings(win);
 
   const saved = lastMsg(posted, 'saveConfig');
   assert.ok(saved, 'closing the settings panel must save the form');
-  assert.strictEqual(
-    saved.config.work_dir,
-    '/srv/elsewhere',
-    'the edited working directory is saved, with surrounding blanks removed',
+  assert.strictEqual(saved.config.max_budget, 77, 'the edit is saved');
+  assert.ok(
+    !('work_dir' in saved.config) && !('memory_dir' in saved.config),
+    'the form has no directory boxes, so it must not invent either key ' +
+      '(the daemon merges the payload; a blank would wipe the stored value)',
   );
   win.close();
-  console.log('  ok - the web client field is editable and saved');
+  console.log('  ok - the web client settings carry no directory fields');
 }
 
 function testRemoteBlankWhenNothingIsStored() {
   const {win, posted} = makeWebview({remote: true});
   openSettings(win);
   send(win, {type: 'configData', config: {}});
-
-  assert.strictEqual(
-    workDirField(win).value,
-    '',
-    'a config without a work_dir leaves the field blank rather than ' +
-      'inventing a path',
-  );
-
   closeSettings(win);
+
   const saved = lastMsg(posted, 'saveConfig');
   assert.ok(saved, 'closing the settings panel must save the form');
-  assert.strictEqual(
-    saved.config.work_dir,
-    '',
-    'an untouched blank field saves as blank',
-  );
+  assert.ok(!('work_dir' in saved.config), 'nothing to save as work_dir');
   assert.deepStrictEqual(
     setWorkDirs(posted),
     [],
     'there is nothing to adopt and nothing to pin',
   );
   win.close();
-  console.log('  ok - a blank stored working directory stays blank');
+  console.log('  ok - a blank stored working directory pins nothing');
 }
 
 function testRemoteInstancePrefersItsOwnPin() {
@@ -188,19 +193,25 @@ function testRemoteInstancePrefersItsOwnPin() {
     remote: true,
     pinnedWorkDir: '/srv/mine',
   });
-  openSettings(win);
   // Another browser tab has since saved its own folder globally.
   send(win, {type: 'configData', config: {work_dir: '/srv/other-instance'}});
-
-  assert.strictEqual(
-    workDirField(win).value,
-    '/srv/mine',
-    'a page that already pinned a folder keeps showing its own, not the ' +
-      'one another instance happened to store last',
-  );
   assert.ok(
     !setWorkDirs(posted).includes('/srv/other-instance'),
-    'and it must not re-adopt that other folder',
+    'a page that already pinned a folder must not re-adopt the one ' +
+      'another instance happened to store last',
+  );
+  // And it scopes its shared tabs by its OWN pin, not the stored value.
+  send(win, {
+    type: 'tabs_state',
+    tabs: [
+      tabEntry('mine-1', '/srv/mine'),
+      tabEntry('other-1', '/srv/other-instance'),
+    ],
+  });
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['mine-1'],
+    'the tab bar shows the tabs of the pinned folder only',
   );
   win.close();
   console.log('  ok - a pinned web client keeps its own working directory');
@@ -208,75 +219,91 @@ function testRemoteInstancePrefersItsOwnPin() {
 
 function testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned() {
   const {win, posted} = makeWebview({remote: true});
-  openSettings(win);
   send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
-
-  assert.strictEqual(
-    workDirField(win).value,
-    '/srv/project',
-    'a fresh page shows the stored working directory',
-  );
   assert.deepStrictEqual(
     setWorkDirs(posted),
     ['/srv/project'],
-    'and claims it as its own pin, so its tasks run where the settings ' +
-      'panel says they do',
+    'a fresh page claims the stored working directory as its own pin, so ' +
+      'its tasks run where the daemon says they do',
   );
+  send(win, {
+    type: 'tabs_state',
+    tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
+  });
+  assert.deepStrictEqual(tabBarIds(win), ['p-1'], 'and scopes by it');
   win.close();
   console.log('  ok - an unpinned web client adopts the stored directory');
 }
 
-function testRemoteSaveRepinsTheEditedWorkDir() {
+function testRemoteWorkDirChangesThroughThePanel() {
   const {win, posted} = makeWebview({
     remote: true,
     pinnedWorkDir: '/srv/project',
   });
-  openSettings(win);
   send(win, {type: 'configData', config: {work_dir: '/srv/project'}});
 
-  typeInto(win, 'cfg-work-dir', '/srv/elsewhere');
-  closeSettings(win);
+  // The "..." menu's "Working directory" panel is the one place to
+  // change the folder now that the settings box is gone.
+  click(win, win.document.getElementById('more-btn'));
+  click(win, win.document.getElementById('workdir-btn'));
+  const panel = win.document.getElementById('workdir-panel');
+  assert.ok(panel.classList.contains('open'), 'the panel opens');
+  typeInto(win, 'workdir-input', '/srv/elsewhere');
+  click(win, win.document.getElementById('workdir-open-btn'));
 
+  const check = lastMsg(posted, 'listDir');
+  assert.ok(
+    check && String(check.token).startsWith('workdir:'),
+    'the daemon is asked to list the typed folder first',
+  );
+  assert.strictEqual(check.path, '/srv/elsewhere');
+  send(win, {
+    type: 'dirListing',
+    token: check.token,
+    path: '/srv/elsewhere',
+    root: '/srv/elsewhere',
+    entries: [],
+  });
+
+  const saved = lastMsg(posted, 'saveConfig');
+  assert.ok(
+    saved && saved.config.work_dir === '/srv/elsewhere',
+    'a real folder is stored as the working directory',
+  );
   assert.ok(
     setWorkDirs(posted).includes('/srv/elsewhere'),
-    'saving an edited working directory re-pins this page as well as ' +
-      'storing it, otherwise the panel would show one folder while the ' +
-      'tasks kept running in another',
+    'and re-pins this page, otherwise the panel would show one folder ' +
+      'while the tasks kept running in another',
   );
+  assert.ok(!panel.classList.contains('open'), 'the panel closes');
   win.close();
-  console.log('  ok - saving an edited working directory re-pins the page');
+  console.log('  ok - the web client changes its folder through the panel');
 }
 
 // --- the VS Code webview -------------------------------------------------
 
-function testWebviewFieldIsReadOnlyAndNotSaved() {
+function testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir() {
   const {win, posted} = makeWebview({remote: false});
   openSettings(win);
-  send(win, {type: 'configData', config: {work_dir: '/home/user/ws_a'}});
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/home/user/ws_a', max_budget: 42},
+  });
+  assertNoDirectoryFields(win);
 
-  const field = workDirField(win);
-  assert.strictEqual(
-    field.value,
-    '/home/user/ws_a',
-    "the field shows this window's own workspace folder",
-  );
-  assert.strictEqual(
-    field.readOnly,
-    true,
-    'in VS Code the working directory is the workspace folder, so the ' +
-      'field is there to be read',
-  );
-  assert.ok(
-    field.title,
-    'and it says so, since a field that refuses to be typed into owes the ' +
-      'reader an explanation',
-  );
-
+  // The user changes something else entirely.
+  typeInto(win, 'cfg-max-budget', '77');
   closeSettings(win);
+
   const saved = lastMsg(posted, 'saveConfig');
   assert.ok(saved, 'closing the settings panel must save the form');
+  assert.strictEqual(
+    saved.config.max_budget,
+    77,
+    'the edit the user actually made is saved',
+  );
   assert.ok(
-    !('work_dir' in saved.config),
+    !('work_dir' in saved.config) && !('memory_dir' in saved.config),
     'a VS Code window must leave work_dir out of what it saves: with ' +
       'three windows open on three projects, whichever closed its ' +
       'settings panel last would otherwise own the stored value',
@@ -288,43 +315,16 @@ function testWebviewFieldIsReadOnlyAndNotSaved() {
       'extension announces the workspace folder itself on connect',
   );
   win.close();
-  console.log('  ok - the VS Code field is read-only and never saved');
-}
-
-function testWebviewSaveDoesNotClobberAnotherWindowsWorkDir() {
-  const {win, posted} = makeWebview({remote: false});
-  openSettings(win);
-  send(win, {
-    type: 'configData',
-    config: {work_dir: '/home/user/ws_a', max_budget: 42},
-  });
-
-  // The user changes something else entirely.
-  typeInto(win, 'cfg-max-budget', '77');
-  closeSettings(win);
-
-  const saved = lastMsg(posted, 'saveConfig');
-  assert.strictEqual(
-    saved.config.max_budget,
-    77,
-    'the edit the user actually made is saved',
-  );
-  assert.ok(
-    !('work_dir' in saved.config),
-    'while the read-only working directory rides along with nothing',
-  );
-  win.close();
-  console.log('  ok - an unrelated VS Code save carries no work_dir');
+  console.log('  ok - the VS Code settings carry no directory fields');
 }
 
 function main() {
-  testRemoteFieldIsEditableAndSaved();
+  testRemoteSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   testRemoteBlankWhenNothingIsStored();
   testRemoteInstancePrefersItsOwnPin();
   testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned();
-  testRemoteSaveRepinsTheEditedWorkDir();
-  testWebviewFieldIsReadOnlyAndNotSaved();
-  testWebviewSaveDoesNotClobberAnotherWindowsWorkDir();
+  testRemoteWorkDirChangesThroughThePanel();
+  testWebviewSettingsHaveNoDirectoryFieldsAndSaveNoWorkDir();
   console.log('settingsWorkDirField.test.js: all tests passed');
 }
 

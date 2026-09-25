@@ -105,7 +105,7 @@ stored value (``sorcar_agent._memory_settings``);
 ``tool_profile()`` (wire field ``toolProfile``) returns the name of the
 tool profile the run's built-in toolset is cut down to — a key of
 ``sorcar_agent.TOOL_PROFILES`` (``"full"``, ``"review"``, ``"shell"``,
-``"bash"``) or ``""`` for the daemon's usual choice; the task runner
+``"assistant"``, ``"bash"``) or ``""`` for the daemon's usual choice; the task runner
 rejects an unknown name when the task starts.
 ``docker_image()`` (wire field ``dockerImage``) returns the Docker
 image the run's shell and file tools execute in, or

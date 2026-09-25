@@ -3750,11 +3750,24 @@ def _build_html() -> str:
         }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    return re.sub(
-        r"\{\{([A-Z_]+)\}\}",
-        lambda m: subs.get(m.group(1), m.group(0)),
-        tpl,
-    )
+
+    def _fill(m: re.Match[str]) -> str:
+        space, key = m.group(1), m.group(2)
+        if key not in subs:
+            return m.group(0)
+        # Attribute-string placeholders carry their own leading space (or
+        # are empty); the template writes them after a separating space
+        # (``<body {{BODY_CLASS_ATTR}}>``) only so htmlhint can parse the
+        # tag.  Drop that space so the page renders exactly
+        # ``<body class="remote-chat">`` / ``<script src=...>``.
+        if key in _ATTR_STRING_KEYS:
+            return subs[key]
+        return space + subs[key]
+
+    return re.sub(r"( ?)\{\{([A-Z_]+)\}\}", _fill, tpl)
+
+
+_ATTR_STRING_KEYS = frozenset({"BODY_CLASS_ATTR", "ENTERKEYHINT", "NONCE_ATTR"})
 
 
 _MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")

@@ -30,6 +30,7 @@ real production functions on both sides of the file.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ import pytest
 
 from kiss.core.models.model_info import _read_model_info_json
 from kiss.scripts.update_models import _write_model_info_json
+from kiss.tests.conftest import HOT_READER_PAUSE
 
 _ROUNDS = 200
 
@@ -77,6 +79,7 @@ class TestWriterNeverPublishesATornFile:
 
         def reader() -> None:
             while not done.is_set():
+                time.sleep(HOT_READER_PAUSE)
                 try:
                     text = path.read_text(encoding="utf-8")
                 except OSError:
@@ -89,9 +92,15 @@ class TestWriterNeverPublishesATornFile:
 
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
+        # At least _ROUNDS rewrites, and more until the reader has sampled
+        # the file often enough: on a loaded machine 200 rewrites can be
+        # over before a 100 KB read completes a dozen times.
+        deadline = time.monotonic() + 60
+        rounds = 0
         try:
-            for _ in range(_ROUNDS):
+            while rounds < _ROUNDS or (reads[0] <= 10 and time.monotonic() < deadline):
                 _write_model_info_json(path, dict(data))
+                rounds += 1
         finally:
             done.set()
             thread.join(timeout=10)
@@ -99,7 +108,7 @@ class TestWriterNeverPublishesATornFile:
         assert reads[0] > 10, "the reader thread never got to run"
         assert not failures, (
             f"{len(failures)} torn reads of MODEL_INFO.json during "
-            f"{_ROUNDS} rewrites, e.g. {failures[0]}"
+            f"{rounds} rewrites, e.g. {failures[0]}"
         )
 
     def test_write_leaves_no_temp_files_behind(self, tmp_path: Path) -> None:
@@ -155,7 +164,7 @@ class TestReaderToleratesAConcurrentRewrite:
     """
 
     def test_read_retries_through_a_truncation_window(
-        self, tmp_path: Path,
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
         """A file truncated by another writer must be read once restored."""
         path = tmp_path / "MODEL_INFO.json"
@@ -167,8 +176,23 @@ class TestReaderToleratesAConcurrentRewrite:
         # catalog and has not written its payload yet.
         path.write_text("", encoding="utf-8")
 
+        # The reader logs every failed attempt at DEBUG; that record is
+        # the cue for the restore, so the truncation is guaranteed to be
+        # observed first, however slowly a loaded machine schedules the
+        # threads (a fixed delay either raced the reader's first attempt
+        # or ran past its retry budget on a busy Windows VM).
+        caplog.set_level(logging.DEBUG, logger="kiss.core.models.model_info")
+
+        def failed_attempts() -> int:
+            return sum(
+                1 for r in caplog.records
+                if r.name == "kiss.core.models.model_info" and r.exc_info is not None
+            )
+
         def restore() -> None:
-            time.sleep(0.15)
+            deadline = time.monotonic() + 10
+            while failed_attempts() == 0 and time.monotonic() < deadline:
+                time.sleep(0.001)
             path.write_text(good, encoding="utf-8")
 
         thread = threading.Thread(target=restore, daemon=True)
@@ -179,6 +203,7 @@ class TestReaderToleratesAConcurrentRewrite:
             thread.join(timeout=10)
 
         assert set(raw) == set(data)
+        assert failed_attempts() >= 1, "the reader never saw the truncated file"
 
 
 class TestNoImplicitUserLocalCatalogWrite:

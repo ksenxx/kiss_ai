@@ -27,11 +27,12 @@ import json
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
+from kiss.tests.conftest import HOT_READER_PAUSE, TRANSIENT_REPLACE_READ_ERRORS
 
 _IS_POSIX = sys.platform != "win32"
 
@@ -98,6 +99,7 @@ class TestGoogleChatSaveToken:
 
         def reader() -> None:
             while not stop.is_set():
+                time.sleep(HOT_READER_PAUSE)
                 try:
                     data = json.loads(token_file.read_text(encoding="utf-8"))
                 except TRANSIENT_REPLACE_READ_ERRORS:

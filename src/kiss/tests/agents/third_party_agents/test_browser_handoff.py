@@ -131,10 +131,32 @@ def _auth_tools(agent: Any) -> dict[str, Any]:
 
 
 def test_opens_url_with_browser_env_and_reports_success(fake_browser: Path) -> None:
-    """``$BROWSER`` is run with the URL appended; a clean exit means opened."""
-    url = _unique_url()
+    """``$BROWSER`` is run with the URL appended; a clean exit means opened.
+
+    The query string carries the characters an OAuth URL is made of
+    (``&``, ``%``, ``^``, ``|``): a ``.cmd`` opener on Windows would
+    otherwise receive the URL cut at the first ``&`` by ``cmd.exe``.
+    """
+    url = _unique_url() + "?redirect_uri=http%3A%2F%2Flocalhost%3A8&scope=a%20b&state=Q^W|E"
     assert open_in_default_browser(url) is True
     assert _opened(fake_browser) == [[url]]
+
+
+def test_batch_opener_refuses_a_url_with_an_embedded_quote(fake_browser: Path) -> None:
+    """A ``"`` in an argument for a ``.cmd`` opener is never handed to ``cmd.exe``.
+
+    ``cmd.exe`` has no escape for a quote inside a quoted argument: the
+    quote would end the argument and the remainder would run as commands.
+    On Windows the launch is refused before anything is spawned; a POSIX
+    opener receives the argument verbatim through ``execv`` and is safe.
+    """
+    url = _unique_url("quoted") + '?q="&whoami&rem "'
+    if IS_WINDOWS:
+        assert open_in_default_browser(url) is False
+        assert _opened(fake_browser) == []
+    else:
+        assert open_in_default_browser(url) is True
+        assert _opened(fake_browser) == [[url]]
 
 
 def test_browser_env_placeholder_and_fallback_list_are_honoured(

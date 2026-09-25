@@ -405,7 +405,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
     async def test_get_config_reports_instance_pin_over_persisted(
         self,
     ) -> None:
-        """The settings panel of a pinned instance must show ITS folder
+        """``getConfig`` for a pinned instance must report ITS folder
         even when another instance persisted a different work_dir
         globally via saveConfig."""
         vc.save_config({"work_dir": str(self.dir_b)})

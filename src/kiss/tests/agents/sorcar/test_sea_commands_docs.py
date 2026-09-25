@@ -25,6 +25,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.conftest import IS_WINDOWS
 
 _REPO = Path(__file__).resolve().parents[5]
 _SITE = _REPO / "website" / "kisssorcar.github.io"
@@ -37,6 +38,18 @@ def _reset_sea_commands() -> Iterator[None]:
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+
+
+@pytest.fixture
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make *tmp_path* the user's home directory.
+
+    ``Path.home()`` reads ``HOME`` on POSIX and ``USERPROFILE`` on
+    Windows; both are set so the fake home works on either.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    return tmp_path
 
 
 def _fenced_block(text: str, first_line: str) -> str:
@@ -62,32 +75,29 @@ def test_page_is_listed_in_every_site_index() -> None:
     assert f"<!-- Source: {url} -->" in (_SITE / "llms-full.txt").read_text()
 
 
-def test_seas_md_example_parses_as_documented(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_seas_md_example_parses_as_documented(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The "complete example" SEAS.md block yields exactly the three documented folders.
 
     The block uses ``~``, ``$WORK``, inline comments, and a leading
     ``#`` comment line; the page promises each of those is handled.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("WORK", str(tmp_path / "work"))
+    monkeypatch.setenv("WORK", str(home / "work"))
     block = _fenced_block(_DOC.read_text(), "# ~/.kiss/SEAS.md")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(block, encoding="utf-8")
 
     folders = sea_commands._read_seas_md_folders()
 
-    assert folders == [
-        tmp_path / "my-seas",
-        tmp_path / "work" / "agents",
-        Path("/opt/agents/experimental"),
-    ]
+    # ``/opt/...`` is absolute on POSIX.  On Windows a path without a
+    # drive is relative, so the parser anchors it in the home directory
+    # (which only contributes its drive: ``C:/opt/agents/experimental``).
+    opt = Path("/opt/agents/experimental")
+    if IS_WINDOWS:
+        opt = home / opt
+    assert folders == [home / "my-seas", home / "work" / "agents", opt]
 
 
-def test_three_step_walkthrough_registers_standup_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     """Following the page's three steps yields ``/standup`` bound to the new file.
 
     Step 1 writes the documented ``standup_sea.py`` (and the snippet
@@ -96,10 +106,9 @@ def test_three_step_walkthrough_registers_standup_command(
     autocomplete (``st`` matches ``standup``) and the ``/standup ...``
     prompt being rewritten into a run_agent directive on that file.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
     doc = _DOC.read_text()
     sea_src = _fenced_block(doc, "# ~/my-seas/standup_sea.py")
-    folder = tmp_path / "my-seas"
+    folder = home / "my-seas"
     folder.mkdir()
     sea_file = folder / "standup_sea.py"
     sea_file.write_text(sea_src, encoding="utf-8")
@@ -127,7 +136,7 @@ def test_three_step_walkthrough_registers_standup_command(
     assert rewritten.endswith(task)
 
 
-def test_documented_edge_cases_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_documented_edge_cases_hold(home: Path) -> None:
     """The bullet list under "The slash-command flow" describes real parser behaviour.
 
     Checks: dotted and spaced stems are skipped, a leading underscore is
@@ -135,8 +144,7 @@ def test_documented_edge_cases_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     rewritten, a leading space disables the command, and ``/deployx``
     does not match ``/deploy``.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    folder = tmp_path / "seas"
+    folder = home / "seas"
     folder.mkdir()
     for stem in ("deploy", "_scratch", "release.notes", "my agent"):
         (folder / f"{stem}_sea.py").write_text("# stub\n", encoding="utf-8")

@@ -19,6 +19,24 @@ const {spawnSync} = require('child_process');
 
 const TEST_DIR = __dirname;
 
+// V8 flags for every suite process.  Node 24+ enables the Maglev optimizing
+// compiler and background ("concurrent") Sparkplug compilation.  Either can
+// leave a V8 worker thread parked waiting for a main-thread GC at the moment
+// `process.exit()` joins the worker pool, and the join then never returns
+// (nodejs/node#64274, fix PR #66171 unmerged as of Node 25.8.1).  One suite
+// in ~700 runs hung this way after printing its final "passed" line.  The
+// flags must be passed on the command line: NODE_OPTIONS rejects V8 flags,
+// and `v8.setFlagsFromString` inside the suite leaves code compiled before
+// the call eligible for the background compilers.
+const V8_FLAGS = ['--no-maglev', '--no-concurrent-sparkplug'];
+
+// Upper bound on one suite's wall-clock time.  The slowest suite
+// (editorTitleGitCommit.test.js) takes about two minutes and the next one
+// about half a minute; this exists so that any hang (in a suite, or in the
+// runtime at exit) is reported as a failure naming the suite instead of
+// stalling `npm test` until someone kills it.
+const SUITE_TIMEOUT_MS = 10 * 60 * 1000;
+
 function testFiles() {
   return fs
     .readdirSync(TEST_DIR)
@@ -35,10 +53,21 @@ function main() {
   const failed = [];
   files.forEach((file, i) => {
     console.log(`\n[${i + 1}/${files.length}] ${file}`);
-    const res = spawnSync(process.execPath, [path.join(TEST_DIR, file)], {
-      stdio: 'inherit',
-      cwd: path.dirname(TEST_DIR),
-    });
+    const res = spawnSync(
+      process.execPath,
+      [...V8_FLAGS, path.join(TEST_DIR, file)],
+      {
+        stdio: 'inherit',
+        cwd: path.dirname(TEST_DIR),
+        timeout: SUITE_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      },
+    );
+    if (res.error && res.error.code === 'ETIMEDOUT') {
+      console.error(
+        `${file}: no exit after ${SUITE_TIMEOUT_MS / 1000}s, killed`,
+      );
+    }
     if (res.status !== 0) failed.push(file);
   });
   console.log(

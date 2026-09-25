@@ -413,7 +413,6 @@ async function main() {
       ofType(posted, 'setWorkDir')[pins].workDir,
       '/data/proj',
     );
-    assert.strictEqual(byId(win, 'cfg-work-dir').value, '/data/proj');
     // The Explorer re-roots at the picked folder.
     list = ofType(posted, 'listDir').filter(
       m => !String(m.token).startsWith('picker:'),
@@ -716,7 +715,7 @@ async function main() {
     assert.strictEqual(ofType(posted, 'saveConfig').length, 0);
   });
 
-  await test('Settings: a work dir saved in the panel re-roots the views past a content tab', async () => {
+  await test('Working directory panel: a folder opened there re-roots the views past a content tab', async () => {
     const {win, posted} = makeWebview();
     pinWorkspace(win);
     send(win, {
@@ -736,12 +735,24 @@ async function main() {
     click(win, byId(win, 'activity-explorer'));
     let list = ofType(posted, 'listDir');
     assert.strictEqual(list[list.length - 1].path, WD + '/sub');
-    // The settings panel: type a new work dir and close (which saves).
-    click(win, byId(win, 'settings-btn'));
-    const wd = byId(win, 'cfg-work-dir');
+    // The "Working directory" panel: type a new work dir and open it;
+    // the daemon's listing confirms the folder and the client saves it.
+    click(win, byId(win, 'more-btn'));
+    click(win, byId(win, 'workdir-btn'));
+    const wd = byId(win, 'workdir-input');
     wd.value = '/parent';
     wd.dispatchEvent(new win.Event('input', {bubbles: true}));
-    click(win, byId(win, 'settings-panel-close'));
+    click(win, byId(win, 'workdir-open-btn'));
+    const checks = ofType(posted, 'listDir').filter(m =>
+      String(m.token).startsWith('workdir:'),
+    );
+    send(win, {
+      type: 'dirListing',
+      token: checks[checks.length - 1].token,
+      path: '/parent',
+      root: '/parent',
+      entries: [],
+    });
     const saved = ofType(posted, 'saveConfig');
     assert.ok(
       saved.length >= 1 &&
@@ -753,7 +764,7 @@ async function main() {
     assert.strictEqual(
       list[list.length - 1].path,
       '/parent',
-      'BUG: the Explorer kept the content tab owner folder after a settings save',
+      'BUG: the Explorer kept the content tab owner folder after a work dir change',
     );
   });
 
