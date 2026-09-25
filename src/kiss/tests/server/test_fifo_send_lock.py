@@ -73,7 +73,15 @@ class FifoSendLockTests(unittest.TestCase):
         self.assertEqual(asyncio.run(scenario()), ["survivor"])
 
     def test_large_backlog_drains_in_linear_time(self) -> None:
-        """A backlog of 20k queued sends drains in well under a second."""
+        """A backlog of 20k queued sends drains in well under a second of loop CPU time.
+
+        The cost is measured with ``time.thread_time`` (CPU time of the
+        thread running the event loop), not wall-clock time: the bound
+        guards against per-waiter work that grows with the queue length,
+        and a wall-clock bound failed spuriously at 2.24 s when the whole
+        suite ran in eight concurrent processes while the drain took
+        0.33 s in isolation.
+        """
 
         async def scenario() -> float:
             lock = FifoSendLock()
@@ -87,11 +95,11 @@ class FifoSendLockTests(unittest.TestCase):
             await lock.acquire()
             tasks = [asyncio.create_task(contender()) for _ in range(20_000)]
             await asyncio.sleep(0)
-            started = time.monotonic()
+            started = time.thread_time()
             lock.release()
             await asyncio.gather(*tasks)
             self.assertEqual(done, 20_000)
-            return time.monotonic() - started
+            return time.thread_time() - started
 
         self.assertLess(asyncio.run(scenario()), 2.0)
 
