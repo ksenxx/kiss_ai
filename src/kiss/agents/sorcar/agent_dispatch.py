@@ -1180,8 +1180,10 @@ def make_run_agent_tool(
                 Appended to each ``<task>`` when the task holds several.
             tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
                 ``"full"`` (everything), ``"review"`` (read and run, no editing, browser
-                or dispatch), ``"shell"`` (Bash, bash_job, Read, run_commands_parallel)
-                or ``"bash"`` (Bash only); empty = the daemon's usual choice.  ``finish``
+                or dispatch), ``"shell"`` (Bash, bash_job, Read, run_commands_parallel),
+                ``"assistant"`` (the shell set plus ask_user_question, talk, decide,
+                summary, set_model) or ``"bash"`` (Bash only); empty = the daemon's
+                usual choice.  ``finish``
                 is always available.  An agent script's ``tool_profile()`` still wins.
 
         Returns:

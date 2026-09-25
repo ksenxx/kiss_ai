@@ -127,8 +127,40 @@ def _drain_exec_stream(
         out_queue.put(None)
 
 
+def _collapse_progress(output: str) -> str:
+    """Render carriage returns the way a terminal does: later text overwrites earlier text.
+
+    Progress bars (pip, tqdm, fastText, wget) redraw one line thousands of
+    times with ``\\r``; in a captured stream those redraws arrive as one huge
+    line whose only useful part is its final state.  Each ``\\r`` moves the
+    cursor to the start of the line, so every segment is written over the
+    previous ones from column 0; characters beyond the new segment's end stay
+    (as on a terminal without erase-to-end-of-line).  ``\\r\\n`` line endings
+    therefore become plain ``\\n``.
+
+    Args:
+        output: The command's combined output.
+
+    Returns:
+        *output* as it would look on a terminal after the carriage returns.
+    """
+    if "\r" not in output:
+        return output
+    lines = []
+    for line in output.split("\n"):
+        if "\r" in line:
+            rendered = ""
+            for segment in line.split("\r"):
+                rendered = segment + rendered[len(segment):]
+            line = rendered
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _with_exit_code(output: str, exit_code: int) -> str:
     """Append the ``[exit code: N]`` marker for a failed command.
+
+    Carriage-return progress output is collapsed first (see :func:`_collapse_progress`).
 
     Args:
         output: The command's combined output.
@@ -137,6 +169,7 @@ def _with_exit_code(output: str, exit_code: int) -> str:
     Returns:
         *output* unchanged on success, else *output* plus the marker.
     """
+    output = _collapse_progress(output)
     if exit_code == 0:
         return output
     suffix = f"[exit code: {exit_code}]"
@@ -152,6 +185,7 @@ class DockerManager:
         workdir: str = "/",
         mount_shared_volume: bool = True,
         ports: dict[int, int] | None = None,
+        volumes: dict[str, str] | None = None,
     ) -> None:
         """Initialize the Docker client.
 
@@ -161,14 +195,25 @@ class DockerManager:
                 is already running.  An attached container is owned by the
                 caller: ``open()`` looks it up instead of starting one,
                 commands run in the container's own ``WorkingDir``, no shared
-                volume is mounted, and ``close()`` leaves it running.
+                volume and no *volumes* are mounted, and ``close()`` leaves
+                it running.
             tag: The tag/version of the image (default: 'latest')
-            workdir: The working directory inside the container
+            workdir: The working directory inside the container.  The
+                container is started with it as its ``WorkingDir`` too, so
+                a later ``container:<id>`` attach runs commands there.
             mount_shared_volume: Whether to mount a shared volume. Set to False
                 for images that already have content in the workdir (e.g., SWE-bench).
             ports: Port mapping from container port to host port.
                 Example: {8080: 8080} maps container port 8080 to host port 8080.
                 Example: {80: 8000, 443: 8443} maps multiple ports.
+            volumes: Extra read-write bind mounts, host path to container
+                path.  Example: ``{"/home/me/repo": "/home/me/repo"}``
+                makes the host directory visible at the same path inside
+                the container.  Unlike the shared volume, these directories
+                belong to the caller and are never deleted by ``close()``.
+                After ``open()``, ``self.volumes`` holds the container's
+                bind mounts: this mapping for a started container, the
+                attached container's own ones in attach mode.
         """
         self.client = docker.from_env()
         self.container: Container | None = None
@@ -182,6 +227,7 @@ class DockerManager:
         self.workdir = workdir
         self.mount_shared_volume = mount_shared_volume
         self.ports = ports
+        self.volumes = dict(volumes or {})
         self.client_shared_path = "/testbed"
         self.host_shared_path: str | None = None
         self.stream_callback: Callable[[str], None] | None = None
@@ -234,6 +280,14 @@ class DockerManager:
         if self.attached_container is not None:
             self.container = self.client.containers.get(self.attached_container)
             self.workdir = self.container.attrs["Config"].get("WorkingDir") or "/"
+            # Report the container's real bind mounts so callers can tell
+            # which host directories are visible inside (e.g. a work dir
+            # mounted by the manager that started this container).
+            self.volumes = {
+                mount["Source"]: mount["Destination"]
+                for mount in self.container.attrs.get("Mounts", [])
+                if mount.get("Type") == "bind"
+            }
             print(f"Attached to running container {(self.container.id or '')[:12]}")
             return
         image = self.image
@@ -251,13 +305,17 @@ class DockerManager:
             "tty": True,
             "stdin_open": True,
             "command": "/bin/bash",
+            "working_dir": self.workdir,
             "labels": {OWNER_LABEL: owner_label_value()},
+        }
+        mounts = {
+            host: {"bind": target, "mode": "rw"} for host, target in self.volumes.items()
         }
         if self.mount_shared_volume:
             self.host_shared_path = tempfile.mkdtemp()
-            container_kwargs["volumes"] = {
-                self.host_shared_path: {"bind": self.client_shared_path, "mode": "rw"}
-            }
+            mounts[self.host_shared_path] = {"bind": self.client_shared_path, "mode": "rw"}
+        if mounts:
+            container_kwargs["volumes"] = mounts
         if self.ports:
             container_kwargs["ports"] = {f"{cp}/tcp": hp for cp, hp in self.ports.items()}
         try:
@@ -591,7 +649,8 @@ class DockerManager:
             # returned with the error instead of being discarded.
             message = f"Error: command timed out after {timeout_seconds}s"
             if output:
-                message += f" and was killed. Output before the timeout:\n{output}"
+                message += " and was killed. Output before the timeout:\n"
+                message += _collapse_progress(output)
             return _truncate_output(message, max_output_chars)
 
         exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)

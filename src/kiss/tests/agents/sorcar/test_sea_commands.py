@@ -22,6 +22,8 @@ cannot fire during another.
 
 from __future__ import annotations
 
+import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -397,3 +399,129 @@ def test_get_command_rescans_on_miss(tmp_path: Path) -> None:
     resolved = sea_commands.get_command("later")
     assert resolved is not None
     assert resolved.name == "later_sea.py"
+
+
+_DATACLASS_SEA = '''\
+"""SEA whose module-level dataclass needs ``sys.modules[__name__]``."""
+
+from __future__ import annotations
+
+import typing
+from dataclasses import dataclass
+
+
+@dataclass
+class Verdict:
+    """String annotations: resolved through ``sys.modules[__module__]``."""
+
+    worktree: bool
+    note: typing.ClassVar[str] = "relay stays on the real checkout"
+
+
+def use_worktree() -> bool:
+    hints = typing.get_type_hints(Verdict)
+    assert hints == {"worktree": bool, "note": typing.ClassVar[str]}, hints
+    return Verdict(worktree=False).worktree
+
+
+def auto_commit() -> bool:
+    return True
+'''
+
+
+def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
+    """A ``@dataclass`` SEA under ``from __future__ import annotations`` imports.
+
+    ``dataclasses`` resolves string annotations through
+    ``sys.modules[cls.__module__].__dict__`` while the class body runs,
+    so the loader must register the module before executing it; the
+    daemon's own agent loader does, and a ``/xxx`` relay evaluating
+    ``use_worktree()`` on the same file must not fail where the daemon
+    succeeds.  The getter also calls ``typing.get_type_hints`` after
+    import, which needs the entry to still be there.
+    """
+    folder = tmp_path / "seas"
+    folder.mkdir()
+    sea = folder / "verdict_sea.py"
+    sea.write_text(_DATACLASS_SEA, encoding="utf-8")
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+
+    assert sea_commands.rewrite_prompt_if_command("/verdict go") is not None
+    assert sea_commands.sea_getter_is_false(sea, "use_worktree") is True
+    assert sea_commands.sea_getter_is_false(sea, "auto_commit") is False
+    assert sea_commands.sea_getter_is_false(sea, "missing_getter") is False
+    with sea_commands._load_sea_module(sea) as loaded:
+        assert sys.modules[loaded.__name__] is loaded
+        assert loaded.__name__.startswith("_kiss_sea_verdict_sea_")
+        assert loaded.__file__ == str(sea)
+        assert loaded.Verdict.note == "relay stays on the real checkout"
+    assert loaded.__name__ not in sys.modules
+
+
+def test_failed_sea_import_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
+    """An SEA raising at import is reported and unregistered again."""
+    sea = tmp_path / "boom_sea.py"
+    sea.write_text("raise SystemExit(3)\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 3") as info:
+        sea_commands.sea_getter_is_false(sea, "use_worktree")
+    assert isinstance(info.value.__cause__, SystemExit)
+    assert not [n for n in sys.modules if n.startswith("_kiss_sea_boom_sea_")]
+
+
+_SLOW_SEA = '''\
+"""Same-stem SEA whose getter resolves a forward reference after import."""
+
+from __future__ import annotations
+
+import time
+import typing
+from dataclasses import dataclass
+
+
+@dataclass
+class {cls}:
+    parent: {cls} | None = None
+
+
+def use_worktree() -> bool:
+    time.sleep({delay})
+    hints = typing.get_type_hints({cls})
+    assert hints["parent"] == ({cls} | None), hints
+    return False
+'''
+
+
+def test_concurrent_same_stem_loads_do_not_clobber_each_other(
+    tmp_path: Path,
+) -> None:
+    """Two ``shared_sea.py`` files evaluated at once each keep their own module.
+
+    Task threads evaluate ``use_worktree()`` concurrently.  ``OnlyA``'s
+    forward reference is resolved through ``sys.modules[__module__]``
+    *after* import, while a second same-stem SEA is being loaded in
+    another thread: a stem-keyed entry would by then point at the other
+    file's namespace and ``get_type_hints`` would raise ``NameError``.
+    """
+    sea_a = tmp_path / "folder_a" / "shared_sea.py"
+    sea_b = tmp_path / "folder_b" / "shared_sea.py"
+    sea_a.parent.mkdir()
+    sea_b.parent.mkdir()
+    sea_a.write_text(_SLOW_SEA.format(cls="OnlyA", delay=0.4), encoding="utf-8")
+    sea_b.write_text(_SLOW_SEA.format(cls="OnlyB", delay=0.0), encoding="utf-8")
+
+    results: dict[str, object] = {}
+
+    def _evaluate(label: str, sea: Path) -> None:
+        try:
+            results[label] = sea_commands.sea_getter_is_false(sea, "use_worktree")
+        except sea_commands.SeaScriptError as exc:
+            results[label] = exc
+
+    thread_a = threading.Thread(target=_evaluate, args=("a", sea_a))
+    thread_a.start()
+    time.sleep(0.15)  # A has imported and is inside its sleep
+    _evaluate("b", sea_b)
+    thread_a.join(timeout=10)
+    assert results == {"a": True, "b": True}, results
+    assert not [n for n in sys.modules if n.startswith("_kiss_sea_shared_sea_")]

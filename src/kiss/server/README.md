@@ -248,8 +248,10 @@ The parameters without getters:
 - **`tool_profile()`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
   (read and run, no editing, browser or dispatch), `"shell"` (`Bash`,
-  `bash_job`, `Read`, `run_commands_parallel`) or `"bash"` (`Bash`
-  only — the bundled `/sh` agent's choice); `finish` is always added.
+  `bash_job`, `Read`, `run_commands_parallel`), `"assistant"` (the
+  `shell` set plus `ask_user_question`, `talk`, `decide`, `summary`,
+  `set_model`) or `"bash"` (`Bash` only — the bundled `/sh` agent's
+  choice); `finish` is always added.
   `""` keeps the daemon's usual choice.  An unknown name fails the
   task when it starts.  Ignored when `if_append_basic_tools()` is
   `False`, which builds no built-in toolset at all.
@@ -783,7 +785,7 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` (`/merge`, `/sh`, `/skillopt`,
-  `/task_update`, `/write_paper`; `dummy_sea.py`, an SEA with no getters, is what
+  `/task_update`, `/write_paper`, `/review_paper`; `dummy_sea.py`, an SEA with no getters, is what
   `run_agent` runs when its `agent` argument is empty) have the
   lowest precedence, so a `SEAS.md` folder can shadow them.  Syntax,
   precedence and the dispatch flow are

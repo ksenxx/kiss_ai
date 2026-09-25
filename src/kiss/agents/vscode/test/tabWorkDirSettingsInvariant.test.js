@@ -96,7 +96,7 @@ function workDirOnMentionAfterSettingsChange(initialWd, newWd, bindKind) {
   // The daemon's registry lists the tab as UNPINNED (workDir "").
   // Canonically unpinned tabs belong to every workspace, so the
   // workspace-scoped tab bar keeps this tab visible and ACTIVE when
-  // the settings work_dir changes below — which is the situation this
+  // the configured work_dir changes below — which is the situation this
   // invariant guards: the new global work_dir must not leak into
   // commands from a tab whose chat was bound under an older one.
   // (A tab the registry pins to the old work_dir is hidden by the
@@ -132,13 +132,13 @@ function testInvariantHoldsAfterSettingsChange_ClearBind() {
   assert.strictEqual(
     wd,
     '/path/initial',
-    'INVARIANT: after the user changes work_dir in settings, a tab ' +
+    'INVARIANT: after the configured work_dir changes, a tab ' +
       'whose backend chat-id was bound via a "clear" event MUST keep ' +
       'routing commands to the work_dir it had when the chat-id was ' +
       'bound — observed workDir = ' +
       JSON.stringify(wd),
   );
-  console.log('  ok - clear-bound tab keeps its original work_dir after settings change');
+  console.log('  ok - clear-bound tab keeps its original work_dir after a work_dir change');
 }
 
 function testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir() {
@@ -150,7 +150,7 @@ function testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir() {
   assert.strictEqual(
     wd,
     '/path/initial',
-    'INVARIANT: after the user changes work_dir in settings, a tab ' +
+    'INVARIANT: after the configured work_dir changes, a tab ' +
       'whose backend chat-id was bound via a "task_events" replay (and ' +
       'whose persisted "extra" carries no ``work_dir`` — older rows) ' +
       'MUST keep routing commands to the work_dir it had when the ' +
@@ -158,7 +158,7 @@ function testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir() {
       JSON.stringify(wd),
   );
   console.log(
-    '  ok - task_events-bound tab keeps its original work_dir after settings change',
+    '  ok - task_events-bound tab keeps its original work_dir after a work_dir change',
   );
 }
 
@@ -205,7 +205,7 @@ function testTaskEventsExtraWorkDirStillWinsOverConfig() {
     'extra.work_dir must pin the tab even when configWorkDir later changes',
   );
   win.close();
-  console.log('  ok - extra.work_dir pin survives settings change');
+  console.log('  ok - extra.work_dir pin survives a work_dir change');
 }
 
 function main() {
