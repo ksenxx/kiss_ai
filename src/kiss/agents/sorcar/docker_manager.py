@@ -127,8 +127,40 @@ def _drain_exec_stream(
         out_queue.put(None)
 
 
+def _collapse_progress(output: str) -> str:
+    """Render carriage returns the way a terminal does: later text overwrites earlier text.
+
+    Progress bars (pip, tqdm, fastText, wget) redraw one line thousands of
+    times with ``\\r``; in a captured stream those redraws arrive as one huge
+    line whose only useful part is its final state.  Each ``\\r`` moves the
+    cursor to the start of the line, so every segment is written over the
+    previous ones from column 0; characters beyond the new segment's end stay
+    (as on a terminal without erase-to-end-of-line).  ``\\r\\n`` line endings
+    therefore become plain ``\\n``.
+
+    Args:
+        output: The command's combined output.
+
+    Returns:
+        *output* as it would look on a terminal after the carriage returns.
+    """
+    if "\r" not in output:
+        return output
+    lines = []
+    for line in output.split("\n"):
+        if "\r" in line:
+            rendered = ""
+            for segment in line.split("\r"):
+                rendered = segment + rendered[len(segment):]
+            line = rendered
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _with_exit_code(output: str, exit_code: int) -> str:
     """Append the ``[exit code: N]`` marker for a failed command.
+
+    Carriage-return progress output is collapsed first (see :func:`_collapse_progress`).
 
     Args:
         output: The command's combined output.
@@ -137,6 +169,7 @@ def _with_exit_code(output: str, exit_code: int) -> str:
     Returns:
         *output* unchanged on success, else *output* plus the marker.
     """
+    output = _collapse_progress(output)
     if exit_code == 0:
         return output
     suffix = f"[exit code: {exit_code}]"
@@ -616,7 +649,8 @@ class DockerManager:
             # returned with the error instead of being discarded.
             message = f"Error: command timed out after {timeout_seconds}s"
             if output:
-                message += f" and was killed. Output before the timeout:\n{output}"
+                message += " and was killed. Output before the timeout:\n"
+                message += _collapse_progress(output)
             return _truncate_output(message, max_output_chars)
 
         exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
