@@ -943,8 +943,9 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert [e["blocked"] for e in gate_events] == [False, False, True, False]
     # the prompt carries the new rules and the trial config takes the gate from the environment
     prompt = plain.system_prompt()
-    assert "The container as you leave it is the deliverable" in prompt
+    assert "Leave the environment as the task expects to find it" in prompt
     assert "byte for byte" not in prompt
+    assert "checker" not in prompt.lower()
     assert "no internet" not in prompt.lower()
     assert trials.trial_config("c", "/app", MODEL)["finish_gate"] is False
     assert plain.model_config() is None
