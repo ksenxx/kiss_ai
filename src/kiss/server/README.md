@@ -258,9 +258,12 @@ The parameters without getters:
 - **`docker_image()`** — the Docker image the run's shell and file
   tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
   execute in: an image name starts a fresh container that is removed
-  when the task ends, `container:<name-or-id>` attaches to a container
-  the caller already runs (commands run in its working directory, it
-  is left running afterwards), `""` runs the tools on the host.
+  when the task ends (the task's `work_dir` is bind-mounted at the
+  same path and is the container's working directory),
+  `container:<name-or-id>` attaches to a container the caller already
+  runs (commands run in its own working directory, nothing extra is
+  mounted, it is left running afterwards), `""` runs the tools on the
+  host.
   `run_parallel` sub-agents share the task's container; `bash_job`
   and persistent memory are unavailable in a Docker run.
 
@@ -776,7 +779,11 @@ class TaskResult:
 - The SEA and its tools run **in the daemon process**
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
-  environment.
+  environment.  A tool that runs on the task's worker thread can call
+  `kiss.server.agent_state.current_agent()` to get the running agent
+  (its `work_dir`, model and usage counters); it returns `None` on any
+  other thread.  The bundled `autoroute_sea.py` and `skillopt_sea.py`
+  use it.
 - Name the file `xxx_sea.py` and put its folder in `~/.kiss/SEAS.md`
   (one folder per line; blank lines and `#` comments are ignored) to
   expose it as the chat command `/xxx`; `/xxx some text` runs the SEA
@@ -784,7 +791,7 @@ class TaskResult:
   `src/kiss/agents/third_party_agents/*_sea.py` scripts take
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
-  `src/kiss/agents/seas/` (`/merge`, `/sh`, `/skillopt`,
+  `src/kiss/agents/seas/` (`/autoroute`, `/merge`, `/sh`, `/skillopt`,
   `/task_update`, `/write_paper`, `/review_paper`; `dummy_sea.py`, an SEA with no getters, is what
   `run_agent` runs when its `agent` argument is empty) have the
   lowest precedence, so a `SEAS.md` folder can shadow them.  Syntax,

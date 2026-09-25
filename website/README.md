@@ -80,8 +80,15 @@ The section shows a 20-panel carousel, one panel per entry from:
 - `./src/kiss/SAMPLE_TASKS.md` — **12 sample tasks** (rendered with a
   `Task` badge), and
 - `./src/kiss/INJECTIONS.md` — **8 promptlet tricks** (rendered with a
-  `Trick` badge; the file has since grown to 10 tricks, and the deck still
-  shows the original 8).
+  `Trick` badge). The deck is static, written from an earlier revision of
+  the file, and is not regenerated when the file changes. Four panels
+  still match a current trick verbatim (invariant reproduction, Claude
+  Fable 5 + GPT-5.6 Sol review, Kimi K3 + GPT-5.6 Sol review,
+  self-improving routing); "Run a task from an instructions file" and
+  "Resolve a merge conflict" come from tricks since removed, and the
+  authentication and GPT-6 Astra panels carry older wording than the
+  file. The file's `git pull`/merge/push trick and its `claude-fable-5-1`
+  + `gpt-6-sol` pair-programming variant have no panel.
 
 Each panel has:
 
