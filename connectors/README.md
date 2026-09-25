@@ -71,8 +71,8 @@ Git clone (`git clone --depth 1`, no ref) and the separately installed `gh` /
 | `playwright` | Second isolated browser (Sorcar has one natively) | none |
 
 `enable.py` refuses to enable a connector whose executables or env vars are
-missing and prints the exact setup steps (from `catalog.json`); `--force`
-writes the entry anyway. Export
+missing: it names the missing items and, for env vars, prints the setup steps
+from `catalog.json`; `--force` writes the entry anyway. Export
 credentials in your shell profile — Sorcar's stdio launcher passes your
 environment to the server at launch, so **no secret is ever stored in
 `mcp.json` or this repository**. Restart Sorcar after changing env vars or

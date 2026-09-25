@@ -26,6 +26,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -35,12 +36,13 @@ import yaml
 import kiss.core.config as config_module
 from kiss.core.base import Base
 from kiss.core.utils import (
+    SHARING_RETRY_SECONDS,
     _try_chmod,
     atomic_write_text,
     finish,
     read_bytes_waiting_for_writer,
 )
-from kiss.tests.conftest import posix_only
+from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, posix_only
 
 # The alphabetically last top-level key of a trajectory document: a
 # reader that cannot see it is looking at a truncated file.
@@ -143,6 +145,51 @@ def test_a_failed_write_leaves_the_previous_file_and_no_debris(
     assert list(tmp_path.iterdir()) == [target]
 
 
+def test_publish_onto_a_directory_fails_at_once(tmp_path: Path) -> None:
+    """A directory at the target is a permanent failure, not a replace in flight.
+
+    Windows reports it as the same ``PermissionError`` a reader's open
+    handle causes, but no amount of waiting clears it, so the publish
+    must fail immediately instead of after the multi-second sharing
+    budget -- and leave neither the staged file nor the directory changed.
+    """
+    target = tmp_path / "occupied"
+    target.mkdir()
+    (target / "keep").write_text("x", encoding="utf-8")
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        atomic_write_text(target, "new content\n")
+    assert time.monotonic() - started < 1.0
+    assert (target / "keep").read_text(encoding="utf-8") == "x"
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_publish_over_a_file_held_open(tmp_path: Path) -> None:
+    """Publishing while another handle holds the target.
+
+    POSIX renames over an open file freely: the holder keeps reading the
+    old inode.  Windows denies the rename until the handle closes; the
+    writer waits :data:`SHARING_RETRY_SECONDS` for it and then gives up
+    with the original error, the previous content intact and no staging
+    residue beside it.
+    """
+    target = tmp_path / "held.txt"
+    atomic_write_text(target, "old\n")
+    started = time.monotonic()
+    with open(target, encoding="utf-8") as holder:
+        if IS_WINDOWS:
+            with pytest.raises(PermissionError):
+                atomic_write_text(target, "new\n")
+            assert time.monotonic() - started >= SHARING_RETRY_SECONDS
+            assert holder.read() == "old\n"
+        else:
+            atomic_write_text(target, "new\n")
+            assert holder.read() == "old\n"
+    expected = "old\n" if IS_WINDOWS else "new\n"
+    assert target.read_text(encoding="utf-8") == expected
+    assert list(tmp_path.iterdir()) == [target]
+
+
 _SHORT_WRITE_PROBE = """
 import resource
 import signal
@@ -237,6 +284,7 @@ def test_a_reader_never_sees_a_partial_trajectory(artifact_dir: Path) -> None:
 
     def reader() -> None:
         while not stop.is_set():
+            time.sleep(HOT_READER_PAUSE)
             try:
                 # On Windows a plain open racing os.replace is denied for a
                 # few ms; the helper waits that out (a torn read would not).

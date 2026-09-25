@@ -37,6 +37,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _save_url_file,
 )
+from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
 from kiss.tests.server.test_web_server import _find_free_port
 
 
@@ -306,7 +307,10 @@ class TestLanCapableServer(_LiveServerCase):
         deadline = asyncio.get_event_loop().time() + 5
         data: dict[str, Any] = {}
         while asyncio.get_event_loop().time() < deadline:
-            data = json.loads(_URL_FILE.read_text())
+            try:
+                data = json.loads(_URL_FILE.read_text())
+            except TRANSIENT_REPLACE_READ_ERRORS:
+                data = {}  # the writer's ``os.replace`` is mid-swap (Windows)
             if data.get("lan") == expected_lan:
                 return data
             await asyncio.sleep(0.02)
@@ -317,12 +321,16 @@ class TestLanCapableServer(_LiveServerCase):
 
         Points the server at an unwritable location and re-runs the
         republish path; the broadcast must still go out and no
-        exception may surface.
+        exception may surface.  The location is a path *under a regular
+        file*, which no OS lets ``mkdir`` create (a POSIX-only ``/proc``
+        path is just ``C:\\proc`` on Windows, where it gets created).
         """
         old_url_file = self.server._url_file
         self.server._last_ips = frozenset()
+        not_a_dir = Path(self.server.work_dir) / "not-a-dir"
+        not_a_dir.write_text("")
         try:
-            self.server._url_file = Path("/proc/kiss-no-such/remote-url.json")
+            self.server._url_file = not_a_dir / "remote-url.json"
             with self.assertLogs(
                 "kiss.server.web_server", level="WARNING"
             ) as logs:

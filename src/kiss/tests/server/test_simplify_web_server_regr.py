@@ -34,6 +34,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.core.brand import PRODUCT_NAME
 from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
@@ -212,7 +213,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self._connect_uds()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
-        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
         for _ in range(200):
             if marker.exists():
                 break
@@ -231,7 +232,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self._connect_uds()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
-        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
         for _ in range(200):
             if marker.exists():
                 break
@@ -264,7 +265,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self._connect_uds()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
-        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
         # Poll for the marker *content*, not mere existence: the shell
         # redirect creates the file empty before echo writes to it, so
         # an existence check can win the race and read ''.
@@ -313,7 +314,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self._connect_uds()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
-        self.assertIn("update of KISS Sorcar", str(notice.get("text")))
+        self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
         for _ in range(200):
             if marker.exists():
                 break

@@ -91,6 +91,13 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     }),
     # Shell runner: just enough to run commands and read their output.
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    # Shell runner that also talks with the user: ``shell`` plus asking
+    # and speaking, decide, summary and switching its own model (no file
+    # editing, browser, memory, agent dispatch or fan-out).
+    "assistant": frozenset({
+        "Bash", "bash_job", "Read", "run_commands_parallel", "ask_user_question",
+        "talk", "decide", "summary", "set_model",
+    }),
     # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
     "bash": frozenset({"Bash"}),
 }
@@ -111,8 +118,8 @@ RESTRICTED_PROFILE_NOTE = """
 
 # Restricted tool profile: {profile}
 This sub-agent has only these tools plus finish: {tools}. Rules above that
-require other tools (Write/Edit files, tmp/PROGRESS.md, browser research,
-memory writes, run_parallel, run_agent, talk) do not apply here: do not attempt
+require any other tool (Write/Edit files, tmp/PROGRESS.md, browser research,
+memory writes, run_parallel, run_agent, ...) do not apply here: do not attempt
 them. Report everything in finish(summary_in_html=...).
 """
 
@@ -319,7 +326,7 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
-    if not GitWorktreeOps.staged_diff(commit_dir):
+    if not GitWorktreeOps.has_staged_changes(commit_dir):
         return False
     _safe_notify(notify_fn, "generating", "")
     try:
@@ -453,6 +460,36 @@ def _broadcast_subagent_done(
                 restore(model, vid)
         except Exception:
             pass
+
+
+def _notify_subagent_done(
+    printer: Any, sub_task_id: str | None, sub_tab_id: str, model: str = "",
+) -> None:
+    """Broadcast ``subagentDone`` to every tab watching a finished sub-agent.
+
+    The targets are the tabs subscribed to *sub_task_id* through the
+    printer's fan-out registry plus the sub-agent's own synthetic
+    *sub_tab_id*.  An empty *sub_task_id* (no ``task_history`` row was
+    allocated, so no ``new_tab`` was ever broadcast) fans out to the
+    synthetic tab only.  Shared by ``run_parallel`` children, ``run_agent``
+    dispatches, the merge agent and the task-update agent.
+
+    Args:
+        printer: The parent task's printer.
+        sub_task_id: The sub-agent's persisted task id, or ``None``.
+        sub_tab_id: The sub-agent's synthetic tab id (may be empty).
+        model: The model the sub-agent was launched with, restored into
+            the watching tabs' pickers.
+    """
+    viewer_ids: list[str] = []
+    fanout = getattr(printer, "_fanout_targets", None)
+    if callable(fanout) and sub_task_id:
+        found = fanout(sub_task_id)
+        if isinstance(found, list):
+            viewer_ids = [v for v in found if v]
+    if sub_tab_id and sub_tab_id not in viewer_ids:
+        viewer_ids.append(sub_tab_id)
+    _broadcast_subagent_done(printer, viewer_ids, model)
 
 
 # How long the parent may sit in one wait() before re-reading its stop
@@ -1098,6 +1135,15 @@ class _LiveUsageMonitor:
         )
 
 
+# Serializes "snapshot the parent's totals, publish them as printer
+# offsets" in ``_attribute_sub_usage``: two concurrent attributions each
+# read the ledger and publish later, so without ordering an older, smaller
+# snapshot could land after a newer one and leave the tab under-counting
+# until the next attribution.  Only ledger reads and the printer's own
+# lock are taken under it, so no caller can deadlock on it.
+_OFFSET_PUBLISH_LOCK = threading.Lock()
+
+
 def _attribute_sub_usage(
     agent: Any,
     budget: float,
@@ -1163,12 +1209,23 @@ def _attribute_sub_usage(
         agent.total_steps = int(getattr(agent, "total_steps", 0) or 0) + steps
     if agent.printer is not None:
         try:
-            # One coherent triple (see _agent_usage): separate property
-            # reads could tear across a concurrent snapshot publish.
-            budget_total, tokens_total, steps_total = _agent_usage(agent)
-            agent.printer.budget_offset = budget_total
-            agent.printer.tokens_offset = tokens_total
-            agent.printer.steps_offset = steps_total
+            with _OFFSET_PUBLISH_LOCK:
+                # One coherent triple (see _agent_usage): separate property
+                # reads could tear across a concurrent snapshot publish.
+                budget_total, tokens_total, steps_total = _agent_usage(agent)
+                # The offsets belong to the PARENT's task.  This runs on
+                # whatever thread finished the child (a fan-out's tool
+                # thread, but also the ``/update`` worker or a server
+                # thread), so a thread-keyed setter would file them under
+                # that thread's task; name the parent's task when it has one.
+                task_id = str(getattr(agent, "last_task_id", "") or "")
+                set_offsets = getattr(agent.printer, "set_usage_offsets", None)
+                if task_id and callable(set_offsets):
+                    set_offsets(task_id, budget_total, tokens_total, steps_total)
+                else:
+                    agent.printer.budget_offset = budget_total
+                    agent.printer.tokens_offset = tokens_total
+                    agent.printer.steps_offset = steps_total
         except Exception:
             pass
 
@@ -1874,6 +1931,9 @@ class SorcarAgent(RelentlessAgent):
             ) -> str:
                 """Runs a bash command in the task's Docker container and returns its output.
 
+                The command starts in the container's working directory;
+                in a container kiss started that is the task's work dir,
+                bind-mounted at its host path.
                 Background jobs (``background=True``) are not available in
                 Docker mode: start long commands yourself with
                 ``nohup cmd > /tmp/out.log 2>&1 < /dev/null &`` and poll
@@ -1991,9 +2051,10 @@ class SorcarAgent(RelentlessAgent):
                     read-only toolset (Bash, bash_job, Read,
                     run_commands_parallel, memory reads, decide, summary);
                     ``"shell"`` just Bash, bash_job, Read and
-                    run_commands_parallel.  Empty
-                    (default): review tasks get ``"review"``, others
-                    the full toolset.
+                    run_commands_parallel; ``"assistant"`` the shell set
+                    plus ask_user_question, talk, decide, summary and
+                    set_model.  Empty (default): review tasks get
+                    ``"review"``, others the full toolset.
 
             Returns:
                 A YAML-formatted string containing a list of result
@@ -2215,8 +2276,9 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(self._memory_tools.tools())
         if allowed is not None:
             # Restricted profile: no skills, MCP servers, channel
-            # dispatch, user interaction, model switching or fan-out.
-            tools.append(summary)
+            # dispatch or fan-out; user interaction and model switching
+            # only where the profile names them (``assistant``).
+            tools.extend([ask_user_question, talk, set_model, summary])
             if decisions_tool_available():
                 tools.append(make_decide_tool(self))
             return [tool for tool in tools if tool.__name__ in allowed]
@@ -2672,7 +2734,8 @@ class SorcarAgent(RelentlessAgent):
                 governs the whole task tree.
             tool_profile: Name of the tool profile this run's built-in
                 toolset is cut down to — a key of :data:`TOOL_PROFILES`
-                (``"full"``, ``"review"``, ``"shell"``, ``"bash"``) —
+                (``"full"``, ``"review"``, ``"shell"``, ``"assistant"``,
+                ``"bash"``) —
                 or ``""`` (the default) to let :meth:`_tool_profile`
                 decide (``full`` for a top-level task, ``review`` for a
                 reviewer sub-agent).  Applies to this agent only:
@@ -3215,17 +3278,9 @@ def run_tasks_parallel(
                 # sub-agent's task stream via the printer's fan-out
                 # registry.
                 try:
-                    viewer_ids: list[str] = []
-                    fanout = getattr(printer, "_fanout_targets", None)
-                    sub_task_id = _persisted_task_id(agent) or None
-                    if callable(fanout) and sub_task_id is not None:
-                        found = fanout(sub_task_id)
-                        if isinstance(found, list):
-                            viewer_ids = [v for v in found if v]
-                    if sub_tab_id not in viewer_ids:
-                        viewer_ids.append(sub_tab_id)
-                    _broadcast_subagent_done(
-                        printer, viewer_ids, model_name or "",
+                    _notify_subagent_done(
+                        printer, _persisted_task_id(agent), sub_tab_id,
+                        model_name or "",
                     )
                 except Exception:
                     logger.debug(

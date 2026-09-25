@@ -11,11 +11,16 @@
 // The panel means something different on each surface:
 //   * remote webapp (body.remote-chat): a typed / listed directory is
 //     checked through the daemon's listDir ('workdir:<n>' token) and then
-//     adopted exactly like the settings field (saveConfig + setWorkDir);
+//     adopted as the instance's workspace (saveConfig + setWorkDir);
 //     the folder button opens the in-page folder browser.
-//   * VS Code webview: the window's folder IS the working directory, so
-//     the pick goes to the extension host (openWorkDir / pickWorkDir),
-//     which answers a bad path with workDirError.
+//   * VS Code webview: the pick goes to the extension host (openWorkDir /
+//     pickWorkDir), which only checks the folder exists -- it answers
+//     workDirPicked (or workDirError for a bad path) and never opens the
+//     folder as the window's workspace.  The verified folder becomes the
+//     ACTIVE CHAT TAB's working directory: its next task runs there
+//     (submit.workDir, plus submit.tabScopeWorkDir = the workspace when
+//     the folder lies outside it so the tab stays in this window); the
+//     window, the workspace and the other tabs are untouched.
 
 /* global require, __dirname, console, process */
 
@@ -273,7 +278,7 @@ function testRemoteTypedPathIsCheckedThenAdopted() {
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
 
   // Second try through the Open button: the daemon lists it (with its
-  // canonical spelling), so it is adopted like the settings field.
+  // canonical spelling), so it is adopted as the workspace.
   typeInto(win, 'workdir-input', '/srv/project2/');
   click(win, byId(win, 'workdir-open-btn'));
   listDirs = msgs(posted, 'listDir');
@@ -292,11 +297,6 @@ function testRemoteTypedPathIsCheckedThenAdopted() {
   assert.strictEqual(pins[pins.length - 1].workDir, '/srv/project2');
   assert.ok(!panelOpen(win), 'a successful open closes the panel');
   assert.ok(byId(win, 'workdir-error').hidden, 'the old error is gone');
-  assert.strictEqual(
-    byId(win, 'cfg-work-dir').value,
-    '/srv/project2',
-    'the settings field follows',
-  );
 
   // Nothing is posted to the VS Code host on the remote surface.
   assert.strictEqual(msgs(posted, 'openWorkDir').length, 0);
@@ -397,12 +397,14 @@ function testVsCodeAsksTheHost() {
   const {win, posted} = makeWebview({remote: false});
   send(win, {type: 'configData', config: {recent_work_dirs: RECENTS}});
   openPanelViaMenu(win);
+  const tabId = win._testApi.getActiveTabId();
 
-  // Typed path: the host opens the folder (no daemon listDir).
+  // Typed path: the host checks the folder (no daemon listDir); the
+  // request names the tab so the reply lands on it.
   typeInto(win, 'workdir-input', '/work/repo');
   pressEnter(win, 'workdir-input');
   assertJsonEqual(msgs(posted, 'openWorkDir'), [
-    {type: 'openWorkDir', path: '/work/repo'},
+    {type: 'openWorkDir', path: '/work/repo', tabId},
   ]);
   assert.strictEqual(msgs(posted, 'listDir').length, 0);
   assert.ok(panelOpen(win), 'the panel stays until the host answers');
@@ -424,7 +426,7 @@ function testVsCodeAsksTheHost() {
 
   // The folder button uses the editor's own dialog, not the in-page one.
   click(win, byId(win, 'workdir-pick-btn'));
-  assertJsonEqual(msgs(posted, 'pickWorkDir'), [{type: 'pickWorkDir'}]);
+  assertJsonEqual(msgs(posted, 'pickWorkDir'), [{type: 'pickWorkDir', tabId}]);
   assert.strictEqual(win.document.getElementById('folder-picker'), null);
 
   // A root is refused locally.
@@ -435,6 +437,195 @@ function testVsCodeAsksTheHost() {
 
   // Nothing settings-related is saved from this surface.
   assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
+}
+
+/** Submit *text* from the composer; the posted `submit` message. */
+function submitPrompt(win, posted, text) {
+  const before = msgs(posted, 'submit').length;
+  byId(win, 'task-input').value = text;
+  click(win, byId(win, 'send-btn'));
+  const sent = msgs(posted, 'submit');
+  assert.strictEqual(sent.length, before + 1, 'one submit is posted');
+  return sent[sent.length - 1];
+}
+
+/** The tab ids the tab bar currently shows. */
+function shownTabIds(win) {
+  return Array.from(win.document.querySelectorAll('.chat-tab')).map(
+    el => el.dataset.tabId,
+  );
+}
+
+/** Pick *dir* for the active tab through the host round trip. */
+function pickForActiveTab(win, posted, dir) {
+  const tabId = win._testApi.getActiveTabId();
+  const asked = msgs(posted, 'openWorkDir').length;
+  openPanelViaMenu(win);
+  typeInto(win, 'workdir-input', dir);
+  pressEnter(win, 'workdir-input');
+  const opens = msgs(posted, 'openWorkDir');
+  assert.strictEqual(opens.length, asked + 1);
+  assert.strictEqual(opens[asked].tabId, tabId, 'the request names the tab');
+  send(win, {type: 'workDirPicked', path: dir, tabId});
+  assert.ok(!panelOpen(win), 'a successful pick closes the panel');
+  return tabId;
+}
+
+function testVsCodePickChangesOnlyTheTab() {
+  const {win, posted} = makeWebview({remote: false});
+  // The window's folder, as the host reports it.
+  send(win, {
+    type: 'configData',
+    config: {work_dir: '/work/ws', recent_work_dirs: RECENTS},
+  });
+  openPanelViaMenu(win);
+  assert.strictEqual(
+    byId(win, 'workdir-current').textContent,
+    'Current: /work/ws',
+    'the panel names the folder the next task would run in',
+  );
+  click(win, byId(win, 'workdir-panel-close'));
+
+  // The host verified the typed folder: the active chat is pinned to
+  // it, the panel closes, and nothing about the window changes.
+  const firstTab = pickForActiveTab(win, posted, '/elsewhere/repo');
+  assert.strictEqual(msgs(posted, 'saveConfig').length, 0);
+  assert.strictEqual(msgs(posted, 'setWorkDir').length, 0);
+  openPanelViaMenu(win);
+  assert.strictEqual(
+    byId(win, 'workdir-current').textContent,
+    'Current: /elsewhere/repo',
+  );
+  click(win, byId(win, 'workdir-panel-close'));
+
+  // The next task runs there; the tab stays scoped to this window's
+  // workspace, which the picked folder lies outside of.
+  let sub = submitPrompt(win, posted, 'list the files');
+  assert.strictEqual(sub.tabId, firstTab);
+  assert.strictEqual(sub.workDir, '/elsewhere/repo');
+  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
+
+  // A pick inside the workspace needs no scope override.
+  send(win, {type: 'status', running: false, tabId: firstTab});
+  pickForActiveTab(win, posted, '/work/ws/sub');
+  sub = submitPrompt(win, posted, 'and again');
+  assert.strictEqual(sub.workDir, '/work/ws/sub');
+  assert.strictEqual(sub.tabScopeWorkDir, undefined);
+
+  // Another chat tab is untouched by the first tab's pin.
+  win._testApi.createNewTab();
+  const secondTab = win._testApi.getActiveTabId();
+  assert.notStrictEqual(secondTab, firstTab);
+  sub = submitPrompt(win, posted, 'third');
+  assert.strictEqual(sub.tabId, secondTab);
+  assert.strictEqual(sub.workDir, undefined);
+  assert.strictEqual(sub.tabScopeWorkDir, undefined);
+
+  // A running tab keeps its directory: the panel refuses locally and
+  // asks the host nothing.
+  send(win, {type: 'status', running: true, tabId: secondTab});
+  const asked = msgs(posted, 'openWorkDir').length;
+  openPanelViaMenu(win);
+  typeInto(win, 'workdir-input', '/elsewhere/other');
+  pressEnter(win, 'workdir-input');
+  assert.strictEqual(msgs(posted, 'openWorkDir').length, asked);
+  assert.ok(/running task/.test(byId(win, 'workdir-error').textContent));
+  click(win, byId(win, 'workdir-pick-btn'));
+  assert.strictEqual(msgs(posted, 'pickWorkDir').length, 0);
+  assert.ok(panelOpen(win));
+  // A late host answer for a tab that started running meanwhile is
+  // refused the same way.
+  send(win, {
+    type: 'workDirPicked',
+    path: '/elsewhere/other',
+    tabId: secondTab,
+  });
+  assert.ok(panelOpen(win), 'the panel stays with the refusal');
+  assert.ok(/running task/.test(byId(win, 'workdir-error').textContent));
+  send(win, {type: 'status', running: false, tabId: secondTab});
+  sub = submitPrompt(win, posted, 'fourth');
+  assert.strictEqual(sub.workDir, undefined, 'the refused pick left no pin');
+}
+
+function testVsCodeLateReplyLandsOnTheTabThatAsked() {
+  const {win, posted} = makeWebview({remote: false});
+  send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
+  const tabA = win._testApi.getActiveTabId();
+  openPanelViaMenu(win);
+  click(win, byId(win, 'workdir-pick-btn'));
+  assertJsonEqual(msgs(posted, 'pickWorkDir'), [
+    {type: 'pickWorkDir', tabId: tabA},
+  ]);
+
+  // The editor's folder dialog is slow; the user opens another tab
+  // meanwhile.  The answer still pins tab A, not the now-active tab B.
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  send(win, {type: 'workDirPicked', path: '/picked/for-a', tabId: tabA});
+  assert.ok(!panelOpen(win));
+  let sub = submitPrompt(win, posted, 'from b');
+  assert.strictEqual(sub.tabId, tabB);
+  assert.strictEqual(sub.workDir, undefined, 'tab B was not pinned');
+
+  click(win, win.document.querySelector(`.chat-tab[data-tab-id="${tabA}"]`));
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+  sub = submitPrompt(win, posted, 'from a');
+  assert.strictEqual(sub.workDir, '/picked/for-a', 'tab A runs where it asked');
+  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
+
+  // A reply for a tab that no longer exists changes nothing.
+  send(win, {type: 'workDirPicked', path: '/picked/gone', tabId: 'no-such'});
+  send(win, {type: 'status', running: false, tabId: tabA});
+  sub = submitPrompt(win, posted, 'again');
+  assert.strictEqual(sub.workDir, undefined, 'the pin was consumed by the run');
+}
+
+function testVsCodePinSurvivesReplayAndKeepsTheTabVisible() {
+  const {win, posted} = makeWebview({remote: false});
+  send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
+  const tabA = pickForActiveTab(win, posted, '/outside/repo');
+
+  // The pin lies outside the workspace, yet the (not yet registered)
+  // tab stays in this window's tab bar -- also after another tab
+  // re-renders the strip.
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  assert.deepStrictEqual(shownTabIds(win).sort(), [tabA, tabB].sort());
+  click(win, win.document.querySelector(`.chat-tab[data-tab-id="${tabA}"]`));
+  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+
+  // A replay of the chat's previous task (its own work dir in `extra`)
+  // reaches the tab before the user submits: the pick still wins.
+  send(win, {
+    type: 'task_events',
+    tabId: tabA,
+    chat_id: 'chat-a',
+    task_id: 41,
+    task: 'the earlier task',
+    events: [],
+    extra: JSON.stringify({work_dir: '/old/task/dir', startTs: 1, endTs: 2}),
+  });
+  openPanelViaMenu(win);
+  assert.strictEqual(
+    byId(win, 'workdir-current').textContent,
+    'Current: /outside/repo',
+  );
+  click(win, byId(win, 'workdir-panel-close'));
+  let sub = submitPrompt(win, posted, 'run it');
+  assert.strictEqual(sub.workDir, '/outside/repo');
+  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
+
+  // The pick is consumed: the tab now carries the replayed task's dir.
+  send(win, {type: 'status', running: false, tabId: tabA});
+  openPanelViaMenu(win);
+  assert.strictEqual(
+    byId(win, 'workdir-current').textContent,
+    'Current: /old/task/dir',
+    'without a pin the tab shows its last task directory',
+  );
+  click(win, byId(win, 'workdir-panel-close'));
+  sub = submitPrompt(win, posted, 'once more');
+  assert.strictEqual(sub.workDir, '/old/task/dir');
 }
 
 function testRemoteCanonicalRootIsRefused() {
@@ -529,6 +720,18 @@ const tests = [
     testRemoteFolderButtonOpensPicker,
   ],
   ['vscode: host opens / picks the folder', testVsCodeAsksTheHost],
+  [
+    'vscode: a pick changes only the active tab and its next task',
+    testVsCodePickChangesOnlyTheTab,
+  ],
+  [
+    'vscode: a late host reply pins the tab that asked',
+    testVsCodeLateReplyLandsOnTheTabThatAsked,
+  ],
+  [
+    'vscode: the pin survives a task replay and keeps the tab shown',
+    testVsCodePinSurvivesReplayAndKeepsTheTabVisible,
+  ],
   [
     'remote: canonical root spelling is refused',
     testRemoteCanonicalRootIsRefused,

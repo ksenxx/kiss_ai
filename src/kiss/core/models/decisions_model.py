@@ -113,6 +113,24 @@ def score(instructions: str, criteria: list[str]) -> dict[str, Any]:
     return {"type": "score", "instructions": instructions, "criteria": list(criteria)}
 
 
+def reported_cost(response: Any) -> float | None:
+    """Return the ``usage.cost`` (USD) OpenRouter attached to a decisions response.
+
+    Args:
+        response: The parsed JSON body of a ``/decisions`` call.
+
+    Returns:
+        The reported cost, or ``None`` when the body has no numeric
+        ``usage.cost``.
+    """
+    if not isinstance(response, dict) or not isinstance(response.get("usage"), dict):
+        return None
+    cost = response["usage"].get("cost")
+    if isinstance(cost, bool) or not isinstance(cost, int | float):
+        return None
+    return float(cost)
+
+
 def api_model_id(model_name: str) -> str:
     """Return the id OpenRouter expects for a catalog name.
 
@@ -296,6 +314,18 @@ class DecisionsModel(Model):
         if isinstance(response, dict) and isinstance(response.get("usage"), dict):
             usage = response["usage"]
         return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0), 0, 0
+
+    def extract_cost_from_response(self, response: Any) -> float | None:
+        """Return the USD cost OpenRouter reports in ``usage.cost``.
+
+        Args:
+            response: The dict returned by :meth:`decide` / :meth:`generate`.
+
+        Returns:
+            The reported cost, or ``None`` when the response lacks a numeric
+            ``usage.cost`` (the caller then prices the tokens from the catalog).
+        """
+        return reported_cost(response)
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Decisions models do not produce embeddings.

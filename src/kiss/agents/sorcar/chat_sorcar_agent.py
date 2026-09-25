@@ -20,6 +20,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.agents.sorcar.git_worktree import strip_worktree_suffix
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -520,7 +521,12 @@ class ChatSorcarAgent(SorcarAgent):
         self._last_user_prompt = history_prompt
         self._last_result_summary = ""
 
-        agent_prompt = self.build_chat_prompt(prompt_template)
+        # A task that is only a filesystem path means "open it"; the
+        # directive is added here, AFTER ``history_prompt`` was taken,
+        # so history and the tab keep the raw path the user typed.
+        agent_prompt = self.build_chat_prompt(
+            with_open_directive(prompt_template, kwargs.get("work_dir") or "."),
+        )
 
         # Consumed, never believed: ``SorcarAgent.run`` has no such
         # parameter, and whether a worktree EXISTS is the only honest
@@ -585,10 +591,20 @@ class ChatSorcarAgent(SorcarAgent):
         # wiring, frequent-task recording, ...) must run inside the try
         # below: an exception in any of them would otherwise bypass the
         # cleanup and leave a permanently "running" task behind (F-14).
+        # The calling thread's previous task binding is restored on exit:
+        # a side-channel task (``/update``, merge conflict resolution)
+        # runs on a worker thread that then attributes the child's spend
+        # to the PARENT agent, and that write lands under whatever
+        # ``task_id`` the thread carries.  Resetting to ``""`` instead of
+        # the previous value stored the parent's budget offset under an
+        # orphan key, so the parent's tab under-counted until its own
+        # thread rewrote the offset.
+        previous_task_id = ""
         try:
             if printer is not None:
                 tl = getattr(printer, "_thread_local", None)
                 if tl is not None:
+                    previous_task_id = getattr(tl, "task_id", "") or ""
                     tl.task_id = task_key
                 allocated = getattr(printer, "agent_task_allocated", None)
                 if allocated is not None:
@@ -689,7 +705,7 @@ class ChatSorcarAgent(SorcarAgent):
                         pass
                 tl = getattr(printer, "_thread_local", None)
                 if tl is not None and getattr(tl, "task_id", "") == task_key:
-                    tl.task_id = ""
+                    tl.task_id = previous_task_id
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 # Once ``super().run`` started, the live agent state is

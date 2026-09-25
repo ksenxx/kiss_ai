@@ -93,6 +93,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
     _load_subagent_rows_by_parent_task_id,
 )
+from kiss.core.brand import BRAND, PRODUCT_NAME
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
@@ -105,8 +106,8 @@ from kiss.core.vscode_config import (
     load_config,
     save_config,
 )
+from kiss.server import agent_state, tls_certs
 from kiss.server import sorcar as sorcar_api
-from kiss.server import tls_certs
 from kiss.server.json_printer import (
     JsonPrinter,
     stamp_event_ts,
@@ -1949,7 +1950,7 @@ def _post_url_to_message_board(
             data=data,
             method="POST",
             headers={
-                "Title": "KISS Sorcar Remote URL",
+                "Title": f"{PRODUCT_NAME} Remote URL",
                 "Tags": "link,kiss-sorcar",
                 "Click": url,
                 "User-Agent": "kiss-web",
@@ -2035,7 +2036,7 @@ def _print_url() -> None:
     if url:
         print(url)
     else:
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
+        print(f"{PRODUCT_NAME} web server is not running.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -3613,6 +3614,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         The complete HTML document string.
     """
     main_css = (MEDIA_DIR / "main.css").read_text(encoding="utf-8")
+    brand_css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
     hljs_dark_css = (MEDIA_DIR / "highlight-vscode-dark.css").read_text(
         encoding="utf-8",
     )
@@ -3620,7 +3622,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         encoding="utf-8",
     )
     share_js = (MEDIA_DIR / "share.js").read_text(encoding="utf-8")
-    page_title = html.escape(title.strip()) or "KISS Sorcar chat"
+    page_title = html.escape(title.strip() or f"{PRODUCT_NAME} chat")
     # Both highlight.js themes ship inline; share.js's theme toggle
     # flips which one applies through the style elements' media
     # attribute (dark is the default).
@@ -3638,6 +3640,7 @@ def _build_share_page(title: str, body_html: str) -> str:
         '<style id="hljs-style-light" media="not all">\n'
         + hljs_light_css + "\n</style>\n"
         "<style>\n" + main_css + "\n</style>\n"
+        "<style>\n" + brand_css + "\n</style>\n"
         "<style>\n" + _SHARE_PAGE_CSS + "</style>\n"
         "</head>\n"
         "<body>\n"
@@ -3705,9 +3708,15 @@ def _build_html() -> str:
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
+        "BRAND_STYLE_HREF": _media_url("brand.css"),
         "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
+        "PRODUCT_NAME": html.escape(PRODUCT_NAME),
+        "TAGLINE": html.escape(BRAND["tagline"]),
+        "BRAND_JSON": json.dumps(
+            {"productName": PRODUCT_NAME, "shortName": BRAND["short_name"]},
+        ).replace("</", "<\\/"),
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
         "ENTERKEYHINT": ' enterkeyhint="send"',
         "MODEL_NAME": "loading...",
@@ -3741,11 +3750,24 @@ def _build_html() -> str:
         }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    return re.sub(
-        r"\{\{([A-Z_]+)\}\}",
-        lambda m: subs.get(m.group(1), m.group(0)),
-        tpl,
-    )
+
+    def _fill(m: re.Match[str]) -> str:
+        space, key = m.group(1), m.group(2)
+        if key not in subs:
+            return m.group(0)
+        # Attribute-string placeholders carry their own leading space (or
+        # are empty); the template writes them after a separating space
+        # (``<body {{BODY_CLASS_ATTR}}>``) only so htmlhint can parse the
+        # tag.  Drop that space so the page renders exactly
+        # ``<body class="remote-chat">`` / ``<script src=...>``.
+        if key in _ATTR_STRING_KEYS:
+            return subs[key]
+        return space + subs[key]
+
+    return re.sub(r"( ?)\{\{([A-Z_]+)\}\}", _fill, tpl)
+
+
+_ATTR_STRING_KEYS = frozenset({"BODY_CLASS_ATTR", "ENTERKEYHINT", "NONCE_ATTR"})
 
 
 _MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
@@ -3766,7 +3788,32 @@ def _app_shell_urls() -> list[str]:
     keeps running across an in-place upgrade.
     """
     urls = sorted(set(_MEDIA_URL_RE.findall(_build_html())))
-    return ["/", *urls]
+    return ["/", *urls, *_brand_css_asset_urls()]
+
+
+_CSS_URL_RE = re.compile(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", re.IGNORECASE)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _brand_css_asset_names() -> list[str]:
+    """Return the media files ``brand.css`` references through relative ``url()``.
+
+    A skin's ``url("kiss-icon.png")`` resolves next to the stylesheet, so
+    the browser requests the plain ``/media/<name>`` (no ``?v=``); those
+    files are precached under exactly that URL.  Comments are ignored and
+    names that do not exist in the media directory are skipped.
+    """
+    try:
+        css = (MEDIA_DIR / "brand.css").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    names = sorted(set(_CSS_URL_RE.findall(_CSS_COMMENT_RE.sub("", css))))
+    return [name for name in names if (MEDIA_DIR / name).is_file()]
+
+
+def _brand_css_asset_urls() -> list[str]:
+    """Return the plain ``/media/<name>`` URLs of the assets ``brand.css`` references."""
+    return [f"/media/{name}" for name in _brand_css_asset_names()]
 
 
 def _build_service_worker() -> str:
@@ -3784,8 +3831,12 @@ def _build_service_worker() -> str:
         The complete service-worker script.
     """
     urls = _app_shell_urls()
+    # The brand.css assets are listed without ``?v=`` (see
+    # _brand_css_asset_urls), so fold their content hashes into the
+    # version separately: a swapped logo must still roll the worker.
+    version_input = urls + [_media_url(name) for name in _brand_css_asset_names()]
     shell = {
-        "version": hashlib.sha256("\n".join(urls).encode("utf-8")).hexdigest()[:16],
+        "version": hashlib.sha256("\n".join(version_input).encode("utf-8")).hexdigest()[:16],
         "urls": urls,
     }
     tpl = (MEDIA_DIR / "sw.js").read_text(encoding="utf-8")
@@ -4089,9 +4140,10 @@ _WS_SHIM_JS = r"""
   function _updateLoadingMsg(reconnecting) {
     var msg = document.getElementById('kiss-server-loading-msg');
     if (!msg) return;
+    var product = (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
     msg.textContent = reconnecting
-      ? 'Reconnecting to KISS Sorcar Server ...'
-      : 'KISS Sorcar Server is starting ...';
+      ? 'Reconnecting to ' + product + ' Server ...'
+      : product + ' Server is starting ...';
   }
 
   // Non-zero while the server has told us (via an ``auth_locked``
@@ -5383,7 +5435,7 @@ class RemoteAccessServer:
             "type": "notification",
             "id": "server-reset-restarting",
             "severity": "info",
-            "message": "Restarting the KISS Sorcar web server…",
+            "message": f"Restarting the {PRODUCT_NAME} web server…",
         }, conn_id)
         self._write_server_reset_flag(conn_id)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
@@ -5494,7 +5546,7 @@ class RemoteAccessServer:
                 "type": "notification",
                 "id": "server-reset-complete",
                 "severity": "info",
-                "message": "KISS Sorcar web server restart complete.",
+                "message": f"{PRODUCT_NAME} web server restart complete.",
             },
         )
 
@@ -5556,41 +5608,97 @@ class RemoteAccessServer:
             self._broadcast_to_conn({
                 "type": "notice",
                 "text": (
-                    "A KISS Sorcar update is already running… "
+                    f"A {PRODUCT_NAME} update is already running… "
                     f"(output: {self._update_log_path})"
                 ),
             }, conn_id)
             return
         self._update_starting = True
+        # From here on the daemon is about to be restarted by the
+        # installer: refuse NEW task submits (running ones are the
+        # user's explicit choice).  The idle poller has already raised
+        # the barrier under the registry lock together with its "no
+        # active tasks" verdict; a direct click raises it here.  Every
+        # path on which no installer ends up running lowers it again.
+        self._set_update_barrier(True)
         # A direct "Update" supersedes an armed "Update when idle": the
         # idle poller must not launch a second installer later.  The
         # poller itself disarms before calling here, so this never
         # cancels the running task.
-        if self._cancel_update_when_idle():
-            await self._broadcast_update_available()
-        # When the clone (or its install.sh) is missing — the extension
-        # was installed from a .vsix, or ~/.kiss/kiss_ai was deleted —
-        # fall back to the public curl bootstrap, which recreates the
-        # clone and hands over to its install.sh, instead of refusing
-        # with "install.sh not found".  The extension's runUpdate() does
-        # the same in its terminal.
-        script = await loop.run_in_executor(
-            None, _find_install_script, self._install_root,
-        )
-        self._broadcast_to_conn({
-            "type": "notice",
-            "text": (
-                "An update of KISS Sorcar is getting installed… "
-                f"(output: {self._update_log_path})"
-            ),
-        }, conn_id)
-        spawned = await loop.run_in_executor(
-            None, self._spawn_update_script, script, conn_id,
-        )
-        if spawned is not None:
-            self._update_watch_task = asyncio.create_task(
-                self._watch_update_exit(*spawned, conn_id),
+        spawned = None
+        try:
+            if self._cancel_update_when_idle():
+                await self._broadcast_update_available()
+            # When the clone (or its install.sh) is missing — the
+            # extension was installed from a .vsix, or ~/.kiss/kiss_ai
+            # was deleted — fall back to the public curl bootstrap,
+            # which recreates the clone and hands over to its
+            # install.sh, instead of refusing with "install.sh not
+            # found".  The extension's runUpdate() does the same in its
+            # terminal.
+            script = await loop.run_in_executor(
+                None, _find_install_script, self._install_root,
             )
+            self._broadcast_to_conn({
+                "type": "notice",
+                "text": (
+                    f"An update of {PRODUCT_NAME} is getting installed… "
+                    f"(output: {self._update_log_path})"
+                ),
+            }, conn_id)
+            spawned = await loop.run_in_executor(
+                None, self._spawn_update_script, script, conn_id,
+            )
+        finally:
+            if spawned is None:
+                # No installer owns the barrier (spawn failure, or a
+                # raise/cancellation before the spawn): admit runs
+                # again and let a later Update click start over.
+                self._set_update_barrier(False)
+                self._update_starting = False
+        if spawned is None:
+            return
+        self._update_watch_task = asyncio.create_task(
+            self._watch_update_exit(*spawned, conn_id),
+        )
+
+    def _set_update_barrier(self, up: bool) -> None:
+        """Raise or lower the run-admission barrier of the self-update.
+
+        Writes ``VSCodeServer._update_installing`` under
+        :data:`agent_state.STATE_LOCK` — the lock ``_cmd_run`` holds
+        while admitting a run — so a submit observes either the barrier
+        or its absence, never a torn state.  Cheap enough to call from
+        the event loop (the lock is held only for short critical
+        sections).
+
+        Args:
+            up: ``True`` to refuse new task submits, ``False`` to
+                admit them again.
+        """
+        with agent_state.STATE_LOCK:
+            self._vscode_server._update_installing = up
+
+    def _arm_update_barrier_if_idle(self) -> bool:
+        """Raise the run-admission barrier when no task is in flight.
+
+        The idle verdict (:func:`_snapshot_active_tabs`) and the arming
+        happen in ONE :data:`agent_state.STATE_LOCK` critical section
+        — the lock ``_cmd_run`` holds while it admits a run — so a
+        ``run`` submitted between the poller's "no active tasks"
+        observation and the installer spawn is either counted as
+        active (and defers the update) or refused by the barrier.
+        Blocks on the lock: call it off the event loop.
+
+        Returns:
+            ``True`` when the barrier was raised (idle), ``False`` when
+            a task is still live and the poller must wait.
+        """
+        with agent_state.STATE_LOCK:
+            if _snapshot_active_tabs():
+                return False
+            self._vscode_server._update_installing = True
+            return True
 
     def _spawn_update_script(
         self, script: Path | None, conn_id: str = "",
@@ -5683,7 +5791,7 @@ class RemoteAccessServer:
         except OSError as exc:
             self._broadcast_to_conn({
                 "type": "error",
-                "text": f"Failed to start KISS Sorcar update: {exc}",
+                "text": f"Failed to start {PRODUCT_NAME} update: {exc}",
             }, conn_id)
             return None
         finally:
@@ -5701,7 +5809,10 @@ class RemoteAccessServer:
         refusal line when this run's slice of the update log holds one
         (``install.sh`` lost the cross-process update lock to another
         installer), otherwise a generic failure pointing at the log.
-        A clean exit reports nothing more.
+        A clean exit reports nothing more.  Either way the installer
+        is gone once this returns, so the run-admission barrier raised
+        for it is lowered: a daemon the installer did not restart (a
+        failed or no-op update) must accept tasks again.
 
         Args:
             proc: The installer started by :meth:`_spawn_update_script`.
@@ -5711,16 +5822,17 @@ class RemoteAccessServer:
         """
         while proc.poll() is None:
             await asyncio.sleep(0.2)
+        self._set_update_barrier(False)
         if proc.returncode == 0:
             return
         try:
             output = self._update_log_path.read_bytes()[log_offset:]
         except OSError:
             output = b""
-        text = f"KISS Sorcar update failed (exit {proc.returncode}), see {self._update_log_path}"
+        text = f"{PRODUCT_NAME} update failed (exit {proc.returncode}), see {self._update_log_path}"
         for line in output.decode("utf-8", errors="replace").splitlines():
             if "another KISS update is already running" in line:
-                text = f"KISS Sorcar update: {line.strip()}"
+                text = f"{PRODUCT_NAME} update: {line.strip()}"
                 break
         self._broadcast_to_conn({"type": "error", "text": text}, conn_id)
 
@@ -7691,10 +7803,13 @@ class RemoteAccessServer:
     async def _run_update_when_idle(self) -> None:
         """Wait until no task is in flight, then launch the installer.
 
-        Polls :func:`_snapshot_active_tabs` (off-thread: it takes the
-        registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.  Once
-        idle it disarms itself and, without yielding to the loop in
-        between, runs :meth:`_handle_run_update` for every window
+        Polls :meth:`_arm_update_barrier_if_idle` (off-thread: it takes
+        the registry lock) every :data:`_IDLE_UPDATE_POLL_S` seconds.
+        The idle verdict and the run-admission barrier are one atomic
+        step, so no ``run`` can start between "no active tasks" and the
+        installer spawn (the barrier makes ``_cmd_run`` refuse it).
+        Once armed it disarms itself and, without yielding to the loop
+        in between, runs :meth:`_handle_run_update` for every window
         (``conn_id=""``): the click that armed it may be long gone by
         the time the update starts, so its notices must not be confined
         to one connection.  The task stays tracked on
@@ -7702,11 +7817,20 @@ class RemoteAccessServer:
         :meth:`stop_async` can cancel it mid-handoff too.
         """
         try:
-            while await asyncio.to_thread(_snapshot_active_tabs):
+            while not await asyncio.to_thread(self._arm_update_barrier_if_idle):
                 await asyncio.sleep(_IDLE_UPDATE_POLL_S)
             self._update_when_idle_armed = False
             await self._handle_run_update("")
             await self._broadcast_update_available()
+        except asyncio.CancelledError:
+            # Cancelled (toast "Cancel", a direct Update click, or
+            # shutdown) after the barrier went up but before an
+            # installer owned it: lower it, or the daemon would refuse
+            # every task until restart.  With an installer running,
+            # its exit watcher lowers the barrier instead.
+            if not self._update_in_progress():
+                self._set_update_barrier(False)
+            raise
         finally:
             if self._update_when_idle_task is asyncio.current_task():
                 self._update_when_idle_task = None
@@ -8015,6 +8139,10 @@ class RemoteAccessServer:
             "prompt": prompt,
             "model": cmd.get("model", ""),
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
+            # A tab pinned to a folder outside the client's workspace
+            # keeps its registry scope there (the webview sends the
+            # workspace); empty for ordinary runs.
+            "tabScopeWorkDir": cmd.get("tabScopeWorkDir", ""),
             "tabId": tab_id,
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", True),
@@ -9092,6 +9220,9 @@ class RemoteAccessServer:
         """
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
+        # No database write may run here: the legacy side-channel stamp
+        # and the orphan sweep live on VSCodeServer's background thread
+        # so a locked sorcar.db never delays binding the listeners.
 
         if not _unix_sockets_supported():
             # CPython on Windows has no AF_UNIX, so the daemon's local
@@ -9507,7 +9638,7 @@ class RemoteAccessServer:
         an injected ``KeyboardInterrupt``).
         """
         await self._setup_server()
-        print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
+        print(f"{PRODUCT_NAME} remote access: {self._local_url}", file=sys.stderr)
         print(f"Local machine:             {self._loopback_url}", file=sys.stderr)
         for lan_url in self._lan_urls():
             print(f"LAN:                       {lan_url}", file=sys.stderr)
@@ -9971,7 +10102,9 @@ class RemoteAccessServer:
         # A GIL-holding stall (2026-09-12: a quadratic regex over a
         # 5.8 MB tool result) freezes every thread, including logging;
         # the C-level watchdog still dumps all thread stacks to stderr.
-        start_stall_watchdog()
+        # Disarmed at the end of the ``finally`` below so an in-process
+        # restart (or a test) does not leave a heartbeat thread behind.
+        stall_watchdog = start_stall_watchdog()
 
         self._install_signal_handlers()
 
@@ -10014,6 +10147,8 @@ class RemoteAccessServer:
                 self._sea_command_subscriber = None
             self._sea_command_watcher_started = False
             sea_commands.stop_registry_watcher()
+            if stall_watchdog is not None:
+                stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)
 
     async def start_async(self) -> None:
@@ -10198,7 +10333,7 @@ def main() -> None:  # pragma: no cover — CLI entry point
     """CLI entry point for the remote access server."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="KISS Sorcar Remote Access Server")
+    parser = argparse.ArgumentParser(description=f"{PRODUCT_NAME} Remote Access Server")
     parser.add_argument(
         "--url", action="store_true",
         help="Print the active remote URL and exit",

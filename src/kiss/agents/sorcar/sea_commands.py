@@ -31,16 +31,26 @@ proactively by a background polling watcher (see
 :func:`start_registry_watcher`) so edits to ``SEAS.md`` — or the
 appearance/removal of ``*_sea.py`` files in any of its folders — take
 effect while the daemon is running.
+
+Locking: two module locks, always acquired in the order
+``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
+subscriber list; ``_notify_lock`` wraps the publish-and-notify section
+of :func:`refresh_registry` so subscribers see snapshots in the order
+they were published.  Nothing calls :func:`refresh_registry` while
+holding ``_lock``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import os
 import re
+import sys
 import threading
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -68,7 +78,22 @@ _registry: dict[str, Path] = {}
 # callback that itself calls :func:`list_commands` cannot deadlock).
 _lock = threading.RLock()
 
-# Callbacks invoked (outside the lock) whenever the registry changes.
+# Serialises the publish-and-notify section of :func:`refresh_registry`
+# so subscribers receive snapshots in the order they were published:
+# without it two concurrent rescans could deliver snapshot B before A
+# and leave every subscriber on the stale list A for good (the
+# ``_last_broadcast`` dedupe then suppresses the correcting rescan).
+#
+# LOCK ORDER: ``_notify_lock`` -> ``_lock``.  ``_notify_lock`` is taken
+# first and held through the callback loop; ``_lock`` is only ever
+# taken inside it or on its own.  No function may call
+# :func:`refresh_registry` while holding ``_lock``.  RLock so a
+# subscriber that re-enters :func:`refresh_registry` (e.g. through
+# :func:`get_command` on a miss) does not self-deadlock.
+_notify_lock = threading.RLock()
+
+# Callbacks invoked (under ``_notify_lock`` but outside ``_lock``)
+# whenever the registry changes.
 _subscribers: list[Callable[[list[str]], None]] = []
 
 # Last snapshot broadcast to subscribers.  Deduplicates identical
@@ -223,8 +248,9 @@ def refresh_registry() -> list[str]:
 
     Returns:
         The sorted list of command names now installed.  Subscribers
-        registered via :func:`subscribe` are invoked (outside the
-        lock) when the list differs from the previous broadcast.
+        registered via :func:`subscribe` are invoked (under
+        ``_notify_lock``, outside ``_lock``) when the list differs
+        from the previous broadcast, in publish order.
     """
     global _last_broadcast
 
@@ -246,26 +272,30 @@ def refresh_registry() -> list[str]:
     for src in sources:
         merged.update(src)
 
-    # Compare-and-swap under the lock so two concurrent rescans can
+    # Compare-and-swap under ``_lock`` so two concurrent rescans can
     # never both observe the old ``_last_broadcast`` and fire the
-    # same notification twice.  Subscribers are invoked OUTSIDE the
-    # lock (below) so a subscriber that itself calls back into the
-    # module — for example :func:`list_commands` — cannot deadlock.
-    with _lock:
-        _registry.clear()
-        _registry.update(merged)
-        snapshot = sorted(_registry)
-        snapshot_tuple = tuple(snapshot)
-        if snapshot_tuple == _last_broadcast:
-            return snapshot
-        _last_broadcast = snapshot_tuple
-        callbacks = list(_subscribers)
+    # same notification twice.  The whole publish-and-notify section
+    # runs under ``_notify_lock`` (order: ``_notify_lock`` -> ``_lock``)
+    # so snapshots reach subscribers in publish order; ``_lock`` itself
+    # is released before the callbacks run so a subscriber that calls
+    # back into the module — e.g. :func:`list_commands` — cannot
+    # deadlock.
+    with _notify_lock:
+        with _lock:
+            _registry.clear()
+            _registry.update(merged)
+            snapshot = sorted(_registry)
+            snapshot_tuple = tuple(snapshot)
+            if snapshot_tuple == _last_broadcast:
+                return snapshot
+            _last_broadcast = snapshot_tuple
+            callbacks = list(_subscribers)
 
-    for cb in callbacks:
-        try:
-            cb(list(snapshot))
-        except Exception:  # pragma: no cover - subscribers own errors
-            logger.debug("SEA registry subscriber failed", exc_info=True)
+        for cb in callbacks:
+            try:
+                cb(list(snapshot))
+            except Exception:  # pragma: no cover - subscribers own errors
+                logger.debug("SEA registry subscriber failed", exc_info=True)
     return snapshot
 
 
@@ -362,7 +392,8 @@ def _split_slash_command(prompt: str) -> tuple[str, str] | None:
     return command, rest.strip()
 
 
-def _load_sea_module(sea_path: Path) -> ModuleType:
+@contextlib.contextmanager
+def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
     """Import the SEA script at *sea_path* as a standalone module.
 
     Mirrors the daemon, which executes the agent file named by
@@ -372,17 +403,35 @@ def _load_sea_module(sea_path: Path) -> ModuleType:
     dependency on ``kiss.agents.third_party_agents``, which the
     layering invariants forbid.
 
+    The module is registered in ``sys.modules`` before it executes,
+    exactly as ``import`` does: ``@dataclass`` under ``from __future__
+    import annotations`` (and ``typing.get_type_hints`` later on)
+    resolve string annotations through
+    ``sys.modules[cls.__module__].__dict__``, so an unregistered module
+    makes every dataclass-bearing SEA fail with ``AttributeError:
+    'NoneType' object has no attribute '__dict__'``.  The name is
+    unique per load (``_kiss_sea_<stem>_<uuid>``): task threads load
+    SEAs concurrently, and two same-stem files (or two loads of one
+    file) sharing a name would overwrite each other's entry mid-use.
+    The entry is removed when the ``with`` block ends, so a long-lived
+    daemon does not accumulate one module per relay.
+
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
 
-    Returns:
-        The freshly executed module.
+    Yields:
+        The freshly executed module, registered for the block's duration.
     """
-    spec = importlib.util.spec_from_file_location(f"_kiss_sea_{sea_path.stem}", sea_path)
+    name = f"_kiss_sea_{sea_path.stem}_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(name, sea_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop(name, None)
 
 
 class SeaScriptError(RuntimeError):
@@ -423,8 +472,9 @@ def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
             diagnostic instead of running against a broken SEA.
     """
     try:
-        fn = getattr(_load_sea_module(sea_path), getter, None)
-        return callable(fn) and fn() is False
+        with _load_sea_module(sea_path) as module:
+            fn = getattr(module, getter, None)
+            return callable(fn) and fn() is False
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
             f"SEA {sea_path} failed while evaluating {getter}(): "
@@ -479,7 +529,8 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
             "Read the events of the task <task_id> from "
             "~/.kiss/sorcar.db and answer the user question above."
         )
-        append_to_system_prompt = _load_sea_module(sea_path).append_to_system_prompt()
+        with _load_sea_module(sea_path) as module:
+            append_to_system_prompt = module.append_to_system_prompt()
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "

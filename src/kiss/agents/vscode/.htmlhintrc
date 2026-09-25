@@ -1,6 +1,6 @@
 {
   "tagname-lowercase": true,
-  "attr-lowercase": true,
+  "attr-lowercase": ["{{BODY_CLASS_ATTR}}", "{{ENTERKEYHINT}}", "{{NONCE_ATTR}}"],
   "attr-value-double-quotes": true,
   "attr-no-duplication": true,
   "doctype-first": false,

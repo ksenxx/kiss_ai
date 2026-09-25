@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
-  "version": "2026.9.22",
+  "version": "2026.9.24",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -75,7 +75,7 @@
     "commands": [
       {
         "command": "kissSorcar.openPanel",
-        "title": "KISS: Open Sorcar Chat",
+        "title": "KISS: Open Chat",
         "icon": {
           "light": "media/kiss-icon.svg",
           "dark": "media/kiss-icon.svg"
@@ -88,7 +88,7 @@
       },
       {
         "command": "kissSorcar.openSettings",
-        "title": "KISS: Open Sorcar Settings",
+        "title": "KISS: Open Settings",
         "icon": "$(settings-gear)"
       },
       {
@@ -219,7 +219,7 @@
     "lint": "npm run lint:ts && npm run lint:css && npm run lint:html",
     "lint:ts": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js'",
     "lint:css": "stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css'",
-    "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html' || true",
+    "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html'",
     "lint:fix": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js' --fix && stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css' --fix",
     "typecheck": "tsc --noEmit -p ./",
     "test": "npm run compile && node test/run-all.js",

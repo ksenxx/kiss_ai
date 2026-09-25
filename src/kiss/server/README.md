@@ -131,8 +131,8 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`, and
-`extension_agent_path` itself has a corresponding
+`sock_path`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`,
+`side_channel`, and `extension_agent_path` itself has a corresponding
 getter the SEA may define.  The getter is named `X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
 `if_append_basic_tools()`.  The table below lists them all.
@@ -177,6 +177,14 @@ The parameters without getters:
   its caller) and whether that caller sits in a reviewer sub-tree
   (so the child's `run_parallel` spawns no further reviewers), which a
   dispatched script must not be able to forge.
+- **`side_channel`** — marks the run as a side channel of its parent
+  (a sub-agent whose result is shown outside its own tab: the `/ask`
+  answerer delivers its answer into the PARENT's transcript, and the
+  periodic `/task_update` child fills the parent task's task-info
+  panel; so its own tab closes when the run ends and is not re-opened
+  when the chat is reloaded); only
+  meaningful with `parent_task_id`, and not forgeable for the same
+  reason.
 - **`extension_agent_path`** — the script cannot override its own path.
 
 ### Getter semantics
@@ -189,8 +197,12 @@ The parameters without getters:
 - **`system_prompt()`** — an empty or blank string leaves the base
   prompt to the daemon: with task classification enabled (the
   default) a task classified as simple runs on the reduced
-  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  A
-  non-empty string replaces that base prompt.  A
+  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  Both
+  files are loaded with their `{{IDENTITY}}` brand placeholder filled
+  in (`kiss.core.brand.render_brand`); a
+  string returned by `system_prompt()` or
+  `append_to_system_prompt()` is used verbatim, with no placeholder
+  rendering.  A non-empty string replaces that base prompt.  A
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
   `setdefault`s it).
@@ -236,8 +248,10 @@ The parameters without getters:
 - **`tool_profile()`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
   (read and run, no editing, browser or dispatch), `"shell"` (`Bash`,
-  `bash_job`, `Read`, `run_commands_parallel`) or `"bash"` (`Bash`
-  only — the bundled `/sh` agent's choice); `finish` is always added.
+  `bash_job`, `Read`, `run_commands_parallel`), `"assistant"` (the
+  `shell` set plus `ask_user_question`, `talk`, `decide`, `summary`,
+  `set_model`) or `"bash"` (`Bash` only — the bundled `/sh` agent's
+  choice); `finish` is always added.
   `""` keeps the daemon's usual choice.  An unknown name fails the
   task when it starts.  Ignored when `if_append_basic_tools()` is
   `False`, which builds no built-in toolset at all.
@@ -685,6 +699,7 @@ def run(
     parent_task_id: str = "",
     parent_tab_id: str = "",
     parent_reviewer: bool = False,
+    side_channel: bool = False,
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
@@ -701,6 +716,8 @@ def run(
     append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
+    tool_profile: str = "",
+    docker_image: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     sock_path: str | Path | None = None,
@@ -725,7 +742,7 @@ class TaskResult:
 | Aspect | SEA (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (18 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
+| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (20 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
 | **Required function** | None — define only the getters you need | Must define `get_tools()` (or `tools()`) |
 | **Can be combined** | Yes — `tools()` can point to a separate tools file | N/A |
 | **Can be self-contained** | Yes — return a list from `tools()` and the script becomes its own tools file | Always self-contained |
@@ -765,8 +782,22 @@ class TaskResult:
   expose it as the chat command `/xxx`; `/xxx some text` runs the SEA
   on "some text" via `run_agent`.  Bundled
   `src/kiss/agents/third_party_agents/*_sea.py` scripts take
-  precedence over `SEAS.md` folders, and later `SEAS.md` lines beat
-  earlier ones.  Syntax, precedence and the dispatch flow are
+  precedence over `SEAS.md` folders, later `SEAS.md` lines beat
+  earlier ones, and the bundled Sorcar-extending SEAs in
+  `src/kiss/agents/seas/` (`/merge`, `/sh`, `/skillopt`,
+  `/task_update`, `/write_paper`, `/review_paper`; `dummy_sea.py`, an SEA with no getters, is what
+  `run_agent` runs when its `agent` argument is empty) have the
+  lowest precedence, so a `SEAS.md` folder can shadow them.  Syntax,
+  precedence and the dispatch flow are
   documented in
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)
   (source: `website/kisssorcar.github.io/docs/sea-commands.md`).
+- The outer run of a `/xxx` command is only a relay that calls
+  `run_agent`; before it starts, for each relay setting that is enabled
+  (worktree isolation, auto-commit) the daemon imports the resolved SEA
+  and checks the matching `use_worktree()` or `auto_commit()` getter.
+  An exact `False` demotes that setting on the relay as well (the SEA is
+  not handed the relay's worktree, and the relay does not auto-commit
+  what the SEA left in the tree); an import or getter exception during
+  such a check fails the relay with `SeaScriptError`, so keep
+  module-level side effects idempotent.

@@ -37,6 +37,7 @@ and the success lines of the macOS keychain / Windows store installers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import ipaddress
 import json
@@ -46,6 +47,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase, skipUnless
 
@@ -55,10 +57,31 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import kiss.agents.sorcar.persistence as th
+from kiss.core.brand import PRODUCT_NAME
 from kiss.core.file_lock import lock_exclusive
 from kiss.server import tls_certs, tls_trust
 from kiss.server import web_server as ws
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
+from kiss.tests.conftest import IS_WINDOWS
+
+
+@contextlib.contextmanager
+def _env(**overrides: str | None) -> Iterator[None]:
+    """Set (or, with ``None``, unset) environment variables for the block."""
+    saved = {name: os.environ.get(name) for name in overrides}
+    try:
+        for name, value in overrides.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _load(path: Path) -> x509.Certificate:
@@ -122,7 +145,7 @@ class TestTlsCerts(TestCase):
         self.assertTrue(
             ca.extensions.get_extension_for_class(x509.KeyUsage).value.key_cert_sign,
         )
-        self.assertTrue(tls_certs.ca_common_name(self.ca).startswith("KISS Sorcar Local CA"))
+        self.assertTrue(tls_certs.ca_common_name(self.ca).startswith(f"{PRODUCT_NAME} Local CA"))
         self.assertGreater(
             ca.not_valid_after_utc - ca.not_valid_before_utc,
             datetime.timedelta(days=3600),
@@ -285,7 +308,7 @@ class TestTlsCerts(TestCase):
             x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, "x")]),
             days=100, ca=True,
         )
-        self.assertEqual(tls_certs.ca_common_name(nocn), "KISS Sorcar Local CA")
+        self.assertEqual(tls_certs.ca_common_name(nocn), f"{PRODUCT_NAME} Local CA")
 
 
 class TestCreateSslContext(TestCase):
@@ -602,27 +625,47 @@ class TestTrustLocalCa(TestCase):
         self.assertIn("/ca.crt", text)
 
         self._nss_dir(".pki/nssdb")
-        saved_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = str(self.tmp / "empty-bin")
-        try:
+        # Hide certutil from PATH *and* from the Homebrew keg probe (this
+        # machine may have Homebrew nss installed outside PATH).
+        empty = self.tmp / "empty-bin"
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=str(empty)):
             lines = tls_trust.trust_local_ca(self.ca, home=self.home, platform="linux")
-        finally:
-            os.environ["PATH"] = saved_path
         self.assertTrue(
             any(line.startswith("certutil not found") for line in lines), lines,
         )
 
-    @skipUnless(shutil.which("certutil"), "needs libnss3-tools (certutil)")
+    def test_certutil_is_found_in_the_homebrew_keg(self) -> None:
+        empty = self.tmp / "empty-bin"
+        keg_certutil = self.tmp / "brew" / "opt" / "nss" / "bin" / "certutil"
+        keg_certutil.parent.mkdir(parents=True)
+        keg_certutil.write_text("#!/bin/sh\nexit 0\n")
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=str(self.tmp / "brew")):
+            self.assertEqual(tls_trust._find_certutil(), str(keg_certutil))
+        with _env(PATH=str(empty), HOMEBREW_PREFIX=None):
+            found = tls_trust._find_certutil()
+        defaults = [
+            p for p in ("/opt/homebrew/opt/nss/bin/certutil", "/usr/local/opt/nss/bin/certutil")
+            if Path(p).is_file()
+        ]
+        self.assertEqual(found, defaults[0] if defaults else None)
+
+    # Windows ships an unrelated ``certutil.exe`` (certificate-store tool) that
+    # shadows NSS's on PATH; NSS databases are a Linux/macOS product path only.
+    @skipUnless(
+        not IS_WINDOWS and tls_trust._find_certutil(),
+        "needs NSS certutil (libnss3-tools / nss-tools / brew nss)",
+    )
     def test_nss_install_is_verified_by_certutil(self) -> None:  # pragma: no cover
+        certutil = tls_trust._find_certutil() or "certutil"
         db = self._nss_dir(".pki/nssdb")
         (db / "cert9.db").unlink()
         subprocess.run(
-            ["certutil", "-N", "-d", f"sql:{db}", "--empty-password"], check=True,
+            [certutil, "-N", "-d", f"sql:{db}", "--empty-password"], check=True,
         )
         lines = tls_trust.trust_local_ca(self.ca, home=self.home, platform="linux")
         self.assertIn(f"Trusted in NSS database sql:{db}", lines)
         listing = subprocess.run(
-            ["certutil", "-L", "-d", f"sql:{db}"], capture_output=True, text=True,
+            [certutil, "-L", "-d", f"sql:{db}"], capture_output=True, text=True,
             check=True,
         ).stdout
         self.assertIn(tls_trust.ca_nickname(self.ca), listing)
@@ -631,7 +674,14 @@ class TestTrustLocalCa(TestCase):
         self.assertIn(f"Trusted in NSS database sql:{db}", lines)
 
     def test_macos_and_windows_paths_report_their_tool_result(self) -> None:
-        """On this platform the macOS/Windows tools are missing: the failure is reported."""
+        """The macOS/Windows store tools are run for real and their verdict is relayed.
+
+        Elsewhere the tool is missing and that failure is reported.  On the
+        tool's own platform the add needs a user-consent dialog (the macOS
+        password prompt, the Windows root-store warning), so it succeeds only
+        in an interactive desktop session; headless (SSH, session 0) the tool
+        refuses and its own error text must come through.
+        """
         mac = tls_trust.trust_local_ca(self.ca, home=self.home, platform="darwin")
         win = tls_trust.trust_local_ca(self.ca, home=self.home, platform="win32")
         if sys.platform == "darwin":
@@ -639,7 +689,14 @@ class TestTrustLocalCa(TestCase):
         else:
             self.assertTrue(any(line.startswith("FAILED for macOS login keychain") for line in mac))
         if sys.platform == "win32":
-            self.assertTrue(any("Windows current-user Root store" in line for line in win))
+            [report] = [line for line in win if "Windows" in line and "Root store" in line]
+            if report.startswith("FAILED"):
+                self.assertIn("CertUtil: -addstore command FAILED", report)
+            else:
+                self.assertIn("Windows current-user Root store", report)
+                # Undo the (consented) install of this throwaway CA.
+                sha1 = _load(self.ca).fingerprint(hashes.SHA1()).hex()
+                subprocess.run(["certutil", "-delstore", "-user", "Root", sha1], check=True)
         else:
             self.assertTrue(
                 any(line.startswith("FAILED for the Windows Root store") for line in win),

@@ -442,6 +442,7 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
     def test_auto_commit_retry_lets_the_merge_sea_resolve(self) -> None:
         self._strand_worktree()
         assert self._wt_state().auto_commit_mode
+        branch = self._wt_state().wt_merge_deferred_branch
         calls = self._spy_worktree_action()
 
         self.server._merge_deferred_worktrees(Path(self.repo))
@@ -449,7 +450,10 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
         self._assert_merged()
         merges = [c for c in calls if c["action"] == "merge"]
         assert merges == [
-            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": True},
+            {
+                "action": "merge", "tab_id": _WT_TAB,
+                "resolve_conflicts": True, "deferred_branch": branch,
+            },
         ], calls
 
     def test_retry_without_auto_commit_does_not_resolve(self) -> None:
@@ -457,6 +461,7 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
         state = self._wt_state()
         with self.server._state_lock:
             state.auto_commit_mode = False
+        branch = state.wt_merge_deferred_branch
         calls = self._spy_worktree_action()
 
         self.server._merge_deferred_worktrees(Path(self.repo))
@@ -464,7 +469,10 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
         self._assert_merged()
         merges = [c for c in calls if c["action"] == "merge"]
         assert merges == [
-            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": False},
+            {
+                "action": "merge", "tab_id": _WT_TAB,
+                "resolve_conflicts": False, "deferred_branch": branch,
+            },
         ], calls
 
     def test_retry_of_a_task_left_for_review_does_not_resolve(self) -> None:
@@ -472,6 +480,7 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
         state = self._wt_state()
         assert state.agent is not None
         state.agent._pending_review = True
+        branch = state.wt_merge_deferred_branch
         calls = self._spy_worktree_action()
 
         self.server._merge_deferred_worktrees(Path(self.repo))
@@ -479,5 +488,8 @@ class TestDeferredMergeResolvesConflicts(_DeferredMergeBase):
         self._assert_merged()
         merges = [c for c in calls if c["action"] == "merge"]
         assert merges == [
-            {"action": "merge", "tab_id": _WT_TAB, "resolve_conflicts": False},
+            {
+                "action": "merge", "tab_id": _WT_TAB,
+                "resolve_conflicts": False, "deferred_branch": branch,
+            },
         ], calls

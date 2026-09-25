@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import atexit
 import os
-import resource
 import shutil
 import statistics
 import subprocess
@@ -56,6 +55,9 @@ pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux") or shutil.which("Xvfb") is None,
     reason="virtual display tests need Linux with Xvfb",
 )
+# ``resource`` (rlimits) does not exist on Windows; the module is Linux-only
+# anyway, so skip at import instead of failing collection there.
+resource = pytest.importorskip("resource")
 
 _EVENTS_PAGE = """<!doctype html><html><head><title>events</title></head>
 <body style="margin:0">

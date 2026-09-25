@@ -204,20 +204,36 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
                 if e.get("type") == "prompt"
                 and e.get("text") == "bughunt2 follow-up during start window"
             ]
+        with self._events_lock:
+            clears_before_release = [
+                e for e in self.events if e.get("type") == "clear"
+            ]
+        assert len(clears_before_release) == 1, (
+            f"{len(clears_before_release)} clear events — a second "
+            "concurrent submit passed the busy guard and started a "
+            "second task"
+        )
         self.release.set()
         t1.join(timeout=30)
+        # The first run exits at its "No model available" check without
+        # ever draining the queued prompt, so the runner re-submits it
+        # as the tab's next run once the first worker has torn down
+        # (a message typed during teardown is never dropped).  Wait for
+        # that second run to finish.
         deadline = time.time() + 30
+        state = None
         while time.time() < deadline:
             state = agent_state.find_by_tab(tab_id)
-            if state is not None and state.task_thread is None:
+            if (
+                state is not None
+                and state.task_thread is None
+                and state.last_user_prompt
+                == "bughunt2 follow-up during start window"
+            ):
                 break
             time.sleep(0.02)
-
-        with self._events_lock:
-            clears = [e for e in self.events if e.get("type") == "clear"]
-        assert len(clears) == 1, (
-            f"{len(clears)} clear events — a second concurrent submit "
-            "passed the busy guard and started a second task"
+        assert state is not None and state.task_thread is None, (
+            "the queued prompt was never re-run after the first run ended"
         )
         assert queued == ["bughunt2 follow-up during start window"], (
             "BUG: a submit landing in the run start window "

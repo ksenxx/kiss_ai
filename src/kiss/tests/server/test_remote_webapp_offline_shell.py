@@ -47,6 +47,9 @@ from typing import Any
 
 import pytest
 from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+from kiss.core.brand import PRODUCT_NAME
 
 MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
 
@@ -217,7 +220,16 @@ def test_sw_script_precaches_exactly_the_page_assets(
     assert page_status == 200
     page_urls = set(MEDIA_URL_RE.findall(page_body.decode("utf-8")))
     assert page_urls, "the page references no /media assets?"
-    assert set(shell["urls"][1:]) == page_urls
+    # ... plus the plain /media/<name> files the brand skin (brand.css)
+    # pulls in through relative url() outside comments, which the browser
+    # requests un-hashed.
+    _, _, brand_css = live_server.get("/media/brand.css")
+    css_no_comments = re.sub(r"/\*.*?\*/", "", brand_css.decode(), flags=re.DOTALL)
+    css_assets = {
+        f"/media/{name}"
+        for name in re.findall(r"""url\(\s*["']?([A-Za-z0-9_.-]+)["']?\s*\)""", css_no_comments)
+    }
+    assert set(shell["urls"][1:]) == page_urls | css_assets
     assert any(u.startswith("/media/main.js?v=") for u in page_urls)
 
     # Every manifest URL is servable, so the install-time addAll succeeds.
@@ -292,6 +304,28 @@ _CACHE_KEYS_JS = r"""
 })()
 """
 
+# The worker registration's lifecycle, for the failure message when the
+# worker never takes control of the page: which worker slots are filled
+# and in what state at the timeout (``found``), and what a fresh
+# ``register()`` yields (``retried``) or throws.
+_SW_REGISTRATION_STATE_JS = r"""
+(async () => {
+  const slots = reg => (reg
+    ? {installing: reg.installing && reg.installing.state,
+       waiting: reg.waiting && reg.waiting.state,
+       active: reg.active && reg.active.state}
+    : null);
+  const found = slots(await navigator.serviceWorker.getRegistration());
+  try {
+    const reg = await navigator.serviceWorker.register(
+      '/sw.js', {updateViaCache: 'none'});
+    return {found, retried: slots(reg)};
+  } catch (e) {
+    return {found, registerError: String(e)};
+  }
+})()
+"""
+
 
 # True on a page that is the server's own copy (not the worker's cached
 # one), reached by a reload, with the app on screen.
@@ -345,10 +379,21 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 page,
                 "document.getElementById('app').style.display === ''",
             )
-            _wait_for(
-                page,
-                "navigator.serviceWorker && !!navigator.serviceWorker.controller",
-            )
+            try:
+                _wait_for(
+                    page,
+                    "navigator.serviceWorker && !!navigator.serviceWorker.controller",
+                )
+            except PlaywrightTimeoutError as exc:
+                # Registration is best effort in the page (the shim
+                # swallows failures), so name the worker's state: an
+                # install aborted by a host network change (Docker
+                # veth churn -> ERR_NETWORK_CHANGED) leaves the
+                # registration without an active worker.
+                state = page.evaluate(_SW_REGISTRATION_STATE_JS)
+                raise AssertionError(
+                    f"worker never took control of the page: {state!r}"
+                ) from exc
             _, _, sw_body = live_server.get("/sw.js")
             manifest = re.search(r"const SHELL = (\{.*?\});", sw_body.decode())
             assert manifest, sw_body[:400]
@@ -375,7 +420,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             during = page.evaluate(_UI_STATE_JS)
             assert during["appShown"], during
             assert during["overlayShown"] and during["banner"], during
-            assert during["msg"] == "Reconnecting to KISS Sorcar Server ...", during
+            assert during["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", during
             assert during["input"] == "typed while offline", during
             assert during["marker"] == "before-outage", during
             rect = during["overlayRect"]
@@ -465,7 +510,15 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             #     well before the server would have replied.
             live_server.stall_page.set()
             started = time.monotonic()
-            response = page.goto(url, wait_until="domcontentloaded")
+            # ``commit``: the clock stops when the cached response is
+            # committed.  Waiting for ``domcontentloaded`` measured the
+            # wrong navigation whenever the cached page's socket
+            # authenticated before its parser finished: the page then
+            # reloads itself (below) before DCL, ``goto`` follows the
+            # reload, and Chromium queues that second request for the
+            # same URL behind the still-stalled first one, so the
+            # measured time was the full stall.
+            response = page.goto(url, wait_until="commit")
             elapsed = time.monotonic() - started
             assert response is not None and response.from_service_worker
             assert elapsed < live_server.PAGE_STALL_S - 1, (
@@ -494,7 +547,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             offline = page.evaluate(_UI_STATE_JS)
             assert offline["overlayShown"] and not offline["banner"], offline
             assert not offline["appShown"], offline
-            assert offline["msg"] == "Reconnecting to KISS Sorcar Server ...", offline
+            assert offline["msg"] == f"Reconnecting to {PRODUCT_NAME} Server ...", offline
             assert offline["offlineMeta"], offline
             # The one reload an offline copy gets is recorded when it
             # happens, not when the copy is parsed.

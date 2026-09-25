@@ -32,9 +32,36 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from kiss.server.web_server import _compare_versions, _read_version
+from kiss.tests.agents.vscode.test_content_tab_editing import _dismiss_toasts
 from kiss.tests.server.test_explorer_scm_commands import (
+    ExplorerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
 )
+
+
+def _dismiss_update_toast(page, harness: ExplorerHarness) -> None:
+    """Close the sticky update toast the daemon raises when PyPI carries a
+    newer release than this checkout.
+
+    The ``update_available`` event is queued right behind the config
+    reply every page waits for, so when the daemon knows about a newer
+    release (same predicate as its ``_broadcast_update_available``) the
+    helper first waits for the event to land: dismissing before that
+    would leave the toast over the control the caller is about to click.
+    The marker is the persistent badge ``renderUpdateAvailable`` puts on
+    the settings panel's update button in the same call that raises the
+    toast, so repeated calls on one page (after the toast is gone) do not
+    wait again.  Without a pending release this only closes whatever
+    other notification is up.
+    """
+    latest = harness.server._latest_version
+    current = _read_version()
+    if latest and current and _compare_versions(latest, current) > 0:
+        page.wait_for_selector(
+            "#cfg-update-btn.has-update", state="attached", timeout=15000,
+        )
+    _dismiss_toasts(page)
 
 
 @pytest.fixture(scope="module")
@@ -664,6 +691,11 @@ def test_phone_drawer_refresh_button_is_clickable(browser, harness):
     try:
         page.click("#menu-btn")
         page.wait_for_selector("#sidebar.open", timeout=15000)
+        # At phone width the notification container spans the whole
+        # top of the page, over the drawer's activity bar; the daemon's
+        # PyPI check raises a sticky update toast there whenever a
+        # newer release exists.
+        _dismiss_update_toast(page, harness)
         page.click("#activity-explorer")
         page.wait_for_selector(".explorer-row.is-file", timeout=15000)
         n_list = len(_sent(frames, "listDir"))
@@ -726,9 +758,12 @@ def _open_page_mobile(browser, harness):
     page.wait_for_function(
         "!document.body.classList.contains('remote-desktop')", timeout=15000,
     )
-    # The config reply (workspace) has landed once the model name shows.
+    # The config reply (workspace) has landed once the docked task-info
+    # panel names a working directory instead of its placeholder dash.
     page.wait_for_function(
-        "document.getElementById('cfg-work-dir') !== null", timeout=15000,
+        "(() => { const t = document.getElementById('meta-workdir').textContent;"
+        " return t !== '' && t !== '\\u2014'; })()",
+        timeout=15000,
     )
     page.wait_for_timeout(500)
     return context, page, sent_frames
@@ -739,9 +774,9 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
     Explorer; Source Control says so instead of failing silently."""
     context, page, _ = _open_page(browser, harness)
     try:
-        # Re-point the workspace through the settings panel, the way a
-        # user does: closing the panel saves the form and re-scopes.
-        _set_work_dir(page, str(harness.plain_dir))
+        # Re-point the workspace through the "Working directory" panel,
+        # the way a user does: opening a folder saves it and re-scopes.
+        _set_work_dir(page, harness, str(harness.plain_dir))
         page.click("#activity-explorer")
         page.wait_for_selector(
             _explorer_row_sel("/plain/only.txt"), timeout=15000,
@@ -765,7 +800,7 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
             timeout=15000,
         )
         # Back to the repository: both views follow the workspace.
-        _set_work_dir(page, str(harness.work_dir))
+        _set_work_dir(page, harness, str(harness.work_dir))
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         assert page.locator("#scm-branch").inner_text() == "main"
         page.click("#activity-explorer")
@@ -778,23 +813,24 @@ def test_views_report_a_plain_folder_without_git(browser, harness):
     finally:
         # Leave the shared server on the repository for the other tests.
         try:
-            _set_work_dir(page, str(harness.work_dir))
+            _set_work_dir(page, harness, str(harness.work_dir))
         except Exception:
             pass
         context.close()
 
 
-def _set_work_dir(page, work_dir: str) -> None:
-    """Change the workspace through the settings panel and wait for the
-    docked task-info panel to show it."""
+def _set_work_dir(page, harness: ExplorerHarness, work_dir: str) -> None:
+    """Change the workspace through the "Working directory" panel of the
+    "..." menu and wait for the docked task-info panel to show it."""
     page.click("#more-btn")
-    page.click("#settings-btn")
-    page.wait_for_selector("#settings-panel.open", timeout=15000)
-    page.wait_for_function(
-        "document.getElementById('cfg-work-dir').value.length > 0", timeout=15000,
-    )
-    page.fill("#cfg-work-dir", work_dir)
-    page.click("#settings-panel-close")
+    page.click("#workdir-btn")
+    page.wait_for_selector("#workdir-panel.open", timeout=15000)
+    page.fill("#workdir-input", work_dir)
+    # The top-right notification container may cover the panel's
+    # controls when the daemon's PyPI check has raised an update toast.
+    _dismiss_update_toast(page, harness)
+    page.click("#workdir-open-btn")
+    page.wait_for_selector("#workdir-panel:not(.open)", timeout=15000)
     page.wait_for_function(
         "wd => document.getElementById('meta-workdir').textContent === wd",
         arg=work_dir,

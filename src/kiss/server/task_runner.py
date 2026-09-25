@@ -46,7 +46,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     sea_getter_is_false as _sea_getter_is_false,
 )
-from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _broadcast_subagent_done
+from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _notify_subagent_done
 from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
@@ -683,6 +683,7 @@ class _TaskRunnerMixin:
             self, repo_root: Path | None,
         ) -> str | None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
+        def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _user_answer_clear_tabs(
             self, ans_tab: str, answered_task_id: str,
         ) -> list[str]: ...
@@ -956,9 +957,34 @@ class _TaskRunnerMixin:
             # merges it kept waiting are retried below.  ``None`` on
             # every normal path, where the inner cleanup already ran.
             stranded_repo: Path | None = None
+            # Prompts typed into the tab after the agent's last step
+            # (during result broadcast, persistence and worktree
+            # merge, while ``task_thread`` was still installed): no
+            # agent drains them any more, so they are re-submitted
+            # below as the tab's next run instead of being dropped.
+            leftover: list[str] = []
+            redispatch = False
             with self._state_lock:
                 task_id_for_end: str | None = None
                 if state is not None:
+                    leftover = list(state.pending_user_messages)
+                    stopped = state.interrupted_by_shutdown or (
+                        state.stop_event is not None
+                        and state.stop_event.is_set()
+                    )
+                    # Mirrors ``commands._reruns_after_teardown``
+                    # (which decides whether the queueing side skips
+                    # the steering echo), plus the stop verdict that
+                    # is only known here.  ``parentTaskId`` is read
+                    # from the command because a run that failed
+                    # before ``_run_task_inner`` stamped the state
+                    # (no model available) never set ``is_subagent``.
+                    redispatch = bool(leftover) and not (
+                        stopped
+                        or state.frontend_closed
+                        or state.is_subagent
+                        or str(cmd.get("parentTaskId", "") or "")
+                    )
                     state.task_thread = None
                     state.stop_event = None
                     state.user_answer_queue = None
@@ -1020,6 +1046,37 @@ class _TaskRunnerMixin:
                     self._merge_deferred_worktrees(stranded_repo)
                 except BaseException:  # pragma: no cover — merge error handler
                     logger.debug("Deferred worktree merge error", exc_info=True)
+            if redispatch:
+                self._redispatch_leftover_prompts(cmd, leftover)
+
+    def _redispatch_leftover_prompts(
+        self, cmd: dict[str, Any], leftover: list[str],
+    ) -> None:
+        """Re-submit prompts left in ``pending_user_messages`` as the tab's next run.
+
+        Called at the very end of :meth:`_run_task`'s cleanup, once the
+        tab's thread slot is free, so :meth:`_cmd_run` takes its
+        fresh-run branch — exactly what would have happened had the
+        user typed the prompt one second later.  The follow-up inherits
+        the finished run's settings (work dir, model, worktree and
+        auto-commit choices) but not its client stamp: the run token
+        (``taskId``) belongs to the submission that has just ended,
+        and the routing key (``_state_key``) to the state that has just
+        been torn down.  Multiple leftovers become one prompt, joined
+        by blank lines, in the order they were typed.
+
+        Args:
+            cmd: The finished run's ``run`` command.
+            leftover: The undrained prompts, oldest first.
+        """
+        followup = {
+            k: v for k, v in cmd.items() if k not in ("taskId", "_state_key")
+        }
+        followup["prompt"] = "\n\n".join(leftover)
+        try:
+            self._cmd_run(followup)
+        except BaseException:
+            logger.debug("Leftover prompt re-dispatch error", exc_info=True)
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
         """Put the user's own model back in *tab_id*'s picker.
@@ -1140,15 +1197,7 @@ class _TaskRunnerMixin:
                 the watching tabs' pickers.
         """
         try:
-            viewer_ids: list[str] = []
-            fanout = getattr(self.printer, "_fanout_targets", None)
-            if callable(fanout) and task_id:
-                found = fanout(task_id)
-                if isinstance(found, list):
-                    viewer_ids = [v for v in found if v]
-            if tab_id and tab_id not in viewer_ids:
-                viewer_ids.append(tab_id)
-            _broadcast_subagent_done(self.printer, viewer_ids, model or "")
+            _notify_subagent_done(self.printer, task_id, tab_id, model or "")
         except Exception:
             logger.debug("subagentDone broadcast failed", exc_info=True)
 
