@@ -37,6 +37,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _save_url_file,
 )
+from kiss.tests.conftest import TRANSIENT_REPLACE_READ_ERRORS
 from kiss.tests.server.test_web_server import _find_free_port
 
 
@@ -306,7 +307,10 @@ class TestLanCapableServer(_LiveServerCase):
         deadline = asyncio.get_event_loop().time() + 5
         data: dict[str, Any] = {}
         while asyncio.get_event_loop().time() < deadline:
-            data = json.loads(_URL_FILE.read_text())
+            try:
+                data = json.loads(_URL_FILE.read_text())
+            except TRANSIENT_REPLACE_READ_ERRORS:
+                data = {}  # the writer's ``os.replace`` is mid-swap (Windows)
             if data.get("lan") == expected_lan:
                 return data
             await asyncio.sleep(0.02)
