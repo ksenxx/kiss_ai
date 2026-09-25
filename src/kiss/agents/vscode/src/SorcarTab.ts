@@ -269,7 +269,7 @@ export interface EditorTabInit {
  *
  * @param init The panel's initial tab state.
  * @returns An attribute string starting with a space, ready to splice
- *     into `<body{{BODY_CLASS_ATTR}}>`.
+ *     into `<body {{BODY_CLASS_ATTR}}>`.
  */
 export function editorTabBodyAttrs(init: EditorTabInit): string {
   const attrs = [' class="editor-tab-mode"'];
@@ -308,7 +308,7 @@ export const HISTORY_PANEL_TAB_ID = 'history-panel';
  * `openChatPanel` message — but `history-panel-mode` (main.js /
  * main.css) shows only the history sidebar, permanently open.
  *
- * @returns An attribute string ready for `<body{{BODY_CLASS_ATTR}}>`.
+ * @returns An attribute string ready for `<body {{BODY_CLASS_ATTR}}>`.
  */
 export function historyPanelBodyAttrs(): string {
   return (
@@ -333,7 +333,7 @@ export const META_PANEL_TAB_ID = 'meta-panel';
  * panel (#meta-panel) — the remote webapp's rightmost desktop panel —
  * which renders the `metaState` relays of the active chat editor tab.
  *
- * @returns An attribute string ready for `<body{{BODY_CLASS_ATTR}}>`.
+ * @returns An attribute string ready for `<body {{BODY_CLASS_ATTR}}>`.
  */
 export function metaPanelBodyAttrs(): string {
   return (
@@ -458,7 +458,40 @@ export function buildChatHtml(
     }),
   };
 
-  return tpl.replace(/\{\{([A-Z_]+)\}\}/g, (match, key: string) =>
-    Object.prototype.hasOwnProperty.call(subs, key) ? subs[key] : match,
+  return substituteTemplate(tpl, subs);
+}
+
+/**
+ * Placeholders whose values are whole attribute strings that carry their
+ * own leading space (or are empty): `' class="remote-chat"'`,
+ * `' nonce="…"'`, `' enterkeyhint="send"'`.
+ *
+ * The template writes them after a separating space
+ * (`<body {{BODY_CLASS_ATTR}}>`, `<script {{NONCE_ATTR}} src=…>`) so
+ * htmlhint can parse the tags; {@link substituteTemplate} drops that
+ * template space for these keys, so the rendered markup is exactly
+ * `<body class="remote-chat">` / `<body>` / `<script src=…>`.
+ */
+const ATTR_STRING_KEYS: ReadonlySet<string> = new Set([
+  'BODY_CLASS_ATTR',
+  'ENTERKEYHINT',
+  'NONCE_ATTR',
+]);
+
+/**
+ * Fill every `{{KEY}}` of `tpl` from `subs`, leaving unknown keys
+ * untouched. Mirrors `_build_html` in `kiss/server/web_server.py`, which
+ * renders the same `media/chat.html` for the remote web app.
+ */
+export function substituteTemplate(
+  tpl: string,
+  subs: Record<string, string>,
+): string {
+  return tpl.replace(
+    /( ?)\{\{([A-Z_]+)\}\}/g,
+    (match, space: string, key: string) => {
+      if (!Object.prototype.hasOwnProperty.call(subs, key)) return match;
+      return ATTR_STRING_KEYS.has(key) ? subs[key] : space + subs[key];
+    },
   );
 }

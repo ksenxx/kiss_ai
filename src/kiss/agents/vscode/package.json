@@ -219,7 +219,7 @@
     "lint": "npm run lint:ts && npm run lint:css && npm run lint:html",
     "lint:ts": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js'",
     "lint:css": "stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css'",
-    "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html' || true",
+    "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html'",
     "lint:fix": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js' --fix && stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css' --fix",
     "typecheck": "tsc --noEmit -p ./",
     "test": "npm run compile && node test/run-all.js",
