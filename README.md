@@ -1,9 +1,9 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/KISS-Sorcar-Logo-Dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/KISS-Sorcar-Logo.png">
-  <img alt="KISS Sorcar" src="assets/KISS-Sorcar-Logo.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/KISS-Sorcar-Logo-Dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/KISS-Sorcar-Logo.png">
+  <img alt="KISS Sorcar" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/KISS-Sorcar-Logo.png">
 </picture>
 
 [![Version](https://img.shields.io/badge/version-2026.9.24-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
