@@ -6,7 +6,7 @@
 // jsdom does not resolve var(): a declaration such as
 // `padding: var(--space-0-5) 0` or `color: var(--status-ok)` comes back
 // from getComputedStyle unresolved (or empty for shorthands).  Suites
-// that read computed spacing, radii, z-index or status colours from
+// that read computed font sizes, spacing, radii, z-index or status colours from
 // media/main.css load the stylesheet through inlineDesignTokens(), which
 // substitutes the design-token values defined in main.css's :root, so
 // the assertions keep checking the concrete values a browser applies.
@@ -22,7 +22,7 @@ const MAIN_CSS = path.join(__dirname, '..', 'media', 'main.css');
 
 // Names of the design tokens (see the "Design tokens" block in main.css).
 const TOKEN_NAME =
-  /^--(space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention)\b/;
+  /^--(fs|space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention)\b/;
 
 /**
  * Return {name: value} for every design token in main.css's first :root.

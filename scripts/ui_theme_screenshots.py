@@ -87,6 +87,8 @@ THEMES: dict[str, tuple[str, dict[str, str]]] = {
         "terminal-ansiRed": "#cd3131", "terminal-ansiGreen": "#0dbc79",
         "terminal-ansiYellow": "#e5e510", "terminal-ansiMagenta": "#bc3fbc",
         "terminal-ansiCyan": "#11a8cd",
+        "charts-green": "#89d185", "charts-red": "#f14c4c",
+        "charts-yellow": "#cca700", "charts-purple": "#b180d7",
     }),
     "light-plus": ("vscode-light", {
         "editor-background": "#ffffff", "editor-foreground": "#000000",
@@ -115,6 +117,8 @@ THEMES: dict[str, tuple[str, dict[str, str]]] = {
         "terminal-ansiRed": "#cd3131", "terminal-ansiGreen": "#107c10",
         "terminal-ansiYellow": "#949800", "terminal-ansiMagenta": "#bc05bc",
         "terminal-ansiCyan": "#0598bc",
+        "charts-green": "#388a34", "charts-red": "#e51400",
+        "charts-yellow": "#bf8803", "charts-purple": "#652d90",
     }),
     "high-contrast": ("vscode-high-contrast", {
         "editor-background": "#000000", "editor-foreground": "#ffffff",
@@ -140,6 +144,8 @@ THEMES: dict[str, tuple[str, dict[str, str]]] = {
         "terminal-ansiRed": "#cd0000", "terminal-ansiGreen": "#00cd00",
         "terminal-ansiYellow": "#cdcd00", "terminal-ansiMagenta": "#cd00cd",
         "terminal-ansiCyan": "#00cdcd",
+        "charts-green": "#89d185", "charts-red": "#f48771",
+        "charts-yellow": "#ffd370", "charts-purple": "#b180d7",
     }),
 }
 

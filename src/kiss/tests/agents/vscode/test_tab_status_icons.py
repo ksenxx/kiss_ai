@@ -52,8 +52,8 @@ def _browser():
             browser.close()
 
 
-# The harness :root defines --vscode-terminal-ansiGreen: #6a9955,
-# --vscode-terminal-ansiRed: #f44747 and --vscode-terminal-ansiMagenta:
+# The harness :root defines --vscode-charts-green: #6a9955,
+# --vscode-charts-red: #f44747 and --vscode-charts-purple:
 # #c586c0, which main.css aliases as --green / --red / --purple.
 _GREEN = "rgb(106, 153, 85)"
 _RED = "rgb(244, 71, 71)"

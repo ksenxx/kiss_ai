@@ -44,7 +44,7 @@ function testVsCodeSurfacesUseGreenThemeBorder() {
   // @media (prefers-reduced-motion) only zeroes the motion tokens.
   const root = MAIN_CSS.match(/:root\s*\{([^}]*)\}/)[1];
   assert.ok(
-    /--green:\s*var\(--vscode-terminal-ansiGreen\)/.test(root),
+    /--green:\s*var\(--vscode-charts-green\b/.test(root),
     '--green must be a theme color derived from the VS Code palette',
   );
   console.log('PASS main.css gives the settings panel a green theme border');
@@ -70,8 +70,8 @@ function testRemoteSurfaceUsesGreenThemeBorder() {
   // body.remote-chat.light-theme, so the border re-themes with the
   // sun/moon toggle.
   assert.ok(
-    /--green:\s*var\(--vscode-terminal-ansiGreen\b/.test(palette),
-    'the remote palette must derive --green from --vscode-terminal-ansiGreen',
+    /--green:\s*var\(--vscode-charts-green\b/.test(palette),
+    'the remote palette must derive --green from --vscode-charts-green',
   );
   console.log('PASS remote-codex.css keeps the green border on remote');
 }

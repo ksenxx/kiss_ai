@@ -3422,7 +3422,8 @@ receives (``src/vs/workbench/contrib/webview/browser/themeing.ts``)."""
 _VSCODE_DARK_MODERN_CSS = (
     # extensions/theme-defaults/themes/dark_modern.json, plus the
     # colour-registry defaults it inherits (list.*, terminal.ansi*,
-    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground).
+    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground,
+    # charts.*: platform/theme/common/colors/chartsColors.ts).
     "      --vscode-foreground: #cccccc;\n"
     "      --vscode-descriptionForeground: #9d9d9d;\n"
     "      --vscode-errorForeground: #f85149;\n"
@@ -3502,6 +3503,10 @@ _VSCODE_DARK_MODERN_CSS = (
     "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
     "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
     "      --vscode-terminal-ansiBrightWhite: #e5e5e5;\n"
+    "      --vscode-charts-green: #89d185;\n"
+    "      --vscode-charts-red: #f14c4c;\n"
+    "      --vscode-charts-yellow: #cca700;\n"
+    "      --vscode-charts-purple: #b180d7;\n"
 )
 """VS Code's "Dark Modern" theme as ``--vscode-*`` variables."""
 
@@ -3587,6 +3592,10 @@ _VSCODE_LIGHT_MODERN_CSS = (
     "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
     "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
     "      --vscode-terminal-ansiBrightWhite: #a5a5a5;\n"
+    "      --vscode-charts-green: #388a34;\n"
+    "      --vscode-charts-red: #e51400;\n"
+    "      --vscode-charts-yellow: #bf8803;\n"
+    "      --vscode-charts-purple: #652d90;\n"
 )
 """VS Code's "Light Modern" theme as ``--vscode-*`` variables."""
 

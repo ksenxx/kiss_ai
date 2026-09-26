@@ -30,10 +30,10 @@ body.remote-chat {
   --accent: var(--vscode-textLink-foreground, #4daafc);
   --border: var(--vscode-panel-border, #2b2b2b);
   --input-bg: var(--vscode-input-background, #313131);
-  --green: var(--vscode-terminal-ansiGreen, #0dbc79);
-  --red: var(--vscode-terminal-ansiRed, #cd3131);
-  --yellow: var(--vscode-terminal-ansiYellow, #e5e510);
-  --purple: var(--vscode-terminal-ansiMagenta, #bc3fbc);
+  --green: var(--vscode-charts-green, #89d185);
+  --red: var(--vscode-charts-red, #f14c4c);
+  --yellow: var(--vscode-charts-yellow, #cca700);
+  --purple: var(--vscode-charts-purple, #b180d7);
   --cyan: var(--vscode-terminal-ansiCyan, #11a8cd);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --error: var(--vscode-errorForeground, #f85149);
@@ -67,6 +67,7 @@ body.remote-chat {
   --send-fg: var(--vscode-button-foreground, #fff);
   --send-hover-bg: var(--vscode-button-hoverBackground, #026ec1);
   --send-disabled-bg: color-mix(in srgb, var(--send-bg) 40%, transparent);
+  --menu-selected-bg: var(--vscode-menu-selectionBackground, #0078d4);
 
   /* main.css design tokens whose value depends on the theme: a token
      derived at :root keeps the dark value, so it is re-derived here. */
@@ -374,7 +375,7 @@ body.remote-chat .sidebar-hdr {
   color: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 body.remote-chat .sidebar-item {
@@ -685,7 +686,7 @@ body.remote-chat #meta-info-content {
     border: none;
     border-radius: var(--radius-round);
     color: var(--icon);
-    font-size: 16px;
+    font-size: var(--fs-lg);
     cursor: pointer;
     transition: background var(--dur-base);
   }
