@@ -304,8 +304,8 @@ function testFinishedTaskShowsSolidGreenCircle() {
   const cs = win.getComputedStyle(completedDot);
   assert.strictEqual(
     cs.color,
-    'rgb(46, 125, 50)',
-    `tick colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
+    'var(--green)',
+    `tick colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
@@ -457,8 +457,8 @@ function testCompletedDotKeyframesNotShared() {
     '.sidebar-item-completed MUST NOT animate; the tick is static',
   );
   assert.ok(
-    /color\s*:\s*#2e7d32/i.test(body),
-    '.sidebar-item-completed MUST colour the tick #2e7d32 green',
+    /color\s*:\s*var\(--green\)/i.test(body),
+    '.sidebar-item-completed MUST colour the tick the theme green (--status-ok)',
   );
   const tick = cssText.match(/\.status-tick\s*\{([^}]*)\}/);
   assert.ok(

@@ -839,7 +839,7 @@
       // currentTaskSettings on switch (see saveCurrentTab).
       taskSettings: null,
       statusTextContent: 'Ready',
-      statusTextColor: 'var(--green)',
+      statusTextColor: 'var(--dim)',
       statusTokensText: '',
       statusBudgetText: '',
       statusStepsText: '',
@@ -1092,7 +1092,7 @@
     // showing a neighbour's, but that is a viewing position too.
     tab.taskSettings = currentTaskSettings;
     tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
-    tab.statusTextColor = statusText ? statusText.style.color : 'var(--green)';
+    tab.statusTextColor = statusText ? statusText.style.color : 'var(--dim)';
     tab.statusTokensText = neighbour
       ? currentTaskMetrics.tokens
       : statusTokens
@@ -1264,7 +1264,7 @@
     updateMetaTaskDetails(currentTaskSettings);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
-      statusText.style.color = tab.statusTextColor || 'var(--green)';
+      statusText.style.color = tab.statusTextColor || 'var(--dim)';
     }
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
@@ -4466,8 +4466,8 @@
    * lands in the status bar lands in the list.  The status span keeps
    * the "Tokens: " style prefix; the bullet item already carries its
    * own label, so stripLabel drops the prefix from the mirrored text.
-   * #status-text also mirrors its inline color (red while running,
-   * green when done) onto the Time item.
+   * #status-text also mirrors its inline color (accent while running,
+   * dim when done) onto the Time item.
    */
   function mirrorStatusIntoMetaPanel(srcId, dstId, stripLabel) {
     const src = document.getElementById(srcId);
@@ -13061,7 +13061,7 @@
   function startTimer() {
     if (!t0) t0 = Date.now();
     if (timerIv) clearInterval(timerIv);
-    statusText.style.color = 'var(--red)';
+    statusText.style.color = 'var(--accent)';
     _renderTimerTick();
     timerIv = setInterval(_renderTimerTick, 1000);
   }
@@ -13070,7 +13070,7 @@
       clearInterval(timerIv);
       timerIv = null;
     }
-    statusText.style.color = 'var(--green)';
+    statusText.style.color = 'var(--dim)';
   }
 
   function updateUsageMetrics(text) {
@@ -14254,7 +14254,7 @@
                 teTab.endTs = bgExtra.endTs;
                 if (teTab.t0) {
                   teTab.statusTextContent = doneLabelFor(teTab.t0, teTab.endTs);
-                  teTab.statusTextColor = 'var(--green)';
+                  teTab.statusTextColor = 'var(--dim)';
                 }
               }
             } catch (_e) {}
@@ -15216,7 +15216,7 @@
         if (hasStart) doneTab.t0 = doneStartTs;
         doneTab.endTs = hasEnd ? doneEndTs : Date.now();
         doneTab.statusTextContent = label || 'Ready';
-        doneTab.statusTextColor = 'var(--green)';
+        doneTab.statusTextColor = 'var(--dim)';
       }
     }
     if (tabId === undefined || tabId === activeTabId) {
@@ -20606,12 +20606,6 @@
       div.className = 'sidebar-item frequent-item';
       const text = String(t.task || '');
       div.dataset.tooltip = text;
-      if (!document.body.classList.contains('remote-chat')) {
-        // The per-task pastel tint is a webview-only cue: the remote
-        // page paints with VS Code theme colours alone (remote-codex.css).
-        div.style.backgroundColor = chatIdBgColor(text);
-        div.style.color = '#1a1a1a';
-      }
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';

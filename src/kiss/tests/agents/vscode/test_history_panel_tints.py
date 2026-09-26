@@ -8,18 +8,17 @@
 Three tints must read at a glance in a real Chromium:
 
 * the collapsible chat panel's header in the task-history panel: the
-  cyan of a Bash tool call's header, strong enough to stand out from
-  the sidebar background;
+  theme accent (the hue of the task panel and the Bash header), strong
+  enough to stand out from the sidebar background;
 * the task panel whose chat webview is on screen
-  (``.running-item.history-active-task``): a green tint and border;
+  (``.running-item.history-active-task``): an accent tint and border;
 * a sub-agent's tab in the chat tab strip: purple tint, purple text,
   purple spinner while it runs and purple tick once it is done.
 
-The harness ``:root`` maps ``--cyan`` / ``--green`` / ``--purple`` to
-``#4ec9b0`` / ``#6a9955`` / ``#c586c0`` (see
-``test_history_failed_red_cross._build_test_page``); the tests compare
-hues against the page's own computed variables and require an alpha
-well above the 8% at which the tints used to vanish.
+The harness ``:root`` maps ``--accent`` / ``--purple`` to ``#3794ff`` /
+``#c586c0`` (see ``test_history_failed_red_cross._build_test_page``);
+the tests compare hues against the page's own computed variables and
+require an alpha well above the 8% at which the tints used to vanish.
 """
 
 from __future__ import annotations
@@ -43,6 +42,10 @@ _REMOTE_CSS = _MEDIA_DIR / "remote-codex.css"
 
 # Below this alpha a tint over the sidebar background is barely visible.
 _MIN_ALPHA = 0.2
+
+# A sub-agent tab is lighter than the history cues: purple text and
+# underline carry most of the signal, the fill only has to be visible.
+_MIN_TAB_ALPHA = 0.15
 
 
 @pytest.fixture(scope="module")
@@ -82,27 +85,27 @@ def _style(page, selector: str, prop: str) -> str:
     )
 
 
-def _assert_tint(color: str, hue_of: str, what: str) -> None:
+def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALPHA) -> None:
     assert _hue_of(color) == pytest.approx(_hue_of(hue_of), abs=2), (
         f"{what} has the wrong hue: {color} vs {hue_of}"
     )
-    assert _alpha_of(color) >= _MIN_ALPHA, f"{what} is barely visible: {color}"
+    assert _alpha_of(color) >= min_alpha, f"{what} is barely visible: {color}"
 
 
-def test_chat_panel_header_is_a_light_cyan(_browser) -> None:
-    """Every chat panel's header carries a light cyan tint (15-20%, so
+def test_chat_panel_header_is_a_light_accent(_browser) -> None:
+    """Every chat panel's header carries a light accent tint (15-20%, so
     it stays visible without dominating the list), and darkens further
     on hover."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
-        cyan = _var_color(page, "--cyan")
+        accent = _var_color(page, "--accent")
         idle = _style(page, ".history-chat-header", "backgroundColor")
-        assert _hue_of(idle) == pytest.approx(_hue_of(cyan), abs=2), (idle, cyan)
+        assert _hue_of(idle) == pytest.approx(_hue_of(accent), abs=2), (idle, accent)
         assert 0.15 <= _alpha_of(idle) <= 0.2, f"the header tint is not light: {idle}"
         page.hover(".history-chat-header")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
-        _assert_tint(hovered, cyan, "the hovered chat panel header")
+        _assert_tint(hovered, accent, "the hovered chat panel header")
         assert _alpha_of(hovered) > _alpha_of(idle), (idle, hovered)
     finally:
         context.close()
@@ -293,12 +296,12 @@ def _settle(page, selector: str) -> None:
     )
 
 
-def _assert_active_row_green(page, what: str) -> None:
-    green = _var_color(page, "--green")
+def _assert_active_row_accent(page, what: str) -> None:
+    accent = _var_color(page, "--accent")
     _settle(page, _ACTIVE_ROW)
-    _assert_tint(_style(page, _ACTIVE_ROW, "backgroundColor"), green, what)
+    _assert_tint(_style(page, _ACTIVE_ROW, "backgroundColor"), accent, what)
     border = _style(page, _ACTIVE_ROW, "borderTopColor")
-    _assert_tint(border, green, what + "'s border")
+    _assert_tint(border, accent, what + "'s border")
     assert _alpha_of(border) >= 0.5, border
 
 
@@ -326,14 +329,14 @@ def _use_remote_surface(page) -> None:
     )
 
 
-def test_active_task_panel_is_a_visible_green(_browser) -> None:
+def test_active_task_panel_is_a_visible_accent(_browser) -> None:
     """The task panel of the task the visible tab shows is painted in a
-    clearly visible green tint with a green border, hovered or not; the
-    other panels are not tinted."""
+    clearly visible accent tint with an accent border, hovered or not;
+    the other panels are not tinted."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
-        _assert_active_row_green(page, "the active task panel")
+        _assert_active_row_accent(page, "the active task panel")
         others = page.evaluate(
             "() => [...document.querySelectorAll('.running-item:not(.history-active-task)')]"
             ".map(el => getComputedStyle(el).backgroundColor)"
@@ -343,21 +346,21 @@ def test_active_task_panel_is_a_visible_green(_browser) -> None:
             assert _alpha_of(bg) < _MIN_ALPHA, f"an inactive panel is tinted: {bg}"
         # The generic .sidebar-item:hover rule must not take the cue away.
         page.hover(_ACTIVE_ROW)
-        _assert_active_row_green(page, "the hovered active task panel")
+        _assert_active_row_accent(page, "the hovered active task panel")
     finally:
         context.close()
 
 
-def test_active_task_panel_is_a_visible_green_on_the_remote_page(_browser) -> None:
+def test_active_task_panel_is_a_visible_accent_on_the_remote_page(_browser) -> None:
     """The remote webapp's own row and hover rules (``remote-codex.css``)
-    must not take the green cue away either."""
+    must not take the accent cue away either."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
         _use_remote_surface(page)
-        _assert_active_row_green(page, "the remote active task panel")
+        _assert_active_row_accent(page, "the remote active task panel")
         page.hover(_ACTIVE_ROW)
-        _assert_active_row_green(page, "the hovered remote active task panel")
+        _assert_active_row_accent(page, "the hovered remote active task panel")
     finally:
         context.close()
 
@@ -398,7 +401,7 @@ def _assert_purple_tabs(page) -> None:
     page.click(_DONE_TAB)
     page.wait_for_selector(_DONE_TAB + ".active", state="attached")
     for sel in (_RUNNING_TAB, _DONE_TAB):
-        _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}")
+        _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}", _MIN_TAB_ALPHA)
     assert _alpha_of(_style(page, _DONE_TAB, "backgroundColor")) > _alpha_of(
         _style(page, _RUNNING_TAB, "backgroundColor")
     ), "the active sub-agent tab is tinted more strongly"

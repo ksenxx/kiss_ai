@@ -22,7 +22,8 @@ MAIN_CSS = (
 )
 
 _TOKEN_NAME = re.compile(
-    r"--(space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention)\b"
+    r"--(space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention"
+    r"|panel-tint|panel-tint-solid|panel-line|accent-tint|accent-tint-solid|accent-line)\b"
 )
 
 

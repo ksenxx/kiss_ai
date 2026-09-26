@@ -226,8 +226,8 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
     cs.color,
-    'rgb(46, 125, 50)',
-    `spinner colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
+    'var(--green)',
+    `spinner colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
@@ -288,8 +288,8 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const cs2 = win.getComputedStyle(completed);
   assert.strictEqual(
     cs2.color,
-    'rgb(46, 125, 50)',
-    `tick colour must be #2e7d32; got: ${cs2.color}`,
+    'var(--green)',
+    `tick colour must be the theme green (--status-ok -> var(--green)); got: ${cs2.color}`,
   );
   const anim2Name = cs2.getPropertyValue('animation-name') || '';
   const anim2Short = cs2.getPropertyValue('animation') || '';

@@ -20,7 +20,8 @@ pipeline used by the History sidebar to surface the
 * The **frontend** half — ``renderHistory`` in ``media/main.js``
   must render a visible ``.sidebar-item-running`` spinner as the FIRST
   child of every row whose ``is_running`` is ``True``: a 12x12 ring
-  whose leading edge is the green ``#2e7d32`` (``rgb(46, 125, 50)``),
+  whose leading edge is the theme green (``--status-ok`` -> ``--vscode-charts-green``,
+  ``#6a9955`` = ``rgb(106, 153, 85)`` in the harness),
   rotated by the ``status-spin`` keyframe animation -- the same ring,
   same animation as the composer's ``#wait-spinner``.
   Rows whose ``is_running`` is ``False`` must NOT render the spinner.
@@ -339,9 +340,9 @@ def test_running_session_renders_spinner(_browser) -> None:
         assert dot["borderTopWidth"] == "2px", (
             f"running spinner ring must be 2px thick; got {dot['borderTopWidth']!r}"
         )
-        assert dot["borderTopColor"] == "rgb(46, 125, 50)", (
+        assert dot["borderTopColor"] == "rgb(106, 153, 85)", (
             "running spinner is not the green colour: "
-            f"border-top-color={dot['borderTopColor']!r}; expected rgb(46, 125, 50)"
+            f"border-top-color={dot['borderTopColor']!r}; expected rgb(106, 153, 85)"
         )
         assert dot["animationName"] == "status-spin", (
             "running spinner must animate via 'status-spin'; "
@@ -650,7 +651,7 @@ def test_search_results_can_render_running_spinner(_browser) -> None:
                 row.querySelector('.sidebar-item-text').textContent ===
                   'running task' &&
                 !!dot && dot.offsetParent !== null &&
-                getComputedStyle(dot).borderTopColor === 'rgb(46, 125, 50)' &&
+                getComputedStyle(dot).borderTopColor === 'rgb(106, 153, 85)' &&
                 getComputedStyle(dot).animationName === 'status-spin';
             }
             """
@@ -738,7 +739,7 @@ def test_backend_history_event_renders_spinner_end_to_end(
               const cs = getComputedStyle(dot);
               return row.offsetParent !== null &&
                 dot.offsetParent !== null &&
-                cs.borderTopColor === 'rgb(46, 125, 50)' &&
+                cs.borderTopColor === 'rgb(106, 153, 85)' &&
                 cs.animationName === 'status-spin';
             }
             """

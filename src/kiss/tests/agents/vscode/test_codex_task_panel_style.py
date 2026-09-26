@@ -7,9 +7,9 @@
 Features on the remote webapp (served by ``RemoteAccessServer``):
 
 1. The pinned task panel (``#task-panel``) inherits main.css's
-   thinking-panel look verbatim (same background and foreground as
-   ``.think``, plus a thick cyan border; the remote page merely swaps
-   the palette variables), sized by the page's injected 14px
+   look verbatim (the thinking panel's foreground over the accent tint,
+   plus a 1px accent hairline; the remote page merely swaps the
+   palette variables), sized by the page's injected 14px
    ``--vscode-editor-font-size``.  The event panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
@@ -164,18 +164,18 @@ def test_main_css_webview_rows_are_neutral() -> None:
     )
 
 
-def test_main_css_chat_header_cyan_single_line() -> None:
+def test_main_css_chat_header_accent_single_line() -> None:
     """The grouped view's chat-panel header sits on a light but visible
-    cyan tint (the Bash tool-call header's hue, 15-20% strong) and
-    shows its title on one ellipsized line."""
+    accent tint (the task panel's and Bash header's hue, 15-20% strong)
+    and shows its title on one ellipsized line."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     header = re.search(r"\n\.history-chat-header\s*\{([^}]*)\}", css)
     assert header, ".history-chat-header rule missing"
     tint = re.search(
-        r"background:\s*color-mix\(in srgb, var\(--cyan\) (\d+)%, transparent\)",
+        r"background:\s*color-mix\(in srgb, var\(--accent\) (\d+)%, transparent\)",
         header.group(1),
     )
-    assert tint, f"the header background must be a --cyan tint; got: {header.group(1)!r}"
+    assert tint, f"the header background must be an --accent tint; got: {header.group(1)!r}"
     assert 15 <= int(tint.group(1)) <= 20, f"the header tint is not a light tint: {tint.group(0)}"
     title = re.search(r"\n\.history-chat-title\s*\{([^}]*)\}", css)
     assert title, ".history-chat-title rule missing"
@@ -482,12 +482,13 @@ _PROBE_STYLES_JS = r"""(() => {
   const thinkCnt = think ? think.querySelector('.cnt') : null;
   const thinkCntCs = thinkCnt ? getComputedStyle(thinkCnt) : null;
 
-  // Resolve var(--cyan) (the task panel's border color) to rgb().
-  const cyanProbe = document.createElement('div');
-  cyanProbe.style.color = 'var(--cyan)';
-  document.body.appendChild(cyanProbe);
-  const cyanColor = getComputedStyle(cyanProbe).color;
-  cyanProbe.remove();
+  // Resolve var(--accent) (the hue of the task panel's tint and
+  // hairline) to rgb().
+  const accentProbe = document.createElement('div');
+  accentProbe.style.color = 'var(--accent)';
+  document.body.appendChild(accentProbe);
+  const accentColor = getComputedStyle(accentProbe).color;
+  accentProbe.remove();
 
   // The old per-chat accent (djb2 hash of the chat id), resolved to an
   // rgb() string: nothing on the row may carry it any more.
@@ -533,7 +534,7 @@ _PROBE_STYLES_JS = r"""(() => {
     taskPanelBorderColor: tp.borderTopColor,
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
     thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
-    cyanColor,
+    accentColor,
     infoLineRects,
     infoClipped,
     oldAccent,
@@ -644,8 +645,8 @@ def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
-    extension's thinking-panel look (same background/foreground as
-    .think, thick cyan border) under the remote palette; history rows
+    extension's look (the thinking panel's foreground over the accent
+    tint, 1px accent hairline) under the remote palette; history rows
     paint the per-chat color on the left border over a neutral
     background; all metadata flows as one wrapping line."""
     ready = threading.Event()
@@ -720,9 +721,9 @@ def test_live_task_panel_typography_and_history_rows(
                             headerBg: getComputedStyle(
                                 g.querySelector('.history-chat-header')
                             ).backgroundColor,
-                            cyan: (() => {
+                            accent: (() => {
                                 const probe = document.createElement('i');
-                                probe.style.color = 'var(--cyan)';
+                                probe.style.color = 'var(--accent)';
                                 document.body.appendChild(probe);
                                 const c = getComputedStyle(probe).color;
                                 probe.remove();
@@ -751,8 +752,8 @@ def test_live_task_panel_typography_and_history_rows(
                     "the chat header shows one line of text: " + repr(group_probe)
                 )
                 assert _hue_of(group_probe["headerBg"]) == pytest.approx(
-                    _hue_of(group_probe["cyan"]), abs=2
-                ), "the chat header background has the page's cyan hue: " + repr(group_probe)
+                    _hue_of(group_probe["accent"]), abs=2
+                ), "the chat header background has the page's accent hue: " + repr(group_probe)
                 assert 0.15 <= _alpha_of(group_probe["headerBg"]) <= 0.2, (
                     "the chat header tint must be light but visible: " + repr(group_probe)
                 )
@@ -995,18 +996,25 @@ def test_live_task_panel_typography_and_history_rows(
         "the task panel text must use the SAME foreground as the "
         "thinking panel (main.css --panel-fg: var(--dim)): " + repr(probes)
     )
-    assert probes["taskPanelBg"] == probes["thinkBg"], (
-        "the task panel background must be the SAME as the thinking "
-        "panel (main.css --panel-bg: the .think cyan tint): " + repr(probes)
+    # The thinking panel is neutral (main.css --panel-tint, 4% of --fg);
+    # the task panel alone sits on the accent tint (--accent-tint, 8%)
+    # behind a 1px accent hairline (--accent-line).
+    assert 0.03 <= _alpha_of(probes["thinkBg"]) <= 0.05, (
+        "the thinking panel is a faint neutral tint: " + repr(probes)
+    )
+    assert _hue_of(probes["taskPanelBg"]) == pytest.approx(
+        _hue_of(probes["accentColor"]), abs=2
+    ), "the task panel background must be the accent tint: " + repr(probes)
+    assert 0.07 <= _alpha_of(probes["taskPanelBg"]) <= 0.09, (
+        "the task panel tint is 8% of the accent: " + repr(probes)
     )
     assert probes["taskPanelBorderStyle"] == "solid", probes
-    assert probes["taskPanelBorderWidth"] == "4px", (
-        "the task panel must carry a thick 4px border: " + repr(probes)
+    assert probes["taskPanelBorderWidth"] == "1px", (
+        "the task panel carries a 1px hairline: " + repr(probes)
     )
-    assert probes["taskPanelBorderColor"] == probes["cyanColor"], (
-        "the task panel border must be the cyan theme color "
-        "(var(--cyan)): " + repr(probes)
-    )
+    assert _hue_of(probes["taskPanelBorderColor"]) == pytest.approx(
+        _hue_of(probes["accentColor"]), abs=4
+    ), "the task panel hairline must be the accent hue (--accent-line): " + repr(probes)
 
     row = probes["row"]
     assert row != "MISSING", "history row was not rendered"

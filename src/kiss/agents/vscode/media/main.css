@@ -110,16 +110,35 @@
   --dur-slow: 0.2s;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
-  /* Semantic colours.  The task-status hues match the history row
-     icons; remote-codex.css re-maps every one of them onto the theme. */
-  --status-ok: #2e7d32;
-  --status-fail: #d32f2f;
+  /* Semantic colours.  Success and failure take the theme's chart
+     green and red (the hues VS Code tunes for UI in every theme), so
+     the history icons, tab icons and result panels follow Light+ and
+     High Contrast instead of one fixed Material green.  Theme-dependent,
+     so remote-codex.css re-derives them on body.remote-chat. */
+  --status-ok: var(--green);
+  --status-fail: var(--red);
   --status-done: var(--accent);
-  --favorite: #f5b400;
+  --favorite: var(--yellow);
+
+  /* Panel chrome.  Every transcript panel (tool call, thinking, Bash
+     output, tool result, prompts, result card) shares ONE neutral tint
+     and hairline, so the transcript reads as one quiet surface; the
+     accent tint and hairline mark the few things the eye should find
+     first: the task panel, the user's prompt, a Bash call, file links,
+     the history group headers and the active history row.  The
+     `-solid` forms are the same tints pre-mixed over --bg for elements
+     that sit on an opaque --surface or float over arbitrary content.
+     Theme-dependent: remote-codex.css re-derives them on body.remote-chat. */
+  --panel-tint: color-mix(in srgb, var(--fg) 4%, transparent);
+  --panel-tint-solid: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  --panel-line: color-mix(in srgb, var(--fg) 10%, transparent);
+  --accent-tint: color-mix(in srgb, var(--accent) 8%, transparent);
+  --accent-tint-solid: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  --accent-line: color-mix(in srgb, var(--accent) 45%, var(--border));
   --on-accent: #fff;
   --menu-selected-bg: var(--vscode-menu-selectionBackground, #0078d4);
   --paper: #fff;   /* white surfaces: confirm buttons, HTML previews */
-  --ink: #000;     /* text on the pastel frequent-task rows */
+  --ink: #000;     /* the dark half of --attention-ring */
   --attention-ring: color-mix(in srgb, var(--ink) 15%, transparent);
 }
 
@@ -358,11 +377,11 @@ body {
 
 .status-metric {
   font-size: var(--fs-sm);
-  color: var(--cyan);
+  color: var(--dim);
   white-space: nowrap;
 }
 .status-metric:not(:empty)::before { content: '·'; margin-right: var(--space-0-5); }
-#status-text { color: var(--green); }
+#status-text { color: var(--dim); }
 
 
 #tab-bar {
@@ -664,9 +683,9 @@ body {
   --status-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 3.5l9 9M12.5 3.5l-9 9' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E");
 }
 
-.chat-tab-spinner { color: var(--green); }
-.chat-tab-ok { color: var(--green); }
-.chat-tab-fail { color: var(--red); }
+.chat-tab-spinner { color: var(--status-ok); }
+.chat-tab-ok { color: var(--status-ok); }
+.chat-tab-fail { color: var(--status-fail); }
 
 @keyframes running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px var(--attention-ring); }
@@ -675,7 +694,7 @@ body {
 
 .chat-tab-attention {
   font-size: var(--fs-md); font-weight: 700; flex-shrink: 0; line-height: 1;
-  color: var(--yellow);
+  color: var(--warning);
   animation: running-pulse 1.5s ease-in-out infinite;
 }
 
@@ -699,23 +718,23 @@ body {
   outline-offset: -1px;
 }
 
-/* A sub-agent's tab is purple all over - tint, text, underline and its
-   status icon - so it is told apart from the chat's own tabs at a
-   glance. */
+/* A sub-agent's tab is purple all over - a light tint, text, underline
+   and its status icon - so it is told apart from the chat's own tabs at
+   a glance without shouting over them. */
 .chat-tab.subagent-tab {
   border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
-  background: color-mix(in srgb, var(--purple) 24%, transparent);
+  background: color-mix(in srgb, var(--purple) 16%, transparent);
   color: color-mix(in srgb, var(--purple) 75%, var(--fg));
   max-width: 160px;
 }
 
 .chat-tab.subagent-tab:hover {
-  background: color-mix(in srgb, var(--purple) 32%, transparent);
+  background: color-mix(in srgb, var(--purple) 22%, transparent);
 }
 
 .chat-tab.subagent-tab.active {
   border-bottom-color: var(--purple);
-  background: color-mix(in srgb, var(--purple) 40%, transparent);
+  background: color-mix(in srgb, var(--purple) 28%, transparent);
   color: var(--purple);
 }
 
@@ -723,17 +742,17 @@ body {
    colour of its own) would flatten a sub-agent tab into an ordinary
    one; these forms outrank them so it stays purple there too. */
 body.remote-chat #tab-bar .chat-tab.subagent-tab {
-  background: color-mix(in srgb, var(--purple) 24%, transparent);
+  background: color-mix(in srgb, var(--purple) 16%, transparent);
   border-color: color-mix(in srgb, var(--purple) 55%, transparent);
   color: color-mix(in srgb, var(--purple) 75%, var(--fg));
 }
 
 body.remote-chat #tab-bar .chat-tab.subagent-tab:hover {
-  background: color-mix(in srgb, var(--purple) 32%, transparent);
+  background: color-mix(in srgb, var(--purple) 22%, transparent);
 }
 
 body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
-  background: color-mix(in srgb, var(--purple) 40%, transparent);
+  background: color-mix(in srgb, var(--purple) 28%, transparent);
   border-color: var(--purple);
   color: var(--purple);
 }
@@ -770,13 +789,14 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   flex-shrink: 0;
   margin: var(--space-2) var(--space-2-5) 0;
   padding: var(--space-2) 64px var(--space-2) var(--space-3);
-  border: 4px solid var(--cyan);
+  border: 1px solid var(--accent-line);
   border-radius: var(--radius-lg);
 
-  /* Same background and foreground as the thinking panel (.think).
-     Secondary content (controls, info rows, scrollbar) uses the same
-     readable --dim; hover states brighten to the full --fg. */
-  --panel-bg: color-mix(in srgb, var(--cyan) 4%, transparent);
+  /* The task is the one panel the eye should find first: an accent
+     hairline over the accent tint, the transcript panels being neutral.
+     Text is the thinking panel's --dim; secondary content (controls,
+     info rows, scrollbar) shares it and hover states brighten to --fg. */
+  --panel-bg: var(--accent-tint);
   --panel-fg: var(--fg);
   --panel-dim: var(--dim);
 
@@ -966,13 +986,13 @@ body.remote-chat #welcome-config { display: none !important; }
 
 .think {
   padding: var(--space-2) var(--space-3); margin: var(--space-2) 0;
-  border: 1px solid color-mix(in srgb, var(--cyan) 12%, transparent); border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--cyan) 4%, transparent); max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--panel-line); border-radius: var(--radius-lg);
+  background: var(--panel-tint); max-height: 200px; overflow-y: auto;
 }
 
 .think .lbl {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
-  letter-spacing: .04em; color: var(--cyan); margin-bottom: var(--space-1);
+  letter-spacing: .04em; color: var(--dim); margin-bottom: var(--space-1);
   display: flex; align-items: center; gap: var(--space-1-5); cursor: pointer; user-select: none;
 }
 .think .lbl .arrow { transition: transform var(--dur-slow); display: inline-block; font-size: var(--fs-md); }
@@ -1009,7 +1029,7 @@ body.remote-chat #welcome-config { display: none !important; }
 .tc-h {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
   font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  background: color-mix(in srgb, var(--orange) 5%, transparent); color: var(--orange);
+  background: var(--panel-tint); color: var(--dim);
 }
 .tc-h:hover { color: var(--fg); }
 
@@ -1057,7 +1077,7 @@ body.ask-answering #input-container {
 }
 
 .tc-h.tc-h-bash {
-  background: color-mix(in srgb, var(--cyan) 5%, transparent); color: var(--cyan);
+  background: var(--accent-tint); color: var(--accent);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
 .tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-stop-btn) { display: none; }
@@ -1074,7 +1094,7 @@ body.ask-answering #input-container {
 .tc-summary > .tc-h > .collapse-preview { display: none; }
 
 .tc-summary > .tc-h > .tc-summary-hint {
-  color: var(--dim);
+  color: color-mix(in srgb, var(--dim) 70%, transparent);
   font-weight: 400;
   font-style: italic;
   text-transform: none;
@@ -1088,26 +1108,26 @@ body.ask-answering #input-container {
 .summary-sub {
   margin: var(--space-1) var(--space-2) var(--space-1-5) var(--space-4);
   padding-left: var(--space-2-5);
-  border-left: 2px solid color-mix(in srgb, var(--orange) 35%, transparent);
+  border-left: 2px solid var(--panel-line);
 }
 
 .tp {
-  font-size: var(--fs-md); color: var(--cyan);
+  font-size: var(--fs-md); color: var(--accent);
   font-family: var(--vscode-editor-font-family, monospace);
   word-break: break-all;
 }
 .tp[data-path] { cursor: pointer; text-decoration: underline dotted; }
-.tp[data-path]:hover { color: color-mix(in srgb, var(--accent) 82%, transparent); text-decoration: underline solid; }
+.tp[data-path]:hover { color: var(--fg); text-decoration: underline solid; }
 
 .kiss-filelink {
-  color: var(--cyan);
+  color: var(--accent);
   cursor: pointer;
   text-decoration: underline dotted;
   word-break: break-all;
 }
 
 .kiss-filelink:hover {
-  color: color-mix(in srgb, var(--accent) 82%, transparent);
+  color: var(--fg);
   text-decoration: underline solid;
 }
 
@@ -1143,15 +1163,15 @@ body.ask-answering #input-container {
   border: 1px solid var(--border); border-radius: var(--radius-lg);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: var(--fs-md); max-height: 150px; overflow-y: auto;
-  white-space: pre-wrap; word-break: break-word; background: color-mix(in srgb, var(--green) 4%, transparent);
+  white-space: pre-wrap; word-break: break-word; background: var(--panel-tint);
 }
 .tr.err { background: color-mix(in srgb, var(--red) 4%, transparent); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 
 .tr.note { border-color: color-mix(in srgb, var(--green) 20%, transparent); }
 .tr.note strong { color: var(--green); }
 
-.tr.warn { background: color-mix(in srgb, var(--orange) 4%, transparent); border-color: color-mix(in srgb, var(--orange) 20%, transparent); }
-.tr.warn strong { color: var(--orange); }
+.tr.warn { background: color-mix(in srgb, var(--warning) 4%, transparent); border-color: color-mix(in srgb, var(--warning) 20%, transparent); }
+.tr.warn strong { color: var(--warning); }
 
 .tr .rl {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
@@ -1160,16 +1180,16 @@ body.ask-answering #input-container {
 .tr .rl.fail { color: var(--red); }
 
 .rc {
-  border: 1px solid var(--green); border-radius: var(--radius-xl);
+  border: 1px solid var(--border); border-radius: var(--radius-xl);
   margin: var(--space-3) 0; overflow: hidden; background: var(--surface);
 }
 
 .rc-h {
-  padding: var(--space-2-5) var(--space-3); background: color-mix(in srgb, var(--green) 5%, transparent);
+  padding: var(--space-2-5) var(--space-3); background: var(--panel-tint);
   display: flex; justify-content: space-between;
   flex-direction: column; align-items: flex-start; gap: var(--space-1-5);
 }
-.rc-h h3 { color: var(--green); font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-0-5); }
+.rc-h h3 { color: var(--fg); font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-0-5); }
 
 .rs {
   font-size: var(--fs-md); color: var(--dim);
@@ -1183,8 +1203,8 @@ body.ask-answering #input-container {
 }
 .rc-body.pre { white-space: pre-wrap; }
 
-.rc-status { color: var(--yellow); font-weight: 700; font-size: var(--fs-xl); margin-bottom: var(--space-2-5); }
-.rc-status.rc-status-fail { color: var(--red); }
+.rc-status { color: var(--status-ok); font-weight: 700; font-size: var(--fs-xl); margin-bottom: var(--space-2-5); }
+.rc-status.rc-status-fail { color: var(--status-fail); }
 
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: var(--radius-lg); margin: var(--space-2) 0;
@@ -1195,8 +1215,8 @@ body.ask-answering #input-container {
   padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm);
   font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
 }
-.system-prompt-h { background: color-mix(in srgb, var(--purple) 5%, transparent); color: var(--purple); }
-.prompt-h { background: color-mix(in srgb, var(--cyan) 5%, transparent); color: var(--cyan); }
+.system-prompt-h { background: var(--panel-tint); color: var(--dim); }
+.prompt-h { background: var(--accent-tint); color: var(--accent); }
 
 .system-prompt-body, .prompt-body {
   padding: var(--space-2) var(--space-3); font-size: var(--fs-md); word-break: break-word;
@@ -1206,20 +1226,20 @@ body.ask-answering #input-container {
 /* The finished `/ask` answer, shown inside the running task's transcript
    (the answering sub-agent's nested tab closes when it ends). */
 .ask-answer {
-  border: 1px solid var(--cyan); border-radius: var(--radius-lg); margin: var(--space-2) 0;
+  border: 1px solid var(--accent-line); border-radius: var(--radius-lg); margin: var(--space-2) 0;
   overflow: hidden; background: var(--surface);
 }
-.ask-answer.failed { border-color: var(--red); }
+.ask-answer.failed { border-color: var(--status-fail); }
 
 .ask-answer-h {
-  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm); color: var(--cyan);
-  background: color-mix(in srgb, var(--cyan) 5%, transparent);
+  padding: var(--space-1-5) var(--space-3); font-size: var(--fs-sm); color: var(--accent);
+  background: var(--accent-tint);
   display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap;
 }
 
 .ask-answer.failed .ask-answer-h {
-  color: var(--red);
-  background: color-mix(in srgb, var(--red) 8%, transparent);
+  color: var(--status-fail);
+  background: color-mix(in srgb, var(--status-fail) 8%, transparent);
 }
 
 .ask-answer-label {
@@ -1244,7 +1264,7 @@ body.ask-answering #input-container {
 
 .bash-panel {
   /* Same background as the thinking panel (.think). */
-  background: color-mix(in srgb, var(--cyan) 4%, transparent); border: 1px solid var(--border);
+  background: var(--panel-tint); border: 1px solid var(--border);
   border-radius: var(--radius-lg); margin: var(--space-0-5) 0 var(--space-2); padding: var(--space-2) var(--space-2-5);
 }
 
@@ -1253,9 +1273,9 @@ body.ask-answering #input-container {
   border-top: 1px solid var(--border);
 
   /* The parent .tc paints the opaque --surface, so the translucent
-     cyan tint alone would render lighter here than the thinking panel
-     (which sits over --bg). Mix over --bg to keep the pixels equal. */
-  background: color-mix(in srgb, var(--cyan) 4%, var(--bg));
+     tint alone would render lighter here than the thinking panel
+     (which sits over --bg). Pre-mixed over --bg to keep the pixels equal. */
+  background: var(--panel-tint-solid);
 }
 
 .tc > .tr {
@@ -2335,11 +2355,12 @@ body.sidebar-chat-mode #meta-info-content {
   max-height: 90vh;
   background: var(--bg2);
 
-  /* Green theme border so the settings dialog stands out on every
-     surface (sidebar, editor panel; the remote page restates it in
-     remote-codex.css with the same variable). */
-  border: 2px solid var(--green);
+  /* A hairline and the dialog elevation lift the settings dialog off
+     the page on every surface (sidebar, editor panel; the remote page
+     restates the border in remote-codex.css through --settings-border). */
+  border: 1px solid var(--settings-border, var(--border));
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   z-index: var(--z-drawer);
   padding: var(--space-4);
   overflow-y: auto;
@@ -2548,10 +2569,10 @@ body.sidebar-chat-mode #meta-info-content {
   flex-shrink: 0;
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
-  color: color-mix(in srgb, var(--ink) 65%, transparent);
+  color: var(--dim);
   padding: var(--space-0-5) var(--space-1-5);
   border-radius: var(--radius-xl);
-  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .sidebar-section {
@@ -3028,8 +3049,8 @@ body.sidebar-chat-mode #meta-info-content {
 
 /* Another worktree checked out at this commit (its folder name). */
 .scm-ref.is-worktree {
-  border-color: var(--cyan);
-  color: var(--cyan);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* Multiple worktrees: one header per worktree (folder name, branch,
@@ -3661,16 +3682,15 @@ body.sidebar-chat-mode #meta-info-content {
 .history-chat-group + .history-chat-group { border-top: none; }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task on ONE line (ellipsized), in the cyan of a Bash tool call's
-   header in the transcript (.tc-h-bash).  A light tint, stronger than
-   that header's 5% (at 8% it vanished behind plain --fg text).  Square
-   like its panel.  No tooltip: the line is all there is. */
+   task on ONE line (ellipsized), on an accent tint stronger than the
+   transcript's --accent-tint (at 8% it vanished behind plain --fg
+   text).  Square like its panel.  No tooltip: the line is all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
   width: 100%;
-  background: color-mix(in srgb, var(--cyan) 18%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   border: none;
   border-radius: 0;
   padding: var(--space-1) var(--space-1-5);
@@ -3684,7 +3704,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--cyan) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .history-chat-chevron {
@@ -3771,9 +3791,9 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The task panel of the task the user is looking at (the chat webview
-   on screen), in the green of the Result panel's header (.rc-h) so the
-   eye finds it in the list; well above that header's 8% tint, which
-   was indistinguishable from the other panels.  The body.remote-chat
+   on screen): an accent fill and outline so the eye finds it in the
+   list, well above the transcript's 8% accent tint, which was
+   indistinguishable from the other panels.  The body.remote-chat
    form outranks the remote webapp's plain .running-item background in
    remote-codex.css; the :hover forms outrank both surfaces' generic
    .sidebar-item:hover rules, so the cue survives the pointer (hover
@@ -3782,8 +3802,8 @@ body.sidebar-chat-mode #meta-info-content {
 .running-item.history-active-task:hover,
 body.remote-chat .running-item.history-active-task,
 body.remote-chat .running-item.history-active-task:hover {
-  background-color: color-mix(in srgb, var(--green) 28%, transparent);
-  border-color: color-mix(in srgb, var(--green) 75%, transparent);
+  background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .running-item > .sidebar-item-text {
@@ -3913,16 +3933,6 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-item-copy.copied { opacity: 0.9; color: var(--status-ok); }
 
-/* The frequent-tasks list keeps its pastel per-task backgrounds with
-   dark text, so its inline buttons stay dark too. */
-.frequent-item .sidebar-item-delete,
-.frequent-item .sidebar-item-copy { color: var(--ink); }
-
-.frequent-item .sidebar-item-delete:hover,
-.frequent-item .sidebar-item-copy:hover {
-  background: color-mix(in srgb, var(--ink) 10%, transparent);
-}
-
 .sidebar-item-favorite.favorited { color: var(--favorite); opacity: 1; }
 .sidebar-item-favorite.favorited:hover { color: var(--favorite); opacity: 1; }
 
@@ -3943,19 +3953,19 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-confirm-yes,
 .sidebar-confirm-no {
-  border: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
+  border: 1px solid var(--border);
   cursor: pointer; padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm); line-height: 1; display: flex; align-items: center;
   font-size: var(--fs-base); font-weight: 600;
-  background: var(--paper);
-  transition: filter var(--dur-base), background var(--dur-base);
+  background: var(--surface2);
+  transition: background var(--dur-base), border-color var(--dur-base);
 }
 
 .sidebar-confirm-yes { color: var(--status-fail); }
-.sidebar-confirm-yes:hover { background: var(--paper); filter: brightness(0.95); }
+.sidebar-confirm-yes:hover { background: color-mix(in srgb, var(--status-fail) 12%, var(--surface2)); border-color: var(--status-fail); }
 
 .sidebar-confirm-no { color: var(--status-ok); }
-.sidebar-confirm-no:hover { background: var(--paper); filter: brightness(0.95); }
+.sidebar-confirm-no:hover { background: color-mix(in srgb, var(--status-ok) 12%, var(--surface2)); border-color: var(--status-ok); }
 
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
@@ -4106,12 +4116,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 #custom-tooltip.task-panel-tooltip {
   font-size: var(--vscode-editor-font-size);
 
-  /* Match the task panel's thinking-panel palette (opaque: the
-     tooltip floats over arbitrary content, so the translucent cyan
-     tint is pre-mixed over --bg). */
-  background: color-mix(in srgb, var(--cyan) 4%, var(--bg));
+  /* Match the task panel's palette (opaque: the tooltip floats over
+     arbitrary content, so the accent tint is pre-mixed over --bg). */
+  background: var(--accent-tint-solid);
   color: var(--dim);
-  border-color: var(--cyan);
+  border-color: var(--accent-line);
 }
 
 .wt-bar {
@@ -4228,7 +4237,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .llm-panel-hdr {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--yellow);
+  color: var(--dim);
   display: flex; align-items: center; padding-bottom: var(--space-1);
 }
 .llm-panel-hdr:hover { color: var(--fg); }

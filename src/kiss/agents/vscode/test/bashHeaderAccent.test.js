@@ -75,7 +75,7 @@ function testBashHeaderHasBashMarkerClass() {
   assert.ok(
     hdr.classList.contains('tc-h-bash'),
     'BUG: Bash tool_call header must carry a "tc-h-bash" CSS hook ' +
-      'so the stylesheet can paint it cyan — got classes: ' +
+      'so the stylesheet can paint it in the accent — got classes: ' +
       JSON.stringify(Array.from(hdr.classList)),
   );
   win.close();
@@ -104,28 +104,28 @@ function testNonBashHeaderDoesNotHaveBashMarker() {
   console.log('  ok - non-Bash tool_call header has no tc-h-bash class');
 }
 
-function testCssDeclaresCyanRuleForBashHeader() {
+function testCssDeclaresAccentRuleForBashHeader() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const blockRe = /([^{}]*tc-h-bash[^{}]*)\{([^}]*)\}/g;
   let match;
-  let foundCyanRule = false;
+  let foundAccentRule = false;
   while ((match = blockRe.exec(css)) !== null) {
     const body = match[2];
-    if (/color\s*:\s*var\(\s*--cyan\s*\)/.test(body)) {
-      foundCyanRule = true;
+    if (/color\s*:\s*var\(\s*--accent\s*\)/.test(body)) {
+      foundAccentRule = true;
       break;
     }
   }
   assert.ok(
-    foundCyanRule,
+    foundAccentRule,
     'BUG: main.css must declare a "tc-h-bash" selector with ' +
-      '"color: var(--cyan)" so the Bash tool_call header renders ' +
-      'in the cyan theme color',
+      '"color: var(--accent)" so the Bash tool_call header renders ' +
+      'in the theme accent, apart from the neutral tool headers',
   );
-  console.log('  ok - main.css colours .tc-h-bash with var(--cyan)');
+  console.log('  ok - main.css colours .tc-h-bash with var(--accent)');
 }
 
-function testBashHeaderComputedStyleIsCyan() {
+function testBashHeaderComputedStyleIsAccent() {
   const {win} = makeWebview();
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const styleEl = win.document.createElement('style');
@@ -147,14 +147,14 @@ function testBashHeaderComputedStyleIsCyan() {
       JSON.stringify(color),
   );
   win.close();
-  console.log('  ok - Bash header computed style picks up the cyan rule');
+  console.log('  ok - Bash header computed style picks up the accent rule');
 }
 
 function runTests() {
   testBashHeaderHasBashMarkerClass();
   testNonBashHeaderDoesNotHaveBashMarker();
-  testCssDeclaresCyanRuleForBashHeader();
-  testBashHeaderComputedStyleIsCyan();
+  testCssDeclaresAccentRuleForBashHeader();
+  testBashHeaderComputedStyleIsAccent();
 }
 
 try {

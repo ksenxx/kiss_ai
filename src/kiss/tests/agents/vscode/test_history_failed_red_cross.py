@@ -22,8 +22,9 @@ function shipped in ``media/main.js`` against the real
   running and completed sessions, and
 * it asserts that the failed row gets a ``.sidebar-item-failed``
   element that is actually painted, has the right geometry (8 × 8 px,
-  rounded), the right colour (the failure red ``#d32f2f`` ≡
-  ``rgb(211, 47, 47)``), and the right accessibility metadata
+  rounded), the right colour (the theme's failure red, ``--status-fail``
+  -> ``--vscode-charts-red``, ``#f44747`` ≡ ``rgb(244, 71, 71)`` in the
+  harness), and the right accessibility metadata
   (``aria-label='Task failed'``), while non-failed rows do not receive
   it.
 
@@ -394,7 +395,7 @@ def test_user_cancelled_task_from_backend_history_renders_red_cross(
             "hasFailedDot": True,
             "dotVisible": True,
             "dotIsCross": True,
-            "dotBackground": "rgb(211, 47, 47)",
+            "dotBackground": "rgb(244, 71, 71)",
             "dotWidth": "12px",
             "dotHeight": "12px",
         }
@@ -467,9 +468,9 @@ def test_failed_session_renders_red_cross(_browser) -> None:
         assert "svg" in (dot["maskImage"] or ""), (
             f"failed cross must be drawn by the SVG mask: mask-image={dot['maskImage']!r}"
         )
-        assert dot["background"] == "rgb(211, 47, 47)", (
+        assert dot["background"] == "rgb(244, 71, 71)", (
             f"failed cross is not the failure-red colour: "
-            f"background-color={dot['background']!r}; expected rgb(211, 47, 47)"
+            f"background-color={dot['background']!r}; expected rgb(244, 71, 71)"
         )
         assert dot["visibility"] == "visible", (
             f"failed dot is hidden: visibility={dot['visibility']!r}"
@@ -670,7 +671,7 @@ def test_search_results_can_render_failed_red_cross(_browser) -> None:
                 row.querySelector('.sidebar-item-text').textContent ===
                   'failing task' &&
                 !!dot && dot.offsetParent !== null &&
-                getComputedStyle(dot).backgroundColor === 'rgb(211, 47, 47)';
+                getComputedStyle(dot).backgroundColor === 'rgb(244, 71, 71)';
             }
             """
         )

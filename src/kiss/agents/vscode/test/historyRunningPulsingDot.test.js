@@ -182,8 +182,8 @@ function testDotRendersForRunningRow() {
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
     cs.color,
-    'rgb(46, 125, 50)',
-    `spinner colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
+    'var(--green)',
+    `spinner colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';

@@ -22,7 +22,7 @@ const MAIN_CSS = path.join(__dirname, '..', 'media', 'main.css');
 
 // Names of the design tokens (see the "Design tokens" block in main.css).
 const TOKEN_NAME =
-  /^--(fs|space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention)\b/;
+  /^--(fs|space|radius|shadow|scrim|z|dur|ease|status|favorite|on-accent|paper|ink|attention|panel-tint|panel-tint-solid|panel-line|accent-tint|accent-tint-solid|accent-line)\b/;
 
 /**
  * Return {name: value} for every design token in main.css's first :root.
