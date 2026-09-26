@@ -1388,6 +1388,16 @@
     }
     const btn = document.getElementById('theme-btn');
     if (btn) updateThemeButton(btn);
+    // Monaco's theme is global: one call recolours every open editor.
+    if (window.monaco && window.monaco.editor) {
+      window.monaco.editor.setTheme(contentMonacoTheme());
+    }
+  }
+
+  // Monaco's built-in theme matching the page: 'vs' (light) under the
+  // remote webapp's light theme, 'vs-dark' otherwise.
+  function contentMonacoTheme() {
+    return document.body.classList.contains('light-theme') ? 'vs' : 'vs-dark';
   }
 
   function toggleRemoteTheme() {
@@ -2095,7 +2105,7 @@
         automaticLayout: true,
         minimap: {enabled: false},
         scrollBeyondLastLine: false,
-        theme: 'vs-dark',
+        theme: contentMonacoTheme(),
       });
       tab.contentEditor = editor;
       appendContentMenuBar(tab, holder, editable);
