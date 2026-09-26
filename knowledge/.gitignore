@@ -1,5 +1,0 @@
-# Regenerable embedding index (memoryfield VectorIndex writes <model>.sqlite3 here).
-*.sqlite3
-*.sqlite3-*
-# Staging files left behind if a page write is killed mid-way (kiss.core.utils atomic write).
-.*.md-*

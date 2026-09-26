@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -30,7 +31,7 @@ from kiss.agents.sorcar.fanout_guard import (
     parse_tasks_json,
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
-from kiss.agents.sorcar.relentless_agent import RelentlessAgent
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -48,7 +49,7 @@ from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
-from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
+from kiss.core.memoryfield.tools import MemoryTools
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -213,6 +214,55 @@ def _memory_settings() -> tuple[bool, Path]:
     raw_dir = str(cfg.get("memory_dir", "")).strip()
     root = Path(raw_dir).expanduser() if raw_dir else kiss_home() / "memories"
     return enabled, root
+
+
+def _repo_memory_domains(work_dir: str) -> dict[str, str]:
+    """The domain memories a run in *work_dir* attaches: the memory of its repository.
+
+    A repository's memory is the sub-directory of the general memory named
+    after the repository's top-level directory (slugified).  The main
+    checkout, its sub-directories and its linked worktrees share one name:
+    ``git rev-parse --git-common-dir`` points at the main checkout's
+    ``.git`` even from a worktree, and that directory's parent is the
+    checkout.  When the common dir is not a ``.git`` directory (a
+    submodule's ``.git/modules/<name>``, a ``--separate-git-dir`` layout),
+    the current checkout's ``--show-toplevel`` names the repository
+    instead.  Pages about the repository's code, architecture and
+    conventions live there rather than in the general memory of daily work.
+
+    Args:
+        work_dir: The run's effective working directory
+            (:func:`resolve_work_dir`).  It may not exist yet (the run
+            creates it); the nearest existing ancestor decides.  A
+            directory outside any git work tree attaches no domain memory.
+
+    Returns:
+        ``{memory_name: description}`` for :class:`MemoryTools`'s *domains*.
+    """
+    from kiss.core.memoryfield.pages import slugify
+    from kiss.core.memoryfield.tools import GENERAL
+
+    cwd = Path(work_dir)
+    while not cwd.is_dir():
+        if cwd.parent == cwd:
+            return {}
+        cwd = cwd.parent
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir", "--show-toplevel"],
+            cwd=cwd, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 2:
+        return {}  # not a repository, or a bare one (no work tree)
+    common_dir = (cwd / lines[0]).resolve()
+    repo = common_dir.parent if common_dir.name == ".git" else Path(lines[1]).resolve()
+    name = slugify(repo.name)
+    if name == GENERAL:
+        name = f"{GENERAL}-repo"  # the general memory's own name is reserved
+    return {name: f"memory of the repository {repo}"}
 
 
 def _generate_commit_message(
@@ -2697,8 +2747,10 @@ class SorcarAgent(RelentlessAgent):
                 use_memory_override=use_memory,
             )
             if memory_root is not None:
-                self._memory_tools = MemoryTools(memory_root)
-                system_instructions += "\n\n" + MEMORY_PROTOCOL
+                self._memory_tools = MemoryTools(
+                    memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
+                )
+                system_instructions += "\n\n" + self._memory_tools.protocol()
             prompt = prompt_template
             if attachments:
                 parts = _attachment_parts(attachments)

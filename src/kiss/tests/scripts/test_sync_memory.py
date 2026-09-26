@@ -166,6 +166,26 @@ def test_a_page_changed_on_both_in_the_same_second_is_a_named_conflict(box: Sand
     assert "hold the same pages" not in result.stdout
 
 
+def test_domain_memories_travel_with_the_general_memory(box: Sandbox) -> None:
+    """Pages of a nested domain memory (``<memory>/kiss/``) sync like general pages."""
+    MemoryDir(box.local_mem / "kiss").write("laptop-repo-fact", "from the laptop", summary="a")
+    MemoryDir(box.remote_mem / "kiss").write("server-repo-fact", "from the server", summary="b")
+    MemoryDir(box.local_mem).write("general-fact", "general", summary="c")
+    write(box.local_mem / "kiss", "clash", "laptop view", "2026-09-20T10:00:00Z")
+    write(box.remote_mem / "kiss", "clash", "server view", "2026-09-20T10:00:00Z")
+    result = box.run()
+    assert result.returncode == 0, result.stdout + result.stderr
+    for mem in (box.local_mem, box.remote_mem):
+        assert MemoryDir(mem / "kiss").page_names() == [
+            "clash", "laptop-repo-fact", "server-repo-fact",
+        ]
+        assert MemoryDir(mem).page_names() == ["general-fact"]
+    assert MemoryDir(box.remote_mem / "kiss").read("clash").body.strip() == "server view"
+    assert "This machine's memory: added 1 updated 0 kept 0 conflicts 1" in result.stdout
+    assert "me@fakehost's memory: added 2 updated 0 kept 1 conflicts 1" in result.stdout
+    assert "both machines changed kiss/clash in the same second" in result.stdout
+
+
 def test_a_second_sync_changes_nothing(box: Sandbox) -> None:
     """Once in sync, a sync copies nothing and rewrites no file."""
     MemoryDir(box.local_mem).write("a", "aa")
@@ -438,6 +458,25 @@ def test_merge_skips_everything_that_is_not_a_page(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == "added 1 updated 0 kept 0 conflicts 0\n"
     assert sorted(p.name for p in dst.iterdir()) == ["good-page.md"]
+
+
+def test_merge_recurses_one_level_into_domain_memories_only(tmp_path: Path) -> None:
+    """``src/kiss/*.md`` lands in ``dst/kiss/``; deeper levels and symlinked dirs stay behind."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    write(src / "kiss", "repo-fact", "about the repo", "2026-09-20T10:00:00Z")
+    write(src / "kiss" / "deeper", "too-deep", "two levels down", "2026-09-20T10:00:00Z")
+    write(src / "other", "elsewhere", "another domain", "2026-09-20T10:00:00Z")
+    (src / "linked").symlink_to(src / "other")
+    write(dst / "kiss", "repo-fact", "older view", "2026-09-19T10:00:00Z")
+    result = merge(src, dst)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "added 1 updated 1 kept 0 conflicts 0\n"
+    assert sorted(p.name for p in dst.iterdir()) == ["kiss", "other"]
+    assert (dst / "kiss" / "repo-fact.md").read_bytes() == (
+        (src / "kiss" / "repo-fact.md").read_bytes()
+    )
+    assert not (dst / "kiss" / "deeper").exists()
+    assert (dst / "other" / "elsewhere.md").exists()
 
 
 def test_merge_falls_back_to_the_file_time_without_a_parsable_stamp(tmp_path: Path) -> None:

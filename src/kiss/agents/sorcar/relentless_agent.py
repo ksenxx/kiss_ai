@@ -343,6 +343,20 @@ WORK_DIR_LINE = "- Work dir: {work_dir}\n"
 
 TASK_SETTINGS_HEADER = "\n# Task Settings\n"
 
+
+def resolve_work_dir(work_dir: str | None) -> str:
+    """The absolute working directory a run with this ``work_dir`` argument uses.
+
+    ``None`` or ``""`` means ``artifact_dir/kiss_workdir``.  The directory is
+    not created here; :meth:`RelentlessAgent._reset` does that when the run
+    starts.
+
+    Args:
+        work_dir: The ``work_dir`` argument of :meth:`RelentlessAgent.run`.
+    """
+    default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
+    return str(Path(work_dir or default_work_dir).resolve())
+
 #: Consecutive continuation sessions that made no progress — no tool
 #: call other than ``finish``, or a summary identical to the previous
 #: session's — after which :meth:`RelentlessAgent.perform_task` stops
@@ -640,9 +654,7 @@ class RelentlessAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
-
-        self.work_dir = str(Path(work_dir or default_work_dir).resolve())
+        self.work_dir = resolve_work_dir(work_dir)
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
         self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000

@@ -7,14 +7,15 @@
 
 The agent's persistent memory (``kiss.core.memoryfield``) is a flat directory
 of Markdown pages, ``<name>.md``, each starting with a YAML frontmatter block
-that carries an ``updated`` timestamp.  scripts/sync-memory.sh copies the
-pages of one machine next to the memory of the other and runs this to fold
-them in.
+that carries an ``updated`` timestamp, plus its domain memories: flat page
+directories nested one level down, ``<name>/`` (the memory of a repository,
+for example).  scripts/sync-memory.sh copies the pages of one machine next to
+the memory of the other and runs this to fold them in.
 
 Usage:
     python3 merge_memory_pages.py SOURCE_DIR DEST_DIR
 
-For every page in ``SOURCE_DIR``:
+For every page in ``SOURCE_DIR`` and in each of its domain memories:
 
 * a page ``DEST_DIR`` does not have is added;
 * a page both have with the same bytes is left alone;
@@ -40,7 +41,8 @@ Stdlib-only and self-contained, so it can be copied to a remote machine and
 run there with the system ``python3`` before the project's environment exists.
 
 Prints one summary line -- ``added N updated N kept N conflicts N`` -- followed
-by the name of every conflicting page, one per line.
+by the name of every conflicting page, one per line (``<memory>/<name>`` for a
+page of a domain memory).
 """
 
 from __future__ import annotations
@@ -128,13 +130,28 @@ def install_page(source: Path, dest: Path) -> None:
             staging.unlink()
 
 
-def merge(source_dir: Path, dest_dir: Path) -> tuple[dict[str, int], list[str]]:
-    """Fold the pages of *source_dir* into *dest_dir*.
+def is_domain_memory(path: Path) -> bool:
+    """Return True when *path* is a domain memory: a sub-directory named like a page.
+
+    A memory's domain memories (the repository memory, for example) are
+    flat page directories nested one level down, ``<memory>/<name>/``
+    (``kiss.core.memoryfield.tools.MemoryTools``).
+
+    Args:
+        path: An entry of a memory directory.
+    """
+    return bool(PAGE_NAME_RE.match(path.name)) and not path.is_symlink() and path.is_dir()
+
+
+def merge(source_dir: Path, dest_dir: Path, prefix: str = "") -> tuple[dict[str, int], list[str]]:
+    """Fold the pages of *source_dir* into *dest_dir*, domain memories included.
 
     Args:
         source_dir: Pages to merge in.  A directory that does not exist holds
             no pages.
         dest_dir: The memory receiving them; created when missing.
+        prefix: Prepended to conflicting page names, ``"<memory>/"`` when
+            merging a domain memory.
 
     Returns:
         The counts of ``added``, ``updated``, ``kept`` and ``conflicts`` pages,
@@ -146,6 +163,12 @@ def merge(source_dir: Path, dest_dir: Path) -> tuple[dict[str, int], list[str]]:
         return counts, conflicts
     dest_dir.mkdir(parents=True, exist_ok=True)
     for source in sorted(source_dir.iterdir()):
+        if not prefix and is_domain_memory(source):
+            sub_counts, sub_conflicts = merge(source, dest_dir / source.name, source.name + "/")
+            for key, value in sub_counts.items():
+                counts[key] += value
+            conflicts.extend(sub_conflicts)
+            continue
         if not is_page(source):
             continue
         dest = dest_dir / source.name
@@ -167,7 +190,7 @@ def merge(source_dir: Path, dest_dir: Path) -> tuple[dict[str, int], list[str]]:
             counts["kept"] += 1
         else:
             counts["conflicts"] += 1
-            conflicts.append(source.stem)
+            conflicts.append(prefix + source.stem)
     return counts, conflicts
 
 

@@ -1,14 +1,25 @@
-"""Measure how well memory search answers a fixed question set over a knowledge base.
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Measure how well memory search answers a fixed question set over one memory.
 
 Each question in the YAML file lists the pages that answer it (``gold``). The script
 syncs the same index the agent's ``memory_search`` tool uses (``VectorIndex`` over
 ``MemoryDir``), runs every question, and prints the rank of the best gold page,
 Recall@1/3/5 and MRR. It exits 1 when Recall@5 is below ``--min-recall5``.
 
+The memory is one flat page directory: the general memory (``~/.kiss/memories``)
+or one of its domain memories (``~/.kiss/memories/kiss`` for the kiss repository).
+The question set defaults to ``<memory>/eval/questions.yaml``, a YAML list of
+``{q: <question>, gold: [<page name>, ...]}`` entries.
+
 Run::
 
-    uv run python knowledge/eval/search_eval.py            # OpenAI embedder if key set
-    uv run python knowledge/eval/search_eval.py --hashed   # offline embedder
+    # OpenAI embedder when OPENAI_API_KEY is set, else the offline one:
+    uv run python -m kiss.scripts.memory_search_eval ~/.kiss/memories/kiss
+    # force the offline embedder:
+    uv run python -m kiss.scripts.memory_search_eval ~/.kiss/memories/kiss --hashed
 """
 
 import argparse
@@ -20,7 +31,6 @@ import yaml
 from kiss.core.memoryfield import MemoryDir, VectorIndex, hashed_embedding
 from kiss.core.memoryfield.index import HASHED_EMBEDDING_MODEL_CODE
 
-HERE = Path(__file__).resolve().parent
 FETCH_K = 10  # results fetched per question; must be >= 5 for R@5
 
 
@@ -46,12 +56,16 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         0 when Recall@5 reaches ``--min-recall5``, else 1.
     """
-    parser = argparse.ArgumentParser(description="Search test for a memory knowledge base.")
-    parser.add_argument("--dir", type=Path, default=HERE.parent, help="knowledge directory")
-    parser.add_argument("--questions", type=Path, default=HERE / "questions.yaml")
+    parser = argparse.ArgumentParser(description="Search test for one memory's pages.")
+    parser.add_argument("dir", type=Path, help="the memory directory (a flat directory of pages)")
+    parser.add_argument(
+        "--questions", type=Path, default=None,
+        help="question set; default <dir>/eval/questions.yaml",
+    )
     parser.add_argument("--hashed", action="store_true", help="use the offline embedder")
     parser.add_argument("--min-recall5", type=float, default=0.0)
     args = parser.parse_args(argv)
+    questions_file = args.questions or args.dir / "eval" / "questions.yaml"
 
     memory = MemoryDir(args.dir)
     if args.hashed:
@@ -59,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         index = VectorIndex(memory)
     index.sync()
-    questions = yaml.safe_load(args.questions.read_text())
+    questions = yaml.safe_load(questions_file.read_text())
     unknown = sorted({g for q in questions for g in q["gold"]} - set(memory.page_names()))
     if unknown:
         print(f"Gold pages missing from {memory.root}: {', '.join(unknown)}")

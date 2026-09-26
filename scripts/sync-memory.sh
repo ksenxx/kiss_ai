@@ -16,7 +16,9 @@
 #
 # The memory is a flat directory of Markdown pages (kiss.core.memoryfield), each
 # with a frontmatter ``updated`` timestamp, plus a ``*.sqlite3`` vector index
-# that is a cache keyed by page content.  Two passes, in this order:
+# that is a cache keyed by page content; its domain memories (the memory of a
+# repository, for example) are such directories nested one level down and
+# travel with it.  Two passes, in this order:
 #
 #   1. remote -> here.  The remote's pages travel as a tar stream over the ssh
 #      connection itself (a fresh cloud image has no rsync) into a scratch

@@ -2,21 +2,29 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent tools over a memoryfield: search, pull, read, write, list, delete.
+"""Agent tools over one or more memoryfields: search, pull, read, write, list, delete.
 
 Pass the bound methods of :class:`MemoryTools` to ``KISSAgent.run(tools=...)``
-and prepend :data:`MEMORY_PROTOCOL` to the system prompt. Every search first
-runs an incremental index sync, so pages written by any process (the agent,
-a human in an editor, git pull) are searchable without a separate reindex.
+and append :meth:`MemoryTools.protocol` to the system prompt. Every search
+first runs an incremental index sync, so pages written by any process (the
+agent, a human in an editor, a sync script) are searchable without a
+separate reindex.
+
+A :class:`MemoryTools` serves a *general* memory (its ``root`` directory)
+plus any number of *domain* memories, each a sub-directory ``root/<name>``
+with its own pages and index -- for example the memory of the repository the
+agent works in.  Page names carry the memory: ``<page>`` is a page of the
+general memory, ``<memory>/<page>`` a page of that domain memory.
 """
 
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kiss.core.memoryfield.index import Embedder, SearchHit, VectorIndex, embedding_text
-from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir
+from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, is_valid_page_name
 
 MEMORY_PROTOCOL = """\
 ## Memory
@@ -40,6 +48,20 @@ search index. Follow this protocol:
    or delete stale pages.
 """
 
+DOMAINS_PROTOCOL = """\
+5. You have several memories. A page of the general memory is named `<page>`; a
+   page of a domain memory is named `<memory>/<page>`, and `memory_search`,
+   `memory_pull`, `memory_list` and `memory_refresh` cover every memory unless
+   `memory=` narrows them (`general` is the general memory). Domain memories:
+{domains}
+   Store what you learn about a domain in its memory (for a repository: its
+   code, architecture, conventions, root causes of its bugs) and keep the
+   general memory for user preferences and lessons that cross domains.
+"""
+
+GENERAL = "general"
+"""The ``memory=`` value that narrows a tool to the general memory."""
+
 _EPHEMERAL_NAME_RE = re.compile(r"(^|-)(round|session|iteration|pass)-?\d+(-|$)")
 """Page names such as ``muse-auth-round4-review`` or ``server-fixes-round-7``
 are per-round working notes (36 of 260 pages in the 2026-09-19 audit)."""
@@ -58,18 +80,30 @@ def _format_hits(hits: list[SearchHit]) -> str:
     return "\n".join(lines)
 
 
+def _qualified(memory: str, name: str) -> str:
+    """The page name an agent sees: ``name`` in the general memory, else ``memory/name``."""
+    return name if memory == GENERAL else f"{memory}/{name}"
+
+
 class MemoryTools:
-    """Tool set giving an agent read/write access to one memory directory.
+    """Tool set giving an agent read/write access to a general memory and its domain memories.
 
     Args:
-        root: The memory directory (created on first write).
+        root: The general memory directory (created on first write).
         embed: Embedding function; defaults to
             :func:`kiss.core.memoryfield.index.default_embedder` — the
             framework's ``text-embedding-3-small`` model when an
             ``OPENAI_API_KEY`` is available, else the fully offline
             :func:`kiss.core.memoryfield.index.hashed_embedding`.
         model_code: Overrides the embedding-model identifier used to name the
-            index file.
+            index files.
+        domains: Domain memories to attach, ``{name: description}``; each
+            lives in the sub-directory ``root/<name>`` and its pages are
+            addressed as ``<name>/<page>``.  A name must follow the page
+            naming rules and must not be ``"general"``.
+
+    Raises:
+        ValueError: On an invalid domain name.
     """
 
     def __init__(
@@ -77,9 +111,22 @@ class MemoryTools:
         root: str | Path,
         embed: Embedder | None = None,
         model_code: str | None = None,
+        domains: dict[str, str] | None = None,
     ) -> None:
         self.memory = MemoryDir(root)
         self.index = VectorIndex(self.memory, embed=embed, model_code=model_code)
+        self.domains: dict[str, str] = dict(domains or {})
+        self.indexes: dict[str, VectorIndex] = {GENERAL: self.index}
+        for name in self.domains:
+            if name == GENERAL or not is_valid_page_name(name):
+                raise ValueError(
+                    f"Invalid memory name {name!r}: use lowercase letters, digits and "
+                    f"hyphens, starting and ending with a letter or digit, not {GENERAL!r}."
+                )
+            self.indexes[name] = VectorIndex(
+                MemoryDir(self.memory.root / name), embed=self.index.embed,
+                model_code=self.index.model_code,
+            )
 
     def tools(self) -> list:
         """The callables to register with ``KISSAgent.run(tools=...)``."""
@@ -93,50 +140,129 @@ class MemoryTools:
             self.memory_refresh,
         ]
 
-    def _search(self, query: str, k: int) -> list[SearchHit]:
-        """Sync the index and search it, embedding the query during the sync.
+    def protocol(self) -> str:
+        """The system-prompt block governing these tools.
+
+        :data:`MEMORY_PROTOCOL`, followed by a description of the attached
+        domain memories and how their pages are named when there are any.
+        """
+        if not self.domains:
+            return MEMORY_PROTOCOL
+        lines = "\n".join(
+            f"   - `{name}/`: {description}" for name, description in self.domains.items()
+        )
+        return MEMORY_PROTOCOL + DOMAINS_PROTOCOL.format(domains=lines)
+
+    def _selected(self, memory: str) -> dict[str, VectorIndex]:
+        """The indexes a ``memory=`` argument selects: all when empty, else that one.
+
+        Raises:
+            ValueError: If *memory* names no attached memory.
+        """
+        if not memory:
+            return self.indexes
+        if memory not in self.indexes:
+            raise ValueError(
+                f"unknown memory {memory!r}; memories: {', '.join(self.indexes)}."
+            )
+        return {memory: self.indexes[memory]}
+
+    def _locate(self, name: str) -> tuple[str, MemoryDir, str]:
+        """Split a page name into ``(memory, its MemoryDir, bare page name)``.
+
+        Raises:
+            ValueError: If the name's memory prefix names no attached memory.
+        """
+        memory, sep, page = name.partition("/")
+        if not sep or not is_valid_page_name(memory):
+            # No prefix, or a prefix (such as "..") that cannot name a memory:
+            # the general MemoryDir validates the whole name.
+            return GENERAL, self.memory, name
+        if memory not in self.indexes:
+            raise ValueError(
+                f"unknown memory {memory!r} in page name {name!r}; "
+                f"memories: {', '.join(self.indexes)}."
+            )
+        return memory, self.indexes[memory].memory, page
+
+    @staticmethod
+    def _search_one(memory: str, index: VectorIndex, query: str, k: int) -> list[SearchHit]:
+        """Sync one index and search it, embedding the query during the sync.
 
         The query's embedding request runs on a worker thread while the
         sync scans the directory (and embeds any changed pages), so the
-        call costs about one embedding round trip instead of two.
+        call costs about one embedding round trip instead of two.  Hit
+        names come back qualified with the memory they were found in.
         """
         if k <= 0:
-            self.index.sync()
+            index.sync()
             return []
         with ThreadPoolExecutor(max_workers=1) as pool:
-            query_vector = pool.submit(self.index.embed_query, query)
-            self.index.sync()
+            query_vector = pool.submit(index.embed_query, query)
+            index.sync()
             query_vector.result()  # re-raises an embedding failure
-        return self.index.search(query, k=k)
+        return [
+            replace(hit, name=_qualified(memory, hit.name)) for hit in index.search(query, k=k)
+        ]
 
-    def memory_search(self, query: str, k: int = 5) -> str:
+    def _search(self, query: str, k: int, memory: str) -> list[SearchHit]:
+        """Search the selected memories concurrently and merge the best *k* hits."""
+        selected = self._selected(memory)
+        with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+            futures = [
+                pool.submit(self._search_one, name, index, query, k)
+                for name, index in selected.items()
+            ]
+            hits = [hit for future in futures for hit in future.result()]
+        hits.sort(key=lambda hit: (-hit.score, hit.name))
+        return hits[:k]
+
+    def _no_hits(self, memory: str) -> str:
+        return (
+            "No memory pages yet."
+            if all(index.count() == 0 for index in self._selected(memory).values())
+            else "No matches."
+        )
+
+    def memory_search(self, query: str, k: int = 5, memory: str = "") -> str:
         """Semantic search over memory pages; returns the best-matching page names with scores.
 
         Args:
             query: What you want to recall, phrased as a question or topic.
             k: Maximum number of pages to return (default 5).
+            memory: Search only this memory ('general' or a domain memory's
+                name); empty (default) searches every memory.
         """
-        hits = self._search(query, k)
+        try:
+            hits = self._search(query, k, memory)
+        except ValueError as e:
+            return f"Error: {e}"
         if not hits:
-            return "No memory pages yet." if self.index.count() == 0 else "No matches."
+            return self._no_hits(memory)
         return _format_hits(hits)
 
-    def memory_pull(self, query: str, k: int = 3) -> str:
+    def memory_pull(self, query: str, k: int = 3, memory: str = "") -> str:
         """Semantic search that returns the full contents of the matching pages in one call.
 
         Args:
             query: What you want to recall, phrased as a question or topic.
             k: Maximum number of pages to return (default 3).
+            memory: Search only this memory ('general' or a domain memory's
+                name); empty (default) searches every memory.
         """
-        hits = self._search(query, k)
+        try:
+            hits = self._search(query, k, memory)
+        except ValueError as e:
+            return f"Error: {e}"
         if not hits:
-            return "No memory pages yet." if self.index.count() == 0 else "No matches."
+            return self._no_hits(memory)
         chunks: list[str] = []
         used = 0
         vanished = 0
         for hit in hits:
+            _, memory_dir, page = self._locate(hit.name)
             try:
-                raw = self.memory.read(hit.name).raw
+                raw = memory_dir.read(page).raw
             except FileNotFoundError:
                 # Another process deleted the page after sync() indexed it.
                 vanished += 1
@@ -162,10 +288,12 @@ class MemoryTools:
         """Return the full text of one memory page.
 
         Args:
-            name: Page name as shown by memory_search or memory_list (with or without .md).
+            name: Page name as shown by memory_search or memory_list (with or
+                without .md); '<memory>/<page>' for a page of a domain memory.
         """
         try:
-            return self.memory.read(name).raw
+            _, memory_dir, page = self._locate(name)
+            return memory_dir.read(page).raw
         except FileNotFoundError:
             return f"Error: no memory page named {name!r}."
         except ValueError as e:
@@ -175,19 +303,22 @@ class MemoryTools:
         """Create or replace a memory page (Markdown body; frontmatter is generated for you).
 
         Args:
-            name: Page name: lowercase letters, digits and hyphens, e.g. 'postgres-agent-auth-flow'.
+            name: Page name: lowercase letters, digits and hyphens, e.g.
+                'postgres-agent-auth-flow'; prefix it with '<memory>/' to write
+                into a domain memory.
             content: Markdown body. Keep it under ~8 KB; one topic per page; cite sources.
             title: Human-readable title (defaults to the name on first write).
             summary: One-sentence summary shown in search results.
         """
         try:
-            page = self.memory.write(name, content, title=title, summary=summary)
+            memory, memory_dir, page_name = self._locate(name)
+            page = memory_dir.write(page_name, content, title=title, summary=summary)
         except ValueError as e:
             return f"Error: {e}"
         size = len(page.raw.encode("utf-8"))
         embedded = len(embedding_text(page.raw).encode("utf-8"))
         note = ""
-        if _EPHEMERAL_NAME_RE.search(name):
+        if _EPHEMERAL_NAME_RE.search(page.name):
             note = (
                 " Warning: the name looks like a per-round/per-session note; such "
                 "notes belong in ./tmp/PROGRESS.md, not in durable memory. Consider "
@@ -199,62 +330,90 @@ class MemoryTools:
                 f"{embedded} bytes; only the first {MAX_PAGE_BYTES} bytes are embedded. "
                 "Split it into several pages."
             )
-        return f"Wrote {page.name}.md ({size} bytes).{note}"
+        return f"Wrote {_qualified(memory, page.name)}.md ({size} bytes).{note}"
 
-    def memory_list(self) -> str:
-        """List every memory page with its title and summary."""
-        names = self.memory.page_names()
-        if not names:
-            return "No memory pages yet."
+    def memory_list(self, memory: str = "") -> str:
+        """List every memory page with its title and summary.
+
+        Args:
+            memory: List only this memory ('general' or a domain memory's
+                name); empty (default) lists every memory.
+        """
+        try:
+            selected = self._selected(memory)
+        except ValueError as e:
+            return f"Error: {e}"
         lines = []
-        for name in names:
-            try:
-                page = self.memory.read(name)
-            except FileNotFoundError:
-                # Deleted by another process after page_names() listed it.
-                continue
-            line = f"{name}  —  {page.title}"
-            if page.summary:
-                line += f": {page.summary}"
-            lines.append(line)
+        for memory_name, index in selected.items():
+            for name in index.memory.page_names():
+                try:
+                    page = index.memory.read(name)
+                except FileNotFoundError:
+                    # Deleted by another process after page_names() listed it.
+                    continue
+                line = f"{_qualified(memory_name, name)}  —  {page.title}"
+                if page.summary:
+                    line += f": {page.summary}"
+                lines.append(line)
+        if not lines:
+            return "No memory pages yet."
         return "\n".join(lines)
 
-    def memory_refresh(self, stale_days: int = 30, duplicate_threshold: float = 0.9) -> str:
+    def memory_refresh(
+        self, stale_days: int = 30, duplicate_threshold: float = 0.9, memory: str = ""
+    ) -> str:
         """Re-index the memory and report pages that need maintenance.
 
         Re-embeds pages changed on disk by any process (the agent, a human in
-        an editor, git pull), drops index rows for deleted pages, and lists
-        near-duplicate page pairs plus pages whose ``updated`` timestamp is
-        old, so they can be merged, re-verified, or deleted.
+        an editor, a sync script), drops index rows for deleted pages, and
+        lists near-duplicate page pairs plus pages whose ``updated`` timestamp
+        is old, so they can be merged, re-verified, or deleted.
 
         Args:
             stale_days: Pages not updated in this many days are listed as
                 stale (default 30).
             duplicate_threshold: Cosine similarity at or above which two pages
                 are reported as near-duplicates (default 0.9).
+            memory: Refresh only this memory ('general' or a domain memory's
+                name); empty (default) refreshes every memory.
         """
-        report = self.index.sync(verify=True)
-        lines = [
-            f"Index refreshed: {report.added} added, {report.updated} updated, "
-            f"{report.removed} removed, {report.unchanged} unchanged."
-        ]
-        duplicates = self.index.near_duplicates(duplicate_threshold)
-        if duplicates:
+        try:
+            selected = self._selected(memory)
+        except ValueError as e:
+            return f"Error: {e}"
+        lines = []
+        for memory_name, index in selected.items():
+            report = index.sync(verify=True)
+            label = "Index" if memory_name == GENERAL and len(selected) == 1 else (
+                f"Index of {memory_name}"
+            )
             lines.append(
-                "Near-duplicate pages (merge with memory_write, then memory_delete the loser):"
+                f"{label} refreshed: {report.added} added, {report.updated} updated, "
+                f"{report.removed} removed, {report.unchanged} unchanged."
             )
-            lines.extend(
-                f"  {a} ~ {b}  (similarity {score:.3f})" for a, b, score in duplicates[:20]
-            )
-        stale = self._stale_pages(stale_days)
-        if stale:
-            lines.append(f"Pages not updated in {stale_days} days (re-verify or delete):")
-            lines.extend(f"  {name}  (updated {updated})" for name, updated in stale[:20])
-        if not duplicates and not stale:
-            lines.append("No near-duplicate or stale pages.")
+            duplicates = index.near_duplicates(duplicate_threshold)
+            if duplicates:
+                lines.append(
+                    "Near-duplicate pages (merge with memory_write, then memory_delete the loser):"
+                )
+                lines.extend(
+                    f"  {_qualified(memory_name, a)} ~ {_qualified(memory_name, b)}  "
+                    f"(similarity {score:.3f})"
+                    for a, b, score in duplicates[:20]
+                )
+            stale = self._stale_pages(index.memory, stale_days)
+            if stale:
+                lines.append(f"Pages not updated in {stale_days} days (re-verify or delete):")
+                lines.extend(
+                    f"  {_qualified(memory_name, name)}  (updated {updated})"
+                    for name, updated in stale[:20]
+                )
+            if not duplicates and not stale:
+                lines.append("No near-duplicate or stale pages.")
         return "\n".join(lines)
 
-    def _stale_pages(self, stale_days: int) -> list[tuple[str, str]]:
+    @staticmethod
+    def _stale_pages(memory_dir: MemoryDir, stale_days: int) -> list[tuple[str, str]]:
         """Return ``(name, updated)`` for pages older than *stale_days* days.
 
         Pages whose ``updated`` frontmatter is missing or unparseable are
@@ -263,9 +422,9 @@ class MemoryTools:
         """
         cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         stale: list[tuple[str, str]] = []
-        for name in self.memory.page_names():
+        for name in memory_dir.page_names():
             try:
-                raw_updated = str(self.memory.read(name).frontmatter.get("updated", ""))
+                raw_updated = str(memory_dir.read(name).frontmatter.get("updated", ""))
             except FileNotFoundError:
                 # Deleted by another process after page_names() listed it.
                 continue
@@ -282,10 +441,12 @@ class MemoryTools:
         """Delete a memory page that is wrong or obsolete.
 
         Args:
-            name: Page name (with or without .md).
+            name: Page name (with or without .md); '<memory>/<page>' for a
+                page of a domain memory.
         """
         try:
-            self.memory.delete(name)
+            _, memory_dir, page = self._locate(name)
+            memory_dir.delete(page)
         except FileNotFoundError:
             return f"Error: no memory page named {name!r}."
         except ValueError as e:
