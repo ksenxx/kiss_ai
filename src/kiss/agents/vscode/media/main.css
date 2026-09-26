@@ -3425,30 +3425,32 @@ body.sidebar-chat-mode #meta-info-content {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
 }
 
+/* No padding: the header's tint runs flush to the panel's border (a
+   padded panel showed a strip of bare sidebar between the two).  The
+   task rows get their inset from .history-chat-body instead. */
 .history-chat-group {
   display: flex;
   flex-direction: column;
-  gap: 3px;
   margin-bottom: 8px;
-  padding: 3px;
   border-radius: 10px;
   border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
 }
 
 /* The chat panel's clickable header: a chevron and the chat's first
    task on ONE line (ellipsized), in the cyan of a Bash tool call's
-   header in the transcript (.tc-h-bash).  The tint is much stronger
-   than that header's 8%: this header carries plain --fg text over the
-   sidebar background, so at 8% it vanished.  No tooltip: the line is
-   all there is. */
+   header in the transcript (.tc-h-bash).  A light tint, stronger than
+   that header's 8% (at 8% it vanished behind plain --fg text).  Its
+   corners follow the panel's inner radius (10px border radius minus
+   the 1px border); only the top ones while the body shows below.  No
+   tooltip: the line is all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  background: color-mix(in srgb, var(--cyan) 30%, transparent);
+  background: color-mix(in srgb, var(--cyan) 18%, transparent);
   border: none;
-  border-radius: 7px;
+  border-radius: 9px;
   padding: 4px 6px;
   cursor: pointer;
   text-align: left;
@@ -3460,7 +3462,11 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--cyan) 42%, transparent);
+  background: color-mix(in srgb, var(--cyan) 28%, transparent);
+}
+
+.history-chat-group:not(.collapsed) > .history-chat-header {
+  border-radius: 9px 9px 0 0;
 }
 
 .history-chat-chevron {
@@ -3490,6 +3496,7 @@ body.sidebar-chat-mode #meta-info-content {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  padding: 3px;
 }
 
 .history-chat-group.collapsed > .history-chat-body { display: none; }

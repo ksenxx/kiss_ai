@@ -165,9 +165,9 @@ def test_main_css_webview_rows_are_neutral() -> None:
 
 
 def test_main_css_chat_header_cyan_single_line() -> None:
-    """The grouped view's chat-panel header sits on a clearly visible
-    cyan tint (the Bash tool-call header's hue, at least 25% strong)
-    and shows its title on one ellipsized line."""
+    """The grouped view's chat-panel header sits on a light but visible
+    cyan tint (the Bash tool-call header's hue, 15-20% strong) and
+    shows its title on one ellipsized line."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     header = re.search(r"\n\.history-chat-header\s*\{([^}]*)\}", css)
     assert header, ".history-chat-header rule missing"
@@ -176,7 +176,7 @@ def test_main_css_chat_header_cyan_single_line() -> None:
         header.group(1),
     )
     assert tint, f"the header background must be a --cyan tint; got: {header.group(1)!r}"
-    assert int(tint.group(1)) >= 25, f"the header tint is barely visible: {tint.group(0)}"
+    assert 15 <= int(tint.group(1)) <= 20, f"the header tint is not a light tint: {tint.group(0)}"
     title = re.search(r"\n\.history-chat-title\s*\{([^}]*)\}", css)
     assert title, ".history-chat-title rule missing"
     assert "white-space: nowrap" in title.group(1)
@@ -753,8 +753,8 @@ def test_live_task_panel_typography_and_history_rows(
                 assert _hue_of(group_probe["headerBg"]) == pytest.approx(
                     _hue_of(group_probe["cyan"]), abs=2
                 ), "the chat header background has the page's cyan hue: " + repr(group_probe)
-                assert _alpha_of(group_probe["headerBg"]) >= 0.25, (
-                    "the chat header tint must be clearly visible: " + repr(group_probe)
+                assert 0.15 <= _alpha_of(group_probe["headerBg"]) <= 0.2, (
+                    "the chat header tint must be light but visible: " + repr(group_probe)
                 )
                 assert group_probe["headerTooltip"] is False, (
                     "the chat header carries no tooltip: " + repr(group_probe)

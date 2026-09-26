@@ -88,19 +88,71 @@ def _assert_tint(color: str, hue_of: str, what: str) -> None:
     assert _alpha_of(color) >= _MIN_ALPHA, f"{what} is barely visible: {color}"
 
 
-def test_chat_panel_header_is_a_visible_cyan(_browser) -> None:
-    """Every chat panel's header carries a cyan tint strong enough to
-    see, and darkens further on hover."""
+def test_chat_panel_header_is_a_light_cyan(_browser) -> None:
+    """Every chat panel's header carries a light cyan tint (15-20%, so
+    it stays visible without dominating the list), and darkens further
+    on hover."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
         cyan = _var_color(page, "--cyan")
         idle = _style(page, ".history-chat-header", "backgroundColor")
-        _assert_tint(idle, cyan, "the chat panel header")
+        assert _hue_of(idle) == pytest.approx(_hue_of(cyan), abs=2), (idle, cyan)
+        assert 0.15 <= _alpha_of(idle) <= 0.2, f"the header tint is not light: {idle}"
         page.hover(".history-chat-header")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
         _assert_tint(hovered, cyan, "the hovered chat panel header")
         assert _alpha_of(hovered) > _alpha_of(idle), (idle, hovered)
+    finally:
+        context.close()
+
+
+_HEADER_INSET_JS = r"""(expand) => {
+  const g = document.querySelector('#history-list .history-chat-group');
+  if (g.classList.contains('collapsed') === expand) {
+    g.querySelector('.history-chat-header').click();
+  }
+  const h = g.querySelector('.history-chat-header');
+  const gr = g.getBoundingClientRect();
+  const hr = h.getBoundingClientRect();
+  const hcs = getComputedStyle(h);
+  const row = g.querySelector('.history-chat-body > .sidebar-item');
+  const rr = row ? row.getBoundingClientRect() : null;
+  return {
+    collapsed: g.classList.contains('collapsed'),
+    top: hr.top - (gr.top + g.clientTop),
+    left: hr.left - (gr.left + g.clientLeft),
+    right: gr.left + g.clientLeft + g.clientWidth - hr.right,
+    bottom: gr.top + g.clientTop + g.clientHeight - hr.bottom,
+    radii: [hcs.borderTopLeftRadius, hcs.borderTopRightRadius,
+            hcs.borderBottomRightRadius, hcs.borderBottomLeftRadius],
+    rowLeft: rr ? rr.left - (gr.left + g.clientLeft) : null,
+    rowGapBelowHeader: rr ? rr.top - hr.bottom : null,
+  };
+}"""
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
+    """The header's tint touches the panel's border on every side it
+    borders (no strip of bare sidebar between them), its corners follow
+    the panel's inner 9px radius (square at the bottom while the task
+    rows show below), and the task rows keep a small inset."""
+    context, page = _open_history_page(_browser)
+    try:
+        _post_history(page, _sample_sessions())
+        probe = page.evaluate(_HEADER_INSET_JS, expand)
+        assert probe["collapsed"] is not expand, probe
+        assert probe["top"] == pytest.approx(0, abs=0.5), probe
+        assert probe["left"] == pytest.approx(0, abs=0.5), probe
+        assert probe["right"] == pytest.approx(0, abs=0.5), probe
+        if expand:
+            assert probe["radii"] == ["9px", "9px", "0px", "0px"], probe
+            assert probe["rowLeft"] == pytest.approx(3, abs=0.5), probe
+            assert probe["rowGapBelowHeader"] == pytest.approx(3, abs=0.5), probe
+        else:
+            assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
+            assert probe["radii"] == ["9px"] * 4, probe
     finally:
         context.close()
 
