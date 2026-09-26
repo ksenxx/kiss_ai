@@ -7,12 +7,13 @@
 
 The tests build a small ``results/<phase>`` tree (SWE-bench Lite trial
 directories and Harbor-style Terminal-Bench trial directories) plus a daemon
-ledger database with the real schema, then run the ``aggregate``, ``audit``,
-``analyze`` and ``report`` command-line tools as subprocesses with
+ledger database with the real schema, then run the ``aggregate`` and ``audit``
+command-line tools as subprocesses with
 ``HARNESSTAX_RESULTS_ROOT`` / ``HARNESSTAX_HOME`` pointing at the tree.
+The ``analyze`` and ``report`` tools are tested in ``test_harnesstax_report.py``.
 
 Not covered here: ``harbor_agent`` and the container attach need a live
-daemon, a model and a container; they were exercised by hand on a real trial.
+daemon, a model and a container.
 """
 
 from __future__ import annotations
@@ -386,65 +387,6 @@ def test_audit_flags_and_quarantines(tree: dict[str, Path]) -> None:
     tb_trial(tree["root"], "fix-git", 1.0, 0.30, prompt=PROMPT_FALLBACK, suffix="def")
     proc = run_tool(tree, "audit", "--phase", PHASE, "--quarantine", "--rerun-plan")
     assert "--tasks fix-git --reps 1 --concurrency 1 --job-suffix=-rerun2-fix-git" in proc.stdout
-
-
-def test_analyze_and_report(tree: dict[str, Path]) -> None:
-    """The trajectory analysis and the HTML report run end to end on the tree."""
-    run_tool(tree, "audit", "--phase", PHASE, "--quarantine")
-    proc = run_tool(tree, "aggregate", "--phase", PHASE)
-    assert proc.returncode == 0, proc.stderr
-    proc = run_tool(
-        tree,
-        "analyze",
-        "--phase",
-        PHASE,
-        "--failures-only",
-        "--benchmark",
-        "swebench-lite",
-        "--rep",
-        "2",
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "gave up" in proc.stdout and "== per model ==" in proc.stdout
-    proc = run_tool(tree, "analyze", "--phase", PHASE, "--model", MODEL)
-    assert proc.returncode == 0, proc.stderr
-    assert "infra/timeout" in proc.stdout and "solved" in proc.stdout
-    out = tree["root"] / "report.html"
-    proc = run_tool(tree, "report", "--phase", PHASE, "--out", str(out))
-    assert (
-        proc.returncode != 0
-        and "incomplete results" in proc.stderr
-        and "claude-fable-5" in proc.stderr
-    )
-    proc = run_tool(tree, "report", "--phase", PHASE, "--out", str(out), "--allow-incomplete")
-    assert proc.returncode == 0, proc.stderr
-    html = out.read_text()
-    # per benchmark: scatter, success bars, cost bars, task grid, turn-cap and spend-cap
-    # curves (6 x 2), plus the wall-clock cap curve that only Terminal-Bench gets
-    assert html.count("<svg") == EXPECTED_SVG_COUNT and "GPT-5.6 Luna · KISS Sorcar" in html
-    assert "Incomplete run" in html and "gpt-5.6-luna 87 slot(s) off" in html
-    assert "n/a</text>" not in html  # the blog has per-task Pi data for luna on both benchmarks
-    assert "1/2 · 0/3</text>" in html  # astropy: KISS solved one of two attempts, Pi none
-
-
-RECORDED_SUMMARY = (
-    REPO_ROOT / "benchmarkings" / "harnesstax" / "results" / "baseline" / "summary.json"
-)
-EXPECTED_SVG_COUNT = 6 * 2 + 1
-
-
-@pytest.mark.skipif(not RECORDED_SUMMARY.is_file(), reason="recorded baseline results not present")
-def test_report_prose_on_the_recorded_study() -> None:
-    """The full discussion renders from the recorded study and every claim check holds."""
-    from benchmarkings.harnesstax import report
-
-    html = report.render("baseline")
-    assert (
-        "Every per-model success rate" in html
-        or "fall inside the blog's confidence interval" in html
-    )
-    assert "Incomplete run" not in html
-    assert html.count("<svg") == EXPECTED_SVG_COUNT
 
 
 def test_trajectory_metrics_and_turn_count(tmp_path: Path) -> None:
@@ -941,7 +883,8 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     gate_events = [e for e in events
                    if e.get("tool") == "finish" and e["args"] == {"success": True}]
     assert [e["blocked"] for e in gate_events] == [False, False, True, False]
-    # the prompt carries the new rules and the trial config takes the gate from the environment
+    # the prompt carries the environment rule and no benchmark-specific wording; the trial
+    # config takes the gate from the environment
     prompt = plain.system_prompt()
     assert "Leave the environment as the task expects to find it" in prompt
     assert "byte for byte" not in prompt
@@ -1053,10 +996,10 @@ def _live_container(image: str, setup: str) -> Any:
 def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None:
     """Shell results name the processes a call left running and the pre-existing files it changed.
 
-    The notes are facts the model cannot otherwise see (optQ analysis tb2-03,
-    tb2-04): a ``nohup ... &`` survivor, a kill that missed, an input file
-    rewritten in place.  Files the agent edits with Edit/Write are its own and
-    are not reported; each changed file is reported once.
+    The notes are facts the model cannot otherwise see: a ``nohup ... &``
+    survivor, a kill that missed, an input file rewritten in place.  Files
+    the agent edits with Edit/Write are its own and are not reported; each
+    changed file is reported once.
     """
     from benchmarkings.harnesstax import sea_core
 
