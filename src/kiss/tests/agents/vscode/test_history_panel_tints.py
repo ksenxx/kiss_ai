@@ -33,6 +33,7 @@ from kiss.tests.agents.vscode.test_codex_task_panel_style import (
 )
 from kiss.tests.agents.vscode.test_history_failed_red_cross import (
     _MEDIA_DIR,
+    _build_test_page,
     _open_history_page,
     _post_history,
     _sample_sessions,
@@ -136,8 +137,8 @@ _HEADER_INSET_JS = r"""(expand) => {
 def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
     """The header's tint touches the panel's border on every side it
     borders (no strip of bare sidebar between them), its corners follow
-    the panel's inner 9px radius (square at the bottom while the task
-    rows show below), and the task rows keep a small inset."""
+    the square panel (no rounding), and the task rows keep a small
+    inset."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
@@ -146,13 +147,131 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         assert probe["top"] == pytest.approx(0, abs=0.5), probe
         assert probe["left"] == pytest.approx(0, abs=0.5), probe
         assert probe["right"] == pytest.approx(0, abs=0.5), probe
+        assert probe["radii"] == ["0px"] * 4, probe
         if expand:
-            assert probe["radii"] == ["9px", "9px", "0px", "0px"], probe
             assert probe["rowLeft"] == pytest.approx(3, abs=0.5), probe
             assert probe["rowGapBelowHeader"] == pytest.approx(3, abs=0.5), probe
         else:
             assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
-            assert probe["radii"] == ["9px"] * 4, probe
+    finally:
+        context.close()
+
+
+# The chat panels' edges against the history panel's boundaries: the
+# left boundary is the activity bar's right edge where the bar shows
+# (remote webapp), else the panel's inner left edge.
+_PANEL_EDGES_JS = r"""() => {
+  const sb = document.getElementById('sidebar');
+  const sr = sb.getBoundingClientRect();
+  const bar = document.getElementById('activity-bar');
+  const barShown = getComputedStyle(bar).display !== 'none';
+  const inner = sr.left + sb.clientLeft;
+  const search = document.querySelector('.history-search-row')
+    .getBoundingClientRect();
+  const sep = document.querySelector('#history-list > .history-day-sep')
+    .getBoundingClientRect();
+  const groups = [...document.querySelectorAll(
+    '#history-list > .history-chat-group')];
+  const rects = groups.map(g => g.getBoundingClientRect());
+  const leftBoundary = barShown ? bar.getBoundingClientRect().right : inner;
+  const rightBoundary = inner + sb.clientWidth;
+  // Rects alone miss clipping by an ancestor: probe what is painted
+  // 1px inside each boundary, halfway down every header (looking
+  // through the transparent drag handle on the docked panel's edge).
+  const painted = groups.map(g => {
+    const hr = g.querySelector('.history-chat-header').getBoundingClientRect();
+    const y = (hr.top + hr.bottom) / 2;
+    return [leftBoundary + 1, rightBoundary - 1].map(x => {
+      const el = document.elementsFromPoint(x, y)
+        .find(e => e.id !== 'sidebar-resizer');
+      return !!el && el.closest('.history-chat-group') === g;
+    });
+  });
+  return {
+    painted,
+    leftBoundary,
+    rightBoundary,
+    lefts: rects.map(r => r.left),
+    rights: rects.map(r => r.right),
+    gaps: rects.slice(1).map((r, i) => r.top - rects[i].bottom),
+    radii: groups.map(g => getComputedStyle(g).borderRadius),
+    borderTops: groups.map(g => getComputedStyle(g).borderTopWidth),
+    borderSides: groups.map(g => {
+      const cs = getComputedStyle(g);
+      return [cs.borderLeftWidth, cs.borderRightWidth];
+    }),
+    insetL: search.left,
+    insetR: search.right,
+    sepL: sep.left,
+    sepR: sep.right,
+  };
+}"""
+
+
+def _assert_seamless_panels(page, what: str) -> None:
+    _post_history(page, _sample_sessions())
+    page.wait_for_function(
+        "document.querySelectorAll('#history-list > .history-chat-group')"
+        ".length === 3",
+        timeout=5000,
+    )
+    e = page.evaluate(_PANEL_EDGES_JS)
+    assert e["leftBoundary"] < e["insetL"], (what, e)
+    for left, right in zip(e["lefts"], e["rights"], strict=True):
+        assert left == pytest.approx(e["leftBoundary"], abs=0.5), (what, e)
+        assert right == pytest.approx(e["rightBoundary"], abs=0.5), (what, e)
+    assert e["painted"] == [[True, True]] * 3, (what, e)
+    assert e["gaps"] == [pytest.approx(0, abs=0.5)] * 2, (what, e)
+    assert e["radii"] == ["0px"] * 3, (what, e)
+    # One shared 1px line between neighbours, none on the sides.
+    assert e["borderTops"] == ["1px", "0px", "0px"], (what, e)
+    assert e["borderSides"] == [["0px", "0px"]] * 3, (what, e)
+    # The day separator keeps the panel's usual inset.
+    assert e["sepL"] == pytest.approx(e["insetL"], abs=0.5), (what, e)
+    assert e["sepR"] == pytest.approx(e["insetR"], abs=0.5), (what, e)
+
+
+def test_chat_panels_are_seamless_in_the_vscode_sidebar(_browser) -> None:
+    """VS Code chat webview's history drawer (16px panel padding): the
+    chat panels span the panel edge to edge with no gap between them;
+    the legacy flat list keeps its rows inset."""
+    context, page = _open_history_page(_browser)
+    try:
+        _assert_seamless_panels(page, "the VS Code history drawer")
+        page.click("#history-view-toggle")
+        page.wait_for_selector("#history-list.legacy-view > .running-item")
+        e = page.evaluate(
+            "() => { const r = document.querySelector("
+            "'#history-list > .running-item').getBoundingClientRect();"
+            " const s = document.querySelector('.history-search-row')"
+            ".getBoundingClientRect();"
+            " return [r.left - s.left, s.right - r.right]; }"
+        )
+        assert e == [pytest.approx(0, abs=0.5)] * 2, e
+    finally:
+        context.close()
+
+
+def test_chat_panels_are_seamless_in_history_panel_mode(_browser) -> None:
+    """The primary-sidebar history view (10px panel padding)."""
+    context, page = _open_history_page(_browser)
+    try:
+        page.evaluate("() => document.body.classList.add('history-panel-mode')")
+        _assert_seamless_panels(page, "the history-panel-mode view")
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("desktop", [False, True])
+def test_chat_panels_are_seamless_on_the_remote_page(_browser, desktop: bool) -> None:
+    """The remote webapp: the phone drawer and the docked desktop panel
+    (collapsing padding), both beside the activity bar."""
+    context, page = _open_history_page(_browser, width=1200 if desktop else 480)
+    try:
+        _use_remote_surface(page)
+        if desktop:
+            page.evaluate("() => document.body.classList.add('remote-desktop')")
+        _assert_seamless_panels(page, f"the remote page (desktop={desktop})")
     finally:
         context.close()
 
@@ -323,3 +442,112 @@ def test_subagent_tab_is_purple_on_the_remote_page(_browser) -> None:
         _assert_purple_tabs(page)
     finally:
         context.close()
+
+
+def _open_remote_desktop_page(browser):
+    """The remote desktop page with ``body.remote-chat`` set BEFORE
+    main.js runs, so its remote-only wiring (the panel resizer) is live,
+    and a history list long enough to scroll."""
+    context = browser.new_context(viewport={"width": 1200, "height": 500})
+    page = context.new_page()
+    html = _build_test_page().replace("<body>", '<body class="remote-chat">', 1)
+    remote_css = "<style>" + _REMOTE_CSS.read_text(encoding="utf-8") + "</style>"
+    page.set_content(html.replace("</head>", remote_css + "</head>", 1))
+    page.evaluate(
+        "() => { document.getElementById('app').style.display = '';"
+        " const ov = document.getElementById('kiss-server-loading');"
+        " if (ov) ov.style.display = 'none'; }"
+    )
+    page.wait_for_selector("body.remote-desktop #sidebar.open", state="attached")
+    assert page.evaluate("() => window.__iifeError") is None
+    template = _sample_sessions()[0]
+    sessions = [
+        dict(template, id=f"chat-{i}", task_id=5000 + i,
+             timestamp=1700000000 - i, preview=f"task {i}")
+        for i in range(40)
+    ]
+    generation = page.evaluate(
+        "() => window.__postedMessages.filter(m => m.type === 'getHistory')"
+        ".at(-1)?.generation || 0"
+    )
+    _post_history(page, sessions, generation=generation)
+    return context, page
+
+
+def test_remote_scrollbar_and_resize_handle_do_not_overlap(_browser) -> None:
+    """On the docked remote panel the flush history list's scrollbar
+    runs along the panel's right edge; the resize handle sits just
+    outside it.  Dragging the scrollbar thumb scrolls the list without
+    resizing, and dragging the handle still resizes the panel."""
+    # Real (non-overlay) scrollbars, as on a desktop browser.
+    browser = _browser.browser_type.launch(ignore_default_args=["--hide-scrollbars"])
+    try:
+        context, page = _open_remote_desktop_page(browser)
+        geo = page.evaluate(
+            """() => {
+              const l = document.getElementById('history-list');
+              const lr = l.getBoundingClientRect();
+              const hr = document.getElementById('sidebar-resizer')
+                .getBoundingClientRect();
+              return {listRight: lr.right, top: lr.top,
+                      bar: l.offsetWidth - l.clientWidth,
+                      overflow: l.scrollHeight > l.clientHeight,
+                      handleLeft: hr.left, handleW: hr.width,
+                      width: document.getElementById('sidebar')
+                        .getBoundingClientRect().width};
+            }"""
+        )
+        assert geo["overflow"] and geo["bar"] > 0, geo
+        assert geo["handleLeft"] >= geo["listRight"] - 1, geo
+        # The thumb, at the top of the scrollbar.
+        x, y = geo["listRight"] - geo["bar"] / 2, geo["top"] + 10
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 100, steps=8)
+        page.mouse.up()
+        assert page.evaluate(
+            "() => document.getElementById('history-list').scrollTop"
+        ) > 0
+        assert page.evaluate(
+            "() => document.getElementById('sidebar')"
+            ".getBoundingClientRect().width"
+        ) == geo["width"]
+        # The handle outside the edge is painted and clickable.
+        hx = geo["handleLeft"] + geo["handleW"] / 2
+        assert page.evaluate(
+            "([x, y]) => document.elementFromPoint(x, y).id", [hx, 250]
+        ) == "sidebar-resizer"
+        page.mouse.move(hx, 250)
+        page.mouse.down()
+        page.mouse.move(hx + 60, 250, steps=8)
+        page.mouse.up()
+        assert page.evaluate(
+            "() => document.getElementById('sidebar')"
+            ".getBoundingClientRect().width"
+        ) == pytest.approx(geo["width"] + 60, abs=2)
+        # Dragged down to its 10px minimum, the panel's content (the
+        # 40px activity bar, the history rows) stays clipped at the
+        # panel's edge: nothing of it shows or takes clicks beside it.
+        page.mouse.move(hx + 60, 250)
+        page.mouse.down()
+        page.mouse.move(0, 250, steps=8)
+        page.mouse.up()
+        leaks = page.evaluate(
+            """() => {
+              const sb = document.getElementById('sidebar');
+              const right = sb.getBoundingClientRect().right;
+              const out = [];
+              for (const y of [60, 250]) {
+                for (let x = right + 0.5; x < right + 12; x += 1) {
+                  const el = document.elementsFromPoint(x, y)
+                    .find(e => e.id !== 'sidebar-resizer');
+                  if (el && sb.contains(el)) out.push([x, y, el.id || el.tagName]);
+                }
+              }
+              return {right, out};
+            }"""
+        )
+        assert leaks["right"] < 20 and leaks["out"] == [], leaks
+        context.close()
+    finally:
+        browser.close()
