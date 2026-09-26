@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy - KISS Sorcar</title>
+  <meta name="description" content="How KISS Sorcar handles your data, including Google user data accessed through Gmail and Google Workspace connectors.">
+  <link rel="canonical" href="https://kisssorcar.github.io/privacy.html">
+  <style>
+    body { font-family: Roboto, system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.6; color: #1f2328; }
+    h1 { font-size: 1.9rem; margin-bottom: 0.2rem; }
+    h2 { font-size: 1.25rem; margin-top: 2rem; }
+    .updated { color: #57606a; margin-top: 0; }
+    a { color: #0969da; }
+    code { font-family: "Roboto Mono", monospace; font-size: 0.92em; background: #f6f8fa; padding: 0 0.25em; }
+  </style>
+</head>
+<body>
+  <p><a href="/">&larr; KISS Sorcar</a></p>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: September 26, 2026</p>
+
+  <p>KISS Sorcar is an open-source AI agent framework (<a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a>) that you install and run on your own computer. This policy explains what happens to your data when you use it, in particular when you connect a Google account through its Gmail, Google Calendar, Google Drive, Google Docs or Google Sheets connectors.</p>
+
+  <h2>Who operates KISS Sorcar</h2>
+  <p>KISS Sorcar is developed by Koushik Sen. There is no KISS Sorcar server or hosted service: the software runs entirely on your machine, and the developer does not receive, collect, store or have access to your data.</p>
+
+  <h2>Google user data we access</h2>
+  <p>When you connect a Google account, you grant the copy of KISS Sorcar on your machine an OAuth token for the scopes shown on Google's consent screen. For Gmail this is <code>https://mail.google.com/</code>, which allows reading, composing, sending, labeling and deleting email. Other connectors request access to Calendar, Drive, Docs or Sheets.</p>
+
+  <h2>How the data is used</h2>
+  <ul>
+    <li>Google data is accessed only to carry out tasks you give the agent, such as searching, summarizing, drafting or sending email.</li>
+    <li>To perform a task, the agent may send relevant content (for example the text of an email) to the large language model provider you have configured, such as Anthropic, OpenAI or Google. That transfer is governed by your agreement with that provider.</li>
+    <li>Google data is not sold, not used for advertising, and not used by the developer to train AI models.</li>
+  </ul>
+
+  <h2>Storage and security</h2>
+  <p>OAuth tokens are stored locally on your computer, in a local credential vault or in a file readable only by your user account (<code>~/.kiss/</code>). Task history is kept in a local database on your machine. Nothing is uploaded to the developer.</p>
+
+  <h2>Sharing</h2>
+  <p>Your data is not shared with anyone except the model provider you choose, as described above, and Google itself when the agent calls Google APIs on your behalf.</p>
+
+  <h2>Revoking access and deleting data</h2>
+  <p>You can revoke KISS Sorcar's access at any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. Deleting the <code>~/.kiss/</code> directory removes all locally stored tokens and task history.</p>
+
+  <h2>Google API Services User Data Policy</h2>
+  <p>KISS Sorcar's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+  <h2>Changes and contact</h2>
+  <p>Changes to this policy are published on this page. Questions: <a href="mailto:kisssorcar@gmail.com">kisssorcar@gmail.com</a>, or open an issue on <a href="https://github.com/ksenxx/kiss_ai/issues">GitHub</a>.</p>
+</body>
+</html>
