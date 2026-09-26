@@ -13,11 +13,15 @@ These checks need a layout engine, so they run the real remote webapp
 page (``_build_html()`` plus the real media assets) in headless
 Chromium and measure:
 
-* both sections start expanded; the list keeps its natural height
-  and the Task update body fills the rest of the panel and scrolls;
+* both sections start expanded and their bodies share the panel
+  equally, whatever their content; the Task update body reaches the
+  bottom of the panel and scrolls;
+* on every surface (remote desktop and mobile drawer, VS Code Task Info
+  view and sidebar-chat drawer) all four expanded bodies are equally
+  tall, and a drag leaves the bodies above the moved boundary alone;
 * dragging the separator down grows the list and shrinks the report by
   the same amount, the height persists across a reload, and a
-  double-click restores the natural height; the arrow keys resize too;
+  double-click restores the equal share; the arrow keys resize too;
 * collapsing a section hides its body (the header stays) and the
   remaining expanded section fills the panel; collapsing both leaves
   two headers and no separator handle;
@@ -301,7 +305,7 @@ def _toggle(page: Page, section_id: str) -> None:
     page.locator(f"#{section_id} .meta-section-toggle").click()
 
 
-def test_both_sections_expanded_list_natural_report_fills_and_scrolls(
+def test_both_sections_expanded_share_the_panel_equally(
     browser: Browser, remote_url: str
 ) -> None:
     page = _open_page(browser, remote_url, 1200)
@@ -318,10 +322,10 @@ def test_both_sections_expanded_list_natural_report_fills_and_scrolls(
         geo = _geometry(page)
         assert geo["headers"][1]["text"] == "Task update"
         assert geo["headers"][1]["expanded"] == "true"
-        # The list keeps its natural height: nothing to scroll.
-        assert geo["listShown"] and not geo["listScrolls"], geo
-        # The report fills the panel down to its padding and scrolls.
-        assert geo["contentShown"], geo
+        # The two bodies are equally tall, whatever their content.
+        assert geo["listShown"] and geo["contentShown"], geo
+        assert geo["listHeight"] == pytest.approx(geo["contentHeight"], abs=1), geo
+        # The report reaches the panel's padding and scrolls.
         assert geo["contentBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
         assert geo["contentScrolls"], geo
         # One separator between them, a real handle; none after the last.
@@ -374,7 +378,7 @@ def test_drag_moves_the_boundary_persists_and_dblclick_restores(
             reloaded,
         )
 
-        # Double-click restores the natural height.
+        # Double-click restores the equal share.
         _section_resizer(page).dblclick()
         restored = _geometry(page)
         assert restored["listHeight"] == pytest.approx(before["listHeight"], abs=2)
@@ -527,32 +531,35 @@ def test_a_third_section_stacks_resizes_and_hides(
     browser: Browser, three_sections_url: str
 ) -> None:
     """A panel added per the chat.html recipe takes part in the stack:
-    it fills while last, gets its own separator, yields its natural
-    height before a dragged neighbour does when the panel is short, and
-    leaves the stack when its owner sets ``hidden``."""
-    page = _open_page(browser, three_sections_url, 1200, height=560)
+    it takes an equal share, gets its own separator, yields its share
+    before a dragged neighbour does when the panel is short, and leaves
+    the stack when its owner sets ``hidden``."""
+    page = _open_page(browser, three_sections_url, 1200, height=700)
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
         geo = _geometry(page)
         assert [h["text"] for h in geo["headers"]] == ["Task Info", "Task update", "Extra"]
         assert [h["expanded"] for h in geo["headers"]] == ["true", "true", "true"]
-        # No task: Task Info and Extra are shown; Extra, last, fills.
+        # No task: Task Info and Extra are shown, equally tall; Extra,
+        # last, reaches the bottom.
         assert [r["shown"] for r in geo["resizers"]] == [True, False, False]
         assert geo["resizers"][0]["handle"] is True
         extra = page.evaluate(_EXTRA_GEOMETRY_JS)
         assert extra["extraBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), extra
+        assert extra["extraHeight"] == pytest.approx(extra["listHeight"], abs=1), extra
 
-        # With a long Task update in the middle the panel is too short
-        # for everything: the update keeps a natural body that shrinks,
-        # Extra (last) fills what is left.
+        # With a long Task update in the middle the three bodies share
+        # the panel equally.
         _show_task_update(page, _LONG_REPORT)
         geo = _geometry(page)
         assert [r["shown"] for r in geo["resizers"]] == [True, True, False]
         assert [r["handle"] for r in geo["resizers"]] == [True, True, False]
         before = page.evaluate(_EXTRA_GEOMETRY_JS)
+        assert before["contentHeight"] == pytest.approx(before["listHeight"], abs=1), before
+        assert before["extraHeight"] == pytest.approx(before["listHeight"], abs=1), before
 
         # Dragging the Task Info separator down grows the list by the
-        # full 100px: the natural Task update body yields first, the
+        # full 100px, taken equally from the two bodies below; the
         # requested height is the rendered height, and aria-valuenow
         # reports it.
         _drag_separator_by(page, 100)
@@ -561,7 +568,8 @@ def test_a_third_section_stacks_resizes_and_hides(
             before,
             after,
         )
-        assert after["contentHeight"] == pytest.approx(before["contentHeight"] - 100, abs=2)
+        assert after["contentHeight"] == pytest.approx(before["contentHeight"] - 50, abs=2)
+        assert after["extraHeight"] == pytest.approx(before["extraHeight"] - 50, abs=2)
         assert after["valueNow"] == str(round(after["listHeight"]))
 
         # A drag further than the space below can give stops where the
@@ -574,7 +582,7 @@ def test_a_third_section_stacks_resizes_and_hides(
         # (.meta-section-fill in main.css) even against a long drag.
         assert capped["extraHeight"] > 50, capped
         for hdr in _geometry(page)["headers"]:
-            assert 0 <= hdr["top"] < hdr["bottom"] <= 560, hdr
+            assert 0 <= hdr["top"] < hdr["bottom"] <= 700, hdr
 
         # The owner hides its section with `hidden` and re-applies the
         # layout (a toggle round trip does that here): the section is
@@ -674,6 +682,8 @@ _GLOBAL_GEOMETRY_JS = """
     scheduleHeight: rect('meta-schedule-list').height,
     appsTop: rect('meta-apps-list').top,
     appsBottom: rect('meta-apps-list').bottom,
+    appsHeight: rect('meta-apps-list').height,
+    listHeight: rect('meta-list').height,
     appsScrolls: apps.scrollHeight > apps.clientHeight + 1,
     headers: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
       .filter(h => h.getClientRects().length > 0)
@@ -707,8 +717,11 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
         # No running task: Task Info, Schedule and Apps are on screen.
         assert geo["headers"] == ["Task Info", "Schedule", "Apps"], geo
-        # Schedule keeps its natural height; Apps fills the rest and scrolls.
+        # The three bodies are equally tall; Apps reaches the bottom
+        # and scrolls.
         assert geo["scheduleTop"] < geo["appsTop"], geo
+        assert geo["scheduleHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["listHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["appsBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
         assert geo["appsScrolls"], geo
         assert geo["appsStatus"] == "1 of 40 connected"
@@ -741,9 +754,8 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
 def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
     browser: Browser, remote_url: str
 ) -> None:
-    """The filling (last expanded) body keeps a minimum share: a long
-    Task update above it shrinks and scrolls instead of squeezing the
-    Apps list to zero height."""
+    """A long Task update above the Apps list takes only its equal
+    share and scrolls instead of squeezing the Apps list."""
     page = _open_page(browser, remote_url, 1200, height=700, global_sections=True)
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
@@ -755,11 +767,90 @@ def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
               const r = id => document.getElementById(id).getBoundingClientRect();
               const c = document.getElementById('meta-info-content');
               return {apps: r('meta-apps-list').height,
+                      update: r('meta-info-content').height,
                       panel: r('meta-panel').height,
                       updateScrolls: c.scrollHeight > c.clientHeight + 1};
             }"""
         )
         assert geo["apps"] >= 80, geo
+        assert geo["update"] == pytest.approx(geo["apps"], abs=1), geo
         assert geo["updateScrolls"], geo
+    finally:
+        page.close()
+
+
+# Each surface that shows the task-info panel, as (viewport width, JS
+# run after boot).  The remote page boots as the desktop dock (wide) or
+# the mobile drawer (narrow, opened from its tab-bar button); the VS
+# Code surfaces are the same markup under the extension's body classes
+# (remote-codex.css only styles body.remote-chat, so dropping it leaves
+# main.css's own rules for that mode).
+_SURFACES = {
+    "remote desktop": (1200, ""),
+    "remote mobile drawer": (500, "document.getElementById('meta-drawer-btn').click();"),
+    "VS Code Task Info view": (1200, "document.body.className = 'meta-panel-mode';"),
+    "VS Code sidebar-chat drawer": (
+        1200,
+        "document.body.className = 'sidebar-chat-mode';"
+        "document.getElementById('meta-panel').classList.add('open');",
+    ),
+}
+
+_BODY_HEIGHTS_JS = """
+() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-apps-list']
+  .map(id => document.getElementById(id).getBoundingClientRect().height)
+"""
+
+
+@pytest.mark.parametrize("surface", list(_SURFACES))
+def test_every_surface_gives_the_expanded_sections_equal_heights(
+    browser: Browser, remote_url: str, surface: str
+) -> None:
+    """All four sections expanded: their bodies are equally tall by
+    default on every surface, whatever their content.  Dragging the
+    Schedule / Apps boundary moves only that boundary: the bodies above
+    it keep their heights."""
+    width, setup = _SURFACES[surface]
+    page = _open_page(browser, remote_url, width, height=900, global_sections=True)
+    try:
+        page.evaluate(f"() => {{ {setup} }}")
+        # Let a drawer's slide-in transition finish before measuring.
+        page.wait_for_function(
+            "() => { const r = document.getElementById('meta-panel').getBoundingClientRect();"
+            " return r.width > 0 && Math.abs(r.right - innerWidth) < 1; }"
+        )
+        _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        # The VS Code surfaces get their Task update relayed from the
+        # editor chat, so show the section directly (as setMetaInfoHTML
+        # does) and re-apply the layout with a toggle round trip.
+        page.evaluate(
+            """html => {
+              document.getElementById('meta-info-content').innerHTML = html;
+              document.getElementById('meta-info').classList.add('visible');
+              const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
+              toggle.click();
+              toggle.click();
+            }""",
+            _LONG_REPORT,
+        )
+        heights = page.evaluate(_BODY_HEIGHTS_JS)
+        assert min(heights) > 40, heights
+        assert max(heights) - min(heights) <= 1, heights
+
+        resizer = page.locator("#meta-schedule + .meta-section-resizer")
+        box = resizer.bounding_box()
+        assert box is not None
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 30, steps=6)
+        page.mouse.up()
+        dragged = page.evaluate(_BODY_HEIGHTS_JS)
+        assert dragged[0] == pytest.approx(heights[0], abs=1), (heights, dragged)
+        assert dragged[1] == pytest.approx(heights[1], abs=1), (heights, dragged)
+        assert dragged[2] == pytest.approx(heights[2] + 30, abs=2), (heights, dragged)
+        assert dragged[3] == pytest.approx(heights[3] - 30, abs=2), (heights, dragged)
     finally:
         page.close()

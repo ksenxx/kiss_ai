@@ -15,9 +15,11 @@
 // * the chevron button collapses / expands its section, updates
 //   aria-expanded and persists the choice in localStorage, which a
 //   fresh page restores;
-// * the layout rule: the last expanded section's body fills
-//   (flex-grow 1, basis 0), a dragged body has a fixed pixel basis,
-//   every other body keeps its natural height; the resizer after a
+// * the layout rule: by default every expanded body takes an equal
+//   share (flex-grow 1, basis 0); a dragged body has a fixed pixel
+//   basis, except the last expanded one, which always fills and keeps
+//   a minimum share while a body above it is dragged; a drag pins the
+//   expanded bodies above the boundary it moves; the resizer after a
 //   section is hidden while nothing shown follows it, `static` unless
 //   both sides are expanded, and a real handle otherwise;
 // * the Task update section joins the stack only once it has content
@@ -180,13 +182,19 @@ function assertExpanded(section, expanded) {
   );
 }
 
-/** 'fill' | 'natural' | '<px>' from a body's inline flex. */
+/**
+ * A body's layout from its inline flex: 'equal' (an equal share,
+ * flex-grow 1, basis 0), 'fill' (the same, plus the minimum share the
+ * last expanded body keeps while a body above it has a dragged height)
+ * or '<px>' (a dragged height).
+ */
 function bodyLayout(body) {
-  const grow = body.style.flexGrow;
-  const basis = body.style.flexBasis;
-  if (grow === '1') return 'fill';
-  if (basis === '' || basis === 'auto') return 'natural';
-  return basis;
+  if (body.style.flexGrow === '1') {
+    assert.strictEqual(body.style.flexBasis, '0px');
+    return body.classList.contains('meta-section-fill') ? 'fill' : 'equal';
+  }
+  assert.strictEqual(body.style.flexGrow, '0');
+  return body.style.flexBasis;
 }
 
 function assertResizer(r, state) {
@@ -273,11 +281,11 @@ async function main() {
         !update.classList.contains('visible'),
         'no task: Task update section hidden',
       );
-      // Apps is the last expanded section, so it fills; the others
-      // keep their natural height and no separator follows Apps.
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
-      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'natural');
-      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+      // Nothing is dragged: every expanded body takes an equal share
+      // and no separator follows Apps, the last shown section.
+      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
+      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
       assertResizer(resizerAfter(info), 'handle');
       assertResizer(resizerAfter(update), 'hidden');
       assertResizer(resizerAfter(schedule), 'handle');
@@ -308,7 +316,7 @@ async function main() {
         ),
         '1',
       );
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
+      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
       // The separator under a collapsed section is no longer a handle.
       assertResizer(resizerAfter(info), 'static');
       click(win, toggleOf(info));
@@ -320,18 +328,17 @@ async function main() {
         null,
       );
       assertResizer(resizerAfter(info), 'handle');
-      // Collapsing Apps hands the fill to Schedule, the new last
-      // expanded section.
+      // Collapsing Apps leaves the shares to the others.
       const apps = el(win, 'meta-apps');
       click(win, toggleOf(apps));
       assertExpanded(apps, false);
-      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'fill');
+      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
       assert.strictEqual(
         win.localStorage.getItem('kiss-meta-section-collapsed:meta-apps'),
         '1',
       );
       click(win, toggleOf(apps));
-      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     });
 
     await test(`${label}: a stored collapse state and height are restored at boot`, () => {
@@ -350,12 +357,12 @@ async function main() {
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
       assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
       // The collapsed Task update section, shown and expanded, keeps
-      // its natural height ('junk' is no stored height).
+      // an equal share ('junk' is no stored height).
       update.classList.add('visible');
       click(win, toggleOf(update));
       assertExpanded(update, true);
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
-      assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'natural');
+      assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
       assertResizer(resizerAfter(info), 'handle');
     });
   }
@@ -367,23 +374,23 @@ async function main() {
     hideGlobalSections(win);
     showTaskUpdate(wv, '<p>progress</p>');
     assert.ok(update.classList.contains('visible'));
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'hidden');
 
-    // Collapse the Task update section: Task Info fills again and the
+    // Collapse the Task update section: Task Info takes it all and the
     // separator stays but is no longer a handle.
     click(win, toggleOf(update));
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
     assertResizer(resizerAfter(info), 'static');
     click(win, toggleOf(update));
 
     // Collapse Task Info instead: the separator under it is static
-    // too (nothing above to resize), Task update fills.
+    // too (nothing above to resize), Task update takes it all.
     click(win, toggleOf(info));
     assertResizer(resizerAfter(info), 'static');
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     click(win, toggleOf(info));
 
     // The task ends: the update is emptied and its section leaves.
@@ -392,7 +399,7 @@ async function main() {
       !update.classList.contains('visible'),
       'emptied update hides its section',
     );
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
     assertResizer(resizerAfter(info), 'hidden');
 
     // With the Schedule and Apps sections back, the Task update
@@ -400,8 +407,8 @@ async function main() {
     el(win, 'meta-schedule').hidden = false;
     el(win, 'meta-apps').hidden = false;
     showTaskUpdate(wv, '<p>progress</p>');
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'natural');
-    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'handle');
   });
@@ -433,20 +440,22 @@ async function main() {
     key(win, r, 'ArrowDown');
     assert.strictEqual(win.localStorage.getItem(HK), '0');
     assert.strictEqual(bodyLayout(list), '0px');
+    // The last expanded body below a dragged one keeps its minimum share.
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
     assert.strictEqual(r.getAttribute('aria-valuenow'), '0');
     assert.strictEqual(r.getAttribute('aria-valuemax'), '0');
     key(win, r, 'ArrowUp');
     assert.strictEqual(bodyLayout(list), '0px');
 
-    // Double-click restores the natural height.
+    // Double-click restores the equal share.
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
     assert.strictEqual(win.localStorage.getItem(HK), null);
-    assert.strictEqual(bodyLayout(list), 'natural');
+    assert.strictEqual(bodyLayout(list), 'equal');
 
     // A pointer drag: the body class marks the drag, moves resize,
     // release ends it; a move without a press does nothing.
     pointer(win, r, 'pointermove', {clientY: 40});
-    assert.strictEqual(bodyLayout(list), 'natural');
+    assert.strictEqual(bodyLayout(list), 'equal');
     pointer(win, r, 'pointerdown', {button: 2});
     assert.ok(
       !win.document.body.classList.contains('meta-section-resizing'),
@@ -473,16 +482,16 @@ async function main() {
     const [info, update, , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
-    // No task: Task Info and Extra are shown; Extra, being last, fills.
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
-    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'fill');
+    // No task: Task Info and Extra are shown, sharing equally.
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'equal');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(extra), 'hidden');
 
     showTaskUpdate(wv, '<p>progress</p>');
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'natural');
-    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'equal');
     assertResizer(resizerAfter(info), 'handle');
     assertResizer(resizerAfter(update), 'handle');
     assertResizer(resizerAfter(extra), 'hidden');
@@ -499,14 +508,64 @@ async function main() {
     extra.hidden = true;
     click(win, toggleOf(info));
     click(win, toggleOf(info));
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     assertResizer(resizerAfter(update), 'hidden');
     assertResizer(resizerAfter(extra), 'hidden');
     extra.hidden = false;
     click(win, toggleOf(info));
     click(win, toggleOf(info));
-    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-extra-body')), 'equal');
     assertResizer(resizerAfter(update), 'handle');
+  });
+
+  await test('a drag pins the expanded bodies above the moved boundary, and only those', () => {
+    const HK = 'kiss-meta-section-h:';
+    // No task: Task Info, Schedule and Apps share the panel equally.
+    let win = makeWebview(REMOTE).win;
+    let schedule = el(win, 'meta-schedule');
+    const r = resizerAfter(schedule);
+    assertResizer(r, 'handle');
+    // Dragging the Schedule / Apps boundary pins Task Info (jsdom has no
+    // layout, so at 0px) and fixes Schedule; Apps, last, fills.  The
+    // hidden Task update section above is not pinned.
+    pointer(win, r, 'pointerdown');
+    pointer(win, r, 'pointermove', {clientY: 40});
+    pointer(win, r, 'pointerup');
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-section-info'), '0');
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '0');
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-info'), null);
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
+    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), '0px');
+    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+    // Double-click returns Schedule to an equal share; the pinned Task
+    // Info keeps its height.
+    r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
+    assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'equal');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
+
+    // A body above that already has a dragged height keeps it.
+    win = makeWebview(REMOTE, {storage: {[HK + 'meta-section-info']: '123'}})
+      .win;
+    schedule = el(win, 'meta-schedule');
+    key(win, resizerAfter(schedule), 'ArrowDown');
+    assert.strictEqual(
+      win.localStorage.getItem(HK + 'meta-section-info'),
+      '123',
+    );
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '0');
+
+    // A collapsed body above is not pinned either.
+    win = makeWebview(REMOTE).win;
+    schedule = el(win, 'meta-schedule');
+    click(win, toggleOf(el(win, 'meta-section-info')));
+    key(win, resizerAfter(schedule), 'ArrowDown');
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-section-info'), null);
+    assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '0');
+    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+    // Collapsing the dragged body leaves nothing dragged above the last:
+    // it returns to a plain share.
+    click(win, toggleOf(schedule));
+    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
   });
 
   await test('opaque origin (no localStorage): sections still work, choices last for the page', () => {
@@ -532,7 +591,7 @@ async function main() {
     key(win, r, 'ArrowDown');
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
-    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
+    assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
   });
 
   if (failures) {

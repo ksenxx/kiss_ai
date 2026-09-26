@@ -1738,11 +1738,11 @@ body.remote-chat #theme-btn { display: flex; }
    column; each <section class="meta-section"> is `display: contents`,
    so its header row and its body are the PANEL's flex items: the
    header keeps its natural height whatever happens and only the body
-   flexes.  A body scrolls inside its share of the panel; main.js
-   (metasections block) gives the last expanded section's body
-   `flex: 1 1 0` to fill the leftover height, a dragged body
-   `flex: 0 1 <px>`, and every other body the natural `0 1 auto`
-   below.  A collapsed section shows its header only.  The resizer
+   flexes.  A body scrolls inside its share of the panel.  By default
+   every expanded body takes an EQUAL share (`flex: 1 1 0`, below);
+   main.js (metasections block) gives a dragged body `flex: 0 1 <px>`,
+   except the last expanded section's body, which always fills the
+   leftover height.  A collapsed section shows its header only.  The resizer
    after a section is the separator line between it and the next
    shown section; it drags the boundary while both sides are expanded
    (`static` otherwise: still a separator, no longer a handle). */
@@ -1797,21 +1797,21 @@ body.remote-chat #theme-btn { display: flex; }
 
 .meta-section-toggle[aria-expanded="true"] .meta-section-chevron { transform: rotate(90deg); }
 
-/* A body at its natural height.  The large shrink factor makes
-   natural bodies give up space long before a dragged body
-   (`flex: 0 1 <px>`, set by main.js) does when the panel is too short
-   for everything: the height the user chose holds until nothing else
-   can shrink. */
+/* An equal share of the height the headers leave, whatever the
+   content (more content than fits scrolls).  With a zero basis these
+   bodies are the first to give up space when the panel is too short:
+   a dragged body (`flex: 0 1 <px>`, set by main.js) keeps the height
+   the user chose until nothing else can shrink. */
 .meta-section-body {
-  flex: 0 1000 auto;
+  flex: 1 1 0px;
   min-height: 0;
   overflow-y: auto;
 }
 
 /* The body that fills the leftover height (the last expanded one, see
-   applyMetaSectionLayout) keeps a minimum share of the panel: natural
-   bodies above it, e.g. a long Task update, shrink and scroll instead
-   of squeezing it to zero height. */
+   applyMetaSectionLayout) keeps a minimum share of the panel while a
+   body above it has a dragged height: the dragged bodies cannot
+   squeeze it to zero height. */
 .meta-section-body.meta-section-fill { min-height: min(8em, 30%); }
 
 /* The separator between two shown sections: a 1px line inside a 9px

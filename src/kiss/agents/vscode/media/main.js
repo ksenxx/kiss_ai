@@ -4507,18 +4507,22 @@
   // a chevron toggle button (.meta-section-toggle) and a scrolling body
   // (.meta-section-body); the section wrappers are `display: contents`,
   // so headers and bodies are the panel's own flex items and a header
-  // is never squeezed.  The .meta-section-resizer after a section is the
-  // separator line before the next shown section; while both sides are
-  // expanded it drags the boundary: the body above takes a fixed height
-  // (flex: 0 1 <px>), the bodies below share the rest.  The LAST
-  // expanded section's body always fills the leftover height.  Collapse
-  // state and dragged heights persist in localStorage; every section
-  // starts expanded.  Adding a panel is one more <section> plus its
-  // resizer in chat.html: nothing here names a particular section.
+  // is never squeezed.  By default every expanded body gets an EQUAL
+  // share of the height the headers leave (flex: 1 1 0px), whatever its
+  // content: a body with more content than its share scrolls.  The
+  // .meta-section-resizer after a section is the separator line before
+  // the next shown section; while both sides are expanded it drags the
+  // boundary: the body above takes a fixed height (flex: 0 1 <px>), the
+  // expanded bodies above it keep the heights they had when the drag
+  // started, and the bodies below share the rest.  The LAST expanded
+  // section's body always fills the leftover height.  Collapse state
+  // and dragged heights persist in localStorage; every section starts
+  // expanded.  Adding a panel is one more <section> plus its resizer in
+  // chat.html: nothing here names a particular section.
   const META_SECTION_COLLAPSED_KEY = 'kiss-meta-section-collapsed:';
   const META_SECTION_HEIGHT_KEY = 'kiss-meta-section-h:';
   const META_SECTION_KEY_STEP = 16;
-  /** Dragged body heights (px) by section id; absent = natural height. */
+  /** Dragged body heights (px) by section id; absent = an equal share. */
   const metaSectionHeights = {};
 
   function metaSections() {
@@ -4562,16 +4566,20 @@
     const sections = metaSections();
     const expanded = sections.filter(metaSectionExpanded);
     const last = expanded[expanded.length - 1];
+    const dragged = expanded.some(
+      section =>
+        section !== last && metaSectionHeights[section.id] !== undefined,
+    );
     for (const section of sections) {
       const body = metaSectionBody(section);
       if (body) {
         const h = metaSectionHeights[section.id];
-        if (section === last) body.style.flex = '1 1 0px';
-        else if (h !== undefined) body.style.flex = '0 1 ' + h + 'px';
-        else body.style.flex = '';
-        // The filling body keeps a minimum share (main.css), or natural
-        // bodies above it could squeeze it to nothing.
-        body.classList.toggle('meta-section-fill', section === last);
+        body.style.flex =
+          section === last || h === undefined ? '1 1 0px' : '0 1 ' + h + 'px';
+        // Once a body above has a dragged height, the filling body keeps
+        // a minimum share (main.css), or the dragged bodies could squeeze
+        // it to nothing.  Without one every share is equal.
+        body.classList.toggle('meta-section-fill', dragged && section === last);
       }
       const resizer = metaSectionResizer(section);
       if (!resizer) continue;
@@ -4611,7 +4619,7 @@
 
   /**
    * Fix a section's body height (px) and persist it.  Pass undefined to
-   * return the body to its natural height.
+   * return the body to its equal share of the panel.
    */
   function setMetaSectionHeight(section, height) {
     if (height === undefined) delete metaSectionHeights[section.id];
@@ -4634,7 +4642,8 @@
    * Wire the separator after a section: a pointer drag or the Up/Down
    * arrow keys move the boundary between that section's body and the
    * expanded bodies below it (which can shrink to nothing: their
-   * headers stay); a double-click restores the natural height.
+   * headers stay); a double-click returns the section to its equal
+   * share.
    */
   function setupMetaSectionResizer(resizer) {
     const section = resizer.previousElementSibling;
@@ -4646,12 +4655,30 @@
     let maxH = 0;
     let dragging = false;
 
+    /**
+     * Record the start height and the drag's range, and pin every
+     * expanded body ABOVE the section at its current height: equal-share
+     * bodies there would otherwise give up or take space as the
+     * boundary moves, shifting the separators above it.
+     */
     function measure() {
+      const sections = metaSections();
+      const index = sections.indexOf(section);
+      for (const other of sections.slice(0, index)) {
+        const otherBody = metaSectionBody(other);
+        if (
+          otherBody &&
+          metaSectionExpanded(other) &&
+          metaSectionHeights[other.id] === undefined
+        )
+          setMetaSectionHeight(
+            other,
+            Math.round(otherBody.getBoundingClientRect().height),
+          );
+      }
       startH = body.getBoundingClientRect().height;
       maxH = startH;
-      for (const other of metaSections().slice(
-        metaSections().indexOf(section) + 1,
-      )) {
+      for (const other of sections.slice(index + 1)) {
         const otherBody = metaSectionBody(other);
         if (otherBody && metaSectionExpanded(other))
           maxH += otherBody.getBoundingClientRect().height;
@@ -4730,7 +4757,7 @@
         );
         height = localStorage.getItem(META_SECTION_HEIGHT_KEY + section.id);
       } catch (_e) {
-        /* storage unavailable: every section starts expanded, natural height */
+        /* storage unavailable: every section starts expanded, equal share */
       }
       if (collapsed === '1') {
         section.classList.add('collapsed');
