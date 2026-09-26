@@ -107,8 +107,12 @@ export function activate(context: vscode.ExtensionContext): void {
   metaView = new SorcarSidebarView(context.extensionUri, {
     rootTabId: META_PANEL_TAB_ID,
     bodyAttrs: metaPanelBodyAttrs(),
-    // The view is display-only: it opens no chats and owns no panel.
-    onEvent: () => {},
+    // The view owns no panel; its only chat-opening action is the Apps
+    // subpanel launching a "connect this app" task, which opens (and
+    // auto-submits) a fresh chat editor panel.
+    onEvent: event => {
+      if (event.kind === 'openChat') panelManager?.openChat(event);
+    },
   });
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

@@ -295,6 +295,14 @@
   - `cmd`: The ``getTaskUpdate`` command (``tabId``, optional ``knownSig``, ``token``, ``refresh``).
   - `ctx`: The transport context of the current call.
 
+- **get_cron_jobs** — Send a client the scheduled cron jobs for its Schedule subpanel. The right sidebar's "Schedule" subpanel (every surface: remote webapp, VS Code sidebar chat, editor-tabs Task Info view) polls this command.  The direct reply, to whichever endpoint (WSS or UDS) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the rows of :func:`kiss.server.sidebar_panels.cron_jobs_report`.<br/>`async get_cron_jobs(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getCronJobs`` command (no fields).
+  - `ctx`: The transport context of the current call.
+
+- **get_apps_status** — Send a client every third-party agent's authentication status. Feeds the right sidebar's "Apps" subpanel.  The status comes from :func:`kiss.server.sidebar_panels.apps_status` (a cached probe subprocess; ``refresh: true`` — the subpanel's refresh button, or an app waiting for its connect task — probes again). The direct reply is ``{"type": "appsStatus", "apps": [...], "checkedAt": <epoch ms>}``. A probe takes seconds, and each connection's commands are dispatched one at a time, so the reply is produced by a background task: a ``submit`` or ``stop`` sent right after the poll is not held up behind the probe.<br/>`async get_apps_status(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getAppsStatus`` command (optional ``refresh``).
+  - `ctx`: The transport context of the current call.
+
 - **list_dir** — List a directory for the remote webapp's Explorer view. The remote webapp's task-history panel carries a VS Code-like activity bar whose Explorer view browses the workspace: opening the view lists the work dir, expanding a folder lists that folder, and clicking a file goes through ``openFile``.  The reply is a ``dirListing`` event sent to the requester only. UDS clients (VS Code windows) have a real Explorer, so a UDS-delivered ``listDir`` is dropped as a defensive no-op, exactly like ``checkPaths``.<br/>`async list_dir(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``listDir`` command (optional ``path``, ``workDir``, ``tabId``, ``token``).
   - `ctx`: The transport context of the current call.

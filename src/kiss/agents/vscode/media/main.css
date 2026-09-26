@@ -1827,6 +1827,12 @@ body.remote-chat #theme-btn { display: flex; }
   overflow-y: auto;
 }
 
+/* The body that fills the leftover height (the last expanded one, see
+   applyMetaSectionLayout) keeps a minimum share of the panel: natural
+   bodies above it, e.g. a long Task update, shrink and scroll instead
+   of squeezing it to zero height. */
+.meta-section-body.meta-section-fill { min-height: min(8em, 30%); }
+
 /* The separator between two shown sections: a 1px line inside a 9px
    grab area.  main.js hides the one after the last shown section. */
 .meta-section-resizer {
@@ -1865,13 +1871,13 @@ body.meta-section-resizing {
   cursor: row-resize;
 }
 
-/* The Task update section's header row: the toggle on the left, the
-   refresh button at the right.  The button turns while the daemon
-   runs the task-update agent and is disabled meanwhile (a second
-   press cannot start a second run). */
+/* A section header's refresh button (Task update, Schedule, Apps),
+   at the right of the toggle.  It turns while its data is being
+   fetched; the Task update one is disabled meanwhile (a second press
+   cannot start a second task-update run). */
 .meta-info-hdr { justify-content: space-between; }
 
-#meta-info-refresh {
+.meta-section-refresh {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1886,14 +1892,14 @@ body.meta-section-resizing {
   flex: 0 0 auto;
 }
 
-#meta-info-refresh:hover:not(:disabled) {
+.meta-section-refresh:hover:not(:disabled) {
   background: color-mix(in srgb, var(--fg) 10%, transparent);
   color: var(--fg);
 }
 
-#meta-info-refresh:disabled { cursor: default; }
+.meta-section-refresh:disabled { cursor: default; }
 
-#meta-info-refresh.spinning svg { animation: status-spin 1s linear infinite; }
+.meta-section-refresh.spinning svg { animation: status-spin 1s linear infinite; }
 
 /* The line under the header: "Updating…", or when and at what cost
    the shown report was produced, and the last run's failure.  Capped
@@ -1914,6 +1920,106 @@ body.meta-section-resizing {
   font-style: italic;
   color: color-mix(in srgb, var(--fg) 55%, transparent);
 }
+
+/* Schedule and Apps rows (every surface).  A row is a name with an
+   optional badge, over a dim second line (a job's schedule and next
+   run); an app row is a status dot, the name and its state at the
+   right.  Apps that are not connected render as buttons. */
+.sidebar-panel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+
+.sched-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 2px;
+}
+
+.sched-row.paused { opacity: 0.6; }
+
+.sidebar-panel-row-top,
+.app-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sidebar-panel-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-panel-sub {
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  overflow-wrap: anywhere;
+}
+
+.sidebar-panel-badge {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.sidebar-panel-badge.running {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.app-row-main {
+  width: 100%;
+  margin: 0;
+  padding: 4px 2px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.app-row-main { cursor: pointer; }
+
+button.app-row-main:hover,
+button.app-row-main:focus-visible {
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+  outline: none;
+}
+
+.app-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+
+.app-dot.connected { background: #3fb950; }
+
+.app-dot.unknown { background: #d29922; }
+
+.app-state {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+button.app-row-main .app-state { color: var(--accent); }
 
 /* Every VS Code webview drops the burger — the history panel lives in
    the PRIMARY sidebar in both editor-tabs and sidebar mode. Only the

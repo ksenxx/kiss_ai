@@ -42,6 +42,43 @@ export interface TaskUpdateState {
 }
 
 /**
+ * One scheduled cron job in the right sidebar's Schedule subpanel (see
+ * cron_jobs_report in kiss/server/sidebar_panels.py).
+ */
+export interface CronJobRow {
+  id: string;
+  name: string;
+  /** The job's schedule expression (cron syntax or "every 30m"). */
+  schedule: string;
+  kind: 'prompt' | 'command';
+  /** The prompt or shell command the job runs. */
+  what: string;
+  enabled: boolean;
+  /** Whether a run of the job is in progress now. */
+  running: boolean;
+  /** Epoch ms of the next / last run, 0 when none. */
+  nextRunAt: number;
+  lastRunAt: number;
+  lastStatus: string;
+  workDir: string;
+}
+
+/**
+ * One third-party agent in the right sidebar's Apps subpanel (see
+ * kiss/agents/third_party_agents/auth_status.py).
+ */
+export interface AppStatusRow {
+  /** Channel name (`<name>_sea.py`), e.g. "slack". */
+  name: string;
+  /** Display name, e.g. "Slack". */
+  label: string;
+  /** Connected, not connected, or null when the check failed. */
+  authenticated: boolean | null;
+  /** Why the check failed, '' otherwise. */
+  error: string;
+}
+
+/**
  * The task-info values a chat editor panel mirrors to the secondary
  * sidebar's Task Info view (editor-tabs mode): the display strings of
  * the panel's own #meta-list items in media/chat.html. All values are
@@ -321,6 +358,10 @@ export type FromWebviewMessage =
       // stamped onto the new panel as data-kiss-pending-text so the new
       // chat's textarea starts out with the same text.
       pendingText?: string;
+      // Fresh conversations only: submit pendingText as the new chat's
+      // first task as soon as the panel is ready (the Apps subpanel's
+      // "connect this app" launch).
+      autoSubmit?: boolean;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire
@@ -351,6 +392,12 @@ export type FromWebviewMessage =
       token?: string;
       refresh?: boolean;
     }
+  // The right sidebar's Schedule / Apps subpanels (sidebarpanels block
+  // in main.js): forwarded to the daemon, which answers with a direct
+  // `cronJobs` / `appsStatus` reply. `refresh` re-probes the apps'
+  // authentication state instead of serving the daemon's cached one.
+  | {type: 'getCronJobs'}
+  | {type: 'getAppsStatus'; refresh?: boolean}
   // Editor-tabs mode (host-only): this panel's live task-info values —
   // the mirror the secondary sidebar's Task Info view renders for the
   // ACTIVE panel. taskUpdate is the running task's task-update report
@@ -1001,6 +1048,13 @@ type ToWebviewMessageBody =
       values: MetaPanelValues | null;
       taskUpdate: TaskUpdateState | null;
     }
+  // The daemon's direct reply to `getCronJobs`: the scheduled cron jobs
+  // (kiss/server/sidebar_panels.py cron_jobs_report).
+  | {type: 'cronJobs'; jobs: CronJobRow[]}
+  // The daemon's direct reply to `getAppsStatus`: every third-party
+  // agent's authentication state and the epoch ms it was probed (0
+  // before the first successful probe).
+  | {type: 'appsStatus'; apps: AppStatusRow[]; checkedAt: number}
   // Host relay to the ACTIVE chat panel: the Task Info view's refresh
   // button was pressed — poll `getTaskUpdate` with `refresh: true`.
   | {type: 'refreshTaskUpdate'}
@@ -1048,7 +1102,9 @@ export interface AgentCommand {
     | 'shareChatTasks'
     | 'snoozeUpdate'
     | 'updateWhenIdle'
-    | 'getTaskUpdate';
+    | 'getTaskUpdate'
+    | 'getCronJobs'
+    | 'getAppsStatus';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -1096,7 +1152,7 @@ export interface AgentCommand {
   knownSig?: string;
   /** getTaskUpdate: generation token echoed on the `taskUpdate` reply. */
   token?: string;
-  /** getTaskUpdate: run the task-update agent now. */
+  /** getTaskUpdate: run the task-update agent now; getAppsStatus: re-probe. */
   refresh?: boolean;
   /** ready: the only registry tab an editor-tab panel shows. */
   singleTabId?: string;

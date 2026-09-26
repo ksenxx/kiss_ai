@@ -302,12 +302,36 @@
       <section class="meta-section" id="meta-info" aria-label="Task update">
         <div class="sidebar-hdr meta-section-hdr meta-info-hdr">
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-info-content"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task update</span></button>
-          <button type="button" id="meta-info-refresh" title="Run the task update now" aria-label="Refresh task update"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+          <button type="button" id="meta-info-refresh" class="meta-section-refresh" title="Run the task update now" aria-label="Refresh task update"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
         </div>
         <div id="meta-info-status" class="meta-info-status" aria-live="polite"></div>
         <div id="meta-info-content" class="md-body meta-section-body"></div>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task update section" aria-controls="meta-info-content" tabindex="0"></div>
+      <!-- Schedule and Apps sections: global, not per task (the
+           sidebarpanels block of main.js polls the daemon for them).
+           Schedule lists the scheduled cron jobs; Apps lists every
+           third-party agent with its authentication state, and a
+           click on an app that is not connected launches a new task
+           that connects it. -->
+      <section class="meta-section" id="meta-schedule" aria-label="Schedule">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-schedule-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Schedule</span></button>
+          <button type="button" id="meta-schedule-refresh" class="meta-section-refresh" title="Reload the scheduled jobs" aria-label="Refresh schedule"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-schedule-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
+        <ul id="meta-schedule-list" class="meta-section-body sidebar-panel-list"></ul>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Schedule section" aria-controls="meta-schedule-list" tabindex="0"></div>
+      <section class="meta-section" id="meta-apps" aria-label="Apps">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-apps-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Apps</span></button>
+          <button type="button" id="meta-apps-refresh" class="meta-section-refresh" title="Check the apps' sign-in state again" aria-label="Refresh apps"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-apps-status" class="meta-info-status" aria-live="polite">Checking&hellip;</div>
+        <ul id="meta-apps-list" class="meta-section-body sidebar-panel-list"></ul>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Apps section" aria-controls="meta-apps-list" tabindex="0"></div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
     <div id="meta-overlay"></div>

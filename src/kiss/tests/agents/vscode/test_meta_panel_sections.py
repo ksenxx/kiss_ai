@@ -110,9 +110,14 @@ _GEOMETRY_JS = """
   const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
+  // The per-task sections only: the global Schedule and Apps sections
+  // (hidden by _open_page unless asked for) are measured separately.
+  const isGlobal = el => el && (el.id === 'meta-schedule' || el.id === 'meta-apps');
   const resizers = Array.from(
-    document.querySelectorAll('#meta-panel > .meta-section-resizer'));
-  const hdrs = Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'));
+    document.querySelectorAll('#meta-panel > .meta-section-resizer'))
+    .filter(r => !isGlobal(r.previousElementSibling));
+  const hdrs = Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
+    .filter(h => !isGlobal(h.parentElement));
   return {
     panelInnerBottom: pr.bottom - pad,
     panelTop: pr.top,
@@ -200,13 +205,38 @@ def browser() -> Iterator[Browser]:
             chromium.close()
 
 
-def _open_page(browser: Browser, url: str, width: int, height: int = 900) -> Page:
-    """Open the remote page at the given viewport with post recording."""
+# Takes the global Schedule and Apps sections out of the stack (the
+# `hidden` attribute; a Task Info toggle round trip re-applies the
+# layout), leaving the per-task sections these geometry tests measure.
+_HIDE_GLOBAL_SECTIONS_JS = """
+() => {
+  document.getElementById('meta-schedule').hidden = true;
+  document.getElementById('meta-apps').hidden = true;
+  const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
+  toggle.click();
+  toggle.click();
+}
+"""
+
+
+def _open_page(
+    browser: Browser,
+    url: str,
+    width: int,
+    height: int = 900,
+    global_sections: bool = False,
+) -> Page:
+    """Open the remote page at the given viewport with post recording.
+
+    Unless ``global_sections``, the Schedule and Apps sections are
+    hidden so only the per-task sections share the panel."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
     page.goto(url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
+    if not global_sections:
+        page.evaluate(_HIDE_GLOBAL_SECTIONS_JS)
     return page
 
 
@@ -336,6 +366,7 @@ def test_drag_moves_the_boundary_persists_and_dblclick_restores(
         page.reload()
         page.wait_for_selector("body.remote-desktop", state="attached")
         page.evaluate(_PREPARE_JS)
+        page.evaluate(_HIDE_GLOBAL_SECTIONS_JS)
         _show_task_update(page, _LONG_REPORT)
         reloaded = _geometry(page)
         assert reloaded["listHeight"] == pytest.approx(shrunk["listHeight"], abs=2), (
@@ -539,7 +570,9 @@ def test_a_third_section_stacks_resizes_and_hides(
         capped = page.evaluate(_EXTRA_GEOMETRY_JS)
         assert capped["valueNow"] == str(round(capped["listHeight"])), capped
         assert capped["contentHeight"] == pytest.approx(0, abs=1), capped
-        assert capped["extraHeight"] == pytest.approx(0, abs=1), capped
+        # The filling (last expanded) body keeps its minimum share
+        # (.meta-section-fill in main.css) even against a long drag.
+        assert capped["extraHeight"] > 50, capped
         for hdr in _geometry(page)["headers"]:
             assert 0 <= hdr["top"] < hdr["bottom"] <= 560, hdr
 
@@ -615,5 +648,118 @@ def test_long_error_status_scrolls_instead_of_pushing_the_report_out(
         state = page.evaluate(status_js)
         assert state["contentHeight"] > 40, state
         assert state["contentBottom"] <= state["panelBottom"], state
+    finally:
+        page.close()
+
+
+# Forty apps (one connected, one whose check failed): more rows than
+# the panel can show, so the Apps body must scroll.
+_APPS = [
+    {"name": f"app{i:02d}", "label": f"App {i:02d}", "authenticated": i == 7, "error": ""}
+    for i in range(38)
+] + [
+    {"name": "slack", "label": "Slack", "authenticated": False, "error": ""},
+    {"name": "matrix", "label": "Matrix", "authenticated": None, "error": "TimeoutError: slow"},
+]
+
+_GLOBAL_GEOMETRY_JS = """
+() => {
+  const rect = id => document.getElementById(id).getBoundingClientRect();
+  const panel = document.getElementById('meta-panel');
+  const pad = parseFloat(getComputedStyle(panel).paddingBottom);
+  const apps = document.getElementById('meta-apps-list');
+  return {
+    panelInnerBottom: panel.getBoundingClientRect().bottom - pad,
+    scheduleTop: rect('meta-schedule-list').top,
+    scheduleHeight: rect('meta-schedule-list').height,
+    appsTop: rect('meta-apps-list').top,
+    appsBottom: rect('meta-apps-list').bottom,
+    appsScrolls: apps.scrollHeight > apps.clientHeight + 1,
+    headers: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
+      .filter(h => h.getClientRects().length > 0)
+      .map(h => h.querySelector('.meta-section-toggle').textContent),
+    appsStatus: document.getElementById('meta-apps-status').textContent,
+    firstApp: apps.querySelector('.app-row .sidebar-panel-name').textContent,
+    buttons: apps.querySelectorAll('button.app-row-main').length,
+  };
+}
+"""
+
+
+def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
+    browser: Browser, remote_url: str
+) -> None:
+    page = _open_page(browser, remote_url, 1200, height=700, global_sections=True)
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        posted = page.evaluate("() => window.__posted.map(m => m.type)")
+        assert "getCronJobs" in posted and "getAppsStatus" in posted
+        _deliver(page, {
+            "type": "cronJobs",
+            "jobs": [{
+                "id": "j1", "name": "Morning email digest", "schedule": "0 9 * * *",
+                "kind": "prompt", "what": "summarize my email", "enabled": True,
+                "running": False, "nextRunAt": "2099-01-01T09:00:00", "lastRunAt": "",
+                "lastStatus": "", "workDir": "",
+            }],
+        })
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
+        geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
+        # No running task: Task Info, Schedule and Apps are on screen.
+        assert geo["headers"] == ["Task Info", "Schedule", "Apps"], geo
+        # Schedule keeps its natural height; Apps fills the rest and scrolls.
+        assert geo["scheduleTop"] < geo["appsTop"], geo
+        assert geo["appsBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        assert geo["appsScrolls"], geo
+        assert geo["appsStatus"] == "1 of 40 connected"
+        assert geo["firstApp"] == "App 07", "connected apps are listed first"
+        assert geo["buttons"] == 39, "every app that is not connected is a button"
+
+        # The static server never completes the websocket handshake, so
+        # the page believes the daemon is down (sends are held back).
+        # Connecting re-requests both subpanels.
+        page.evaluate("() => { window.__posted.length = 0; }")
+        _deliver(page, {"type": "daemonStatus", "connected": True})
+        posted = page.evaluate("() => window.__posted.map(m => m.type)")
+        assert "getCronJobs" in posted and "getAppsStatus" in posted
+
+        # Clicking an app that is not connected submits a connect task
+        # in a NEW tab.
+        tabs_before = page.locator("#tab-list .chat-tab").count()
+        page.locator('.app-row[data-app="slack"] button').click()
+        submit = page.evaluate(
+            "() => window.__posted.filter(m => m.type === 'submit').pop() || null"
+        )
+        assert submit is not None
+        assert submit["prompt"].startswith('Connect my Slack app: authenticate the "slack"')
+        assert 'run_agent with agent "slack"' in submit["prompt"]
+        assert page.locator("#tab-list .chat-tab").count() == tabs_before + 1
+    finally:
+        page.close()
+
+
+def test_a_long_task_update_leaves_the_apps_list_a_usable_share(
+    browser: Browser, remote_url: str
+) -> None:
+    """The filling (last expanded) body keeps a minimum share: a long
+    Task update above it shrinks and scrolls instead of squeezing the
+    Apps list to zero height."""
+    page = _open_page(browser, remote_url, 1200, height=700, global_sections=True)
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        _show_task_update(page, _LONG_REPORT)
+        geo = page.evaluate(
+            """() => {
+              const r = id => document.getElementById(id).getBoundingClientRect();
+              const c = document.getElementById('meta-info-content');
+              return {apps: r('meta-apps-list').height,
+                      panel: r('meta-panel').height,
+                      updateScrolls: c.scrollHeight > c.clientHeight + 1};
+            }"""
+        )
+        assert geo["apps"] >= 80, geo
+        assert geo["updateScrolls"], geo
     finally:
         page.close()

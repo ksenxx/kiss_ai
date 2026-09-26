@@ -843,6 +843,7 @@ export class SorcarPanelManager {
     taskId?: string | number | null;
     title?: string;
     pendingText?: string;
+    autoSubmit?: boolean;
   }): void {
     const chatId = event.chatId ? String(event.chatId) : '';
     if (chatId) {
@@ -865,7 +866,12 @@ export class SorcarPanelManager {
         }
       }
     }
-    this._createPanel({
+    // The Apps subpanel's connect launch: a fresh chat whose first
+    // task is the prompt.  The host submits it once, after the webview
+    // is ready -- never through the panel's HTML, which a webview
+    // reload would replay into a second submission.
+    const autoSubmit = !chatId && !!event.autoSubmit && !!event.pendingText;
+    const created = this._createPanel({
       tabId: randomTabId(),
       title: event.title,
       resumeChatId: chatId || undefined,
@@ -875,8 +881,10 @@ export class SorcarPanelManager {
           : String(event.taskId),
       // Only a FRESH chat starts from the opener's draft; a resume
       // shows the resumed chat's own composer state.
-      pendingText: chatId ? undefined : event.pendingText || undefined,
+      pendingText:
+        chatId || autoSubmit ? undefined : event.pendingText || undefined,
     });
+    if (autoSubmit) created.controller.submitWhenReady(event.pendingText || '');
   }
 
   /**

@@ -4569,6 +4569,9 @@
         if (section === last) body.style.flex = '1 1 0px';
         else if (h !== undefined) body.style.flex = '0 1 ' + h + 'px';
         else body.style.flex = '';
+        // The filling body keeps a minimum share (main.css), or natural
+        // bodies above it could squeeze it to nothing.
+        body.classList.toggle('meta-section-fill', section === last);
       }
       const resizer = metaSectionResizer(section);
       if (!resizer) continue;
@@ -5246,6 +5249,292 @@
     renderTaskUpdate(update ? ev.taskUpdate : null);
   }
   // metarelay-coverage:end
+
+  // sidebarpanels-coverage:start
+  // ---- Right sidebar: Schedule and Apps subpanels ----
+  //
+  // Two GLOBAL subpanels under the per-task ones in #meta-panel, on
+  // every surface that shows it (remote webapp, sidebar-chat drawer,
+  // editor-tabs Task Info view):
+  //
+  // * Schedule lists the scheduled cron jobs (daemon reply `cronJobs`
+  //   to getCronJobs, kiss/server/sidebar_panels.py cron_jobs_report);
+  // * Apps lists every third-party agent with its authentication state
+  //   (reply `appsStatus` to getAppsStatus).  Clicking an app that is
+  //   not connected launches a new task that connects it.
+  //
+  // Both are requested at boot and whenever the daemon (re)connects,
+  // and polled every SIDEBAR_PANELS_POLL_MS once the daemon has
+  // answered (the daemon caches the apps probe).
+  // Chat editor panels (their own panel is hidden: they relay to the
+  // Task Info view) and the history panel never poll.
+  const scheduleList = document.getElementById('meta-schedule-list');
+  const scheduleStatus = document.getElementById('meta-schedule-status');
+  const scheduleRefreshBtn = document.getElementById('meta-schedule-refresh');
+  const appsList = document.getElementById('meta-apps-list');
+  const appsStatusLine = document.getElementById('meta-apps-status');
+  const appsRefreshBtn = document.getElementById('meta-apps-refresh');
+  const SIDEBAR_PANELS_POLL_MS = 30000;
+  const SIDEBAR_PANELS_SHOWN = !POST_META_UPDATES && !HISTORY_PANEL_MODE;
+  // Apps with a connect task launched from this webview (name -> launch
+  // time): while any is waiting, the poll re-probes (refresh) so the
+  // new state shows without waiting for the daemon's cache to expire.
+  // An app leaves the set once connected, or after APP_AUTH_WAIT_MS.
+  const appsAwaitingAuth = new Map();
+  const APP_AUTH_WAIT_MS = 30 * 60000;
+  let sidebarPanelsTimer = 0;
+
+  /**
+   * Ask the daemon for the Schedule and Apps data.
+   *
+   * @param {boolean} refreshApps Re-probe the apps' authentication
+   *     state instead of accepting the daemon's cached answer.
+   */
+  function requestSidebarPanels(refreshApps) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    api.getCronJobs();
+    api.getAppsStatus(refreshApps ? {refresh: true} : undefined);
+    if (refreshApps) {
+      appsRefreshBtn.disabled = true;
+      appsRefreshBtn.classList.add('spinning');
+    }
+  }
+
+  /** Boot the subpanels: refresh buttons and the first request. */
+  function startSidebarPanels() {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    scheduleRefreshBtn.addEventListener('click', () => api.getCronJobs());
+    appsRefreshBtn.addEventListener('click', () => requestSidebarPanels(true));
+    requestSidebarPanels(false);
+  }
+
+  /**
+   * Start the poll timer, once: called on the daemon's first reply, so
+   * a page whose daemon never answers keeps no timer running.
+   */
+  function ensureSidebarPanelsPoll() {
+    if (sidebarPanelsTimer) return;
+    sidebarPanelsTimer = setInterval(() => {
+      if (document.hidden) return;
+      const now = Date.now();
+      for (const [name, at] of appsAwaitingAuth) {
+        if (now - at > APP_AUTH_WAIT_MS) appsAwaitingAuth.delete(name);
+      }
+      requestSidebarPanels(appsAwaitingAuth.size > 0);
+    }, SIDEBAR_PANELS_POLL_MS);
+  }
+
+  /**
+   * The apps refresh button stops turning: its reply arrived, or the
+   * daemon connection dropped (the reply will never come).
+   */
+  function stopAppsRefreshSpin() {
+    appsRefreshBtn.disabled = false;
+    appsRefreshBtn.classList.remove('spinning');
+  }
+
+  /**
+   * "in 5m" / "3h ago" for an epoch-millisecond time; '' when unset.
+   *
+   * @param {number} t The time.
+   * @returns {string} The relative text.
+   */
+  function sidebarPanelTimeText(t) {
+    if (!t) return '';
+    const delta = Math.round((t - Date.now()) / 60000);
+    const abs = Math.abs(delta);
+    let amount;
+    if (abs < 1) return 'now';
+    if (abs < 60) amount = abs + 'm';
+    else if (abs < 48 * 60) amount = Math.round(abs / 60) + 'h';
+    else amount = Math.round(abs / 1440) + 'd';
+    return delta > 0 ? 'in ' + amount : amount + ' ago';
+  }
+
+  /**
+   * One text span with a class.
+   *
+   * @param {string} cls The class name.
+   * @param {string} text The text.
+   * @returns {HTMLSpanElement} The span.
+   */
+  function sidebarPanelSpan(cls, text) {
+    const span = document.createElement('span');
+    span.className = cls;
+    span.textContent = text;
+    return span;
+  }
+
+  /**
+   * Render the daemon's `cronJobs` reply into the Schedule subpanel.
+   * Each row shows the job's name, a running / paused badge, its
+   * schedule and its next (or, when paused, last) run; the tooltip
+   * holds the prompt or command and the last run's outcome.
+   *
+   * @param {{jobs: Array<Object>}} ev The reply.
+   */
+  function renderCronJobs(ev) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    ensureSidebarPanelsPoll();
+    const jobs = Array.isArray(ev.jobs) ? ev.jobs : [];
+    scheduleList.textContent = '';
+    scheduleStatus.textContent = jobs.length
+      ? ''
+      : 'No scheduled jobs. Ask Sorcar to schedule a task, e.g. "every morning at 9 summarize my email".';
+    for (const job of jobs) {
+      const li = document.createElement('li');
+      li.className = 'sidebar-panel-row sched-row';
+      li.classList.toggle('paused', !job.enabled);
+      const top = document.createElement('div');
+      top.className = 'sidebar-panel-row-top';
+      top.appendChild(sidebarPanelSpan('sidebar-panel-name', job.name));
+      if (job.running)
+        top.appendChild(
+          sidebarPanelSpan('sidebar-panel-badge running', 'running'),
+        );
+      else if (!job.enabled)
+        top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'paused'));
+      li.appendChild(top);
+      const when = job.enabled
+        ? job.nextRunAt && 'next ' + sidebarPanelTimeText(job.nextRunAt)
+        : job.lastRunAt && 'last ' + sidebarPanelTimeText(job.lastRunAt);
+      li.appendChild(
+        sidebarPanelSpan(
+          'sidebar-panel-sub',
+          [job.schedule, when].filter(Boolean).join(' \u00b7 '),
+        ),
+      );
+      const tip = [(job.kind === 'command' ? '$ ' : '') + job.what];
+      if (job.lastStatus) tip.push('Last run: ' + job.lastStatus);
+      li.title = tip.join('\n');
+      scheduleList.appendChild(li);
+    }
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * Render the daemon's `appsStatus` reply into the Apps subpanel:
+   * connected apps first, then the rest alphabetically.  A connected
+   * app is a plain row; any other app is a button that launches the
+   * task connecting it.
+   *
+   * @param {{apps: Array<Object>, checkedAt: string}} ev The reply.
+   */
+  function renderAppsStatus(ev) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    ensureSidebarPanelsPoll();
+    stopAppsRefreshSpin();
+    const apps = (Array.isArray(ev.apps) ? ev.apps : []).slice();
+    for (const app of apps) {
+      if (app.authenticated === true) appsAwaitingAuth.delete(app.name);
+    }
+    apps.sort(
+      (a, b) =>
+        (b.authenticated === true) - (a.authenticated === true) ||
+        String(a.label).localeCompare(String(b.label)),
+    );
+    const connected = apps.filter(app => app.authenticated === true).length;
+    appsStatusLine.textContent = apps.length
+      ? connected + ' of ' + apps.length + ' connected'
+      : 'Could not check the apps. Press refresh to try again.';
+    appsList.textContent = '';
+    for (const app of apps) {
+      const li = document.createElement('li');
+      li.className = 'sidebar-panel-row app-row';
+      li.dataset.app = app.name;
+      const row = document.createElement(
+        app.authenticated === true ? 'div' : 'button',
+      );
+      row.className = 'app-row-main';
+      const state =
+        app.authenticated === true
+          ? 'connected'
+          : app.authenticated === false
+            ? 'disconnected'
+            : 'unknown';
+      row.appendChild(sidebarPanelSpan('app-dot ' + state, ''));
+      row.appendChild(sidebarPanelSpan('sidebar-panel-name', app.label));
+      if (state === 'connected') {
+        row.appendChild(sidebarPanelSpan('app-state', 'Connected'));
+        row.title = app.label + ' is connected';
+      } else {
+        row.type = 'button';
+        row.appendChild(sidebarPanelSpan('app-state', 'Connect'));
+        row.title =
+          (state === 'unknown' ? 'Status unknown (' + app.error + '). ' : '') +
+          'Click to connect ' +
+          app.label +
+          ' in a new task';
+        row.addEventListener('click', () => launchAppAuthTask(app));
+      }
+      li.appendChild(row);
+      appsList.appendChild(li);
+    }
+    applyMetaSectionLayout();
+  }
+
+  /**
+   * The prompt of the task that connects *app*: Sorcar hands it to the
+   * app's own agent (run_agent), which drives the most autonomous
+   * sign-in the service offers — an OAuth consent page or device-code
+   * approval opened in the user's browser, the agent polling for the
+   * result — so the user only signs in and approves, the way Grok Bot
+   * plugins and Meta Muse connectors connect an app.
+   *
+   * @param {{name: string, label: string}} app The app.
+   * @returns {string} The task prompt.
+   */
+  function appAuthPrompt(app) {
+    return [
+      'Connect my ' +
+        app.label +
+        ' app: authenticate the "' +
+        app.name +
+        '" third-party agent (run_agent with agent "' +
+        app.name +
+        '").',
+      '',
+      'Make it as autonomous as possible, like a one-tap OAuth connect:',
+      '- Reuse anything already on this machine first (existing tokens, CLI logins, config files, environment variables).',
+      '- Prefer an OAuth consent or device-code flow: open the sign-in / approval page in my default browser yourself and poll or listen for completion, so all I do is sign in and click Approve.',
+      '- When the service needs a developer app, API key or token, open the exact console page for it and walk me through it one step at a time; read values back from the page when you can.',
+      '- Ask me only for what cannot be automated (signing in, 2FA, CAPTCHA, approving consent, a secret only I can see), one short question at a time. Never ask for my password in chat.',
+      '',
+      'Keep my accounts safe from being flagged or banned:',
+      "- Use only the service's official sign-in: OAuth, device codes, official API tokens or its own pairing flow (QR code, app approval). Never script a login form, type my password into a site, solve or bypass a CAPTCHA, or fake a browser or device.",
+      '- Never retry a failed sign-in in a loop: after one failure, stop and tell me what happened. Respect rate limits and wait when the service asks you to.',
+      "- If the only option is an unofficial client or automation the service's terms forbid (a risk of suspension), explain the risk and ask me before going ahead.",
+      "- Finish by verifying the connection with the agent's auth-check tool and tell me which account is connected, or exactly what still blocks it.",
+    ].join('\n');
+  }
+
+  /**
+   * Launch the task that connects *app* in a new chat.  Editor-tabs
+   * surfaces (the Task Info view) ask the host for a fresh chat editor
+   * panel that submits the prompt as soon as it is ready; the others
+   * open a new internal tab and submit there, closing the mobile
+   * drawer so the new chat is on screen.
+   *
+   * @param {{name: string, label: string}} app The app to connect.
+   */
+  function launchAppAuthTask(app) {
+    const prompt = appAuthPrompt(app);
+    appsAwaitingAuth.set(app.name, Date.now());
+    if (EDITOR_TAB_MODE) {
+      postToHost({
+        type: 'openChatPanel',
+        pendingText: prompt,
+        autoSubmit: true,
+      });
+      return;
+    }
+    createNewTab();
+    inp.value = prompt;
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
+    setMetaDrawerOpen(false);
+    sendMessage();
+  }
+  // sidebarpanels-coverage:end
 
   // activitybar-coverage:start
   // ---- Activity bar: Tasks / Explorer / Source Control views ----
@@ -13153,6 +13442,7 @@
         setServerLoading(!ev.connected, ev.reconnecting === true);
         if (!ev.connected) {
           forgetInFlightPathChecks();
+          stopAppsRefreshSpin();
           // An outage swallows in-flight replies. A getAdjacentTask reply
           // that never comes must not leave the loader row up and every
           // later overscroll blocked behind adjacentLoading; sidebar
@@ -13196,6 +13486,7 @@
           // the file links they were for stay grey for ever.
           reissueFileLinkChecks();
           refreshHistory();
+          requestSidebarPanels(false);
         }
         return;
       case 'notification':
@@ -13506,6 +13797,12 @@
         break;
       case 'taskUpdate':
         renderTaskUpdateEvent(ev);
+        break;
+      case 'cronJobs':
+        renderCronJobs(ev);
+        break;
+      case 'appsStatus':
+        renderAppsStatus(ev);
         break;
       case 'metaState':
         // The host relays the ACTIVE chat editor panel's task-info
@@ -16408,6 +16705,7 @@
       }
     }
     api.getConfig();
+    startSidebarPanels();
   }
 
   function setupEventListeners() {

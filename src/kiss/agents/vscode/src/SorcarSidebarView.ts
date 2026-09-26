@@ -251,6 +251,8 @@ export type PanelEvent =
       title?: string;
       // Fresh chats: composer draft to seed the new panel's textarea.
       pendingText?: string;
+      // Fresh chats: submit pendingText as the first task once ready.
+      autoSubmit?: boolean;
     }
   // Close this panel. retire=true means the USER closed the root chat
   // inside the panel, so the host must also retire the tab from the
@@ -378,6 +380,10 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // agent when due (or when `refresh` is set) and answers with a
   // direct `taskUpdate` that the client-listener relay passes back.
   getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
+  // The right sidebar's Schedule / Apps subpanels; the direct
+  // `cronJobs` / `appsStatus` replies come back through the client relay.
+  getCronJobs: [],
+  getAppsStatus: ['refresh'],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings
@@ -472,6 +478,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
   private _webviewReady: boolean = false;
+  // A prompt to submit as soon as the webview is ready (see
+  // submitWhenReady); '' when none is waiting.
+  private _pendingSubmit = '';
 
   private _voiceWake: VoiceWakeService | undefined;
   private _voiceSensitivity: number | undefined;
@@ -1494,6 +1503,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           restoredTabs: message.restoredTabs,
           singleTabId: message.singleTabId,
         } as AgentCommand);
+        if (this._pendingSubmit) {
+          this._sendToWebview({
+            type: 'insertAndSubmit',
+            text: this._pendingSubmit,
+          });
+          this._pendingSubmit = '';
+        }
         break;
       }
 
@@ -1908,6 +1924,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           taskId: message.taskId,
           title: message.title,
           pendingText: message.pendingText,
+          autoSubmit: message.autoSubmit,
         });
         break;
 
@@ -2196,6 +2213,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
     this._openUpdateTerminal(path.dirname(scriptPath), preflight);
+  }
+
+  /**
+   * Submit *prompt* as a task in this webview's chat once the webview
+   * is ready, however long its first load takes: posted now when it is
+   * ready, otherwise held and posted once on its `ready`.  Unlike
+   * submitTask there is no timeout fallback, which would start a run
+   * without this panel's tab id (a run the daemon drops).
+   *
+   * @param prompt The task text; blank text is ignored.
+   */
+  public submitWhenReady(prompt: string): void {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this._webviewReady) {
+      this._sendToWebview({type: 'insertAndSubmit', text});
+    } else {
+      this._pendingSubmit = text;
+    }
   }
 
   public async submitTask(prompt: string): Promise<void> {

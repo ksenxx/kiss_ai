@@ -124,8 +124,13 @@ from kiss.agents.sorcar.daemon_client import (
 )
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
+from kiss.server import sidebar_panels
 
 logger = logging.getLogger(__name__)
+
+# In-flight ``appsStatus`` replies (see ServerApi.get_apps_status): the
+# event loop keeps only weak references to tasks.
+_APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
 
 
 def _job_dir_is_contained(
@@ -280,6 +285,8 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getTaskUpdate", handler="get_task_update"),
+    ApiCommand("getCronJobs", handler="get_cron_jobs"),
+    ApiCommand("getAppsStatus", handler="get_apps_status"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
@@ -466,6 +473,10 @@ class ServerBackend(Protocol):
     _vscode_server: Any
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
+
+    async def _reply_direct(
+        self, endpoint: Any, reply: dict[str, Any], what: str,
+    ) -> None: ...
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
@@ -1097,6 +1108,66 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_get_task_update(cmd, ctx.endpoint)
+
+    async def get_cron_jobs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the scheduled cron jobs for its Schedule subpanel.
+
+        The right sidebar's "Schedule" subpanel (every surface: remote
+        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
+        this command.  The direct reply, to whichever endpoint (WSS or
+        UDS) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
+        rows of :func:`kiss.server.sidebar_panels.cron_jobs_report`.
+
+        Args:
+            cmd: The ``getCronJobs`` command (no fields).
+            ctx: The transport context of the current call.
+        """
+        jobs = await asyncio.to_thread(sidebar_panels.cron_jobs_report)
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "cronJobs", "jobs": jobs}, "getCronJobs"
+        )
+
+    async def get_apps_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client every third-party agent's authentication status.
+
+        Feeds the right sidebar's "Apps" subpanel.  The status comes
+        from :func:`kiss.server.sidebar_panels.apps_status` (a cached
+        probe subprocess; ``refresh: true`` — the subpanel's refresh
+        button, or an app waiting for its connect task — probes again).
+        The direct reply is ``{"type": "appsStatus", "apps": [...],
+        "checkedAt": <epoch ms>}``.
+
+        A probe takes seconds, and each connection's commands are
+        dispatched one at a time, so the reply is produced by a
+        background task: a ``submit`` or ``stop`` sent right after the
+        poll is not held up behind the probe.
+
+        Args:
+            cmd: The ``getAppsStatus`` command (optional ``refresh``).
+            ctx: The transport context of the current call.
+        """
+        task = asyncio.create_task(
+            self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh")))
+        )
+        _APPS_STATUS_REPLIES.add(task)
+        task.add_done_callback(_APPS_STATUS_REPLIES.discard)
+
+    async def _reply_apps_status(self, endpoint: Any, refresh: bool) -> None:
+        """Probe (or read the cache) and send the ``appsStatus`` reply.
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            refresh: Probe again even when the cache is fresh.
+        """
+        try:
+            apps, checked_at = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
+            await self._backend._reply_direct(
+                endpoint,
+                {"type": "appsStatus", "apps": apps, "checkedAt": checked_at},
+                "getAppsStatus",
+            )
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("getAppsStatus reply failed", exc_info=True)
 
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """List a directory for the remote webapp's Explorer view.

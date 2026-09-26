@@ -42,6 +42,8 @@
     'saveFile',
     'checkPaths',
     'getTaskUpdate',
+    'getCronJobs',
+    'getAppsStatus',
     'listDir',
     'gitStatus',
     'gitLog',

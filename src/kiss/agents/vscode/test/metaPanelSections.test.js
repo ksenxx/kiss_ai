@@ -225,6 +225,19 @@ function showTaskUpdate(wv, html) {
   });
 }
 
+/**
+ * Take the global Schedule and Apps sections out of the stack (the
+ * `hidden` attribute, then a Task Info toggle round trip re-applies
+ * the layout), leaving only the two per-task sections.
+ */
+function hideGlobalSections(win) {
+  el(win, 'meta-schedule').hidden = true;
+  el(win, 'meta-apps').hidden = true;
+  const info = el(win, 'meta-section-info');
+  click(win, toggleOf(info));
+  click(win, toggleOf(info));
+}
+
 function pointer(win, target, type, fields) {
   const ev = new win.Event(type, {bubbles: true, cancelable: true});
   Object.assign(ev, {button: 0, clientY: 0, pointerId: 1}, fields);
@@ -243,24 +256,32 @@ async function main() {
     ['sidebar-chat drawer', SIDEBAR],
     ['Task Info view', META_VIEW],
   ]) {
-    await test(`${label}: both sections start expanded, the Task update one hidden`, () => {
+    await test(`${label}: every section starts expanded, the Task update one hidden`, () => {
       const {win} = makeWebview(attrs);
-      const [info, update] = sections(win);
+      const [info, update, schedule, apps] = sections(win);
       assert.strictEqual(info.id, 'meta-section-info');
       assert.strictEqual(update.id, 'meta-info');
+      assert.strictEqual(schedule.id, 'meta-schedule');
+      assert.strictEqual(apps.id, 'meta-apps');
       assert.strictEqual(toggleOf(info).textContent, 'Task Info');
       assert.strictEqual(toggleOf(update).textContent, 'Task update');
-      assertExpanded(info, true);
-      assertExpanded(update, true);
+      assert.strictEqual(toggleOf(schedule).textContent, 'Schedule');
+      assert.strictEqual(toggleOf(apps).textContent, 'Apps');
+      for (const section of [info, update, schedule, apps])
+        assertExpanded(section, true);
       assert.ok(
         !update.classList.contains('visible'),
         'no task: Task update section hidden',
       );
-      // Only Task Info is shown, so it is the last expanded section and
-      // fills; no separator follows it.
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
-      assertResizer(resizerAfter(info), 'hidden');
+      // Apps is the last expanded section, so it fills; the others
+      // keep their natural height and no separator follows Apps.
+      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
+      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'natural');
+      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+      assertResizer(resizerAfter(info), 'handle');
       assertResizer(resizerAfter(update), 'hidden');
+      assertResizer(resizerAfter(schedule), 'handle');
+      assertResizer(resizerAfter(apps), 'hidden');
       // Bodies are the scrolling parts.
       assert.ok(el(win, 'meta-list').classList.contains('meta-section-body'));
       assert.ok(
@@ -287,8 +308,9 @@ async function main() {
         ),
         '1',
       );
-      // Collapsed: the body no longer fills (nothing is expanded).
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
+      // The separator under a collapsed section is no longer a handle.
+      assertResizer(resizerAfter(info), 'static');
       click(win, toggleOf(info));
       assertExpanded(info, true);
       assert.strictEqual(
@@ -297,7 +319,19 @@ async function main() {
         ),
         null,
       );
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
+      assertResizer(resizerAfter(info), 'handle');
+      // Collapsing Apps hands the fill to Schedule, the new last
+      // expanded section.
+      const apps = el(win, 'meta-apps');
+      click(win, toggleOf(apps));
+      assertExpanded(apps, false);
+      assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), 'fill');
+      assert.strictEqual(
+        win.localStorage.getItem('kiss-meta-section-collapsed:meta-apps'),
+        '1',
+      );
+      click(win, toggleOf(apps));
+      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
     });
 
     await test(`${label}: a stored collapse state and height are restored at boot`, () => {
@@ -311,16 +345,17 @@ async function main() {
       const [info, update] = sections(win);
       assertExpanded(info, true);
       assertExpanded(update, false);
-      // Task Info is still the last expanded section, so it fills
-      // regardless of its stored height...
-      assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
-      // ...until the collapsed Task update section is shown and
-      // expanded: then the stored height applies.
+      // Task Info is not the last expanded section (Schedule and Apps
+      // follow), so its stored height applies.
+      assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
+      assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+      // The collapsed Task update section, shown and expanded, keeps
+      // its natural height ('junk' is no stored height).
       update.classList.add('visible');
       click(win, toggleOf(update));
       assertExpanded(update, true);
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
-      assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
+      assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'natural');
       assertResizer(resizerAfter(info), 'handle');
     });
   }
@@ -329,6 +364,7 @@ async function main() {
     const wv = makeWebview(REMOTE);
     const win = wv.win;
     const [info, update] = sections(win);
+    hideGlobalSections(win);
     showTaskUpdate(wv, '<p>progress</p>');
     assert.ok(update.classList.contains('visible'));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'natural');
@@ -358,12 +394,23 @@ async function main() {
     );
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'fill');
     assertResizer(resizerAfter(info), 'hidden');
+
+    // With the Schedule and Apps sections back, the Task update
+    // section sits between Task Info and Schedule.
+    el(win, 'meta-schedule').hidden = false;
+    el(win, 'meta-apps').hidden = false;
+    showTaskUpdate(wv, '<p>progress</p>');
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'natural');
+    assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'fill');
+    assertResizer(resizerAfter(info), 'handle');
+    assertResizer(resizerAfter(update), 'handle');
   });
 
   await test('remote webapp: arrow keys, double-click and pointer drag on the separator', () => {
     const wv = makeWebview(REMOTE);
     const win = wv.win;
     const [info] = sections(win);
+    hideGlobalSections(win);
     const r = resizerAfter(info);
     const list = el(win, 'meta-list');
     const HK = 'kiss-meta-section-h:meta-section-info';
@@ -422,7 +469,8 @@ async function main() {
   await test('a third section added per the chat.html recipe joins the stack; `hidden` removes it', () => {
     const wv = makeWebview(REMOTE, {extraSection: true});
     const win = wv.win;
-    const [info, update, extra] = sections(win);
+    hideGlobalSections(win);
+    const [info, update, , , extra] = sections(win);
     assert.strictEqual(extra.id, 'meta-section-extra');
     assertExpanded(extra, true);
     // No task: Task Info and Extra are shown; Extra, being last, fills.
