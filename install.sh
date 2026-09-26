@@ -313,7 +313,11 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
-NODE_VERSION="v22.16.0"
+# Node.js release installed when the machine has none.  Keep this at the
+# newest release of the 22.x line (https://nodejs.org/dist/latest-v22.x/):
+# releases before v22.23.2 carry the HIGH-severity CVEs fixed in the
+# July 2026 security release.
+NODE_VERSION="v22.23.3"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR"
 export PATH="$BIN_DIR:$PATH"

@@ -12,7 +12,10 @@ import os
 from collections.abc import Callable
 from typing import Any
 
-import httpx
+# The Anthropic SDK (>= 1.0) speaks HTTP through ``httpx2``, the
+# maintained fork of httpx, and rejects ``httpx`` objects (Timeout, clients)
+# at construction time; the exceptions it raises are httpx2's as well.
+import httpx2
 from anthropic import Anthropic, APITimeoutError
 from anthropic.resources.messages import Messages
 
@@ -495,7 +498,7 @@ class AnthropicModel(Model):
             )
             self.client = Anthropic(
                 api_key=self.api_key,
-                timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
+                timeout=httpx2.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
                 max_retries=_MAX_RETRIES,
                 default_headers=default_headers,
             )
@@ -839,8 +842,8 @@ class AnthropicModel(Model):
         stream stalls for :attr:`_stream_stall_timeout` seconds at either
         level:
 
-        * **byte level** — the client's httpx read timeout raises
-          ``httpx.ReadTimeout`` mid-iteration (SDK does not retry it, and
+        * **byte level** — the client's httpx2 read timeout raises
+          ``httpx2.ReadTimeout`` mid-iteration (SDK does not retry it, and
           its message is often empty) or ``anthropic.APITimeoutError``
           when the response headers never arrive (SDK retries
           ``_MAX_RETRIES`` times first);
@@ -942,7 +945,7 @@ class AnthropicModel(Model):
                 finally:
                     # Idempotent second stop for the exception paths.
                     watchdog.stop()
-        except (httpx.TimeoutException, APITimeoutError) as exc:
+        except (httpx2.TimeoutException, APITimeoutError) as exc:
             if self._stream_was_stopped(watchdog):
                 raise self._stop_error() from exc
             raise self._stall_error() from exc

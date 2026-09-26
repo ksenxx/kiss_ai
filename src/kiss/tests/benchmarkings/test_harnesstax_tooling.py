@@ -947,7 +947,8 @@ def test_verification_pass_runs_fresh_context_after_first_run(tmp_path: Path) ->
             )
         finally:
             del os.environ["HARNESSTAX_VERIFY_PASS"]
-        assert live.exec_run(["cat", "/app/hello.txt"]).output.decode().strip() == "hello"
+        written = live.exec_run(["cat", "/app/hello.txt"]).output
+        assert isinstance(written, bytes) and written.decode().strip() == "hello"
         second = metrics["verify_pass"]
         assert second is not None and second["error"] == "" and second["agent_success"]
         assert metrics["agent_success"] and metrics["cost_usd"] >= second["cost_usd"] > 0

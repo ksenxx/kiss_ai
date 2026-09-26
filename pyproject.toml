@@ -36,7 +36,9 @@ classifiers = [
 ]
 dependencies = [
     "openai>=2.13.0",
-    "anthropic>=0.40.0",
+    # >=1.0: the SDK speaks HTTP through httpx2 and kiss.core.models.
+    # anthropic_model builds its Timeout / catches its exceptions from httpx2.
+    "anthropic>=1.0.0",
     "rich>=14.2.0",
     # Markdown -> HTML conversion for finish()'s HTML summary guarantee
     # (kiss.core.utils.ensure_html).
@@ -47,7 +49,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pyyaml>=6.0.0",
     "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    "pydantic-settings>=2.14.2",  # CVE-2026-58203 fixed in 2.14.2
     "flask>=3.0.0",
     "playwright>=1.40.0",
     # Patched Playwright driver without the CDP leaks bot-protection
@@ -60,17 +62,27 @@ dependencies = [
     "sounddevice>=0.5.0",
     "slack_sdk>=3.30.0",
     "google-api-python-client>=2.100.0",
-    "requests>=2.28.0",
+    "requests>=2.33.0",  # PYSEC-2026-2275 fixed in 2.33.0
     # The repository has a top-level ``brotli`` gitlink.  Without the real
     # codec installed, Python exposes that directory as a namespace package;
     # urllib3 mistakes it for Brotli support and crashes while importing.
     "brotli>=1.2.0",
     "harbor>=0.3.0",
     "websockets>=15.0",
-    "cryptography>=44.0.0",
+    # 50.0.0 closes PYSEC-2026-35/36/3552/3553/3554 and GHSA-537c-gmf6-5ccf.
+    # 49.0+ publishes arm64-only macOS wheels, so Intel Macs stay on the
+    # newest release with universal2 wheels (48.x) instead of falling back
+    # to a Rust source build.  The advisories still open on 48.0.1 concern
+    # PKCS7 decryption and X.509 chain verification, which KISS never calls
+    # (it only mints its own TLS certificate in kiss.server.tls_certs and
+    # signs with Ed25519 in qq_sea).
+    "cryptography>=50.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "cryptography>=48.0.1,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     # Official MCP SDK: client transports + OAuth used by the
-    # the MCP tool integration.
-    "mcp>=1.20.0",
+    # the MCP tool integration.  1.28.1 closes the SSE/Streamable-HTTP
+    # session-hijack, cross-client task access and WebSocket Host/Origin
+    # advisories.
+    "mcp>=1.28.1",
     # Static-analysis scanners wired into SWEDefend's taint/dataflow
     # provenance layer (swedefend.defense.provenance): the harness invokes
     # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
@@ -111,14 +123,20 @@ packages = ["src/kiss", "projects/swedefend"]
 dev = [
     "mypy>=1.19.1",
     "ruff>=0.14.9",
-    "pytest>=9.0.2",
+    # 9.0.3 closes PYSEC-2026-1845.  9.1.0/9.1.1 lose a package's conftest
+    # fixtures when a file from the parent directory is listed between that
+    # package's files (pytest-dev/pytest#14635; the split test runs do
+    # exactly that).  Fixed upstream, unreleased: lift the cap at 9.1.2.
+    "pytest>=9.0.3,<9.1",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
     "mdformat>=1.0.0",
-    "requests>=2.28.0",
+    "requests>=2.33.0",
     "types-requests>=2.32.4.20260107",
     "pyright>=1.1.408",
-    "starlette>=0.38.0",
+    # 1.3.1 closes the Host-header path confusion, unbounded urlencoded
+    # form (DoS) and HTTPEndpoint method-dispatch advisories.
+    "starlette>=1.3.1",
     "types-qrcode>=8.2.0.20260518",
 ]
 
@@ -126,7 +144,7 @@ dev = [
 core = [
     "numpy>=1.26.0",
     "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    "pydantic-settings>=2.14.2",
     "pyyaml>=6.0.0",
     "rich>=14.2.0",
 ]
@@ -134,7 +152,7 @@ core = [
 # Core + Anthropic Claude support
 claude = [
     {include-group = "core"},
-    "anthropic>=0.40.0",
+    "anthropic>=1.0.0",
 ]
 
 # Core + OpenAI support
@@ -154,14 +172,15 @@ sorcar = [
     {include-group = "core"},
     "playwright>=1.40.0",
     "patchright>=1.63.0",
-    "mcp>=1.20.0",
+    "mcp>=1.28.1",
 ]
 
 # Sorcar (which includes core) + dependencies for kiss.server
 server = [
     {include-group = "sorcar"},   # transitively includes core
     "websockets>=15.0",
-    "cryptography>=44.0.0",
+    "cryptography>=50.0.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "cryptography>=48.0.1,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "vosk==0.3.44",
     "sounddevice>=0.5.0",
     "flask>=3.0.0",               # needed: web_server.py top-level-imports kiss.viz_trajectory.server
@@ -346,6 +365,26 @@ src = [".", "src", "projects"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
 ignore = []
+
+[tool.uv]
+# Floors for packages KISS does not import itself but that arrive through the
+# dependency tree.  They keep ``uv lock`` from ever resolving a release with a
+# published advisory (pip-audit, 2026-09-26); each is the first fixed release.
+constraint-dependencies = [
+    "aiohttp>=3.14.3",
+    "anyio>=4.14.2",
+    "click>=8.3.3",
+    "h2>=4.4.1",
+    "hpack>=4.2.0",
+    "httplib2>=0.32.0",
+    "idna>=3.15",
+    "litellm>=1.84.0",
+    "pyasn1>=0.6.4",
+    "pygments>=2.20.0",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.31",
+    "urllib3>=2.7.0",
+]
 
 [tool.uv.workspace]
 members = [

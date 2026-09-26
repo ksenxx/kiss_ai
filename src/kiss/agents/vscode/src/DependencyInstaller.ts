@@ -61,7 +61,11 @@ const INSTALL_STEP_TIMEOUT_MS = 30 * 60_000;
 
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
-const UV_VERSION = '0.11.2';
+// Keep at the newest release (https://github.com/astral-sh/uv/releases):
+// releases before 0.11.15 carry GHSA-4gg8-gxpx-9rph (arbitrary file write
+// through entry-point names) and GHSA-pjjw-68hj-v9mw (file deletion through
+// RECORD entries).  Dockerfile pins the same version.
+const UV_VERSION = '0.12.19';
 
 function xmlEscape(s: string): string {
   return s
@@ -1926,10 +1930,15 @@ async function installGit(): Promise<boolean> {
 }
 
 async function installMinGitWindows(): Promise<boolean> {
-  const GIT_VERSION = '2.49.0';
-  const archSuffix = process.arch === 'arm64' ? 'arm64' : '64';
-  const assetName = `MinGit-${GIT_VERSION}-${archSuffix}-bit`;
-  const url = `https://github.com/git-for-windows/git/releases/download/v${GIT_VERSION}.windows.1/${assetName}.zip`;
+  // git-for-windows tags a release `v<git>.windows.<n>` and names its
+  // assets `MinGit-<git>[.<n>]-64-bit.zip` / `MinGit-<git>[.<n>]-arm64.zip`
+  // (the `.<n>` suffix is dropped when n == 1).  Newest release:
+  // https://github.com/git-for-windows/git/releases/latest
+  const GIT_RELEASE_TAG = 'v2.55.0.windows.5';
+  const GIT_VERSION = '2.55.0.5';
+  const archSuffix = process.arch === 'arm64' ? 'arm64' : '64-bit';
+  const assetName = `MinGit-${GIT_VERSION}-${archSuffix}`;
+  const url = `https://github.com/git-for-windows/git/releases/download/${GIT_RELEASE_TAG}/${assetName}.zip`;
   const gitDir = path.join(HOME_DIR, '.local', 'git');
 
   log(`Downloading MinGit from ${url}`);
