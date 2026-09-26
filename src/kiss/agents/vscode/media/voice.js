@@ -10,7 +10,14 @@
   const inp = document.getElementById('task-input');
   if (!btn || !inp) return;
 
-  const WAKE_ALIASES = ['sorcar', 'sir car', 'sore car', 'sar car'];
+  // "Hey" + in-vocabulary sound-alikes of "Sorcar" (mirrors
+  // WAKE_ALIASES in kiss/server/voice_wake.py).
+  const WAKE_ALIASES = [
+    'hey sorcar',
+    'hey sir car',
+    'hey sore car',
+    'hey sar car',
+  ];
   const COOLDOWN_MS = 2000;
   const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
@@ -331,7 +338,7 @@
   let voskLoadPromise = null;
 
   let lastUiState = 'off';
-  let lastUiTip = "Voice trigger: listen for the word 'Sorcar'";
+  let lastUiTip = "Voice trigger: listen for the words 'Hey Sorcar'";
   let lastFlashCls = null;
 
   function applyUiClasses(el) {
@@ -361,7 +368,7 @@
     let tip;
     if (state === 'listening') {
       tip =
-        "Voice trigger on: say 'Sorcar' and pause briefly " +
+        "Voice trigger on: say 'Hey Sorcar' and pause briefly " +
         '(click to turn off)';
     } else if (state === 'loading') {
       tip = 'Voice trigger: starting ...';
@@ -377,7 +384,7 @@
         'KISS has no microphone. Use the remote web app to dictate with ' +
         "your browser's microphone.";
     } else {
-      tip = "Voice trigger: listen for the word 'Sorcar'";
+      tip = "Voice trigger: listen for the words 'Hey Sorcar'";
     }
     lastUiState = state;
     lastUiTip = tip;

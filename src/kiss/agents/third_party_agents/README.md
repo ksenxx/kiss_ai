@@ -41,7 +41,7 @@ plain-language prompts work everywhere**:
 2. **Web / mobile app.** The identical chat interface served over a cloudflared
    tunnel — copy the URL and password from the Settings panel and open it on any
    phone, tablet, or browser.
-3. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Sorcar,
+3. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Hey Sorcar,
    tell the eng Slack channel that the deploy is done."* You can also steer a running
    task by voice; Sorcar replies aloud in the language you spoke.
 4. **Your existing messaging apps.** Once a channel gateway is running (see
@@ -430,7 +430,7 @@ directly:
 
 ## Example prompts
 
-Everything below is a prompt you can type — or speak, with the wake word "sorcar, …" —
+Everything below is a prompt you can type — or speak, with the wake word "Hey Sorcar, …" —
 into any Sorcar chat surface (VS Code sidebar, web/mobile app, a channel gateway, an
 OpenAI-compatible client).
 

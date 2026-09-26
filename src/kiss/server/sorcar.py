@@ -1332,7 +1332,7 @@ class ServerApi:
     ) -> None:
         """Transcribe a remote-web client's post-wake utterance.
 
-        A remote-web (browser mode) client heard the "Sorcar" wake
+        A remote-web (browser mode) client heard the "Hey Sorcar" wake
         word and captured the utterance that followed in the page (VS
         Code webviews never send this: their speech is captured and
         translated by the extension host's local listener).  The audio
