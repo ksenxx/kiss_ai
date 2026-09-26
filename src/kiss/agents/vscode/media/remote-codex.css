@@ -345,19 +345,6 @@ body.remote-chat .file-chip.error {
   color: var(--red);
 }
 
-body.remote-chat .suggestion-chip {
-  background: transparent;
-  border: 1px solid var(--border-widget);
-  border-radius: 16px;
-  color: var(--fg);
-}
-
-body.remote-chat .suggestion-chip:hover {
-  background: var(--hover);
-  border-color: var(--ring);
-  color: var(--fg);
-}
-
 body.remote-chat #sidebar,
 body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel,

@@ -791,11 +791,18 @@ body.remote-chat #tab-bar .chat-tab.subagent-tab.active {
   display: flex; flex-direction: column; align-items: center;
   justify-content: center; padding: 20px 14px; text-align: center;
 }
+
+/* The logo art is dark ink on a transparent background, so it sits on
+   its own white card: seamless on light themes, legible on dark ones. */
+#welcome-logo {
+  display: block; width: min(280px, 80%); height: auto; box-sizing: border-box;
+  margin-bottom: 18px; padding: 12px 16px; border-radius: 16px;
+  background: #fff; border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+}
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
 
 body.remote-chat #welcome { min-height: 100%; box-sizing: border-box; }
-body.remote-chat #welcome > #suggestions { display: none; }
 body.remote-chat #welcome-config { display: none !important; }
 
 #remote-url { width: 100%; margin-bottom: 10px; }
@@ -852,32 +859,6 @@ body.remote-chat #welcome-config { display: none !important; }
 #welcome-remote-url .remote-url-link { flex: 0 1 auto; max-width: 100%; }
 #welcome-remote-url .remote-url-tls-hint { text-align: center; }
 .welcome-config-label { text-align: left; }
-
-#suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
-
-.suggestion-chip {
-  background: color-mix(in srgb, var(--fg) 3%, transparent); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
-  border-radius: 8px; padding: 7px 11px; cursor: pointer; text-align: left;
-  font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 79%, transparent); line-height: 1.35; transition: all 0.15s;
-}
-
-.suggestion-chip:hover {
-  background: color-mix(in srgb, var(--fg) 6%, transparent); border-color: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg);
-}
-
-.chip-label {
-  display: block; font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--accent); margin-bottom: 2px; opacity: 0.8;
-}
-
-.chip-text {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
 .ev { margin-bottom: 6px; animation: fadeIn .15s ease; }
 

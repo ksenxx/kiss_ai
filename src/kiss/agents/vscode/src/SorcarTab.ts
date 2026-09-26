@@ -177,35 +177,6 @@ export function resetTipsOnExtensionUpdate(): void {
   // audit0903-coverage:end
 }
 
-export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
-  const items: Array<{text: string}> = [];
-
-  const myTasksPath = ensureUserAssetFromDefault(
-    'MY_TASK_TEMPLATES.md',
-    '## Task\n\nHi!\n',
-  );
-  if (myTasksPath !== null) {
-    for (const text of readMarkdownSections(myTasksPath, 'Task')) {
-      items.push({text});
-    }
-  }
-
-  const packagePath = path.join(
-    extensionRoot,
-    'kiss_project',
-    'src',
-    'kiss',
-    'SAMPLE_TASKS.md',
-  );
-  const sourcePath = path.join(extensionRoot, '..', '..', 'SAMPLE_TASKS.md');
-  const bundledPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
-  for (const text of readMarkdownSections(bundledPath, 'Task')) {
-    items.push({text});
-  }
-
-  return items;
-}
-
 export function getNonce(): string {
   return crypto
     .randomBytes(24)
@@ -415,6 +386,7 @@ export function buildChatHtml(
     CSP_META: csp,
     STYLE_HREF: u('main.css'),
     BRAND_STYLE_HREF: u('brand.css'),
+    WELCOME_LOGO_SRC: u('welcome-logo.png'),
     HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
     HEAD_STYLE: '',
     BODY_CLASS_ATTR: bodyAttrs || '',

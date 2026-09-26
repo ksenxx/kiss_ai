@@ -3760,7 +3760,7 @@
     }
     registerTab(tab);
     api.newChat({tabId: tab.id});
-    api.getWelcomeSuggestions();
+    api.getWelcomeInfo();
     focusInputWithRetry();
   }
 
@@ -14112,9 +14112,6 @@
         }
         break;
       }
-      case 'welcome_suggestions':
-        renderWelcomeSuggestions(ev.suggestions);
-        break;
       case 'remote_url':
         renderRemoteUrl(
           ev.url,
@@ -15991,26 +15988,6 @@
     });
   }
 
-  function renderWelcomeSuggestions(suggestions) {
-    const container = document.getElementById('suggestions');
-    if (!container) return;
-    container.innerHTML = '';
-    if (!suggestions || suggestions.length === 0) return;
-    suggestions.forEach(s => {
-      const chip = document.createElement('div');
-      chip.className = 'suggestion-chip';
-      chip.dataset.prompt = s.text;
-      chip.dataset.tooltip = s.text;
-      chip.innerHTML =
-        '<span class="chip-label">Suggested prompt</span>' +
-        '<span class="chip-text">' +
-        esc(s.text) +
-        '</span>';
-      chip.addEventListener('click', () => copyFollowupToInput(s.text));
-      container.appendChild(chip);
-    });
-  }
-
   /**
    * Render *events* into *container*, holding back the sub-agent tab
    * closes the replay's collapse passes ask for until the whole
@@ -16050,7 +16027,7 @@
    * Copy a suggested follow-up prompt into the chat input box and
    * focus it — the one behavior every clickable "Suggested next" bar
    * (live stream, active-tab replay, background-tab replay, spliced-in
-   * adjacent transcripts) and welcome suggestion chip shares.
+   * adjacent transcripts) shares.
    *
    * @param {string} text The prompt to place in the input box.
    */

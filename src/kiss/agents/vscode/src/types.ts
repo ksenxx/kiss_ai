@@ -260,7 +260,7 @@ export type FromWebviewMessage =
       taskId?: string | number | null;
       tabId?: string;
     }
-  | {type: 'getWelcomeSuggestions'}
+  | {type: 'getWelcomeInfo'}
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
@@ -792,7 +792,6 @@ type ToWebviewMessageBody =
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
-  | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
   | {
       type: 'remote_url';
       url: string;

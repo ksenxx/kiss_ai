@@ -3803,6 +3803,7 @@ def _build_html() -> str:
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
+        "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
         "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
@@ -7824,21 +7825,6 @@ class RemoteAccessServer:
         Broadcasts the ``remote_url`` event using the in-memory URL,
         the URL file, or — for tunnel-enabled servers only — the
         ``cloudflared`` metrics API as successive fallbacks.
-
-        Historically this method also broadcast a
-        ``welcome_suggestions`` event with an empty list because the
-        remote-chat webview hides the sample-task suggestions panel
-        via CSS (``body.remote-chat #welcome > #suggestions { display:
-        none }``).  That broadcast was redundant for the webapp and
-        actively harmful for the VS Code extension: the extension is
-        a *second* client of the same broadcaster (over its UDS
-        connection), and it populates its own ``#suggestions``
-        container locally from ``~/.kiss/MY_TASK_TEMPLATES.md`` plus
-        the bundled ``src/kiss/SAMPLE_TASKS.md``.  The empty-list
-        broadcast was forwarded to the extension's webview and
-        cleared every chip on the welcome page whenever any webapp
-        client opened a new chat tab — see
-        ``test_welcome_suggestions_not_broadcast.py``.
 
         M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
         call (which spawns ``pgrep`` and does HTTP requests) are

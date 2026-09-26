@@ -27,7 +27,7 @@ Two problems follow:
    * It posts ``{type:'newChat', tabId: newTab.id}`` to the backend.
      The sub-agent run shares the parent's ``chat_id``; minting a
      fresh backend chat for the sub-agent tab is wrong.
-   * It posts ``{type:'getWelcomeSuggestions'}`` even though the new
+   * It posts ``{type:'getWelcomeInfo'}`` even though the new
      tab will never display a welcome screen (the imminent
      ``openSubagentTab`` flips it into a sub-agent view).
    * It triggers ``focusInputWithRetry()`` on the sub-agent tab,
@@ -36,7 +36,7 @@ Two problems follow:
 The fix is to materialise the sub-agent tab **in the background**:
 push a fresh tab into the ``tabs`` array, render the tab bar, persist
 state — and leave ``activeTabId`` untouched.  No ``newChat`` /
-``getWelcomeSuggestions`` posts.  No focus theft.
+``getWelcomeInfo`` posts.  No focus theft.
 
 This file runs the real ``main.js`` source in Node.js (no jsdom, no
 mocks) so a future regression that re-introduces the spurious tab
@@ -165,21 +165,21 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "'newChat' — it would mint a duplicate chat_id."
         )
 
-    def test_subagent_path_does_not_post_welcome_suggestions(
+    def test_subagent_path_does_not_post_welcome_info(
         self,
     ) -> None:
         """The sub-agent branch must not post
-        ``getWelcomeSuggestions`` — the sub-agent tab will never
+        ``getWelcomeInfo`` — the sub-agent tab will never
         show a welcome screen (it is flipped to a sub-agent view by
         the imminent ``openSubagentTab``).
         """
         branch = self._subagent_branch()
         assert (
-            "'getWelcomeSuggestions'" not in branch
-            and '"getWelcomeSuggestions"' not in branch
+            "'getWelcomeInfo'" not in branch
+            and '"getWelcomeInfo"' not in branch
         ), (
             "sub-agent branch of case 'new_tab' must not post "
-            "getWelcomeSuggestions — the tab never shows a welcome."
+            "getWelcomeInfo — the tab never shows a welcome."
         )
 
     def test_background_helper_marks_tab_as_subagent(self) -> None:
@@ -298,7 +298,7 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
 
         * Pre-fix: dispatching the ``new_tab`` event briefly flipped
           ``activeTabId`` to the new sub-agent tab and posted
-          ``newChat`` + ``getWelcomeSuggestions`` to the backend.
+          ``newChat`` + ``getWelcomeInfo`` to the backend.
         * Post-fix: ``activeTabId`` never changes, only a
           ``resumeSession`` is posted (carrying the new sub tab's id),
           and the new sub tab is queued immediately to the right of
@@ -391,12 +391,12 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
                 errors.push('expected resumeSession, got: ' + posted[0].type);
             else if (posted[0].taskId !== 999)
                 errors.push('wrong taskId: ' + posted[0].taskId);
-            // No newChat / getWelcomeSuggestions side effects.
+            // No newChat / getWelcomeInfo side effects.
             for (var i = 0; i < posted.length; i++) {
                 if (posted[i].type === 'newChat')
                     errors.push('newChat must not be posted for sub-agent tab');
-                if (posted[i].type === 'getWelcomeSuggestions')
-                    errors.push('getWelcomeSuggestions must not be posted');
+                if (posted[i].type === 'getWelcomeInfo')
+                    errors.push('getWelcomeInfo must not be posted');
             }
             // The new tab must sit immediately to the right of the parent.
             if (tabs.length !== 3)
@@ -462,7 +462,7 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
                 stopTimer();
                 removeSpinner();
                 vscode.postMessage({type: 'newChat', tabId: tab.id});
-                vscode.postMessage({type: 'getWelcomeSuggestions'});
+                vscode.postMessage({type: 'getWelcomeInfo'});
                 focusInputWithRetry();
             }
             function switchToTab(id) {
@@ -519,12 +519,12 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
                 errors.push('expected 2 saves, got ' + saves.length);
             else if (saves[1] === 'parent-A')
                 errors.push('active never flipped — bug not reproduced');
-            // And it posted newChat + getWelcomeSuggestions + resumeSession.
+            // And it posted newChat + getWelcomeInfo + resumeSession.
             var types = posted.map(function(m) { return m.type; });
             if (types.indexOf('newChat') < 0)
                 errors.push('old handler should have posted newChat');
-            if (types.indexOf('getWelcomeSuggestions') < 0)
-                errors.push('old handler should have posted getWelcomeSuggestions');
+            if (types.indexOf('getWelcomeInfo') < 0)
+                errors.push('old handler should have posted getWelcomeInfo');
 
             if (errors.length) {
                 process.stdout.write('FAIL: ' + errors.join('; '));

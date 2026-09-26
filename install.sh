@@ -1049,7 +1049,7 @@ guard_vsix_tracking() {
 # ---------------------------------------------------------------------------
 # A white-label distribution re-brands KISS Sorcar by replacing the data
 # files under src/kiss/agents/vscode/media/ (brand.json, brand.css,
-# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg; see kiss.core.brand and
+# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg, welcome-logo.png; see kiss.core.brand and
 # scripts/apply-brand.js).  Editing those tracked files in place would
 # make the Update button's pre-flight (``git stash`` / ``git reset --hard
 # @{upstream}`` / ``git stash pop``) conflict on every release, because
@@ -1074,7 +1074,7 @@ guard_vsix_tracking() {
 # the brand, and every later update rebuilds with the same overlay.
 # Without a ``.brand/`` directory both functions do nothing (stock KISS
 # Sorcar), so a development checkout is never re-branded by accident.
-BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg)
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png)
 BRAND_MEDIA_REL="src/kiss/agents/vscode/media"
 BRAND_MANIFEST_REL="src/kiss/agents/vscode/package.json"
 # Snapshot directory while the overlay is applied; empty otherwise.
@@ -1390,7 +1390,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # User-curated model overrides / extensions live in
     # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
     # short documentation block and one commented-out example entry —
-    # matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+    # matching the ``MY_INJECTION.md`` pattern.
     MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
     MODEL_INFO_DST="${KISS_HOME:-$HOME/.kiss}/MODEL_INFO.json"
     if [ -f "$MODEL_INFO_SRC" ]; then
@@ -1410,8 +1410,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
     # — auto-seeded on first read with a single ``## Trick`` starter
     # ("Write end-to-end 100% coverage tests for the feature first.
-    # Then implement the feature.") — matching the
-    # ``MY_TASK_TEMPLATES.md`` / ``SAMPLE_TASKS.md`` pattern.
+    # Then implement the feature.").
     #
     # Re-introducing the copy here would mean a stale user-side
     # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed

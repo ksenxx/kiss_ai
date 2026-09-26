@@ -192,7 +192,7 @@ import {
   provisionalDefaultModel,
   resolveDefaultModel,
 } from './DependencyInstaller';
-import {buildChatHtml, readSampleTasks} from './SorcarTab';
+import {buildChatHtml} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
@@ -1277,13 +1277,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendWelcomeSuggestions(): void {
-    this._sendToWebview({
-      type: 'welcome_suggestions',
-      suggestions: readSampleTasks(this._extensionUri.fsPath),
-    } as ToWebviewMessage);
-  }
-
   private _sendRemoteUrl(): void {
     const urlFile = path.join(kissHomeDir(), 'remote-url.json');
     this._tryReadAndSendUrl(urlFile);
@@ -1482,7 +1475,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'daemonStatus',
           connected: this._daemonConnected,
         });
-        this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
         this._watchConfigFile();
         // The Task Info view (meta-panel-mode): a metaState relayed
@@ -1653,8 +1645,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'getWelcomeSuggestions':
-        this._sendWelcomeSuggestions();
+      case 'getWelcomeInfo':
         this._sendRemoteUrl();
         break;
 

@@ -363,8 +363,8 @@
   - `cmd`: The ``activeTasksQuery`` command (unused).
   - `ctx`: The transport context of the current call.
 
-- **get_welcome_suggestions** — Broadcast the welcome-screen suggestions.<br/>`async get_welcome_suggestions(cmd: dict[str, Any], ctx: ApiContext) -> None`
-  - `cmd`: The ``getWelcomeSuggestions`` command (unused).
+- **get_welcome_info** — Broadcast the welcome-screen info (the active remote URL).<br/>`async get_welcome_info(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getWelcomeInfo`` command (unused).
   - `ctx`: The transport context of the current call (unused).
 
 - **run_update** — Run the KISS Sorcar installer to update the checkout.<br/>`async run_update(cmd: dict[str, Any], ctx: ApiContext) -> None`

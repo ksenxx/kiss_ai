@@ -76,7 +76,7 @@ CONTROL_IDS = [
     "welcome-remote-url",
     "welcome-cfg-remote-password",
     "welcome-cfg-remote-password-toggle",
-    "suggestions",
+    "welcome-logo",
     "input-area",
     "autocomplete",
     "input-container",

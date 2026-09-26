@@ -4,7 +4,7 @@
 // add your name here
 
 // Audit 2026-09-02 (vscode-ext2): ensureUserAssetFromDefault() in
-// src/userAssets.ts seeds ~/.kiss/MY_INJECTION.md and MY_TASK_TEMPLATES.md
+// src/userAssets.ts seeds ~/.kiss/MY_INJECTION.md
 // with a truncating fs.writeFileSync after an existsSync check.  The
 // daemon's autocomplete worker reads MY_INJECTION.md on every keystroke
 // (server/user_assets.py::read_tricks), so a reader that lands between

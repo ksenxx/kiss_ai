@@ -256,9 +256,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),
-    ApiCommand(
-        "getWelcomeSuggestions", handler="get_welcome_suggestions"
-    ),
+    ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
     ApiCommand("activeTasksQuery", handler="active_tasks_query"),
     ApiCommand("getModels"),
     ApiCommand("selectModel", required=("model",)),
@@ -1472,13 +1470,13 @@ class ServerApi:
         """
         await self._backend._handle_active_tasks_query(ctx.endpoint)
 
-    async def get_welcome_suggestions(
+    async def get_welcome_info(
         self, cmd: dict[str, Any], ctx: ApiContext,
     ) -> None:
-        """Broadcast the welcome-screen suggestions.
+        """Broadcast the welcome-screen info (the active remote URL).
 
         Args:
-            cmd: The ``getWelcomeSuggestions`` command (unused).
+            cmd: The ``getWelcomeInfo`` command (unused).
             ctx: The transport context of the current call (unused).
         """
         await self._backend._send_welcome_info()

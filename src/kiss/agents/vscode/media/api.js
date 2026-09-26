@@ -25,7 +25,7 @@
     'setFavorite',
     'getInputHistory',
     'getSeaCommands',
-    'getWelcomeSuggestions',
+    'getWelcomeInfo',
     'activeTasksQuery',
     'getModels',
     'selectModel',

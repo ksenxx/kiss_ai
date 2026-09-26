@@ -69,8 +69,7 @@ class TestBuildHtml(unittest.TestCase):
     def test_body_has_remote_chat_class(self) -> None:
         """Body carries ``remote-chat`` class so CSS/JS can branch on remote.
 
-        The remote-chat layout hides SAMPLE_TASKS suggestions on the
-        welcome page and centers the input textbox + buttons inside
+        The remote-chat layout centers the input textbox + buttons inside
         ``#welcome``.  The frontend (``main.js`` and ``main.css``)
         relies on ``body.remote-chat`` to enable that layout only for
         the remote webview, not the bundled VS Code extension webview.
@@ -95,6 +94,17 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)
+
+    def test_welcome_page_has_logo_and_no_suggestions(self) -> None:
+        """The remote welcome page shows the logo and no suggested prompts."""
+        html = _build_html()
+        self.assertIn('<img id="welcome-logo" src="/media/welcome-logo.png?v=', html)
+        logo = Path(__file__).resolve().parents[2] / (
+            "agents/vscode/media/welcome-logo.png"
+        )
+        self.assertEqual(logo.read_bytes()[1:4], b"PNG")
+        self.assertNotIn('id="suggestions"', html)
+        self.assertNotIn("{{", html)
 
 
 class TestWebappServerLoadingOverlay(unittest.TestCase):
@@ -551,13 +561,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_ready_command(self) -> None:
         """The 'ready' command returns models, inputHistory, configData, focusInput.
-
-        Note: ``welcome_suggestions`` is intentionally NOT emitted by
-        the webapp ``ready`` handshake — the remote-chat webview hides
-        the suggestions panel via CSS and the VS Code extension
-        populates its own ``#suggestions`` container locally.  See
-        :class:`TestWelcomeSuggestionsNotBroadcast` for the regression
-        test that pins this behaviour.
         """
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
@@ -585,7 +588,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 ev = json.loads(raw)
                 received_types.add(ev["type"])
-            self.assertNotIn("welcome_suggestions", received_types)
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
         """The 'ready' command must NOT produce an 'Unknown command' error."""
@@ -693,23 +695,13 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                         ev.get("text", ""),
                     )
 
-    async def test_ws_get_welcome_suggestions(self) -> None:
-        """getWelcomeSuggestions broadcasts the remote_url info.
-
-        ``getWelcomeSuggestions`` no longer produces a
-        ``welcome_suggestions`` event (the remote-chat webview hides
-        the suggestions panel via CSS, and the VS Code extension
-        populates its own suggestions locally — broadcasting an empty
-        list used to clobber the extension's welcome page when the
-        webapp opened a new chat).  It still broadcasts the
-        ``remote_url`` event so the webapp can render the remote
-        password/share-link panel.
-        """
+    async def test_ws_get_welcome_info(self) -> None:
+        """getWelcomeInfo broadcasts the remote_url info."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             received_types: list[str] = []
             for _ in range(5):
                 try:
@@ -718,7 +710,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 except TimeoutError:
                     break
             self.assertIn("remote_url", received_types)
-            self.assertNotIn("welcome_suggestions", received_types)
 
     async def test_ws_remote_url_from_active_url(self) -> None:
         """remote_url event uses in-memory _active_url even when URL file is missing."""
@@ -728,7 +719,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             events: list[dict[str, Any]] = []
             for _ in range(3):
                 try:
@@ -1450,7 +1441,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "getFiles", "prefix": ""},
                 {"type": "getInputHistory"},
                 {"type": "getConfig"},
-                {"type": "getWelcomeSuggestions"},
+                {"type": "getWelcomeInfo"},
                 {"type": "getAdjacentTask", "tabId": "t", "taskId": None, "direction": "prev"},
                 {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
                 {"type": "newChat", "tabId": "all-t"},
@@ -2696,7 +2687,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -2749,7 +2740,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -2757,8 +2748,6 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                     events.append(json.loads(raw))
                 except TimeoutError:
                     break
-            types = [e.get("type") for e in events]
-            self.assertNotIn("welcome_suggestions", types)
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertEqual(len(url_events), 1)
             self.assertEqual(url_events[0].get("url"), "")
@@ -2777,7 +2766,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -2805,7 +2794,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -4102,68 +4091,6 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._tunnel_proc)
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.returncode)
-
-
-class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
-    """The remote chat webview must never expose SAMPLE_TASKS suggestions."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self._backup_url: bytes | None = None
-        if _URL_FILE.is_file():
-            self._backup_url = _URL_FILE.read_bytes()
-
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-        if self._backup_url is not None:
-            _URL_FILE.write_bytes(self._backup_url)
-        else:
-            _URL_FILE.unlink(missing_ok=True)
-
-    async def test_remote_welcome_suggestions_not_broadcast(self) -> None:
-        """Remote-chat ready handshake does NOT broadcast welcome_suggestions.
-
-        The remote chat webview suppresses the SAMPLE_TASKS.md
-        suggestions via CSS and centers the input textbox on the
-        welcome page instead, so the backend never needs to broadcast
-        a ``welcome_suggestions`` event.  Broadcasting one (even an
-        empty list) used to clobber the VS Code extension's locally
-        populated suggestions panel whenever a webapp client opened a
-        new chat — see ``test_welcome_suggestions_not_broadcast.py``.
-        """
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({"type": "ready", "tabId": "t1"}))
-            msgs = []
-            for _ in range(15):
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                    msgs.append(json.loads(raw))
-                except TimeoutError:
-                    break
-            welcome = [m for m in msgs if m["type"] == "welcome_suggestions"]
-            self.assertEqual(welcome, [])
 
 
 class TestStartMethodLifecycle(unittest.TestCase):

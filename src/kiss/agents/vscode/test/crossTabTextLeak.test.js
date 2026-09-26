@@ -1493,22 +1493,6 @@ test('models still updates the model picker', () => {
   win.close();
 });
 
-test('welcome_suggestions still renders the sample prompts', () => {
-  const {win} = makeWebview();
-  twoTabs(win);
-  send(win, {
-    type: 'welcome_suggestions',
-    suggestions: [{text: 'suggestion-QK71'}],
-  });
-  assert.ok(
-    win.document
-      .getElementById('suggestions')
-      .textContent.includes('suggestion-QK71'),
-    'workspace sample prompts are app-global and must keep rendering',
-  );
-  win.close();
-});
-
 test('history still renders in the sidebar', () => {
   const {win} = makeWebview();
   twoTabs(win);

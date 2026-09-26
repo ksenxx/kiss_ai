@@ -313,7 +313,6 @@ The full authoring guide is in [`src/kiss/server/README.md`](https://github.com/
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`. A curated catalog of privacy-first MCP connectors (fetch, time, memory, GitHub, Slack, Google Workspace, WhatsApp, …) ships in [`connectors/`](https://github.com/ksenxx/kiss_ai/blob/main/connectors/README.md) with `enable.py`/`verify.py` CLIs.
 - "Tricks" (inject-instruction) entries are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled `src/kiss/INJECTIONS.md`, read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first.
-- Welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.
 
 ---
 
@@ -739,7 +738,7 @@ If the command does not appear, check that the file name ends in `_sea.py`, that
 
 # Sample Tasks for KISS Sorcar
 
-> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. In the VS Code extension these appear as welcome-screen chips. The bundled tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md); you can add your own at `~/.kiss/MY_TASK_TEMPLATES.md`.
+> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. The tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md).
 
 ## Code Understanding & Editing
 
