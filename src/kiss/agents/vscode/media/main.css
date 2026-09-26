@@ -1728,6 +1728,11 @@ body.remote-chat #theme-btn { display: flex; }
   transition: transform 0.2s ease;
   z-index: 200;
   padding: 16px;
+
+  /* The horizontal padding, for children that span it (#activity-bar,
+     #history-list); every rule that changes it resets this too. */
+  --sidebar-pad-x: 16px;
+
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1937,6 +1942,8 @@ body.history-panel-mode #sidebar {
   transition: none;
   border-right: none;
   padding: 10px;
+
+  --sidebar-pad-x: 10px;
 }
 
 body.history-panel-mode #sidebar-close,
@@ -2374,9 +2381,34 @@ body.sidebar-chat-mode #meta-info-content {
   overflow: visible;
 }
 
+/* The history list spans the whole panel width so the chat panels
+   (.history-chat-group) run edge to edge: negative margins cancel the
+   gap to the panel's left and right boundaries (--history-bleed-l /
+   -r; remote-codex.css overrides the left one where the activity bar
+   is that boundary).  The Tasks view bleeds too, padding its header
+   and search rows back in: it clips its overflow, so a list wider
+   than the view would be cut back to the old inset.  Everything else
+   in the list keeps the panel's usual inset. */
+#sidebar-tab-history-panel {
+  --history-bleed-l: var(--sidebar-pad-x);
+  --history-bleed-r: var(--sidebar-pad-x);
+
+  margin-left: calc(-1 * var(--history-bleed-l));
+  margin-right: calc(-1 * var(--history-bleed-r));
+  padding-left: var(--history-bleed-l);
+  padding-right: var(--history-bleed-r);
+}
+
 #history-list {
   overflow-y: auto;
   flex: 1;
+  margin-left: calc(-1 * var(--history-bleed-l));
+  margin-right: calc(-1 * var(--history-bleed-r));
+}
+
+#history-list > :not(.history-chat-group) {
+  margin-left: var(--history-bleed-l);
+  margin-right: var(--history-bleed-r);
 }
 
 /* The history panel's inner layout: an activity bar (remote webapp
@@ -2406,8 +2438,8 @@ body.sidebar-chat-mode #meta-info-content {
    and its history-panel mode never show it); the negative margins
    undo the panel's own padding so the strip runs flush with the
    panel's top, bottom and left edges like VS Code's does.
-   --sidebar-pad-x mirrors the panel's horizontal padding (16px, or the
-   collapsing desktop value set in remote-codex.css). */
+   --sidebar-pad-x mirrors the panel's horizontal padding (see #sidebar;
+   remote-codex.css sets the collapsing desktop value). */
 #activity-bar {
   display: none;
   flex: 0 0 40px;
@@ -2416,7 +2448,7 @@ body.sidebar-chat-mode #meta-info-content {
   align-items: center;
   gap: 2px;
   padding: 6px 0;
-  margin: -16px 10px -16px calc(-1 * var(--sidebar-pad-x, 16px));
+  margin: -16px 10px -16px calc(-1 * var(--sidebar-pad-x));
   background: color-mix(in srgb, var(--fg) 4%, var(--bg2));
   border-right: 1px solid var(--border);
   box-sizing: border-box;
@@ -3425,24 +3457,26 @@ body.sidebar-chat-mode #meta-info-content {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
 }
 
-/* No padding: the header's tint runs flush to the panel's border (a
-   padded panel showed a strip of bare sidebar between the two).  The
-   task rows get their inset from .history-chat-body instead. */
+/* The chat panels form one seamless stack running edge to edge across
+   the history list (which itself spans the whole panel width, see
+   #history-list): no margins, square corners, no side borders, and a
+   single 1px line between neighbours (the top border is dropped on a
+   panel that directly follows another).  No padding: the header's
+   tint runs flush to the panel's edges; the task rows get their inset
+   from .history-chat-body instead. */
 .history-chat-group {
   display: flex;
   flex-direction: column;
-  margin-bottom: 8px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  border-block: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
 }
+
+.history-chat-group + .history-chat-group { border-top: none; }
 
 /* The chat panel's clickable header: a chevron and the chat's first
    task on ONE line (ellipsized), in the cyan of a Bash tool call's
    header in the transcript (.tc-h-bash).  A light tint, stronger than
-   that header's 8% (at 8% it vanished behind plain --fg text).  Its
-   corners follow the panel's inner radius (10px border radius minus
-   the 1px border); only the top ones while the body shows below.  No
-   tooltip: the line is all there is. */
+   that header's 8% (at 8% it vanished behind plain --fg text).  Square
+   like its panel.  No tooltip: the line is all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
@@ -3450,7 +3484,7 @@ body.sidebar-chat-mode #meta-info-content {
   width: 100%;
   background: color-mix(in srgb, var(--cyan) 18%, transparent);
   border: none;
-  border-radius: 9px;
+  border-radius: 0;
   padding: 4px 6px;
   cursor: pointer;
   text-align: left;
@@ -3463,10 +3497,6 @@ body.sidebar-chat-mode #meta-info-content {
 
 .history-chat-header:hover {
   background: color-mix(in srgb, var(--cyan) 28%, transparent);
-}
-
-.history-chat-group:not(.collapsed) > .history-chat-header {
-  border-radius: 9px 9px 0 0;
 }
 
 .history-chat-chevron {

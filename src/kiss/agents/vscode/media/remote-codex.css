@@ -558,6 +558,12 @@ body.remote-chat #activity-bar {
   border-right: 1px solid var(--border-soft);
 }
 
+/* Here the activity bar is the history list's left boundary: the Tasks
+   view and its list bleed over the bar's 10px right margin (main.css
+   #activity-bar, #sidebar-tab-history-panel) so the chat panels meet
+   the bar's edge. */
+body.remote-chat #sidebar-tab-history-panel { --history-bleed-l: 10px; }
+
 body.remote-chat .activity-btn {
   color: var(--activity-inactive);
 }
@@ -836,6 +842,21 @@ body.remote-chat #meta-info-content {
        with a negative left margin so it stays flush with the panel's
        edge however narrow the panel gets. */
     --sidebar-pad-x: min(16px, calc(var(--sidebar-w, var(--sidebar-default-w)) / 4));
+
+    /* The chat panels in the history list run flush to the right edge,
+       so the list's scrollbar sits there too: the drag handle
+       (#sidebar-resizer below) goes just OUTSIDE the edge to keep the
+       two apart.  main.css's overflow: hidden would clip the handle,
+       so the panel's content is clipped by #sidebar-body instead. */
+    overflow: visible;
+  }
+
+  /* Clips the panel's content to the panel's padding box, exactly as
+     the panel's overflow: hidden did: the insets reach out over the
+     panel's padding (16px top and bottom, --sidebar-pad-x at the
+     sides), where the activity bar and the history list bleed. */
+  body.remote-chat.remote-desktop #sidebar.open #sidebar-body {
+    clip-path: inset(-16px calc(-1 * var(--sidebar-pad-x)));
   }
 
   body.remote-chat.remote-desktop #sidebar-overlay,
@@ -894,7 +915,7 @@ body.remote-chat #meta-info-content {
     display: block;
     position: absolute;
     top: 0;
-    right: 0;
+    right: -6px;
     bottom: 0;
     width: 6px;
     cursor: col-resize;
