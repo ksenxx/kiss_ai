@@ -1390,14 +1390,64 @@
     if (btn) updateThemeButton(btn);
     // Monaco's theme is global: one call recolours every open editor.
     if (window.monaco && window.monaco.editor) {
-      window.monaco.editor.setTheme(contentMonacoTheme());
+      applyContentMonacoTheme(window.monaco);
     }
   }
 
-  // Monaco's built-in theme matching the page: 'vs' (light) under the
-  // remote webapp's light theme, 'vs-dark' otherwise.
-  function contentMonacoTheme() {
-    return document.body.classList.contains('light-theme') ? 'vs' : 'vs-dark';
+  // The page palette variables (VS Code Dark/Light Modern, injected by
+  // web_server.py) that the Monaco themes take their colours from.  Each
+  // name is a VS Code colour id with its first '.' written as '-'.
+  // Only colours whose paired foreground/background is also in the
+  // palette are listed, so Monaco never mixes a Modern background with
+  // a mismatched built-in foreground.
+  const CONTENT_MONACO_COLOR_VARS = [
+    '--vscode-foreground',
+    '--vscode-focusBorder',
+    '--vscode-editor-background',
+    '--vscode-editor-foreground',
+    '--vscode-editor-selectionBackground',
+    '--vscode-editor-inactiveSelectionBackground',
+    '--vscode-editor-selectionHighlightBackground',
+    '--vscode-editorLineNumber-foreground',
+    '--vscode-editorLineNumber-activeForeground',
+    '--vscode-editorWidget-background',
+    '--vscode-widget-border',
+    '--vscode-widget-shadow',
+    '--vscode-input-background',
+    '--vscode-input-foreground',
+    '--vscode-input-border',
+    '--vscode-input-placeholderForeground',
+    '--vscode-scrollbarSlider-background',
+  ];
+
+  /**
+   * Define Monaco's 'kiss-light' or 'kiss-dark' theme, whichever matches
+   * the page's current theme, from the page's --vscode-* palette, and
+   * switch Monaco to it.  Monaco's theme is global, so this recolours
+   * every open editor.  The palette is read from <body> because Monaco
+   * sets its own --vscode-* variables on each .monaco-editor element.
+   * @param {object} monaco The loaded Monaco API (window.monaco).
+   * @returns {string} The name of the theme now in use.
+   */
+  function applyContentMonacoTheme(monaco) {
+    const light = document.body.classList.contains('light-theme');
+    const name = light ? 'kiss-light' : 'kiss-dark';
+    const style = window.getComputedStyle(document.body);
+    const colors = {};
+    for (const cssVar of CONTENT_MONACO_COLOR_VARS) {
+      const value = style.getPropertyValue(cssVar).trim();
+      if (value) {
+        colors[cssVar.slice('--vscode-'.length).replace('-', '.')] = value;
+      }
+    }
+    monaco.editor.defineTheme(name, {
+      base: light ? 'vs' : 'vs-dark',
+      inherit: true,
+      rules: [],
+      colors,
+    });
+    monaco.editor.setTheme(name);
+    return name;
   }
 
   function toggleRemoteTheme() {
@@ -2105,7 +2155,7 @@
         automaticLayout: true,
         minimap: {enabled: false},
         scrollBeyondLastLine: false,
-        theme: contentMonacoTheme(),
+        theme: applyContentMonacoTheme(monaco),
       });
       tab.contentEditor = editor;
       appendContentMenuBar(tab, holder, editable);
