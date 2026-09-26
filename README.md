@@ -1,6 +1,10 @@
 <div align="center">
 
-![KISS Framework](assets/KISS-Sorcar.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/KISS-Sorcar-Logo-Dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/KISS-Sorcar-Logo.png">
+  <img alt="KISS Sorcar" src="assets/KISS-Sorcar-Logo.png">
+</picture>
 
 [![Version](https://img.shields.io/badge/version-2026.9.24-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
