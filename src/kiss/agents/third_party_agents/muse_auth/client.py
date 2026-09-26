@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httplib2  # type: ignore[import-untyped]
@@ -40,7 +41,7 @@ from kiss.agents.third_party_agents.muse_auth._common import (
     socket_path,
 )
 from kiss.agents.third_party_agents.muse_auth.sentinel import grant_command
-from kiss.core.file_lock import lock_exclusive
+from kiss.core.file_lock import exclusive_file_lock, lock_exclusive
 from kiss.core.processes import popen_process_group
 
 __all__ = [
@@ -201,6 +202,35 @@ def ensure_daemon() -> None:
     socket_id = _socket_id()
     if socket_id is not None and socket_id == _verified_socket_id and _daemon_running():
         return
+    if _daemon_protocol() == PROTOCOL_VERSION:
+        _verified_socket_id = _socket_id()
+        return
+    directory = muse_auth_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        directory.chmod(0o700)
+    # Serialize the check-stop-spawn-wait sequence across processes so
+    # concurrent callers start only one daemon: a waiter re-checks under
+    # the lock and finds the winner's daemon.  This is a different lock
+    # file from the daemon's own ``daemon.lock`` (taken inside
+    # ``MuseAuthDaemon.run`` around bind), because the holder waits here
+    # for the daemon to bind.
+    with exclusive_file_lock(directory / "spawn.lock"):
+        _spawn_daemon_locked(directory)
+
+
+def _spawn_daemon_locked(directory: Path) -> None:
+    """Stop an incompatible daemon, spawn a current one and wait for it.
+
+    Must run under ``spawn.lock`` (see :func:`ensure_daemon`).
+
+    Args:
+        directory: The Muse-auth state directory (holds ``daemon.log``).
+
+    Raises:
+        MuseAuthError: When a compatible daemon does not come up within 15s.
+    """
+    global _verified_socket_id
     protocol = _daemon_protocol()
     if protocol == PROTOCOL_VERSION:
         _verified_socket_id = _socket_id()
@@ -212,10 +242,6 @@ def ensure_daemon() -> None:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and _daemon_running():
             time.sleep(0.05)
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        directory.chmod(0o700)
     with open(directory / "daemon.log", "ab") as log:
         popen_process_group(
             [sys.executable, "-m", "kiss.agents.third_party_agents.muse_auth.daemon"],
