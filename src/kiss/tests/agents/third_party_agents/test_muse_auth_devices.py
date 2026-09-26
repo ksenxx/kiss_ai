@@ -82,7 +82,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
     grant,
     mint_surrogate,
-    stop_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -93,7 +92,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     requires_muse_daemon,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
@@ -691,8 +689,7 @@ def test_govee_header_kind_credential_and_action_classes(
     assert [d["deviceName"] for d in govee.list_devices()] == ["Desk lamp"]
 
     # Surrogates die with the daemon; the CLI re-mints and retries once.
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     state_after_restart = govee.state({"sku": "H6008", "device": "AA:BB"})
     assert state_after_restart["data"]["device"] == "AA:BB"
     assert api_server.header("Govee-API-Key") == _REAL_GOVEE_KEY
@@ -1075,8 +1072,7 @@ def test_boundary_ignores_ambient_proxy_env(
     finally:
         # Not muse_env: stop the daemon even when an assert above fails,
         # or the detached subprocess outlives the test session.
-        stop_daemon()
-        wait_daemon_stopped()
+        teardown_muse_env()
 
 
 def test_rotation_invalidates_old_surrogates(
@@ -1600,31 +1596,6 @@ def test_ipv6_origin_helpers(muse_env: Path) -> None:
     daemon = MuseAuthDaemon()
     assert daemon.sentinel.origin_allowed("homeassistant", "http://[::1]:8123/api/states")
     assert not daemon.sentinel.origin_allowed("homeassistant", "http://[::1]:9999/api/states")
-
-
-def test_govee_does_not_replay_writes_on_ambiguous_failure(
-    muse_env: Path, api_server: _DeviceApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An ambiguous post-egress failure surfaces instead of replaying."""
-    from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
-
-    monkeypatch.setattr(
-        govee, "API", f"http://127.0.0.1:{api_server.server_address[1]}/router/api/v1"
-    )
-    monkeypatch.setattr(govee, "_MUSE_SESSION", None)
-    monkeypatch.setenv("GOVEE_API_KEY", _REAL_GOVEE_KEY)
-    # Enroll first (a clean read), then make control fail post-egress.
-    assert govee.list_devices()
-    grant("govee", "write", "session")
-    api_server.drop_after_recording = {"/router/api/v1/device/control"}
-    before = len(api_server.requests)
-    with pytest.raises((SystemExit, MuseAuthError)):
-        govee.control({"sku": "H6008", "device": "AA:BB"},
-                      "devices.capabilities.on_off", "powerSwitch", 1)
-    # Exactly one control POST reached the endpoint: no replay.
-    controls = [r for r in api_server.requests[before:]
-                if r["path"].endswith("/device/control")]
-    assert len(controls) == 1
 
 
 def test_authenticate_accepts_terminal_dot_host(

@@ -72,7 +72,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
     grant,
     mint_surrogate,
-    stop_daemon,
     vault_has_credentials,
 )
 from kiss.agents.third_party_agents.slack_sea import (
@@ -86,7 +85,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
@@ -651,8 +649,7 @@ def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:
     # A relic that REPLACES the verified daemon (new socket inode) is
     # caught without any cache reset: the socket identity changed, so
     # the handshake reruns and replaces the relic again.
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     relic2, stopped2 = _start_relic_daemon()
     muse_client.ensure_daemon()
     relic2.join(timeout=10.0)

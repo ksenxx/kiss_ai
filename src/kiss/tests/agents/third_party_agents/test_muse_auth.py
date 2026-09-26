@@ -80,7 +80,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     SurrogateCredentials,
     bearer_surrogate,
     mint_surrogate,
-    stop_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -88,7 +87,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
 
 _REAL_DRIVE_TOKEN = "real-secret-token-drive"
@@ -281,8 +279,7 @@ def test_ttl_and_session_grants(muse_env: Path, api_server: _ApiServer) -> None:
 
     muse_client.grant("google_drive", "write", "session")
     assert json.loads(backend.gdrive_create_folder("in-session"))["ok"] is True
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     # New daemon: the session grant is gone and the old surrogate is stale.
     backend2 = _drive_backend(base_url)
     assert json.loads(backend2.gdrive_create_folder("new-session"))["ok"] is False
@@ -305,8 +302,7 @@ def test_stale_surrogate_raises(muse_env: Path, api_server: _ApiServer) -> None:
     store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
     handle = mint_surrogate("google_drive")
     assert handle is not None
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     session = MuseBoundarySession("google_drive")
     port = api_server.server_address[1]
     with pytest.raises(MuseAuthError, match="stale"):
@@ -651,7 +647,9 @@ def test_concurrent_token_migration_single_store(muse_env: Path) -> None:
     barrier = threading.Barrier(8)
 
     def migrate(_i: int) -> Any:
-        barrier.wait()
+        # Bounded: if a pool thread fails to start, the others must not
+        # block forever (the executor's shutdown would then hang too).
+        barrier.wait(timeout=30.0)
         return mint_surrogate_migrating("gmail", token_file, ["scope-a"])
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:

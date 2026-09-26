@@ -1006,7 +1006,7 @@ class VSCodeServer(
             if persisted and (valid is None or persisted in valid):
                 self._default_model = persisted
 
-    def _printer_cleanup_tab(self, tab_id: str) -> None:
+    def _printer_cleanup_tab(self, tab_id: str, keep_task_id: str = "") -> None:
         """Drop the printer's per-tab subscriptions/state for *tab_id*.
 
         Resolved via ``getattr`` because some duck-typed test printers
@@ -1015,10 +1015,12 @@ class VSCodeServer(
 
         Args:
             tab_id: The frontend tab identifier to clean up.
+            keep_task_id: A task whose subscription of *tab_id* is
+                kept (see :meth:`JsonPrinter.cleanup_tab`).
         """
         cleanup_tab = getattr(self.printer, "cleanup_tab", None)
         if cleanup_tab is not None:
-            cleanup_tab(tab_id)
+            cleanup_tab(tab_id, keep_task_id)
 
     def _get_models(self, conn_id: str = "") -> None:
         """Send available models list with usage counts and pricing.
@@ -2017,12 +2019,12 @@ class VSCodeServer(
         if not result:
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result:
-            self._printer_cleanup_tab(tab_id)
-            rebound_state = self._attach_viewer_to_running_chat(
+            rebound_state, _, recording = self._attach_viewer_to_running_chat(
                 chat_id,
                 tab_id,
                 task_id=task_id,
                 is_subagent=False,
+                replace_subscriptions=True,
             )
             if rebound_state is not None:
                 start_ts = self._live_task_start_ms(task_id, chat_id)
@@ -2035,9 +2037,6 @@ class VSCodeServer(
                 # resume, and a pre-history-row run's recording (e.g.
                 # its setup-failure result) is keyed by the
                 # provisional id the state carries (audit0903 F4).
-                live_events = self.printer.peek_recording_for_task(
-                    rebound_state.task_id,
-                )
                 events_payload: dict[str, Any] = {
                     "type": "task_events",
                     # The run has no ``task_history`` row to read the
@@ -2053,9 +2052,14 @@ class VSCodeServer(
                     "tabId": tab_id,
                     **replay_scope,
                 }
-                self.printer.broadcast(
-                    {**events_payload, "events": live_events},
-                )
+                # Each live event is either in the snapshot or sent
+                # after the replay (see ``JsonPrinter.replay_snapshot``).
+                with self.printer.replay_snapshot(
+                    rebound_state.task_id, conn_id, recording,
+                ) as live_events:
+                    self.printer.broadcast(
+                        {**events_payload, "events": live_events},
+                    )
                 self._finalize_viewer_attach(
                     tab_id, rebound_state, live_events, events_payload,
                 )
@@ -2099,36 +2103,15 @@ class VSCodeServer(
                 pass
 
         rebound_task_id = _coerce_id(result.get("task_id") if result else None)
-        self._printer_cleanup_tab(tab_id)
-        rebound_state = self._attach_viewer_to_running_chat(
-            chat_id,
-            tab_id,
-            task_id=rebound_task_id,
-            is_subagent=subagent_info is not None,
-        )
-        if rebound_state is not None:
-            # The task is still running, so the events table lags
-            # behind it: display events reach the database through an
-            # asynchronous writer, and a tab resumed moments after the
-            # task started (the round trip a freshly spawned
-            # ``run_parallel`` sub-agent's ``new_tab`` triggers) would
-            # replay an EMPTY transcript and permanently miss every
-            # event from before this subscription.  The printer's live
-            # in-memory recording is the authoritative copy while the
-            # task runs; events recorded after this snapshot reach the
-            # tab through the fan-out the reattach above just set up.
-            # Known micro-window: recording and fan-out are two steps
-            # of one broadcast, so an event recorded just before this
-            # snapshot can also fan out just after the replay below and
-            # render twice.  That window is a thread preemption inside
-            # a single broadcast (microseconds); the alternative — the
-            # events-table read this replaces — lost the whole
-            # transcript head for the async writer's full lag.
-            live_events = self.printer.peek_recording_for_task(
-                rebound_task_id,
+        rebound_state, attached_task_id, recording = (
+            self._attach_viewer_to_running_chat(
+                chat_id,
+                tab_id,
+                task_id=rebound_task_id,
+                is_subagent=subagent_info is not None,
+                replace_subscriptions=True,
             )
-            if live_events:
-                result["events"] = live_events
+        )
         if subagent_info is None and chat_id:
             # A resumed chat binds + titles the tab for EVERY client:
             # the shared registry is what makes a history click on one
@@ -2203,9 +2186,6 @@ class VSCodeServer(
             self._broadcast_viewer_running(
                 tab_id, rebound_state, start_ts_for_resume,
             )
-        replayed_events = with_task_settings_event(
-            _coalesced_replay_events(result["events"]), result,
-        )
         replay_payload: dict[str, Any] = {
             "type": "task_events",
             "task": result["task"],
@@ -2215,7 +2195,35 @@ class VSCodeServer(
             "tabId": tab_id,
             **replay_scope,
         }
-        self.printer.broadcast({**replay_payload, "events": replayed_events})
+        # While the task runs the events table lags behind it: display
+        # events reach the database through an asynchronous writer, and
+        # a tab resumed moments after the task started (the round trip
+        # a freshly spawned ``run_parallel`` sub-agent's ``new_tab``
+        # triggers) would replay an EMPTY transcript.  The printer's
+        # live in-memory recording is the authoritative copy while the
+        # task runs.  Snapshotted after the reattach above subscribed
+        # the tab, so each live event is either in this snapshot or
+        # fanned out after the replay (see ``replay_snapshot``).  The
+        # attach's recording is used only when it belongs to the row
+        # being replayed (a chat-id fallback can attach another task).
+        # Checked against the id captured with the recording, not the
+        # state's current ``task_id``: a sequential run re-keys the same
+        # state to its next subtask, possibly before this check.
+        if attached_task_id != rebound_task_id:
+            recording = None
+        with self.printer.replay_snapshot(
+            rebound_task_id if rebound_state is not None else "",
+            conn_id,
+            recording,
+        ) as live_events:
+            if live_events:
+                result["events"] = live_events
+            replayed_events = with_task_settings_event(
+                _coalesced_replay_events(result["events"]), result,
+            )
+            self.printer.broadcast(
+                {**replay_payload, "events": replayed_events},
+            )
         if rebound_state is not None:
             self._finalize_viewer_attach(
                 tab_id, rebound_state, replayed_events, replay_payload,
@@ -2402,23 +2410,14 @@ class VSCodeServer(
                     **scope,
                 })
                 continue
+            recording: list[dict[str, Any]] | None = None
             if not is_done:
-                self._reattach_running_chat(
+                _, _, recording = self._attach_viewer_to_running_chat(
                     str(row.get("chat_id", "") or ""),
                     sub_tab_id,
                     task_id=str(sub_task_id),
                     is_subagent=True,
                 )
-                # A still-running sub-agent's events table lags behind
-                # the live run (asynchronous writer); its in-memory
-                # recording holds the full transcript so far.  Events
-                # recorded after this snapshot reach the tab through
-                # the fan-out the reattach above just set up.
-                live_events = self.printer.peek_recording_for_task(
-                    str(sub_task_id),
-                )
-                if live_events:
-                    row["events"] = live_events
             self.printer.broadcast(
                 {
                     "type": "openSubagentTab",
@@ -2435,20 +2434,30 @@ class VSCodeServer(
                     **scope,
                 }
             )
-            self.printer.broadcast(
-                {
-                    "type": "task_events",
-                    "events": with_task_settings_event(
-                        _coalesced_replay_events(row["events"]), row,
-                    ),
-                    "task": description,
-                    "task_id": sub_task_id,
-                    "chat_id": row.get("chat_id", ""),
-                    "extra": _extra_for_replay(row.get("extra", "")),
-                    "tabId": sub_tab_id,
-                    **scope,
-                }
-            )
+            # A still-running sub-agent's events table lags behind the
+            # live run (asynchronous writer); its in-memory recording
+            # holds the full transcript so far.  Snapshotted after the
+            # reattach above subscribed the tab, so each live event is
+            # either in this snapshot or fanned out after the replay.
+            with self.printer.replay_snapshot(
+                "" if is_done else sub_task_id, conn_id, recording,
+            ) as live_events:
+                if live_events:
+                    row["events"] = live_events
+                self.printer.broadcast(
+                    {
+                        "type": "task_events",
+                        "events": with_task_settings_event(
+                            _coalesced_replay_events(row["events"]), row,
+                        ),
+                        "task": description,
+                        "task_id": sub_task_id,
+                        "chat_id": row.get("chat_id", ""),
+                        "extra": _extra_for_replay(row.get("extra", "")),
+                        "tabId": sub_tab_id,
+                        **scope,
+                    }
+                )
             self._emit_pending_ask(sub_tab_id)
             if not is_done and _subagent_is_done(sub_task_id):
                 self.printer.broadcast(
@@ -2525,15 +2534,10 @@ class VSCodeServer(
             ``True`` when a matching live agent exists and
             *new_tab_id* is now subscribed to its event stream.
         """
-        return (
-            self._attach_viewer_to_running_chat(
-                chat_id,
-                new_tab_id,
-                task_id=task_id,
-                is_subagent=is_subagent,
-            )
-            is not None
+        source, _, _ = self._attach_viewer_to_running_chat(
+            chat_id, new_tab_id, task_id=task_id, is_subagent=is_subagent,
         )
+        return source is not None
 
     def _attach_viewer_to_running_chat(
         self,
@@ -2542,7 +2546,8 @@ class VSCodeServer(
         *,
         task_id: str | None = None,
         is_subagent: bool = False,
-    ) -> AgentState | None:
+        replace_subscriptions: bool = False,
+    ) -> tuple[AgentState | None, str, list[dict[str, Any]] | None]:
         """Subscribe *new_tab_id* to a still-running agent state
         so its live agent's events ALSO flow to the newly opened tab —
         without stealing the stream from the original client.
@@ -2588,22 +2593,49 @@ class VSCodeServer(
                 ``task_history_id`` equals this id are eligible.
                 Used by sub-agent multi-view to disambiguate from
                 the parent (which shares ``chat_id``).
+            is_subagent: Skip the chat-id fallback pass (sub-agent
+                views must match by task id alone).
+            replace_subscriptions: First drop every printer
+                subscription/state of *new_tab_id* (a session replay
+                rebinding the tab) EXCEPT its subscription to the
+                resolved live task.  The tab is shared by every
+                window, and a ``connId``-scoped replay re-sends the
+                transcript to one window only: unsubscribing and
+                re-subscribing the tab would let an event the task
+                emits in between reach no window, so the other
+                windows showing the tab would silently lose it.
 
         Returns:
-            The live source state *new_tab_id* is now subscribed to,
-            or ``None`` when no matching live agent exists.  Callers
-            that broadcast an optimistic ``status running=true`` for
-            the attach re-check THIS object's liveness afterwards
+            ``(source, source_task_id, recording)``: the live source
+            state *new_tab_id* is now subscribed to (``None`` when no
+            matching live agent exists), the task id it was subscribed
+            under (``""`` when none; unlike ``source.task_id`` it does
+            not change when a sequential run re-keys the state to its
+            next subtask), and that task's recording list as returned
+            by :meth:`JsonPrinter.subscribe_tab` in the same lock hold
+            (``None`` when there is none).  Callers that broadcast an
+            optimistic ``status running=true`` for the attach re-check
+            THIS state object's liveness afterwards
             (:meth:`_broadcast_viewer_running`) — the object survives
             the printer bridge's mid-run re-keying, which a task-id
-            lookup would not.
+            lookup would not.  A replay passes the recording to
+            :meth:`JsonPrinter.replay_snapshot`, so the run stopping
+            its recording or being cleaned up before the snapshot
+            cannot drop events the tab missed.
         """
         if not new_tab_id:
-            return None
-        if task_id is None and not chat_id:
-            return None
+            return None, "", None
+        recording: list[dict[str, Any]] | None = None
+        source: AgentState | None = None
+        # One ``_state_lock`` section resolves the source AND rewires
+        # the printer: the printer bridge re-keys a run to its
+        # persisted id (and the runner then subscribes the launching
+        # tab to it) under the same lock, so a cleanup run after the
+        # release could keep an obsolete provisional id and drop the
+        # fresh persisted-id subscription.  Lock order ``STATE_LOCK``
+        # → printer locks; ``subscribe_tab``'s catch-up broadcast only
+        # schedules sends, so nothing here blocks under the lock.
         with self._state_lock:
-            source: AgentState | None = None
             if task_id is not None:
                 candidate = agent_state.get(task_id)
                 # thread_alive() (C-R4) additionally counts a created-
@@ -2622,11 +2654,14 @@ class VSCodeServer(
                     if t.thread_alive() or t.is_task_active:
                         source = t
                         break
-            if source is None:
-                return None
-            source_task_id = source.task_id
-        self.printer.subscribe_tab(source_task_id, new_tab_id)
-        return source
+            source_task_id = source.task_id if source is not None else ""
+            if replace_subscriptions:
+                self._printer_cleanup_tab(new_tab_id, source_task_id)
+            if source is not None:
+                recording = self.printer.subscribe_tab(
+                    source_task_id, new_tab_id,
+                )
+        return source, source_task_id, recording
 
     def _viewer_owns_other_busy_run(
         self,

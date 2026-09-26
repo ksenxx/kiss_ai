@@ -4696,7 +4696,9 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
             f.write(
                 "#!/bin/bash\n"
                 'echo "INF https://test-abc.trycloudflare.com" >&2\n'
-                "sleep 60\n"
+                # exec: SIGTERM to the tracked pid must end the whole
+                # fake cloudflared, not orphan a ``sleep`` child.
+                "exec sleep 60\n"
             )
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
@@ -4796,7 +4798,9 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
             f.write(
                 "#!/bin/bash\n"
                 'echo "INF https://restarted-tunnel.trycloudflare.com" >&2\n'
-                "sleep 60\n"
+                # exec: SIGTERM to the tracked pid must end the whole
+                # fake cloudflared, not orphan a ``sleep`` child.
+                "exec sleep 60\n"
             )
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path

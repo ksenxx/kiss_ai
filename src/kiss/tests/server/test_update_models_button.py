@@ -110,6 +110,12 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
+        # The updater is detached by design and may outlive stop_async
+        # (whose cancelled watcher no longer reaps it); wait for the
+        # released stub to exit so it does not outlive the test.
+        proc = self.server._update_models_proc
+        if proc is not None:
+            await asyncio.to_thread(proc.wait, 10)
         if th._db_conn is not None:
             th._db_conn.close()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]

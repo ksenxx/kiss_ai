@@ -92,6 +92,7 @@ from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
     _load_subagent_rows_by_parent_task_id,
+    _queue_chat_event,
 )
 from kiss.core.brand import BRAND, PRODUCT_NAME
 from kiss.core.config import get_jobs_root as get_jobs_root
@@ -136,6 +137,10 @@ from kiss.viz_trajectory.server import (
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
 logger = logging.getLogger(__name__)
+
+# An outbound payload: serialised JSON, or a replay slot reserved by
+# ``JsonPrinter.replay_snapshot`` whose JSON is supplied later.
+Payload = str | ConcurrentFuture[str]
 
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "agents" / "vscode" / "media"
 
@@ -2546,7 +2551,7 @@ class WebPrinter(JsonPrinter):
         """
         return self._tab_worktree_dirs.get(tab_id, "")
 
-    def cleanup_tab(self, tab_id: str) -> None:
+    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
         """Drop *tab_id*'s per-tab state, including its worktree dir.
 
         A tab closed without merging (no successful ``worktree_result``
@@ -2573,8 +2578,9 @@ class WebPrinter(JsonPrinter):
 
         Args:
             tab_id: The frontend tab identifier to drop.
+            keep_task_id: See :meth:`JsonPrinter.cleanup_tab`.
         """
-        super().cleanup_tab(tab_id)
+        super().cleanup_tab(tab_id, keep_task_id)
         if tab_id:
             with self._lock:
                 self._tab_worktree_dirs.pop(tab_id, None)
@@ -2632,6 +2638,15 @@ class WebPrinter(JsonPrinter):
                     or os.getcwd()
                 )
 
+        slot = self._take_replay_slot(event)
+        if slot is not None:
+            # A running task's replay: its sends were reserved under
+            # ``delivery_lock`` by ``replay_snapshot``; supply the payload.
+            if "tabId" in event:
+                self._track_worktree_event(event, event.get("tabId"))
+            slot.set_result(json.dumps(event))
+            return
+
         if conn_id:
             # A ``ready``-driven replay is delivered to one connection
             # but still re-presents the tab's worktree (a running
@@ -2643,11 +2658,19 @@ class WebPrinter(JsonPrinter):
             return
 
         if "tabId" in event:
-            self._track_worktree_event(event, event.get("tabId"))
-            self._keep_tab_stamped_task_event(event)
-            if record_only:
-                return
-            self._send_to_ws_clients(json.dumps(event))
+            # Recording and sending under ``delivery_lock``: a replay
+            # snapshot of the task either has this event and precedes
+            # it, or lacks it and follows it (see ``delivery_lock``).
+            # Encoded first: a transcript payload can be large, and the
+            # lock serializes every task's deliveries.
+            kept = self._tab_stamped_task_record(event)
+            data = "" if record_only else json.dumps(event)
+            with self.delivery_lock:
+                self._track_worktree_event(event, event.get("tabId"))
+                if kept is not None:
+                    self._keep_tab_stamped_task_event(*kept)
+                if data:
+                    self._send_to_ws_clients(data)
             return
 
         event = self._inject_task_id(event)
@@ -2658,22 +2681,35 @@ class WebPrinter(JsonPrinter):
             self._send_to_ws_clients(json.dumps(event))
             return
 
-        with self._lock:
-            self._record_event(event)
-            # Mirror JsonPrinter.broadcast: record the file paths of
-            # mutating tool calls so the end-of-task cross-repo
-            # auto-commit (_autocommit_changed_repos) also sees tasks
-            # run through the web printer.
-            self._track_changed_path(event)
+        # A ``talk`` event is never replayed (not a display event), and
+        # its playback arbitration takes the agent-state lock and may
+        # start a local player, so it fans out after the lock.
+        talk = event.get("type") == "talk"
+        # Resolved before ``delivery_lock`` (it takes ``STATE_LOCK`` and
+        # the agent's lock); queued under it so the events table keeps
+        # the order the clients saw.
+        persist_id = self._persistence_task_id(event)
+        # Encoded once, before the lock (a tool result can embed
+        # images): persisted as is, and spliced per subscribed tab.
+        # The tabId branch above returned, so ``event`` has no tabId.
+        data = "" if talk else json.dumps(event)
+        with self.delivery_lock:
+            with self._lock:
+                self._record_event(event)
+                # Mirror JsonPrinter.broadcast: record the file paths of
+                # mutating tool calls so the end-of-task cross-repo
+                # auto-commit (_autocommit_changed_repos) also sees tasks
+                # run through the web printer.
+                self._track_changed_path(event)
+            if persist_id:
+                _queue_chat_event(data, task_id=persist_id)
+            if not record_only and not talk:
+                self._fanout_stamped(event, data)
 
-        self._persist_event(event)
+        if talk and not record_only:
+            self._fanout_stamped(event)
 
-        if record_only:
-            return
-
-        self._fanout_stamped(event)
-
-    def _fanout_stamped(self, event: dict[str, Any]) -> None:
+    def _fanout_stamped(self, event: dict[str, Any], encoded: str = "") -> None:
         """Send one ``tabId``-stamped copy of *event* per subscribed tab.
 
         The frontend filters incoming events by ``tabId``; an event
@@ -2691,16 +2727,23 @@ class WebPrinter(JsonPrinter):
         marker), and splicing a second ``"tabId"`` member would
         produce ambiguous JSON with duplicate keys — routed correctly
         today only because parsers happen to keep the last member.
+
+        Args:
+            event: The task event (carrying ``taskId``).
+            encoded: ``json.dumps(event)`` from a caller that encodes
+                before taking ``delivery_lock``, or ``""``.  Ignored
+                when *event* carries a ``tabId``.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
         if "tabId" in event:
             event = {k: v for k, v in event.items() if k != "tabId"}
+            encoded = ""
         if event.get("type") == "talk":
             self._fanout_talk(event, targets)
             return
-        base = json.dumps(event)[:-1]
+        base = (encoded or json.dumps(event))[:-1]
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
             self._send_to_ws_clients(
@@ -2988,7 +3031,7 @@ class WebPrinter(JsonPrinter):
             logger.exception("daemon-side talk clip playback failed")
             return False
 
-    def _send_to_wss_clients(self, data: str) -> None:
+    def _send_to_wss_clients(self, data: Payload) -> None:
         """Send a pre-serialised JSON payload to WSS clients only.
 
         WSS peers are remote browsers — separate devices from the
@@ -2996,14 +3039,15 @@ class WebPrinter(JsonPrinter):
         copy while the same-machine UDS peers get the muted one.
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         with self._ws_lock:
             endpoints = list(self._ws_clients)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_uds_writers(self, data: str, tab_id: str = "") -> None:
+    def _send_to_uds_writers(self, data: Payload, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
         UDS peers (VS Code extension webviews, Python clients) are
@@ -3011,7 +3055,8 @@ class WebPrinter(JsonPrinter):
         muted copies when a local player already owns the utterance.
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             tab_id: The tab the payload is stamped with, when it is a
                 task-event copy; only the peers that can show that tab
                 receive it (see :meth:`_uds_writers_for_tab`).  Empty
@@ -3025,7 +3070,7 @@ class WebPrinter(JsonPrinter):
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to every connected client.
 
         Factored out of :meth:`broadcast` so fan-out copies for
@@ -3037,7 +3082,8 @@ class WebPrinter(JsonPrinter):
         preserved by each endpoint's ``send_lock``).
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             tab_id: The stamped tab of a task-event copy (empty for
                 global events); UDS delivery is narrowed to the peers
                 that can show it.
@@ -3045,7 +3091,29 @@ class WebPrinter(JsonPrinter):
         self._send_to_wss_clients(data)
         self._send_to_uds_writers(data, tab_id)
 
-    def _send_to_conn(self, conn_id: str, data: str) -> None:
+    def _reserve_replay_send(
+        self, slot: ConcurrentFuture[str], conn_id: str,
+    ) -> None:
+        """Schedule a replay's sends now, with the payload supplied later.
+
+        Each recipient's send takes its FIFO place at once and waits
+        for *slot* (see :meth:`_locked_send`), so sends scheduled
+        afterwards follow the replay while the payload is built
+        outside ``delivery_lock``.  Recipients are those
+        :meth:`broadcast` picks for a ``task_events`` replay: the
+        requesting connection, or every client.  The caller owns
+        *slot* and cancels it if the payload never comes.
+
+        Args:
+            slot: The future the serialised replay is set on.
+            conn_id: Connection the replay is scoped to, or ``""``.
+        """
+        if conn_id:
+            self._send_to_conn(conn_id, slot)
+        else:
+            self._send_to_ws_clients(slot)
+
+    def _send_to_conn(self, conn_id: str, data: Payload) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
 
         Used by :meth:`broadcast` for request/reply events stamped
@@ -3055,7 +3123,8 @@ class WebPrinter(JsonPrinter):
 
         Args:
             conn_id: The connection id registered via :meth:`bind_conn`.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         with self._ws_lock:
             endpoint = self._conn_endpoints.get(conn_id)
@@ -3089,14 +3158,15 @@ class WebPrinter(JsonPrinter):
     async def _locked_send(
         self,
         endpoint: Any,
-        data: str,
+        data: Payload,
         admit: Callable[[], bool] | None = None,
     ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
         Args:
             endpoint: The client connection to write to.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             admit: Optional last-moment admission check, evaluated
                 AFTER the send lock is acquired; a ``False`` result
                 drops the payload without touching the wire.  The
@@ -3109,14 +3179,23 @@ class WebPrinter(JsonPrinter):
                 review, finding 6).
         """
         async with self.send_lock(endpoint):
+            if isinstance(data, ConcurrentFuture):
+                # A reserved replay slot (``replay_snapshot``): hold this
+                # endpoint's FIFO place until the payload is set (or the
+                # slot is cancelled, which raises ``CancelledError``).
+                # Shielded so a disconnect cancelling this send cannot
+                # cancel the slot shared with the other recipients.
+                text = await asyncio.shield(asyncio.wrap_future(data))
+            else:
+                text = data
             if admit is not None and not admit():
                 return
             if isinstance(endpoint, asyncio.StreamWriter):
-                await self._uds_send(endpoint, data)
+                await self._uds_send(endpoint, text)
             else:
-                await endpoint.send(data)
+                await endpoint.send(text)
 
-    def _schedule_send(self, endpoint: Any, data: str) -> None:
+    def _schedule_send(self, endpoint: Any, data: Payload) -> None:
         """Schedule one payload send to one endpoint on the event loop.
 
         Shared by :meth:`_send_to_ws_clients` (fan-out) and
@@ -3128,7 +3207,8 @@ class WebPrinter(JsonPrinter):
 
         Args:
             endpoint: The client connection to write to.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         loop = self._loop
         if loop is None or not loop.is_running():

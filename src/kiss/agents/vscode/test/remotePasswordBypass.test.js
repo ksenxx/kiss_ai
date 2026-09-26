@@ -1201,6 +1201,64 @@ async function run() {
     window.close();
   }
 
+  {
+    // A page script that fails to load while the document is parsing
+    // (a server restart mid-load) reloads the page once per 30 s; any
+    // other error event is ignored.  jsdom keeps readyState 'loading'
+    // until a later macrotask, so the synchronous part below runs while
+    // the document still counts as parsing.
+    const reloads = [];
+    const dom = buildDom({reloads});
+    const {window} = dom;
+    const doc = window.document;
+    installFakeWebSocket(window, []);
+    evalShim(window, shimJs);
+    function failLoad(tag, src) {
+      const el = doc.createElement(tag);
+      if (src) el.setAttribute('src', src);
+      doc.head.appendChild(el);
+      el.dispatchEvent(new window.Event('error'));
+    }
+    try {
+      assert.strictEqual(doc.readyState, 'loading');
+      window.dispatchEvent(new window.Event('error'));
+      failLoad('img', '/logo.png');
+      failLoad('script', '');
+      failLoad('script', 'https://cdn.other.test/monaco.js');
+      assert.strictEqual(reloads.length, 0,
+        'non-script, inline and cross-origin failures never reload');
+      failLoad('script', '/media/main.js');
+      assert.strictEqual(reloads.length, 1, 'a failed page script reloads');
+      assert.ok(Number(window.sessionStorage.getItem(
+        'sorcar-script-reloaded-at')) > 0, 'the reload is time-stamped');
+      failLoad('script', '/media/main.js');
+      assert.strictEqual(reloads.length, 1,
+        'a second failure within 30 s does not reload again');
+      window.sessionStorage.setItem('sorcar-script-reloaded-at',
+        String(Date.now() - 31000));
+      failLoad('script', '/media/main.js');
+      assert.strictEqual(reloads.length, 2, 'the guard expires after 30 s');
+      const realGetItem = window.Storage.prototype.getItem;
+      window.Storage.prototype.getItem = function () {
+        throw new Error('SecurityError');
+      };
+      failLoad('script', '/media/main.js');
+      window.Storage.prototype.getItem = realGetItem;
+      assert.strictEqual(reloads.length, 2,
+        'without storage there is no loop guard, so no reload');
+      await tick();
+      assert.notStrictEqual(doc.readyState, 'loading');
+      window.sessionStorage.removeItem('sorcar-script-reloaded-at');
+      failLoad('script', '/media/main.js');
+      assert.strictEqual(reloads.length, 2,
+        'a script failing after parsing (on-demand load) never reloads');
+      ok('a page script failing to load mid-parse reloads once per 30 s');
+    } catch (err) {
+      fail('script load-error recovery broken', err);
+    }
+    window.close();
+  }
+
   console.log('\nAll remotePasswordBypass tests passed.');
 }
 

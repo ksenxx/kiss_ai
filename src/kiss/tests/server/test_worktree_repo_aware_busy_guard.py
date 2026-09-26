@@ -128,8 +128,14 @@ class _RepoAwareGuardBase(_WorktreeNoAutocommitBase):
             state.non_wt_repo_root = repo_root.resolve() if repo_root else None
 
     def _run_worktree_task_with_changes(self) -> None:
-        """Run one worktree task (autoCommit on) that creates a file."""
-        self._original_run = _patch_parent_run_create_file("agent_out.txt")
+        """Run one worktree task (autoCommit on) that creates a file.
+
+        ``setUp`` already saved the real parent ``run``; re-saving the
+        patch's return value here would store the previous call's stub
+        when a test runs this helper twice, and ``tearDown`` would then
+        leave ``run`` stubbed for every later test.
+        """
+        _patch_parent_run_create_file("agent_out.txt")
         self.server._run_task_inner({
             "prompt": "worktree task with changes",
             "workDir": self.repo,
@@ -582,7 +588,7 @@ class TestNonWorktreeTaskAdmission(_RepoAwareGuardBase):
             tab.is_merging = True
 
     def _start_non_wt_task(self, work_dir: str) -> None:
-        self._original_run = _patch_parent_run_create_file("direct_out.txt")
+        _patch_parent_run_create_file("direct_out.txt")
         self.server._run_task_inner({
             "prompt": "direct task",
             "workDir": work_dir,

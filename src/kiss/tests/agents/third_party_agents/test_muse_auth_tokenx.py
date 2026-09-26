@@ -108,7 +108,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     ensure_daemon,
     grant,
     mint_surrogate,
-    stop_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -119,7 +118,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
@@ -2033,8 +2031,7 @@ def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:
     old = time.time() - 3600
     os.utime(stale, (old, old))
     # Restart the daemon (protocol handshake tears down and respawns).
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     ensure_daemon()
     # Give the startup sweep a moment.
     deadline = time.monotonic() + 5.0

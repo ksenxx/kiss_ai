@@ -23,7 +23,9 @@ Not covered here, and why:
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import urllib.request
 import uuid
@@ -75,8 +77,15 @@ with open(os.path.join(here, "browser-log"), "a") as fh:
     fh.write(json.dumps(sys.argv[1:]) + "\\n")
 if os.path.exists(os.path.join(here, "refuse")):
     sys.exit(1)
+# A lingering opener stays up (like a browser that is its own launcher)
+# until the test removes the marker; it records its pid so the test can
+# wait for it to exit.
 if os.path.exists(os.path.join(here, "linger")):
-    time.sleep(5)
+    with open(os.path.join(here, "linger-pid"), "w") as fh:
+        fh.write(str(os.getpid()))
+    deadline = time.monotonic() + 30
+    while os.path.exists(os.path.join(here, "linger")) and time.monotonic() < deadline:
+        time.sleep(0.02)
 """
 
 _DUMMY_CLIENT_SECRETS = {
@@ -114,6 +123,23 @@ def _opened(home: Path) -> list[list[str]]:
     if not log.exists():
         return []
     return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def _release_lingering_opener(home: Path) -> None:
+    """Let the ``linger`` opener exit and reap it.
+
+    ``open_in_default_browser`` deliberately leaves a still-running
+    opener alone (it may be the browser itself), so the test ends it
+    instead of leaving it to the subprocess reaper.  On Windows the pid
+    is the interpreter behind the ``.cmd`` shim, not our child, so only
+    the marker is removed there.
+    """
+    (home / "linger").unlink()
+    if IS_WINDOWS:
+        return
+    pid = int((home / "linger-pid").read_text())
+    with contextlib.suppress(ChildProcessError):  # already reaped
+        os.waitpid(pid, 0)
 
 
 def _unique_url(path: str = "signin") -> str:
@@ -163,8 +189,6 @@ def test_browser_env_placeholder_and_fallback_list_are_honoured(
     fake_browser: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``%s`` receives the URL; ``os.pathsep`` entries are tried in order."""
-    import os
-
     launcher = os.environ["BROWSER"]
     monkeypatch.setenv("BROWSER", f'/no/such/browser{os.pathsep}"{launcher}" --new-tab=%s')
     url = _unique_url("placeholder")
@@ -183,8 +207,6 @@ def test_malformed_browser_env_or_url_never_raises(
     assert open_in_default_browser(_unique_url("malformed")) is False
     monkeypatch.setenv("BROWSER", " ")
     assert _launch_commands("https://x.test/")[0][0] in ("open", "xdg-open")
-    import os
-
     monkeypatch.setenv("BROWSER", f"{os.pathsep}/bin/x{os.pathsep}")
     assert _launch_commands("https://x.test/") == [["/bin/x", "https://x.test/"]]
     assert _opened(fake_browser) == []
@@ -208,6 +230,7 @@ def test_concurrent_callers_open_one_tab(fake_browser: Path) -> None:
         assert not thread.is_alive(), "open_in_default_browser did not return"
     assert results == [True, True]
     assert _opened(fake_browser) == [[url]]
+    _release_lingering_opener(fake_browser)
 
 
 def test_headless_and_disallowed_schemes_never_launch(
@@ -244,6 +267,7 @@ def test_lingering_opener_counts_as_opened(fake_browser: Path) -> None:
     url = _unique_url("linger")
     assert open_in_default_browser(url) is True
     assert _opened(fake_browser) == [[url]]
+    _release_lingering_opener(fake_browser)
 
 
 def test_recently_opened_url_is_not_opened_twice(fake_browser: Path) -> None:

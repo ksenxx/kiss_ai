@@ -3597,7 +3597,7 @@ def _write_event_batch_locked(
 
 
 def _queue_chat_event(
-    event: dict[str, object],
+    event: dict[str, object] | str,
     task_id: str,
     origin_db_path: str | None = None,
 ) -> None:
@@ -3612,7 +3612,8 @@ def _queue_chat_event(
     must call ``_flush_chat_events()`` first.
 
     Args:
-        event: The event dict to persist.
+        event: The event dict to persist, or its ``json.dumps``
+            encoding (lets a caller encode before taking a lock).
         task_id: Stable ``task_history`` row id.  Must be non-None.
         origin_db_path: Database path *task_id* was resolved against.
             Defaults to the active ``_DB_PATH``.  The background
@@ -3627,7 +3628,7 @@ def _queue_chat_event(
     # ``_flush_chat_events(task_id)`` would then spin forever.
     item = (
         task_id,
-        json.dumps(event),
+        event if isinstance(event, str) else json.dumps(event),
         time.time(),
         origin_db_path or _current_db_path(),
     )

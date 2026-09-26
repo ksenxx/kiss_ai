@@ -48,7 +48,10 @@ def _persist(
     payload: dict[str, object] = {
         "model": "test-model",
         "work_dir": "/work/dir",
-        "startTs": _NOW_MS - 90_000,
+        # Relative to the real clock at call time (not the frozen module-level
+        # _NOW_MS): the digest measures elapsed time against time.time(), so a
+        # module imported long before the test ran would report "2 min".
+        "startTs": int(time.time() * 1000) - 90_000,
     }
     payload.update(extra or {})
     task_id, _chat = _add_task(prompt, extra=payload)

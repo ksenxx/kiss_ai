@@ -685,6 +685,11 @@ class _TaskRunnerMixin:
             self, repo_root: Path | None,
         ) -> str | None: ...
         def _main_tree_blocks_merge(self, repo_root: Path | None) -> bool: ...
+        def _claim_main_tree(
+            self, repo_root: Path, reason: str,
+            holder: list[Any] | None = None,
+        ) -> bool: ...
+        def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
         def _user_answer_clear_tabs(
@@ -943,7 +948,33 @@ class _TaskRunnerMixin:
                         state.task_id, exc_info=True,
                     )
                     self.printer.cleanup_task(state.task_id)
-            self.printer.broadcast(setup_result)
+            # Recording the result (the launcher's copy) and choosing
+            # the viewers that get live copies form one step under
+            # ``delivery_lock``: a viewer's replay snapshot then either
+            # holds the result and supersedes the live copy, or lacks
+            # it and is followed by it — never both.
+            with self.printer.delivery_lock:
+                self.printer.broadcast(setup_result)
+                if state is not None and state.task_id:  # pragma: no branch
+                    # Viewers that attached during setup are subscribed
+                    # to the provisional task id (the launcher is not:
+                    # it is subscribed only once a task id is
+                    # allocated).  Give each one live copy, as the
+                    # normal end-of-run result fan-out does.  The copies
+                    # drop ``taskId`` so they stay transient: the
+                    # launcher's copy above already recorded the result
+                    # once for replay.
+                    viewer_result = {
+                        k: v for k, v in setup_result.items()
+                        if k not in ("tabId", "taskId")
+                    }
+                    for viewer_tab_id in self.printer._fanout_targets(
+                        state.task_id,
+                    ):
+                        if viewer_tab_id != tab_id:
+                            self.printer.broadcast(
+                                {**viewer_result, "tabId": viewer_tab_id},
+                            )
         finally:
             if state is None:
                 # The interrupt (or an override crash) landed before
@@ -1663,47 +1694,75 @@ class _TaskRunnerMixin:
             # that has left every tracked file untouched (this run
             # itself, which has not started writing yet, or another
             # tab's read-only task) does not stand in the way.
-            with self._state_lock:
-                main_tree_busy = self._any_non_wt_running(
-                    getattr(agent, "_repo_root", None),
-                )
-                wt_occupied = self._any_non_wt_running(
-                    getattr(agent, "_wt_dir", None),
-                )
-                merge_blocked = self._main_tree_blocks_merge(
-                    getattr(agent, "_repo_root", None),
-                )
-            if main_tree_busy and wt_occupied:
-                # A task on another tab is running INSIDE the pending
-                # worktree itself.  Every disposal — discard and the
-                # commit-and-remove preserve alike — deletes that
-                # directory out from under the running task, so leave
-                # the worktree pending; a later retire retries.
-                agent._set_warnings(merge=(
-                    f"Worktree '{agent._wt_branch}' was left pending: "
-                    "another tab is running a task inside it."
-                ))
-            elif main_tree_busy:
-                # Retiring the previous worktree is an automatic path,
-                # so it obeys the toggle as it stands NOW — the value
-                # this run carried, not the one the run that created
-                # the worktree carried.  ``agent.run`` binds the same
-                # attribute for every cleanup that happens later, but
-                # this release runs before it.
-                agent.auto_commit_enabled = state.auto_commit_mode
-                if merge_blocked:
-                    _release_worktree_without_merging(
-                        agent, bool(self._get_worktree_changed_files(tab_id)),
+            # Merging here rewrites the main tree without an
+            # ``is_merging`` flag (the tab's run is starting, not a
+            # merge_flow merge), so the merge publishes a main-tree
+            # claim in the same locked section as the check: direct-run
+            # admission on another tab refuses while it is held,
+            # instead of starting to write the tree mid-merge.  A
+            # worktree run retires here too, under the same claim —
+            # left to ``_try_setup_worktree`` the merge ran with no
+            # claim at all.
+            # A worktree run enters setup only when its work_dir is in
+            # a git repository — the same ``discover_repo`` condition
+            # ``WorktreeSorcarAgent.run`` applies; otherwise the agent
+            # runs the task directly outside any repository and the
+            # pending worktree stays pending, as it did before.
+            wt_setup = use_worktree and repo is not None
+            retires = wt_setup or not use_worktree
+            wt_repo_root = getattr(agent, "_repo_root", None)
+            retire_claims: list[Any] = []
+            try:
+                with self._state_lock:
+                    main_tree_busy = self._any_non_wt_running(wt_repo_root)
+                    wt_occupied = self._any_non_wt_running(
+                        getattr(agent, "_wt_dir", None),
                     )
-                elif not use_worktree:
-                    # The main tree is occupied but untouched, so the
-                    # carried-over worktree can still be merged — and
-                    # it must be merged NOW, before this direct run
-                    # starts writing the tree.  A worktree run needs
-                    # nothing here: its own ``_try_setup_worktree``
-                    # retires the previous worktree under the repo
-                    # lock as it always did.
-                    agent._retire_previous_worktree()
+                    merge_blocked = self._main_tree_blocks_merge(wt_repo_root)
+                    if (
+                        wt_repo_root is not None
+                        and (main_tree_busy or wt_setup) and retires
+                        and not wt_occupied and not merge_blocked
+                    ):
+                        merge_blocked = not self._claim_main_tree(
+                            wt_repo_root, "worktree merge",
+                            holder=retire_claims,
+                        )
+                if main_tree_busy and wt_occupied:
+                    # A task on another tab is running INSIDE the pending
+                    # worktree itself.  Every disposal — discard and the
+                    # commit-and-remove preserve alike — deletes that
+                    # directory out from under the running task, so leave
+                    # the worktree pending; a later retire retries.
+                    agent._set_warnings(merge=(
+                        f"Worktree '{agent._wt_branch}' was left pending: "
+                        "another tab is running a task inside it."
+                    ))
+                elif main_tree_busy or (wt_setup and not wt_occupied):
+                    # Retiring the previous worktree is an automatic path,
+                    # so it obeys the toggle as it stands NOW — the value
+                    # this run carried, not the one the run that created
+                    # the worktree carried.  ``agent.run`` binds the same
+                    # attribute for every cleanup that happens later, but
+                    # this release runs before it.
+                    agent.auto_commit_enabled = state.auto_commit_mode
+                    if merge_blocked:
+                        _release_worktree_without_merging(
+                            agent, bool(self._get_worktree_changed_files(tab_id)),
+                        )
+                    elif retires:
+                        # The main tree is unoccupied, or occupied but
+                        # untouched, so the carried-over worktree can
+                        # still be merged — and it must be merged NOW,
+                        # under the claim, before this run starts (a
+                        # direct run writes the tree next; a worktree
+                        # run's ``_try_setup_worktree`` then finds
+                        # nothing pending).
+                        agent._retire_previous_worktree()
+            finally:
+                for claim in retire_claims:
+                    with self._state_lock:
+                        self._release_main_tree_claim(claim)
 
         with self._state_lock:
             opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")
@@ -2497,7 +2556,8 @@ class _TaskRunnerMixin:
             end_ms: End timestamp (ms epoch) for the ``extra``
                 payload; defaults to now.
             cleanup: Release the printer's per-task resources via
-                ``cleanup_task`` after persisting.
+                ``cleanup_task`` after persisting, also when persisting
+                fails.
             reraise: Propagate persistence errors instead of logging
                 and swallowing them.
 
@@ -2539,8 +2599,6 @@ class _TaskRunnerMixin:
                 task_id=task_id,
             )
             self.printer.broadcast({"type": "tasks_updated"})
-            if cleanup and task_id is not None:
-                self.printer.cleanup_task(task_id)
             logger.info(
                 "Task result persisted: task_id=%s result=%r",
                 task_id,
@@ -2554,6 +2612,12 @@ class _TaskRunnerMixin:
                 task_id,
                 exc_info=True,
             )
+        finally:
+            # Even when persisting failed: the run moves on to its next
+            # subtask, and the end-of-run cleanup frees only the last
+            # subtask's id, so this one's retired recording would leak.
+            if cleanup and task_id is not None:
+                self.printer.cleanup_task(task_id)
 
     def _broadcast_failure_result(
         self,

@@ -2928,8 +2928,7 @@ def run_tasks_parallel(
             ``"budget_used"``, ``"total_tokens_used"`` and
             ``"total_steps"`` so the caller can attribute sub-agent
             usage back to the parent task (see
-            :func:`_attribute_sub_usage`), plus the per-child spend
-            list ``"budget_used_per_task"`` (same order as *tasks*).
+            :func:`_attribute_sub_usage`).
         max_budget: Per-sub-agent budget cap in USD, forwarded to each
             sub-agent's ``run``.  Callers spawning sub-agents on behalf
             of a parent task pass each child one share of the parent's
@@ -3205,7 +3204,6 @@ def run_tasks_parallel(
                 totals_out["budget_used"] = sum(u[0] for u in sub_usage)
                 totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
                 totals_out["total_steps"] = sum(u[2] for u in sub_usage)
-                totals_out["budget_used_per_task"] = [u[0] for u in sub_usage]
     return results
 
 
