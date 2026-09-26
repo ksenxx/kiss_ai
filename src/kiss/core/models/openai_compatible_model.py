@@ -536,6 +536,35 @@ class OpenAICompatibleBase(Model):
                 f"Embedding generation failed for model {model_to_use}: {e}"
             ) from e
 
+    def get_embeddings(
+        self, texts: list[str], embedding_model: str | None = None
+    ) -> list[list[float]]:
+        """Generate embedding vectors for several texts in one request.
+
+        Args:
+            texts: The texts to embed (at most 2048, 300k tokens in total).
+            embedding_model: Optional model name for embedding generation. Uses the
+                model's name if not specified.
+
+        Returns:
+            The embedding vectors, in the order of *texts*.
+
+        Raises:
+            KISSError: If the embedding generation fails.
+        """
+        if not texts:
+            return []
+        model_to_use = embedding_model or self.model_name
+        try:
+            response = self.client.embeddings.create(model=model_to_use, input=texts)
+            ordered = sorted(response.data, key=lambda item: item.index)
+            return [list(item.embedding) for item in ordered]
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            raise KISSError(
+                f"Embedding generation failed for model {model_to_use}: {e}"
+            ) from e
+
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
         """Convert one :class:`Attachment` to this transport's content part.

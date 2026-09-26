@@ -1468,6 +1468,7 @@ dependencies = [
     { name = "harbor" },
     { name = "markdown-it-py" },
     { name = "mcp" },
+    { name = "numpy" },
     { name = "openai" },
     { name = "patchright" },
     { name = "playwright" },
@@ -1488,12 +1489,14 @@ dependencies = [
 [package.dev-dependencies]
 claude = [
     { name = "anthropic" },
+    { name = "numpy" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
 core = [
+    { name = "numpy" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -1517,12 +1520,14 @@ docker = [
 ]
 gemini = [
     { name = "google-genai" },
+    { name = "numpy" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "rich" },
 ]
 openai = [
+    { name = "numpy" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1533,6 +1538,7 @@ server = [
     { name = "cryptography" },
     { name = "flask" },
     { name = "mcp" },
+    { name = "numpy" },
     { name = "patchright" },
     { name = "playwright" },
     { name = "pydantic" },
@@ -1545,6 +1551,7 @@ server = [
 ]
 sorcar = [
     { name = "mcp" },
+    { name = "numpy" },
     { name = "patchright" },
     { name = "playwright" },
     { name = "pydantic" },
@@ -1567,6 +1574,7 @@ requires-dist = [
     { name = "harbor", specifier = ">=0.3.0" },
     { name = "markdown-it-py", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.20.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "openai", specifier = ">=2.13.0" },
     { name = "patchright", specifier = ">=1.63.0" },
     { name = "playwright", specifier = ">=1.40.0" },
@@ -1587,12 +1595,14 @@ requires-dist = [
 [package.metadata.requires-dev]
 claude = [
     { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "rich", specifier = ">=14.2.0" },
 ]
 core = [
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
@@ -1614,12 +1624,14 @@ dev = [
 docker = [{ name = "docker", specifier = ">=7.0.0" }]
 gemini = [
     { name = "google-genai", specifier = ">=0.30.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "rich", specifier = ">=14.2.0" },
 ]
 openai = [
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "openai", specifier = ">=2.13.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
@@ -1630,6 +1642,7 @@ server = [
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "flask", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.20.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "patchright", specifier = ">=1.63.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
@@ -1642,6 +1655,7 @@ server = [
 ]
 sorcar = [
     { name = "mcp", specifier = ">=1.20.0" },
+    { name = "numpy", specifier = ">=1.26.0" },
     { name = "patchright", specifier = ">=1.63.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.0.0" },

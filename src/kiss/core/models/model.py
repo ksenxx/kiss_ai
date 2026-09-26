@@ -1170,6 +1170,23 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def get_embeddings(
+        self, texts: list[str], embedding_model: str | None = None
+    ) -> list[list[float]]:
+        """Generates one embedding vector per text.
+
+        The base implementation calls :meth:`get_embedding` once per text;
+        providers with a batch endpoint override it with a single request.
+
+        Args:
+            texts: The texts to embed.
+            embedding_model: Optional model name to use for embedding generation.
+
+        Returns:
+            The embedding vectors, in the order of *texts*.
+        """
+        return [self.get_embedding(text, embedding_model) for text in texts]
+
     def set_usage_info_for_messages(self, usage_info: str) -> None:
         """Sets token information to append to messages sent to the LLM.
 

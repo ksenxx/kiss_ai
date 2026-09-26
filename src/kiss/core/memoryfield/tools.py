@@ -11,6 +11,7 @@ a human in an editor, git pull) are searchable without a separate reindex.
 """
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -92,6 +93,22 @@ class MemoryTools:
             self.memory_refresh,
         ]
 
+    def _search(self, query: str, k: int) -> list[SearchHit]:
+        """Sync the index and search it, embedding the query during the sync.
+
+        The query's embedding request runs on a worker thread while the
+        sync scans the directory (and embeds any changed pages), so the
+        call costs about one embedding round trip instead of two.
+        """
+        if k <= 0:
+            self.index.sync()
+            return []
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            query_vector = pool.submit(self.index.embed_query, query)
+            self.index.sync()
+            query_vector.result()  # re-raises an embedding failure
+        return self.index.search(query, k=k)
+
     def memory_search(self, query: str, k: int = 5) -> str:
         """Semantic search over memory pages; returns the best-matching page names with scores.
 
@@ -99,8 +116,7 @@ class MemoryTools:
             query: What you want to recall, phrased as a question or topic.
             k: Maximum number of pages to return (default 5).
         """
-        self.index.sync()
-        hits = self.index.search(query, k=k)
+        hits = self._search(query, k)
         if not hits:
             return "No memory pages yet." if self.index.count() == 0 else "No matches."
         return _format_hits(hits)
@@ -112,8 +128,7 @@ class MemoryTools:
             query: What you want to recall, phrased as a question or topic.
             k: Maximum number of pages to return (default 3).
         """
-        self.index.sync()
-        hits = self.index.search(query, k=k)
+        hits = self._search(query, k)
         if not hits:
             return "No memory pages yet." if self.index.count() == 0 else "No matches."
         chunks: list[str] = []
@@ -218,7 +233,7 @@ class MemoryTools:
             duplicate_threshold: Cosine similarity at or above which two pages
                 are reported as near-duplicates (default 0.9).
         """
-        report = self.index.sync()
+        report = self.index.sync(verify=True)
         lines = [
             f"Index refreshed: {report.added} added, {report.updated} updated, "
             f"{report.removed} removed, {report.unchanged} unchanged."

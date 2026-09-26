@@ -14,6 +14,7 @@ frontmatter block carrying ``title``, ``uuid``, ``summary``, ``created`` and
 Only the standard library plus PyYAML (already a project dependency) is used.
 """
 
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -219,25 +220,40 @@ class MemoryDir:
             raise ValueError(f"Page path {path} escapes the memory directory {self.root}.")
         return path
 
+    def page_stats(self) -> dict[str, os.stat_result]:
+        """Map the name of every page in the directory to its ``lstat`` result.
+
+        One ``os.scandir`` pass: sub-directories, symlinks, non-``.md``
+        files, debris files and invalid names are skipped, and no page is
+        opened.  A page deleted during the scan is left out.
+        """
+        stats: dict[str, os.stat_result] = {}
+        try:
+            entries = os.scandir(self.root)
+        except (FileNotFoundError, NotADirectoryError):
+            return stats
+        with entries:
+            for entry in entries:
+                stem = entry.name[:-3]
+                if (
+                    not entry.name.endswith(".md")
+                    or is_debris(entry.name)
+                    or not is_valid_page_name(stem)
+                    or not entry.is_file(follow_symlinks=False)
+                ):
+                    continue
+                try:
+                    stats[stem] = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # deleted since the directory was listed
+        return stats
+
     def page_names(self) -> list[str]:
         """Return the sorted names of every page in the directory.
 
         Sub-directories, symlinks, non-``.md`` files and debris files are skipped.
         """
-        if not self.root.is_dir():
-            return []
-        names: list[str] = []
-        for path in self.root.iterdir():
-            if (
-                path.is_symlink()
-                or not path.is_file()
-                or path.suffix != ".md"
-                or is_debris(path.name)
-            ):
-                continue
-            if is_valid_page_name(path.stem):
-                names.append(path.stem)
-        return sorted(names)
+        return sorted(self.page_stats())
 
     def read(self, name: str) -> Page:
         """Load page *name* from disk.
