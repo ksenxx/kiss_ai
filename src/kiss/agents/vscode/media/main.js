@@ -900,6 +900,9 @@
       contentPreviewHolder: null,
       contentMonacoHolder: null,
       contentModeBtn: null,
+      // The File / Edit / Selection / View / Go menu bar of the
+      // tab's Monaco editor (see appendContentMenuBar).
+      contentMenuBar: null,
       // Set on a sub-agent tab opened by a run_parallel fan-out, naming
       // the conversation that started it.
       isSubagentTab: false,
@@ -1790,6 +1793,8 @@
   }
 
   function showContentTab(tab) {
+    // An open editor menu belongs to the surface being swapped out.
+    closeContentMenu();
     const area = ensureContentArea();
     setChatSurfaceVisible(false);
     area.style.display = '';
@@ -1820,6 +1825,7 @@
   }
 
   function hideContentArea() {
+    closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
     setChatSurfaceVisible(true);
   }
@@ -1866,6 +1872,12 @@
     tab.contentPreviewHolder = null;
     tab.contentMonacoHolder = null;
     tab.contentModeBtn = null;
+    if (tab.contentMenuBar) {
+      if (openContentMenu && openContentMenu.bar === tab.contentMenuBar) {
+        closeContentMenu();
+      }
+      tab.contentMenuBar = null;
+    }
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -2086,6 +2098,7 @@
         theme: 'vs-dark',
       });
       tab.contentEditor = editor;
+      appendContentMenuBar(tab, holder, editable);
       if (editable) {
         const model = editor.getModel();
         tab.contentSavedVersionId = model.getAlternativeVersionId();
@@ -2125,6 +2138,455 @@
     // rejection in the console, not vanish into the <pre> path.
     ensureMonaco().then(onMonaco, onCdnFailure);
   }
+
+  // The menus of a content tab's Monaco editor, laid out like VS Code's
+  // menu bar. Monaco by itself only has a right-click menu with a few
+  // entries, which a phone cannot even open. An item runs either a
+  // Monaco action / command id (editor.trigger) or its own `run`;
+  // `edits` marks items that change the text (disabled in a read-only
+  // viewer). `keys` = [Windows, macOS, Linux] shortcut labels as
+  // Monaco binds them (Linux defaults to the Windows label).
+  const CONTENT_MENUS = [
+    {
+      label: 'File',
+      items: [
+        {
+          label: 'Save',
+          keys: ['Ctrl+S', '\u2318S'],
+          edits: true,
+          enabled: tab => tab.contentDirty && !tab.contentSaving,
+          run: tab => saveContentTab(tab, false),
+        },
+        '-',
+        {label: 'Close Editor', run: tab => closeTab(tab.id)},
+      ],
+    },
+    {
+      label: 'Edit',
+      items: [
+        {label: 'Undo', id: 'undo', edits: true, keys: ['Ctrl+Z', '\u2318Z']},
+        {
+          label: 'Redo',
+          id: 'redo',
+          edits: true,
+          keys: ['Ctrl+Y', '\u21e7\u2318Z'],
+        },
+        '-',
+        {
+          label: 'Cut',
+          id: 'editor.action.clipboardCutAction',
+          edits: true,
+          keys: ['Ctrl+X', '\u2318X'],
+        },
+        {
+          label: 'Copy',
+          id: 'editor.action.clipboardCopyAction',
+          keys: ['Ctrl+C', '\u2318C'],
+        },
+        {
+          label: 'Paste',
+          id: 'editor.action.clipboardPasteAction',
+          edits: true,
+          keys: ['Ctrl+V', '\u2318V'],
+        },
+        '-',
+        {label: 'Find', id: 'actions.find', keys: ['Ctrl+F', '\u2318F']},
+        {
+          label: 'Replace',
+          id: 'editor.action.startFindReplaceAction',
+          edits: true,
+          keys: ['Ctrl+H', '\u2325\u2318F'],
+        },
+        '-',
+        {
+          label: 'Toggle Line Comment',
+          id: 'editor.action.commentLine',
+          edits: true,
+          keys: ['Ctrl+/', '\u2318/'],
+        },
+        {
+          label: 'Toggle Block Comment',
+          id: 'editor.action.blockComment',
+          edits: true,
+          keys: ['Shift+Alt+A', '\u21e7\u2325A', 'Ctrl+Shift+A'],
+        },
+        {
+          label: 'Format Document',
+          id: 'editor.action.formatDocument',
+          edits: true,
+          keys: ['Shift+Alt+F', '\u21e7\u2325F', 'Ctrl+Shift+I'],
+        },
+      ],
+    },
+    {
+      label: 'Selection',
+      items: [
+        {
+          label: 'Select All',
+          id: 'editor.action.selectAll',
+          keys: ['Ctrl+A', '\u2318A'],
+        },
+        {
+          label: 'Expand Selection',
+          id: 'editor.action.smartSelect.expand',
+          keys: ['Shift+Alt+Right', '\u2303\u21e7\u2318\u2192'],
+        },
+        {
+          label: 'Shrink Selection',
+          id: 'editor.action.smartSelect.shrink',
+          keys: ['Shift+Alt+Left', '\u2303\u21e7\u2318\u2190'],
+        },
+        '-',
+        {
+          label: 'Copy Line Up',
+          id: 'editor.action.copyLinesUpAction',
+          edits: true,
+          keys: ['Shift+Alt+Up', '\u21e7\u2325\u2191', 'Ctrl+Shift+Alt+Up'],
+        },
+        {
+          label: 'Copy Line Down',
+          id: 'editor.action.copyLinesDownAction',
+          edits: true,
+          keys: ['Shift+Alt+Down', '\u21e7\u2325\u2193', 'Ctrl+Shift+Alt+Down'],
+        },
+        {
+          label: 'Move Line Up',
+          id: 'editor.action.moveLinesUpAction',
+          edits: true,
+          keys: ['Alt+Up', '\u2325\u2191'],
+        },
+        {
+          label: 'Move Line Down',
+          id: 'editor.action.moveLinesDownAction',
+          edits: true,
+          keys: ['Alt+Down', '\u2325\u2193'],
+        },
+        '-',
+        {
+          label: 'Add Cursor Above',
+          id: 'editor.action.insertCursorAbove',
+          keys: ['Ctrl+Alt+Up', '\u2325\u2318\u2191', 'Shift+Alt+Up'],
+        },
+        {
+          label: 'Add Cursor Below',
+          id: 'editor.action.insertCursorBelow',
+          keys: ['Ctrl+Alt+Down', '\u2325\u2318\u2193', 'Shift+Alt+Down'],
+        },
+        {
+          label: 'Add Cursors to Line Ends',
+          id: 'editor.action.insertCursorAtEndOfEachLineSelected',
+          keys: ['Shift+Alt+I', '\u21e7\u2325I'],
+        },
+        {
+          label: 'Add Next Occurrence',
+          id: 'editor.action.addSelectionToNextFindMatch',
+          keys: ['Ctrl+D', '\u2318D'],
+        },
+        {
+          label: 'Select All Occurrences',
+          id: 'editor.action.selectHighlights',
+          keys: ['Ctrl+Shift+L', '\u21e7\u2318L'],
+        },
+      ],
+    },
+    {
+      label: 'View',
+      items: [
+        {
+          label: 'Command Palette\u2026',
+          id: 'editor.action.quickCommand',
+          keys: ['F1', 'F1'],
+        },
+        '-',
+        {
+          label: 'Word Wrap',
+          checked: editor =>
+            editor.getOption(window.monaco.editor.EditorOption.wordWrap) !==
+            'off',
+          run: (tab, editor) =>
+            editor.updateOptions({
+              wordWrap:
+                editor.getOption(window.monaco.editor.EditorOption.wordWrap) ===
+                'off'
+                  ? 'on'
+                  : 'off',
+            }),
+        },
+        {
+          label: 'Minimap',
+          checked: editor =>
+            editor.getOption(window.monaco.editor.EditorOption.minimap).enabled,
+          run: (tab, editor) =>
+            editor.updateOptions({
+              minimap: {
+                enabled: !editor.getOption(
+                  window.monaco.editor.EditorOption.minimap,
+                ).enabled,
+              },
+            }),
+        },
+        '-',
+        {
+          label: 'Fold',
+          id: 'editor.fold',
+          keys: ['Ctrl+Shift+[', '\u2325\u2318['],
+        },
+        {
+          label: 'Unfold',
+          id: 'editor.unfold',
+          keys: ['Ctrl+Shift+]', '\u2325\u2318]'],
+        },
+        {
+          label: 'Fold All',
+          id: 'editor.foldAll',
+          keys: ['Ctrl+K Ctrl+0', '\u2318K \u23180'],
+        },
+        {
+          label: 'Unfold All',
+          id: 'editor.unfoldAll',
+          keys: ['Ctrl+K Ctrl+J', '\u2318K \u2318J'],
+        },
+      ],
+    },
+    {
+      label: 'Go',
+      items: [
+        {
+          label: 'Go to Line/Column\u2026',
+          id: 'editor.action.gotoLine',
+          keys: ['Ctrl+G', '\u2303G'],
+        },
+        {
+          label: 'Go to Symbol\u2026',
+          id: 'editor.action.quickOutline',
+          keys: ['Ctrl+Shift+O', '\u21e7\u2318O'],
+        },
+        {
+          label: 'Go to Bracket',
+          id: 'editor.action.jumpToBracket',
+          keys: ['Ctrl+Shift+\\', '\u21e7\u2318\\'],
+        },
+        '-',
+        {
+          label: 'Next Match',
+          id: 'editor.action.nextMatchFindAction',
+          keys: ['F3', '\u2318G'],
+        },
+        {
+          label: 'Previous Match',
+          id: 'editor.action.previousMatchFindAction',
+          keys: ['Shift+F3', '\u21e7\u2318G'],
+        },
+      ],
+    },
+  ];
+
+  // The one open dropdown: {bar, btn, el}.
+  let openContentMenu = null;
+
+  function closeContentMenu() {
+    if (!openContentMenu) return;
+    openContentMenu.el.remove();
+    openContentMenu.btn.classList.remove('open');
+    openContentMenu.btn.setAttribute('aria-expanded', 'false');
+    openContentMenu = null;
+  }
+
+  // An editor action (getAction finds it) is offered when Monaco says
+  // it applies right now — e.g. Go to Symbol needs a language with a
+  // symbol provider. Other ids (undo, clipboard, select all) are core
+  // editor commands, always available.
+  function contentMenuItemEnabled(item, tab, editable) {
+    if (item.edits && !editable) return false;
+    if (item.enabled) return item.enabled(tab);
+    if (!item.id) return true;
+    const action = tab.contentEditor.getAction(item.id);
+    return action ? action.isSupported() : true;
+  }
+
+  function contentMenuKeyLabel(keys) {
+    if (!keys) return '';
+    if (IS_MAC) return keys[1];
+    return (IS_LINUX && keys[2]) || keys[0];
+  }
+
+  function runContentMenuItem(item, tab) {
+    const editor = tab.contentEditor;
+    if (!editor) return;
+    editor.focus();
+    if (item.run) item.run(tab, editor);
+    else editor.trigger('menu', item.id, null);
+  }
+
+  // Open *menu*'s dropdown under *btn*. `focusFirst` (the menu was
+  // opened from the keyboard) moves focus into the dropdown, whose
+  // Up / Down / Home / End keys move between the enabled items, Enter
+  // or Space runs one and Left / Right open the neighbouring menu.
+  function showContentMenu(tab, bar, btn, menu, editable, focusFirst) {
+    closeContentMenu();
+    const el = document.createElement('div');
+    el.className = 'content-menu-dropdown';
+    el.setAttribute('role', 'menu');
+    menu.items.forEach(item => {
+      if (item === '-') {
+        const sep = document.createElement('div');
+        sep.className = 'content-menu-sep';
+        sep.setAttribute('role', 'separator');
+        el.appendChild(sep);
+        return;
+      }
+      const enabled = contentMenuItemEnabled(item, tab, editable);
+      const row = document.createElement('div');
+      row.className = 'content-menu-item' + (enabled ? '' : ' disabled');
+      row.setAttribute('role', item.checked ? 'menuitemcheckbox' : 'menuitem');
+      row.setAttribute('aria-disabled', String(!enabled));
+      if (enabled) row.tabIndex = -1;
+      const check = document.createElement('span');
+      check.className = 'content-menu-check';
+      if (item.checked) {
+        const on = !!item.checked(tab.contentEditor);
+        row.setAttribute('aria-checked', String(on));
+        check.textContent = on ? '\u2713' : '';
+      }
+      const label = document.createElement('span');
+      label.className = 'content-menu-label';
+      label.textContent = item.label;
+      const key = document.createElement('span');
+      key.className = 'content-menu-key';
+      key.textContent = contentMenuKeyLabel(item.keys);
+      row.append(check, label, key);
+      // Keep the editor focused (and its selection painted) while the
+      // pointer is on the menu.
+      row.addEventListener('mousedown', e => e.preventDefault());
+      row.addEventListener('click', () => {
+        if (!enabled) return;
+        closeContentMenu();
+        runContentMenuItem(item, tab);
+      });
+      el.appendChild(row);
+    });
+    el.addEventListener('keydown', e => onContentMenuKey(e, bar, btn, el));
+    document.body.appendChild(el);
+    const r = btn.getBoundingClientRect();
+    el.style.left =
+      Math.max(0, Math.min(r.left, window.innerWidth - el.offsetWidth - 4)) +
+      'px';
+    el.style.top = r.bottom + 'px';
+    el.style.maxHeight = Math.max(80, window.innerHeight - r.bottom - 4) + 'px';
+    btn.classList.add('open');
+    btn.setAttribute('aria-expanded', 'true');
+    openContentMenu = {bar: bar, btn: btn, el: el};
+    const first = el.querySelector('.content-menu-item[tabindex]');
+    if (focusFirst && first) first.focus();
+  }
+
+  function onContentMenuKey(e, bar, btn, el) {
+    const rows = Array.from(
+      el.querySelectorAll('.content-menu-item[tabindex]'),
+    );
+    const at = rows.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = at < 0 && step < 0 ? rows.length - 1 : at + step;
+      rows[(next + rows.length) % rows.length].focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      rows[e.key === 'Home' ? 0 : rows.length - 1].focus();
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      if (at >= 0) rows[at].click();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const btns = Array.from(bar.children);
+      const step = e.key === 'ArrowRight' ? 1 : -1;
+      const i = btns.indexOf(btn) + step;
+      const sibling = btns[(i + btns.length) % btns.length];
+      sibling.focus();
+      sibling.click();
+    } else if (e.key === 'Tab') {
+      // Tab moves on from the menu's button, not from the detached
+      // dropdown's spot at the end of the document.
+      btn.focus();
+      closeContentMenu();
+      return;
+    } else {
+      return;
+    }
+    e.preventDefault();
+  }
+
+  // The menus sit in their own row directly above the editor, so the
+  // Save bar keeps its room on a phone-sized screen.
+  function appendContentMenuBar(tab, holder, editable) {
+    const bar = document.createElement('div');
+    bar.className = 'content-menubar';
+    bar.setAttribute('role', 'menubar');
+    CONTENT_MENUS.forEach(menu => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'content-menu-btn';
+      btn.textContent = menu.label;
+      btn.setAttribute('aria-haspopup', 'menu');
+      btn.setAttribute('aria-expanded', 'false');
+      btn.addEventListener('mousedown', e => e.preventDefault());
+      // A click with detail 0 came from the keyboard (Enter / Space).
+      btn.addEventListener('click', e => {
+        if (openContentMenu && openContentMenu.btn === btn) closeContentMenu();
+        else showContentMenu(tab, bar, btn, menu, editable, e.detail === 0);
+      });
+      btn.addEventListener('keydown', e => {
+        if (e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        showContentMenu(tab, bar, btn, menu, editable, true);
+      });
+      // Like a desktop menu bar: once one menu is open, pointing at a
+      // sibling opens that one instead. Mouse only: a tap sends a
+      // compatibility pointerenter right before its click, which would
+      // open the menu and let the click close it again.
+      btn.addEventListener('pointerenter', e => {
+        if (
+          e.pointerType === 'mouse' &&
+          openContentMenu &&
+          openContentMenu.bar === bar &&
+          openContentMenu.btn !== btn
+        ) {
+          showContentMenu(tab, bar, btn, menu, editable, false);
+        }
+      });
+      bar.appendChild(btn);
+    });
+    holder.parentNode.insertBefore(bar, holder);
+    // A previewable tab switched back to its preview while Monaco was
+    // still loading: the menus appear with the source.
+    if (tab.contentPreviewHolder && !tab.contentSourceMode) {
+      bar.style.display = 'none';
+    }
+    tab.contentMenuBar = bar;
+  }
+
+  document.addEventListener(
+    'mousedown',
+    e => {
+      if (!openContentMenu) return;
+      if (openContentMenu.el.contains(e.target)) return;
+      if (openContentMenu.bar.contains(e.target)) return;
+      closeContentMenu();
+    },
+    true,
+  );
+  // Escape closes the open menu (before Monaco sees the key, so a find
+  // widget under it stays open) and returns keyboard focus to its
+  // button when the focus was inside the dropdown.
+  document.addEventListener(
+    'keydown',
+    e => {
+      if (e.key !== 'Escape' || !openContentMenu) return;
+      e.stopPropagation();
+      const btn = openContentMenu.btn;
+      const refocus = openContentMenu.el.contains(document.activeElement);
+      closeContentMenu();
+      if (refocus) btn.focus();
+    },
+    true,
+  );
+  window.addEventListener('resize', closeContentMenu);
 
   // The bar above an editable content tab's editor: the file's path,
   // a status word (Unsaved changes / Saving / Saved / the error), and
@@ -2212,6 +2674,13 @@
     const preview = tab.contentPreviewHolder;
     const source = tab.contentMonacoHolder;
     if (!preview || !source) return;
+    // The editor's menus act on the source: hidden with it.
+    if (tab.contentMenuBar) {
+      tab.contentMenuBar.style.display = tab.contentSourceMode ? '' : 'none';
+      if (openContentMenu && openContentMenu.bar === tab.contentMenuBar) {
+        closeContentMenu();
+      }
+    }
     if (tab.contentSourceMode) {
       preview.style.display = 'none';
       source.style.display = '';
