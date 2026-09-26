@@ -174,9 +174,11 @@ The parameters without getters:
   already runs on that daemon.
 - **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
   CALLING task's identity (how `run_agent` nests a dispatched run under
-  its caller) and whether that caller sits in a reviewer sub-tree
-  (so the child's `run_parallel` spawns no further reviewers), which a
-  dispatched script must not be able to forge.
+  its caller) and whether that caller sits in a reviewer sub-tree (a
+  marker the child and its own sub-agents inherit; with tool profiles
+  enabled, a marked run whose task is not an implementation task and
+  that names no explicit profile gets the read-only `review` profile),
+  which a dispatched script must not be able to forge.
 - **`side_channel`** — marks the run as a side channel of its parent
   (a sub-agent whose result is shown outside its own tab: the `/ask`
   answerer delivers its answer into the PARENT's transcript, and the

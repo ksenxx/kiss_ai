@@ -1,6 +1,6 @@
 # Third-Party Agents
 
-This package contains KISS Sorcar's **channel agents**: 44 `*_sea.py` modules plus the
+This package contains KISS Sorcar's **channel agents**: 45 `*_sea.py` modules plus the
 `govee.py` smart-light helper. All but one wrap an external service — a messaging
 platform (Slack, Telegram, WhatsApp, ...), a service API (GitHub, Notion, PostgreSQL,
 ...), or a piece of agent infrastructure (A2A, OpenAI-compatible server) — and expose
@@ -108,8 +108,10 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Each service module defines a `tools()` function (`ask_sea.py`, which wraps no
-  service, defines only the agent-script getters `system_prompt()`,
-  `append_to_system_prompt()`, `is_parallel()`, and `use_web_tools()`). The daemon calls
+  service, returns its three trajectory tools `task_overview`, `task_transcript`, and
+  `task_step` from `tools()` and defines the agent-script getters `system_prompt()`,
+  `append_to_system_prompt()`, `tool_profile()`, `is_parallel()`, `use_web_tools()`,
+  and `use_memory()`; see "Task Q&A" below). The daemon calls
   `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
@@ -337,13 +339,25 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 
 `ask_sea.py` is the one module that wraps no external service. On an idle tab,
 `/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
-plus an instruction to read the events of the task you are asking about from
-`~/.kiss/sorcar.db`; the script swaps the system prompt for the compact SYSTEM_LITE
-prompt with a no-internet, answer-quickly suffix, and returns `False` from
-`is_parallel()` and `use_web_tools()`, so the answering session has no browser tools and
-no parallel sub-agents and is instructed to answer only from the local event log. Typed
-into a tab whose task is still running, the question is instead dispatched directly to
-the daemon through a background side channel that does not interrupt the running agent:
+plus an instruction naming the task you are asking about and telling the agent to call
+`task_overview` on it first. The script gives the answering session three read-only
+trajectory tools over a pre-digested copy of that task's persisted events
+(`kiss.agents.sorcar.task_digest`): `task_overview(task_id)` (status, model, spend, the
+sub-agents it dispatched, later user messages, progress summaries, and its last 30
+transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
+page of the digested transcript, optionally filtered), and `task_step(task_id, index,
+max_chars)` (one entry in full). It swaps the system prompt
+for the compact SYSTEM_LITE prompt (`papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md`
+in a source checkout, else the byte-identical bundled `_ask_system_lite.md`) with a
+no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
+`review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and
+`use_memory()`, so the answering session has no browser tools, no memory tools, and no
+parallel sub-agents. It answers from the trajectory tools, may run one short read-only
+Bash command for live state the transcript cannot show (result files, background jobs,
+`git diff` in the task's work dir), and is told never to read `~/.kiss/sorcar.db` by
+hand. Typed into a tab whose task is still running, the question
+is instead dispatched directly to the daemon through a background side channel that does
+not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
 while it works (the tab closes when it finishes and does not reappear on reload), and the
 reply lands in that task's transcript. No configuration or credentials are involved.
