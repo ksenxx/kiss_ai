@@ -297,7 +297,6 @@ _GMAIL_TOOL_ERROR_CASES = [
     ("create_draft", {"to": "test@example.com", "subject": "Test", "body": "Draft"}),
     ("trash_message", {"message_id": "fake-id"}),
     ("untrash_message", {"message_id": "fake-id"}),
-    ("delete_message", {"message_id": "fake-id"}),
     ("modify_labels", {"message_id": "fake-id", "add_label_ids": "STARRED"}),
     ("list_labels", {}),
     ("create_label", {"name": "TestLabel"}),

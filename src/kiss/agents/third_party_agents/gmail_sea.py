@@ -8,7 +8,7 @@ Provides authenticated access to a Gmail account via OAuth2.
 Handles authentication (reading token from disk or prompting the user
 via the browser), stores the token securely in
 ``~/.kiss/third_party_agents/gmail/token.json``, and exposes a focused set of
-Gmail API tools that give the agent full control over email.
+Gmail API tools for reading, sending, labeling and trashing email.
 
 Usage::
 
@@ -45,8 +45,10 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 from kiss.core.config import kiss_home
 
+# gmail.modify covers reading, composing, sending, labeling and trashing mail.
+# It cannot delete permanently; that would need https://mail.google.com/.
 _SCOPES = [
-    "https://mail.google.com/",
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 
@@ -683,22 +685,6 @@ class GmailChannelBackend(ToolMethodBackend):
         assert self._service is not None
         try:
             self._service.users().messages().untrash(userId="me", id=message_id).execute()
-            return json.dumps({"ok": True})
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
-    def delete_message(self, message_id: str) -> str:
-        """Permanently delete a message (cannot be undone).
-
-        Args:
-            message_id: ID of the message to permanently delete.
-
-        Returns:
-            JSON string with ok status.
-        """
-        assert self._service is not None
-        try:
-            self._service.users().messages().delete(userId="me", id=message_id).execute()
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
