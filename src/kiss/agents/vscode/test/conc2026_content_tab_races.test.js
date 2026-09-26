@@ -76,6 +76,10 @@ function makeWebview() {
   const created = [];
   win.monaco = {
     editor: {
+      // main.js defines a kiss-light/kiss-dark theme from the page palette
+      // before every create(); real Monaco always exposes both calls.
+      defineTheme: () => {},
+      setTheme: () => {},
       create: (holder, opts) => {
         let value = String(opts.value === undefined ? '' : opts.value);
         let version = 1;

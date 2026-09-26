@@ -35,6 +35,7 @@ import time
 
 import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
 
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
@@ -59,6 +60,10 @@ class _Loads:
     def __init__(self, asset: str, abort_first_n: int) -> None:
         self.asset = asset
         self.abort_first_n = abort_first_n
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget every request seen so far (used when a navigation is retried)."""
         self.documents = 0
         self.asset_requests = 0
         self.aborted = 0
@@ -90,7 +95,20 @@ def _open(browser: Browser, harness: ExplorerHarness, loads: _Loads) -> tuple:
     page.route(f"**/media/{loads.asset}*", loads.route)
     # The self-reload interrupts the first navigation's ``load`` event,
     # so wait for the commit only and let the assertions drive the rest.
-    page.goto(harness.base_url + "/", wait_until="commit")
+    # The real ``ERR_NETWORK_CHANGED`` (host interface churn on a busy
+    # CI box) can also hit the *document* request, before the injected
+    # script failure gets a chance; that is not what is under test, so
+    # retry the navigation and forget the requests the aborted attempt
+    # recorded, keeping the exact counts asserted below meaningful.
+    for attempt in range(3):
+        try:
+            page.goto(harness.base_url + "/", wait_until="commit")
+            break
+        except PlaywrightError as exc:
+            if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
+                raise
+            loads.reset()
+            time.sleep(1.0)
     return context, page
 
 
