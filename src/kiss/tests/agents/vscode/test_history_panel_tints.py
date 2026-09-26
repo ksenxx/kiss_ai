@@ -7,9 +7,10 @@
 
 Three tints must read at a glance in a real Chromium:
 
-* the collapsible chat panel's header in the task-history panel: the
-  theme accent (the hue of the task panel and the Bash header), strong
-  enough to stand out from the sidebar background;
+* the collapsible chat panel's header in the task-history panel: a
+  quiet NEUTRAL tint (no hue of its own), so a list of many chats does
+  not become a stack of accent bands and the accent stays reserved for
+  the active row below;
 * the task panel whose chat webview is on screen
   (``.running-item.history-active-task``): an accent tint and border;
 * a sub-agent's tab in the chat tab strip: purple tint, purple text,
@@ -28,6 +29,7 @@ from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.test_codex_task_panel_style import (
     _alpha_of,
+    _chroma_of,
     _hue_of,
 )
 from kiss.tests.agents.vscode.test_history_failed_red_cross import (
@@ -92,20 +94,20 @@ def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALP
     assert _alpha_of(color) >= min_alpha, f"{what} is barely visible: {color}"
 
 
-def test_chat_panel_header_is_a_light_accent(_browser) -> None:
-    """Every chat panel's header carries a light accent tint (15-20%, so
-    it stays visible without dominating the list), and darkens further
-    on hover."""
+def test_chat_panel_header_is_a_quiet_neutral(_browser) -> None:
+    """Every chat panel's header is a faint neutral tint of the
+    foreground (visible, but with no hue of its own), darkens on hover,
+    and never borrows the accent that marks the active task row (that
+    row's tint is checked by test_active_task_panel_is_a_visible_accent)."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
-        accent = _var_color(page, "--accent")
         idle = _style(page, ".history-chat-header", "backgroundColor")
-        assert _hue_of(idle) == pytest.approx(_hue_of(accent), abs=2), (idle, accent)
-        assert 0.15 <= _alpha_of(idle) <= 0.2, f"the header tint is not light: {idle}"
+        assert _chroma_of(idle) <= 8, f"the header tint has a hue: {idle}"
+        assert 0.04 <= _alpha_of(idle) <= 0.1, f"the header tint is off: {idle}"
         page.hover(".history-chat-header")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
-        _assert_tint(hovered, accent, "the hovered chat panel header")
+        assert _chroma_of(hovered) <= 8, f"the hovered header has a hue: {hovered}"
         assert _alpha_of(hovered) > _alpha_of(idle), (idle, hovered)
     finally:
         context.close()

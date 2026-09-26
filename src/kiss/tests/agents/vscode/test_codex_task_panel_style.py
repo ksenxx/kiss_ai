@@ -164,19 +164,21 @@ def test_main_css_webview_rows_are_neutral() -> None:
     )
 
 
-def test_main_css_chat_header_accent_single_line() -> None:
-    """The grouped view's chat-panel header sits on a light but visible
-    accent tint (the task panel's and Bash header's hue, 15-20% strong)
-    and shows its title on one ellipsized line."""
+def test_main_css_chat_header_neutral_single_line() -> None:
+    """The grouped view's chat-panel header sits on a faint neutral tint
+    of the foreground (4-10%: visible as a header, never an accent band
+    competing with the active row) and shows its title on one ellipsized
+    line."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     header = re.search(r"\n\.history-chat-header\s*\{([^}]*)\}", css)
     assert header, ".history-chat-header rule missing"
     tint = re.search(
-        r"background:\s*color-mix\(in srgb, var\(--accent\) (\d+)%, transparent\)",
+        r"background:\s*color-mix\(in srgb, var\(--fg\) (\d+)%, transparent\)",
         header.group(1),
     )
-    assert tint, f"the header background must be an --accent tint; got: {header.group(1)!r}"
-    assert 15 <= int(tint.group(1)) <= 20, f"the header tint is not a light tint: {tint.group(0)}"
+    assert tint, f"the header background must be a --fg tint; got: {header.group(1)!r}"
+    assert 4 <= int(tint.group(1)) <= 10, f"the header tint is not faint: {tint.group(0)}"
+    assert "var(--accent)" not in header.group(1), header.group(1)
     title = re.search(r"\n\.history-chat-title\s*\{([^}]*)\}", css)
     assert title, ".history-chat-title rule missing"
     assert "white-space: nowrap" in title.group(1)
@@ -200,6 +202,16 @@ def _hue_of(rgba: str) -> float:
     else:
         h = (r - g) / d + 4
     return h * 60
+
+
+def _chroma_of(color: str) -> float:
+    """The spread between the largest and smallest RGB channel (0..255)
+    of a computed ``rgb(...)`` / ``rgba(...)`` / ``color(srgb ...)``
+    color string; 0 for a pure grey."""
+    nums = [float(n) for n in re.findall(r"[\d.]+", color.replace("srgb", ""))[:3]]
+    if "srgb" in color:
+        nums = [n * 255 for n in nums]
+    return max(nums) - min(nums)
 
 
 def _alpha_of(rgba: str) -> float:
@@ -646,9 +658,10 @@ def test_live_task_panel_typography_and_history_rows(
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
     extension's look (the thinking panel's foreground over the accent
-    tint, 1px accent hairline) under the remote palette; history rows
-    paint the per-chat color on the left border over a neutral
-    background; all metadata flows as one wrapping line."""
+    tint, 1px accent hairline) under the remote palette; chat headers
+    are a faint neutral tint; history rows paint the per-chat color on
+    the left border over a neutral background; all metadata flows as
+    one wrapping line."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -751,11 +764,12 @@ def test_live_task_panel_typography_and_history_rows(
                 assert group_probe["whiteSpace"] == "nowrap", (
                     "the chat header shows one line of text: " + repr(group_probe)
                 )
-                assert _hue_of(group_probe["headerBg"]) == pytest.approx(
-                    _hue_of(group_probe["accent"]), abs=2
-                ), "the chat header background has the page's accent hue: " + repr(group_probe)
-                assert 0.15 <= _alpha_of(group_probe["headerBg"]) <= 0.2, (
-                    "the chat header tint must be light but visible: " + repr(group_probe)
+                assert _chroma_of(group_probe["headerBg"]) <= 8, (
+                    "the chat header background must be neutral, not the accent: "
+                    + repr(group_probe)
+                )
+                assert 0.04 <= _alpha_of(group_probe["headerBg"]) <= 0.1, (
+                    "the chat header tint must be faint but visible: " + repr(group_probe)
                 )
                 assert group_probe["headerTooltip"] is False, (
                     "the chat header carries no tooltip: " + repr(group_probe)

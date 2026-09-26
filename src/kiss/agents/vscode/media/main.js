@@ -14187,6 +14187,23 @@
         );
         break;
       case 'followup_suggestion': {
+        // The daemon sends the bar only after the whole task lifecycle
+        // (auto-commit, worktree merge) has finished, typically many
+        // seconds after task_done -- by which time the report tab that
+        // task_done opened has taken focus and the task's own tab is in
+        // the background. The bar belongs to that tab's transcript, so
+        // it is appended to the tab's parked fragment exactly like any
+        // other background-tab event; restoreTab brings it on screen.
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          const fuTab = getTab(ev.tabId);
+          if (fuTab) {
+            if (!fuTab.outputFragment)
+              fuTab.outputFragment = document.createDocumentFragment();
+            fuTab.outputFragment.appendChild(
+              mkFollowupBar(ev.text, copyFollowupToInput),
+            );
+          }
+        }
         // tableak-coverage:start
         if (!isForActiveTab(ev)) break;
         // tableak-coverage:end

@@ -117,7 +117,6 @@
      so remote-codex.css re-derives them on body.remote-chat. */
   --status-ok: var(--green);
   --status-fail: var(--red);
-  --status-done: var(--accent);
   --favorite: var(--yellow);
 
   /* Panel chrome.  Every transcript panel (tool call, thinking, Bash
@@ -2796,7 +2795,7 @@ body.sidebar-chat-mode #meta-info-content {
   color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
 
-.explorer-row.is-dir > .explorer-icon { color: var(--yellow); }
+.explorer-row.is-dir > .explorer-icon { color: var(--accent); }
 
 .explorer-name {
   overflow: hidden;
@@ -2821,7 +2820,7 @@ body.sidebar-chat-mode #meta-info-content {
 .explorer-root-mark {
   display: inline-flex;
   align-items: center;
-  color: var(--green);
+  color: var(--accent);
 }
 
 .explorer-root-btn {
@@ -3038,13 +3037,13 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .scm-ref.is-head {
-  border-color: var(--green);
-  color: var(--green);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .scm-ref.is-tag {
-  border-color: var(--yellow);
-  color: var(--yellow);
+  border-color: color-mix(in srgb, var(--fg) 45%, transparent);
+  color: color-mix(in srgb, var(--fg) 75%, transparent);
 }
 
 /* Another worktree checked out at this commit (its folder name). */
@@ -3250,7 +3249,7 @@ body.sidebar-chat-mode #meta-info-content {
   white-space: nowrap;
 }
 
-.folder-picker-item svg { flex: 0 0 16px; color: var(--yellow); }
+.folder-picker-item svg { flex: 0 0 16px; color: var(--accent); }
 
 .folder-picker-item:hover {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
@@ -3480,7 +3479,7 @@ body.sidebar-chat-mode #meta-info-content {
 
 .hf-chip-errored:has(> input:checked) .hf-chip-dot { color: var(--status-fail); }
 
-.hf-chip-succeeded:has(> input:checked) .hf-chip-dot { color: var(--status-done); }
+.hf-chip-succeeded:has(> input:checked) .hf-chip-dot { color: var(--status-ok); }
 
 .hf-chip-icon {
   flex: 0 0 auto; width: 10px; height: 10px; opacity: 0.85;
@@ -3682,15 +3681,16 @@ body.sidebar-chat-mode #meta-info-content {
 .history-chat-group + .history-chat-group { border-top: none; }
 
 /* The chat panel's clickable header: a chevron and the chat's first
-   task on ONE line (ellipsized), on an accent tint stronger than the
-   transcript's --accent-tint (at 8% it vanished behind plain --fg
-   text).  Square like its panel.  No tooltip: the line is all there is. */
+   task on ONE line (ellipsized), on a quiet neutral tint (a list of
+   many chats must not become a stack of accent bands; the accent is
+   reserved for the active row).  Square like its panel.  No tooltip:
+   the line is all there is. */
 .history-chat-header {
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
   width: 100%;
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
   border: none;
   border-radius: 0;
   padding: var(--space-1) var(--space-1-5);
@@ -3704,7 +3704,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 .history-chat-header:hover {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  background: color-mix(in srgb, var(--fg) 11%, transparent);
 }
 
 .history-chat-chevron {

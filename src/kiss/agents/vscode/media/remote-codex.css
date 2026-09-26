@@ -85,7 +85,6 @@ body.remote-chat {
      Every main.css rule that uses them re-themes with no override. */
   --status-ok: var(--green);
   --status-fail: var(--red);
-  --status-done: var(--accent);
   --favorite: var(--yellow);
   --panel-tint: color-mix(in srgb, var(--fg) 4%, transparent);
   --panel-tint-solid: color-mix(in srgb, var(--fg) 4%, var(--bg));
@@ -529,10 +528,6 @@ body.remote-chat .explorer-row:hover,
 body.remote-chat .scm-row:hover,
 body.remote-chat .scm-commit:hover {
   background: var(--hover);
-}
-
-body.remote-chat .explorer-row.is-dir > .explorer-icon {
-  color: var(--dim);
 }
 
 body.remote-chat .scm-commit.expanded {
