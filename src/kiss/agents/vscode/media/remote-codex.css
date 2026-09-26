@@ -678,7 +678,9 @@ body.remote-chat .meta-section-resizer::after {
 body.remote-chat .meta-section-resizer:not(.static):hover::after,
 body.remote-chat .meta-section-resizer:not(.static):active::after,
 body.remote-chat .meta-section-resizer:not(.static):focus-visible::after {
-  border-top-color: var(--accent);
+  /* VS Code paints a hovered sash with focusBorder (sash.hoverBorder
+     defaults to it), which is what --ring-focus aliases. */
+  border-top-color: var(--ring-focus);
 }
 
 body.remote-chat #meta-list {
