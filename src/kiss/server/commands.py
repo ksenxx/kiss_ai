@@ -1354,10 +1354,7 @@ class _CommandsMixin:
                 tab_id,
             )
             return
-        append_to_prompt = (
-            f"Read the events of the task {owner_task_id} from "
-            f"~/.kiss/sorcar.db and answer the user question above."
-        )
+        append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
 
