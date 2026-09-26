@@ -327,7 +327,7 @@
   - `cmd`: The ``shareChatTasks`` command (``chatId``, optional ``tabId``, optional ``taskId`` — a sub-agent tab's share narrows the reply to that one task and its sub-agents).
   - `ctx`: The transport context of the current call.
 
-- **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener).  The audio is translated with the same gpt-audio call the local listener uses and answered with the ``voiceSpeech`` message ``voice.js`` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Hey Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener).  The audio is translated with the same gpt-audio call the local listener uses and answered with the ``voiceSpeech`` message ``voice.js`` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``voiceTranscribe`` command carrying the audio.
   - `ctx`: The transport context of the current call.
 
