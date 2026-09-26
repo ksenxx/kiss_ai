@@ -384,6 +384,12 @@ constraint-dependencies = [
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.31",
     "urllib3>=2.7.0",
+    # composio 0.24.0 (the newest stable) pins composio-client==2.0.0rc8, a
+    # pre-release.  uv 0.11.x accepts a transitive pre-release only when a
+    # first-party requirement or constraint names one, so without this line
+    # ``uv lock --upgrade`` has no solution there (uv 0.12.19, the version
+    # the installers pin, would fall back to the pre-release on its own).
+    "composio-client>=2.0.0rc8",
 ]
 
 [tool.uv.workspace]
