@@ -59,7 +59,6 @@ from kiss.agents.sorcar.task_classifier import (
     _structured_output_config,
     cached_classification,
     classification_enabled,
-    classification_will_call_model,
     classify_task,
     clear_classification_cache,
     remember_classification,
@@ -404,43 +403,6 @@ def test_cache_persists_across_process_state_reset(
     )
     assert again.steps == 0
     assert len(endpoint.requests) == 1
-
-
-def test_classification_will_call_model_mirrors_the_gates(
-    env: IsolatedKissHome, endpoint: _CountingClassifierEndpoint,
-) -> None:
-    """The overlap hint is true exactly when a round trip is imminent."""
-    config = endpoint.model_config
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is True
-    # Disabled by override, env kill switch, or config.
-    assert classification_will_call_model(
-        "fresh", STANDIN_MODEL, config, enabled_override=False,
-    ) is False
-    os.environ[_DISABLE_ENV] = "1"
-    try:
-        assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    finally:
-        os.environ[_DISABLE_ENV] = "0"
-    env.write_config(classify_tasks=False)
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    assert classification_will_call_model(
-        "fresh", STANDIN_MODEL, config, enabled_override=True,
-    ) is True
-    env.write_config(classify_tasks=True)
-    # Run-to-completion CLI models are never classified.
-    assert classification_will_call_model("fresh", "cc/opus", config) is False
-    assert classification_will_call_model("fresh", "codex/default", config) is False
-    # A memoised verdict needs no call; truncation is applied before
-    # the lookup, so an over-long prompt keys the same as its prefix.
-    classify_task(task="fresh", model_name=STANDIN_MODEL, model_config=config)
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    huge = "x" * 30_000
-    classify_task(task=huge, model_name=STANDIN_MODEL, model_config=config)
-    assert classification_will_call_model(huge, STANDIN_MODEL, config) is False
-    assert classification_will_call_model(
-        huge[:20_000] + "y" * 10_000, STANDIN_MODEL, config,
-    ) is False
-    assert len(endpoint.requests) == 2
 
 
 def test_unparseable_verdict_is_not_cached_and_falls_back(

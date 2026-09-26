@@ -47,7 +47,6 @@ from kiss.agents.sorcar.sea_commands import (
     sea_getter_is_false as _sea_getter_is_false,
 )
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _notify_subagent_done
-from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
@@ -1582,25 +1581,28 @@ class _TaskRunnerMixin:
         _classify_enabled = (
             _raw_classify if isinstance(_raw_classify, bool) else None
         )
-        # When a classifier round trip (~2 s) is about to happen, start
-        # preparing a spare worktree NOW on a background thread so the
-        # ~1.5 s full checkout of ``git worktree add`` overlaps that
-        # wait instead of following it.  ``_acquire_task_worktree``
-        # consumes the spare (a near-instant reset) when this run does
-        # use a worktree; otherwise it stays pooled for the next one.
-        # Maintenance passes are skipped (``exclude_branches_fn=None``):
-        # the orphan reclaim can squash-merge into the main branch,
-        # which must not happen underneath a run that is about to work
-        # in the main tree.  The post-acquisition refill keeps its
-        # maintenance pass.  Gated three ways: the client asked for
-        # worktrees (a user who turned them off gets no spare checkout
-        # on disk they did not ask for — and no worktree at all, since
-        # a verdict can only demote, never promote); a classifier call is really
-        # imminent (without one there is nothing to overlap, and the
-        # run would only wait on a checkout it just started); and the
-        # run is not itself inside a kiss worktree (a nested sub-agent
-        # run keeps today's acquire-then-refill path so no extra spare
-        # is nested under a worktree that is about to be removed).
+        # Start preparing a spare worktree NOW on a background thread
+        # (a no-op when one is pooled or already being created), before
+        # classification, whether the verdict will come from an LLM
+        # round trip, from the verdict cache, or not at all.  A
+        # classifier call overlaps the full checkout of
+        # ``git worktree add``.  Without one, the refill thread already
+        # holds ``repo_lock`` when ``_acquire_task_worktree`` asks for
+        # it, so the run waits for this checkout and consumes its
+        # spare instead of running a second checkout plus the orphan
+        # maintenance pass inline.  A run the verdict keeps out of a worktree leaves
+        # the spare pooled for the next one.  Maintenance passes are
+        # skipped (``exclude_branches_fn=None``): the orphan reclaim
+        # can squash-merge into the main branch, which must not happen
+        # underneath a run that is about to work in the main tree.  The
+        # post-acquisition refill keeps its maintenance pass.  Gated
+        # two ways: the client asked for worktrees (a user who turned
+        # them off gets no spare checkout on disk they did not ask for
+        # — and no worktree at all, since a verdict can only demote,
+        # never promote); and the run is not itself inside a kiss
+        # worktree (a nested sub-agent run keeps the acquire-then-
+        # refill path so no extra spare is nested under a worktree
+        # that is about to be removed).
         _classify_task_text = prompt + append_to_prompt
         _classify_model_config = (
             _raw_mc_early
@@ -1612,12 +1614,6 @@ class _TaskRunnerMixin:
             use_worktree
             and repo is not None
             and _WORKTREE_SUBDIR not in repo.parts
-            and classification_will_call_model(
-                _classify_task_text,
-                agent._resolve_model_name(model),
-                _classify_model_config,
-                _classify_enabled,
-            )
         ):
             worktree_pool.prewarm_async(repo, None)
         _classify_verdict = agent.classify_task_for_run(

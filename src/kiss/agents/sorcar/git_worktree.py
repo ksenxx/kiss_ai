@@ -2524,6 +2524,38 @@ class GitWorktreeOps:
         )
 
     @staticmethod
+    def merge_has_content_conflict(
+        repo: Path, branch: str, baseline: str | None,
+    ) -> bool:
+        """Whether squash-merging *branch* into HEAD conflicts on content.
+
+        :meth:`squash_merge_branch` and :meth:`squash_merge_from_baseline`
+        report every failed git command as :attr:`MergeResult.CONFLICT`,
+        including operational failures such as a held ``index.lock``.
+        This re-checks with ``git merge-tree --write-tree``, which
+        merges in memory without touching the index or the working
+        tree, using the same merge base (*baseline* when given, as the
+        cherry-pick of ``baseline..branch`` does) and the same
+        ``-X theirs`` choice as :meth:`squash_merge_from_baseline`.
+
+        Args:
+            repo: Git repo root path (HEAD is the merge target).
+            branch: Branch that would be merged.
+            baseline: Baseline commit of the branch, or ``None`` to use
+                the regular merge base.
+
+        Returns:
+            True only when git exits 1 (merge completed with
+            conflicts); False when the merge is clean or git failed.
+        """
+        args = ["merge-tree", "--write-tree"]
+        if baseline:
+            args.append(f"--merge-base={baseline}")
+            if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
+                args.extend(["-X", "theirs"])
+        return _git(*args, "HEAD", branch, cwd=repo).returncode == 1
+
+    @staticmethod
     def _abort_cherry_pick(repo: Path, before: str) -> None:
         """Undo a failed cherry-pick, verifying the abort actually worked.
 
@@ -2996,6 +3028,10 @@ class GitWorktreeOps:
           pre-commit hook).
         * The squash-merge returns anything other than
           :attr:`MergeResult.SUCCESS` (conflict, cherry-pick failure).
+          A content conflict (confirmed by
+          :meth:`merge_has_content_conflict`) also writes the
+          preserve-for-review marker, so later passes skip the
+          worktree instead of re-running the same failing merge.
 
         Args:
             repo: Git repo root path.
@@ -3197,6 +3233,24 @@ class GitWorktreeOps:
                         "merge into '%s' returned %s; preserving",
                         wt_dir, original_branch, result.value,
                     )
+                    if (
+                        result == MergeResult.CONFLICT
+                        and GitWorktreeOps.merge_has_content_conflict(
+                            repo, branch, baseline,
+                        )
+                    ):
+                        # A content conflict needs a human; retrying
+                        # it on every later pass (each task start and
+                        # pool refill) only repeats a multi-second
+                        # failing merge.  Park the worktree for manual
+                        # review so the preserve check above skips it
+                        # from now on.  CONFLICT also covers failed git
+                        # commands (a held index.lock), so the content
+                        # conflict is re-checked; those failures and
+                        # MERGE_FAILED (the merge applied but its
+                        # commit was rejected) may be transient and
+                        # are retried.
+                        GitWorktreeOps.save_preserve_marker(repo, branch)
                     continue
                 # The dead task's git-ignored output (auto-commit
                 # cannot capture it) would be destroyed with the

@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
+from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
     _delete_frequent_task,
@@ -533,6 +535,35 @@ class VSCodeServer(
         """
         self.tab_registry = TabRegistry(path)
         self._tab_chat_views = dict(self.tab_registry.bindings())
+
+    def prewarm_worktree_pool(self) -> threading.Thread | None:
+        """Start creating a spare worktree for the daemon's work dir.
+
+        Called once at daemon start.  The spare pool is in-process, so
+        a freshly started daemon otherwise holds no spare and its first
+        worktree task pays for a full ``git worktree add`` checkout
+        (seconds on a large repository) while the user waits.  The
+        refill skips the orphan-maintenance passes, like the
+        submit-time prewarm in ``_run_task_inner``: a reclaim could
+        squash-merge into the main branch underneath a direct task
+        started meanwhile; the first post-acquisition refill runs them.
+
+        Nothing is created when the pool is disabled, the persisted
+        "Use worktrees" setting is off, the work dir is not inside a
+        git repository, or it is itself a kiss worktree.
+
+        Returns:
+            The background refill thread, or ``None`` when nothing was
+            scheduled.
+        """
+        from kiss.core.vscode_config import load_config
+
+        if not worktree_pool.pool_enabled() or not load_config().get("is_worktree"):
+            return None
+        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        if repo is None or _WORKTREE_SUBDIR in repo.parts:
+            return None
+        return worktree_pool.prewarm_async(repo, None)
 
     def _local_tab_shown(
         self, tab_id: str, interested: bool, webview_attached: bool,

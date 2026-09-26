@@ -10333,6 +10333,7 @@ def main() -> None:  # pragma: no cover — CLI entry point
         tunnel_url=tunnel_url,
         work_dir=args.workdir,
     )
+    server._vscode_server.prewarm_worktree_pool()
     server.start()
 
 
