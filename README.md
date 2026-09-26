@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 688 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 689 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -289,7 +289,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **688 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`, plus the upstream provider's charge under BYOK) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **689 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`, plus the upstream provider's charge under BYOK) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -299,14 +299,14 @@ KISS Sorcar ships a catalog of **688 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 401 |
+| OpenRouter | 403 |
 | Claude Code CLI (`cc/*`) | 15 |
-| Codex CLI (`codex/*`) | 10 |
+| Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **670** generation-capable models
-- **504** function-calling-capable models
+- **671** generation-capable models
+- **505** function-calling-capable models
 - **7** embedding models
 - **2** decision models
 
@@ -611,7 +611,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (401)</strong></summary>
+<summary><strong>OpenRouter (403)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -625,7 +625,6 @@ Full model list:
 - `openrouter/amazon/nova-premier-v1`
 - `openrouter/amazon/nova-pro-v1`
 - `openrouter/anthracite-org/magnum-v4-72b`
-- `openrouter/anthropic/claude-3-haiku`
 - `openrouter/anthropic/claude-3.7-sonnet:thinking`
 - `openrouter/anthropic/claude-fable-5`
 - `openrouter/anthropic/claude-fable-5.1`
@@ -652,6 +651,7 @@ Full model list:
 - `openrouter/bytedance/ui-tars-1.5-7b`
 - `openrouter/cognitivecomputations/dolphin-mistral-24b-venice-edition`
 - `openrouter/cohere/command-a`
+- `openrouter/cohere/command-a-plus`
 - `openrouter/cohere/command-r-08-2024`
 - `openrouter/cohere/command-r-plus-08-2024`
 - `openrouter/cohere/command-r7b-12-2024`
@@ -727,6 +727,7 @@ Full model list:
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
+- `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
 - `openrouter/mistralai/ministral-3b-2512`
 - `openrouter/mistralai/ministral-8b-2512`
@@ -850,6 +851,7 @@ Full model list:
 - `openrouter/openai/o4-mini`
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
+- `openrouter/perceptron/perceptron-mk1.5`
 - `openrouter/perplexity/sonar`
 - `openrouter/perplexity/sonar-deep-research`
 - `openrouter/perplexity/sonar-pro`
@@ -1039,11 +1041,10 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Codex CLI (codex/*) (10)</strong></summary>
+<summary><strong>Codex CLI (codex/*) (9)</strong></summary>
 
 - `codex/codex-auto-review`
 - `codex/default`
-- `codex/gpt-5.4`
 - `codex/gpt-5.5`
 - `codex/gpt-5.6-luna`
 - `codex/gpt-5.6-sol`
