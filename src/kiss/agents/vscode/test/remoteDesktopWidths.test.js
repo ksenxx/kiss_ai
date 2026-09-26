@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -104,7 +105,7 @@ function drag(win, resizer, x0, x1) {
   pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
 }
 
-const CSS = fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8');
+const CSS = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8'));
 
 function cssRule(selector) {
   const source = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

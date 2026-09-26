@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -54,7 +55,7 @@ function makeWebview() {
     };
   };
 
-  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   const styleEl = win.document.createElement('style');
   styleEl.textContent = cssText;
   win.document.head.appendChild(styleEl);

@@ -18,6 +18,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -73,14 +74,14 @@ function makeWebview(opts) {
   }
 
   const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  style.textContent = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   win.document.head.appendChild(style);
   if (remote) {
     const remoteStyle = win.document.createElement('style');
-    remoteStyle.textContent = fs.readFileSync(
+    remoteStyle.textContent = inlineDesignTokens(fs.readFileSync(
       path.join(MEDIA, 'remote-codex.css'),
       'utf8',
-    );
+    ));
     win.document.head.appendChild(remoteStyle);
   }
 

@@ -3633,7 +3633,7 @@ html, body { height: auto; overflow: auto; }
 #tab-bar {
   position: sticky;
   top: 0;
-  z-index: 900;
+  z-index: var(--z-docked);
   padding-right: 56px;
 }
 /* A hidden section (a sub-agent transcript whose tab is not open, or
@@ -3645,13 +3645,13 @@ html, body { height: auto; overflow: auto; }
   position: fixed;
   top: 10px;
   right: 14px;
-  z-index: 1000;
+  z-index: var(--z-drawer);
   display: flex;
   align-items: center;
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   border: 1px solid var(--border);
   background: var(--bg2);
   color: var(--fg);
@@ -3660,7 +3660,7 @@ html, body { height: auto; overflow: auto; }
 #share-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
 /* One .share-task section per task of the chat, oldest first. */
 .share-task + .share-task {
-  margin-top: 14px;
+  margin-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
 /* Each task's panel text carries a per-task unique id (its drawer's

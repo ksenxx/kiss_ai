@@ -24,8 +24,35 @@ add your name here
             --accent: #7ab8e0;
             --accent-2: #b87ae0;
             --accent-3: #7ae0b8;
+            --accent-4: #e0b87a;
             --code-bg: #0a0f16;
             --code-border: #233246;
+            --code-fg: #9ad8f0;
+            --code-block-fg: #d7e6f5;
+            --quote-fg: #bfe7db;
+            --surface-tint: rgb(255 255 255 / 2%);
+
+            /* Design tokens: the same names and steps as the KISS Sorcar
+               chat UI (media/main.css), so both tools share one scale. */
+            --space-0-5: 2px;
+            --space-1: 4px;
+            --space-1-5: 6px;
+            --space-2: 8px;
+            --space-2-5: 10px;
+            --space-3: 12px;
+            --space-4: 16px;
+            --space-6: 24px;
+            --space-8: 32px;
+            --radius-md: 6px;
+            --radius-lg: 8px;
+            --radius-xl: 10px;
+            --radius-pill: 999px;
+
+            /* Role colours: user, model, tool, system. */
+            --role-user: var(--accent);
+            --role-model: var(--accent-2);
+            --role-tool: var(--accent-3);
+            --role-system: var(--accent-4);
         }
 
         * { box-sizing: border-box; }
@@ -51,7 +78,7 @@ add your name here
         .trajectories-sidebar { width: 360px; }
 
         .sidebar-header {
-            padding: 16px 18px;
+            padding: var(--space-4);
             background: var(--panel-2);
             border-bottom: 1px solid var(--border);
         }
@@ -62,32 +89,32 @@ add your name here
             text-transform: uppercase;
             color: var(--muted);
         }
-        .sidebar-header p { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+        .sidebar-header p { margin: var(--space-1-5) 0 0; font-size: 12px; color: var(--muted); }
 
-        .sidebar-list { padding: 10px; overflow: auto; flex: 1; }
+        .sidebar-list { padding: var(--space-2-5); overflow: auto; flex: 1; }
 
         .list-item {
-            background: rgba(255,255,255,0.02);
+            background: var(--surface-tint);
             border: 1px solid var(--border);
-            border-radius: 10px;
-            padding: 10px 12px;
-            margin-bottom: 10px;
+            border-radius: var(--radius-xl);
+            padding: var(--space-2-5) var(--space-3);
+            margin-bottom: var(--space-2-5);
             cursor: pointer;
             overflow: hidden;
         }
-        .list-item:hover { border-color: rgba(122,184,224,0.55); }
+        .list-item:hover { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
         .list-item.active {
-            border-color: rgba(122,184,224,0.85);
-            box-shadow: 0 0 0 1px rgba(122,184,224,0.2) inset;
+            border-color: color-mix(in srgb, var(--accent) 85%, transparent);
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent) inset;
         }
         .list-item-title { font-weight: 600; font-size: 13px; word-break: break-word; }
-        .list-item-subtitle { font-size: 11px; color: var(--muted); margin-top: 4px; }
-        .list-item-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 4px; }
+        .list-item-subtitle { font-size: 11px; color: var(--muted); margin-top: var(--space-1); }
+        .list-item-meta { display: flex; gap: var(--space-2-5); flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: var(--space-1); }
 
         .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
         .content-header {
-            padding: 16px 18px;
+            padding: var(--space-4);
             background: var(--panel-2);
             border-bottom: 1px solid var(--border);
         }
@@ -95,85 +122,90 @@ add your name here
         .content-header-command {
             color: var(--accent-3);
             font-size: 12px;
-            margin-top: 6px;
+            margin-top: var(--space-1-5);
             word-break: break-all;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         }
-        .content-header-meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+        .content-header-meta { display: flex; gap: var(--space-3); flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: var(--space-1-5); }
 
-        .messages-container { flex: 1; overflow: auto; padding: 18px; }
+        .messages-container { flex: 1; overflow: auto; padding: var(--space-4); }
 
-        .message { margin-bottom: 14px; }
+        .message { margin-bottom: var(--space-3); }
         .message-role {
+            --role: var(--muted);
             display: inline-block;
-            padding: 4px 10px;
-            margin-bottom: 6px;
-            border-radius: 999px;
+            padding: var(--space-1) var(--space-2-5);
+            margin-bottom: var(--space-1-5);
+            border-radius: var(--radius-pill);
             font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.08em;
             border: 1px solid var(--border);
-            color: var(--muted);
-            background: rgba(255,255,255,0.02);
+            color: var(--role);
+            background: var(--surface-tint);
         }
-        .message-role.user { color: var(--accent); border-color: rgba(122,184,224,0.35); }
-        .message-role.model { color: var(--accent-2); border-color: rgba(184,122,224,0.35); }
-        .message-role.tool { color: var(--accent-3); border-color: rgba(122,224,184,0.35); }
-        .message-role.system { color: #e0b87a; border-color: rgba(224,184,122,0.35); }
+        .message-role.user,
+        .message-role.model,
+        .message-role.tool,
+        .message-role.system { border-color: color-mix(in srgb, var(--role) 35%, transparent); }
+        .message-role.user { --role: var(--role-user); }
+        .message-role.model { --role: var(--role-model); }
+        .message-role.tool { --role: var(--role-tool); }
+        .message-role.system { --role: var(--role-system); }
 
         .message-content {
-            background: rgba(255,255,255,0.02);
+            background: var(--surface-tint);
             border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 14px;
+            border-radius: var(--radius-xl);
+            padding: var(--space-3);
             line-height: 1.55;
         }
 
-        .message-content h1, .message-content h2, .message-content h3 { margin: 16px 0 8px; }
+        .message-content h1, .message-content h2, .message-content h3 { margin: var(--space-4) 0 var(--space-2); }
         .message-content h1 { font-size: 20px; color: var(--accent); }
         .message-content h2 { font-size: 17px; color: var(--accent-2); }
-        .message-content h3 { font-size: 15px; color: #e0b87a; }
-        .message-content p { margin: 0 0 10px; }
-        .message-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(122,184,224,0.5); }
-        .message-content a:hover { border-bottom-color: rgba(122,184,224,0.9); }
+        .message-content h3 { font-size: 15px; color: var(--accent-4); }
+        .message-content p { margin: 0 0 var(--space-2-5); }
+        .message-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); }
+        .message-content a:hover { border-bottom-color: color-mix(in srgb, var(--accent) 90%, transparent); }
         .message-content code {
             background: var(--code-bg);
             border: 1px solid var(--code-border);
-            padding: 1px 6px;
-            border-radius: 6px;
-            color: #9ad8f0;
+            padding: 1px var(--space-1-5);
+            border-radius: var(--radius-md);
+            color: var(--code-fg);
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             font-size: 0.92em;
         }
         .message-content pre {
             background: var(--code-bg);
             border: 1px solid var(--code-border);
-            padding: 12px;
-            border-radius: 10px;
+            padding: var(--space-3);
+            border-radius: var(--radius-xl);
             overflow: auto;
-            margin: 10px 0;
+            margin: var(--space-2-5) 0;
         }
         .message-content pre code {
             border: none;
             padding: 0;
             background: transparent;
             font-size: 13px;
-            color: #d7e6f5;
+            color: var(--code-block-fg);
         }
         .message-content blockquote {
-            margin: 10px 0;
-            padding: 10px 12px;
-            border-left: 3px solid rgba(122,224,184,0.8);
-            background: rgba(122,224,184,0.05);
-            border-radius: 8px;
-            color: #bfe7db;
+            margin: var(--space-2-5) 0;
+            padding: var(--space-2-5) var(--space-3);
+            border-left: 3px solid color-mix(in srgb, var(--accent-3) 80%, transparent);
+            background: color-mix(in srgb, var(--accent-3) 5%, transparent);
+            border-radius: var(--radius-lg);
+            color: var(--quote-fg);
         }
-        .message-content ul, .message-content ol { margin: 0 0 10px 22px; }
-        .message-content table { border-collapse: collapse; width: 100%; margin: 10px 0; }
-        .message-content th, .message-content td { border: 1px solid var(--border); padding: 8px; }
-        .message-content th { background: rgba(122,184,224,0.08); color: var(--accent); text-align: left; }
+        .message-content ul, .message-content ol { margin: 0 0 var(--space-2-5) var(--space-6); }
+        .message-content table { border-collapse: collapse; width: 100%; margin: var(--space-2-5) 0; }
+        .message-content th, .message-content td { border: 1px solid var(--border); padding: var(--space-2); }
+        .message-content th { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); text-align: left; }
 
-        .empty-state, .loading { padding: 30px 18px; color: var(--muted); text-align: center; }
+        .empty-state, .loading { padding: var(--space-8) var(--space-4); color: var(--muted); text-align: center; }
     </style>
 </head>
 <body>

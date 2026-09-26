@@ -49,6 +49,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.agents.vscode.design_tokens import inline_design_tokens
 from kiss.tests.server.test_codex_mobile_layout import _build_html
 
 MEDIA_DIR = (
@@ -288,7 +289,7 @@ def test_codex_composer_card() -> None:
     assert re.search(
         r"--ring:\s*var\(--vscode-input-border,\s*#3c3c3c\)", dark
     ), "--ring must be input.border"
-    css = _read_codex_css()
+    css = inline_design_tokens(_read_codex_css())
     m = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
     )
@@ -315,7 +316,7 @@ def test_codex_circular_composer_controls() -> None:
     assert re.search(
         r"--send-fg:\s*var\(--vscode-button-foreground,\s*#fff\)", dark
     ), "--send-fg must be button.foreground"
-    css = _read_codex_css()
+    css = inline_design_tokens(_read_codex_css())
     m = re.search(r"body\.remote-chat #send-btn[^{]*\{([^}]*)\}", css)
     assert m, "#send-btn rule missing"
     send = m.group(1)
@@ -330,7 +331,7 @@ def test_codex_circular_composer_controls() -> None:
 
 def test_codex_pill_tabs_and_status() -> None:
     """Tab chips and the status row become rounded pills."""
-    css = _read_codex_css()
+    css = inline_design_tokens(_read_codex_css())
     assert re.search(
         r"body\.remote-chat #tab-bar .chat-tab[^{]*\{[^}]*"
         r"border-radius:\s*(999px|9999px)",

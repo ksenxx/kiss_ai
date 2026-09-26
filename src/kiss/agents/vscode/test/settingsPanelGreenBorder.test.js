@@ -40,7 +40,9 @@ function testVsCodeSurfacesUseGreenThemeBorder() {
     `the sidebar/editor settings panel needs a green theme border — ` +
       `got: ${rule.trim()}`,
   );
-  const root = cssRule(MAIN_CSS, ':root');
+  // The palette is the first :root block; a later one inside
+  // @media (prefers-reduced-motion) only zeroes the motion tokens.
+  const root = MAIN_CSS.match(/:root\s*\{([^}]*)\}/)[1];
   assert.ok(
     /--green:\s*var\(--vscode-terminal-ansiGreen\)/.test(root),
     '--green must be a theme color derived from the VS Code palette',

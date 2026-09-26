@@ -149,8 +149,9 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         assert probe["right"] == pytest.approx(0, abs=0.5), probe
         assert probe["radii"] == ["0px"] * 4, probe
         if expand:
-            assert probe["rowLeft"] == pytest.approx(3, abs=0.5), probe
-            assert probe["rowGapBelowHeader"] == pytest.approx(3, abs=0.5), probe
+            # The inset is one --space-1 step (4px) of the spacing scale.
+            assert probe["rowLeft"] == pytest.approx(4, abs=0.5), probe
+            assert probe["rowGapBelowHeader"] == pytest.approx(4, abs=0.5), probe
         else:
             assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
     finally:
