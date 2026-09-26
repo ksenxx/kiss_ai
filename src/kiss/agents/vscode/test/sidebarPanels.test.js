@@ -138,6 +138,19 @@ function iso(offsetMinutes) {
   return Date.now() + offsetMinutes * 60000;
 }
 
+// The Schedule subpanel's Pacific-time rendering of a run time.
+function pt(t) {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(new Date(t));
+}
+
 function job(fields) {
   return Object.assign(
     {
@@ -210,22 +223,29 @@ async function main() {
     send(win, {type: 'cronJobs', jobs: 'bogus'});
     assert.match(el(win, 'meta-schedule-status').textContent, /^No scheduled jobs/);
 
+    const times = {
+      a: iso(5.2),
+      b: iso(3 * 60 + 1),
+      c: iso(3 * 1440 + 1),
+      d: iso(0.2),
+      f: iso(-125),
+    };
     send(win, {
       type: 'cronJobs',
       jobs: [
-        job({id: 'a', name: 'Digest', nextRunAt: iso(5.2), lastStatus: 'ok'}),
+        job({id: 'a', name: 'Digest', nextRunAt: times.a, lastStatus: 'ok'}),
         job({
           id: 'b',
           name: 'Backup',
           kind: 'command',
           what: 'rsync -a src dst',
           running: true,
-          nextRunAt: iso(3 * 60 + 1),
+          nextRunAt: times.b,
         }),
-        job({id: 'c', name: 'Weekly', nextRunAt: iso(3 * 1440 + 1)}),
-        job({id: 'd', name: 'Soon', nextRunAt: iso(0.2)}),
+        job({id: 'c', name: 'Weekly', nextRunAt: times.c}),
+        job({id: 'd', name: 'Soon', nextRunAt: times.d}),
         job({id: 'e', name: 'No next run'}),
-        job({id: 'f', name: 'Old', enabled: false, lastRunAt: iso(-125)}),
+        job({id: 'f', name: 'Old', enabled: false, lastRunAt: times.f}),
         job({id: 'g', name: 'Never ran', enabled: false}),
       ],
     });
@@ -238,19 +258,36 @@ async function main() {
     };
     assert.strictEqual(rows.length, 7);
     assert.strictEqual(rows[0].querySelector('.sidebar-panel-name').textContent, 'Digest');
-    assert.strictEqual(sub(rows[0]), 'every 5m \u00b7 next in 5m');
+    assert.strictEqual(sub(rows[0]), `every 5m \u00b7 next ${pt(times.a)} (in 5m)`);
     assert.strictEqual(rows[0].title, 'do it\nLast run: ok');
     assert.strictEqual(badge(rows[0]), '');
     assert.strictEqual(badge(rows[1]), 'running');
-    assert.strictEqual(sub(rows[1]), 'every 5m \u00b7 next in 3h');
+    assert.strictEqual(sub(rows[1]), `every 5m \u00b7 next ${pt(times.b)} (in 3h)`);
     assert.strictEqual(rows[1].title, '$ rsync -a src dst');
-    assert.strictEqual(sub(rows[2]), 'every 5m \u00b7 next in 3d');
-    assert.strictEqual(sub(rows[3]), 'every 5m \u00b7 next now');
+    assert.strictEqual(sub(rows[2]), `every 5m \u00b7 next ${pt(times.c)} (in 3d)`);
+    assert.strictEqual(sub(rows[3]), `every 5m \u00b7 next ${pt(times.d)} (now)`);
     assert.strictEqual(sub(rows[4]), 'every 5m');
     assert.ok(rows[5].classList.contains('paused'));
     assert.strictEqual(badge(rows[5]), 'paused');
-    assert.strictEqual(sub(rows[5]), 'every 5m \u00b7 last 2h ago');
+    assert.strictEqual(sub(rows[5]), `every 5m \u00b7 last ${pt(times.f)} (2h ago)`);
     assert.strictEqual(sub(rows[6]), 'every 5m');
+  });
+
+  await test('Schedule run times are Pacific time whatever the viewer zone', () => {
+    const {win} = makeWebview(REMOTE);
+    // 2026-09-27 12:00 UTC is 5:00 AM PDT; 2026-12-01 17:00 UTC is 9:00 AM PST.
+    send(win, {
+      type: 'cronJobs',
+      jobs: [
+        job({id: 's', name: 'Summer', nextRunAt: Date.UTC(2026, 8, 27, 12, 0)}),
+        job({id: 'w', name: 'Winter', nextRunAt: Date.UTC(2026, 11, 1, 17, 0)}),
+      ],
+    });
+    const subs = Array.from(el(win, 'meta-schedule-list').children).map(
+      r => r.querySelector('.sidebar-panel-sub').textContent,
+    );
+    assert.match(subs[0], /^every 5m \u00b7 next Sun, Sep 27, 5:00\s?AM PDT \(/);
+    assert.match(subs[1], /^every 5m \u00b7 next Tue, Dec 1, 9:00\s?AM PST \(/);
   });
 
   await test('Apps: connected first, status line, buttons for the rest, failure hint', () => {

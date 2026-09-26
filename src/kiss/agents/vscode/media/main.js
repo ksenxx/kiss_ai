@@ -5378,6 +5378,34 @@
     return delta > 0 ? 'in ' + amount : amount + ' ago';
   }
 
+  // Cron schedules are evaluated in Pacific time (cron_agent.SCHEDULE_TZ),
+  // so the Schedule subpanel shows run times there too, whatever the
+  // viewer's own time zone.
+  const SCHEDULE_TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  });
+
+  /**
+   * "Sun, Sep 27, 5:00 AM PDT (in 8h)" for an epoch-millisecond time.
+   *
+   * @param {number} t The time.
+   * @returns {string} The Pacific time followed by the relative text.
+   */
+  function scheduleTimeText(t) {
+    return (
+      SCHEDULE_TIME_FORMAT.format(new Date(t)) +
+      ' (' +
+      sidebarPanelTimeText(t) +
+      ')'
+    );
+  }
+
   /**
    * One text span with a class.
    *
@@ -5423,8 +5451,8 @@
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'paused'));
       li.appendChild(top);
       const when = job.enabled
-        ? job.nextRunAt && 'next ' + sidebarPanelTimeText(job.nextRunAt)
-        : job.lastRunAt && 'last ' + sidebarPanelTimeText(job.lastRunAt);
+        ? job.nextRunAt && 'next ' + scheduleTimeText(job.nextRunAt)
+        : job.lastRunAt && 'last ' + scheduleTimeText(job.lastRunAt);
       li.appendChild(
         sidebarPanelSpan(
           'sidebar-panel-sub',
