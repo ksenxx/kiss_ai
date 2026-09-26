@@ -749,7 +749,7 @@ class VSCodeServer(
 
     def ready_tab_sync(
         self, restored: list[dict[str, str]],
-    ) -> list[tuple[str, str, str]]:
+    ) -> tuple[list[tuple[str, str, str]], bool]:
         """Synchronize a (re)connecting client with the tab registry.
 
         Adopts the client's legacy ``restoredTabs`` when the registry
@@ -762,22 +762,27 @@ class VSCodeServer(
                 client's ``ready`` command.
 
         Returns:
-            ``(tab_id, chat_id, task_id)`` triples for every
-            chat-bound registry tab — the caller replays each so all
-            clients converge on the same transcripts.  ``task_id`` is
-            the specific historical task the tab was resumed to
-            (``""`` when the tab tracks the chat's latest task);
-            replaying it verbatim keeps a tab pinned to an older task
-            from being silently switched to the chat's latest task by
-            any client's reconnect.
+            ``(bound, adopted)``.  ``bound`` holds ``(tab_id, chat_id,
+            task_id)`` triples for every chat-bound registry tab — the
+            caller replays each to the (re)connecting client so it
+            converges on the transcripts the other clients show.
+            ``task_id`` is the specific historical task the tab was
+            resumed to (``""`` when the tab tracks the chat's latest
+            task); replaying it verbatim keeps a tab pinned to an
+            older task from being silently switched to the chat's
+            latest task by any client's reconnect.  ``adopted`` is
+            ``True`` when this call seeded the empty registry from
+            *restored*: the tabs are then new to EVERY connected
+            client, so the caller broadcasts their replays instead of
+            scoping them to the announcing connection.
         """
-        self.tab_registry.merge_if_empty(restored)
+        adopted = self.tab_registry.merge_if_empty(restored)
         bound = self.tab_registry.bound_tabs()
         with self._state_lock:
             for tab_id, chat_id, _task_id in bound:
                 self._tab_chat_views.setdefault(tab_id, chat_id)
         self._broadcast_tabs_state()
-        return bound
+        return bound, adopted
 
     def _tab_model(self, tab_id: str) -> str:
         """Return the model selected for *tab_id* (default when unset).
@@ -1958,6 +1963,7 @@ class VSCodeServer(
         chat_id: str,
         tab_id: str = "",
         task_id: str | None = None,
+        conn_id: str = "",
     ) -> None:
         """Replay recorded chat events for a previous chat session.
 
@@ -1983,10 +1989,21 @@ class VSCodeServer(
                 specific task instead of the latest task in the chat
                 session.  This is used when the user clicks a specific
                 task in the history panel.
+            conn_id: When non-empty, the ``task_events`` transcripts are
+                delivered ONLY to this connection.  A (re)connecting
+                client's ``ready`` resumes every bound registry tab to
+                rebuild its own view; broadcasting those replays would
+                make every other window rebuild transcripts it already
+                shows.  ``""`` (a user's history click) reaches every
+                client, since the other windows mirror the same tab and
+                have no other way to learn its new transcript.  The tab
+                binding (``tabs_state``) and status events are always
+                broadcast.
         """
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
+        replay_scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
         with self._state_lock:
             if task_id:
                 self._tab_opened_task_ids[tab_id] = str(task_id)
@@ -2034,6 +2051,7 @@ class VSCodeServer(
                     "chat_id": chat_id,
                     "extra": "",
                     "tabId": tab_id,
+                    **replay_scope,
                 }
                 self.printer.broadcast(
                     {**events_payload, "events": live_events},
@@ -2195,6 +2213,7 @@ class VSCodeServer(
             "chat_id": chat_id,
             "extra": _extra_for_replay(result.get("extra", "")),
             "tabId": tab_id,
+            **replay_scope,
         }
         self.printer.broadcast({**replay_payload, "events": replayed_events})
         if rebound_state is not None:
@@ -2208,6 +2227,7 @@ class VSCodeServer(
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
+                conn_id=conn_id,
             )
 
     def _emit_pending_ask(self, tab_id: str) -> None:
@@ -2332,6 +2352,7 @@ class VSCodeServer(
         *,
         parent_task_id: str,
         parent_tab_id: str,
+        conn_id: str = "",
     ) -> None:
         """Broadcast ``openSubagentTab`` + ``task_events`` for every
         persisted sub-agent row whose parent is *parent_task_id*.
@@ -2354,7 +2375,16 @@ class VSCodeServer(
             parent_task_id: ``task_history.id`` of the parent task.
             parent_tab_id: Frontend tab id of the parent tab.  Used
                 as the prefix for the deterministic sub-tab ids.
+            conn_id: When non-empty, the sub-agent tabs and their
+                transcripts are delivered only to this connection —
+                the client whose ``ready`` replays the parent tab (see
+                :meth:`_replay_session`).  The other clients opened
+                these tabs from their own replay; re-announcing them
+                would also re-open a sub-tab a user closed by hand.
+                A reattached still-running sub-agent's live events
+                keep fanning out to every viewer as before.
         """
+        scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
         sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
         for idx, row in enumerate(sub_rows):
             sub_task_id = row["task_id"]
@@ -2367,9 +2397,10 @@ class VSCodeServer(
                 # run_parallel child it has no fan-out panel that
                 # keeps its finished tab closed, so a re-announce
                 # would re-open it on every reconnect.  Close it.
-                self.printer.broadcast(
-                    {"type": "subagentDone", "tab_id": sub_tab_id, "tabId": ""},
-                )
+                self.printer.broadcast({
+                    "type": "subagentDone", "tab_id": sub_tab_id, "tabId": "",
+                    **scope,
+                })
                 continue
             if not is_done:
                 self._reattach_running_chat(
@@ -2401,6 +2432,7 @@ class VSCodeServer(
                     # The frontend attributes the row to the fan-out
                     # call that was running when it started.
                     "startTs": _start_ts_from_extra(row.get("extra", "")),
+                    **scope,
                 }
             )
             self.printer.broadcast(
@@ -2414,6 +2446,7 @@ class VSCodeServer(
                     "chat_id": row.get("chat_id", ""),
                     "extra": _extra_for_replay(row.get("extra", "")),
                     "tabId": sub_tab_id,
+                    **scope,
                 }
             )
             self._emit_pending_ask(sub_tab_id)
@@ -2423,6 +2456,7 @@ class VSCodeServer(
                         "type": "subagentDone",
                         "tab_id": sub_tab_id,
                         "tabId": "",
+                        **scope,
                     }
                 )
 
@@ -2712,7 +2746,8 @@ class VSCodeServer(
             events_payload: The replay's ``task_events`` payload minus
                 ``events`` — reused verbatim for the corrective
                 terminal snapshot so both broadcasts describe the same
-                task/chat/tab.
+                task/chat/tab and reach the same connections (a
+                ``connId``-scoped replay stays scoped).
         """
         with self._state_lock:
             if source.is_task_active or source.thread_alive():

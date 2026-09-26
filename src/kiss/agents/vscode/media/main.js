@@ -678,6 +678,10 @@
   // like the attachments themselves: a wait in one tab must not swallow the
   // Enter of another.
   let _deferHighlight = false;
+  // True while renderReplayedEvents rebuilds a transcript from recorded
+  // events.  Per-event work that only matters for a live stream (folding
+  // older panels, auto-scrolling) is skipped and done once at the end.
+  let _replaying = false;
   let acIdx = -1;
   // Slash-command list (SEA agents), pushed by the daemon on connect
   // and on any registry rescan.  Empty until the daemon replies.
@@ -10210,11 +10214,19 @@
     // would be closed by the very panel it is about to move out of.
     if (!container || container.nodeType !== 1) return;
     if (!streamTabIsRunning(tabId)) return;
+    // A replay folds the whole transcript once, at its end
+    // (collapseAllExceptResult); folding after every replayed event
+    // would rebuild each older panel's preview O(events x panels) times.
+    if (_replaying) return;
     const panels = Array.from(container.children).filter(
       el => el.classList && el.classList.contains('collapsible'),
     );
     for (let i = 0; i < panels.length - STREAM_OPEN_PANELS; i++) {
       const p = panels[i];
+      // Already folded: its preview was built when it collapsed, and
+      // rebuilding it from the panel's DOM on every event is the
+      // quadratic cost that freezes long transcripts.
+      if (p.classList.contains('collapsed')) continue;
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
       // A `/ask` answer the user is reading while the task keeps
@@ -10655,8 +10667,10 @@
   function autoScrollStreamed(el) {
     // Scroll every scrollable panel enclosing a streamed text update,
     // then the outer chat, so the newest text stays visible.  Nodes
-    // still inside a background tab's detached fragment are skipped.
-    if (!el || !O.contains(el)) return;
+    // still inside a background tab's detached fragment are skipped, and
+    // so is a replay: each scroll forces a layout, and replayTaskEvents
+    // scrolls the finished transcript once (autoScrollLatestEventPanel).
+    if (_replaying || !el || !O.contains(el)) return;
     let n = el;
     while (n && n !== O) {
       if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL))
@@ -15250,7 +15264,9 @@
     ctx.state.suppressReportOpen = true;
     // report-coverage:end
     const prevDefer = _deferHighlight;
+    const prevReplaying = _replaying;
     _deferHighlight = true;
+    _replaying = true;
     try {
       events.forEach(ev => {
         normalizeEventTs(ev);
@@ -15274,6 +15290,7 @@
       });
     } finally {
       _deferHighlight = prevDefer;
+      _replaying = prevReplaying;
     }
     // The replay is over: the returned context may be adopted as a
     // still-running task's live stream state (replayTaskEvents, the
@@ -15788,7 +15805,14 @@
     // the chat the host commits or toasts against.
     // readychat-coverage:start
     const chatTabId = chatTabIdForHost();
-    api.ready({tabId: chatTabId, restoredTabs: collectRestoredTabs()});
+    const ready = {tabId: chatTabId, restoredTabs: collectRestoredTabs()};
+    // An editor-tab panel shows exactly one registry tab and drops the
+    // task_events of every other one (see the task_events handler), so
+    // it asks the daemon to replay only that tab instead of every
+    // bound tab's transcript.
+    const root = EDITOR_TAB_MODE ? editorRootTab() : null;
+    if (root) ready.singleTabId = root.id;
+    api.ready(ready);
     reportedChatTabId = chatTabId;
     // readychat-coverage:end
   }

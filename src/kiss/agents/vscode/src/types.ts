@@ -205,6 +205,9 @@ export type FromWebviewMessage =
   | {
       type: 'ready';
       tabId?: string;
+      /** The only registry tab this client shows (editor-tab panel):
+       *  the daemon replays just that tab instead of every bound one. */
+      singleTabId?: string;
       restoredTabs?: Array<{
         tabId: string;
         chatId: string;
@@ -1095,6 +1098,8 @@ export interface AgentCommand {
   token?: string;
   /** getTaskUpdate: run the task-update agent now. */
   refresh?: boolean;
+  /** ready: the only registry tab an editor-tab panel shows. */
+  singleTabId?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

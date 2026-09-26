@@ -2633,6 +2633,12 @@ class WebPrinter(JsonPrinter):
                 )
 
         if conn_id:
+            # A ``ready``-driven replay is delivered to one connection
+            # but still re-presents the tab's worktree (a running
+            # worktree task's ``worktree_created`` nested in the
+            # transcript), which the daemon tracks for every client.
+            if "tabId" in event:
+                self._track_worktree_event(event, event.get("tabId"))
             self._send_to_conn(conn_id, json.dumps(event))
             return
 
@@ -7892,10 +7898,20 @@ class RemoteAccessServer:
         the client's legacy ``restoredTabs`` are adopted only into an
         EMPTY registry (one-time migration), a canonical ``tabs_state``
         snapshot is broadcast, and every chat-bound registry tab is
-        replayed so all connected clients converge on identical
-        transcripts.  Tab state is server-canonical — clients never
-        keep a tab set of their own — so the same path serves VS Code
-        webviews (UDS) and remote web apps (WSS) alike.
+        replayed TO THIS CLIENT so it converges on the transcripts the
+        other clients already show (``replayConnId``: the other windows
+        have those transcripts and must not rebuild them because a new
+        panel connected).  A client that mirrors exactly one registry
+        tab (a VS Code editor-tab panel, which names it in
+        ``singleTabId``) receives only that tab's replay: it drops
+        every other tab's events on arrival, so sending them only costs
+        the serialization of every transcript.  The one exception is a
+        ``ready`` whose legacy ``restoredTabs`` seed an EMPTY registry:
+        those tabs are new to every client, so all of them are replayed
+        to everyone.
+        Tab state is server-canonical — clients never keep a tab set
+        of their own — so the same path serves VS Code webviews (UDS)
+        and remote web apps (WSS) alike.
 
         Args:
             cmd: The ``ready`` message from the client (already
@@ -7905,6 +7921,7 @@ class RemoteAccessServer:
         """
         tab_id = self._cmd_str(cmd, "tabId")
         conn_id = cmd.get("connId", "")
+        single_tab_id = self._cmd_str(cmd, "singleTabId")
         work_dir = cmd.get("workDir", "")
         for init_cmd in (
             "getModels", "getInputHistory", "getConfig", "getMyModels",
@@ -7930,16 +7947,24 @@ class RemoteAccessServer:
             pass
         restored = self._sanitized_restored_tabs(cmd)
         try:
-            bound = await asyncio.to_thread(
+            bound, adopted = await asyncio.to_thread(
                 self._vscode_server.ready_tab_sync, restored,
             )
         except Exception:
             logger.exception("ready tab-registry sync failed")
-            bound = []
+            bound, adopted = [], False
+        # Tabs this ready just seeded the empty registry with (legacy
+        # migration) are new to every other client too: those clients
+        # adopt them from the ``tabs_state`` snapshot without asking for
+        # their transcripts, so the replays must reach everyone — every
+        # seeded tab's, even when the seeding client shows only one.
+        replay_conn_id = "" if adopted else conn_id
         for rt_id, rt_chat, rt_task in bound:
+            if single_tab_id and not adopted and rt_id != single_tab_id:
+                continue
             resume: dict[str, Any] = {
                 "type": "resumeSession", "chatId": rt_chat,
-                "tabId": rt_id,
+                "tabId": rt_id, "replayConnId": replay_conn_id,
             }
             # A tab pinned to a specific historical task replays THAT
             # task; without the taskId the replay would silently

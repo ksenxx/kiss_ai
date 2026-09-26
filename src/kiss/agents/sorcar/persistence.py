@@ -469,6 +469,11 @@ _MAX_FREQUENT_TASKS = 100
 # task's composer, kept only so autocomplete can offer them again).
 _MAX_STEER_INPUTS = 1000
 
+# Cap on the composer's ArrowUp history sent to every (re)connecting
+# client.  Unbounded, a long-lived install ships every prompt ever
+# typed (tens of thousands of rows, megabytes) on each connect.
+_MAX_INPUT_HISTORY = 500
+
 _OWNER_DIR_NAME = "task-owners"
 
 _owner_state: tuple[str, str, IO[Any]] | None = None
@@ -2033,13 +2038,17 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     return [row["task"] for row in rows]
 
 
-def _load_input_history() -> list[str]:
-    """Return every distinct text the user ever typed into the composer.
+def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
+    """Return the most recent distinct texts the user typed into the composer.
 
     Combines the listable ``task_history`` rows (sub-agent rows
     excluded) with the ``steer_inputs`` table, most recent first —
     a text's position is that of its most recent use in either
     table.  Feeds the composer's ArrowUp history.  Thread-safe.
+
+    Args:
+        limit: Maximum number of texts returned (the most recent ones);
+            defaults to :data:`_MAX_INPUT_HISTORY`.
     """
     with _rw_lock.read_lock():
         db = _get_db()
@@ -2050,7 +2059,9 @@ def _load_input_history() -> list[str]:
             "UNION ALL "
             "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
             ") GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC",
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC "
+            "LIMIT ?",
+            (int(limit),),
         ).fetchall()
     return [row["task"] for row in rows]
 

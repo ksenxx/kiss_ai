@@ -1486,11 +1486,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // replies (models / input history / config), merges any legacy
         // restoredTabs into an empty registry, answers with the
         // canonical `tabs_state` snapshot, and replays every
-        // chat-bound tab's transcript.
+        // chat-bound tab's transcript to this connection (only the
+        // `singleTabId` one for an editor-tab panel).
         this._getApi().forward({
           type: 'ready',
           tabId: message.tabId,
           restoredTabs: message.restoredTabs,
+          singleTabId: message.singleTabId,
         } as AgentCommand);
         break;
       }

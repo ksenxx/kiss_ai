@@ -377,7 +377,11 @@ class _CommandsMixin:
             tab_id: str = "",
         ) -> None: ...
         def _replay_session(
-            self, chat_id: str, tab_id: str = "", task_id: str | None = None,
+            self,
+            chat_id: str,
+            tab_id: str = "",
+            task_id: str | None = None,
+            conn_id: str = "",
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
@@ -1564,13 +1568,22 @@ class _CommandsMixin:
 
         When ``taskId`` is present, load that specific task instead of
         the latest task in the chat session.
+
+        ``replayConnId`` is set only on the resumes a client's ``ready``
+        fans out (``_handle_ready``): the transcript then goes to that
+        connection alone.  A user's history click carries no
+        ``replayConnId`` and its transcript is broadcast, since every
+        window mirroring the tab must show the newly bound chat.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
         task_id = _opt_str(cmd.get("taskId"))
         if chat_id or task_id is not None:
             self._replay_session(
-                chat_id, cmd.get("tabId", ""), task_id=task_id,
+                chat_id,
+                cmd.get("tabId", ""),
+                task_id=task_id,
+                conn_id=str(cmd.get("replayConnId") or ""),
             )
 
     def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
