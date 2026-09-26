@@ -22,7 +22,7 @@ which surfaces, and what each channel can do.
 - [Credential isolation (Muse auth)](#credential-isolation-muse-auth)
 - [Agent catalog](#agent-catalog)
   - [Messaging and device channels](#messaging-and-device-channels-32)
-  - [Service APIs](#service-apis-9)
+  - [Service APIs](#service-apis-10)
   - [Infrastructure: two extra surfaces](#infrastructure-two-extra-surfaces)
   - [Task Q&A: the `/ask` command](#task-qa-the-ask-command)
   - [Home lights (Govee)](#home-lights-govee)
@@ -169,7 +169,9 @@ turns the automatic opening off.
   you and lists the steps — Google Chat, whose check tool opens the console and gives
   the setup instructions instead, has no such tool.)
 - **Portal hand-off with token paste-back** (Slack, Discord, and the API-key channels
-  such as Brave, Notion, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram).
+  such as Brave, Notion, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
+  Overleaf, which has no OAuth or public API, is the same flow with the
+  `overleaf_session2` browser cookie pasted back instead of a token).
   `start_slack_browser_auth` / `start_discord_browser_auth` — or, for the API-key
   channels, `check_<service>_auth` itself — open the provider's developer portal in
   your default browser and tell the agent the steps to relay; you create the app in
@@ -285,7 +287,7 @@ caps bodies at 1 MB, suppresses duplicate deliveries, rate-limits to 60 events p
 route per minute, and can either queue events as agent tasks or push them straight
 through another channel's backend (`deliver_module` routes).
 
-### Service APIs (9)
+### Service APIs (10)
 
 | Agent | Name in prompts | Auth / config | Backend tools |
 | --- | --- | --- | --- |
@@ -297,9 +299,10 @@ through another channel's backend (`deliver_module` routes).
 | Google Drive | `gdrive` | OAuth2 quintet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
 | Google Sheets | `gsheets` | OAuth2 quintet (for `google_sheets`), `google_sheets/` | `gsheets_create_spreadsheet`, `gsheets_get_info`, `gsheets_get_values`, `gsheets_update_values`, `gsheets_append_values`, `gsheets_clear_values`, `gsheets_add_sheet`, `gsheets_batch_update`, `gsheets_list_spreadsheets` |
 | Notion | `notion` | internal-integration token, `notion/config.json` | `notion_search`, `notion_get_page`, `notion_get_block_children`, `notion_append_paragraph`, `notion_append_blocks`, `notion_create_page`, `notion_update_page`, `notion_get_database`, `notion_query_database`, `notion_list_users`, `notion_create_comment`, `notion_get_comments` |
+| Overleaf | `overleaf` | `overleaf_session2` browser session cookie (no OAuth or public API; sign in in your own browser and paste the cookie) + optional Git bridge token and Server Pro `host`, `overleaf/config.json` | `overleaf_whoami`, `overleaf_list_projects`, `overleaf_create_project`, `overleaf_upload_project_zip`, `overleaf_rename_project`, `overleaf_clone_project`, `overleaf_set_project_state`, `overleaf_update_project_settings`, `overleaf_download_project_zip`, `overleaf_list_files`, `overleaf_read_file`, `overleaf_download_file`, `overleaf_write_file`, `overleaf_upload_file`, `overleaf_create_folder`, `overleaf_rename_entity`, `overleaf_move_entity`, `overleaf_delete_entity`, `overleaf_compile`, `overleaf_download_pdf`, `overleaf_word_count`, `overleaf_clear_compile_cache`, `overleaf_list_members`, `overleaf_invite_collaborator`, `overleaf_set_collaborator_privileges`, `overleaf_remove_collaborator`, `overleaf_revoke_invite`, `overleaf_get_sharing_links`, `overleaf_leave_project`, `overleaf_transfer_ownership`, `overleaf_get_chat_messages`, `overleaf_send_chat_message`, `overleaf_list_tags`, `overleaf_create_tag`, `overleaf_edit_tag`, `overleaf_delete_tag`, `overleaf_tag_project`, `overleaf_get_history`, `overleaf_list_labels`, `overleaf_create_label`, `overleaf_delete_label`, `overleaf_get_diff`, `overleaf_download_version_zip`, `overleaf_restore_file`, `overleaf_revert_project`, `overleaf_list_notifications`, `overleaf_git_clone`, `overleaf_git_sync` |
 | PostgreSQL | `postgres` | `postgresql://` URI, `postgres/config.json` | `pg_query`, `pg_execute`, `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_list_indexes`, `pg_explain` |
 
-All nine are outbound-only (no gateway mode). PostgreSQL defaults to **read-only
+All ten are outbound-only (no gateway mode). PostgreSQL defaults to **read-only
 enforced server-side**: connections open with `default_transaction_read_only=on` and
 `pg_query` uses the extended query protocol so multi-statement strings are rejected;
 read paths run under a 60 s server-side `statement_timeout` while `pg_execute` (write
