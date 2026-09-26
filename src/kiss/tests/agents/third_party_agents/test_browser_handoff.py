@@ -11,7 +11,8 @@ sign-in.  These tests run the real code paths with a scripted browser
 installed through ``$BROWSER`` (the ``webbrowser`` convention) that
 records every URL it is asked to open, so nothing is mocked: the
 launcher really forks the browser process, the consent sessions really
-start, the Google loopback server really listens.
+start, the Composio Connect Link really comes from a local Composio API
+emulator.
 
 Not covered here, and why:
 
@@ -26,8 +27,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -46,21 +45,14 @@ from kiss.agents.third_party_agents._device_auth import (
     consent_instructions,
     consent_required,
 )
-from kiss.agents.third_party_agents._google_workspace_utils import (
-    CLOUD_CONSOLE_URL,
-    google_consent_steps,
-    remote_oauth_instructions,
-    start_google_consent,
-)
 from kiss.agents.third_party_agents.brave_sea import BraveSearchAgent
 from kiss.agents.third_party_agents.discord_sea import DiscordAgent
 from kiss.agents.third_party_agents.gcal_sea import GoogleCalendarAgent
-from kiss.agents.third_party_agents.gmail_sea import GmailAgent
-from kiss.agents.third_party_agents.googlechat_sea import GoogleChatAgent
 from kiss.agents.third_party_agents.signal_sea import SignalAgent
 from kiss.agents.third_party_agents.slack_sea import SlackAgent
 from kiss.agents.third_party_agents.telegram_sea import TelegramAgent
 from kiss.agents.third_party_agents.whatsapp_sea import _qr_handoff
+from kiss.tests.agents.third_party_agents.composio_test_utils import start_fake_composio
 from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
@@ -87,17 +79,6 @@ if os.path.exists(os.path.join(here, "linger")):
     while os.path.exists(os.path.join(here, "linger")) and time.monotonic() < deadline:
         time.sleep(0.02)
 """
-
-_DUMMY_CLIENT_SECRETS = {
-    "installed": {
-        "client_id": "test-client-id.apps.googleusercontent.com",
-        "client_secret": "test-secret",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost"],
-    }
-}
-
 
 @pytest.fixture()
 def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -387,117 +368,38 @@ def test_whatsapp_qr_handoff_both_outcomes(
 
 
 # --------------------------------------------------------------------------
-# Google consent (loopback server) and Cloud Console setup
+# Google sign-in through a Composio Connect Link
 # --------------------------------------------------------------------------
 
 
-def _write_client_secrets(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_DUMMY_CLIENT_SECRETS))
+@pytest.fixture()
+def composio(monkeypatch: pytest.MonkeyPatch):
+    """Run the local Composio API emulator and point the SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
-def _forge_redirect(auth_url: str) -> None:
-    """Play a browser that lands on the loopback server with a bogus code."""
-    match = re.search(r"redirect_uri=http%3A%2F%2Flocalhost%3A(\d+)", auth_url)
-    assert match is not None
-    with urllib.request.urlopen(
-        f"http://localhost:{match.group(1)}/?state=bogus&code=bogus", timeout=10
-    ) as resp:
-        assert resp.status == 200
-
-
-def test_google_consent_opens_auth_url_and_finishes_locally(
-    isolated_kiss_home: Path, fake_browser: Path
+def test_google_connect_link_opens_in_default_browser(
+    isolated_kiss_home: Path, fake_browser: Path, composio: Any
 ) -> None:
-    """authenticate_google_calendar() opens Google's consent page and returns at once."""
-    from kiss.agents.third_party_agents._google_workspace_utils import credentials_path
-
-    _write_client_secrets(credentials_path("google_calendar"))
+    """authenticate_google_calendar() opens the Connect Link and returns at once."""
     tools = _auth_tools(GoogleCalendarAgent())
     started = json.loads(tools["authenticate_google_calendar"]())
     assert started["status"] == "consent_required" and started["browser_opened"] is True
-    assert started["auth_url"].startswith("https://accounts.google.com/o/oauth2/auth")
-    assert _opened(fake_browser) == [[started["auth_url"]]]
-    text = started["instructions"]
-    assert "has just been opened in the user's default browser" in text
-    assert "completes by itself" in text and "Only if a URL was pasted back" in text
-    assert started["auth_url"] in text and "finish_google_calendar_auth()" in text
-    _forge_redirect(started["auth_url"])
-    finished = json.loads(tools["finish_google_calendar_auth"]())
-    assert finished["ok"] is False and "state" in finished["error"].lower()
+    uri = started["verification_uri"]
+    assert uri.startswith("https://connect.composio.dev/link/")
+    assert _opened(fake_browser) == [[uri]]
+    assert uri in started["instructions"]
+    assert "finish_google_calendar_auth()" in started["instructions"]
 
 
-def test_google_consent_headless_and_missing_or_broken_credentials(
-    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
+def test_google_connect_link_headless_is_handed_over(
+    isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch, composio: Any
 ) -> None:
-    """Headless: the URL is handed over for paste-back; bad/missing credentials.json."""
-    from kiss.agents.third_party_agents._google_workspace_utils import credentials_path
-
+    """Headless: nothing is launched and the link is handed to the user."""
     monkeypatch.setenv("KISS_HEADLESS", "1")
-    assert start_google_consent("google_docs", "Google Docs", ["scope"]) is None
-    _write_client_secrets(credentials_path("google_docs"))
-    answer = start_google_consent("google_docs", "Google Docs", ["scope"])
-    assert answer is not None
-    started = json.loads(answer)
-    assert started["browser_opened"] is False
-    assert "No browser could be opened" in started["instructions"]
-    assert "paste back" in started["instructions"]
-    _forge_redirect(started["auth_url"])
-    from kiss.agents.third_party_agents._google_workspace_utils import RemoteOAuthSession
-
-    creds, status = RemoteOAuthSession.finish("google_docs", ["scope"])
-    assert creds is None and status != "pending"
-    credentials_path("google_docs").write_text("not json")
-    answer = start_google_consent("google_docs", "Google Docs", ["scope"])
-    assert answer is not None
-    broken = json.loads(answer)
-    assert broken["ok"] is False and "may be malformed" in broken["error"]
-    # The instruction builder's opened branch, standalone.
-    note = remote_oauth_instructions("google_docs", "Google Docs", "https://a.test/", True)
-    assert "completes by itself" in note and "https://a.test/" in note
-    assert "ALWAYS call ask_user_question() with the full auth_url" in google_consent_steps("g")
-
-
-def test_gmail_and_googlechat_use_the_shared_consent(
-    isolated_kiss_home: Path, fake_browser: Path
-) -> None:
-    """The two hand-written Google agents open the consent page the same way."""
-    from kiss.agents.third_party_agents import gmail_sea, googlechat_sea
-
-    _write_client_secrets(gmail_sea._credentials_path())
-    gmail_tools = _auth_tools(GmailAgent())
-    started = json.loads(gmail_tools["authenticate_gmail"]())
-    assert started["status"] == "consent_required" and started["browser_opened"] is True
-    _forge_redirect(started["auth_url"])
-    assert json.loads(gmail_tools["finish_gmail_auth"]())["ok"] is False
-
-    _write_client_secrets(googlechat_sea._credentials_path())
-    chat_tools = _auth_tools(GoogleChatAgent())
-    started = json.loads(chat_tools["authenticate_googlechat"]())
-    assert started["status"] == "consent_required" and started["browser_opened"] is True
-    _forge_redirect(started["auth_url"])
-    assert json.loads(chat_tools["finish_googlechat_auth"]())["ok"] is False
-    assert len(_opened(fake_browser)) == 2
-
-
-def test_cloud_console_setup_tools_open_the_console(
-    isolated_kiss_home: Path, fake_browser: Path
-) -> None:
-    """start_*_browser_setup() and the Google Chat check open Cloud Console for the user."""
-    gmail_tools = _auth_tools(GmailAgent())
-    missing = gmail_tools["authenticate_gmail"]()
-    assert "credentials.json not found" in missing and "start_gmail_browser_setup()" in missing
-    setup = gmail_tools["start_gmail_browser_setup"]()
-    assert f"{CLOUD_CONSOLE_URL} has just been opened" in setup
-    assert "Desktop app" in setup and "authenticate_gmail()" in setup
-    assert "autonomously" not in setup and "go_to_url" not in setup
-    generic = _auth_tools(GoogleCalendarAgent())["start_google_calendar_browser_setup"]()
-    assert "has just been opened" in generic and "authenticate_google_calendar()" in generic
-    chat_tools = _auth_tools(GoogleChatAgent())
-    check = chat_tools["check_googlechat_auth"]()
-    assert "Not authenticated with Google Chat" in check and "has just been opened" in check
-    # One console tab for all three: the reopen guard collapses them.
-    assert _opened(fake_browser) == [[CLOUD_CONSOLE_URL]]
+    started = json.loads(_auth_tools(GoogleCalendarAgent())["authenticate_google_calendar"]())
+    assert started["status"] == "consent_required" and started["browser_opened"] is False
+    assert started["verification_uri"] in started["instructions"]
 
 
 # --------------------------------------------------------------------------
@@ -508,22 +410,13 @@ def test_cloud_console_setup_tools_open_the_console(
 def test_token_agents_open_their_developer_portals(
     isolated_kiss_home: Path, fake_browser: Path
 ) -> None:
-    """check_*_auth() / start_*_browser_auth() open the portal and keep the paste-back."""
+    """check_*_auth() of the API-key channels opens the portal and keeps the paste-back."""
     slack = SlackAgent()
     slack._backend._client = None
-    slack_tools = _auth_tools(slack)
-    check = slack_tools["check_slack_auth"]()
-    assert "Not authenticated with Slack" in check and "start_slack_browser_auth()" in check
-    assert "user's default browser" in check and "paste back" in check
-    start = slack_tools["start_slack_browser_auth"]()
-    assert "https://api.slack.com/apps has just been opened" in start
-    assert "OWN browser" in start and "paste back" in start and "go_to_url" not in start
-
-    discord = DiscordAgent()
-    discord._backend._bot_token = ""
-    start = _auth_tools(discord)["start_discord_browser_auth"]()
-    assert "https://discord.com/developers/applications has just been opened" in start
-    assert "Reset Token" in start and "paste back" in start
+    check = _auth_tools(slack)["check_slack_auth"]()
+    # Slack signs in through the KISS app now: no portal, no paste-back.
+    assert "Not authenticated with Slack" in check and "authenticate_slack()" in check
+    assert "api.slack.com/apps" not in check
 
     brave = BraveSearchAgent()
     brave._backend._api_key = ""
@@ -537,8 +430,6 @@ def test_token_agents_open_their_developer_portals(
     assert "@BotFather" in check and "https://t.me/BotFather has just been opened" in check
 
     assert [launch[0] for launch in _opened(fake_browser)] == [
-        "https://api.slack.com/apps",
-        "https://discord.com/developers/applications",
         "https://api-dashboard.search.brave.com/",
         "https://t.me/BotFather",
     ]
@@ -548,29 +439,22 @@ def test_device_flow_prerequisite_portals_open(
     isolated_kiss_home: Path, fake_browser: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without an OAuth app ID, the registration portal opens for the user."""
-    from kiss.agents.third_party_agents.github_sea import GitHubAgent
-    from kiss.agents.third_party_agents.msteams_sea import MSTeamsAgent
     from kiss.agents.third_party_agents.twitch_sea import TwitchAgent
 
-    monkeypatch.delenv("KISS_GITHUB_CLIENT_ID", raising=False)
-    missing = json.loads(_auth_tools(GitHubAgent())["authenticate_github"]())
-    assert missing["ok"] is False
-    assert "https://github.com/settings/applications/new has just been opened" in missing["error"]
     twitch = _auth_tools(TwitchAgent())["authenticate_twitch"]("")
     assert twitch.startswith("client_id cannot be empty.")
     assert "https://dev.twitch.tv/console/apps has just been opened" in twitch
-    teams = _auth_tools(MSTeamsAgent())["authenticate_msteams"]("", "")
-    assert teams.startswith("tenant_id cannot be empty.")
-    assert "portal.azure.com" in teams and "has just been opened" in teams
-    assert len(_opened(fake_browser)) == 3
+    assert len(_opened(fake_browser)) == 1
 
 
 def test_prompts_describe_the_default_browser_hand_off() -> None:
     """The channel prompts tell the agent the page is opened for the user and to show the URL."""
-    for agent_cls in (SlackAgent, DiscordAgent):
-        prompt = agent_cls.channel_system_prompt
-        assert "user's default browser" in prompt and "if it did not open by itself" in prompt
-        assert "Do not drive the portal" in prompt
+    prompt = SlackAgent.channel_system_prompt
+    assert "'browser_opened'" in prompt and "ALWAYS call ask_user_question()" in prompt
+    assert "Do not drive the portal" not in prompt
+    discord_prompt = DiscordAgent.channel_system_prompt
+    assert "Do not drive the portal" not in discord_prompt
+    assert "authenticate_discord() with no arguments" in discord_prompt
     from kiss.agents.third_party_agents.github_sea import GitHubAgent
 
     prompt = GitHubAgent.channel_system_prompt

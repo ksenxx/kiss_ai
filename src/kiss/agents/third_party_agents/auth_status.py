@@ -43,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 from kiss.agents.sorcar.agent_dispatch import _agent_class, available_channels
+from kiss.agents.third_party_agents._composio_google import TOOLKITS
 
 # Per-run deadline for the whole probe; channels still running when it
 # expires are reported as unknown.
@@ -133,7 +134,9 @@ def channel_status(name: str, enrolled: set[str] | None = None) -> dict[str, Any
         if agent_cls is None:
             raise RuntimeError("module defines no channel agent")
         service = getattr(module, "_SERVICE", None) or _MUSE_SERVICES.get(name, name)
-        in_vault = enrolled is not None and service in enrolled
+        # Google services left the vault for Composio: an old enrollment
+        # there says nothing about the current connection.
+        in_vault = enrolled is not None and service in enrolled and service not in TOOLKITS
         authenticated: bool | None = in_vault or bool(agent_cls()._is_authenticated())
         error = ""
     except Exception as exc:  # noqa: BLE001 - one broken channel must not hide the rest

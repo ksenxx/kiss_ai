@@ -4,11 +4,11 @@
 # add your name here
 """Gmail Agent — channel agent with Gmail API tools.
 
-Provides authenticated access to a Gmail account via OAuth2.
-Handles authentication (reading token from disk or prompting the user
-via the browser), stores the token securely in
-``~/.kiss/third_party_agents/gmail/token.json``, and exposes a focused set of
-Gmail API tools for reading, sending, labeling and trashing email.
+Provides access to a Gmail account through Composio (see
+:mod:`._composio_google`): the user connects Gmail with a Composio
+Connect Link, and every API call goes through Composio's proxy, which
+holds the Google token.  Exposes a focused set of Gmail API tools for
+reading, sending, labeling and trashing email.
 
 Usage::
 
@@ -22,151 +22,31 @@ import base64
 import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
-    write_private_file,
 )
+from kiss.agents.third_party_agents._composio_google import ComposioHttp, connected_account_id
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    CLOUD_CONSOLE_URL,
-    RemoteOAuthSession,
-    google_consent_steps,
-    start_google_consent,
+    google_auth_prompt,
+    make_google_auth_tools,
 )
-from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-from kiss.core.config import kiss_home
 
-# gmail.modify covers reading, composing, sending, labeling and trashing mail.
-# It cannot delete permanently; that would need https://mail.google.com/.
-_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-]
+_SERVICE = "gmail"
 
 
-def _gmail_dir() -> Path:
-    """Return the Gmail credential directory, honoring ``KISS_HOME``.
-
-    Returns:
-        Path to ``$KISS_HOME/third_party_agents/gmail`` (defaults to
-        ``~/.kiss/third_party_agents/gmail``).
-    """
-    return kiss_home() / "third_party_agents" / "gmail"
-
-
-def _token_path() -> Path:
-    """Return the path to the stored Gmail OAuth2 token file.
-
-    Returns:
-        Path to ``token.json`` inside :func:`_gmail_dir`.
-    """
-    return _gmail_dir() / "token.json"
-
-
-def _credentials_path() -> Path:
-    """Return the path to the OAuth2 client credentials file.
-
-    Returns:
-        Path to ``credentials.json`` inside :func:`_gmail_dir`.
-    """
-    return _gmail_dir() / "credentials.json"
-
-
-def _load_credentials() -> Credentials | None:
-    """Load stored OAuth2 credentials from disk.
-
-    In Muse-auth mode (the default) the real token stays in
-    the daemon vault and a surrogate-bearing handle is returned instead.
-
-    Returns:
-        Valid Credentials object (or a surrogate handle in Muse-auth
-        mode), or None if not found or expired.
-    """
-    if muse_auth_enabled():
-        # A leftover legacy token.json (working install upgraded to the
-        # Muse-auth default) is migrated into the vault and removed.
-        from kiss.agents.third_party_agents.muse_auth.client import mint_surrogate_migrating
-
-        return cast("Credentials | None", mint_surrogate_migrating("gmail", _token_path(), _SCOPES))
-    path = _token_path()
-    if not path.exists():
-        return None
-    try:
-        creds: Credentials = Credentials.from_authorized_user_file(str(path), _SCOPES)
-    except (json.JSONDecodeError, OSError, ValueError):
-        return None
-    if creds.valid:  # pragma: no branch
-        return creds
-    if creds.expired and creds.refresh_token:  # pragma: no branch
-        try:
-            creds.refresh(Request())
-            _save_credentials(creds)
-            return creds
-        except Exception:
-            return None
-    return None
-
-
-def _save_credentials(creds: Credentials) -> None:
-    """Save OAuth2 credentials to disk atomically with restricted permissions.
-
-    In Muse-auth mode the credential goes straight into the daemon
-    vault; no agent-readable ``token.json`` is written (surrogate
-    handles are skipped — there is nothing real to persist).
-
-    Args:
-        creds: Google OAuth2 Credentials object (or a surrogate handle).
-    """
-    if muse_auth_enabled():
-        from kiss.agents.third_party_agents.muse_auth.client import (
-            SurrogateCredentials,
-            store_credentials,
-        )
-
-        if not isinstance(creds, SurrogateCredentials):
-            store_credentials("gmail", creds, list(getattr(creds, "scopes", None) or []))
-        return
-    write_private_file(_token_path(), creds.to_json())
-
-
-def _clear_credentials() -> None:
-    """Delete the stored Gmail OAuth2 token (legacy file and Muse vault)."""
-    path = _token_path()
-    if path.exists():
-        path.unlink()
-    if muse_auth_enabled():
-        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
-
-        clear_credentials("gmail")
-
-
-def _build_service(creds: Credentials) -> Any:
-    """Build a Gmail API service object.
-
-    With a surrogate handle (Muse-auth mode) the service routes every
-    API call through the Muse-auth daemon via
-    :class:`~kiss.agents.third_party_agents.muse_auth.client.MuseHttp`,
-    so this process never signs requests with a real token.
-
-    Args:
-        creds: Valid OAuth2 Credentials or a Muse-auth surrogate handle.
+def _build_service() -> Any:
+    """Build a Gmail API service whose requests go through Composio's proxy.
 
     Returns:
         Gmail API service resource.
     """
-    from kiss.agents.third_party_agents.muse_auth.client import MuseHttp, SurrogateCredentials
-
-    if isinstance(creds, SurrogateCredentials):
-        return build("gmail", "v1", http=MuseHttp("gmail", creds.token), static_discovery=True)
-    return build("gmail", "v1", credentials=creds)
+    return build("gmail", "v1", http=ComposioHttp(_SERVICE), static_discovery=True)
 
 
 def _extract_body(payload: dict) -> str:  # type: ignore[type-arg]
@@ -253,16 +133,15 @@ class GmailChannelBackend(ToolMethodBackend):
         self._connection_info: str = ""
 
     def connect(self) -> bool:
-        """Authenticate with Gmail using stored OAuth2 credentials.
+        """Connect to Gmail through the recorded Composio connection.
 
         Returns:
             True on success, False on failure.
         """
-        creds = _load_credentials()
-        if not creds:  # pragma: no branch
-            self._connection_info = "No Gmail credentials found. Please authenticate first."
+        if not connected_account_id(_SERVICE):
+            self._connection_info = "Gmail is not connected. Please authenticate first."
             return False
-        self._service = _build_service(creds)
+        self._service = _build_service()
         try:
             profile = self._service.users().getProfile(userId="me").execute()
             self._connection_info = f"Authenticated as {profile.get('emailAddress', '')}"
@@ -875,9 +754,8 @@ class GmailAgent(BaseChannelAgent):
     file editing, and browser automation) with authenticated Gmail API tools for
     reading, sending, searching, labeling, and managing email.
 
-    The agent checks for stored OAuth2 credentials on initialization.
-    If no valid credentials are found, authentication tools guide the
-    user through the OAuth2 flow.
+    When Gmail has no Composio connection yet, the authentication tools
+    guide the user through the Composio Connect Link.
 
     Example::
 
@@ -887,163 +765,21 @@ class GmailAgent(BaseChannelAgent):
         )
     """
 
-    channel_system_prompt = (
-        "\n\n## Gmail Authentication\n"
-        "Always call check_gmail_auth() first; if it returns ok, report the "
-        "authenticated email and stop — never start an OAuth flow over valid "
-        "credentials. If credentials.json is missing, call "
-        "start_gmail_browser_setup(), which opens Google Cloud Console for the "
-        "user to create an OAuth Desktop-app client; if credentials.json exists, "
-        "call authenticate_gmail() directly.\n"
-        + google_consent_steps("gmail")
-        + " Finish by verifying with check_gmail_auth() and reporting the "
-        "authenticated email address."
-    )
+    channel_system_prompt = google_auth_prompt(_SERVICE, "Gmail")
 
     def __init__(self) -> None:
         super().__init__("Gmail Agent")
         self._backend = GmailChannelBackend()
-        creds = _load_credentials()
-        if creds:  # pragma: no branch
-            self._backend._service = _build_service(creds)
+        if connected_account_id(_SERVICE):
+            self._backend._service = _build_service()
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return self._backend._service is not None
+        """Return True if Gmail is connected through Composio."""
+        return bool(connected_account_id(_SERVICE))
 
     def _get_auth_tools(self) -> list:
-        """Return channel-specific authentication tool functions."""
-        agent = self
-
-        def check_gmail_auth() -> str:
-            """Check if Gmail OAuth2 credentials are configured and valid.
-
-            Tests the stored credentials against the Gmail API.
-
-            Returns:
-                Authentication status with email address, or instructions
-                for how to authenticate.
-            """
-            if agent._backend._service is None:
-                creds_exist = _credentials_path().exists()
-                if creds_exist:
-                    return (
-                        "Not authenticated with Gmail. A credentials.json file exists. "
-                        "Call authenticate_gmail() to start the OAuth2 flow. "
-                        "Use ask_user_question() if you need user help with a browser login."
-                    )
-                return (
-                    "Not authenticated with Gmail. Call start_gmail_browser_setup() "
-                    "to open Google Cloud Console in the user's default browser so "
-                    "they can create OAuth credentials, then call "
-                    "authenticate_gmail() to start the OAuth2 consent."
-                )
-            try:
-                profile = agent._backend._service.users().getProfile(userId="me").execute()
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "email": profile.get("emailAddress", ""),
-                        "messages_total": profile.get("messagesTotal", 0),
-                    }
-                )
-            except Exception as e:
-                return json.dumps({"ok": False, "error": str(e)})
-
-        def authenticate_gmail() -> str:
-            """Start the Gmail OAuth2 consent flow.
-
-            Starts the loopback consent server, opens the Google consent
-            page in the user's default browser when this machine has one,
-            and returns the auth_url for the user to open by hand
-            otherwise. Requires credentials.json to exist at
-            ~/.kiss/third_party_agents/gmail/credentials.json. Complete
-            the flow with finish_gmail_auth().
-
-            Returns:
-                status 'consent_required' with auth_url, browser_opened and
-                instructions; instructions when credentials.json is missing;
-                or an error message.
-            """
-            answer = start_google_consent("gmail", "Gmail", _SCOPES)
-            if answer is None:
-                return (
-                    f"credentials.json not found at {_credentials_path()}. "
-                    f"Download it from Google Cloud Console ({CLOUD_CONSOLE_URL}) > "
-                    "OAuth 2.0 Client IDs > Download JSON, then save it to "
-                    f"{_credentials_path()}, or call start_gmail_browser_setup()."
-                )
-            return answer
-
-        def clear_gmail_auth() -> str:
-            """Clear the stored Gmail authentication credentials.
-
-            Returns:
-                Status message.
-            """
-            _clear_credentials()
-            agent._backend._service = None
-            return "Gmail authentication cleared."
-
-        def start_gmail_browser_setup() -> str:
-            """Open Google Cloud Console for the user to create Gmail OAuth credentials.
-
-            Opens the Credentials page in the user's default browser when
-            this machine has one and returns the steps to relay to the
-            user with ask_user_question(). Do not drive Google Cloud
-            Console or any Google sign-in page with your built-in browser,
-            and never ask for the user's Google password or 2FA code.
-
-            Returns:
-                The console URL and step-by-step instructions for the user.
-            """
-            return (
-                f"The user creates the OAuth client themselves. "
-                f"{portal_handoff(CLOUD_CONSOLE_URL)} Ask them to: 1. Create or "
-                "select a project. 2. Enable the Gmail API (APIs & Services > "
-                "Enable APIs). 3. Credentials > Create Credentials > OAuth client "
-                "ID > Desktop app. 4. Download the JSON and either paste its "
-                f"content back or save it to {_credentials_path()}. Write pasted "
-                "content to that path yourself, then call authenticate_gmail() to "
-                "start the OAuth consent. Do not drive Google Cloud Console or any "
-                "Google sign-in page with your built-in browser, and never ask for "
-                "the user's Google password or 2FA code."
-            )
-
-        def finish_gmail_auth() -> str:
-            """Complete the Gmail OAuth consent started by authenticate_gmail().
-
-            Call after the user has approved consent in their own browser
-            (and, when they did so on another machine, after the pasted
-            redirect URL has been delivered to the local consent server
-            with ``curl -s '<pasted redirect URL>'``).
-
-            Returns:
-                Authentication result, a pending status when consent is not
-                finished, or an error message.
-            """
-            creds, status = RemoteOAuthSession.finish("gmail", _SCOPES)
-            if status == "pending":
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "status": "pending",
-                        "error": "Consent is not completed yet; finish the flow in "
-                                 "the browser, then call this tool again.",
-                    }
-                )
-            if creds is None:
-                return json.dumps({"ok": False, "error": f"OAuth flow failed: {status}"})
-            agent._backend._service = _build_service(creds)
-            return json.dumps({"ok": True, "message": "Gmail authentication successful."})
-
-        return [
-            check_gmail_auth,
-            authenticate_gmail,
-            clear_gmail_auth,
-            start_gmail_browser_setup,
-            finish_gmail_auth,
-        ]
+        """Return the Composio sign-in tool set for Gmail."""
+        return make_google_auth_tools(self, _SERVICE, "Gmail", self._backend.connect)
 
 
 def main() -> None:
@@ -1056,7 +792,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    Composio connection recorded under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return GmailAgent()._get_tools()

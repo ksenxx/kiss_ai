@@ -5,14 +5,15 @@
 """End-to-end tests for the Google Docs channel agent.
 
 Runs a REAL local HTTP server (stdlib ``ThreadedHTTPServer``) emulating
-the Google Docs v1 and Drive v3 REST endpoints — no mocks, patches, or
-fakes.  The server asserts the ``Authorization: Bearer`` header on
-every call, returns canned JSON, and records requests (method, path,
-query, body) for verification.
+the Google Docs v1 and Drive v3 REST endpoints and reached through a
+real local Composio API emulator (``composio_test_utils``) whose proxy
+injects the bearer token — no mocks or patches.  The server asserts
+the ``Authorization: Bearer`` header on every call, returns canned
+JSON, and records requests (method, path, query, body) for
+verification.
 
-Credential state is isolated per pytest process because the session
-conftest points ``KISS_HOME`` at a temporary directory and every
-``_google_workspace_utils`` path helper resolves ``$KISS_HOME`` lazily.
+Connection state is isolated per pytest process because the session
+conftest points ``KISS_HOME`` at a temporary directory.
 """
 
 from __future__ import annotations
@@ -31,26 +32,24 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents._google_workspace_utils import (
-    clear_google_credentials,
-    fresh_access_token,
-    token_path,
-)
 from kiss.agents.third_party_agents.gdocs_sea import (
-    _SCOPES,
     _SERVICE,
     GoogleDocsAgent,
     GoogleDocsChannelBackend,
 )
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    TOKEN,
+    connect,
+    reset_state,
+    start_fake_composio,
+)
 
-_TOKEN = "test-token"
-_SYNTHETIC_TOKEN = "synthetic-access-token"
+_TOKEN = TOKEN
 
 _AUTH_TOOL_NAMES = [
     "check_google_docs_auth",
     "authenticate_google_docs",
     "clear_google_docs_auth",
-    "start_google_docs_browser_setup",
     "finish_google_docs_auth",
 ]
 
@@ -296,41 +295,28 @@ def docs_server():
 
 
 @pytest.fixture()
-def backend(docs_server):
-    """A backend pointed at the emulated server with a directly injected token."""
+def backend(docs_server, composio):
+    """A connected backend pointed at the emulated server."""
     base_url, server = docs_server
+    connect(composio, _SERVICE)
     b = GoogleDocsChannelBackend()
-    b._token = _TOKEN
     b._base_url = base_url
     b._drive_base_url = f"{base_url}/drive/v3"
     return b, server
 
 
 @pytest.fixture(autouse=True)
-def _fresh_credentials():
-    """Start and end every test with no persisted Google Docs token."""
-    clear_google_credentials(_SERVICE)
+def _fresh_state():
+    """Start and end every test with no recorded Composio connection."""
+    reset_state(_SERVICE)
     yield
-    clear_google_credentials(_SERVICE)
+    reset_state(_SERVICE)
 
 
-def _write_synthetic_token() -> None:
-    """Persist a synthetic, non-expiring OAuth2 user token for the service."""
-    path = token_path(_SERVICE)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "token": _SYNTHETIC_TOKEN,
-                "refresh_token": "synthetic-refresh",
-                "client_id": "synthetic-client-id",
-                "client_secret": "synthetic-client-secret",
-                "scopes": _SCOPES,
-                "expiry": "2099-01-01T00:00:00Z",
-            }
-        ),
-        encoding="utf-8",
-    )
+@pytest.fixture()
+def composio(monkeypatch):
+    """Run the local Composio API emulator and point the SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
 def test_unauthenticated_agent_exposes_only_auth_tools() -> None:
@@ -341,15 +327,16 @@ def test_unauthenticated_agent_exposes_only_auth_tools() -> None:
     assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
 
 
-def test_synthetic_token_authenticates_new_agent() -> None:
-    """A synthetic token.json makes a NEW agent authenticated without network."""
-    _write_synthetic_token()
+def test_connect_link_flow_authenticates_agent(composio) -> None:
+    """authenticate -> user approves -> finish unlocks the backend tools."""
     agent = GoogleDocsAgent()
+    tools = {t.__name__: t for t in agent._get_tools()}
+    started = json.loads(tools["authenticate_google_docs"]())
+    assert started["status"] == "consent_required"
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    assert json.loads(tools["finish_google_docs_auth"]())["ok"] is True
     assert agent._is_authenticated() is True
-    creds = agent._backend._creds
-    assert creds is not None
-    assert creds.valid is True
-    assert fresh_access_token(creds) == _SYNTHETIC_TOKEN
+    assert agent._backend.connection_info == "Google Docs connected through Composio."
     names = {t.__name__ for t in agent._get_tools()}
     assert set(_AUTH_TOOL_NAMES) <= names
     assert _BACKEND_TOOL_NAMES <= names
@@ -357,14 +344,14 @@ def test_synthetic_token_authenticates_new_agent() -> None:
     assert "connect" not in names
 
 
-def test_clear_auth_removes_token_and_relocks() -> None:
-    """clear_google_docs_auth deletes the token file and re-locks the agent."""
-    _write_synthetic_token()
+def test_clear_auth_removes_connection_and_relocks(composio) -> None:
+    """clear_google_docs_auth deletes the Composio connection and re-locks the agent."""
+    account = connect(composio, _SERVICE)
     agent = GoogleDocsAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools["clear_google_docs_auth"]()
     assert "cleared" in result.lower()
-    assert not token_path(_SERVICE).exists()
+    assert composio.deleted == [account]
     assert agent._is_authenticated() is False
     assert len(agent._get_tools()) == len(_AUTH_TOOL_NAMES)
 
@@ -380,24 +367,15 @@ def test_connect_without_credentials_fails() -> None:
     """connect() fails cleanly when no token is persisted or injected."""
     b = GoogleDocsChannelBackend()
     assert b.connect() is False
-    assert "No Google Docs credentials" in b.connection_info
+    assert "not connected" in b.connection_info
 
 
-def test_connect_with_persisted_token_succeeds() -> None:
-    """connect() loads a persisted synthetic token into the backend."""
-    _write_synthetic_token()
+def test_connect_with_composio_connection_succeeds(composio) -> None:
+    """connect() succeeds once a Composio connection is recorded."""
+    connect(composio, _SERVICE)
     b = GoogleDocsChannelBackend()
     assert b.connect() is True
-    assert b._creds is not None
-    assert "credentials loaded" in b.connection_info.lower()
-
-
-def test_connect_with_injected_token_succeeds() -> None:
-    """connect() accepts a directly injected bearer token without a token file."""
-    b = GoogleDocsChannelBackend()
-    b._token = _TOKEN
-    assert b.connect() is True
-    assert b._creds is None
+    assert "connected through Composio" in b.connection_info
 
 
 def test_poll_messages_returns_empty(backend) -> None:
@@ -564,13 +542,10 @@ def test_document_id_is_encoded_as_single_path_segment(backend) -> None:
     assert server.requests[-1]["path"] == "/documents/doc%201%252"
 
 
-def test_unauthorized_token_returns_ok_false(docs_server) -> None:
+def test_unauthorized_token_returns_ok_false(backend, composio) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = docs_server
-    b = GoogleDocsChannelBackend()
-    b._token = "wrong-token"
-    b._base_url = base_url
-    b._drive_base_url = f"{base_url}/drive/v3"
+    b, _ = backend
+    composio.token = "wrong-token"
     for call in (
         lambda: b.gdocs_create_document("t"),
         lambda: b.gdocs_read_document("doc123"),
@@ -596,10 +571,9 @@ def test_server_error_returns_ok_false(backend) -> None:
     assert "500" in result["error"]
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(backend) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
-    b = GoogleDocsChannelBackend()
-    b._token = _TOKEN
+    b, _ = backend
     b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
     b._drive_base_url = "http://127.0.0.1:9/drive/v3"
     for call in (

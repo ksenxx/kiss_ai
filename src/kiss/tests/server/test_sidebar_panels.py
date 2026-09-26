@@ -160,9 +160,10 @@ class TestAuthStatusProbe(_StoreTestCase):
         self.assertIs(
             auth_status.channel_status("brave", {"brave_search"})["authenticated"], True
         )
-        # Google Workspace channels enroll under their module's _SERVICE.
+        # Google Workspace channels connect through Composio now: a stale
+        # vault enrollment left by an older version does not count.
         self.assertIs(
-            auth_status.channel_status("gcal", {"google_calendar"})["authenticated"], True
+            auth_status.channel_status("gcal", {"google_calendar"})["authenticated"], False
         )
         by_name = {
             s["name"]: s for s in auth_status.all_channel_statuses(enrolled={"discord"})

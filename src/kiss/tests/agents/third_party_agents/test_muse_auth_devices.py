@@ -336,7 +336,7 @@ def test_discord_bot_scheme_boundary_swap(muse_env: Path, api_server: _DeviceApi
     )
     backend = _discord_backend(api_server)
     assert backend.connect()
-    assert backend._bot_token.startswith("muse-sgt.discord.")
+    assert backend._token.startswith("muse-sgt.discord.")
     assert vault_has_credentials("discord")
     # connect() validated /users/@me (a read) through the boundary with
     # the REAL Bot-scheme header; the surrogate never hit the network.
@@ -407,11 +407,11 @@ def test_discord_vault_first_and_make_backend(
     # The vault alone still connects (mint path, no config anywhere).
     backend2 = _discord_backend(api_server)
     assert backend2.connect()
-    assert backend2._bot_token.startswith("muse-sgt.discord.")
+    assert backend2._token.startswith("muse-sgt.discord.")
 
     # Poll-mode backends wire the same surrogate.
     polled = _make_backend()
-    assert polled._muse and polled._bot_token.startswith("muse-sgt.discord.")
+    assert polled._muse and polled._token.startswith("muse-sgt.discord.")
 
     # Without vault or config there is nothing to connect with.
     clear_credentials("discord")
@@ -432,7 +432,7 @@ def test_discord_authenticate_rotation_rollback_clear(
         "DISCORD_API_BASE", f"http://127.0.0.1:{api_server.server_address[1]}/api/v10"
     )
     agent = DiscordAgent()
-    assert agent._backend._bot_token == ""
+    assert agent._backend._token == ""
     tools = auth_tools(agent)
     assert "Not authenticated" in tools["check_discord_auth"]()
 
@@ -461,7 +461,7 @@ def test_discord_authenticate_rotation_rollback_clear(
     failed = json.loads(tools["authenticate_discord"]("tok-invalid"))
     assert failed["ok"] is False
     assert not vault_has_credentials("discord")
-    assert agent._backend._bot_token == ""
+    assert agent._backend._token == ""
 
     # A token the daemon itself rejects (embedded newline) surfaces the
     # enrollment error and leaves the vault empty too.
@@ -892,12 +892,12 @@ def test_discord_legacy_mode_unchanged(
     assert not (muse_auth_dir() / "vault").exists()
 
     agent2 = DiscordAgent()
-    assert agent2._backend._bot_token == _REAL_DISCORD_TOKEN
+    assert agent2._backend._token == _REAL_DISCORD_TOKEN
     polled = _make_backend()
-    assert polled._bot_token == _REAL_DISCORD_TOKEN and not polled._muse
+    assert polled._token == _REAL_DISCORD_TOKEN and not polled._muse
     backend2 = _discord_backend(api_server)
     assert backend2.connect()
-    assert backend2._connection_info == "Authenticated as kissbot#0"
+    assert backend2._connection_info == "Authenticated as kissbot#0 (bot)"
 
     assert "cleared" in tools["clear_discord_auth"]()
     assert not discord_config.path.exists()
@@ -1629,7 +1629,7 @@ def test_wiring_failure_leaves_agents_constructible(
     # A token the daemon rejects at enrollment (embedded newline).
     discord_config.save({"bot_token": "bad\ntoken"})
     agent = DiscordAgent()
-    assert agent._backend._bot_token == ""
+    assert agent._backend._token == ""
     assert "Muse-auth wiring failed" in agent._backend._connection_info
     assert not vault_has_credentials("discord")
 

@@ -28,12 +28,16 @@ the user's password or second factor is never requested.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import math
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import requests
 
@@ -405,6 +409,195 @@ class NextcloudLoginSession(ConsentSession):
         return self.base_url
 
 
+@dataclass(frozen=True)
+class PkceProvider:
+    """Endpoints of an OAuth 2.0 authorization server used with PKCE.
+
+    Attributes:
+        authorize_url: Authorization endpoint the user's browser opens.
+        token_url: Token endpoint the code is exchanged at.
+    """
+
+    authorize_url: str
+    token_url: str
+
+
+class _CallbackHandler(BaseHTTPRequestHandler):
+    """Records the OAuth redirect on the loopback server's session."""
+
+    server: _LoopbackServer  # type: ignore[assignment]
+    # Socket timeout of an accepted connection: a half-open browser
+    # request must not pin the serving thread (and the port) forever.
+    timeout = 5
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server naming
+        """Record the redirect query and show a completion page."""
+        parts = urlsplit(self.path)
+        if parts.path != self.server.callback_path:
+            self.send_error(404)
+            return
+        self.server.session._callback = dict(parse_qsl(parts.query))
+        body = b"Sign-in received. You can close this tab and return to the chat."
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: Any) -> None:  # type: ignore[override]
+        """Silence per-request logging."""
+
+
+class _LoopbackServer(HTTPServer):
+    """Loopback redirect server bound to one :class:`LoopbackPkceSession`."""
+
+    allow_reuse_address = True
+
+    def __init__(self, port: int, callback_path: str, session: LoopbackPkceSession) -> None:
+        self.callback_path = callback_path
+        self.session = session
+        super().__init__(("127.0.0.1", port), _CallbackHandler)
+
+
+class LoopbackPkceSession(ConsentSession):
+    """OAuth 2.0 authorization-code grant with PKCE for a public client.
+
+    Slack and Discord offer no device flow, but both accept a public
+    client that proves possession with PKCE (RFC 7636) instead of a
+    client secret.  The session binds a loopback redirect server, hands
+    back the authorization URL for the user's browser, and exchanges the
+    returned code for tokens once the redirect lands.  When the user
+    approves on another device, their browser stops at an unreachable
+    ``http://localhost:PORT/callback?...`` page; the agent replays that
+    pasted URL here with ``curl`` and the exchange completes locally.
+
+    At most one loopback session runs at a time because every KISS app
+    registers the same fixed redirect port.
+    """
+
+    loopback = True
+    _port_lock = threading.RLock()
+    _port_owner: LoopbackPkceSession | None = None
+
+    def __init__(
+        self,
+        service: str,
+        provider: PkceProvider,
+        client_id: str,
+        redirect_uri: str,
+        params: dict[str, str],
+        lifetime: float = 600.0,
+    ) -> None:
+        """Bind the redirect server and build the authorization URL.
+
+        Args:
+            service: Connector service name.
+            provider: The authorization server's endpoints.
+            client_id: Public OAuth client ID (never a secret).
+            redirect_uri: Registered ``http://localhost:PORT/path`` URI.
+            params: Extra authorization parameters (scopes and any
+                provider-specific fields).
+            lifetime: Seconds the user has to approve.
+
+        Raises:
+            OSError: When the redirect port cannot be bound.
+        """
+        super().__init__(service, lifetime, 0.5)
+        self.provider = provider
+        self.client_id = client_id
+        self.redirect_uri = redirect_uri
+        self._callback: dict[str, str] | None = None
+        self._verifier = secrets.token_urlsafe(64)
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(self._verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        self._state = secrets.token_urlsafe(24)
+        redirect = urlsplit(redirect_uri)
+        with LoopbackPkceSession._port_lock:
+            owner = LoopbackPkceSession._port_owner
+            if owner is not None:
+                owner.cancel()
+            self._server = _LoopbackServer(redirect.port or 80, redirect.path or "/", self)
+            self._server.timeout = 0.25
+            self._server_thread = threading.Thread(target=self._serve, daemon=True)
+            self._server_thread.start()
+            # Published only once fully set up: a concurrent constructor
+            # cancels the owner, which joins its serving thread.
+            LoopbackPkceSession._port_owner = self
+        query = {
+            **params,
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": self._state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        self.verification_uri = f"{provider.authorize_url}?{urlencode(query)}"
+
+    def _serve(self) -> None:
+        """Answer redirect requests until the session stops, then close the socket.
+
+        The socket is closed here, on the serving thread: closing it from
+        another thread while ``handle_request`` is blocked in ``select``
+        keeps the kernel socket (and the port) alive until that call
+        returns, so a replacing session would fail to bind.
+        """
+        try:
+            while not self._cancelled and self.result is None and not self.error:
+                self._server.handle_request()
+        finally:
+            self._server.server_close()
+
+    def cancel(self) -> None:
+        """Stop polling and release the redirect port."""
+        super().cancel()
+        self._close_server()
+
+    def _close_server(self) -> None:
+        """Wait for the redirect server to close and give up port ownership.
+
+        Every caller has already set a stop condition (cancel, result or
+        error), so the serving loop exits within one ``handle_request``
+        timeout.
+        """
+        with LoopbackPkceSession._port_lock:
+            if LoopbackPkceSession._port_owner is self:
+                LoopbackPkceSession._port_owner = None
+            self._server_thread.join()
+
+    def _run(self) -> None:
+        """Poll for the redirect, then release the port."""
+        try:
+            super()._run()
+        finally:
+            self._close_server()
+
+    def _poll_once(self) -> dict[str, Any] | None:
+        """Exchange the code once the redirect has arrived."""
+        callback = self._callback
+        if callback is None:
+            return None
+        if not secrets.compare_digest(callback.get("state", ""), self._state):
+            raise RuntimeError("sign-in refused (state mismatch)")
+        if callback.get("error"):
+            raise RuntimeError(_describe_failure(400, callback, "sign-in"))
+        form = {
+            "grant_type": "authorization_code",
+            "code": callback.get("code", ""),
+            "redirect_uri": self.redirect_uri,
+            "client_id": self.client_id,
+            "code_verifier": self._verifier,
+        }
+        status, data = _post_form(self.provider.token_url, form)
+        # Slack answers HTTP 200 with ``ok: false`` on failure.
+        if status == 200 and not data.get("error") and data.get("ok", True) is not False:
+            return data
+        raise RuntimeError(_describe_failure(status, data, "code exchange"))
+
+
 def _origin(url: str) -> tuple[str, str, int | None]:
     """Return ``(scheme, host, port)`` of *url* for same-origin checks.
 
@@ -462,6 +655,27 @@ def consent_instructions(
         f"{max(session.expires_in // 60, 1)} minutes). 2) Call "
         f"finish_{service}_auth(); if it returns 'pending', wait a few seconds "
         "and call it again. Nothing has to be pasted back."
+        + _loopback_step(session)
+    )
+
+
+def _loopback_step(session: ConsentSession) -> str:
+    """Return the paste-back hand-off for a loopback-redirect session.
+
+    Args:
+        session: The started session.
+
+    Returns:
+        Extra instructions for a :class:`LoopbackPkceSession` (whose
+        redirect only reaches this machine), else ``""``.
+    """
+    if not getattr(session, "loopback", False):
+        return ""
+    return (
+        " Exception: if the user approved on ANOTHER device, their browser ends "
+        "on an unreachable http://localhost:PORT/callback?... page; ask them to "
+        "paste that complete URL back and deliver it to this machine with Bash: "
+        "curl -s '<pasted URL>' (quote it), then call the finish tool."
     )
 
 
@@ -517,7 +731,7 @@ class TokenGrant:
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_session(cls, session: DeviceFlowSession) -> TokenGrant:
+    def from_session(cls, session: ConsentSession) -> TokenGrant:
         """Normalize the token response a finished device-flow session holds.
 
         Args:

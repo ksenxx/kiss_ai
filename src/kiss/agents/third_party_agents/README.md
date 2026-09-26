@@ -116,11 +116,11 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
-  `~/.kiss`). On Linux, outbound API secrets for the 24 Muse-covered services (see
+  `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
   below) migrate out of those files into the `$KISS_HOME/muse_auth/vault` credential
-  vault on first use; non-secret settings, OAuth bootstrap files (Google's
-  `credentials.json`), and inbound-verification secrets (LINE's `channel_secret`) stay
-  in the service directory. Because auth tools are always available,
+  vault on first use; non-secret settings and inbound-verification secrets (LINE's
+  `channel_secret`) stay in the service directory. The Google Workspace agents keep no
+  Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
   a not-yet-configured agent can walk you through authentication *in chat* — you never
   have to hand-edit `config.json` first.
 - Backends whose platform has an inbound message stream also implement
@@ -148,8 +148,8 @@ one) in the chat, so you can finish by hand when no window appeared — the agen
 on a remote or headless host, say. `$BROWSER` picks the browser; `KISS_HEADLESS=1`
 turns the automatic opening off.
 
-- **Connect-style browser sign-in** (GitHub, Twitch, Microsoft Teams, Nextcloud Talk,
-  Matrix, Signal). `authenticate_<service>` without a token starts the sign-in, opens
+- **Connect-style browser sign-in** (GitHub, Microsoft Teams, Slack, Discord, Twitch,
+  Nextcloud Talk, Matrix, Signal). `authenticate_<service>` starts the sign-in, opens
   the link in your default browser when it can, and returns it — for Signal, a QR code
   to scan like Signal Desktop, also opened as a black-on-white page — that you open
   and approve in your *own* browser or on your phone, while the agent polls in the
@@ -157,28 +157,44 @@ turns the automatic opening off.
   until your approval lands). WhatsApp has its own variant of this:
   `start_whatsapp_bridge` + `get_whatsapp_qr_code` open a pairing QR page that you
   scan from the phone, and `wait_for_whatsapp_pairing` waits for the scan.
-  Where the flow first needs an OAuth app of your own (GitHub, Twitch, Microsoft
-  Teams), calling `authenticate_<service>` without the client ID opens the provider's
-  app-registration page for you and says what to copy back.
-- **Consent hand-off** (Gmail and the five other Google agents).
-  `authenticate_<service>` starts a loopback consent server, opens Google's consent
-  page in your default browser when it can, and hands you the authorization URL
-  either way. Approving on the same machine completes by itself; approving from
-  another device ends on a `localhost` redirect URL that you paste back into the chat
-  for the agent to replay locally. `finish_<service>_auth` stores the token. (Creating
-  the OAuth client itself is separate: `start_gmail_browser_setup` /
-  `start_<service>_browser_setup` opens the Google Cloud Console credentials page for
-  you and lists the steps — Google Chat, whose check tool opens the console and gives
-  the setup instructions instead, has no such tool.)
-- **Portal hand-off with token paste-back** (Slack, Discord, and the API-key channels
-  such as Brave, Notion, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
+  GitHub, Microsoft Teams, Slack and Discord sign in through KISS-owned public OAuth
+  apps (device flow for GitHub and Teams, PKCE with a loopback redirect for Slack and
+  Discord), so you register nothing: you sign in and click Allow. The client IDs live
+  in `_oauth_apps.py`; `KISS_<PROVIDER>_CLIENT_ID` substitutes your own app. A
+  Slack or Discord sign-in yields a *user* token: Slack acts as you (its posts appear
+  under your name, and in channel mode it answers other people, not messages you
+  wrote yourself), and Discord can list your servers and post to the one channel you
+  pick at sign-in (its message reading and channel mode still need a bot token, which
+  Discord issues only to the app owner). Twitch still needs an OAuth app of your own; calling
+  `authenticate_twitch` without the client ID opens its app-registration page.
+- **MCP servers with OAuth** (Notion, Linear, Asana, Zoom and any remote MCP server).
+  Sorcar's `connect_mcp_server(name)` tool (or `python -m kiss.agents.sorcar.mcp_oauth
+  <name>`) runs the MCP authorization flow directly against the server: the client
+  registers itself (CIMD or dynamic registration), you sign in and click Allow, and
+  the tokens land in `~/.kiss/mcp_auth/<server>.json`, where later runs refresh them.
+  Zoom's authorization server accepts only pre-registered apps: set
+  `KISS_MCP_ZOOM_CLIENT_ID` / `KISS_MCP_ZOOM_CLIENT_SECRET` from an app that lists
+  `http://localhost:53683/callback` as redirect URI.
+- **Composio sign-in** (Gmail, Google Calendar, Docs, Drive, Sheets and Chat).
+  Google only lets verified OAuth apps request Workspace scopes, so KISS brokers
+  Google through Composio. `authenticate_<service>` (pass `api_key=` once if no
+  `COMPOSIO_API_KEY` is configured; create one at https://dashboard.composio.dev)
+  returns a Composio Connect Link and opens it in your default browser when it can;
+  you sign in to Google and click Allow there, and `finish_<service>_auth` records the
+  connection (answering `pending` until you approve). Every API call then goes through
+  Composio's proxy, which adds the Google token, so no Google token is stored locally.
+  One limit: Composio has no managed Google Chat app, so Chat user sign-in needs a custom
+  Composio auth config whose ID you set in `KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT`.
+  Google Chat can instead act as a Chat bot via
+  `authenticate_googlechat_service_account(path)`.
+- **Portal hand-off with token paste-back** (the API-key channels such as Brave,
+  Notion's REST agent, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
   Overleaf, which has no OAuth or public API, is the same flow with the
   `overleaf_session2` browser cookie pasted back instead of a token).
-  `start_slack_browser_auth` / `start_discord_browser_auth` — or, for the API-key
-  channels, `check_<service>_auth` itself — open the provider's developer portal in
-  your default browser and tell the agent the steps to relay; you create the app in
-  your own browser and paste the token back. The agent never drives the portal with
-  its built-in browser.
+  `check_<service>_auth` opens the provider's developer portal in your default
+  browser and tells the agent the steps to relay; you create the key in your own
+  browser and paste it back. The agent never drives the portal with its built-in
+  browser.
 
 Do interactive auth from a chat surface — the agent may need to ask you questions,
 and the chat panel is where you answer them.
@@ -191,7 +207,7 @@ your **next** prompt:
 
 ## Credential isolation (Muse auth)
 
-On Linux, credentials for the 24 Muse-supported services are isolated by default behind
+On Linux, credentials for the 18 Muse-supported services are isolated by default behind
 a Meta-Muse-style security boundary implemented in the `muse_auth/` package: legacy
 tokens auto-migrate into a vault owned by a local auth daemon on first use (a one-time
 hand-off of the real credential through the agent process), after which ordinary
@@ -203,15 +219,13 @@ write, and checked against an allow/deny/ask policy. Reads are allowed by defaul
 writes ask for a grant. The audit log records the Sentinel's allow/deny/ask decisions —
 not whether the network call afterwards succeeded.
 
-Covered services (`muse_auth/_common.py` `SERVICE_HOSTS`): the six Google services
-(`gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`,
-`googlechat` — Google Chat's service-account mode excepted) plus `slack`, `github`,
-`notion`, `discord`, `homeassistant`, `firecrawl`, `brave_search`, `ntfy`, `govee`,
+Covered services: `slack`, `github`, `notion`, `discord`, `homeassistant`, `firecrawl`, `brave_search`, `ntfy`, `govee`,
 `line`, `mattermost`, `msteams`, `nextcloud`, `synology`, `telegram`, `twitch`, `zalo`,
-and `bluebubbles`. Other channels keep their legacy direct-credential path.
+and `bluebubbles`. Other channels keep their legacy direct-credential path; the
+Google agents go through Composio instead.
 
 The boundary is managed with `python -m kiss.agents.third_party_agents.muse_auth`
-(verbs: `status`, `enroll SERVICE`, `import SERVICE`, `grant SERVICE read|write`,
+(verbs: `status`, `import SERVICE`, `grant SERVICE read|write`,
 `revoke SERVICE`, `export SERVICE`, `clear SERVICE`, `audit`, `daemon`, `stop`) —
 you can run it yourself or simply ask Sorcar to do it:
 
@@ -219,8 +233,7 @@ you can run it yourself or simply ask Sorcar to do it:
 
 > Grant the github service a single-use write permission.
 
-`enroll` supports only the six Google OAuth services; every other covered service
-enrolls itself when its legacy credential auto-migrates on first use — and the
+Every covered service enrolls itself when its legacy credential auto-migrates on first use — and the
 Connect-style browser sign-ins for GitHub, Twitch, and Microsoft Teams store their
 grant straight into the vault: as a refresh-token credential the daemon renews itself
 when the grant includes a refresh token (Teams requires one; GitHub OAuth apps issue
@@ -249,18 +262,18 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | --- | --- | --- | --- | --- |
 | BlueBubbles (iMessage via a Mac server) | `bluebubbles` | yes | server URL + password, `bluebubbles/config.json` | `list_chats`, `get_chat`, `get_chat_messages`, `post_message`, `get_server_info`, `mark_chat_read` |
 | DingTalk group robots | `dingtalk` | yes | robot webhook (+ optional `secret`, `outgoing_token`), `dingtalk/config.json` | `post_message`, `post_markdown` |
-| Discord | `discord` | yes | bot token (also `start_discord_browser_auth`), `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
+| Discord | `discord` | yes | click-Allow sign-in through the KISS Discord app (`authenticate_discord`, `finish_discord_auth`; user token + one webhook channel), or `authenticate_discord(bot_token=...)` for bot-only features, `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
 | Email (any IMAP/SMTP mailbox) | `email` | yes | IMAP host + SMTP host + address + app-password, `email/config.json` | `send_email`, `list_unread_emails`, `read_email`, `mark_email_read` |
 | Feishu / Lark | `feishu` | yes | `app_id` + `app_secret`, `feishu/config.json` | `send_text_message`, `reply_message`, `delete_message`, `list_messages`, `list_chats`, `get_chat`, `get_user_info` |
-| Gmail | `gmail` | no | OAuth2 (`start_gmail_browser_setup`, `finish_gmail_auth`), token in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
-| Google Chat | `googlechat` | yes | service account or OAuth2 (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
+| Gmail | `gmail` | no | Composio Connect Link (`authenticate_gmail`, `finish_gmail_auth`), connection record in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
+| Google Chat | `googlechat` | yes | service account (`authenticate_googlechat_service_account`) or Composio with a custom auth config (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
 | Home Assistant | `homeassistant` | no | `base_url` + long-lived token, `homeassistant/config.json` | `ha_get_states`, `ha_call_service`, `ha_list_services`, `ha_get_history`, `ha_render_template`, `ha_fire_event` |
 | iMessage (macOS AppleScript) | `imessage` | no | local Messages app, `imessage/config.json` | `send_imessage`, `send_attachment`, `list_conversations`, `get_messages` |
 | IRC | `irc` | yes | server/nick (+ NickServ), `irc/config.json` | `connect_irc`, `join_irc_channel`, `leave_channel`, `post_message`, `send_notice`, `get_topic`, `set_topic`, `kick_user`, `whois`, `identify_nickserv` |
 | LINE | `line` | yes | channel access token, `line/config.json` | `push_text_message`, `reply_message`, `get_profile`, `get_quota`, `leave_group`, `push_image_message` |
 | Matrix | `matrix` | yes | browser sign-in via the homeserver's OAuth 2.0 device grant (`authenticate_matrix(homeserver_url)`, `finish_matrix_auth`; matrix.org and other MAS-backed servers; the agent renews the short-lived token itself) or a hand-supplied access token (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile`, `refresh_if_needed` (renews an OAuth-issued token) |
 | Mattermost | `mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_third_party_agents` (channels), `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
-| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow (`authenticate_msteams(tenant_id, client_id)`, `finish_msteams_auth`; delegated token refreshed by the Muse daemon) or app-only client credentials, `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
+| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow through the KISS multi-tenant app (`authenticate_msteams()`, optional `tenant_id`; `finish_msteams_auth`; delegated token refreshed by the Muse daemon), `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
 | Nextcloud Talk | `nextcloud` | yes | browser sign-in via Login Flow v2 (`authenticate_nextcloud(url)`, `finish_nextcloud_auth`; app password issued by the server) or username + app password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message`, `revoke_app_password` |
 | Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
@@ -268,7 +281,7 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | QQ bot platform | `qq` | yes | app id/secret (Ed25519 webhook), `qq/config.json` | `send_group_message`, `send_c2c_message` |
 | Signal (signal-cli) | `signal` | yes | link like Signal Desktop: `authenticate_signal()` runs `signal-cli link` and shows a QR code to scan from the phone, `finish_signal_auth` records the account; or an already registered signal-cli number, `signal/config.json` | `send_signal_message`, `receive_messages`, `send_attachment`, `list_contacts`, `list_groups` |
 | SimpleX Chat | `simplex` | yes | local `simplex-chat -p 5225` WebSocket, `simplex/config.json` | `send_simplex_message`, `list_simplex_contacts`, `get_simplex_address` |
-| Slack | `slack` | yes | bot token (also `start_slack_browser_auth`); one credential set per workspace in `slack/<workspace>/token.json` | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
+| Slack | `slack` | yes | click-Allow sign-in through the KISS Slack app with PKCE (`authenticate_slack`, `finish_slack_auth`; rotating user token refreshed by the Muse daemon); one credential set per workspace | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
 | SMS / voice (Twilio) | `sms` | yes | account SID + auth token + from number, `sms/config.json` | `send_sms`, `send_mms`, `list_messages`, `get_message`, `list_phone_numbers`, `get_account_info`, `send_whatsapp_message`, `create_call`, `list_calls`, `get_call`, `cancel_message` |
 | Synology Chat | `synology` | yes | incoming/outgoing webhooks, `synology/config.json` | `post_message`, `send_file_message` |
 | Telegram | `telegram` | yes | @BotFather bot token, `telegram/config.json` | `send_text`, `send_photo`, `send_document`, `edit_message_text`, `delete_message`, `pin_message`, `unpin_message`, `get_chat`, `get_chat_members_count`, `get_chat_member`, `ban_chat_member`, `unban_chat_member`, `get_updates`, `send_poll`, `forward_message` |
@@ -295,11 +308,11 @@ through another channel's backend (`deliver_module` routes).
 | --- | --- | --- | --- |
 | Brave Search | `brave` | subscription token, `brave_search/config.json` | `brave_web_search`, `brave_news_search`, `brave_image_search`, `brave_video_search` |
 | Firecrawl (scraping/crawling) | `firecrawl` | API key (+ optional self-hosted `base_url`), `firecrawl/config.json` | `firecrawl_scrape`, `firecrawl_map`, `firecrawl_search`, `firecrawl_start_crawl`, `firecrawl_get_crawl_status`, `firecrawl_cancel_crawl` |
-| GitHub | `github` | browser sign-in via the OAuth device flow (`authenticate_github(client_id=...)` with a device-flow-enabled OAuth app; the client ID may instead come from `oauth_client_id` in `github/config.json` or `$KISS_GITHUB_CLIENT_ID`; finish with `finish_github_auth`) or a personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
-| Google Calendar | `gcal` | OAuth2 quintet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `start_google_calendar_browser_setup`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
-| Google Docs | `gdocs` | OAuth2 quintet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
-| Google Drive | `gdrive` | OAuth2 quintet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
-| Google Sheets | `gsheets` | OAuth2 quintet (for `google_sheets`), `google_sheets/` | `gsheets_create_spreadsheet`, `gsheets_get_info`, `gsheets_get_values`, `gsheets_update_values`, `gsheets_append_values`, `gsheets_clear_values`, `gsheets_add_sheet`, `gsheets_batch_update`, `gsheets_list_spreadsheets` |
+| GitHub | `github` | browser sign-in via the OAuth device flow through the KISS GitHub app (`authenticate_github(read_only=...)`, finish with `finish_github_auth`; `$KISS_GITHUB_CLIENT_ID` substitutes another app), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
+| Google Calendar | `gcal` | Composio quartet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
+| Google Docs | `gdocs` | Composio quartet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
+| Google Drive | `gdrive` | Composio quartet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
+| Google Sheets | `gsheets` | Composio quartet (for `google_sheets`), `google_sheets/` | `gsheets_create_spreadsheet`, `gsheets_get_info`, `gsheets_get_values`, `gsheets_update_values`, `gsheets_append_values`, `gsheets_clear_values`, `gsheets_add_sheet`, `gsheets_batch_update`, `gsheets_list_spreadsheets` |
 | Notion | `notion` | internal-integration token, `notion/config.json` | `notion_search`, `notion_get_page`, `notion_get_block_children`, `notion_append_paragraph`, `notion_append_blocks`, `notion_create_page`, `notion_update_page`, `notion_get_database`, `notion_query_database`, `notion_list_users`, `notion_create_comment`, `notion_get_comments` |
 | Overleaf | `overleaf` | `overleaf_session2` browser session cookie (no OAuth or public API; sign in in your own browser and paste the cookie) + optional Git bridge token and Server Pro `host`, `overleaf/config.json` | `overleaf_whoami`, `overleaf_list_projects`, `overleaf_create_project`, `overleaf_upload_project_zip`, `overleaf_rename_project`, `overleaf_clone_project`, `overleaf_set_project_state`, `overleaf_update_project_settings`, `overleaf_download_project_zip`, `overleaf_list_files`, `overleaf_read_file`, `overleaf_download_file`, `overleaf_write_file`, `overleaf_upload_file`, `overleaf_create_folder`, `overleaf_rename_entity`, `overleaf_move_entity`, `overleaf_delete_entity`, `overleaf_compile`, `overleaf_download_pdf`, `overleaf_word_count`, `overleaf_clear_compile_cache`, `overleaf_list_members`, `overleaf_invite_collaborator`, `overleaf_set_collaborator_privileges`, `overleaf_remove_collaborator`, `overleaf_revoke_invite`, `overleaf_get_sharing_links`, `overleaf_leave_project`, `overleaf_transfer_ownership`, `overleaf_get_chat_messages`, `overleaf_send_chat_message`, `overleaf_list_tags`, `overleaf_create_tag`, `overleaf_edit_tag`, `overleaf_delete_tag`, `overleaf_tag_project`, `overleaf_get_history`, `overleaf_list_labels`, `overleaf_create_label`, `overleaf_delete_label`, `overleaf_get_diff`, `overleaf_download_version_zip`, `overleaf_restore_file`, `overleaf_revert_project`, `overleaf_list_notifications`, `overleaf_git_clone`, `overleaf_git_sync` |
 | PostgreSQL | `postgres` | `postgresql://` URI, `postgres/config.json` | `pg_query`, `pg_execute`, `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_list_indexes`, `pg_explain` |
@@ -528,10 +541,10 @@ workspace whose `SORCAR.md` points at `govee.py`, as this repository's does.)
 (`get_stream_info` returns title and viewer data but no URL — the prompt builds the
 link from the channel login.)
 
-**13. Google Drive backup, link shared to Mattermost:**
+**13. Google Drive file shared to Mattermost:**
 
-> Upload ./reports/q3-summary.pdf to the "Team Reports" folder on Google Drive, share
-> it read-only with team-lead@acme.dev, then post the file link to the town-square
+> Find "q3-summary.pdf" in the "Team Reports" folder on Google Drive, share it
+> read-only with team-lead@acme.dev, then post the file link to the town-square
 > Mattermost channel.
 
 **14. Slack thread → Google Docs minutes:**

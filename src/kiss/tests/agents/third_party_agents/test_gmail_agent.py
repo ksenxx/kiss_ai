@@ -4,92 +4,50 @@
 # add your name here
 """Integration tests for gmail_sea — no mocks or test doubles.
 
-Tests token persistence, tool creation, GmailAgent construction,
-authentication workflows, body extraction, and tool function signatures.
+Tests tool creation, GmailAgent construction, the Composio sign-in
+workflow, body extraction, and tool error handling.  Gmail API calls go
+through the real googleapiclient and Composio SDK to a real local
+Composio emulator (``composio_test_utils``), whose proxy forwards them
+to a local Gmail endpoint.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import stat
 import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
-import google_auth_httplib2  # type: ignore[import-untyped]
-import httplib2  # type: ignore[import-untyped]
 import pytest
-from googleapiclient.discovery import build
 
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
+from kiss.agents.third_party_agents._composio_google import connected_account_id
 from kiss.agents.third_party_agents.gmail_sea import (
+    _SERVICE,
     GmailAgent,
     GmailChannelBackend,
-    _credentials_path,
     _extract_attachments,
     _extract_body,
-    _save_credentials,
-    _token_path,
     main,
 )
-from kiss.tests.conftest import IS_WINDOWS
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    TOKEN,
+    connect,
+    reset_state,
+    start_fake_composio,
+)
 
 
-def _backup_and_clear() -> tuple[str | None, str | None]:
-    """Back up existing token and credentials files and remove them."""
-    token_backup = None
-    creds_backup = None
-    tp = _token_path()
-    cp = _credentials_path()
-    if tp.exists():
-        token_backup = tp.read_text()
-        tp.unlink()
-    if cp.exists():
-        creds_backup = cp.read_text()
-        cp.unlink()
-    return token_backup, creds_backup
-
-
-def _restore(token_backup: str | None, creds_backup: str | None) -> None:
-    """Restore previously backed-up token and credentials files."""
-    tp = _token_path()
-    cp = _credentials_path()
-    if token_backup is not None:
-        tp.parent.mkdir(parents=True, exist_ok=True)
-        tp.write_text(token_backup)
-    elif tp.exists():
-        tp.unlink()
-    if creds_backup is not None:
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(creds_backup)
-    elif cp.exists():
-        cp.unlink()
-
-
-class TestTokenPersistence:
-    """Tests for credential loading, saving, and clearing."""
-
-    def setup_method(self) -> None:
-        self._token_backup, self._creds_backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._token_backup, self._creds_backup)
-
-    def test_save_sets_permissions(self) -> None:
-        from google.oauth2.credentials import Credentials
-
-        creds = Credentials(token="fake-perm-test")
-        _save_credentials(creds)
-        path = _token_path()
-        assert path.exists()
-        # NTFS has no POSIX mode bits: chmod(0o600) is a no-op there.
-        mode = path.stat().st_mode
-        assert IS_WINDOWS or mode & stat.S_IRWXG == 0
-        assert IS_WINDOWS or mode & stat.S_IRWXO == 0
+@pytest.fixture(autouse=True)
+def _fresh_state():
+    """Start and end every test with no recorded Gmail connection."""
+    reset_state(_SERVICE)
+    yield
+    reset_state(_SERVICE)
 
 
 class TestBodyExtraction:
@@ -191,13 +149,23 @@ class TestBodyExtraction:
         assert result[0]["filename"] == "image.png"
 
 
-class _GmailErrorHandler(BaseHTTPRequestHandler):
-    """Replies 401 with a Gmail-shaped JSON error body to every request."""
+class _GmailHandler(BaseHTTPRequestHandler):
+    """Answers the profile call for the Composio-injected token, else 401."""
 
     def _reply(self) -> None:
-        cast(_GmailErrorServer, self.server).requests.append(
+        cast(_GmailServer, self.server).requests.append(
             {"method": self.command, "path": self.path}
         )
+        if self.path.split("?", 1)[0].endswith("/users/me/profile") and (
+            self.headers.get("Authorization") == f"Bearer {TOKEN}"
+        ):
+            profile = json.dumps({"emailAddress": "me@example.com", "messagesTotal": 3})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=UTF-8")
+            self.send_header("Content-Length", str(len(profile)))
+            self.end_headers()
+            self.wfile.write(profile.encode())
+            return
         body = json.dumps(
             {
                 "error": {
@@ -244,47 +212,43 @@ class _GmailErrorHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _GmailErrorServer(ThreadedHTTPServer):
+class _GmailServer(ThreadedHTTPServer):
     """ThreadedHTTPServer that records every request it receives."""
 
     def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _GmailErrorHandler)
+        super().__init__(address, _GmailHandler)
         self.requests: list[dict[str, str]] = []
 
 
 @pytest.fixture()
-def gmail_error_server():
-    """Start a local 401-only Gmail endpoint; yield (base_url, server)."""
-    server = _GmailErrorServer(("127.0.0.1", 0))
+def gmail_server(monkeypatch):
+    """Run a local Gmail endpoint behind the local Composio emulator.
+
+    Yields:
+        ``(composio, server)``: the emulator (Gmail connected, requests
+        to gmail.googleapis.com rerouted to the local endpoint) and the
+        local Gmail server.
+    """
+    server = _GmailServer(("127.0.0.1", 0))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}/"
     try:
-        yield base_url, server
+        for composio in start_fake_composio(monkeypatch):
+            composio.upstream_overrides["https://gmail.googleapis.com"] = (
+                f"http://127.0.0.1:{server.server_address[1]}"
+            )
+            connect(composio, _SERVICE)
+            yield composio, server
     finally:
         stop_http_server(server, thread)
 
 
-def _make_error_backend(base_url: str) -> GmailChannelBackend:
-    """Create a GmailChannelBackend whose invalid token is rejected locally.
-
-    Uses the real googleapiclient against a local server that answers 401
-    for every request, so API calls fail like they do on an invalid token
-    without ever reaching the real gmail.googleapis.com (and with a bounded
-    transport timeout, so a black-holed network cannot hang the tests).
-    """
-    from google.oauth2.credentials import Credentials
-
-    creds = Credentials(token="invalid-token-for-test")
-    http = google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=10))
+def _make_error_backend(composio) -> GmailChannelBackend:
+    """Create a connected GmailChannelBackend whose token Gmail rejects."""
+    composio.token = "invalid-token-for-test"
     backend = GmailChannelBackend()
-    backend._service = build(
-        "gmail",
-        "v1",
-        http=http,
-        static_discovery=True,
-        client_options={"api_endpoint": base_url},
-    )
+    assert backend.connect() is False
+    assert "Gmail auth failed" in backend.connection_info
     return backend
 
 
@@ -310,11 +274,11 @@ class TestGmailTools:
 
     @pytest.mark.parametrize("tool_name,kwargs", _GMAIL_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
-        self, gmail_error_server, tool_name: str, kwargs: dict
+        self, gmail_server, tool_name: str, kwargs: dict
     ) -> None:
         """Every Gmail tool returns {ok: false, error: ...} with invalid credentials."""
-        base_url, server = gmail_error_server
-        backend = _make_error_backend(base_url)
+        composio, server = gmail_server
+        backend = _make_error_backend(composio)
         tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == tool_name)
         result = json.loads(fn(**kwargs))
@@ -324,70 +288,49 @@ class TestGmailTools:
 
 
 class TestGmailAgent:
-    """Tests for GmailAgent construction and tool integration."""
+    """Tests for GmailAgent construction and the Composio sign-in tools."""
 
-    def setup_method(self) -> None:
-        self._token_backup, self._creds_backup = _backup_and_clear()
-
-    def teardown_method(self) -> None:
-        _restore(self._token_backup, self._creds_backup)
-
-    def test_check_auth_unauthenticated_no_creds_file(self) -> None:
+    def test_check_auth_unauthenticated(self) -> None:
         agent = GmailAgent()
-        tools = agent._get_tools()
-        check = next(t for t in tools if t.__name__ == "check_gmail_auth")
+        assert agent._is_authenticated() is False
+        assert agent._backend._service is None
+        check = next(t for t in agent._get_tools() if t.__name__ == "check_gmail_auth")
         result = check()
-        assert "Not authenticated" in result
-        assert "start_gmail_browser_setup()" in result
-
-    def test_check_auth_unauthenticated_with_creds_file(self) -> None:
-        cp = _credentials_path()
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(json.dumps({"installed": {"client_id": "fake"}}))
-        agent = GmailAgent()
-        tools = agent._get_tools()
-        check = next(t for t in tools if t.__name__ == "check_gmail_auth")
-        result = check()
-        assert "Not authenticated" in result
+        assert "Not authenticated with Gmail" in result
         assert "authenticate_gmail()" in result
 
-    def test_authenticate_no_creds_file(self) -> None:
-        agent = GmailAgent()
-        tools = agent._get_tools()
-        auth = next(t for t in tools if t.__name__ == "authenticate_gmail")
-        result = auth()
-        assert "credentials.json not found" in result
+    def test_connect_without_connection_fails(self) -> None:
+        backend = GmailChannelBackend()
+        assert backend.connect() is False
+        assert "not connected" in backend.connection_info
 
-    def test_clear_auth(self) -> None:
-        tp = _token_path()
-        tp.parent.mkdir(parents=True, exist_ok=True)
-        tp.write_text("{}")
+    def test_connect_link_flow_builds_service(self, gmail_server) -> None:
+        """authenticate -> approve -> finish wires a working Gmail service."""
+        composio, _ = gmail_server
+        reset_state(_SERVICE)
         agent = GmailAgent()
-        tools = agent._get_tools()
-        clear = next(t for t in tools if t.__name__ == "clear_gmail_auth")
-        result = clear()
-        assert "cleared" in result.lower()
-        assert not tp.exists()
-        assert agent._backend._service is None
+        tools = {t.__name__: t for t in agent._get_tools()}
+        started = json.loads(tools["authenticate_gmail"]())
+        composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+        assert json.loads(tools["finish_gmail_auth"]())["ok"] is True
+        assert agent._is_authenticated() is True
+        assert agent._backend.connection_info == "Authenticated as me@example.com"
+        assert json.loads(agent._backend.get_profile())["email"] == "me@example.com"
 
-    def test_clear_auth_when_not_authenticated(self) -> None:
+    def test_new_agent_uses_recorded_connection(self, gmail_server) -> None:
+        """A new agent builds its service from the recorded connection."""
         agent = GmailAgent()
-        tools = agent._get_tools()
-        clear = next(t for t in tools if t.__name__ == "clear_gmail_auth")
-        result = clear()
-        assert "cleared" in result.lower()
+        assert agent._is_authenticated() is True
+        assert json.loads(agent._backend.get_profile())["email"] == "me@example.com"
 
-    def test_check_auth_with_invalid_token(self, gmail_error_server) -> None:
-        """check_gmail_auth with an invalid token returns an error."""
-        base_url, server = gmail_error_server
+    def test_clear_auth(self, gmail_server) -> None:
+        composio, _ = gmail_server
+        account = connected_account_id(_SERVICE)
         agent = GmailAgent()
-        agent._backend = _make_error_backend(base_url)
-        tools = agent._get_tools()
-        check = next(t for t in tools if t.__name__ == "check_gmail_auth")
-        result = json.loads(check())
-        assert result["ok"] is False
-        assert "error" in result
-        assert server.requests, "check_gmail_auth never reached the local Gmail endpoint"
+        clear = next(t for t in agent._get_tools() if t.__name__ == "clear_gmail_auth")
+        assert "cleared" in clear().lower()
+        assert composio.deleted == [account]
+        assert agent._is_authenticated() is False
 
 
 class TestCLIMain:

@@ -2213,9 +2213,11 @@ class SorcarAgent(RelentlessAgent):
         if skill_tool is not None:
             tools.append(skill_tool)
         try:
+            from kiss.agents.sorcar.mcp_oauth import make_mcp_auth_tools
             from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 
             tools.extend(make_mcp_tools(self.work_dir or "."))
+            tools.extend(make_mcp_auth_tools(self.work_dir or "."))
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool

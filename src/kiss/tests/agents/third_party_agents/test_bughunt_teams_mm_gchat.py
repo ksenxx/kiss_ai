@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -79,7 +78,6 @@ def _make_backend(server: ThreadingHTTPServer) -> MSTeamsChannelBackend:
     port = server.server_address[1]
     backend = MSTeamsChannelBackend(graph_base=f"http://127.0.0.1:{port}")
     backend._access_token = "test-token"
-    backend._token_expiry = time.time() + 3600
     return backend
 
 

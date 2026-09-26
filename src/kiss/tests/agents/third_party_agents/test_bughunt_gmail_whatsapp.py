@@ -7,12 +7,10 @@
 No mocks, patches, or fakes of kiss classes: WhatsApp tests run the real
 ``WhatsAppChannelBackend`` against a real local HTTP server speaking the
 whatsapp-mcp bridge REST protocol and a real bridge-schema SQLite database;
-Gmail tests use the real OAuth flow (headless, real dummy credentials file)
-and a real googleapiclient service built from the bundled static discovery
-document.
+Gmail tests use a real googleapiclient service built from the bundled
+static discovery document.
 
 Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
-  (A) gmail: ``flow.run_console()`` removed in google-auth-oauthlib >= 1.0.
   (C) gmail: ``send_message`` addressed mail to a label ID (e.g. "INBOX").
   (E) whatsapp: ``send_message`` must surface bridge send failures.
   (G) whatsapp: ``poll_messages`` must honour ``channel_id``/limit/cursor.
@@ -21,35 +19,21 @@ Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
-import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 import pytest
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents import gmail_sea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
 from kiss.agents.third_party_agents.gmail_sea import GmailChannelBackend
 from kiss.agents.third_party_agents.whatsapp_sea import WhatsAppChannelBackend
-
-_DUMMY_CLIENT_SECRETS = {
-    "installed": {
-        "client_id": "test-client-id.apps.googleusercontent.com",
-        "client_secret": "test-secret",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost"],
-    }
-}
 
 
 class _BridgeHandler(BaseHTTPRequestHandler):
@@ -180,44 +164,6 @@ class TestWhatsAppPollMessages:
         backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
         messages, _ = backend.poll_messages("111", "2026-01-01 00:00:01+00:00", limit=10)
         assert [m["text"] for m in messages] == ["from-111-b"]
-
-
-class TestGmailOAuthFlow:
-    """Bug (A): the OAuth consent must never block the tool or use run_console()."""
-
-    def test_run_console_removed_from_installed_dependency(self) -> None:
-        assert not hasattr(InstalledAppFlow, "run_console")
-
-    def test_headless_consent_hands_off_and_rejects_forged_redirect(
-        self, isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """authenticate_gmail() returns at once with the consent URL.
-
-        The loopback redirect server runs in the background; the test
-        plays the browser and sends a bogus ``?state=...&code=...``
-        redirect.  ``fetch_token`` then fails on the CSRF state check
-        before any network I/O, so finish_gmail_auth() reports the error
-        (never a leaked thread or a stored token).
-        """
-        creds_path = gmail_sea._credentials_path()
-        creds_path.parent.mkdir(parents=True, exist_ok=True)
-        creds_path.write_text(json.dumps(_DUMMY_CLIENT_SECRETS))
-        monkeypatch.setenv("KISS_HEADLESS", "1")
-        tools = {tool.__name__: tool for tool in gmail_sea.GmailAgent()._get_auth_tools()}
-        started = json.loads(tools["authenticate_gmail"]())
-        assert started["status"] == "consent_required"
-        assert started["browser_opened"] is False
-        match = re.search(r"redirect_uri=http%3A%2F%2Flocalhost%3A(\d+)", started["auth_url"])
-        assert match is not None
-        port = int(match.group(1))
-        with urllib.request.urlopen(
-            f"http://localhost:{port}/?state=bogus&code=bogus", timeout=10
-        ) as resp:
-            assert resp.status == 200
-        finished = json.loads(tools["finish_gmail_auth"]())
-        assert finished["ok"] is False
-        assert "state" in finished["error"].lower()
-        assert not gmail_sea._token_path().exists()
 
 
 class TestGmailSendMessage:

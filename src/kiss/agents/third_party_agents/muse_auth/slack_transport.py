@@ -6,8 +6,8 @@
 
 :class:`MuseWebClient` is a drop-in :class:`slack_sdk.WebClient` whose
 token is a Muse surrogate: every Web API call is shipped to the
-Muse-auth daemon, which swaps the surrogate for the real ``xoxb-``
-token at the network boundary.  The override point is
+Muse-auth daemon, which swaps the surrogate for the real ``xoxp-``
+user token at the network boundary.  The override point is
 ``BaseClient._perform_urllib_http_request_internal`` — the innermost
 transport seam (it receives a fully built ``urllib.request.Request``
 and returns ``{"status", "headers", "body"}``) — so all of slack_sdk's
@@ -51,7 +51,7 @@ class MuseWebClient(WebClient):
 
     Construct it with the Muse *service* name (``slack`` or
     ``slack-<workspace>``) and the surrogate token; the agent process
-    never holds the real bot token.  Sentinel denials surface as
+    never holds the real Slack token.  Sentinel denials surface as
     ``{"ok": false, "error": "muse_auth_denied", ...}`` API responses,
     so ``SlackResponse.validate()`` raises a normal ``SlackApiError``
     carrying the grant instructions.
