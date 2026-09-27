@@ -208,49 +208,53 @@ keeps its tier-order position. Prices still come from `model_menu`, never from h
 <!-- rsi7d:model-evidence -->
 _Observed in the task history, refreshed 2026-09-27 by /rsi7d._
 
-Window: 2026-09-20 03:27 to 2026-09-27 03:27 UTC (`window_start` 2026-09-20 03:27:20 UTC),
-2,494 tasks (top-level, sub-agent and reviewer runs of this installation and its synced
+Window: 2026-09-20 08:06 to 2026-09-27 08:06 UTC (`window_start` 2026-09-20 08:06:45 UTC),
+2,579 tasks (top-level, sub-agent and reviewer runs of this installation and its synced
 machines). "$/step" and "s/step" are medians over tasks of the task's own cost and wall time
 per own agent step (sub-agents excluded); "failed" counts runs killed, errored or stopped,
-"unsuccessful" runs that finished with success: false; "errors" are runs whose result is a
-KISS error (stall, refusal, billing, budget); "tool err" is errored tool results per step.
+"unsucc" runs that finished with success: false; "errors" are runs whose result is a KISS
+error (stall, refusal, billing, budget); "tool err" is errored tool results per step.
 
 | model | tasks | top/sub/rev | failed/unsucc | errors | $/step | s/step | tool err |
 |---|---|---|---|---|---|---|---|
-| claude-fable-5-1 | 1634 | 409 / 1223 / 2 | 94 / 51 | 53 | 0.103 | 11.0 | 1.2% |
-| claude-opus-5-5 | 365 | 73 / 292 / 0 | 8 / 4 | 0 | 0.038 | 7.1 | 0.8% |
-| gpt-5.6-sol | 186 | 0 / 173 / 13 | 0 / 0 | 0 | 0.060 | 12.0 | 2.2% |
-| gpt-6-astra | 129 | 1 / 124 / 4 | 5 / 1 | 5 | 0.127 | 10.1 | 0.5% |
-| claude-opus-4-8 | 50 | 9 / 41 / 0 | 4 / 1 | 0 | 0.063 | 8.1 | 2.1% |
+| claude-fable-5-1 | 1716 | 417 / 1297 / 2 | 95 / 53 | 42 | 0.103 | 10.9 | 1.1% |
+| claude-opus-5-5 | 368 | 73 / 295 / 0 | 8 / 4 | 0 | 0.038 | 7.1 | 0.8% |
+| gpt-5.6-sol | 177 | 0 / 164 / 13 | 0 / 0 | 0 | 0.060 | 11.8 | 2.1% |
+| gpt-6-astra | 149 | 1 / 143 / 5 | 5 / 1 | 5 | 0.122 | 10.1 | 0.4% |
+| claude-opus-4-8 | 48 | 7 / 41 / 0 | 3 / 1 | 0 | 0.063 | 8.1 | 2.1% |
 | gpt-6-sol | 38 | 0 / 37 / 1 | 0 / 1 | 0 | 0.025 | 8.5 | 1.1% |
-| claude-fable-5 | 37 | 32 / 5 / 0 | 5 / 0 | 0 | 0.084 | 8.7 | 2.6% |
-| claude-opus-4-7 | 32 | 32 / 0 / 0 | 1 / 1 | 0 | 0.065 | 7.1 | 1.2% |
-| others (small/medium tier, opus-4-6, haiku, nano) | <= 6 | insufficient data | | | | | |
+| claude-fable-5 | 36 | 31 / 5 / 0 | 5 / 0 | 0 | 0.084 | 8.5 | 3.5% |
+| claude-opus-4-7 | 22 | 22 / 0 / 0 | 1 / 1 | 0 | 0.060 | 5.9 | 1.0% |
+| others (see note) | <= 7 | insufficient data | | | | | |
+
+Note: "others" are openrouter/openai/gpt-6-astra (7), openrouter/openai/gpt-6-sol (6),
+claude-opus-4-6 (6), gpt-4.1-nano-2025-04-14 (3) and claude-haiku-4-5 (1).
 
 - claude-opus-5-5 is the best-measured frontier choice for a routed unit: cheapest observed
   frontier per step ($0.038, 37% of claude-fable-5-1), fastest (7.1 s/step), lowest
-  tool-error rate of the Claude models (0.8%), zero task errors in 365 runs. In the paper
-  SEAs it finished review_paper at a median $1.20 (5 of 7 ok) against claude-fable-5-1's
-  $4.4 (15 of 23 ok).
-- claude-fable-5-1 is the default top-level model and the only one with stream stalls (5),
-  safety refusals (4, e.g. `/sh ./install.sh` twice and one paper review) and
-  budget-exceeded runs (36, all `task_update` side-channel reports that paged a 400-entry
-  transcript inside a $1 budget: a SEA problem, fixed in its prompt this round). Its failed
-  count is also inflated by paper-SEA runs stopped externally at 300 s (11 review_paper + 9
-  write_paper). Route to it for the longest context or hardest reasoning, not for volume.
-- gpt-6-astra costs the most per step ($0.127) and all 5 of its errors are OpenAI billing
+  tool-error rate of the Claude models (0.8%), zero task errors in 368 runs (8 failed /
+  4 unsuccessful, 3.3%). In review_paper it finished 5 of 7 runs at a median $1.20 against
+  claude-fable-5-1's $4.4 (15 of 23 ok).
+- claude-fable-5-1 is the default top-level model and the only one with stream stalls (4),
+  billing errors (2) and budget-exceeded runs (34, all `task_update` side-channel reports
+  that paged a 400-entry transcript inside a $1 budget; the SEA prompt was fixed on
+  2026-09-27 and both replays finished at $0.75). Its failed count is also inflated by
+  paper-SEA runs stopped externally at 300 s (11 review_paper + 9 write_paper). Route to it
+  for the longest context or hardest reasoning, not for volume.
+- gpt-6-astra costs the most per step ($0.122) and all 5 of its errors are OpenAI billing
   ("no credits remaining"): such a failure is an account problem, so exclude it for the rest
-  of the task instead of escalating. Otherwise reliable (1 unsuccessful in 129, tool-error
-  rate 0.5%), used almost only as sub-agent or reviewer.
-- gpt-5.6-sol never failed in 186 sub-agent and reviewer runs (2 of 2 review_paper
-  second-opinion checks ok) but is the slowest (12.0 s/step) and has the highest tool-error
-  rate of the frequently used models (2.2%): a good reviewer, an expensive executor.
+  of the task instead of escalating. Otherwise reliable (1 unsuccessful in 149, tool-error
+  rate 0.4%), used almost only as sub-agent or reviewer.
+- gpt-5.6-sol never failed in 177 sub-agent and reviewer runs (5 of 5 review_paper
+  second-opinion checks returned confirmed findings) but is the slowest (11.8 s/step) and
+  has the highest tool-error rate of the frequently used models (2.1%): a good reviewer,
+  an expensive executor.
 - gpt-6-sol is the cheapest measured model per step ($0.025) with no failures in 38
   sub-agent runs (1 unsuccessful: a review_paper run that finished at step 1 claiming it
   needed `run_agent`); prefer it over gpt-5.6-sol for medium-tier units when both are
   runnable. No top-level evidence yet.
-- claude-fable-5 (superseded by claude-fable-5-1) failed 5 of 37 top-level runs with the
-  highest tool-error rate (2.6%), and claude-opus-4-8 finished only 2 of 5 review_paper
+- claude-fable-5 (superseded by claude-fable-5-1) failed 5 of 36 top-level runs with the
+  highest tool-error rate (3.5%), and claude-opus-4-8 finished only 2 of 5 review_paper
   runs: exclude both when their successor is runnable.
 - No small-tier model has 10 tasks in the window, so the small tier keeps its catalog order;
   log every small-tier pick so the next refresh can measure it.

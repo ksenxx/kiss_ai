@@ -219,14 +219,22 @@ anything the paper claims that you could not verify.
   step 5 without trying `run_agent`, check every quoted sentence and number yourself
   against the .tex or `pdftotext` text, and say in the report that the second-opinion
   check was not run.
-- Draft to 85% of the word limit. Before writing, allot words per section (Summary at
-  most 3 sentences; Weaknesses the largest share) and write the file once. Count with
-  `wc -w` before `check_review`. If it is still over, cut whole sentences or bullets in
-  one `Edit` pass; do not rewrite the whole file again and again.
+- Draft to 85% of the word limit L with these caps: Summary 3 sentences (0.08 L),
+  Strengths 3 bullets (0.15 L), Weaknesses 5 to 7 bullets of at most 0.05 L words each
+  (0.35 L), Detailed review 0.27 L. Write the file once. If `check_review` still reports
+  too many words, cut whole sentences or bullets in one pass; do not rewrite the whole
+  file again and again.
+- Trim to at most 95% of L (950 words for L = 1000) before the second-opinion step, not
+  to L - 1: the confirmed findings add words, and a review trimmed to 999 words fails the
+  next `check_review` and costs another trim round.
+- Apply every fix from one `check_review` result or one second-opinion report before the
+  next `check_review`: one `Write` of the whole corrected text when more than three
+  sentences change, otherwise the `Edit` calls back to back. Plan for three
+  `check_review` calls in a run (after the draft, after the trim, after the
+  second-opinion fixes), not one per sentence changed.
 - When the task names a path under the main checkout and you run in a worktree
   (`git rev-parse --show-toplevel`), translate it to the worktree path before any Bash,
-  `read_paper` or `check_review` call; the Bash guard rejects main-checkout paths.
-"""
+  `read_paper` or `check_review` call; the Bash guard rejects main-checkout paths."""
 """The reviewing rules, appended to the default system prompt."""
 
 _HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review")
