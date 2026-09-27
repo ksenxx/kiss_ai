@@ -140,3 +140,44 @@ class ReplayInCloneTest(DaemonUdsHarness):
         assert str(system["content"]).startswith("You are the demo agent.")
         user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
         assert out["task"] in str(user["content"])
+
+    def test_replay_of_a_plain_sorcar_run_uses_this_checkouts_system_prompt(self) -> None:
+        """A run without a SEA replays as a plain task on the checkout's (patched) SYSTEM.md."""
+        # The scope over KISS Sorcar itself needs the checkout to be a git repository.
+        run_git(self.checkout, "init", "-q")
+        marker = "You are the patched Sorcar prompt under test. Finish quickly."
+        (self.checkout / "src" / "kiss" / "SYSTEM.md").write_text(
+            "{{IDENTITY}}\n\n" + marker + "\n", encoding="utf-8"
+        )
+        repo = Path(self.repo)
+        base = run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        # No auto-commit to go back from: the replay starts at the HEAD of the
+        # task's start, so the task must have started after the seed commit.
+        now_ms = int(time.time() * 1000)
+        task_id, _chat = _add_task(
+            f"Leave a mark in {repo}",
+            extra={
+                "model": "model-a", "work_dir": str(repo),
+                "startTs": now_ms + 2_000, "endTs": now_ms + 5_000, "cost": 0.2, "steps": 2,
+            },
+        )
+
+        out = json.loads(
+            sea.replay_in_clone(task_id, max_budget=1.0, timeout=120, model=STANDIN_MODEL)
+        )
+
+        clone = Path(out["clone"])
+        assert out["sea"] == sea.SORCAR and out["commit"] == base
+        assert out["sea_file"] == str((self.checkout / "src" / "kiss" / "SYSTEM.md").resolve())
+        assert clone == self.checkout / sea.REPLAY_DIR / f"sorcar-{task_id[:8]}"
+        assert out["task"] == f"Leave a mark in {clone}"
+        assert (clone / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
+        assert not (repo / "replayed.txt").exists()
+        assert out["result"]["success"] is True and out["replay_task_id"], out
+        row = sea._task_row(out["replay_task_id"])
+        assert row is not None and row["work_dir"] == str(clone) and not row["sea"], row
+        agentic = [r for r in self.requests if r.get("tools")]
+        assert len(agentic) == 2, [list(r) for r in self.requests]
+        system = str(next(m for m in agentic[0]["messages"] if m["role"] == "system")["content"])
+        assert system.startswith("You are KISS Sorcar") and marker in system, system[:300]
+        assert "{{IDENTITY}}" not in system

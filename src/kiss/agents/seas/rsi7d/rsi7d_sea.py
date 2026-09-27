@@ -36,6 +36,14 @@ reverts it.  It also refreshes the observed model evidence the
 autorouter SEA routes on.  rsi7d is itself one of the indexed SEAs: its
 own finished sweeps are mined and its prompt patched the same way.
 
+KISS Sorcar itself is mined as the pseudo-SEA ``sorcar`` (the top-level
+runs on no SEA) and may be changed too — its system prompt
+``src/kiss/SYSTEM.md`` / ``SYSTEM_LITE.md``, the user's
+``~/.kiss/SORCAR.md`` and its code under ``src/kiss`` — but only with the
+user's permission: :func:`request_sorcar_permission` asks the user (or
+verifies a permitting sentence of the task text quoted by the agent) and
+:func:`patch_sorcar` refuses any target that was not granted in this run.
+
 The deterministic tools live in this file (a SEA runs under the
 installed kiss package, so it imports no sibling module of the
 checkout); the reasoning is the agent's.
@@ -109,12 +117,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from kiss.agents.sorcar import agent_dispatch, persistence, sea_commands, task_digest
+from kiss.agents.seas import sorcar_md
+from kiss.agents.sorcar import agent_dispatch, cron_agent, persistence, sea_commands, task_digest
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
     USER_PROMPT_HEADING,
     strip_worktree_suffix,
 )
+from kiss.core.brand import render_brand
 from kiss.server.agent_state import current_agent
 from kiss.server.tools_file import execute_python_file
 
@@ -134,6 +144,46 @@ REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
 SEAS_DIR_OPTION = "--seas-dir"
 """Task-text option naming the folder whose SEAs the sweep is restricted to (and may edit)."""
+SORCAR = "sorcar"
+"""Pseudo-SEA name of KISS Sorcar itself: the runs on its own system prompt, and the
+permission-gated targets ``SYSTEM.md``, ``SYSTEM_LITE.md``, ``SORCAR.md`` and its code."""
+SORCAR_AGENT_LABEL = "(KISS Sorcar itself, no SEA)"
+SORCAR_PROMPT_FILES = ("SYSTEM.md", "SYSTEM_LITE.md")
+"""The system prompt files in the ``kiss`` package directory (``kiss.core.base`` reads them)."""
+SORCAR_MD = "SORCAR.md"
+"""Target name of the user's ``~/.kiss/SORCAR.md`` instruction file."""
+_PERMISSION_QUOTE_MIN_CHARS = 12
+_SENTENCE_START = ".!?;:\n"
+_SENTENCE_STOP = ".!?;\n"
+"""What may precede / follow a quoted sentence of the task text for it to be a whole one."""
+_GRANT_WORDS = re.compile(
+    r"(?i)(\b(may|can|could|allowed|permitted|permission|authori[sz]|feel free|free to|"
+    r"go ahead|ok(ay)? to|freely|as needed|as you see fit)\b|without asking|no need to ask)"
+)
+"""A sentence of the task text permits a change only when it says so."""
+_NEGATION = re.compile(
+    r"(?i)(\bnot\b|\bnever\b|n't\b|\bask (me|first|before|the user)\b|"
+    r"\bbefore (modifying|changing|editing|touching)\b|\bmust ask\b|"
+    r"\b(needs?|requires?) (my |explicit )?(permission|approval|consent)\b)"
+)
+"""Sentences that forbid or condition the change; they never count as permission."""
+_BLANKET = re.compile(r"(?i)(kiss sorcar|sorcar itself|\bsorcar\b(?!\.md))")
+"""A sentence about KISS Sorcar as a whole covers every target."""
+_TARGET_PATTERNS = {
+    "SORCAR.md": re.compile(r"(?i)(sorcar\.md|standing instructions)"),
+    "prompt": re.compile(r"(?i)(system[ _]?prompt|system(_lite)?\.md)"),
+    "code": re.compile(r"(?i)(\bcode\b|\bsource\b|\.py\b)"),
+}
+"""What a sentence must mention to cover one kind of target when it is not about the whole."""
+_YES = re.compile(
+    r"(?i)^\W*(y|yes|yep|yeah|ok|okay|sure|go ahead|approved?|granted|do it|proceed|"
+    r"allowed|permission granted|fine)\b"
+)
+_CONDITIONAL = re.compile(
+    r"(?i)\b(but|not|never|except|only|unless|if|when|once|after|before|first|provided|"
+    r"as long as|however|though|although|don't|instead)\b"
+)
+"""A qualified yes ("yes, but ...", "yes, if ...") is not a grant for everything asked."""
 
 SYSTEM_PROMPT = """\
 You are rsi7d, the KISS Sorcar agent that improves the other agents. Every indexed SEA
@@ -162,15 +212,52 @@ task text names but `scope.names` lacks was not recognised (a typo or an unregis
 name): stop and tell the user the recognised names. When `autorouter` is out of scope, skip
 step 6 (`write_autorouter_evidence` refuses).
 
+## KISS Sorcar itself (the pseudo-SEA `sorcar`, permission required)
+The top-level tasks that ran on no SEA ran on KISS Sorcar's own system prompt; `sea_runs()`
+and `sea_findings("sorcar")` list them under the name `sorcar`. You may improve KISS Sorcar
+itself as well: its system prompt (`src/kiss/SYSTEM.md`, and `SYSTEM_LITE.md` for simple
+tasks), the user's standing instructions in `~/.kiss/SORCAR.md`, and its code under
+`src/kiss/`. Read them with `sorcar_text(target)` (code with Read/grep) and change them
+only through `patch_sorcar(target, old, new)`; never with Edit/Write.
+- Permission first, always. Before the first `patch_sorcar` of a batch call
+  `request_sorcar_permission(targets, reason)` with the exact files and the evidence-backed
+  change you intend; `patch_sorcar` refuses targets that were not granted. Do not ask before
+  you have the evidence and the concrete change: one question per batch, not one per
+  finding. Only when the user's task text (the "Additional instructions") itself permits
+  changing KISS Sorcar do you pass that whole sentence verbatim as `prompt_quote` (the tool
+  checks it is a complete permitting sentence of the task text that covers the targets), and
+  then no question is asked. A denial, a qualified yes ("yes, but ...", "yes, if ..."), or an
+  unattended (scheduled) sweep means: no change; write the proposal into the report under
+  "Recommended changes to KISS Sorcar (not applied: permission)" with the evidence, or ask
+  again for only what was allowed.
+- `SYSTEM.md`: keep changes small and evidence-backed, one section `## Lessons from recent
+  runs (rsi7d)` of at most about 8 bullets, merged with the existing one as for SEAs; mirror
+  a bullet into `SYSTEM_LITE.md` only when the evidence comes from a run that used the lite
+  prompt. Evaluate with `replay_in_clone(task_id, max_budget=<cap>)` on a plain past run
+  (`sea_runs(name="sorcar")`): the replay runs a plain task with this checkout's patched
+  `SYSTEM.md` as its base prompt. Revert with `git checkout -- src/kiss/SYSTEM.md`.
+- `SORCAR.md`: bullets the user would want in every task (a preference or convention that
+  the user repeated in follow-up messages of several runs), never task-specific text.
+  `patch_sorcar("SORCAR.md", "", <bullet>)` adds, `patch_sorcar("SORCAR.md", <bullet>, "")`
+  removes; the original is saved to `tmp/rsi7d/SORCAR.md.before`.
+- Code: fix a demonstrated bug or a cost/speed sink whose cause is in the code (cite the
+  traceback or the tool result). Change the minimum, add or adjust an end-to-end test under
+  `src/kiss/tests/` through `patch_sorcar` too, run the impacted tests with `uv run pytest -q
+  <test files>` and `uv run check --full`; revert with `git checkout -- <files>` when either
+  fails. A code change is not replay-verified (the replay runs the installed package): say so
+  in the report.
+
 ## Hard rules
 - Change SEA files only through `patch_sea_prompt` and `write_autorouter_evidence`. They edit
   one string constant and reject anything that changes code. Never edit a SEA with
-  Edit/Write, never touch files outside the editable folders (`src/kiss/agents/seas/` and
-  `src/kiss/agents/third_party_agents/`, or the `--seas-dir` folder), never edit a SEA whose
-  `editable_path` or `prompt_constant` is empty in `indexed_seas()` (user SEAs, and the
-  channel SEAs such as `slack` or `gmail`, whose prompts are assembled at run time): analyse
-  those and put recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
-  have a prompt constant and is optimized like the SEAs in `seas/`.
+  Edit/Write, never edit a SEA whose `editable_path` or `prompt_constant` is empty in
+  `indexed_seas()` (user SEAs, and the channel SEAs such as `slack` or `gmail`, whose
+  prompts are assembled at run time): analyse those and put recommendations in the report
+  instead. `/ask` (`seas/ask/ask_sea.py`) does have a prompt constant and is optimized like
+  the SEAs in `seas/`. Files outside the editable folders (`src/kiss/agents/seas/` and
+  `src/kiss/agents/third_party_agents/`, or the `--seas-dir` folder) are KISS Sorcar itself:
+  touch them only through `patch_sorcar` after `request_sorcar_permission` (see above),
+  except `tmp/` and `reports/`.
 - Every instruction you add must be grounded in evidence from the trajectories: cite the
   task id and digest entry index (from `run_findings` / `run_transcript`) in your notes. No
   instruction for a failure mode that did not occur.
@@ -195,8 +282,10 @@ step 6 (`write_autorouter_evidence` refuses).
    and `model_scorecard()`. Write `./tmp/rsi7d/baseline.md`: per SEA the number of runs,
    success/unsuccessful/failed counts, median cost, steps, seconds per step, models used; per
    model the scorecard row. Skip SEAs with zero runs in the window (say so in the report).
-2. Mine mistakes per editable SEA with runs. Call `sea_findings(name)` for the aggregated
-   signals, then drill into the runs that carry the most signal: every failed or
+2. Mine mistakes per editable SEA with runs, `sorcar` (KISS Sorcar itself) included when it
+   is in scope; its changes wait for the permission step described above. Call
+   `sea_findings(name)` for the aggregated signals, then drill into the runs that carry the
+   most signal: every failed or
    unsuccessful run, the costliest, the slowest (seconds per step) and one typical
    successful run. Use `run_overview`, `run_transcript` (with `contains` to jump to errors,
    USER messages, summaries) and `run_entry` for the exact text. Look beyond the
@@ -253,9 +342,10 @@ step 6 (`write_autorouter_evidence` refuses).
    window (`window_start`) so a reader can tell how fresh the evidence is.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: baseline table, per SEA the findings,
    the added or changed bullets, the evaluation result (replay ids and metrics, or why not
-   replayed), the autorouter evidence update, recommendations for non-editable SEAs, and
-   ideas rejected with reasons. `git add` the report. Maintain `./tmp/PROGRESS.md` while you
-   work.
+   replayed), the autorouter evidence update, recommendations for non-editable SEAs, the
+   changes to KISS Sorcar itself (applied with whose permission, or recommended because
+   permission was not given), and ideas rejected with reasons. `git add` the report.
+   Maintain `./tmp/PROGRESS.md` while you work.
 8. Finish with a summary that lists every changed file, every added instruction, and the
    evaluation evidence."""
 
@@ -307,10 +397,12 @@ def description() -> str:
         "Mines the last 7 days of the indexed SEAs' runs in ~/.kiss/sorcar.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
         "SEA's SYSTEM_PROMPT (its own included; file-modifying tasks are replayed in a clone "
-        "at the task's commit) and refreshes the autorouter SEA's model evidence. The task "
-        "text starts with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper "
-        "write_paper` (those SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of "
-        "that folder, which become the editable ones); instructions may follow. Or "
+        "at the task's commit), refreshes the autorouter SEA's model evidence and, with the "
+        "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
+        "itself: src/kiss/SYSTEM.md, ~/.kiss/SORCAR.md and its code. The task text starts "
+        "with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper write_paper` (those "
+        "SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of that folder, which "
+        "become the editable ones); instructions may follow. Or "
         '`run_agent(agent="rsi7d", task="all")`.'
     )
 
@@ -515,7 +607,9 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
     "unmatched_dispatches"}``.  ``runs`` are newest first.  A dispatch
     whose child row cannot be found (the child was never persisted, or
     ran on another machine whose history was not synced) counts in
-    ``unmatched_dispatches``.
+    ``unmatched_dispatches``.  The top-level rows that no SEA claims and
+    that record no ``sea`` are the plain KISS Sorcar runs; they are
+    grouped under the pseudo-SEA :data:`SORCAR`.
     """
     rows = _rows_since(days)
     by_id = {r["id"]: r for r in rows}
@@ -555,6 +649,12 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
         for tid in ids:
             claimed.add(tid)
             matched[name].append(("(system prompt signature)", by_id[tid]))
+    # What is left without a parent and without a recorded SEA ran on
+    # KISS Sorcar's own system prompt: the pseudo-SEA ``sorcar``.
+    for tid, row in by_id.items():
+        if tid not in claimed and not row.get("parent_task_id") and not row.get("sea"):
+            claimed.add(tid)
+            matched[SORCAR].append((SORCAR_AGENT_LABEL, row))
     flags = _final_success(sorted(claimed))
     seas: dict[str, Any] = {}
     for name in sorted(matched):
@@ -886,7 +986,7 @@ def parse_scope(text: str) -> Scope:
         if not seas_dir.is_dir():
             return Scope(seas_dir, error=f"{SEAS_DIR_OPTION} {seas_dir} is not a directory")
         text = text[: match.start()] + text[match.end() :]
-    known: set[str] = set() if seas_dir is not None else set(sea_commands.list_commands())
+    known: set[str] = set() if seas_dir is not None else {*sea_commands.list_commands(), SORCAR}
     for folder in _dirs_of(seas_dir):
         known.update(sea_commands._scan_folder(folder))
     names: list[str] = []
@@ -1103,8 +1203,36 @@ def indexed_seas() -> str:
         names = set(_editable_seas())
         if scope.seas_dir is None:
             names.update(sea_commands.list_commands())
-    rows = [_sea_info(name, sea_commands.get_command(name)) for name in sorted(names)]
+    rows = [_sea_info(name, sea_commands.get_command(name)) for name in sorted(names - {SORCAR})]
+    if _sorcar_in_scope(scope):
+        rows.append(_sorcar_info())
     return json.dumps({"scope": scope.as_dict(), "seas": rows}, indent=1)
+
+
+def _sorcar_in_scope(scope: Scope) -> bool:
+    """Return whether KISS Sorcar itself (the pseudo-SEA ``sorcar``) is in *scope*: with
+    the checkout's editable folders (no ``--seas-dir``) and either every SEA or ``sorcar``
+    named."""
+    if scope.error or scope.seas_dir is not None:
+        return False
+    return not scope.names or SORCAR in scope.names
+
+
+def _sorcar_info() -> dict[str, Any]:
+    """Describe KISS Sorcar itself as the pseudo-SEA ``sorcar``: targets and permission."""
+    system_md = _kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]
+    in_checkout = _toplevel(_kiss_pkg_dir()) is not None
+    return {
+        "name": SORCAR,
+        "registered_path": "",
+        "editable_path": str(system_md) if in_checkout and system_md.is_file() else "",
+        "prompt_getter": "",
+        "prompt_constant": "",
+        "prompt_chars": len(system_md.read_text(encoding="utf-8")) if system_md.is_file() else 0,
+        "targets": [*SORCAR_PROMPT_FILES, SORCAR_MD, "src/kiss/**/*.py"],
+        "permission": "required: request_sorcar_permission(...) before patch_sorcar(...)",
+        "granted": sorted(_granted),
+    }
 
 
 def _signatures() -> dict[str, str]:
@@ -1598,6 +1726,237 @@ def _work_root() -> Path:
     return Path(agent.work_dir) if agent is not None and agent.work_dir else Path.cwd()
 
 
+# ---------------------------------------------------------------------------
+# KISS Sorcar itself (the pseudo-SEA ``sorcar``), changed only with permission
+# ---------------------------------------------------------------------------
+
+_granted: dict[str, str] = {}
+"""Resolved Sorcar target path -> how permission to change it was obtained (this run)."""
+
+
+def _kiss_pkg_dir() -> Path:
+    """Return the ``kiss`` package directory (``src/kiss``) the checkout's ``seas`` folder is in."""
+    return _checkout_seas_dir().parents[1]
+
+
+def _sorcar_target(target: str) -> Path | str:
+    """Resolve *target* to the file ``patch_sorcar`` may change, or return an ``Error: ...``.
+
+    ``SORCAR.md`` is the user's ``~/.kiss/SORCAR.md``; ``SYSTEM.md`` and
+    ``SYSTEM_LITE.md`` are the prompt files of the ``kiss`` package; any
+    other target is a code file under the checkout's ``src/kiss`` (a path
+    relative to the checkout, or absolute), never a SEA file.
+    """
+    target = target.strip()
+    if target == SORCAR_MD:
+        return sorcar_md.sorcar_md_path()
+    pkg = _kiss_pkg_dir().resolve()
+    root = _toplevel(pkg)
+    if root is None:
+        return f"Error: {pkg} is not inside a git checkout; only {SORCAR_MD} can be changed here"
+    if target in SORCAR_PROMPT_FILES:
+        path = pkg / target
+    else:
+        path = (Path(target) if Path(target).is_absolute() else root / target).resolve()
+        if not path.is_relative_to(pkg):
+            return f"Error: {target!r} is not a file of {pkg}"
+        if any(path.is_relative_to(folder.resolve()) for folder in _editable_dirs()):
+            return f"Error: {target!r} is a SEA file; SEA prompts change through patch_sea_prompt"
+    if not path.is_file():
+        return f"Error: {target!r} does not exist"
+    return path
+
+
+def _task_text() -> str:
+    """Return the text of the task this sweep runs on (empty outside a task)."""
+    agent = current_agent()
+    return cron_agent._current_task_text(agent) if agent is not None else ""
+
+
+def _squeeze(text: str) -> str:
+    """Collapse runs of blanks to one space and trim around newlines, keeping the newlines."""
+    return re.sub(r"[ \t]+", " ", re.sub(r"[ \t]*\n[ \t]*", "\n", text)).strip()
+
+
+def _is_whole_sentence(text: str, quote: str) -> bool:
+    """Return whether *quote* occurs in *text* from one sentence boundary to the next."""
+    start = text.find(quote)
+    while start >= 0:
+        before = text[:start].rstrip(" ")
+        after = text[start + len(quote):].lstrip(" ")
+        if (not before or before[-1] in _SENTENCE_START) and (
+            not after or after[0] in _SENTENCE_STOP
+        ):
+            return True
+        start = text.find(quote, start + 1)
+    return False
+
+
+def _covers(sentence: str, target: str) -> bool:
+    """Return whether *sentence* is about KISS Sorcar as a whole or names *target*'s kind."""
+    kind = target if target == SORCAR_MD else "prompt" if target in SORCAR_PROMPT_FILES else "code"
+    return bool(_BLANKET.search(sentence) or _TARGET_PATTERNS[kind].search(sentence))
+
+
+def _prompt_grant(quote: str, targets: list[str]) -> str:
+    """Return ``""`` when *quote* is a whole sentence of the task text that permits changing
+    every one of *targets*, else the reason it does not count."""
+    quote = _squeeze(quote).rstrip(_SENTENCE_STOP)
+    if len(quote) < _PERMISSION_QUOTE_MIN_CHARS:
+        return "the quote is too short to be a permission sentence"
+    if not _is_whole_sentence(_squeeze(_task_text()), quote):
+        return (
+            "the quote is not a whole sentence of the user's task text (quote the complete "
+            "sentence, verbatim)"
+        )
+    if _NEGATION.search(quote):
+        return "the quote forbids or conditions the change instead of permitting it"
+    if not _GRANT_WORDS.search(quote):
+        return "the quote does not permit anything (no 'may', 'can', 'allowed', 'without asking')"
+    uncovered = [t for t in targets if not _covers(quote, t)]
+    if uncovered:
+        return f"the quote does not mention {', '.join(uncovered)} (nor KISS Sorcar as a whole)"
+    return ""
+
+
+def sorcar_text(target: str = "SYSTEM.md") -> str:
+    """Return the current text of a KISS Sorcar target: ``SYSTEM.md`` (the system prompt),
+    ``SYSTEM_LITE.md`` (the reduced prompt simple tasks get), ``SORCAR.md`` (the user's
+    ``~/.kiss/SORCAR.md`` instructions) or a code file path under ``src/kiss/``."""
+    path = _sorcar_target(target)
+    if isinstance(path, str):
+        return path
+    if not path.is_file():
+        return f"({path} does not exist yet)"
+    return path.read_text(encoding="utf-8")
+
+
+def request_sorcar_permission(targets: str, reason: str, prompt_quote: str = "") -> str:
+    """Obtain the user's permission to change KISS Sorcar itself, before ``patch_sorcar``.
+
+    *targets* lists what you want to change, separated by commas or
+    newlines: ``SYSTEM.md``, ``SYSTEM_LITE.md``, ``SORCAR.md`` or code
+    file paths under ``src/kiss/``.  *reason* states the change and the
+    evidence behind it (task ids, digest entries); the user reads it.
+    When the user's task text already permits the change, pass that whole
+    sentence verbatim as *prompt_quote*: it must be a complete sentence of
+    the task text that permits ("may", "can", "allowed", "without asking")
+    changing KISS Sorcar as a whole or the kind of every target named
+    (``SORCAR.md``, the system prompt, the code); then nobody is asked.
+    Otherwise the user is asked once for exactly these targets.  An
+    unattended (scheduled) sweep, a "no" and a qualified yes ("yes, but
+    ...", "yes, if ...") are denials: put the change in the report as a
+    recommendation, or ask again with only the targets the answer allows.
+    Returns what was granted, or why it was denied.
+    """
+    names = [t.strip() for t in re.split(r"[,\n]", targets) if t.strip()]
+    if not names:
+        return "Error: name at least one target"
+    paths: list[Path] = []
+    for name in names:
+        path = _sorcar_target(name)
+        if isinstance(path, str):
+            return path
+        paths.append(path)
+    listing = ", ".join(names)
+    if prompt_quote:
+        why = _prompt_grant(prompt_quote, names)
+        if why:
+            return f"Error: {why}; ask the user instead (call again without prompt_quote)"
+        how = f"the user's task text: {_squeeze(prompt_quote)!r}"
+    else:
+        agent = current_agent()
+        if agent is not None and cron_agent.is_unattended(agent):
+            return (
+                "Denied: this sweep runs unattended (scheduled automation) and nobody can "
+                "grant permission. Do not ask again; report the change as a recommendation."
+            )
+        ask = getattr(agent, "_ask_user_question_callback", None)
+        if not callable(ask):
+            return (
+                "Denied: the user cannot be asked from here; report the change as a "
+                "recommendation."
+            )
+        answer = str(
+            ask(
+                "rsi7d asks permission to change KISS Sorcar itself.\n"
+                f"Files: {listing}\n"
+                f"Change and evidence: {reason}\n"
+                "Answer yes to allow exactly these changes; anything else (no, or what you "
+                "allow instead) denies them."
+            )
+        ).strip()
+        if not _YES.match(answer) or _CONDITIONAL.search(answer):
+            return (
+                f"Denied by the user: {answer!r}. Do not make these changes; report them as "
+                "recommendations, or ask again with only the targets the answer allows."
+            )
+        how = f"the user's answer {answer!r}"
+    for path in paths:
+        _granted[str(path)] = how
+    return f"Permission granted for {listing} by {how}."
+
+
+def patch_sorcar(target: str, old: str, new: str) -> str:
+    """Change KISS Sorcar itself: a system prompt file, ``~/.kiss/SORCAR.md`` or a code file.
+
+    Needs a grant for *target* from ``request_sorcar_permission`` in this
+    run.  In ``SYSTEM.md``, ``SYSTEM_LITE.md`` and code files *old* must
+    occur exactly once and is replaced by *new*; an empty *old* appends
+    *new*; a ``.py`` file must still compile.  ``SORCAR.md`` holds one
+    instruction per bullet: an empty *old* adds *new* as a bullet, an
+    empty *new* removes the bullet *old*, both replace it; the file is
+    copied to ``tmp/rsi7d/SORCAR.md.before`` before its first change.
+    Revert a checkout file with ``git checkout -- <file>``.
+    """
+    path = _sorcar_target(target)
+    if isinstance(path, str):
+        return path
+    if str(path) not in _granted:
+        return f"Error: no permission to change {target}; call request_sorcar_permission first"
+    if target.strip() == SORCAR_MD:
+        return _patch_sorcar_md(path, old, new)
+    text = path.read_text(encoding="utf-8")
+    if old:
+        count = text.count(old)
+        if count != 1:
+            return f"Error: `old` occurs {count} times in {path}; it must occur exactly once"
+        updated = text.replace(old, new)
+    else:
+        updated = text.rstrip("\n") + "\n\n" + new.strip("\n") + "\n"
+    if path.suffix == ".py":
+        try:
+            compile(updated, str(path), "exec")
+        except SyntaxError as e:
+            return f"Error: {path.name} would not compile: {e}"
+    path.write_text(updated, encoding="utf-8")
+    return (
+        f"Patched {path} ({len(text)} -> {len(updated)} chars); "
+        f"revert with `git checkout -- {path}`"
+    )
+
+
+def _patch_sorcar_md(path: Path, old: str, new: str) -> str:
+    """Remove bullet *old* and/or add bullet *new* to ``~/.kiss/SORCAR.md``, after a backup."""
+    if not old and not new:
+        return "Error: give `old` (the bullet to remove), `new` (the bullet to add) or both"
+    backup = _work_root() / "tmp" / "rsi7d" / "SORCAR.md.before"
+    if path.is_file() and not backup.exists():
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, backup)
+    reports = []
+    if old:
+        reports.append(sorcar_md.remove_instruction(old))
+    if new:
+        reports.append(sorcar_md.add_instruction(new))
+    return " ".join(reports)
+
+
+def _sorcar_system_prompt() -> str:
+    """Return the base system prompt a ``sorcar`` replay runs with: the checkout's SYSTEM.md."""
+    return render_brand((_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]).read_text(encoding="utf-8"))
+
+
 def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     """Clone the repository of past run *task_id* at the commit it started from.
 
@@ -1605,18 +1964,32 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     ``repo``, ``commit``, ``commit_source``, ``clone``, ``work_dir`` — the
     task's directory inside the clone — ``model`` and the ``task`` with
     repository paths rewritten to the clone) or an ``Error: ...`` string.
-    *name* overrides the SEA recorded on the run.  An existing clone of
-    the same run is replaced.
+    *name* overrides the SEA recorded on the run; a run that records no
+    SEA is a plain KISS Sorcar run (``sea`` = :data:`SORCAR`, ``sea_file``
+    = this checkout's ``SYSTEM.md``).  An existing clone of the same run
+    is replaced.
     """
     row = _task_row(task_id)
     if row is None:
         return f"Error: unknown task id {task_id!r}"
-    sea = name or sea_name_of(row.get("sea") or "")
-    if not sea:
-        return f"Error: run {task_id} does not record its SEA; pass name=<sea>"
-    sea_file = _editable_path(sea)
-    if sea_file is None:
-        return _not_editable(sea)
+    sea = name or sea_name_of(row.get("sea") or "") or SORCAR
+    if sea == SORCAR:
+        # A plain KISS Sorcar run: the replay is a plain task whose base
+        # system prompt is this checkout's (possibly patched) SYSTEM.md.
+        if not _sorcar_in_scope(_scope()):
+            return _not_editable(sea)
+        system_md = _sorcar_target(SORCAR_PROMPT_FILES[0])
+        if isinstance(system_md, str):
+            return (
+                f"Error: run {task_id} is a plain KISS Sorcar run and cannot be replayed from "
+                f"here: {system_md.removeprefix('Error: ')}"
+            )
+        sea_file = system_md
+    else:
+        editable = _editable_path(sea)
+        if editable is None:
+            return _not_editable(sea)
+        sea_file = editable
     work_dir = str(row.get("work_dir") or "")
     located = _task_tree(work_dir)
     if located is None:
@@ -1677,7 +2050,11 @@ def replay_in_clone(
     same directory of the clone the task ran in.  The replay runs without
     a worktree and without auto-commit, with the original run's model
     unless *model* is given, capped by *max_budget* (USD) and *timeout*
-    (seconds); *name* overrides the SEA recorded on the run.  Returns JSON
+    (seconds); *name* overrides the SEA recorded on the run.  A run of
+    KISS Sorcar itself (``sorcar``: no SEA recorded, or ``name="sorcar"``)
+    is replayed as a plain task whose base system prompt is this
+    checkout's ``SYSTEM.md``, patched or not, so a ``SYSTEM.md`` change is
+    evaluated the same way.  Returns JSON
     with ``replay_task_id`` (pass it to ``run_findings``), ``clone``,
     ``commit``, ``commit_source`` and the replay's ``result``.  Inspect
     what the replay changed with ``git -C <clone> status --short`` and
@@ -1686,17 +2063,22 @@ def replay_in_clone(
     prepared = prepare_replay_clone(task_id, name)
     if isinstance(prepared, str):
         return prepared
+    plain = prepared["sea"] == SORCAR
     result = agent_dispatch.dispatch_result(
         prepared["sea"],
         prepared["task"],
-        prepared["sea_file"],
+        "" if plain else prepared["sea_file"],
         prepared["work_dir"],
         model or prepared["model"],
         max_budget,
         timeout,
         parent_agent=current_agent(),
         scope_work_dir=str(_work_root()),
-        options=agent_dispatch.RunOptions(use_worktree=False, auto_commit=False),
+        options=agent_dispatch.RunOptions(
+            use_worktree=False,
+            auto_commit=False,
+            system_prompt=_sorcar_system_prompt() if plain else "",
+        ),
     )
     if isinstance(result, str):
         prepared["replay_task_id"] = ""
@@ -1725,4 +2107,7 @@ def tools() -> list[Any]:
         patch_sea_prompt,
         write_autorouter_evidence,
         replay_in_clone,
+        sorcar_text,
+        request_sorcar_permission,
+        patch_sorcar,
     ]

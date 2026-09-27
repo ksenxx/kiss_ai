@@ -182,6 +182,9 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "patch_sea_prompt",
         "write_autorouter_evidence",
         "replay_in_clone",
+        "sorcar_text",
+        "request_sorcar_permission",
+        "patch_sorcar",
     ]
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
@@ -1128,8 +1131,12 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     )
     assert sea.prepare_replay_clone("nope") == "Error: unknown task id 'nope'"
     no_sea = _persist("Plain sub-agent task", [], work_dir=str(repo))
+    # A run without a SEA is a plain KISS Sorcar run; the fake checkout is
+    # not a git repository, so there is no SYSTEM.md to replay it with.
     assert sea.prepare_replay_clone(no_sea) == (
-        f"Error: run {no_sea} does not record its SEA; pass name=<sea>"
+        f"Error: run {no_sea} is a plain KISS Sorcar run and cannot be replayed from here: "
+        f"{(tmp_path / 'src' / 'kiss').resolve()} is not inside a git checkout; only "
+        "SORCAR.md can be changed here"
     )
     assert sea.prepare_replay_clone(no_sea, name="slack") == (
         f"Error: 'slack' is not an editable SEA under {', '.join(map(str, sea._editable_dirs()))}"
