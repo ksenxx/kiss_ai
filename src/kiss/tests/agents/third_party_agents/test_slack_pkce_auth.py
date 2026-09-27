@@ -41,18 +41,24 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     sign_in,
     start_sign_in,
 )
+from kiss.tests.conftest import hold_loopback_port
 
 
 @pytest.fixture()
 def slack(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[SlackOAuthState, SlackApiServer]]:
-    """Run the emulated Slack in legacy (plaintext token file) mode."""
+    """Run the emulated Slack in legacy (plaintext token file) mode.
+
+    Reserves the fixed redirect port across pytest processes for the
+    test's duration.
+    """
     oauth = SlackOAuthState()
     server = SlackApiServer(oauth)
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     monkeypatch.setenv("KISS_SLACK_BASE_URL", server.base_url + "/")
     monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
-    yield oauth, server
-    ConsentSession.cancel_active("slack")
+    with hold_loopback_port(LOOPBACK_PORT):
+        yield oauth, server
+        ConsentSession.cancel_active("slack")
     server.stop()
 
 

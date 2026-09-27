@@ -531,6 +531,26 @@ def test_persistent_block_is_reported_with_a_note(tool, server):
     assert 12 <= elapsed < 40
 
 
+def test_page_read_survives_a_navigation_landing_under_it(tool, server):
+    """A page that navigates itself during a read is read again on the new document.
+
+    Cloudflare's challenge reloads the real page on its own once its checks
+    pass.  When that landed between ``wait_for_function`` resolving and
+    ``json_value`` fetching the result, ``go_to_url`` answered ``Error
+    navigating to https://journals.sagepub.com/: JSHandle.json_value:
+    Execution context was destroyed``.  Each attempt here schedules a
+    navigation 1 ms ahead from the page, which lands in that gap about
+    half the time on the development machine (the raw read failed 27-30
+    of 60 attempts); the read must answer every time.
+    """
+    tool.go_to_url(f"{server}/hop-0")
+    for i in range(1, 41):
+        tool._page.evaluate(f"() => setTimeout(() => location.replace('/hop-{i}'), 1)")
+        assert tool._read_page(tool._page, "() => [document.title]") == ["inert"]
+        tool._page.wait_for_url(f"**/hop-{i}")
+        tool._page.wait_for_load_state("domcontentloaded")
+
+
 def test_turnstile_checkbox_is_ticked_like_a_person(tool, server):
     """The interactive "Verify you are human" box is found in the widget frame and pressed.
 

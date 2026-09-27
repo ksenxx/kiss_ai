@@ -31,9 +31,8 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from urllib.parse import urlsplit
-
-from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 
 # Only pages we built ourselves (file://) or public sign-in pages.
 _ALLOWED_SCHEMES = ("http", "https", "file")
@@ -47,6 +46,29 @@ _LAUNCH_GRACE = 3.0
 
 _opened_at: dict[str, float] = {}
 _lock = threading.Lock()
+
+
+def is_headless_environment() -> bool:
+    """Return True when running in a headless/Docker/Linux environment.
+
+    Checks in order:
+    1. KISS_HEADLESS env var (explicit override, "1"/"true"/"yes" → headless)
+    2. Presence of /.dockerenv (running inside Docker)
+    3. Linux with no $DISPLAY and no $WAYLAND_DISPLAY set
+    """
+    env = os.environ.get("KISS_HEADLESS", "").lower()
+    if env in ("1", "true", "yes"):  # pragma: no branch
+        return True
+    if env in ("0", "false", "no"):  # pragma: no branch
+        return False
+    if Path("/.dockerenv").exists():  # pragma: no branch
+        return True
+    if sys.platform.startswith("linux"):  # pragma: no branch
+        if (  # pragma: no branch
+            not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+        ):
+            return True
+    return False
 
 
 def _launch_commands(url: str) -> list[list[str]]:

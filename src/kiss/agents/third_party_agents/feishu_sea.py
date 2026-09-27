@@ -20,13 +20,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.browser_handoff import portal_handoff
 
 _FEISHU_DIR = Path.home() / ".kiss" / "third_party_agents" / "feishu"
 _config = ChannelConfig(

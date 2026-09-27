@@ -39,7 +39,6 @@ from urllib.parse import quote
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -47,6 +46,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.agents.third_party_agents._overleaf_realtime import fetch_file_tree, flatten_tree
+from kiss.core.browser_handoff import portal_handoff
 
 _TIMEOUT = 60
 _MAX_OUTPUT = 8000

@@ -88,6 +88,7 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     SlackOAuthState,
     sign_in,
 )
+from kiss.tests.conftest import hold_loopback_port
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
 _REAL_FIRECRAWL_KEY = "fc-real-secret-key"
@@ -238,13 +239,19 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
 
 @pytest.fixture()
 def slack_sign_in(api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Point the Slack sign-in at the emulator's token endpoint."""
+    """Point the Slack sign-in at the emulator's token endpoint.
+
+    Reserves the fixed redirect port across pytest processes for the
+    test's duration.
+    """
     from kiss.agents.third_party_agents._device_auth import ConsentSession
+    from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT
 
     monkeypatch.setenv("KISS_SLACK_BASE_URL", f"http://127.0.0.1:{api_server.server_address[1]}")
     monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
-    yield api_server
-    ConsentSession.cancel_active("slack")
+    with hold_loopback_port(LOOPBACK_PORT):
+        yield api_server
+        ConsentSession.cancel_active("slack")
 
 
 def _slack_backend(api_server: _ApiServer) -> SlackChannelBackend:

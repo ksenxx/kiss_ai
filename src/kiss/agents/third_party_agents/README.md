@@ -386,8 +386,8 @@ sub-agents it dispatched, later user messages, progress summaries, and its last 
 transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
 page of the digested transcript, optionally filtered), and `task_step(task_id, index,
 max_chars)` (one entry in full). It swaps the system prompt
-for the compact SYSTEM_LITE prompt (`papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md`
-in a source checkout, else the byte-identical bundled `_ask_system_lite.md`) with a
+for the compact SYSTEM_LITE prompt (the bundled `_ask_system_lite.md`, a copy of the
+ablation prompt with the brand identity as a `{{IDENTITY}}` placeholder) with a
 no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
 `review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and
 `use_memory()`, so the answering session has no browser tools, no memory tools, and no

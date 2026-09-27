@@ -14,17 +14,19 @@ fixed loopback callback ``http://localhost:53683/callback``.
 
 The redirect port is fixed by design (a dynamically registered client
 keeps working only if its redirect URI never changes), so these tests
-need port 53683 free.
+need port 53683 free: ``_own_redirect_port`` reserves it across
+concurrently running pytest processes.
 
 Branches not exercised:
 
 * ``_noninteractive_callback`` in ``mcp_servers``: the SDK calls the
   redirect handler first, and ``_noninteractive_redirect`` always
   raises, so the callback handler can never be reached.
-* ``MCPLoginSession._run``'s ``error = "sign-in cancelled"`` branch:
-  it needs a cancel to land after the redirect was consumed but before
-  ``initialize`` returns, a window no real client/server exchange can
-  hit deterministically.
+* ``MCPLoginSession._run``'s no-exception ``error = "sign-in cancelled"``
+  branch: it needs a cancel to land after the redirect was consumed but
+  before ``initialize`` returns, a window no real client/server exchange
+  can hit deterministically (the exception path of a cancel is covered
+  by ``test_new_session_replaces_running_one``).
 * ``if self._server is not None`` being false in ``_run``: ``start``
   always binds the server before starting the thread.
 * The ``__main__`` guard (``sys.exit(main())``): ``main`` itself is
@@ -80,6 +82,7 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     user_mcp_config_path,
 )
+from kiss.tests.conftest import hold_loopback_port
 
 # ---------------------------------------------------------------------------
 # A real OAuth-protected MCP server
@@ -252,14 +255,19 @@ def server(home: Path) -> Iterator[_AuthMCPServer]:
 
 
 @pytest.fixture(autouse=True)
-def _stop_login_sessions() -> Iterator[None]:
-    """Cancel any login session a test left running (frees port 53683)."""
-    yield
-    session = MCPLoginSession._active
-    if session is not None:
-        session.cancel()
-        session.wait(10)
-    MCPLoginSession._active = None
+def _own_redirect_port() -> Iterator[None]:
+    """Reserve port 53683 across pytest processes and free it afterwards.
+
+    Cancels any login session the test left running before the
+    reservation ends, so the next test (in any process) can bind it.
+    """
+    with hold_loopback_port(MCP_REDIRECT_PORT):
+        yield
+        session = MCPLoginSession._active
+        if session is not None:
+            session.cancel()
+            session.wait(10)
+        MCPLoginSession._active = None
 
 
 def _cfg(server: _AuthMCPServer, name: str = "authdemo") -> MCPServerConfig:
@@ -402,7 +410,7 @@ def test_new_session_replaces_running_one(server: _AuthMCPServer, home: Path) ->
     second = MCPLoginSession.start(_cfg(server))
     assert first.wait(0)
     assert first.done is False
-    assert "sign-in was not completed" in first.error
+    assert first.error == "sign-in cancelled"
     assert MCPLoginSession.active("authdemo") is second
     assert second.auth_url and second.auth_url != first.auth_url
     _approve(second.auth_url)
@@ -425,7 +433,7 @@ def test_half_open_redirect_connection_does_not_pin_the_port(
         session.cancel()
         assert session.wait(10)
         assert session.done is False
-        assert "sign-in was not completed" in session.error
+        assert session.error == "sign-in cancelled"
         assert half_open.recv(1) == b""  # the server closed the half-open connection
 
         replacement = MCPLoginSession.start(_cfg(server))

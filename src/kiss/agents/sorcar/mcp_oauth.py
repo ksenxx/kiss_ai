@@ -46,8 +46,8 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     save_mcp_server,
 )
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.browser_handoff import open_in_default_browser
 
 #: Well-known remote MCP servers: name -> (transport, URL).
 KNOWN_MCP_SERVERS: dict[str, tuple[str, str]] = {
@@ -268,8 +268,16 @@ class MCPLoginSession:
         return session if session is not None and session.cfg.name == name else None
 
     def cancel(self) -> None:
-        """Stop the session; its thread exits at the next wake-up."""
+        """Stop the session and free the redirect port at once.
+
+        The login thread exits at its next wake-up, but it may sit in a
+        network call to the MCP server for much longer; closing the
+        listener here lets a replacement session bind the port without
+        waiting for that call to return.
+        """
         self._cancelled = True
+        if self._server is not None:
+            self._server.server_close()
 
     def wait(self, seconds: float) -> bool:
         """Wait up to *seconds* for the session to end; return True if it did."""
@@ -283,7 +291,9 @@ class MCPLoginSession:
             if self._cancelled:
                 self.error = "sign-in cancelled"
         except BaseException as exc:
-            self.error = describe_exception(exc)
+            # A cancel closes the listener under the running flow, so
+            # whatever the flow raised, the cause is the cancel.
+            self.error = "sign-in cancelled" if self._cancelled else describe_exception(exc)
         finally:
             if self._server is not None:
                 self._server.server_close()

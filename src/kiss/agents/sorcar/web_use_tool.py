@@ -922,10 +922,40 @@ class WebUseTool:
         bounded error (its loop never exits); ``close_browser()`` is the
         agent's escape hatch, exactly as for any other wedged page.
         """
-        handle = page.wait_for_function(
-            "() => [document.title]", timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-        )
-        return str(handle.json_value()[0])
+        return str(WebUseTool._read_page(page, "() => [document.title]")[0])
+
+    @staticmethod
+    def _read_page(page: Any, expression: str) -> Any:
+        """Evaluate *expression* (a function returning a non-empty list) on *page*.
+
+        ``wait_for_function`` bounds the read (see :meth:`_page_title`) and
+        survives navigations: Playwright re-arms it in the new document.
+        The follow-up ``json_value()`` does not.  A page that navigates
+        itself — a Cloudflare challenge reloading the real page once its
+        checks pass, a redirecting landing page — can destroy the execution
+        context between the two calls, which surfaced as ``Error navigating
+        to ...: JSHandle.json_value: Execution context was destroyed``.
+        The read is then repeated once on the new document.
+
+        Args:
+            page: The Playwright page to read.
+            expression: JavaScript function source returning a list.
+
+        Returns:
+            The list the expression returned, as Python values.
+        """
+        try:
+            return page.wait_for_function(
+                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+            ).json_value()
+        except web_stealth.playwright_api().Error as exc:
+            if "Execution context was destroyed" not in str(exc):
+                raise
+            logger.debug("page navigated under the read; reading the new document", exc_info=True)
+            page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
+            return page.wait_for_function(
+                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
+            ).json_value()
 
     def _require_responsive_renderer(self) -> None:
         """Raise ``TimeoutError`` unless the page's renderer answers promptly.
@@ -1078,12 +1108,10 @@ class WebUseTool:
 
     def _challenge_vendor(self) -> str | None:
         """Return the bot-protection vendor whose interstitial is showing, if any."""
-        handle = self._page.wait_for_function(
+        title, body_head = self._read_page(
+            self._page,
             "() => [document.title, document.body ? document.body.innerText.slice(0, 1500) : '']",
-            timeout=_PAGE_READ_TIMEOUT_MS,
-            polling=100,
         )
-        title, body_head = handle.json_value()
         return web_stealth.challenge_vendor(str(title), str(body_head))
 
     def _turnstile_checkbox(self) -> dict[str, float] | None:

@@ -9,7 +9,7 @@ mocks, just the real registry, the real rewriter and the real
 dispatch code:
 
 1. The ``ask_sea`` module itself: ``system_prompt`` MUST return the
-   bytes of ``papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md``,
+   bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
    ``append_to_system_prompt`` MUST start with the no-internet and
    answer-quickly directives and carry the answering playbook,
    ``tools`` MUST expose the three trajectory tools, ``tool_profile``
@@ -126,37 +126,20 @@ def test_use_web_tools_returns_false() -> None:
     assert ask_sea.use_web_tools() is False
 
 
-def test_bundled_system_lite_is_byte_identical() -> None:
-    """The wheel-fallback copy MUST match the repo copy byte for byte.
+def test_system_lite_is_bundled_next_to_the_module() -> None:
+    """The prompt MUST ship inside the package, not under ``papers/``.
 
-    The bundled ``_ask_system_lite.md`` next to ``ask_sea.py`` is
-    what ``system_prompt()`` returns from a wheel install (``papers/``
-    is excluded from sdist/wheel per ``pyproject.toml``).  If it
-    drifts from the repo file, wheel users get a stale ablation
-    prompt while source users get the updated one — a silent split
-    the ablation study cannot tolerate.
+    ``papers/`` is excluded from sdist/wheel per ``pyproject.toml``,
+    and its ``ablation/prompts/SYSTEM_LITE.md`` is a frozen record of
+    the ablation run (literal identity sentence, no brand
+    placeholder), so ``system_prompt()`` must read a copy that lives
+    next to ``ask_sea.py`` and carries ``{{IDENTITY}}`` for
+    ``render_brand``.
     """
-    repo_bytes = ask_sea._SYSTEM_LITE_PATH.read_bytes()
-    bundled_bytes = ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_bytes()
-    assert bundled_bytes == repo_bytes
-
-
-def test_system_prompt_falls_back_to_bundled_copy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A missing ``papers/`` MUST NOT break ``system_prompt()``.
-
-    Simulates a wheel install by pointing ``_SYSTEM_LITE_PATH`` at a
-    non-existent file: the function MUST fall back to
-    ``_BUNDLED_SYSTEM_LITE_PATH`` (identical content, verified
-    above) and return the same text a repo install would.
-    """
-    missing = tmp_path / "does-not-exist.md"
-    monkeypatch.setattr(ask_sea, "_SYSTEM_LITE_PATH", missing)
-    text = ask_sea.system_prompt()
-    assert text == render_brand(
-        ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_text(encoding="utf-8"),
-    )
+    path = ask_sea._SYSTEM_LITE_PATH
+    assert path.parent == Path(ask_sea.__file__).resolve().parent
+    assert path.is_file()
+    assert "{{IDENTITY}}" in path.read_text(encoding="utf-8")
 
 
 def test_ask_sea_lives_in_third_party_agents_package() -> None:
