@@ -3,7 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Coverage gate: requires 100% line coverage of consumeTipsFirstRun()
+// Coverage gate: requires 100% line coverage of claimTipsPopup()
 // in out/SorcarTab.js (the region fenced by `// audit0903-coverage:start`
 // / `// audit0903-coverage:end`) when running the functional suite in
 // test/audit0903_tips_first_run.test.js.  The suite's child processes

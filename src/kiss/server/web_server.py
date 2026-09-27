@@ -117,7 +117,7 @@ from kiss.server.json_printer import (
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
-from kiss.server.tips import read_tips
+from kiss.server.tips import read_tips, tips_disabled
 from kiss.server.tricks import read_tricks_data
 from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
@@ -3769,8 +3769,14 @@ def _build_html() -> str:
     version = _read_version()
     tricks_data = read_tricks_data()
     tricks_json = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
+    # The server serves many devices and cannot tell which of them saw
+    # the tips, so unless the user opted out (a choice shared with the
+    # extension) it allows the auto-open and sends the running version:
+    # tips.js opens the window once per version per browser
+    # (localStorage), i.e. on first use and again after every update.
+    tips = read_tips()
     tips_json = json.dumps(
-        {"tips": read_tips(), "show": False},
+        {"tips": tips, "show": bool(tips) and not tips_disabled(), "version": version},
     ).replace("</", "<\\/")
     head_style = (
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
