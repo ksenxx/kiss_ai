@@ -8,9 +8,9 @@
 Three tints must read at a glance in a real Chromium:
 
 * the collapsible chat panel's header in the task-history panel: a
-  quiet NEUTRAL tint (no hue of its own), so a list of many chats does
-  not become a stack of accent bands and the accent stays reserved for
-  the active row below;
+  plain row with no fill of its own and a quiet NEUTRAL tint (no hue)
+  under the pointer, so a list of many chats does not become a stack
+  of bands and the accent stays reserved for the active row below;
 * the task panel whose chat webview is on screen
   (``.running-item.history-active-task``): an accent tint and border;
 * a sub-agent's tab in the chat tab strip: purple tint, purple text,
@@ -95,20 +95,20 @@ def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALP
 
 
 def test_chat_panel_header_is_a_quiet_neutral(_browser) -> None:
-    """Every chat panel's header is a faint neutral tint of the
-    foreground (visible, but with no hue of its own), darkens on hover,
-    and never borrows the accent that marks the active task row (that
-    row's tint is checked by test_active_task_panel_is_a_visible_accent)."""
+    """Every chat panel's header is a plain row (no fill of its own),
+    takes a faint neutral tint of the foreground (no hue) under the
+    pointer, and never borrows the accent that marks the active task row
+    (that row's tint is checked by test_active_task_panel_is_a_visible_accent)."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
         idle = _style(page, ".history-chat-header", "backgroundColor")
-        assert _chroma_of(idle) <= 8, f"the header tint has a hue: {idle}"
-        assert 0.04 <= _alpha_of(idle) <= 0.1, f"the header tint is off: {idle}"
+        assert _alpha_of(idle) == 0, f"the idle header has a fill: {idle}"
         page.hover(".history-chat-header")
+        _settle(page, ".history-chat-header:hover")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
         assert _chroma_of(hovered) <= 8, f"the hovered header has a hue: {hovered}"
-        assert _alpha_of(hovered) > _alpha_of(idle), (idle, hovered)
+        assert 0.03 <= _alpha_of(hovered) <= 0.1, f"the hover tint is off: {hovered}"
     finally:
         context.close()
 
@@ -140,10 +140,10 @@ _HEADER_INSET_JS = r"""(expand) => {
 
 @pytest.mark.parametrize("expand", [False, True])
 def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
-    """The header's tint touches the panel's border on every side it
-    borders (no strip of bare sidebar between them), its corners follow
-    the square panel (no rounding), and the task rows keep a small
-    inset."""
+    """The header row spans the panel on every side it borders (no strip
+    of bare sidebar between them), its corners follow the square panel
+    (no rounding), and the task rows are indented behind the nesting
+    guide."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
@@ -154,9 +154,10 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         assert probe["right"] == pytest.approx(0, abs=0.5), probe
         assert probe["radii"] == ["0px"] * 4, probe
         if expand:
-            # The inset is one --space-1 step (4px) of the spacing scale.
-            assert probe["rowLeft"] == pytest.approx(4, abs=0.5), probe
-            assert probe["rowGapBelowHeader"] == pytest.approx(4, abs=0.5), probe
+            # .history-chat-body: a 12px margin, the 1px guide line and
+            # an 8px padding (--space-3 + 1px + --space-2).
+            assert probe["rowLeft"] == pytest.approx(21, abs=0.5), probe
+            assert probe["rowGapBelowHeader"] == pytest.approx(0, abs=0.5), probe
         else:
             assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
     finally:
@@ -230,7 +231,7 @@ def _assert_seamless_panels(page, what: str) -> None:
     assert e["gaps"] == [pytest.approx(0, abs=0.5)] * 2, (what, e)
     assert e["radii"] == ["0px"] * 3, (what, e)
     # One shared 1px line between neighbours, none on the sides.
-    assert e["borderTops"] == ["1px", "0px", "0px"], (what, e)
+    assert e["borderTops"] == ["0px", "1px", "1px"], (what, e)
     assert e["borderSides"] == [["0px", "0px"]] * 3, (what, e)
     # The day separator keeps the panel's usual inset.
     assert e["sepL"] == pytest.approx(e["insetL"], abs=0.5), (what, e)

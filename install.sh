@@ -1078,7 +1078,7 @@ guard_vsix_tracking() {
 # the brand, and every later update rebuilds with the same overlay.
 # Without a ``.brand/`` directory both functions do nothing (stock KISS
 # Sorcar), so a development checkout is never re-branded by accident.
-BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png)
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png welcome-logo-dark.png)
 BRAND_MEDIA_REL="src/kiss/agents/vscode/media"
 BRAND_MANIFEST_REL="src/kiss/agents/vscode/package.json"
 # Snapshot directory while the overlay is applied; empty otherwise.

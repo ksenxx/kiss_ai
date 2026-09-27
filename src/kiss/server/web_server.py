@@ -3814,6 +3814,7 @@ def _build_html() -> str:
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
+        "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
         "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',

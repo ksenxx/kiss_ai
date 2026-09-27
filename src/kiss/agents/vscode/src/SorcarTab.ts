@@ -402,7 +402,10 @@ export function buildChatHtml(
     STYLE_HREF: u('main.css'),
     BRAND_STYLE_HREF: u('brand.css'),
     WELCOME_LOGO_SRC: u('welcome-logo.png'),
-    HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
+    WELCOME_LOGO_DARK_SRC: u('welcome-logo-dark.png'),
+    // The dark sheet is the initial one; main.js (followVscodeTheme)
+    // swaps in the light sheet whenever the editor theme is light.
+    HLJS_CSS_HREF: u('highlight-vscode-dark.css'),
     HEAD_STYLE: '',
     BODY_CLASS_ATTR: bodyAttrs || '',
     PRODUCT_NAME: escapeHtml(BRAND.productName),
@@ -426,7 +429,13 @@ export function buildChatHtml(
     CTX_MENU_SRC: u('contentContextMenu.js'),
     TREE_MENU_SRC: u('treeContextMenu.js'),
     MAIN_SRC: u('main.js'),
-    SHIM_SCRIPT: '',
+    SHIM_SCRIPT:
+      `<script nonce="${nonce}">window.__HLJS_THEME_CSS__ = ` +
+      JSON.stringify({
+        dark: u('highlight-vscode-dark.css'),
+        light: u('highlight-vscode-light.css'),
+      }).replace(/<\//g, '<\\/') +
+      ';</script>',
     TRICKS_JSON: tricksJson,
     MY_TRICKS_COUNT: String(tricksData.userCount),
     TIPS_JSON: tipsJson,

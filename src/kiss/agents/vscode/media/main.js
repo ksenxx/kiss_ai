@@ -1378,14 +1378,74 @@
     btn.setAttribute('aria-label', label);
   }
 
-  function applyRemoteTheme(theme) {
-    if (!document.body.classList.contains('remote-chat')) return;
-    document.body.classList.toggle('light-theme', theme === 'light');
+  /**
+   * Point the highlight.js stylesheet at the sheet for `theme`
+   * ('dark' or 'light').  The page provides both URLs in
+   * window.__HLJS_THEME_CSS__ (web_server.py for the remote page,
+   * SorcarTab.ts for the webview).  A single dark sheet on a light
+   * theme would paint near-white code tokens on the theme's light code
+   * block, since main.css gives .hljs the theme's own background.
+   */
+  function setHljsTheme(theme) {
     const hljsLink = document.getElementById('hljs-theme');
     const hljsUrls = window.__HLJS_THEME_CSS__;
     if (hljsLink && hljsUrls && hljsUrls[theme]) {
       hljsLink.setAttribute('href', hljsUrls[theme]);
     }
+  }
+
+  /**
+   * Whether the VS Code webview's editor theme is light.  VS Code
+   * stamps the body with exactly one of vscode-light / vscode-dark /
+   * vscode-high-contrast / vscode-high-contrast-light (the last one
+   * also carries vscode-high-contrast), and updates the classes live
+   * when the user switches themes.
+   */
+  function vscodeThemeIsLight() {
+    const cls = document.body.classList;
+    return (
+      cls.contains('vscode-light') || cls.contains('vscode-high-contrast-light')
+    );
+  }
+
+  /**
+   * Whether the page is on a light theme: the remote page's own toggle
+   * (body.light-theme) or, in the webview, VS Code's light editor theme.
+   */
+  function pageThemeIsLight() {
+    return (
+      document.body.classList.contains('light-theme') || vscodeThemeIsLight()
+    );
+  }
+
+  /** Recolour the code highlighting (and Monaco, once loaded) for the VS Code theme. */
+  function syncVscodeTheme() {
+    setHljsTheme(vscodeThemeIsLight() ? 'light' : 'dark');
+    if (window.monaco && window.monaco.editor) {
+      applyContentMonacoTheme(window.monaco);
+    }
+  }
+
+  /**
+   * Keep the highlight.js sheet in step with the VS Code editor theme:
+   * applied once at start-up and again whenever VS Code rewrites the
+   * body's theme classes.  No-op on the remote page, whose theme is
+   * the user's own toggle (applyRemoteTheme).
+   */
+  function followVscodeTheme() {
+    if (document.body.classList.contains('remote-chat')) return;
+    syncVscodeTheme();
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(syncVscodeTheme).observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+
+  function applyRemoteTheme(theme) {
+    if (!document.body.classList.contains('remote-chat')) return;
+    document.body.classList.toggle('light-theme', theme === 'light');
+    setHljsTheme(theme);
     const btn = document.getElementById('theme-btn');
     if (btn) updateThemeButton(btn);
     // Monaco's theme is global: one call recolours every open editor.
@@ -1430,7 +1490,7 @@
    * @returns {string} The name of the theme now in use.
    */
   function applyContentMonacoTheme(monaco) {
-    const light = document.body.classList.contains('light-theme');
+    const light = pageThemeIsLight();
     const name = light ? 'kiss-light' : 'kiss-dark';
     const style = window.getComputedStyle(document.body);
     const colors = {};
@@ -14174,7 +14234,6 @@
         renderRemoteUrl(
           ev.url,
           ev.ntfyUrl,
-          ev.tunnelActive,
           ev.loopbackUrl,
           ev.lanUrls,
           ev.localCa === true,
@@ -15867,14 +15926,7 @@
     return hint;
   }
 
-  function renderRemoteUrl(
-    url,
-    ntfyUrl,
-    tunnelActive,
-    loopbackUrl,
-    lanUrls,
-    localCa,
-  ) {
+  function renderRemoteUrl(url, ntfyUrl, loopbackUrl, lanUrls, localCa) {
     const displayUrl = ntfyUrl || url;
     // Alongside the Cloudflare (or ntfy) URL, always show how to
     // reach the webapp from this machine (127.0.0.1) and from other
@@ -15899,26 +15951,13 @@
     const caBaseUrl = localCa
       ? (lanUrls || []).find(u => !!u) || loopbackUrl
       : '';
-    const containerIds = ['remote-url', 'welcome-remote-url'];
-    for (const id of containerIds) {
-      const container = document.getElementById(id);
-      if (!container) continue;
-      container.innerHTML = '';
-      for (const [barUrl, isNtfy, labelText] of bars) {
-        container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
-      }
-      if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
+    const container = document.getElementById('remote-url');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const [barUrl, isNtfy, labelText] of bars) {
+      container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
     }
-    const welcomeCfg = document.getElementById('welcome-config');
-    if (welcomeCfg) {
-      const isRemoteChat = document.body.classList.contains('remote-chat');
-      const visible = isRemoteChat
-        ? false
-        : tunnelActive === undefined
-          ? !!displayUrl
-          : !!tunnelActive;
-      welcomeCfg.style.display = visible ? '' : 'none';
-    }
+    if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
   }
 
   const UPDATE_NOTIFICATION_ID = 'kiss-update-available';
@@ -16951,46 +16990,15 @@
       input.click();
     });
     setupPasswordToggle('cfg-remote-password-toggle', 'cfg-remote-password');
-    setupPasswordToggle(
-      'welcome-cfg-remote-password-toggle',
-      'welcome-cfg-remote-password',
-    );
     FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
       .concat(['cfg-custom-api-key'])
       .forEach(setupSecretInput);
-    const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
     const settingsPwInp = document.getElementById('cfg-remote-password');
-    function _flushPw() {
-      saveSettingsIfPopulated();
-    }
-    if (welcomePwInp && settingsPwInp) {
-      welcomePwInp.addEventListener('input', () => {
-        settingsPwInp.value = welcomePwInp.value;
-        // Assigning .value fires no input event, so the mirrored field
-        // has to be marked by hand or the very first password a user
-        // sets from the welcome screen is dropped.
-        markSettingsFieldEdited('cfg-remote-password');
-      });
-      settingsPwInp.addEventListener('input', () => {
-        welcomePwInp.value = settingsPwInp.value;
-      });
-    }
-    if (welcomePwInp) {
-      welcomePwInp.addEventListener('change', _flushPw);
-      welcomePwInp.addEventListener('blur', _flushPw);
-      welcomePwInp.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          _flushPw();
-          welcomePwInp.blur();
-        }
-      });
-    }
     if (settingsPwInp) {
       settingsPwInp.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           e.preventDefault();
-          _flushPw();
+          saveSettingsIfPopulated();
           settingsPwInp.blur();
         }
       });
@@ -17290,6 +17298,7 @@
     setupActivityBar();
     setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
+    followVscodeTheme();
     if (SIDEBAR_CHAT_MODE) {
       // The sidebar chat's task-info drawer starts closed AND inert:
       // its off-screen close button must not sit in the keyboard tab
@@ -18943,17 +18952,6 @@
     return btn;
   }
 
-  function chatIdBgColor(chatId) {
-    if (!chatId) return 'hsl(0, 0%, 75%)';
-    let hash = 5381;
-    for (let i = 0; i < chatId.length; i++) {
-      hash = (hash << 5) + hash + chatId.charCodeAt(i);
-      hash |= 0;
-    }
-    const hue = Math.abs(hash) % 360;
-    return 'hsl(' + hue + ', 55%, 75%)';
-  }
-
   // ---- History grouping: one block per chat, day separators ----
   //
   // The daemon lists tasks newest first, so the first task seen for a
@@ -20060,10 +20058,7 @@
         closeSidebar();
       });
       if (historyLegacyView) {
-        // The flat list: rows in the daemon's newest-first order, each
-        // with its chat's color (a hue hashed from the chat id) as a
-        // narrow bar on its right edge.
-        div.style.setProperty('--task-color', chatIdBgColor(chatId));
+        // The flat list: rows in the daemon's newest-first order.
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
@@ -21192,11 +21187,6 @@
       setValue('cfg-custom-headers', cfg.custom_headers || '');
     }
     setValue('cfg-remote-password', cfg.remote_password || '');
-    // The welcome screen's password box mirrors the settings one, so it
-    // follows the same edited mark.
-    if (!settingsEditedFields.has('cfg-remote-password')) {
-      setValue('welcome-cfg-remote-password', cfg.remote_password || '');
-    }
     configFormPopulated = true;
     FIRST_PARTY_KEY_IDS.forEach(k => {
       setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');

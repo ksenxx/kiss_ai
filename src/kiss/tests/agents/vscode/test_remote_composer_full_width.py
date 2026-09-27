@@ -97,6 +97,7 @@ def _build_test_page(body_class: str) -> str:
         .replace("{{PRODUCT_NAME}}", "KISS Sorcar")
         .replace("{{TAGLINE}}", "Your AI assistant.")
         .replace("{{WELCOME_LOGO_SRC}}", "")
+        .replace("{{WELCOME_LOGO_DARK_SRC}}", "")
     )
     input_area = (
         _extract_div_block(src, "input-area")

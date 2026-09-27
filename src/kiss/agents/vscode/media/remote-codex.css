@@ -385,11 +385,6 @@ body.remote-chat .sidebar-hdr {
   font-size: var(--fs-sm);
 }
 
-body.remote-chat .sidebar-item {
-  border-radius: var(--radius-xl);
-  transition: background var(--dur-base);
-}
-
 body.remote-chat .sidebar-item:hover {
   background: var(--hover);
 }
@@ -558,11 +553,6 @@ body.remote-chat #meta-resizer {
    is being dragged. */
 body.remote-chat.sidebar-resizing {
   user-select: none;
-}
-
-body.remote-chat .running-item {
-  background-color: var(--selected);
-  color: var(--fg);
 }
 
 body.remote-chat .running-item-metrics {
