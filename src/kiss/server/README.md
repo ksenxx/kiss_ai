@@ -200,6 +200,30 @@ SEA without a callable `description()`, or whose `description()`
 raises or returns something other than a non-empty string, yields a
 diagnostic instead.
 
+### `add_to_system_prompt()` and `register_as_model()` — model routing SEAs
+
+| Function                 | Return type | Effect                                                     |
+|--------------------------|-------------|------------------------------------------------------------|
+| `add_to_system_prompt()` | `str`       | text **added** to `appendToSystemPrompt` after the value already there |
+| `register_as_model()`    | `bool`      | `True` lists the SEA in the model picker under its command name |
+
+`add_to_system_prompt()` carries a SEA's *model routing protocol*: the
+returned text is appended to the run's system prompt after whatever
+`appendToSystemPrompt` already holds (the caller's text, or the value
+an `append_to_system_prompt()` getter staged), separated by a blank
+line.  Unlike `append_to_system_prompt()` it never replaces the
+caller's value, so the protocol reaches every run of the SEA and the
+caller's own additions survive; `run_parallel` workers inherit it like
+any system-prompt suffix.  `register_as_model()` is a registry flag,
+not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
+lists every registered SEA whose `register_as_model()` returns `True`,
+the daemon offers them in the model picker (vendor `Router`, once at
+least one catalog model is runnable), and a task run with such a pick
+becomes an agent-script run of the SEA on the model its `model()`
+getter names (else the default model) — `/xxx` slash commands and runs
+that already carry an `agentPath` keep their agent and only take that
+model.  The bundled `autorouter` and `bestrouter` are such SEAs.
+
 The parameters without getters:
 
 - **`timeout`** — bounds the *client's* local wait (`None` waits
@@ -881,7 +905,7 @@ class TaskResult:
   environment.  A tool that runs on the task's worker thread can call
   `kiss.server.agent_state.current_agent()` to get the running agent
   (its `work_dir`, model and usage counters); it returns `None` on any
-  other thread.  The bundled `seas/autoroute/autoroute_sea.py` and
+  other thread.  The bundled `seas/autorouter/autorouter_sea.py` and
   `seas/skillopt/skillopt_sea.py` use it.
 - Put the SEA in a folder named after the command, `xxx/xxx_sea.py`,
   and list that folder's parent in `~/.kiss/SEAS.md` (one folder per
@@ -895,9 +919,10 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 13 bundled SEA folders register
-  these commands: `/autoroute` (runs a task on the cheapest model tier
-  that will finish it), `/coding` (unattended coding in a Docker
+  folder can shadow them.  The 14 bundled SEA folders register
+  these commands: `/autorouter` (runs a task on the cheapest model tier
+  that will finish it), `/bestrouter` (runs a task on
+  `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
   container; the module defines no top-level run-parameter getters, its
   `ContainerHarness` getters are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`

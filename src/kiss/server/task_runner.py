@@ -41,7 +41,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_commands import SeaScriptError, model_sea, sea_getter_value
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as _sea_help_text,
 )
@@ -58,7 +58,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import AUTOROUTER, get_available_models
+from kiss.core.models.model_info import get_available_models, get_default_model
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
@@ -738,21 +738,19 @@ class _TaskRunnerMixin:
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
-    def _resolve_autorouter(self, cmd: dict[str, Any]) -> None:
-        """Turn a run on the ``autorouter`` picker entry into an autoroute SEA run.
+    def _resolve_sea_model(self, cmd: dict[str, Any]) -> None:
+        """Turn a run whose model is a model-picker SEA into a run of that SEA.
 
-        ``autorouter`` (:data:`kiss.core.models.model_info.AUTOROUTER`)
-        is the model-picker entry that hands every task to
-        :mod:`kiss.agents.seas.autoroute_sea`, which routes each unit of
-        work to the cheapest model tier that passes its acceptance check.
-        When the run's model — the wire field ``model``, else the tab's
-        pick (the same lookup ``_run_task_inner`` makes) — is that entry,
-        the command is rewritten in place:
+        A SEA whose ``register_as_model()`` returns ``True`` (``autorouter``,
+        ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_seas`)
+        is offered in the model picker under its command name.  When the
+        run's model — the wire field ``model``, else the tab's pick (the
+        same lookup ``_run_task_inner`` makes) — is such an entry, the
+        command is rewritten in place:
 
-        * ``model`` becomes the SEA's orchestrator model
-          (:func:`~kiss.agents.seas.autoroute_sea.orchestrator_model`),
-          so the run, its history row and its sub-agents all name a real
-          catalog model;
+        * ``model`` becomes the model the SEA's ``model()`` getter names,
+          else the default model, so the run, its history row and its
+          sub-agents all name a real model;
         * ``agentPath`` becomes the SEA file when the caller supplied
           none, unless the prompt is a ``/xxx`` slash command.  A
           supplied ``agentPath`` (a ``run_agent`` child, the ``/ask``
@@ -763,26 +761,33 @@ class _TaskRunnerMixin:
 
         Every other run is left untouched.  Called twice per run: before
         ``apply_agent_overrides`` (which must see the SEA as this run's
-        ``agentPath``) and again in ``_run_task_inner`` before the model
-        is read, because an agent script's ``model()`` getter may
+        ``agentPath`` and adds the SEA's ``add_to_system_prompt()`` protocol
+        to the system prompt) and again in ``_run_task_inner`` before the
+        model is read, because an agent script's ``model()`` getter may
         override ``model`` with ``""`` — "the tab's pick" — which would
         otherwise resolve back to the entry itself.
 
         Args:
             cmd: The ``run`` command, mutated in place.
+
+        Raises:
+            AgentFileError: When the SEA's ``model()`` getter raises.
         """
         model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
-        if model != AUTOROUTER:
+        sea_path = model_sea(model) if isinstance(model, str) and model else None
+        if sea_path is None:
             return
-        from kiss.agents.seas import autoroute_sea
-
         prompt = cmd.get("prompt", "")
         is_slash_command = (
             isinstance(prompt, str) and _rewrite_sea_command_prompt(prompt) is not None
         )
         if cmd.get("agentPath") in (None, "") and not is_slash_command:
-            cmd["agentPath"] = str(Path(autoroute_sea.__file__).resolve())
-        cmd["model"] = autoroute_sea.orchestrator_model()
+            cmd["agentPath"] = str(sea_path)
+        try:
+            picked = sea_getter_value(sea_path, "model")
+        except SeaScriptError as exc:
+            raise AgentFileError(str(exc)) from exc
+        cmd["model"] = picked if isinstance(picked, str) and picked else get_default_model()
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -826,10 +831,11 @@ class _TaskRunnerMixin:
             agent_file_error: AgentFileError | None = None
             overridden_fields: set[str] = set()
             try:
-                # The ``autorouter`` picker entry names an agent script,
-                # not a model: resolve it before the overrides run so
-                # they see the autoroute SEA as this run's ``agentPath``.
-                self._resolve_autorouter(cmd)
+                # A model-picker SEA (``autorouter``, ``bestrouter``) names
+                # an agent script, not a model: resolve it before the
+                # overrides run so they see the SEA as this run's
+                # ``agentPath``.
+                self._resolve_sea_model(cmd)
                 overridden_fields = apply_agent_overrides(cmd)
             except AgentFileError as exc:
                 agent_file_error = exc
@@ -1494,7 +1500,7 @@ class _TaskRunnerMixin:
         state = self._resolve_run_state(cmd)
         # Second pass: an agent script's ``model()`` getter may have
         # blanked ``model`` back to "the tab's pick" (see the method).
-        self._resolve_autorouter(cmd)
+        self._resolve_sea_model(cmd)
         model = cmd.get("model") or self._tab_model(tab_id)
 
         with self._state_lock:

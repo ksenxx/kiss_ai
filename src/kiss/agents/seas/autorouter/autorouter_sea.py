@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Autoroute agent — runs a task on the cheapest model tier that will finish it.
+"""Autorouter agent — runs a task on the cheapest model tier that will finish it.
 
 Frontier models cost 40 to 100 times more per token than small models, and
 most agent tokens go to exploration, file reads, test output and mechanical
@@ -19,13 +19,17 @@ set), which is shared by every task so it accumulates the routing history of
 the installation; each row carries the task id of the run that wrote it.  The
 objective is cost per accepted task, not cost per token.
 
-Two ways to run it::
+Three ways to run it::
 
-    /autoroute add a --json flag to the export command and cover it with tests
+    /autorouter add a --json flag to the export command and cover it with tests
 
-    run_agent(agent="src/kiss/agents/seas/autoroute/autoroute_sea.py", task="...")
+    run_agent(agent="src/kiss/agents/seas/autorouter/autorouter_sea.py", task="...")
 
-The routing protocol is the system prompt (:data:`SYSTEM_PROMPT`); the
+    pick ``autorouter`` in the model picker: every task of the tab runs
+    through this SEA (see ``register_as_model()`` below)
+
+The routing protocol (:data:`SYSTEM_PROMPT`) is added to the default Sorcar
+system prompt through the ``add_to_system_prompt()`` getter; the
 deterministic parts — the priced candidate menu, the pick, the cost estimate
 and the decision ledger — are the tools this module exposes through
 ``tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
@@ -38,8 +42,9 @@ and reliability; :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` refreshes it from
 ``~/.kiss/sorcar.db`` and the protocol treats it as the posterior over the
 tier-order prior.
 
-Module-level getters (``system_prompt()``, ``is_parallel()``, ...) follow the
-SEA contract in :mod:`kiss.server.agent_file`.
+Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
+``model()``, ``is_parallel()``, ...) follow the SEA contract in
+:mod:`kiss.server.agent_file`.
 """
 
 from __future__ import annotations
@@ -77,7 +82,11 @@ TIERS: dict[str, tuple[tuple[str, str], ...]] = {
         ("gpt-6-sol", "OpenAI mid model, 400k context; cheapest measured per step"),
         ("claude-sonnet-5", "Anthropic mid model; default when Anthropic is required"),
         ("claude-opus-5-5", "Anthropic frontier; cheapest, fastest frontier per step measured"),
-        ("kimi-k3", "Moonshot, 1M context. Best cheaper alternative to claude-fable-5-1. Got to model for security analysis and hardening."),
+        (
+            "kimi-k3",
+            "Moonshot, 1M context. Best cheaper alternative to claude-fable-5-1. Go-to model "
+            "for security analysis and hardening.",
+        ),
     ),
     "frontier": (
         ("gpt-6-astra", "OpenAI frontier; priciest per step measured, reliable reviewer"),
@@ -110,7 +119,9 @@ LEDGER_HEADER = (
 """Title and table header written when the ledger is created."""
 
 SYSTEM_PROMPT = """\
-You are the autoroute agent. You receive a task and finish it at the lowest cost per
+## Model routing protocol (autorouter)
+
+You are the autorouter agent. You receive a task and finish it at the lowest cost per
 accepted result by routing every unit of work to the cheapest model tier that will
 complete it correctly on the first attempt, escalating only on a verified failure. A
 cheap model that fails, retries and then escalates costs more than routing correctly the
@@ -271,12 +282,12 @@ the ledger.
 
 
 def description() -> str:
-    """Return the one-sentence help text shown by ``/autoroute help``."""
+    """Return the one-sentence help text shown by ``/autorouter help``."""
     return (
         "Splits a task into units, runs each on the cheapest model tier (small, medium, "
         "frontier) that passes its acceptance check, escalating on failure and logging every "
-        "decision to ~/.kiss/MODEL_DECISIONS.md; use it as `/autoroute <task>` in the chat or "
-        'run_agent(agent="autoroute", task="...").'
+        "decision to ~/.kiss/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
+        '`/autorouter <task>` in the chat, or run_agent(agent="autorouter", task="...").'
     )
 
 
@@ -437,12 +448,8 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
 
 
 def orchestrator_model() -> str:
-    """Return the model the routing agent itself runs on when picked as ``autorouter``.
+    """Return the model the routing agent itself runs on.
 
-    ``autorouter`` (:data:`kiss.core.models.model_info.AUTOROUTER`) is the
-    model-picker entry that runs every task through this SEA; the daemon's
-    task runner (``kiss.server.task_runner._resolve_autorouter``) turns such
-    a run into an agent-script run of this file on the model returned here.
     The protocol plans, verifies and accepts on the frontier tier, so this is
     the first runnable candidate of ``TIERS["frontier"]``.  When none is
     runnable it is the best runnable function-calling model in the picker's
@@ -463,9 +470,24 @@ def orchestrator_model() -> str:
     return ranked[0] if ranked else get_default_model()
 
 
-def system_prompt() -> str:
-    """Replace the default system prompt with the routing protocol."""
+def register_as_model() -> bool:
+    """List ``autorouter`` in the model picker.
+
+    A picked ``autorouter`` makes the daemon run every task of the tab
+    through this SEA on :func:`orchestrator_model` (``model()`` below), with
+    :data:`SYSTEM_PROMPT` added to the system prompt (``add_to_system_prompt()``).
+    """
+    return True
+
+
+def add_to_system_prompt() -> str:
+    """Add the routing protocol to the default Sorcar system prompt."""
     return SYSTEM_PROMPT
+
+
+def model() -> str:
+    """Run the router itself on the frontier orchestrator model."""
+    return orchestrator_model()
 
 
 def tools() -> list[Any]:
@@ -474,9 +496,9 @@ def tools() -> list[Any]:
 
 
 def is_parallel() -> bool:
-    """Withhold ``run_parallel``: its workers would inherit this protocol as their prompt.
+    """Withhold ``run_parallel``: its workers would inherit this protocol in their prompt.
 
-    ``run_parallel`` forwards the parent's custom system prompt to every
+    ``run_parallel`` forwards the parent's system-prompt additions to every
     worker, which would turn each routed unit into another router without
     the routing tools.  ``run_agent`` starts a fresh default session, so it
     is the dispatch primitive (one unit per call).
@@ -485,7 +507,7 @@ def is_parallel() -> bool:
 
 
 def classify_tasks() -> bool:
-    """Skip the lite/full prompt classifier: the protocol above is the whole prompt."""
+    """Skip the lite/full prompt classifier: the router always gets the full prompt."""
     return False
 
 

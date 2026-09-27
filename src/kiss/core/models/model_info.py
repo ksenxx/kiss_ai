@@ -1064,16 +1064,6 @@ def _decisions_model(
 
 MODEL_INFO: dict[str, ModelInfo] = _load_model_info()
 
-AUTOROUTER = "autorouter"
-"""Name of the model picker's routing entry, which is not a model.
-
-Picking it makes the Sorcar daemon run every task through the autoroute
-agent script (``kiss.agents.seas.autoroute_sea``) on a real model of that
-script's choosing.  The name is never in :data:`MODEL_INFO` and
-:func:`model` rejects it; code that resolves a persisted pick into a
-model to run (``SorcarAgent._resolve_model_name``) must skip it.
-"""
-
 _ANTHROPIC_CACHE_PREFIXES = (
     "claude-",
     "openrouter/anthropic/",

@@ -19,7 +19,7 @@ applies the winners to the SEA's ``SYSTEM_PROMPT`` constant, evaluates
 the change (a real replay of the past task that best exercises the new
 instructions; any run that cost below $500 is eligible) and keeps or
 reverts it.  It also refreshes the observed model evidence the
-autoroute SEA routes on.
+autorouter SEA routes on.
 
 The deterministic tools live in this file (a SEA runs under the
 installed kiss package, so it imports no sibling module of the
@@ -44,7 +44,7 @@ dicts:
   the digest entry numbers ``task_digest.transcript_page`` shows so
   each signal can be drilled into with ``task_digest.entry_detail``.
 * :func:`_model_scorecard` — per-model speed, cost and reliability
-  over every task of the window, the evidence the autoroute SEA's
+  over every task of the window, the evidence the autorouter SEA's
   model notes are refreshed from.
 
 The database holds 7 days of ~1.7M events: every query filters by
@@ -86,12 +86,12 @@ WRAP_COLUMNS = 92
 """Prose written into a SEA prompt is wrapped here; the repo lints lines over 100."""
 SIGNATURE_CHARS = 200
 """Prompt prefix length that identifies a SEA run's ``system_prompt`` event."""
-PROMPT_GETTERS = ("system_prompt", "append_to_system_prompt")
+PROMPT_GETTERS = ("system_prompt", "append_to_system_prompt", "add_to_system_prompt")
 EVIDENCE_START = "<!-- rsi7d:model-evidence -->"
 EVIDENCE_END = "<!-- /rsi7d:model-evidence -->"
-"""Markers delimiting the observed-model-evidence block in the autoroute SEA's prompt."""
+"""Markers delimiting the observed-model-evidence block in the autorouter SEA's prompt."""
 STAMP_PREFIX = "_Observed in the task history"
-"""First words of the stamp line ``write_autoroute_evidence`` puts above the evidence."""
+"""First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
 
 SYSTEM_PROMPT = """\
 You are rsi7d, the KISS Sorcar agent that improves the other agents. Every indexed SEA
@@ -99,11 +99,11 @@ You are rsi7d, the KISS Sorcar agent that improves the other agents. Every index
 `/<name>`) has a `SYSTEM_PROMPT` constant. Your job is to read the last 7 days of every SEA's
 trajectories in the task history and make each SEA finish with higher quality (most
 important), fewer agentic mistakes, lower cost and higher speed, mostly by adding precise
-instructions to its system prompt. You also refresh the observed model evidence the autoroute
+instructions to its system prompt. You also refresh the observed model evidence the autorouter
 SEA routes on.
 
 ## Hard rules
-- Change SEA files only through `patch_sea_prompt` and `write_autoroute_evidence`. They edit
+- Change SEA files only through `patch_sea_prompt` and `write_autorouter_evidence`. They edit
   one string constant and reject anything that changes code. Never edit a SEA with
   Edit/Write, never touch files outside `src/kiss/agents/seas/`, never edit a SEA whose
   `editable_path` is empty in `indexed_seas()` (third-party and user SEAs): analyse those
@@ -169,8 +169,8 @@ SEA routes on.
    evidence-backed and passes `uv run pytest -q
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it "not
    replay-verified" in the report.
-6. Autoroute evidence. From `model_scorecard()` and the per-SEA models, write a compact
-   evidence block for the router with `write_autoroute_evidence(text)`: a Markdown table
+6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
+   evidence block for the router with `write_autorouter_evidence(text)`: a Markdown table
    (model, tasks, role mix, failed/unsuccessful, median $ per step, median s per step,
    tool-error rate; keep every row under 92 characters by abbreviating headers or dropping a
    column, the tool rejects longer rows) followed by at most 8 bullets naming what each
@@ -179,7 +179,7 @@ SEA routes on.
    window (`window_start`) so a reader can tell how fresh the evidence is.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: baseline table, per SEA the findings,
    the added or changed bullets, the evaluation result (replay ids and metrics, or why not
-   replayed), the autoroute evidence update, recommendations for non-editable SEAs, and
+   replayed), the autorouter evidence update, recommendations for non-editable SEAs, and
    ideas rejected with reasons. `git add` the report. Maintain `./tmp/PROGRESS.md` while you
    work.
 8. Finish with a summary that lists every changed file, every added instruction, and the
@@ -232,7 +232,7 @@ def description() -> str:
     return (
         "Mines the last 7 days of every indexed SEA's runs in ~/.kiss/sorcar.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
-        "SEA's SYSTEM_PROMPT and refreshes the autoroute SEA's model evidence; run it with "
+        "SEA's SYSTEM_PROMPT and refreshes the autorouter SEA's model evidence; run it with "
         '`/rsi7d all` in the chat or `run_agent(agent="rsi7d", task="all")`.'
     )
 
@@ -731,7 +731,7 @@ def build_prompt(text: str) -> str:
     text = text.strip()
     default = (
         f"Go over the last {DEFAULT_DAYS} days of every indexed SEA's trajectories and "
-        "optimize each editable SEA following the procedure; refresh the autoroute evidence."
+        "optimize each editable SEA following the procedure; refresh the autorouter evidence."
     )
     return f"{default}\n\nAdditional instructions: {text}" if text else default
 
@@ -1237,8 +1237,8 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
     )
 
 
-def write_autoroute_evidence(text: str) -> str:
-    """Replace the observed-model-evidence block of the autoroute SEA's prompt with *text*.
+def write_autorouter_evidence(text: str) -> str:
+    """Replace the observed-model-evidence block of the autorouter SEA's prompt with *text*.
 
     *text* is Markdown (a table plus a few bullets) describing what the
     task history shows about each model's cost, speed and reliability;
@@ -1246,13 +1246,13 @@ def write_autoroute_evidence(text: str) -> str:
     same gate and wrapping as ``patch_sea_prompt``, so every table row
     must fit in 92 columns.
     """
-    current = sea_prompt("autoroute")
+    current = sea_prompt("autorouter")
     if current.startswith("Error:"):
         return current
     start = current.find(EVIDENCE_START)
     end = current.find(EVIDENCE_END)
     if start < 0 or end < start:
-        return f"Error: the autoroute prompt has no {EVIDENCE_START} ... {EVIDENCE_END} block"
+        return f"Error: the autorouter prompt has no {EVIDENCE_START} ... {EVIDENCE_END} block"
     old = current[start : end + len(EVIDENCE_END)]
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
     if text.lstrip().startswith(STAMP_PREFIX):  # the caller repeated the stamp line
@@ -1261,7 +1261,7 @@ def write_autoroute_evidence(text: str) -> str:
         f"{EVIDENCE_START}\n{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n"
         f"{text.strip()}\n{EVIDENCE_END}"
     )
-    return patch_sea_prompt("autoroute", old, new)
+    return patch_sea_prompt("autorouter", old, new)
 
 
 def tools() -> list[Any]:
@@ -1277,5 +1277,5 @@ def tools() -> list[Any]:
         model_scorecard,
         sea_prompt,
         patch_sea_prompt,
-        write_autoroute_evidence,
+        write_autorouter_evidence,
     ]

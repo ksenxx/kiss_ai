@@ -22,6 +22,7 @@ cannot fire during another.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -624,3 +625,83 @@ def test_every_bundled_sea_has_a_description() -> None:
         assert path.parent.name == name, path
         text = sea_commands.sea_description(path)
         assert text.rstrip(".").strip(), name
+
+
+_ROUTER_TRUE = "def description():\n    return 'r'\ndef register_as_model():\n    return True \n"
+_ROUTER_FALSE = "def description():\n    return 'r'\ndef register_as_model():\n    return False\n"
+"""Same-length sources: an edit between them keeps the file size."""
+
+
+def _write_router(folder: Path, name: str, source: str) -> Path:
+    """Create ``<folder>/<name>/<name>_sea.py`` with *source* and return it."""
+    path = folder / name / f"{name}_sea.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_model_seas_rereads_an_edit_within_the_same_second(tmp_path: Path) -> None:
+    """A same-size edit whose mtime moves by one nanosecond is seen.
+
+    The bytecode cache keys staleness on whole-second mtime and size, so
+    an import-based loader would re-run the stale ``.pyc``; the SEA loader
+    compiles the source directly.
+    """
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "flip", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("flip") == router
+    stamp = router.stat().st_mtime_ns
+    router.write_text(_ROUTER_FALSE, encoding="utf-8")
+    os.utime(router, ns=(stamp + 1, stamp + 1))
+    assert router.stat().st_size == len(_ROUTER_TRUE)
+    assert sea_commands.model_sea("flip") is None
+    assert "flip" not in sea_commands.model_seas()
+
+
+def test_model_seas_rereads_an_atomic_replacement_with_the_same_mtime(tmp_path: Path) -> None:
+    """A file swapped in with identical size and mtime (new inode) is re-read."""
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "swap", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("swap") == router
+    st = router.stat()
+    replacement = router.with_name("swap_sea.py.new")
+    replacement.write_text(_ROUTER_FALSE, encoding="utf-8")
+    os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(replacement, router)
+    assert router.stat().st_mtime_ns == st.st_mtime_ns
+    assert router.stat().st_ino != st.st_ino
+    assert sea_commands.model_sea("swap") is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+def test_unreadable_sea_does_not_break_the_model_picker_registry(tmp_path: Path) -> None:
+    """A SEA without read permission is skipped, not raised through ``model_seas()``."""
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "ok", _ROUTER_TRUE)
+    locked = _write_router(folder, "locked", _ROUTER_TRUE)
+    locked.chmod(0)
+    try:
+        _write_seas_md([str(folder)])
+        sea_commands.refresh_registry()
+        seas = sea_commands.model_seas()
+        assert seas["ok"] == router and "locked" not in seas
+        assert {"autorouter", "bestrouter"} <= set(seas)
+    finally:
+        locked.chmod(0o644)
+
+
+def test_model_sea_finds_a_router_installed_after_the_registry_was_built(
+    tmp_path: Path,
+) -> None:
+    """Without a watcher, a miss rescans the folders like ``get_command`` does."""
+    folder = tmp_path / "seas"
+    _write_router(folder, "early", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("late") is None
+    late = _write_router(folder, "late", _ROUTER_TRUE)
+    assert sea_commands.model_sea("late") == late

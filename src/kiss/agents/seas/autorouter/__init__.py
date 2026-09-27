@@ -2,4 +2,4 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The ``/autoroute`` Sorcar Extension Agent (``autoroute_sea.py``) and its helpers."""
+"""The ``/autorouter`` Sorcar Extension Agent (``autorouter_sea.py``), also a model-picker entry."""

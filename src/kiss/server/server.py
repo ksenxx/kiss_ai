@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar import sea_commands, worktree_pool
 from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
@@ -55,7 +55,6 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core import config as config_module
 from kiss.core.models.model_info import (
-    AUTOROUTER,
     MODEL_INFO,
     get_default_model,
     list_custom_models,
@@ -1113,16 +1112,16 @@ class VSCodeServer(
                 "extra_headers": _parse_custom_headers(cm["headers"]),
             })
 
-        # The ``autorouter`` entry is not a model: picking it runs every
-        # task through the autoroute SEA (``_resolve_autorouter`` in the
-        # task runner), whose tier menu names catalog models — so it is
-        # offered only when at least one catalog model is runnable, and
-        # it is a valid pick but never the fallback a stale pick lands
-        # on (that stays the first real model).  It heads the list.
-        offer_autorouter = bool(catalog_names)
-        available_names = {m["name"] for m in models_list}
-        if offer_autorouter:
-            available_names.add(AUTOROUTER)
+        # A SEA whose ``register_as_model()`` returns True (``autorouter``,
+        # ``bestrouter``) is listed under its command name but is not a
+        # model: picking it runs every task through the SEA
+        # (``_resolve_sea_model`` in the task runner) on catalog models —
+        # so the entries are offered only when at least one catalog model
+        # is runnable, and each is a valid pick but never the fallback a
+        # stale pick lands on (that stays the first real model).  They
+        # head the list.
+        routers = sea_commands.model_seas() if catalog_names else {}
+        available_names = {m["name"] for m in models_list} | set(routers)
         with self._state_lock:
             self._refresh_default_model(available_names)
 
@@ -1136,15 +1135,17 @@ class VSCodeServer(
                     self._default_model = refreshed
             selected = self._default_model
 
-        if offer_autorouter:
-            models_list.insert(0, {
-                "name": AUTOROUTER,
+        models_list[:0] = [
+            {
+                "name": name,
                 "inp": 0,
                 "out": 0,
-                "uses": usage.get(AUTOROUTER, 0),
-                "vendor": "Autoroute",
-                "cost_label": "cheapest tier per unit of work",
-            })
+                "uses": usage.get(name, 0),
+                "vendor": "Router",
+                "cost_label": "routes by its own protocol",
+            }
+            for name in routers
+        ]
 
         event: dict[str, Any] = {
             "type": "models",

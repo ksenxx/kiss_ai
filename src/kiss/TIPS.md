@@ -17,11 +17,14 @@ You can ask a question about the current task by prefixing the question with the
 {{PRODUCT_NAME}} supports commands prefixed with `/`. Type `/` in the chat textbox to see all available commands. To build your own command say `/xyz`, write a Sorcar Extension Agent (or a SEA) in a folder `/path/to/seas` and append the folder to the file `~/.kiss/SEAS.md`.  Coammnd `/xyz` will then be availble to {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
 
 # Tip 
-## Autorouter as model
+## Routers as models
 
 In the model picker, select autorouter as a model to enable {{PRODUCT_NAME}} 
 to route the subtasks of a task to various capable models to perform 
-the task at a lower cost and higher speed without degrading quality.
+the task at a lower cost and higher speed without degrading quality. 
+Select bestrouter to run every task on claude-fable-5-1 and have 
+gpt-6-astra review and debug the result. Any SEA whose 
+`register_as_model()` returns True appears in the picker the same way.
 
 # Tip
 

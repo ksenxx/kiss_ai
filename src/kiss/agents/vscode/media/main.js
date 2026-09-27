@@ -19928,7 +19928,7 @@
       'div',
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
-    // Entries that are not priced models (the ``autorouter`` router)
+    // Entries that are not priced models (the ``autorouter`` / ``bestrouter`` SEAs)
     // carry a ``cost_label`` string instead of per-1M prices.
     const price =
       typeof m.cost_label === 'string'

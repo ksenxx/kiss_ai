@@ -37,6 +37,15 @@ proactively by a background polling watcher (see
 appearance/removal of SEA folders in any of its folders — take
 effect while the daemon is running.
 
+A registered SEA whose script defines ``register_as_model()`` returning
+``True`` is also a *model-picker entry*: :func:`model_seas` lists such
+SEAs under their command names and the daemon offers them in the model
+picker next to the real models.  Picking one runs every task of the tab
+through the SEA (on the model its ``model()`` getter names, else the
+default model), with the model routing protocol its
+``add_to_system_prompt()`` getter returns added to the system prompt
+(see :mod:`kiss.server.agent_file`).
+
 Locking: two module locks, always acquired in the order
 ``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
 subscriber list; ``_notify_lock`` wraps the publish-and-notify section
@@ -58,6 +67,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from kiss.core.config import kiss_home
 
@@ -104,6 +114,11 @@ _subscribers: list[Callable[[list[str]], None]] = []
 # Last snapshot broadcast to subscribers.  Deduplicates identical
 # rescans so the daemon does not spam clients with unchanged lists.
 _last_broadcast: tuple[str, ...] = ()
+
+# ``register_as_model()`` verdict per SEA script, keyed by path and
+# stamped with the file's (mtime_ns, size, inode) so an edited or
+# replaced script is re-read.  Guarded by ``_lock``.
+_model_sea_cache: dict[Path, tuple[tuple[int, int, int], bool]] = {}
 
 # Watcher-thread coordination.
 _watcher_thread: threading.Thread | None = None
@@ -434,7 +449,11 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
     SEAs concurrently, and two same-stem files (or two loads of one
     file) sharing a name would overwrite each other's entry mid-use.
     The entry is removed when the ``with`` block ends, so a long-lived
-    daemon does not accumulate one module per relay.
+    daemon does not accumulate one module per relay.  The source is
+    compiled and executed directly — no ``__pycache__`` bytecode is read
+    or written — so an edit that keeps the file's size and whole-second
+    mtime (the bytecode cache's staleness key) is still seen, exactly as
+    the daemon's agent-file loader (``kiss.server.tools_file``) behaves.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
@@ -443,12 +462,13 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
         The freshly executed module, registered for the block's duration.
     """
     name = f"_kiss_sea_{sea_path.stem}_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(name, sea_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
+    module = ModuleType(name)
+    module.__file__ = str(sea_path)
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        source = sea_path.read_text(encoding="utf-8")
+        code = compile(source, str(sea_path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102 — the SEA script is the user's own code
         yield module
     finally:
         sys.modules.pop(name, None)
@@ -464,6 +484,32 @@ class SeaScriptError(RuntimeError):
     requested stop that landed inside the import stays recognisable
     through the cause chain (``task_runner._stop_interrupt_wrapped``).
     """
+
+
+def sea_getter_value(sea_path: Path, getter: str) -> Any:
+    """Return ``getter()`` of the SEA at *sea_path*, or ``None`` when it defines none.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+        getter: Name of the zero-argument getter, e.g. ``"model"``.
+
+    Returns:
+        The getter's return value when the script defines a callable
+        *getter*, else ``None``.
+
+    Raises:
+        SeaScriptError: When the script fails to import or *getter*
+            raises (whatever it raises).
+    """
+    try:
+        with _load_sea_module(sea_path) as module:
+            fn = getattr(module, getter, None)
+            return fn() if callable(fn) else None
+    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        raise SeaScriptError(
+            f"SEA {sea_path} failed while evaluating {getter}(): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
@@ -491,15 +537,81 @@ def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
             raises (whatever it raises), so the relay fails with the
             diagnostic instead of running against a broken SEA.
     """
+    return sea_getter_value(sea_path, getter) is False
+
+
+def _registers_as_model(sea_path: Path) -> bool:
+    """Return whether the SEA at *sea_path* defines ``register_as_model()`` returning ``True``.
+
+    The verdict is cached per file stamp (mtime, size, inode), so both an
+    edit and an atomic replacement are re-read.  Only a script whose
+    source mentions ``register_as_model`` is imported: importing every
+    registered SEA (channel agents with heavy dependencies among them)
+    on each picker refresh would be slow for nothing.  A script that
+    cannot be read, fails to import or whose getter raises is logged and
+    treated as not registered, so one broken SEA cannot break the model
+    picker.
+    """
     try:
-        with _load_sea_module(sea_path) as module:
-            fn = getattr(module, getter, None)
-            return callable(fn) and fn() is False
-    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
-        raise SeaScriptError(
-            f"SEA {sea_path} failed while evaluating {getter}(): "
-            f"{type(exc).__name__}: {exc}"
-        ) from exc
+        st = sea_path.stat()
+        stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        with _lock:
+            cached = _model_sea_cache.get(sea_path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        source = sea_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.warning("SEA %s: cannot be read", sea_path, exc_info=True)
+        return False
+    verdict = False
+    if "register_as_model" in source:
+        try:
+            verdict = sea_getter_value(sea_path, "register_as_model") is True
+        except SeaScriptError:
+            logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
+    with _lock:
+        _model_sea_cache[sea_path] = (stamp, verdict)
+    return verdict
+
+
+def model_seas() -> dict[str, Path]:
+    """Return the registered SEAs that are model-picker entries, by command name.
+
+    A SEA is a model-picker entry when its script defines
+    ``register_as_model()`` returning ``True``.  The daemon offers each
+    entry in the model picker under its command name; a task run with
+    such a pick goes through the SEA (``task_runner._resolve_sea_model``).
+
+    Returns:
+        ``{command_name: absolute_sea_path}``, sorted by name.
+    """
+    list_commands()  # populate the registry on a cold start
+    with _lock:
+        entries = sorted(_registry.items())
+    return {name: path for name, path in entries if _registers_as_model(path)}
+
+
+def model_sea(name: str) -> Path | None:
+    """Return the script of the model-picker SEA *name*, or ``None``.
+
+    A *name* that is no registered command (every real model name)
+    costs one :func:`get_command` lookup — a folder rescan on the miss,
+    as for an unknown slash command — and touches no script, so the
+    task runner can ask this for every run's model and a SEA installed
+    after the registry was built is still found.
+
+    Args:
+        name: The model-picker value, e.g. ``"autorouter"`` or
+            ``"gpt-6-astra"``.
+
+    Returns:
+        The absolute SEA path when *name* is a registered command whose
+        ``register_as_model()`` returns ``True``, else ``None``.
+    """
+    path = get_command(name) if name else None
+    if path is None or not _registers_as_model(path):
+        return None
+    return path
 
 
 def sea_description(sea_path: Path) -> str:
@@ -725,4 +837,5 @@ def _reset_for_tests() -> None:
     with _lock:
         _registry.clear()
         _subscribers.clear()
+        _model_sea_cache.clear()
         _last_broadcast = ()

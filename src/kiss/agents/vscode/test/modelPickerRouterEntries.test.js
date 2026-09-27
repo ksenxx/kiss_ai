@@ -3,10 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The daemon lists `autorouter` in the model picker. It is not a model, so
-// its row carries a `cost_label` string instead of per-1M prices, and the
+// The daemon lists SEAs registered as models (`autorouter`, `bestrouter`)
+// in the model picker under the `Router` vendor. They are not models, so
+// each row carries a `cost_label` string instead of per-1M prices, and the
 // picker shows that label where every other row shows "$in / $out".
-// Picking it posts a plain `selectModel` like any other row.
+// Picking one posts a plain `selectModel` like any other row.
 //
 // Driven through the real webview: media/chat.html plus media/main.js in
 // jsdom, fed the `models` event the daemon emits.
@@ -21,7 +22,7 @@ const {JSDOM} = require('jsdom');
 const MEDIA = path.join(__dirname, '..', 'media');
 
 const REAL_MODEL = 'claude-opus-5';
-const LABEL = 'cheapest tier per unit of work';
+const LABEL = 'routes by its own protocol';
 
 const MODEL_LIST = [
   {
@@ -29,7 +30,15 @@ const MODEL_LIST = [
     inp: 0,
     out: 0,
     uses: 0,
-    vendor: 'Autoroute',
+    vendor: 'Router',
+    cost_label: LABEL,
+  },
+  {
+    name: 'bestrouter',
+    inp: 0,
+    out: 0,
+    uses: 0,
+    vendor: 'Router',
     cost_label: LABEL,
   },
   {name: REAL_MODEL, inp: 5, out: 25, uses: 3, vendor: 'anthropic'},
@@ -112,21 +121,23 @@ function test(name, fn) {
   }
 }
 
-test('the autorouter row shows its cost_label, priced rows show prices', () => {
+test('the router rows show their cost_label, priced rows show prices', () => {
   const {win} = makeWebview();
   send(win, {type: 'models', models: MODEL_LIST, selected: REAL_MODEL});
 
   const rows = openPicker(win);
-  const router = rows.find(r => r.name === 'autorouter');
-  assert.ok(router, 'the picker must list autorouter');
-  assert.strictEqual(router.cost, LABEL);
+  for (const name of ['autorouter', 'bestrouter']) {
+    const router = rows.find(r => r.name === name);
+    assert.ok(router, `the picker must list ${name}`);
+    assert.strictEqual(router.cost, LABEL);
+  }
   const real = rows.find(r => r.name === REAL_MODEL);
   assert.ok(real, 'the picker must list the real model');
   assert.strictEqual(real.cost, '$5.00 / $25.00');
   win.close();
 });
 
-test('the autorouter row sits in its own vendor group', () => {
+test('the router rows sit in their own vendor group', () => {
   const {win} = makeWebview();
   send(win, {type: 'models', models: MODEL_LIST, selected: REAL_MODEL});
 
@@ -135,8 +146,8 @@ test('the autorouter row sits in its own vendor group', () => {
     win.document.querySelectorAll('#model-list .model-group-hdr'),
   ).map(el => el.textContent);
   assert.ok(
-    groups.indexOf('Autoroute') >= 0,
-    `expected an Autoroute group; got ${JSON.stringify(groups)}`,
+    groups.indexOf('Router') >= 0,
+    `expected a Router group; got ${JSON.stringify(groups)}`,
   );
   win.close();
 });

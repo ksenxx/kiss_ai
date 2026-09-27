@@ -137,6 +137,25 @@ semantics: ``llm_call_hook`` may rewrite the new messages before every
 LLM call, ``tool_call_hook`` may veto every tool call).
 """
 
+ADD_FIELDS: tuple[tuple[str, str], ...] = (
+    ("add_to_system_prompt", "appendToSystemPrompt"),
+)
+"""Agent-script getters whose text is ADDED to a wire field, as ``(getter, field)`` pairs.
+
+``add_to_system_prompt()`` returns text — a SEA's *model routing
+protocol* — that is appended to the run's system prompt AFTER whatever
+``appendToSystemPrompt`` already carries (the caller's text, or the
+value an ``append_to_system_prompt()`` getter staged), separated by a
+blank line.  Unlike the :data:`PARAM_FIELDS` getters it never replaces
+the caller's value, so a SEA can carry its protocol into every run
+while the caller's own additions survive.  A SEA that defines this
+getter and whose ``register_as_model()`` returns ``True`` is also listed
+in the model picker under its command name
+(:func:`kiss.agents.sorcar.sea_commands.model_seas`); picking it runs
+every task of the tab through the SEA.  ``register_as_model`` is a
+registry flag, not a run parameter, so it is not evaluated here.
+"""
+
 
 def _check_override(raw_path: str, param: str, value: Any) -> Any:
     """Type-check one ``X()`` return value against parameter ``X``.
@@ -169,8 +188,8 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
         expected = "a non-empty string"
     elif param in (
         "work_dir", "model", "chat_id", "system_prompt",
-        "append_to_system_prompt", "append_to_prompt", "scope_work_dir",
-        "tool_profile", "docker_image",
+        "append_to_system_prompt", "add_to_system_prompt", "append_to_prompt",
+        "scope_work_dir", "tool_profile", "docker_image",
     ):
         ok = isinstance(value, str)
         expected = "a string"
@@ -262,6 +281,10 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     ``llm_call_hook`` / ``tool_call_hook`` argument.  Their staged
     fields (``llmCallHook`` / ``toolCallHook``) live only on the
     daemon-side command dict — callables are never wire-serialized.
+    An ``add_to_system_prompt()`` getter (:data:`ADD_FIELDS`) is
+    evaluated last: its text is appended to the ``appendToSystemPrompt``
+    field — after the caller's text or the staged
+    ``append_to_system_prompt()`` value — instead of replacing it.
 
     The getters run in the daemon process on the task's worker thread,
     like a tools file's ``get_tools()``, and the file is re-imported
@@ -297,7 +320,9 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     # overridden command — e.g. an earlier successful ``chat_id()``
     # surviving a later getter's failure.
     staged: dict[str, Any] = {}
-    for param, field in PARAM_FIELDS + HOOK_FIELDS:
+    # ``ADD_FIELDS`` last: an addition applies on top of the value an
+    # ``append_to_system_prompt()`` getter may have staged.
+    for param, field in PARAM_FIELDS + HOOK_FIELDS + ADD_FIELDS:
         getter_name = param
         # Membership (not ``.get() is None``) decides absence: a
         # DEFINED ``X = None`` is a broken getter, not a missing
@@ -342,6 +367,15 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
                 f"{param}() of agent script {raw_path!r} returned a "
                 f"broken value: {_safe_message(exc)}"
             ) from exc
+        if param == "add_to_system_prompt":
+            value = _add_text(staged.get(field, cmd.get(field)), value)
         staged[field] = value
     cmd.update(staged)
     return set(staged)
+
+
+def _add_text(base: Any, addition: str) -> str:
+    """Return *addition* appended to *base* (a wire value; non-strings count as empty)."""
+    if not isinstance(base, str) or not base:
+        return addition
+    return f"{base}\n\n{addition}" if addition else base

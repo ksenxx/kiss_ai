@@ -10,9 +10,11 @@ services, the SEAs here drive Sorcar's own workflows — for example
 auto-commit worktree merge runs when a squash merge conflicts, or
 :mod:`kiss.agents.seas.sh.sh_sea`, which runs the shell command in its
 prompt with the ``Bash`` tool alone and returns the output, or
-:mod:`kiss.agents.seas.autoroute.autoroute_sea`, which finishes a task at the lowest
+:mod:`kiss.agents.seas.autorouter.autorouter_sea`, which finishes a task at the lowest
 cost per accepted result by routing each unit of work to the cheapest
 model tier that passes its acceptance check, or
+:mod:`kiss.agents.seas.bestrouter.bestrouter_sea`, which runs every task on
+one fixed frontier model and has a second model review its work, or
 :mod:`kiss.agents.seas.skillopt.skillopt_sea`, which optimizes the prompt text of
 a skill or of another SEA against an eval set (SkillOpt), or
 :mod:`kiss.agents.seas.write_paper.write_paper_sea`, which writes or revises a
@@ -39,11 +41,15 @@ its helper modules and data files (``sh/sh_sea.py`` and ``sh/evals/``,
 shared helpers such as :mod:`kiss.agents.seas.sorcar_md` stay at the
 package top level.  :mod:`kiss.agents.sorcar.sea_commands` exposes every
 such folder as the chat slash command ``/<name>`` (``/merge``, ``/sh``,
-``/autoroute``, ``/skillopt``, ``/write_paper``, ``/review_paper``,
+``/autorouter``, ``/bestrouter``, ``/skillopt``, ``/write_paper``, ``/review_paper``,
 ``/git_extract_knowledge``, ``/remember``, ``/forget``, ...); a script
 placed directly in the package, outside its own folder, is not
 registered.  Every SEA
 defines ``description()``, a zero-argument function returning one
 sentence on what it does and how to use it, which ``/<name> help``
-prints without running the SEA.
+prints without running the SEA.  A SEA whose ``register_as_model()``
+returns ``True`` is also listed in the model picker under its name
+(``autorouter``, ``bestrouter``): picking it runs every task of the tab
+through the SEA, with the model routing protocol its
+``add_to_system_prompt()`` returns added to the system prompt.
 """

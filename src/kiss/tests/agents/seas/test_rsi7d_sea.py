@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas.autoroute import autoroute_sea
+from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -102,11 +102,11 @@ def tools() -> list:
 def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake KISS checkout in *tmp_path* that ``_seas_dir`` resolves through the cwd."""
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
-    for name in ("rsi7d", "autoroute", "demo", "fdemo", "tdemo", "noprompt"):
+    for name in ("rsi7d", "autorouter", "demo", "fdemo", "tdemo", "noprompt"):
         (seas / name).mkdir(parents=True)
     shutil.copy(_SEA_PATH, seas / "rsi7d" / "rsi7d_sea.py")
-    autoroute = _SEAS_DIR / "autoroute" / "autoroute_sea.py"
-    shutil.copy(autoroute, seas / "autoroute" / "autoroute_sea.py")
+    autorouter = _SEAS_DIR / "autorouter" / "autorouter_sea.py"
+    shutil.copy(autorouter, seas / "autorouter" / "autorouter_sea.py")
     (seas / "demo" / "demo_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
     (seas / "fdemo" / "fdemo_sea.py").write_text(_FSTRING_SEA, encoding="utf-8")
     (seas / "tdemo" / "tdemo_sea.py").write_text(_TEMPLATE_SEA, encoding="utf-8")
@@ -177,7 +177,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "model_scorecard",
         "sea_prompt",
         "patch_sea_prompt",
-        "write_autoroute_evidence",
+        "write_autorouter_evidence",
     ]
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
@@ -635,39 +635,38 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
     assert fragile.read_text(encoding="utf-8") == original
 
 
-def test_write_autoroute_evidence_replaces_the_marker_block(checkout: Path) -> None:
+def test_write_autorouter_evidence_replaces_the_marker_block(checkout: Path) -> None:
     """The evidence block is replaced in place, stamped, and never duplicated."""
-    path = checkout / "autoroute" / "autoroute_sea.py"
+    path = checkout / "autorouter" / "autorouter_sea.py"
     assert (
-        sea.EVIDENCE_START in autoroute_sea.SYSTEM_PROMPT
-        and sea.EVIDENCE_END in autoroute_sea.SYSTEM_PROMPT
+        sea.EVIDENCE_START in autorouter_sea.SYSTEM_PROMPT
+        and sea.EVIDENCE_END in autorouter_sea.SYSTEM_PROMPT
     )
     table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
-    assert sea.write_autoroute_evidence(table).startswith("Patched SYSTEM_PROMPT of")
-    prompt = sea._execute_sea(path)["system_prompt"]()
+    assert sea.write_autorouter_evidence(table).startswith("Patched SYSTEM_PROMPT of")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
     assert prompt.count(sea.EVIDENCE_START) == 1 and prompt.count(sea.EVIDENCE_END) == 1
     block = prompt[prompt.index(sea.EVIDENCE_START) : prompt.index(sea.EVIDENCE_END)]
     assert f"refreshed {stamp} by /rsi7d" in block and table in block
     assert "No evidence recorded yet" not in prompt
     assert "## Hard rules" in prompt.split(sea.EVIDENCE_END)[1]
-    assert sea.write_autoroute_evidence("| model | tasks |\n|---|---|\n| model-y | 3 |").startswith(
-        "Patched"
-    )
-    prompt = sea._execute_sea(path)["system_prompt"]()
+    table_y = "| model | tasks |\n|---|---|\n| model-y | 3 |"
+    assert sea.write_autorouter_evidence(table_y).startswith("Patched")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert "model-x" not in prompt and "model-y | 3" in prompt
     assert prompt.count(sea.EVIDENCE_START) == 1
     # A caller that repeats the stamp line does not duplicate it; a long
     # bullet is wrapped; a table row that does not fit is refused.
     repeated = f"{sea.STAMP_PREFIX}, refreshed 2020-01-01 by /rsi7d._\n\n- " + "word " * 40
-    assert sea.write_autoroute_evidence(repeated).startswith("Patched")
-    prompt = sea._execute_sea(path)["system_prompt"]()
+    assert sea.write_autorouter_evidence(repeated).startswith("Patched")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert prompt.count(sea.STAMP_PREFIX) == 1 and "2020-01-01" not in prompt
     assert "\n  word word" in prompt and max(len(line) for line in prompt.splitlines()) <= 92
     wide = "| model | " + "x" * 100 + " |"
-    refused = sea.write_autoroute_evidence(wide)
+    refused = sea.write_autorouter_evidence(wide)
     assert refused.startswith("Error: a line of the new text is longer than 92 characters")
-    assert "| model | xxxx" not in sea._execute_sea(path)["system_prompt"]()
+    assert "| model | xxxx" not in sea._execute_sea(path)["add_to_system_prompt"]()
     # Without markers the tool refuses instead of appending.
     source = (
         path.read_text(encoding="utf-8")
@@ -675,9 +674,10 @@ def test_write_autoroute_evidence_replaces_the_marker_block(checkout: Path) -> N
         .replace(sea.EVIDENCE_END, "")
     )
     path.write_text(source, encoding="utf-8")
-    assert sea.write_autoroute_evidence("x").startswith("Error: the autoroute prompt has no")
+    assert sea.write_autorouter_evidence("x").startswith("Error: the autorouter prompt has no")
     path.unlink()
-    assert sea.write_autoroute_evidence("x").startswith("Error: 'autoroute' is not an editable SEA")
+    refused = sea.write_autorouter_evidence("x")
+    assert refused.startswith("Error: 'autorouter' is not an editable SEA")
 
 
 def test_wrap_markdown_wraps_prose_and_keeps_tables_and_code() -> None:
