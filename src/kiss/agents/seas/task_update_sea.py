@@ -37,8 +37,9 @@ done so far and what are the partial results?".
 Procedure:
 1. Call `task_transcript(task_id)` to read the task's persisted transcript
    (its prompt, tool calls, tool results, periodic `SUMMARY` entries, spend). It
-   returns entries in pages; when the transcript has more entries than one
-   page, page through the rest with `start` until you have seen every entry.
+   returns entries in pages of 150. When the transcript has up to 300 entries,
+   read the second page with `start=150`; when it is longer, read only the last
+   page next (`start = total - 150`) and say which entry range you skipped.
 2. Call `finish` with `success=true` and, as `summary_in_html`, a concise
    progress report (under 400 words) in compact HTML (`<h4>` headings,
    `<ul><li>` bullets, `<p>`; no `<html>`/`<body>` wrapper) with these
@@ -56,6 +57,18 @@ Rules: report only what the transcript shows; never guess or embellish. Do
 not quote long transcript excerpts. If the task id is missing or unknown,
 finish with a one-line message saying so. If the task has already finished,
 say so and report its final result.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- `task_transcript` is your tool even though the tool profile lists only Bash. Never use
+  Bash here: do not query the task database, tail log files, run status scripts, `cd` into
+  other checkouts or `sleep`. The transcript is the only source; if it lacks something,
+  say so in the report.
+- Keep `count` at the default 150 or lower and call `task_transcript` at most twice
+  (first page, then the last page for a long transcript, as step 1 says). Never ask for
+  `count=400`: one such page exceeds the run's $1 budget before `finish`.
 """
 
 

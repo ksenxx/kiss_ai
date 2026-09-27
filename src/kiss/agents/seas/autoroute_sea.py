@@ -31,7 +31,12 @@ and the decision ledger — are the tools this module exposes through
 ``tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
-always the one this installation can run.
+always the one this installation can run.  The prompt's "Observed model
+evidence" block (between the ``rsi7d:model-evidence`` markers) holds what
+this installation's own task history shows about each model's cost, speed
+and reliability; :mod:`kiss.agents.seas.rsi7d_sea` refreshes it from
+``~/.kiss/sorcar.db`` and the protocol treats it as the posterior over the
+tier-order prior.
 
 Module-level getters (``system_prompt()``, ``is_parallel()``, ...) follow the
 SEA contract in :mod:`kiss.server.agent_file`.
@@ -69,21 +74,23 @@ TIERS: dict[str, tuple[tuple[str, str], ...]] = {
         ("openrouter/z-ai/glm-5.3", "same model via OpenRouter"),
         ("deepseek-ai/DeepSeek-V4-Pro-0813", "DeepSeek pro"),
         ("openrouter/x-ai/grok-4.7", "xAI"),
-        ("gpt-6-sol", "OpenAI mid model, 400k context"),
+        ("gpt-6-sol", "OpenAI mid model, 400k context; cheapest measured per step"),
         ("claude-sonnet-5", "Anthropic mid model; default when Anthropic is required"),
         ("kimi-k3", "Moonshot, 1M context"),
     ),
     "frontier": (
-        ("claude-opus-5-5", "Anthropic frontier; cheapest frontier per token"),
-        ("gpt-6-astra", "OpenAI frontier"),
-        ("claude-fable-5-1", "Anthropic top model; longest and hardest tasks only"),
+        ("claude-opus-5-5", "Anthropic frontier; cheapest, fastest frontier per step measured"),
+        ("gpt-6-astra", "OpenAI frontier; priciest per step measured, reliable reviewer"),
+        ("claude-fable-5-1", "Anthropic top model; longest, hardest tasks only; measured stalls"),
     ),
 }
 """Ordered ``(model, note)`` candidates per tier; the first runnable one wins.
 
-The order is by measured coding quality per dollar as of 2026-09-24.  Edit
-it when models or prices change; prices themselves are read from the
-catalog, never stored here.
+The order is by measured coding quality per dollar as of 2026-09-24; the
+notes carry what the 7-day task history measured (see the "Observed model
+evidence" block of :data:`SYSTEM_PROMPT`, refreshed by ``/rsi7d``).  Edit
+the order when models or prices change; prices themselves are read from
+the catalog, never stored here.
 """
 
 DEFAULT_TOKENS_IN = 200_000
@@ -187,6 +194,67 @@ name or a price.
    (`~/.kiss/MODEL_DECISIONS.md`) is shared by every task and every row carries the
    task id, so it is what shows, across tasks, whether a tier fails too often for a
    kind of unit.
+
+## Observed model evidence
+
+The block below is measured from this installation's own task history (`~/.kiss/sorcar.db`)
+and refreshed by the `/rsi7d` agent; the tier order above is the prior, this block is the
+posterior. Use it as follows: a model whose observed failure or task-error share is high
+for the role you need goes into `exclude` even when `pick_model` ranks it first; among
+runnable models of a tier prefer the lower observed median cost per step and seconds per
+step when the evidence covers at least 10 tasks; a model listed with "insufficient data"
+keeps its tier-order position. Prices still come from `model_menu`, never from here.
+
+<!-- rsi7d:model-evidence -->
+_Observed in the task history, refreshed 2026-09-27 by /rsi7d._
+
+Window: 2026-09-20 03:27 to 2026-09-27 03:27 UTC (`window_start` 2026-09-20 03:27:20 UTC),
+2,494 tasks (top-level, sub-agent and reviewer runs of this installation and its synced
+machines). "$/step" and "s/step" are medians over tasks of the task's own cost and wall time
+per own agent step (sub-agents excluded); "failed" counts runs killed, errored or stopped,
+"unsuccessful" runs that finished with success: false; "errors" are runs whose result is a
+KISS error (stall, refusal, billing, budget); "tool err" is errored tool results per step.
+
+| model | tasks | top/sub/rev | failed/unsucc | errors | $/step | s/step | tool err |
+|---|---|---|---|---|---|---|---|
+| claude-fable-5-1 | 1634 | 409 / 1223 / 2 | 94 / 51 | 53 | 0.103 | 11.0 | 1.2% |
+| claude-opus-5-5 | 365 | 73 / 292 / 0 | 8 / 4 | 0 | 0.038 | 7.1 | 0.8% |
+| gpt-5.6-sol | 186 | 0 / 173 / 13 | 0 / 0 | 0 | 0.060 | 12.0 | 2.2% |
+| gpt-6-astra | 129 | 1 / 124 / 4 | 5 / 1 | 5 | 0.127 | 10.1 | 0.5% |
+| claude-opus-4-8 | 50 | 9 / 41 / 0 | 4 / 1 | 0 | 0.063 | 8.1 | 2.1% |
+| gpt-6-sol | 38 | 0 / 37 / 1 | 0 / 1 | 0 | 0.025 | 8.5 | 1.1% |
+| claude-fable-5 | 37 | 32 / 5 / 0 | 5 / 0 | 0 | 0.084 | 8.7 | 2.6% |
+| claude-opus-4-7 | 32 | 32 / 0 / 0 | 1 / 1 | 0 | 0.065 | 7.1 | 1.2% |
+| others (small/medium tier, opus-4-6, haiku, nano) | <= 6 | insufficient data | | | | | |
+
+- claude-opus-5-5 is the best-measured frontier choice for a routed unit: cheapest observed
+  frontier per step ($0.038, 37% of claude-fable-5-1), fastest (7.1 s/step), lowest
+  tool-error rate of the Claude models (0.8%), zero task errors in 365 runs. In the paper
+  SEAs it finished review_paper at a median $1.20 (5 of 7 ok) against claude-fable-5-1's
+  $4.4 (15 of 23 ok).
+- claude-fable-5-1 is the default top-level model and the only one with stream stalls (5),
+  safety refusals (4, e.g. `/sh ./install.sh` twice and one paper review) and
+  budget-exceeded runs (36, all `task_update` side-channel reports that paged a 400-entry
+  transcript inside a $1 budget: a SEA problem, fixed in its prompt this round). Its failed
+  count is also inflated by paper-SEA runs stopped externally at 300 s (11 review_paper + 9
+  write_paper). Route to it for the longest context or hardest reasoning, not for volume.
+- gpt-6-astra costs the most per step ($0.127) and all 5 of its errors are OpenAI billing
+  ("no credits remaining"): such a failure is an account problem, so exclude it for the rest
+  of the task instead of escalating. Otherwise reliable (1 unsuccessful in 129, tool-error
+  rate 0.5%), used almost only as sub-agent or reviewer.
+- gpt-5.6-sol never failed in 186 sub-agent and reviewer runs (2 of 2 review_paper
+  second-opinion checks ok) but is the slowest (12.0 s/step) and has the highest tool-error
+  rate of the frequently used models (2.2%): a good reviewer, an expensive executor.
+- gpt-6-sol is the cheapest measured model per step ($0.025) with no failures in 38
+  sub-agent runs (1 unsuccessful: a review_paper run that finished at step 1 claiming it
+  needed `run_agent`); prefer it over gpt-5.6-sol for medium-tier units when both are
+  runnable. No top-level evidence yet.
+- claude-fable-5 (superseded by claude-fable-5-1) failed 5 of 37 top-level runs with the
+  highest tool-error rate (2.6%), and claude-opus-4-8 finished only 2 of 5 review_paper
+  runs: exclude both when their successor is runnable.
+- No small-tier model has 10 tasks in the window, so the small tier keeps its catalog order;
+  log every small-tier pick so the next refresh can measure it.
+<!-- /rsi7d:model-evidence -->
 
 ## Hard rules
 

@@ -61,6 +61,15 @@ Rules you MUST follow:
 6. Finish with a short summary listing each file and how it was resolved.
    If a file cannot be resolved with confidence, say so explicitly in the
    summary instead of guessing, and leave that file conflicted.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Open each conflicted file with the `Read` tool (the region around every conflict
+  block) before its first `Edit`. Looking at the file through `git diff`, `grep` or
+  `cat` in Bash does not count: `Edit` rejects a file that was not read in the session
+  and the call has to be repeated.
 """
 
 
