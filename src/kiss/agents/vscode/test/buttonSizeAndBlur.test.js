@@ -196,8 +196,11 @@ function clickAndAssertBlurred(win, el, what) {
     el,
     what + ' must be focusable in this harness (test setup)',
   );
+  // A pointer click (detail 1).  A keyboard-originated click carries
+  // detail 0 and deliberately keeps focus (see
+  // ui_antipattern_keyboard.test.js), so this contract is mouse-only.
   el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
   );
   assert.notStrictEqual(
     win.document.activeElement,

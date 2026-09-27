@@ -70,13 +70,6 @@ interface ChatPanel {
    */
   suppressCloseTab: boolean;
   /**
-   * Raised when the USER closed the root chat from inside the webview
-   * (closeSelf with retire): the replacement chat that keeps the
-   * one-tab invariant then takes the keyboard focus, exactly like the
-   * sidebar strip's createNewTab focuses the fresh composer.
-   */
-  userClosed: boolean;
-  /**
    * The panel's last reported task-info values (metaUpdate), cached so
    * a panel switch can repaint the secondary sidebar's Task Info view
    * without waiting for the panel's next report.
@@ -309,9 +302,10 @@ export class SorcarPanelManager {
    * teardown.
    *
    * @param opts preserveFocus: open the replacement in the background
-   *     (an automatic open the user did not ask for — activation, a
-   *     chat closed by another client); otherwise the fresh chat takes
-   *     the keyboard focus like the sidebar's createNewTab does.
+   *     (an automatic open the user did not ask for — activation, any
+   *     chat tab close); otherwise the fresh chat takes the keyboard
+   *     focus, which only a user request for a chat (switching the
+   *     mode on) does.
    * @returns The new chat's controller, or undefined when nothing
    *     needed opening.
    */
@@ -643,7 +637,6 @@ export class SorcarPanelManager {
       panel,
       controller: undefined as unknown as SorcarSidebarView,
       suppressCloseTab: false,
-      userClosed: false,
     };
     // A revived panel may still carry the previous session's status
     // prefix in its persisted title (the serializer strips it from
@@ -720,8 +713,12 @@ export class SorcarPanelManager {
       // updates it before disposing the editor input), so a restored
       // placeholder still standing keeps this from duplicating it.
       // Mode-off closes (closeAll) and teardown are skipped inside.
-      const userClose = !cp.suppressCloseTab || cp.userClosed;
-      this.ensureChatOpen({preserveFocus: !userClose});
+      // The replacement ALWAYS opens in the background: closing a tab
+      // is not a request for a new chat, and a user who closed the chat
+      // to get back to a file must not have the cursor pulled into a
+      // fresh composer.  A new chat is one click away (the editor
+      // title's + button / KISS: New Conversation) when wanted.
+      this.ensureChatOpen({preserveFocus: true});
     });
     this._refreshPoster();
     return cp;
@@ -779,7 +776,11 @@ export class SorcarPanelManager {
       case 'reveal':
         // A finished task brings its editor tab forward the way
         // sidebar mode switches its internal tab — without stealing
-        // the user's keyboard focus.
+        // the user's keyboard focus, and never while the user is in a
+        // file: revealing would replace the document they are reading
+        // in its group. The tab's ✅ / ❌ title decoration already tells
+        // them the task ended.
+        if (vscode.window.activeTextEditor) break;
         cp.panel.reveal(undefined, true);
         break;
       case 'metaUpdate':
@@ -816,7 +817,6 @@ export class SorcarPanelManager {
         cp.suppressCloseTab = true;
         // retire = the USER closed the root chat inside the webview;
         // otherwise the registry dropped the tab (closed elsewhere).
-        cp.userClosed = !!event.retire;
         if (event.retire) this._retire(cp);
         cp.panel.dispose();
         break;

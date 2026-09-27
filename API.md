@@ -340,7 +340,7 @@
   - `cmd`: The ``fsAction`` command (``action``, ``path``, optional ``dest``, ``name``, ``query``, ``overwrite``, ``workDir``, ``tabId``, ``token``).
   - `ctx`: The transport context of the current call.
 
-- **share_chat** — Write a chat webview's transcript as a standalone HTML page. The chat webview serialized the highlighted tab's static task panel and event panels (its ``shareChat`` command carries the markup) and asks the daemon to save them as ``reports/chat-<chatId>.html`` under the tab's work dir.  Both transports take this path — the VS Code extension host forwards the webview's ``shareChat`` over UDS, the remote webapp sends it over WSS — so the page is built in exactly one place.  The reply is a direct ``share_done`` event to the requester.<br/>`async share_chat(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **share_chat** — Write a chat webview's transcript as a standalone HTML page. The chat webview serialized the highlighted tab's static task panel and event panels (its ``shareChat`` command carries the markup) and asks the daemon to save them as ``reports/chat-<title-slug>-<chatId>.html`` under the tab's work dir.  Both transports take this path — the VS Code extension host forwards the webview's ``shareChat`` over UDS, the remote webapp sends it over WSS — so the page is built in exactly one place.  The reply is a direct ``share_done`` event to the requester.<br/>`async share_chat(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``shareChat`` command (``chatId``, ``html``, optional ``title``, ``workDir``, ``tabId``).
   - `ctx`: The transport context of the current call.
 
@@ -391,6 +391,10 @@
 - **snooze_update** — Snooze the update notification for 24 hours. Services the "Remind me later" action of the update toast in both frontends: records the snooze in the update-check cache shared with the VS Code extension and rebroadcasts the ``update_available`` state so every client's toast disappears.<br/>`async snooze_update(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``snoozeUpdate`` command; its optional ``latest`` field names the release being snoozed.
   - `ctx`: The transport context of the current call (unused — the resulting rebroadcast must reach every window).
+
+- **tips_opt_out** — Persist, or forget, the "Don't show tips again" choice. Services the tips window's checkbox on the remote page.  The choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` — the same file the VS Code extension writes and reads (``SorcarTab.recordTipsOptOut`` / ``tipsDisabled``), so a choice made on one surface holds on every surface.  ``optOut`` ``false`` (checkbox unticked again) removes the marker; absent or any other value opts out.<br/>`async tips_opt_out(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``tipsOptOut`` command with an optional boolean ``optOut``.
+  - `ctx`: The transport context of the current call (unused).
 
 - **update_when_idle** — Arm (or cancel) an update that runs once no task is running. Services the "Update when idle" action of the update toast: the daemon polls its agent registry and launches ``install.sh`` the first time no task is in flight.  The ``update_available`` state is rebroadcast with ``pendingIdle`` so every chat window's toast reflects the armed state.<br/>`async update_when_idle(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``updateWhenIdle`` command; ``cancel: true`` disarms a pending idle update instead of arming one.

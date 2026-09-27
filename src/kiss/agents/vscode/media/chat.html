@@ -62,18 +62,18 @@
             <div id="ghost-overlay"></div>
             <div id="listening-overlay">Listening ...</div>
             <textarea id="task-input" placeholder="{{INPUT_PLACEHOLDER}}" rows="1" {{ENTERKEYHINT}}></textarea>
-            <button id="input-clear-btn" style="display:none;">&times;</button>
+            <button id="input-clear-btn" aria-label="Clear input" style="display:none;">&times;</button>
           </div>
         </div>
         <div id="input-footer">
           <div id="footer-tools">
-            <button id="menu-btn">
+            <button id="menu-btn" data-tooltip="Show or hide history" aria-label="Show or hide history">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </button>
             <button id="new-chat-btn" data-tooltip="New chat" aria-label="New chat">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
-            <button id="tricks-btn" class="toggle-btn" data-tooltip="Inject promptlet">
+            <button id="tricks-btn" class="toggle-btn" data-tooltip="Inject promptlet" aria-label="Inject promptlet">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m6 18-2 2"/><path d="m14 4 6 6"/></svg>
             </button>
             <div id="more-menu-wrap">
@@ -81,23 +81,23 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
               </button>
               <div id="more-menu" role="menu" aria-label="More actions">
-                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: the folder the next task runs in">
+                <button id="workdir-btn" class="more-menu-item" role="menuitem" data-tooltip="Working directory: the folder the next task runs in" aria-label="Working directory: the folder the next task runs in">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                   <span class="more-item-label">Working directory</span>
                 </button>
-                <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the words 'Hey Sorcar'">
+                <button id="voice-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Voice trigger: listen for the words 'Hey Sorcar'" aria-label="Voice trigger: listen for the words 'Hey Sorcar'">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
                   <span class="more-item-label">Voice trigger</span>
                 </button>
-                <button id="share-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Share chat: save it as reports/chat-&lt;id&gt;.html">
+                <button id="share-btn" class="toggle-btn more-menu-item" role="menuitem" data-tooltip="Share chat: save it as reports/chat-&lt;id&gt;.html" aria-label="Share chat: save it as reports/chat-&lt;id&gt;.html">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></span>
                   <span class="more-item-label">Share chat</span>
                 </button>
-                <button id="upload-btn" class="more-menu-item" role="menuitem" data-tooltip="Attach files">
+                <button id="upload-btn" class="more-menu-item" role="menuitem" data-tooltip="Attach files" aria-label="Attach files">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg></span>
                   <span class="more-item-label">Attach files</span>
                 </button>
-                <button id="autocommit-btn" class="more-menu-item" role="menuitem" data-tooltip="git commit">
+                <button id="autocommit-btn" class="more-menu-item" role="menuitem" data-tooltip="git commit" aria-label="Git commit">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></span>
                   <span class="more-item-label">Git Commit</span>
                 </button>
@@ -105,7 +105,7 @@
                   <span class="more-item-icon"></span>
                   <span class="more-item-label">Switch theme</span>
                 </button>
-                <button id="settings-btn" class="more-menu-item" role="menuitem" data-tooltip="Settings">
+                <button id="settings-btn" class="more-menu-item" role="menuitem" data-tooltip="Settings" aria-label="Settings">
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
                   <span class="more-item-label">Settings</span>
                 </button>
@@ -114,7 +114,7 @@
           </div>
           <div id="input-actions">
             <div id="model-picker">
-              <button id="model-btn" data-tooltip="Select model">
+              <button id="model-btn" data-tooltip="Select model" aria-label="Select model">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
                 <!-- The &lrm; marks pin the LTR character order inside
                      the pill's RTL (leading-truncation) line, exactly
@@ -123,17 +123,17 @@
               </button>
               <div id="model-dropdown">
                 <div class="search-wrap">
-                  <input type="text" id="model-search" placeholder="Search models...">
-                  <button class="search-clear-btn" id="model-search-clear" style="display:none;">&times;</button>
+                  <input type="text" id="model-search" placeholder="Search models..." aria-label="Search models">
+                  <button class="search-clear-btn" id="model-search-clear" aria-label="Clear search" style="display:none;">&times;</button>
                 </div>
                 <div id="model-list"></div>
               </div>
             </div>
             <span id="wait-spinner"></span>
-            <button id="send-btn" data-tooltip="Send message">
+            <button id="send-btn" data-tooltip="Send message" aria-label="Send message">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
-            <button id="stop-btn" data-tooltip="Stop agent" style="display:none;">
+            <button id="stop-btn" data-tooltip="Stop agent" aria-label="Stop agent" style="display:none;">
               <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
             </button>
           </div>
@@ -142,7 +142,7 @@
     </div>
 
     <div id="sidebar">
-      <button id="sidebar-close">&times;</button>
+      <button id="sidebar-close" aria-label="Close sidebar">&times;</button>
       <!-- The remote webapp's activity bar: a VS Code-like narrow strip
            on the panel's left edge switching between the Tasks (history),
            Explorer (workspace files) and Source Control (git changes +
@@ -160,8 +160,8 @@
         <div class="sidebar-hdr">History</div>
         <div class="history-search-row">
           <div class="search-wrap">
-            <input type="text" id="history-search" placeholder="Search history...">
-            <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
+            <input type="text" id="history-search" placeholder="Search history..." aria-label="Search history">
+            <button class="search-clear-btn" id="history-search-clear" aria-label="Clear search" style="display:none;">&times;</button>
           </div>
           <!-- Flat list / grouped-by-chat switch: pressed = the legacy
                flat list (newest first, a per-chat color bar on each
@@ -343,7 +343,7 @@
     <div id="meta-overlay"></div>
 
     <div id="frequent-panel">
-      <button id="frequent-panel-close">&times;</button>
+      <button id="frequent-panel-close" aria-label="Close frequent tasks">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
         <div class="sidebar-hdr">Frequent tasks</div>
         <div id="frequent-list">
@@ -354,7 +354,7 @@
     <div id="frequent-overlay"></div>
 
     <div id="tricks-panel">
-      <button id="tricks-panel-close">&times;</button>
+      <button id="tricks-panel-close" aria-label="Close promptlets">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
         <div class="sidebar-hdr">Inject</div>
         <div class="search-wrap">
@@ -400,7 +400,7 @@
     <div id="workdir-overlay"></div>
 
     <div id="settings-panel">
-      <button id="settings-panel-close">&times;</button>
+      <button id="settings-panel-close" aria-label="Close settings">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">{{PRODUCT_NAME}} Configuration{{VERSION_SUFFIX}}</div>
         <div id="remote-url"></div>
@@ -561,7 +561,7 @@
           </div>
           <div class="server-reset-confirm-actions">
             <button type="button" id="server-reset-confirm-cancel" class="server-reset-confirm-btn server-reset-confirm-cancel">Cancel</button>
-            <button type="button" id="server-reset-confirm-ok" class="server-reset-confirm-btn server-reset-confirm-ok">OK</button>
+            <button type="button" id="server-reset-confirm-ok" class="server-reset-confirm-btn server-reset-confirm-ok">Restart and abort task</button>
           </div>
         </div>
       </div>

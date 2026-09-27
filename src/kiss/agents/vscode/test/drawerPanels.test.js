@@ -561,8 +561,10 @@ function testDrawerButtonsLoseFocusAfterClick() {
       el,
       `#${id} must be focusable (test setup)`,
     );
+    // A pointer click (detail 1); a keyboard-originated click (detail
+    // 0) keeps focus by design, see ui_antipattern_keyboard.test.js.
     el.dispatchEvent(
-      new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+      new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
     );
     assert.notStrictEqual(
       win.document.activeElement,

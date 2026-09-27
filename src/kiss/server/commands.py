@@ -491,7 +491,9 @@ class _CommandsMixin:
         the moment the user hits Enter and only a ``status
         running:false`` ever lowers it again, so the refusal MUST
         clear it first or the tab's composer stays disabled forever
-        (F08-1).
+        (F08-1).  The ``error`` carries ``code: "prompt_refused"`` so
+        the webview can put the refused draft (text and attachments)
+        back into the composer instead of losing what the user typed.
 
         Args:
             tab_id: The tab whose submit is refused.
@@ -500,9 +502,32 @@ class _CommandsMixin:
         self.printer.broadcast(
             {"type": "status", "running": False, "tabId": tab_id},
         )
-        self.printer.broadcast(
-            {"type": "error", "text": text, "tabId": tab_id},
-        )
+        self.printer.broadcast({
+            "type": "error",
+            "code": "prompt_refused",
+            "text": text,
+            "tabId": tab_id,
+        })
+
+    def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None:
+        """Deliver the submit-time notice a ``run`` carries in ``_notice``.
+
+        The remote webapp's ``submit`` handler attaches a notice (e.g.
+        "only the first 32 attachments were sent") to the run it
+        builds instead of broadcasting it itself: a notice sent before
+        the run's ``clear`` is wiped from the transcript by that very
+        reset, so it goes out here, after the new task has cleared the
+        tab (or, for a prompt steered into a running task, at once).
+
+        Args:
+            cmd: The ``run`` command, possibly carrying ``_notice``.
+            tab_id: The tab the notice is addressed to.
+        """
+        text = cmd.get("_notice", "")
+        if isinstance(text, str) and text:
+            self.printer.broadcast(
+                {"type": "notice", "text": text, "tabId": tab_id},
+            )
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -652,6 +677,7 @@ class _CommandsMixin:
                 self._echo_injected_prompt(
                     tab_id, inject_prompt, inject_task, remember,
                 )
+                self._broadcast_run_notice(cmd, tab_id)
             return
         # ``thread`` and ``state`` are created together above, so a
         # non-None thread guarantees the state.
@@ -749,6 +775,7 @@ class _CommandsMixin:
                 "chat_id": chat_id,
                 "tabId": tab_id,
             })
+            self._broadcast_run_notice(cmd, tab_id)
             # Start/cancel handshake (audit0903 F1/F2): a ``stop`` or
             # the graceful-shutdown sweep can land while the registry
             # write and the ``clear`` broadcast above hold the

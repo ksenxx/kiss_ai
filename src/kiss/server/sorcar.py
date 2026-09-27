@@ -93,6 +93,7 @@ import json
 import logging
 import math
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -122,6 +123,7 @@ from kiss.agents.sorcar.daemon_client import (
 from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
+from kiss.core.config import kiss_home
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
 from kiss.server import sidebar_panels
@@ -131,6 +133,29 @@ logger = logging.getLogger(__name__)
 # In-flight ``appsStatus`` replies (see ServerApi.get_apps_status): the
 # event loop keeps only weak references to tasks.
 _APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
+
+TIPS_OPT_OUT_MARKER = "TIPS_DISABLED"
+"""Basename, under ``$KISS_HOME``, of the "don't show tips again" marker."""
+
+
+def _write_tips_opt_out_marker(opt_out: bool) -> None:
+    """Create (``opt_out``) or remove the tips opt-out marker file.
+
+    Best-effort: an unwritable ``$KISS_HOME`` only means the tips
+    window may show again, so no error surfaces to the user.
+
+    Args:
+        opt_out: True to record the opt-out, False to forget it.
+    """
+    marker = kiss_home() / TIPS_OPT_OUT_MARKER
+    try:
+        if opt_out:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not update %s: %s", marker, exc)
 
 
 def _job_dir_is_contained(
@@ -315,6 +340,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
     ),
+    ApiCommand("tipsOptOut", handler="tips_opt_out"),
     ApiCommand("voiceToggle", required=("enabled",), handler="drop"),
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
@@ -772,8 +798,11 @@ class ServerApi:
         try:
             await websocket.send(json.dumps({
                 "type": "error",
-                "text": "No remote_password is configured; only "
-                        "localhost may connect.",
+                "code": "localhost_only",
+                "text": "Remote access is turned off: no remote "
+                        "password is set, so only this computer may "
+                        "connect. On it, open Settings and set a "
+                        "Remote password.",
             }))
             await websocket.close()
         except Exception:
@@ -923,9 +952,14 @@ class ServerApi:
                     return False
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
-            await websocket.send(
-                json.dumps({"type": "error", "text": "Authentication failed"})
-            )
+            # ``code`` lets the webapp shim tell this apart from other
+            # pre-auth errors (it shows the text inside the password
+            # dialog and keeps the dialog open across the close below).
+            await websocket.send(json.dumps({
+                "type": "error",
+                "code": "auth_failed",
+                "text": "That password is not correct. Try again.",
+            }))
             await websocket.close()
             return False
         except Exception:
@@ -1311,7 +1345,8 @@ class ServerApi:
         The chat webview serialized the highlighted tab's static task
         panel and event panels (its ``shareChat`` command carries the
         markup) and asks the daemon to save them as
-        ``reports/chat-<chatId>.html`` under the tab's work dir.  Both
+        ``reports/chat-<title-slug>-<chatId>.html`` under the tab's work
+        dir.  Both
         transports take this path — the VS Code extension host
         forwards the webview's ``shareChat`` over UDS, the remote
         webapp sends it over WSS — so the page is built in exactly one
@@ -1548,6 +1583,25 @@ class ServerApi:
         await self._backend._handle_snooze_update(
             latest if isinstance(latest, str) else "",
         )
+
+    async def tips_opt_out(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Persist, or forget, the "Don't show tips again" choice.
+
+        Services the tips window's checkbox on the remote page.  The
+        choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` — the
+        same file the VS Code extension writes and reads
+        (``SorcarTab.recordTipsOptOut`` / ``tipsDisabled``), so a
+        choice made on one surface holds on every surface.  ``optOut``
+        ``false`` (checkbox unticked again) removes the marker; absent
+        or any other value opts out.
+
+        Args:
+            cmd: The ``tipsOptOut`` command with an optional boolean
+                ``optOut``.
+            ctx: The transport context of the current call (unused).
+        """
+        opt_out = cmd.get("optOut") is not False
+        await asyncio.to_thread(_write_tips_opt_out_marker, opt_out)
 
     async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Arm (or cancel) an update that runs once no task is running.

@@ -242,10 +242,13 @@ async function runTest() {
     assert.strictEqual(calls.updateChecks, 1);
     assert.strictEqual(calls.runUpdate, 1);
     assert.strictEqual(notifications[0].kind, 'info');
+    // 'Skip this version' (ui_antipattern_update_nag.test.js) joined the
+    // three original actions.
     assert.deepStrictEqual(notifications[0].actions, [
       'Update now',
       'Update when idle',
       'Remind me later',
+      'Skip this version',
     ]);
     assert.ok(
       notifications[0].message.includes('2099.1.1'),

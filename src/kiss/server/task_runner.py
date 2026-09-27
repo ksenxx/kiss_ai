@@ -691,6 +691,7 @@ class _TaskRunnerMixin:
         def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
+        def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
         def _user_answer_clear_tabs(
             self, ans_tab: str, answered_task_id: str,
         ) -> list[str]: ...
@@ -853,6 +854,9 @@ class _TaskRunnerMixin:
                         "chat_id": override_chat_id,
                         "tabId": tab_id,
                     })
+                    # That ``clear`` wipes the transcript again, so the
+                    # run's notice (dropped attachments) must follow it.
+                    self._broadcast_run_notice(cmd, tab_id)
             status_start: dict[str, Any] = {
                 "type": "status",
                 "running": True,

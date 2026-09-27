@@ -1592,7 +1592,8 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": "also-wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "error")
-            self.assertIn("Authentication failed", resp["text"])
+            self.assertEqual(resp.get("code"), "auth_failed")
+            self.assertEqual(resp["text"], "That password is not correct. Try again.")
 
 
 class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):

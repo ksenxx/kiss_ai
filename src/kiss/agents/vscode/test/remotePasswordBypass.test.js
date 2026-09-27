@@ -51,6 +51,7 @@ function buildDom(opts) {
   const modal = opts.noModal ? '' : `
       <div id="auth-modal" style="display:none;">
         <input id="auth-modal-input" type="password">
+        <div id="auth-modal-error" role="alert"></div>
         <button id="auth-modal-ok"></button>
         <button id="auth-modal-cancel"></button>
       </div>`;
@@ -779,7 +780,7 @@ async function run() {
       new window.KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
     await tick();
     try {
-      assert.ok(!isVisible(modal), 'Enter submits and closes the modal');
+      assert.ok(isVisible(modal), 'Enter keeps the modal open until the server answers');
       assert.strictEqual(
         window.localStorage.getItem('sorcar-remote-pwd'), 'pw2',
         'Enter must save the typed password for the reconnect',
@@ -813,8 +814,8 @@ async function run() {
     try {
       assert.strictEqual(
         msgEl.textContent,
-        'Too many failed login attempts. ' +
-          'Asking for the password again in 1s ...',
+        'Too many wrong passwords from this network. ' +
+          'You can try again in 1 s.',
         'auth_locked must explain the lockout on the overlay',
       );
       assert.ok(isVisible(overlay), 'overlay shown while locked');
@@ -831,8 +832,8 @@ async function run() {
     try {
       assert.strictEqual(
         msgEl.textContent,
-        'Too many failed login attempts. ' +
-          'Asking for the password again in 1s ...',
+        'Too many wrong passwords from this network. ' +
+          'You can try again in 1 s.',
         'the close after auth_locked must not overwrite the explanation',
       );
       assert.ok(isVisible(overlay), 'overlay stays shown after the close');
@@ -1256,6 +1257,464 @@ async function run() {
     } catch (err) {
       fail('script load-error recovery broken', err);
     }
+    window.close();
+  }
+
+  // A bare spinner for a long outage leaves the user guessing whether
+  // waiting helps.  After OVERLAY_ESCALATE_MS the overlay must say how
+  // long it has been trying, hint at the fix and offer "Retry now",
+  // which reconnects immediately; a server answer removes the button.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const msg = doc.getElementById('kiss-server-loading-msg');
+    try {
+      sockets[0].fireClose();
+      await sleep(1100);
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null,
+        'no Retry button during the first seconds of an outage');
+      const realNow = window.Date.now;
+      window.Date.now = function () {
+        return realNow() + 9000;
+      };
+      await sleep(1100);
+      assert.match(msg.textContent,
+        /^Still trying to reach the KISS Sorcar server \(\d+ s\)\. Check that it is running on this machine\.$/,
+        'escalated overlay text names the elapsed time and a remedy');
+      const retry = doc.getElementById('kiss-server-loading-action');
+      assert.ok(retry, 'the escalated overlay offers a button');
+      assert.strictEqual(retry.textContent, 'Retry now');
+      // Close the in-flight attempt so a backoff timer is pending when
+      // the user clicks: Retry now must drop that timer and connect.
+      sockets[sockets.length - 1].fireClose();
+      const before = sockets.length;
+      retry.click();
+      assert.strictEqual(sockets.length, before + 1,
+        'Retry now opens a new socket at once instead of waiting for the backoff');
+      await sleep(600);
+      assert.strictEqual(sockets.length, before + 1,
+        'the pending backoff timer was cancelled, so no second attempt follows');
+      const sock = sockets[sockets.length - 1];
+      sock.fireOpen();
+      retry.click();
+      assert.strictEqual(sockets.length, before + 1,
+        'Retry now is a no-op while the socket is open');
+      sock.fireMessage({type: 'auth_required'});
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null,
+        'the server answering removes the Retry button');
+      window.Date.now = realNow;
+      ok('a long outage escalates the overlay text and offers Retry now');
+    } catch (err) {
+      fail('overlay escalation broken', err);
+    }
+    window.close();
+  }
+
+  // A page without the overlay message node (older cached shell) must
+  // survive the escalation tick without a script error.
+  {
+    const dom = buildDom({noModal: true, silent: true});
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    evalShim(window, shimJs);
+    try {
+      sockets[0].fireClose();
+      const realNow = window.Date.now;
+      window.Date.now = function () {
+        return realNow() + 9000;
+      };
+      await sleep(1100);
+      window.Date.now = realNow;
+      assert.strictEqual(
+        window.document.getElementById('kiss-server-loading-action'), null,
+        'no button without a message node to attach it to');
+      ok('the escalation tick tolerates a page without the overlay message');
+    } catch (err) {
+      fail('escalation without message node broken', err);
+    }
+    window.close();
+  }
+
+  // Cancelling the password dialog must not strand the user behind a
+  // spinner that pretends the server is starting: the overlay says a
+  // password is needed and "Enter password" re-opens the dialog.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const sock = sockets[0];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_required'});
+    doc.getElementById('auth-modal-cancel').click();
+    await tick();
+    try {
+      assert.strictEqual(doc.getElementById('kiss-server-loading-msg').textContent,
+        'A password is needed to use this server.');
+      const enter = doc.getElementById('kiss-server-loading-action');
+      assert.ok(enter, 'the overlay offers a way back into the dialog');
+      assert.strictEqual(enter.textContent, 'Enter password');
+      // The server drops the idle unauthenticated socket after 60 s and
+      // the reconnect gets auth_required again: the cancelled dialog
+      // must stay closed and the overlay must keep its explanation.
+      sock.fireClose();
+      await sleep(300);
+      const msgEl = doc.getElementById('kiss-server-loading-msg');
+      assert.strictEqual(msgEl.textContent,
+        'A password is needed to use this server.',
+        'the quiet reconnect does not flip the text back to "starting"');
+      const sock2 = sockets[sockets.length - 1];
+      assert.notStrictEqual(sock2, sock, 'the shim reconnected underneath');
+      sock2.fireOpen();
+      sock2.fireMessage({type: 'auth_required'});
+      assert.ok(!isVisible(doc.getElementById('auth-modal')),
+        'a declined dialog is not popped back up by the reconnect');
+      assert.ok(!isVisible(doc.getElementById('app')), 'the app stays gated');
+      assert.strictEqual(msgEl.textContent,
+        'A password is needed to use this server.');
+      const enter2 = doc.getElementById('kiss-server-loading-action');
+      assert.strictEqual(enter2.textContent, 'Enter password');
+      // Click while the socket is down: the dialog opens and the shim
+      // reconnects at once instead of waiting for the backoff.
+      sock2.fireClose();
+      const before = sockets.length;
+      enter2.click();
+      await tick();
+      assert.ok(isVisible(doc.getElementById('auth-modal')),
+        'Enter password re-opens the dialog');
+      assert.ok(isVisible(doc.getElementById('app')),
+        'the app is revealed under the dialog again');
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null,
+        'the button is gone once the dialog is open');
+      assert.strictEqual(sockets.length, before + 1,
+        'Enter password on a closed socket reconnects immediately');
+      const sock3 = sockets[sockets.length - 1];
+      sock3.fireOpen();
+      sock3.fireMessage({type: 'auth_required'});
+      assert.ok(isVisible(doc.getElementById('auth-modal')),
+        'auth_required while the dialog is pending leaves it as it is');
+      // Another tab's stored password may win the race: auth_ok closes
+      // the pending dialog without leaving a stale prompt behind.
+      sock3.fireMessage({type: 'auth_ok'});
+      assert.ok(!isVisible(doc.getElementById('auth-modal')),
+        'auth_ok closes a pending dialog');
+      sock3.fireClose();
+      await sleep(300);
+      const sock4 = sockets[sockets.length - 1];
+      sock4.fireOpen();
+      sock4.fireMessage({type: 'auth_required'});
+      assert.ok(isVisible(doc.getElementById('auth-modal')),
+        'the next auth_required can open the dialog again (no stale prompt)');
+      ok('a cancelled password prompt stays closed until Enter password is clicked');
+    } catch (err) {
+      fail('Enter password re-open broken', err);
+    }
+    window.close();
+  }
+
+  // A wrong password is reported inside the still-open dialog, keeping
+  // the typed text so the user can retype at once, and the socket close
+  // that follows keeps the dialog as it is.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const sock = sockets[0];
+    sock.fireOpen();
+    sock.fireMessage({type: 'auth_required'});
+    const input = doc.getElementById('auth-modal-input');
+    input.value = 'wrong';
+    doc.getElementById('auth-modal-ok').click();
+    await tick();
+    try {
+      assert.deepStrictEqual(JSON.parse(sock.sent[sock.sent.length - 1]),
+        {type: 'auth', password: 'wrong'});
+      // A browser that forbids storage (private mode) must not turn the
+      // wrong-password report into a script error.
+      const realRemoveItem = window.Storage.prototype.removeItem;
+      window.Storage.prototype.removeItem = function () {
+        throw new Error('SecurityError');
+      };
+      sock.fireMessage({type: 'error', code: 'auth_failed',
+        text: 'That password is not correct. Try again.'});
+      window.Storage.prototype.removeItem = realRemoveItem;
+      await tick();
+      assert.ok(isVisible(doc.getElementById('auth-modal')),
+        'the dialog stays open after a wrong password');
+      assert.strictEqual(doc.getElementById('auth-modal-error').textContent,
+        'That password is not correct. Try again.');
+      assert.strictEqual(input.value, 'wrong', 'the typed text is kept');
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), 'wrong',
+        'storage that throws is tolerated');
+      sock.fireMessage({type: 'error', code: 'auth_failed',
+        text: 'That password is not correct. Try again.'});
+      await tick();
+      assert.strictEqual(window.localStorage.getItem('sorcar-remote-pwd'), null,
+        'the rejected password is not stored for the reconnect');
+      assert.strictEqual(doc.getElementById('kiss-server-loading-msg').textContent,
+        'KISS Sorcar Server is starting ...',
+        'a wrong password never touches the overlay text');
+      ok('a wrong password is reported inside the dialog with the text kept');
+    } catch (err) {
+      fail('wrong-password feedback broken', err);
+    }
+    window.close();
+  }
+
+  // Any other pre-auth error (e.g. remote access disabled) replaces the
+  // overlay text so the user learns why, and the close that follows
+  // keeps that explanation instead of a spinner label.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const sock = sockets[0];
+    sock.fireOpen();
+    try {
+      sock.fireMessage({type: 'error', text: 'Remote access is disabled on this server.'});
+      const msg = doc.getElementById('kiss-server-loading-msg');
+      assert.strictEqual(msg.textContent, 'Remote access is disabled on this server.');
+      assert.ok(!isVisible(doc.getElementById('app')), 'the app stays gated');
+      sock.fireClose();
+      assert.strictEqual(msg.textContent, 'Remote access is disabled on this server.',
+        'the close after a pre-auth error keeps the explanation');
+      sockets[sockets.length - 1].fireOpen();
+      sockets[sockets.length - 1].fireMessage({type: 'error'});
+      assert.strictEqual(msg.textContent, 'Something went wrong.',
+        'an error frame without text still replaces the spinner label');
+      ok('a pre-auth server error is explained on the overlay and survives the close');
+    } catch (err) {
+      fail('pre-auth error overlay broken', err);
+    }
+    window.close();
+  }
+
+  // SECURITY (R4-1): without the dialog markup the shim falls back to
+  // window.prompt(), which answers synchronously.  A wrong password
+  // there, the auth_failed that follows, the reconnect and the next
+  // auth_required must prompt AGAIN: the resolved fallback promise
+  // must not linger as "a prompt is pending", which made every later
+  // _promptForPassword a no-op and left the revealed app without any
+  // way to log in.
+  {
+    const dom = buildDom({noModal: true});
+    const {window} = dom;
+    const answers = ['wrong', 'right'];
+    const prompts = [];
+    window.prompt = function (label) {
+      prompts.push(label);
+      return answers.shift();
+    };
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const app = doc.getElementById('app');
+    try {
+      const s0 = sockets[0];
+      s0.fireOpen();
+      s0.fireMessage({type: 'auth_required'});
+      await tick();
+      assert.strictEqual(prompts.length, 1, 'the native prompt asked once');
+      assert.deepStrictEqual(
+        JSON.parse(s0.sent[s0.sent.length - 1]), {type: 'auth', password: 'wrong'});
+      s0.fireMessage({type: 'error', code: 'auth_failed', text: 'That password is not correct.'});
+      assert.ok(!isVisible(app), 'auth_failed re-gates the app');
+      s0.fireClose();
+      for (let i = 0; i < 40 && sockets.length < 2; i++) await sleep(50);
+      assert.strictEqual(sockets.length, 2, 'the shim reconnected after the refusal');
+      const s1 = sockets[1];
+      s1.fireOpen();
+      s1.fireMessage({type: 'auth_required'});
+      assert.strictEqual(prompts.length, 2,
+        'the next auth_required prompts again instead of being swallowed by a stale pending prompt');
+      await tick();
+      assert.deepStrictEqual(
+        JSON.parse(s1.sent[s1.sent.length - 1]), {type: 'auth', password: 'right'});
+      s1.fireMessage({type: 'auth_ok'});
+      assert.ok(isVisible(app), 'the right password reveals the app');
+      ok('the native-prompt fallback re-prompts after a wrong password (no stale pending prompt)');
+    } catch (err) {
+      fail('native-prompt fallback re-prompt broken', err);
+    }
+    window.close();
+  }
+
+  // R4-4: a lockout whose deadline has passed with the server still
+  // unreachable must not count "0 s" forever.  Offline (fake sockets
+  // never open): the overlay first returns to the plain label, then
+  // escalates to "Still trying ..." + "Retry now" like any outage.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const msg = doc.getElementById('kiss-server-loading-msg');
+    const realNow = window.Date.now;
+    try {
+      sockets[0].fireOpen();
+      sockets[0].fireMessage({type: 'auth_locked', retry_after: 2});
+      assert.strictEqual(msg.textContent,
+        'Too many wrong passwords from this network. You can try again in 2 s.');
+      sockets[0].fireClose();
+      await sleep(1100);
+      assert.strictEqual(msg.textContent,
+        'Too many wrong passwords from this network. You can try again in 1 s.',
+        'the countdown ticks down while the lockout is still in force');
+      window.Date.now = function () { return realNow() + 2000; };
+      await sleep(1100);
+      assert.ok(sockets.length >= 2, 'the reconnect scheduled for the lockout end was attempted');
+      assert.strictEqual(msg.textContent, 'KISS Sorcar Server is starting ...',
+        'an expired lockout gives the overlay back to the outage wording, not "0 s"');
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null,
+        'no action button within the first seconds after the lockout ended');
+      window.Date.now = function () { return realNow() + 10000; };
+      await sleep(1100);
+      assert.match(msg.textContent,
+        /^Still trying to reach the KISS Sorcar server \(\d+ s\)\. Check that it is running on this machine\.$/,
+        'the outage clock started at the lockout end, so the overlay escalates');
+      const retry = doc.getElementById('kiss-server-loading-action');
+      assert.ok(retry, 'the escalated overlay offers a button');
+      assert.strictEqual(retry.textContent, 'Retry now');
+      const before = sockets.length;
+      retry.click();
+      assert.strictEqual(sockets.length, before + 1, 'Retry now reconnects at once');
+      ok('an expired lockout while offline escalates to Still trying + Retry now');
+    } catch (err) {
+      fail('expired lockout offline handling broken', err);
+    }
+    window.Date.now = realNow;
+    window.close();
+  }
+
+  // R4-4, dialog cancelled before the lockout: once the lockout runs
+  // out offline the overlay returns to "A password is needed" with the
+  // "Enter password" button (the state the cancel had set up), instead
+  // of "0 s" forever.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const msg = doc.getElementById('kiss-server-loading-msg');
+    const realNow = window.Date.now;
+    try {
+      sockets[0].fireOpen();
+      sockets[0].fireMessage({type: 'auth_required'});
+      doc.getElementById('auth-modal-cancel').click();
+      await tick();
+      assert.strictEqual(msg.textContent, 'A password is needed to use this server.');
+      sockets[0].fireMessage({type: 'auth_locked', retry_after: 1});
+      assert.match(msg.textContent, /try again in 1 s/);
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null,
+        'the lockout text replaces the Enter password button');
+      sockets[0].fireClose();
+      window.Date.now = function () { return realNow() + 10000; };
+      await sleep(1100);
+      assert.strictEqual(msg.textContent, 'A password is needed to use this server.',
+        'the expired lockout hands back to the cancelled-dialog explanation');
+      const enter = doc.getElementById('kiss-server-loading-action');
+      assert.ok(enter, 'the Enter password button is back');
+      assert.strictEqual(enter.textContent, 'Enter password');
+      await sleep(1100);
+      assert.strictEqual(msg.textContent, 'A password is needed to use this server.',
+        'the overlay tick stopped: no escalation overwrites the explanation');
+      enter.click();
+      assert.ok(isVisible(doc.getElementById('auth-modal')), 'Enter password reopens the dialog');
+      ok('an expired lockout after a cancelled dialog restores Enter password');
+    } catch (err) {
+      fail('expired lockout after cancel broken', err);
+    }
+    window.Date.now = realNow;
+    window.close();
+  }
+
+  // R4-4, the lockout runs out while a socket is open (the server is
+  // about to answer): only the countdown ends; nothing is relabelled
+  // and the server's auth_required opens the dialog as usual.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const msg = doc.getElementById('kiss-server-loading-msg');
+    const realNow = window.Date.now;
+    try {
+      sockets[0].fireOpen();
+      sockets[0].fireMessage({type: 'auth_locked', retry_after: 1});
+      window.Date.now = function () { return realNow() + 2000; };
+      await sleep(1100);
+      assert.match(msg.textContent, /try again in 1 s/,
+        'an open socket at the lockout end leaves the text to the server answer');
+      assert.strictEqual(doc.getElementById('kiss-server-loading-action'), null);
+      sockets[0].fireMessage({type: 'auth_required'});
+      assert.ok(isVisible(doc.getElementById('auth-modal')), 'auth_required opens the dialog');
+      ok('an expired lockout with the socket open only ends the countdown');
+    } catch (err) {
+      fail('expired lockout with open socket broken', err);
+    }
+    window.Date.now = realNow;
+    window.close();
+  }
+
+  // R4-4, a lockout announced during an outage that is already being
+  // counted: when it expires offline the earlier outage clock is kept,
+  // so the escalation follows from the original outage start.
+  {
+    const dom = buildDom();
+    const {window} = dom;
+    const sockets = [];
+    installFakeWebSocket(window, sockets);
+    wireOverlayContract(window);
+    evalShim(window, shimJs);
+    const doc = window.document;
+    const msg = doc.getElementById('kiss-server-loading-msg');
+    const realNow = window.Date.now;
+    try {
+      sockets[0].fireClose();
+      for (let i = 0; i < 40 && sockets.length < 2; i++) await sleep(50);
+      const s1 = sockets[sockets.length - 1];
+      s1.fireOpen();
+      s1.fireMessage({type: 'auth_locked', retry_after: 1});
+      assert.match(msg.textContent, /try again in 1 s/);
+      s1.fireClose();
+      window.Date.now = function () { return realNow() + 10000; };
+      await sleep(1100);
+      assert.match(msg.textContent, /^Still trying to reach the KISS Sorcar server \(\d+ s\)/,
+        'the outage counted before the lockout resumes when the lockout expires');
+      assert.ok(doc.getElementById('kiss-server-loading-action'), 'Retry now is offered');
+      ok('a lockout inside a counted outage keeps that outage clock on expiry');
+    } catch (err) {
+      fail('lockout inside outage broken', err);
+    }
+    window.Date.now = realNow;
     window.close();
   }
 

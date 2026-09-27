@@ -351,7 +351,10 @@ function runPanel() {
   });
   click(win, rows(doc)[1].querySelector('.sidebar-item-edit'));
   assert.ok(rows(doc)[1].classList.contains('editing'));
+  // The trash icon reveals an inline Delete confirm first
+  // (ui_antipattern_destructive_confirm.test.js).
   click(win, rows(doc)[0].querySelector('.sidebar-item-delete'));
+  click(win, rows(doc)[0].querySelector('.sidebar-confirm-yes'));
   assert.deepStrictEqual(texts(doc), ['Mine B', 'Bundled alpha']);
   assert.strictEqual(list.querySelectorAll('.tricks-edit-input').length, 0);
   assert.strictEqual(rows(doc)[0].querySelectorAll('.sidebar-item-edit').length, 1);

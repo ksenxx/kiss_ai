@@ -236,7 +236,8 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
             await self._recv_type(ws, "auth_required")
             await ws.send(json.dumps({"type": "auth", "password": "nope2"}))
             err = await self._recv_type(ws, "error")
-            self.assertEqual(err.get("text"), "Authentication failed")
+            self.assertEqual(err.get("code"), "auth_failed")
+            self.assertEqual(err.get("text"), "That password is not correct. Try again.")
 
 
 if __name__ == "__main__":

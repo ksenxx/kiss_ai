@@ -309,6 +309,29 @@ body {
   outline: none;
 }
 
+/* Destructive choice of a confirm toast (confirmAction({danger: true})). */
+.kiss-notification-action-danger {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.kiss-notification-action-danger:hover,
+.kiss-notification-action-danger:focus-visible {
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+  border-color: var(--error);
+}
+
+/* Text field of a prompt toast (promptText), aligned with the message text. */
+.kiss-notification-field {
+  padding: 0 var(--space-2-5) var(--space-2) var(--space-10);
+}
+
+.kiss-notification-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 24px;
+}
+
 .kiss-notification-action-icon {
   width: 14px;
   height: 14px;
@@ -1013,6 +1036,13 @@ body.remote-chat:not(.light-theme) .welcome-logo-dark { display: block; }
 .think .lbl .arrow { transition: transform var(--dur-slow); display: inline-block; font-size: var(--fs-md); }
 .think .lbl .arrow.collapsed { transform: rotate(-90deg); }
 
+/* Keyboard focus ring for the two focusable disclosure headers (tabindex="0" role="button"). */
+.collapse-header:focus-visible,
+.think .lbl:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .think .cnt {
   font-size: var(--fs-md); color: var(--dim); font-style: italic;
   white-space: pre-wrap; word-break: break-word;
@@ -1523,11 +1553,14 @@ body.content-tab-open #send-btn { display: none !important; }
 }
 #task-input::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
 
+/* 24x24 is the WCAG 2.2 minimum pointer target; the glyph keeps its
+   size, the padding grows the hit area so a near miss does not land in
+   the input and move the caret instead of clearing. */
 #input-clear-btn {
-  position: absolute; top: 2px; right: 2px; z-index: var(--z-float-top);
+  position: absolute; top: 0; right: 0; z-index: var(--z-float-top);
   background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
   font-size: var(--fs-xl); line-height: 1; cursor: pointer;
-  width: 18px; height: 18px; border-radius: var(--radius-sm); padding: 0;
+  width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
   display: flex; align-items: center; justify-content: center;
   transition: color var(--dur-base), background var(--dur-base);
 }
@@ -1579,8 +1612,8 @@ body.content-tab-open #send-btn { display: none !important; }
   border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); font-size: var(--fs-base); font-family: inherit;
   color: color-mix(in srgb, var(--fg) 58%, transparent); cursor: pointer; transition: border-color var(--dur-slow);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: min(300px, 50vw);
-  outline: none;
 }
+#model-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 /* A truncated model name keeps its END visible (the distinctive part:
    variant/size/date), so the ellipsis goes at the START: an RTL line
@@ -1670,7 +1703,10 @@ body.content-tab-open #send-btn { display: none !important; }
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: color-mix(in srgb, var(--fg) 85%, transparent);
 }
-.more-menu-item:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* 0.5 keeps the disabled label legible so the user can still read
+   which action is unavailable. */
+.more-menu-item:disabled { opacity: 0.5; cursor: not-allowed; }
 .more-item-icon { display: flex; align-items: center; flex-shrink: 0; }
 .more-item-icon svg { width: 16px; height: 16px; }
 .more-item-label { overflow: hidden; text-overflow: ellipsis; }
@@ -1695,11 +1731,12 @@ body.remote-chat #theme-btn { display: flex; }
 
 .search-wrap { position: relative; }
 
+/* 24x24 hit target (WCAG 2.2 minimum), same glyph size as before. */
 .search-clear-btn {
-  position: absolute; top: 50%; right: 8px; transform: translateY(-50%); z-index: var(--z-float-top);
+  position: absolute; top: 50%; right: 5px; transform: translateY(-50%); z-index: var(--z-float-top);
   background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
   font-size: var(--fs-xl); line-height: 1; cursor: pointer;
-  width: 18px; height: 18px; border-radius: var(--radius-sm); padding: 0;
+  width: 24px; height: 24px; border-radius: var(--radius-sm); padding: 3px;
   display: flex; align-items: center; justify-content: center;
   transition: color var(--dur-base), background var(--dur-base);
 }
@@ -1708,8 +1745,9 @@ body.remote-chat #theme-btn { display: flex; }
 #model-search {
   width: 100%; background: transparent; border: none;
   border-bottom: 1px solid color-mix(in srgb, var(--fg) 6%, transparent); color: var(--fg);
-  font-size: var(--fs-base); padding: var(--space-2) 28px var(--space-2) var(--space-3); outline: none; font-family: inherit;
+  font-size: var(--fs-base); padding: var(--space-2) 28px var(--space-2) var(--space-3); font-family: inherit;
 }
+#model-search:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 #model-search::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
 #model-list { overflow-y: auto; overflow-x: hidden; flex: 1; }
 
@@ -4429,6 +4467,46 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   background: color-mix(in srgb, var(--dim) 20%, transparent);
 }
 
+/* The action bar's inline two-step confirm ("Delete branch 'x' and all
+   of the task's changes?" + Discard / Keep), shown in place of the
+   buttons so a destructive click is never a single step. main.js
+   toggles it with the hidden attribute. */
+.wt-confirm {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1-5); width: 100%;
+}
+.wt-confirm-text { flex: 1 1 100%; font-size: var(--fs-sm); }
+
+.wt-confirm[hidden],
+.wt-btns[hidden] { display: none !important; }
+
+/* Inline notes under settings fields (#cfg-max-budget-note,
+   #settings-update-status) and under the promptlet Add row
+   (#tricks-add-error): the message stays next to the field it is about
+   instead of vanishing in a toast. */
+.config-field-note {
+  font-size: var(--fs-sm);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  padding: 0 var(--space-2-5) var(--space-1-5);
+}
+.config-field-note-error { color: var(--red); }
+.config-field-note[hidden] { display: none !important; }
+
+/* "New output ↓": the sibling right after #output in #app's column while
+   the user has scrolled up and new output arrived below. The negative
+   top margin floats it over the transcript's bottom edge so it takes no
+   room from the composer. */
+.new-output-btn {
+  position: relative; z-index: var(--z-float);
+  align-self: center; margin-top: calc(-1 * var(--space-8)); margin-bottom: var(--space-1-5);
+  padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--bg2); color: var(--fg);
+  font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+.new-output-btn:hover { background: color-mix(in srgb, var(--accent) 15%, var(--bg)); }
+.new-output-btn:focus-visible { outline: 1px solid var(--accent); }
+.new-output-btn[hidden] { display: none !important; }
+
 .wt-result-ok {
   color: var(--green); padding: var(--space-2) var(--space-3);
   border-left: 3px solid var(--green); margin: var(--space-1-5) 0;
@@ -4531,7 +4609,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .copyable:hover > .panel-copy-btn,
 .panel-copy-btn:focus-visible,
-.panel-copy-btn.copied { opacity: 1; }
+.panel-copy-btn.copied,
+.panel-copy-btn.copy-failed { opacity: 1; }
 
 .panel-copy-btn:hover {
   color: var(--fg);
@@ -4539,6 +4618,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .panel-copy-btn.copied { color: var(--green); }
+.panel-copy-btn.copy-failed { color: var(--error); }
 
 /* Per-panel Stop for a running tool call: sits immediately left of the
    copy button (24px wide at right: 6px) and is shown only while the

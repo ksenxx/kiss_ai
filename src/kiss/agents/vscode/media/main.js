@@ -491,8 +491,8 @@
   function scheduleNotificationDismiss(id, severity, sticky) {
     clearNotificationTimer(id);
     if (sticky) return;
-    const delay =
-      severity === 'error' ? 7500 : severity === 'warning' ? 6000 : 5000;
+    // Errors never reach here: showNotification makes them sticky.
+    const delay = severity === 'warning' ? 6000 : 5000;
     notificationTimers.set(
       id,
       setTimeout(() => removeNotification(id, undefined, false), delay),
@@ -513,7 +513,14 @@
         typeof action.onClick === 'function',
     );
     const notifyOnClose = actions.length > 0 && !hasLocalActions;
-    const sticky = !!ev.sticky || actions.length > 0 || !!ev.progress;
+    // An error never dismisses itself: the reader may be looking
+    // elsewhere when it lands, and a vanished error reads as "nothing
+    // happened". The close button stays available.
+    const sticky =
+      !!ev.sticky ||
+      severity === 'error' ||
+      actions.length > 0 ||
+      !!ev.progress;
     if (!toast) {
       toast = document.createElement('article');
       toast.className = 'kiss-notification';
@@ -575,9 +582,13 @@
     closeBtn.className = 'kiss-notification-close';
     closeBtn.setAttribute('aria-label', 'Dismiss notification');
     closeBtn.textContent = '\u00d7';
-    closeBtn.addEventListener('click', () =>
-      removeNotification(id, undefined, notifyOnClose),
-    );
+    closeBtn.addEventListener('click', () => {
+      // On a confirm / prompt toast the X is one more way to say "no":
+      // it takes the cancel button's path (onCancel, focus restore).
+      const cancel = toast.querySelector('[data-dialog-cancel]');
+      if (cancel) cancel.click();
+      else removeNotification(id, undefined, notifyOnClose);
+    });
     body.appendChild(icon);
     body.appendChild(content);
     body.appendChild(closeBtn);
@@ -598,6 +609,9 @@
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'kiss-notification-action';
+        if (isObj && action.danger) {
+          button.classList.add('kiss-notification-action-danger');
+        }
         if (isObj && action.svg) {
           const cleaned = kissSanitize(String(action.svg));
           const parser = new window.DOMParser();
@@ -655,6 +669,258 @@
       return;
     }
     showNotification(ev);
+  }
+
+  // In-webview replacements for window.confirm / window.prompt. The VS
+  // Code webview sandbox has no `allow-modals`, so the native dialogs
+  // silently return false / null there; in a browser they block the
+  // page with generic OK / Cancel buttons. Both helpers render a sticky
+  // notification instead, with the SAFE choice focused so a habitual
+  // Enter never destroys anything, and Escape cancelling.
+
+  /**
+   * The element a new confirm / prompt toast hands focus back to when it
+   * closes.  A toast that replaces an earlier question with the same id,
+   * or is chained from one (focus is inside another dialog toast, as in
+   * Create Tag's second step), inherits that toast's opener as long as it
+   * is still in the document; otherwise the opener is whatever has focus
+   * now.
+   */
+  function dialogOpener(id) {
+    const active = document.activeElement;
+    const source =
+      document.querySelector(notificationSelector(id)) ||
+      (active && active.closest ? active.closest('.kiss-notification') : null);
+    const inherited = source && source.kissOpenerFocus;
+    return inherited && inherited.isConnected ? inherited : active;
+  }
+
+  /**
+   * Move focus back to the element that was focused when a toast opened,
+   * unless a handler has already put it somewhere else (a follow-up
+   * prompt's input, say).  An opener that has left the document (a
+   * closed tab's button, a re-rendered row) gives way to the composer,
+   * so focus never lands on BODY.
+   */
+  function restoreToastOpenerFocus(toast) {
+    const opener = toast.kissOpenerFocus;
+    toast.kissOpenerFocus = null;
+    const active = document.activeElement;
+    const focusMoved =
+      active && active !== document.body && !toast.contains(active);
+    if (focusMoved) return;
+    const usable =
+      opener &&
+      opener !== document.body &&
+      opener.isConnected &&
+      typeof opener.focus === 'function';
+    if (usable) {
+      opener.focus();
+      return;
+    }
+    // While a file/webview tab is on screen the composer is hidden by
+    // CSS (body.content-tab-open) and cannot take focus, so the active
+    // tab's strip entry is the visible fallback.
+    const composerHidden = document.body.classList.contains('content-tab-open');
+    const fallback = composerHidden
+      ? document.querySelector('#tab-list .chat-tab.active')
+      : document.getElementById('task-input');
+    if (fallback) fallback.focus();
+  }
+
+  /** Escape inside a confirm / prompt toast presses its cancel button. */
+  function onDialogToastKey(e) {
+    if (e.key !== 'Escape') return;
+    const cancel = e.currentTarget.querySelector('[data-dialog-cancel]');
+    if (!cancel) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancel.click();
+  }
+
+  // Inline two-step confirms (.wt-confirm under a post-task action bar,
+  // .sidebar-item-confirm next to a promptlet / custom-model trash icon)
+  // swap a destructive button for a Delete / Keep pair in place.  They
+  // answer Escape like the toasts above and count as an open popup for
+  // the sheet's Escape handler, so one Escape folds the question back
+  // into its button instead of closing the whole sheet.
+
+  /** Escape inside an inline confirm presses its Keep / Cancel button. */
+  function onInlineConfirmKey(e) {
+    if (e.key !== 'Escape') return;
+    const cancel = e.currentTarget.querySelector('[data-inline-cancel]');
+    if (!cancel) return;
+    e.preventDefault();
+    e.stopPropagation();
+    cancel.click();
+  }
+
+  function inlineConfirmIsOpen(el) {
+    return !el.hidden && el.style.display !== 'none';
+  }
+
+  /** The open inline confirm under `root`, or null. */
+  function openInlineConfirm(root) {
+    return (
+      Array.from(
+        root.querySelectorAll('.wt-confirm, .sidebar-item-confirm'),
+      ).find(inlineConfirmIsOpen) || null
+    );
+  }
+
+  /** Fold every open inline confirm under `root` back into its button. */
+  function resetInlineConfirms(root) {
+    let open = openInlineConfirm(root);
+    while (open) {
+      open.querySelector('[data-inline-cancel]').click();
+      open = openInlineConfirm(root);
+    }
+  }
+
+  /**
+   * Ask the user to confirm an action with verb-labelled buttons.
+   *
+   * Renders a sticky warning notification whose actions are, in order,
+   * `confirmLabel` (running `onConfirm`), any `otherActions`, and
+   * `cancelLabel` (running `onCancel`, if given).  The cancel button is
+   * focused, Escape presses it, and focus returns to the element that
+   * had it when the toast opened.  Re-asking with the same `id`
+   * replaces the earlier question.
+   *
+   * @param {{id: string, message: string, confirmLabel: string,
+   *   cancelLabel: string, danger?: boolean, onConfirm: function(): void,
+   *   onCancel?: function(): void,
+   *   otherActions?: Array<{label: string, onClick: function(): void,
+   *   danger?: boolean}>}} opts
+   */
+  function confirmAction(opts) {
+    const opener = dialogOpener(opts.id);
+    const actions = [
+      dialogAction(opts.id, {
+        label: opts.confirmLabel,
+        onClick: opts.onConfirm,
+        danger: opts.danger,
+      }),
+    ];
+    (opts.otherActions || []).forEach(action =>
+      actions.push(dialogAction(opts.id, action)),
+    );
+    actions.push(
+      dialogAction(opts.id, {label: opts.cancelLabel, onClick: opts.onCancel}),
+    );
+    showNotification({
+      id: opts.id,
+      message: opts.message,
+      severity: 'warning',
+      actions: actions,
+    });
+    const toast = document.querySelector(notificationSelector(opts.id));
+    toast.kissOpenerFocus = opener;
+    toast.onkeydown = onDialogToastKey;
+    const buttons = toast.querySelectorAll('.kiss-notification-action');
+    const cancelBtn = buttons[buttons.length - 1];
+    cancelBtn.setAttribute('data-dialog-cancel', 'true');
+    cancelBtn.focus();
+  }
+
+  /**
+   * A confirm-toast action that hands focus back to the toast's opener
+   * before running its own handler (so a handler that moves focus
+   * itself, say by closing a tab, has the last word).
+   */
+  function dialogAction(id, action) {
+    return {
+      label: action.label,
+      danger: !!action.danger,
+      onClick: function () {
+        const toast = document.querySelector(notificationSelector(id));
+        if (toast) restoreToastOpenerFocus(toast);
+        if (typeof action.onClick === 'function') action.onClick();
+      },
+    };
+  }
+
+  /** The prompt toast's Submit: keep it open (value intact) when refused. */
+  function submitPromptToast(toast) {
+    const prompt = toast.kissPrompt;
+    const value = toast.querySelector('.kiss-notification-input').value;
+    if (prompt.onSubmit(value) === false) return;
+    removeNotification(prompt.id, undefined, false);
+    restoreToastOpenerFocus(toast);
+  }
+
+  function onPromptToastSubmitClick(e) {
+    submitPromptToast(e.currentTarget.closest('.kiss-notification'));
+  }
+
+  function onPromptToastCancelClick(e) {
+    const toast = e.currentTarget.closest('.kiss-notification');
+    removeNotification(toast.kissPrompt.id, undefined, false);
+    restoreToastOpenerFocus(toast);
+  }
+
+  function onPromptToastInputKey(e) {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    submitPromptToast(e.currentTarget.closest('.kiss-notification'));
+  }
+
+  /**
+   * Ask the user for a line of text with an in-webview notification.
+   *
+   * Renders a sticky notification carrying `message`, a labelled text
+   * input (pre-filled with `value`, focused with its text selected) and
+   * two buttons: `submitLabel` and Cancel.  Enter submits, Escape
+   * cancels.  `onSubmit(value)` may return `false` to refuse the value:
+   * the notification then stays open with the typed text intact.  Focus
+   * returns to the element that had it when the toast opened.
+   *
+   * @param {{id: string, message: string, placeholder?: string,
+   *   value?: string, submitLabel: string,
+   *   onSubmit: function(string): (boolean|void)}} opts
+   */
+  function promptText(opts) {
+    const opener = dialogOpener(opts.id);
+    showNotification({
+      id: opts.id,
+      message: opts.message,
+      severity: 'info',
+      sticky: true,
+    });
+    const toast = document.querySelector(notificationSelector(opts.id));
+    toast.kissPrompt = opts;
+    toast.kissOpenerFocus = opener;
+    toast.onkeydown = onDialogToastKey;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'kiss-notification-input explorer-input';
+    input.placeholder = opts.placeholder || '';
+    input.value = opts.value || '';
+    input.setAttribute('aria-label', opts.message);
+    input.addEventListener('keydown', onPromptToastInputKey);
+    const field = document.createElement('div');
+    field.className = 'kiss-notification-field';
+    field.appendChild(input);
+    const row = document.createElement('div');
+    row.className = 'kiss-notification-actions';
+    const submit = document.createElement('button');
+    submit.type = 'button';
+    submit.className = 'kiss-notification-action';
+    submit.textContent = opts.submitLabel;
+    submit.addEventListener('click', onPromptToastSubmitClick);
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'kiss-notification-action';
+    cancel.textContent = 'Cancel';
+    cancel.setAttribute('data-dialog-cancel', 'true');
+    cancel.addEventListener('click', onPromptToastCancelClick);
+    row.appendChild(submit);
+    row.appendChild(cancel);
+    toast.appendChild(field);
+    toast.appendChild(row);
+    input.focus();
+    input.select();
   }
 
   let isRunning = false;
@@ -825,6 +1091,7 @@
       // as drafts so the user can send them again instead of losing
       // them.
       unackedPrompt: '',
+      unackedAttachments: [],
       unackedAnswer: '',
       unackedQuestion: null,
       isRunning: false,
@@ -1739,12 +2006,19 @@
         ) {
           e.preventDefault();
           moveTabFocus(el, e.key);
+        } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+          // The keyboard's context-menu gesture opens the same menu the
+          // right click does, under the tab.
+          e.preventDefault();
+          e.stopPropagation();
+          const r = el.getBoundingClientRect();
+          showTabContextMenu(r.left, r.bottom, tab.id, el);
         }
       });
       el.addEventListener('contextmenu', e => {
         e.preventDefault();
         e.stopPropagation();
-        showTabContextMenu(e.clientX, e.clientY, tab.id);
+        showTabContextMenu(e.clientX, e.clientY, tab.id, el);
       });
       tabList.appendChild(el);
     });
@@ -1982,6 +2256,7 @@
     tab.contentPendingVersionId = 0;
     tab.contentSaving = false;
     tab.contentSaveToken = '';
+    tab.contentCloseAfterSave = false;
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaveTimer = null;
     tab.contentSaveBar = null;
@@ -2018,23 +2293,70 @@
     // orphaned, its "Reload from disk" action would open a surprise new tab
     // for a closed editor's path.
     removeNotification('file-save-conflict-' + tab.id, undefined, false);
+    removeNotification('close-dirty-' + tab.id, undefined, false);
   }
 
-  function closeContentTab(tabId) {
+  /**
+   * The "unsaved changes" question for a closing content tab: Save and
+   * close (the close follows the daemon's fileSaved reply), Don't save,
+   * or Keep editing.  Keep editing is the focused choice and the one
+   * Escape takes, so no habitual key press throws the edits away.
+   */
+  function askToSaveBeforeClose(tab) {
+    confirmAction({
+      id: 'close-dirty-' + tab.id,
+      message: "'" + (tab.title || 'This file') + "' has unsaved changes.",
+      confirmLabel: 'Save and close',
+      onConfirm: function () {
+        saveAndCloseContentTab(tab);
+      },
+      otherActions: [
+        {
+          label: "Don't save",
+          danger: true,
+          onClick: function () {
+            closeContentTab(tab.id, true);
+          },
+        },
+      ],
+      cancelLabel: 'Keep editing',
+      onCancel: function () {
+        // Keep editing (or Escape / X) while a Save-bar save is in flight
+        // withdraws the close, not the save: the reply just marks the
+        // tab clean.
+        tab.contentCloseAfterSave = false;
+      },
+    });
+  }
+
+  function saveAndCloseContentTab(tab) {
+    if (!tab.contentDirty) {
+      // Saved (by the Save bar, say) while the question was open:
+      // nothing is left to write, so close now.
+      closeContentTab(tab.id, false);
+      return;
+    }
+    saveContentTab(tab, false);
+    // Only a save that is actually in flight closes the tab when its
+    // reply lands; a refused one (not connected) has left its reason in
+    // the Save bar and the tab stays open with its edits.
+    tab.contentCloseAfterSave = tab.contentSaving === true;
+  }
+
+  /**
+   * Close a content (file) tab.  Like VS Code, an editor with unsaved
+   * edits asks first -- the edits live only in this tab's Monaco model.
+   * `discardEdits` skips the question (the user already chose "Don't
+   * save", or the save that precedes the close just succeeded).
+   */
+  function closeContentTab(tabId, discardEdits) {
     const idx = tabs.findIndex(t => {
       return t.id === tabId;
     });
     if (idx < 0) return;
     const tab = tabs[idx];
-    // Like VS Code, closing an editor with unsaved edits asks first;
-    // the edits live only in this tab's Monaco model.
-    if (
-      tab.contentDirty &&
-      !window.confirm(
-        (tab.title || 'This file') +
-          ' has unsaved changes. Close without saving?',
-      )
-    ) {
+    if (tab.contentDirty && !discardEdits) {
+      askToSaveBeforeClose(tab);
       return;
     }
     tabs.splice(idx, 1);
@@ -2888,6 +3210,7 @@
       if (!tab.contentSaving) return;
       tab.contentSaving = false;
       tab.contentSaveToken = '';
+      tab.contentCloseAfterSave = false;
       setContentSaveStatus(tab, 'Save failed: no reply from the server', true);
     }, 30000);
     api.saveFile({
@@ -2925,6 +3248,8 @@
     clearTimeout(tab.contentSaveTimer);
     tab.contentSaving = false;
     tab.contentSaveToken = '';
+    const closeAfterSave = tab.contentCloseAfterSave === true;
+    tab.contentCloseAfterSave = false;
     if (ev.ok) {
       tab.contentSavedVersionId = tab.contentPendingVersionId;
       if (typeof ev.version === 'string') {
@@ -2936,6 +3261,9 @@
         model.getAlternativeVersionId() !== tab.contentSavedVersionId,
       );
       if (!tab.contentDirty) setContentSaveStatus(tab, 'Saved', false);
+      // "Save and close": the close waited for this reply.  Edits typed
+      // meanwhile keep the tab dirty, so the close asks again.
+      if (closeAfterSave) closeContentTab(tab.id, false);
       return;
     }
     const error = ev.error || 'Save failed';
@@ -3586,14 +3914,63 @@
 
   const tabCtxMenu = document.createElement('div');
   tabCtxMenu.id = 'tab-context-menu';
+  tabCtxMenu.setAttribute('role', 'menu');
+  tabCtxMenu.setAttribute('aria-label', 'Tab actions');
   document.body.appendChild(tabCtxMenu);
+  // The tab the open menu was invoked from: Escape and a chosen item
+  // hand keyboard focus back to it (a closed menu must not strand
+  // focus on <body>).
+  let tabCtxMenuAnchor = null;
 
   function closeTabContextMenu() {
+    const wasOpen = tabCtxMenu.classList.contains('open');
     tabCtxMenu.classList.remove('open');
+    const anchor = tabCtxMenuAnchor;
+    tabCtxMenuAnchor = null;
+    if (!wasOpen || !anchor || !anchor.isConnected) return;
+    if (!tabCtxMenu.contains(document.activeElement)) return;
+    try {
+      anchor.focus();
+    } catch (_err) {}
   }
 
-  function showTabContextMenu(x, y, tabId) {
+  /** The menu's items, in order. */
+  function tabCtxMenuItems() {
+    return Array.from(tabCtxMenu.querySelectorAll('.tab-ctx-item'));
+  }
+
+  /**
+   * Keyboard operation of the open tab menu, like the sidebar tree
+   * menus: arrows / Home / End move between items (wrapping), Enter or
+   * Space picks the focused one, Escape closes and returns focus to
+   * the tab.
+   */
+  function onTabCtxMenuKey(e) {
+    const items = tabCtxMenuItems();
+    if (!items.length) return;
+    const idx = items.indexOf(document.activeElement);
+    let next = -1;
+    if (e.key === 'ArrowDown') next = idx < 0 ? 0 : (idx + 1) % items.length;
+    else if (e.key === 'ArrowUp') next = idx <= 0 ? items.length - 1 : idx - 1;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = items.length - 1;
+    else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (idx >= 0) items[idx].click();
+      return;
+    } else if (e.key === 'Tab') {
+      // Tabbing out of a menu closes it (no focus trap).
+      closeTabContextMenu();
+      return;
+    } else return;
+    e.preventDefault();
+    items[next].focus();
+  }
+  tabCtxMenu.addEventListener('keydown', onTabCtxMenuKey);
+
+  function showTabContextMenu(x, y, tabId, anchorEl) {
     tabCtxMenu.innerHTML = '';
+    tabCtxMenuAnchor = anchorEl || null;
     const items = [
       {
         label: 'Close',
@@ -3654,6 +4031,8 @@
     items.forEach(item => {
       const el = document.createElement('div');
       el.className = 'tab-ctx-item';
+      el.setAttribute('role', 'menuitem');
+      el.tabIndex = -1;
       el.textContent = item.label;
       el.addEventListener('click', () => {
         closeTabContextMenu();
@@ -3674,6 +4053,10 @@
     const py = Math.min(y, window.innerHeight - mh - 4);
     tabCtxMenu.style.left = Math.max(0, px) + 'px';
     tabCtxMenu.style.top = Math.max(0, py) + 'px';
+    // Focus lands on the first item so the arrows work at once (a
+    // mouse user's next click lands wherever they click anyway).
+    const first = tabCtxMenuItems()[0];
+    if (first) first.focus();
   }
 
   document.addEventListener('click', () => {
@@ -3700,10 +4083,14 @@
     '#task-panel-drawer-btn',
     '#input-drawer-btn',
   ].join(', ');
+  // Drop the focus ring a mouse click leaves on a toolbar button.  A
+  // click that came from the keyboard (Enter / Space: `detail` is 0)
+  // must keep focus where it is, or keyboard users lose their place.
   document.addEventListener(
     'click',
     e => {
       if (!e.target || typeof e.target.closest !== 'function') return;
+      if (e.detail === 0) return;
       const btn = e.target.closest(BLUR_AFTER_CLICK_SELECTOR);
       if (btn && typeof btn.blur === 'function') btn.blur();
     },
@@ -7882,12 +8269,46 @@
     }
   }
 
-  function sidebarError(message) {
+  /**
+   * Report a failed Explorer / Git action.  When the daemon sent no
+   * text, `fallback` names what failed ("Could not delete 'foo.py'.")
+   * rather than the bare "The action failed".
+   */
+  function sidebarError(message, fallback) {
+    const text = typeof message === 'string' ? message.trim() : '';
     updateNotification({
       id: 'sidebar-action-error',
-      message: String(message || 'The action failed'),
+      message: text || fallback || 'The action failed.',
       severity: 'error',
     });
+  }
+
+  /**
+   * "Could not delete 'foo.py'." for a pending fsAction / gitAction /
+   * gitShow request (the last has no `action`; it shows a commit).
+   */
+  function describeSidebarFailure(request) {
+    const verbs = {
+      delete: 'delete',
+      rename: 'rename',
+      move: 'move',
+      copy: 'copy',
+      newFile: 'create the file',
+      newFolder: 'create the folder',
+      findInFolder: 'search',
+      compare: 'compare',
+      checkoutDetached: 'check out',
+      createBranch: 'create the branch',
+      createTag: 'create the tag',
+      cherryPick: 'cherry-pick',
+      show: 'show',
+    };
+    const action = request.action || 'show';
+    const verb = verbs[action] || action;
+    let target = request.name || '';
+    if (!target && request.path) target = pathBaseName(request.path);
+    if (!target && request.sha) target = String(request.sha).slice(0, 7);
+    return 'Could not ' + verb + (target ? " '" + target + "'." : '.');
   }
 
   function sidebarInfo(message) {
@@ -7985,19 +8406,23 @@
         const target = pathBaseName(
           request.action === 'rename' ? request.dest : request.path,
         );
-        if (
-          window.confirm(
-            "A file or folder with the name '" +
-              target +
-              "' already exists in the destination folder. Do you want to replace it?",
-          )
-        ) {
-          request.overwrite = true;
-          sendFsAction(request);
-        }
+        confirmAction({
+          id: 'fs-overwrite',
+          message:
+            "A file or folder named '" +
+            target +
+            "' already exists in the destination folder. Replace it?",
+          confirmLabel: 'Replace',
+          cancelLabel: 'Keep existing',
+          danger: true,
+          onConfirm: function () {
+            request.overwrite = true;
+            sendFsAction(request);
+          },
+        });
         return;
       }
-      sidebarError(ev.error);
+      sidebarError(ev.error, describeSidebarFailure(request));
       return;
     }
     if (request.action === 'findInFolder') {
@@ -8283,14 +8708,23 @@
         label: 'Find in Folder...',
         key: keyLabel('Shift+Alt+F', '\u21E7\u2325F'),
         run: () => {
-          const query = window.prompt('Find in ' + name, '');
-          if (query)
-            sendFsAction({
-              action: 'findInFolder',
-              path: path,
-              query: query,
-              root: root,
-            });
+          promptText({
+            id: 'find-in-folder',
+            message: "Find in '" + name + "'",
+            placeholder: 'Text to search for',
+            submitLabel: 'Find',
+            onSubmit: query => {
+              // An empty query keeps the box open: there is nothing to
+              // search for yet.
+              if (!query) return false;
+              sendFsAction({
+                action: 'findInFolder',
+                path: path,
+                query: query,
+                root: root,
+              });
+            },
+          });
         },
       });
       items.push({separator: true});
@@ -8386,15 +8820,19 @@
       label: 'Delete',
       key: keyLabel('Delete', '\u2318\u232B'),
       run: () => {
-        if (
-          window.confirm(
-            "Are you sure you want to delete '" +
-              name +
-              "'?\nThis action is irreversible!",
-          )
-        ) {
-          sendFsAction({action: 'delete', path: path, root: root});
-        }
+        confirmAction({
+          id: 'fs-delete',
+          message:
+            "Delete '" +
+            name +
+            "'? The server has no trash, so it cannot be restored.",
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep',
+          danger: true,
+          onConfirm: function () {
+            sendFsAction({action: 'delete', path: path, root: root});
+          },
+        });
       },
     });
     return items;
@@ -8452,13 +8890,33 @@
       row.focus({preventScroll: true});
     }
     treeMenu.show(document, e.clientX || 0, e.clientY || 0, items, () => {
-      if (row) row.classList.remove('ctx-active');
+      if (!row) return;
+      row.classList.remove('ctx-active');
+      // The menu held focus on its items; closing it (before the picked
+      // item runs) would drop focus on <body>.  The row the menu was
+      // opened on takes it back, so a dialog the item opens returns
+      // focus there when it closes.
+      if (document.activeElement === document.body && row.isConnected) {
+        row.focus({preventScroll: true});
+      }
     });
   }
 
   // ---- Source Control context menus ----
 
-  function sendGitAction(action, sha, extra) {
+  /**
+   * The repository and chat tab a Source Control action is aimed at,
+   * read when the user picks the action.  A prompt (branch or tag name,
+   * compare base) stays open while the user may switch working directory
+   * or tab, so its submit sends this captured target instead of
+   * re-reading the selection.
+   */
+  function gitTarget() {
+    return {workDir: scmWorkDir || sidebarWorkDir(), tabId: activeTabId};
+  }
+
+  function sendGitAction(action, sha, extra, target) {
+    const at = target || gitTarget();
     const token = nextSidebarToken('git');
     pendingSidebarRequests.set(
       token,
@@ -8469,8 +8927,8 @@
         {
           action: action,
           sha: sha,
-          workDir: scmWorkDir || sidebarWorkDir(),
-          tabId: activeTabId,
+          workDir: at.workDir,
+          tabId: at.tabId,
           token: token,
         },
         extra || {},
@@ -8478,7 +8936,8 @@
     );
   }
 
-  function sendGitShow(request) {
+  function sendGitShow(request, target) {
+    const at = target || gitTarget();
     const token = nextSidebarToken('show');
     pendingSidebarRequests.set(token, request);
     api.gitShow({
@@ -8486,8 +8945,8 @@
       path: request.path || '',
       base: request.base || '',
       mode: request.mode || 'patch',
-      workDir: scmWorkDir || sidebarWorkDir(),
-      tabId: activeTabId,
+      workDir: at.workDir,
+      tabId: at.tabId,
       token: token,
     });
   }
@@ -8497,7 +8956,7 @@
     if (!request) return;
     pendingSidebarRequests.delete(String(ev.token || ''));
     if (ev.error) {
-      sidebarError(ev.error);
+      sidebarError(ev.error, describeSidebarFailure(request));
       // A failed action may still have changed the repository (a
       // cherry-pick that stopped on conflicts leaves the conflicted
       // files in the tree): show that state, as VS Code does.
@@ -8523,7 +8982,7 @@
     if (!request) return;
     pendingSidebarRequests.delete(String(ev.token || ''));
     if (ev.error) {
-      sidebarError(ev.error);
+      sidebarError(ev.error, describeSidebarFailure(request));
       return;
     }
     const short = String(ev.sha || request.sha).slice(0, 7);
@@ -8566,6 +9025,28 @@
     );
   }
 
+  /**
+   * Second step of Create Tag: the optional annotation.  Left empty, the
+   * tag is a lightweight one, as in VS Code; Cancel creates no tag.
+   */
+  function askTagMessage(sha, name, target) {
+    promptText({
+      id: 'git-create-tag-message',
+      message:
+        "Message for tag '" + name + "' (leave empty for a lightweight tag)",
+      placeholder: 'Annotation message',
+      submitLabel: 'Create tag',
+      onSubmit: message => {
+        sendGitAction(
+          'createTag',
+          sha,
+          {name: name, message: message.trim()},
+          target,
+        );
+      },
+    });
+  }
+
   function scmCommitMenuItems(commit) {
     const sha = commit.sha;
     const short = String(sha).slice(0, 7);
@@ -8586,15 +9067,17 @@
         id: 'create-branch',
         label: 'Create Branch...',
         run: () => {
-          const name = window.prompt(
-            'Branch name\nPlease provide a new branch name (from ' +
-              short +
-              ')',
-            '',
-          );
-          if (name && name.trim()) {
-            sendGitAction('createBranch', sha, {name: name.trim()});
-          }
+          const target = gitTarget();
+          promptText({
+            id: 'git-create-branch',
+            message: 'New branch from ' + short,
+            placeholder: 'Branch name',
+            submitLabel: 'Create branch',
+            onSubmit: name => {
+              if (!name.trim()) return false;
+              sendGitAction('createBranch', sha, {name: name.trim()}, target);
+            },
+          });
         },
       },
       {separator: true},
@@ -8602,20 +9085,16 @@
         id: 'create-tag',
         label: 'Create Tag...',
         run: () => {
-          const name = window.prompt(
-            'Tag name\nPlease provide a tag name (at ' + short + ')',
-            '',
-          );
-          if (!name || !name.trim()) return;
-          // Dismissing the optional message box still creates the
-          // tag -- a lightweight one -- exactly like VS Code.
-          const message = window.prompt(
-            'Message\nPlease provide a message to annotate the tag (optional)',
-            '',
-          );
-          sendGitAction('createTag', sha, {
-            name: name.trim(),
-            message: message === null ? '' : message.trim(),
+          const target = gitTarget();
+          promptText({
+            id: 'git-create-tag',
+            message: 'New tag at ' + short,
+            placeholder: 'Tag name',
+            submitLabel: 'Next',
+            onSubmit: name => {
+              if (!name.trim()) return false;
+              askTagMessage(sha, name.trim(), target);
+            },
           });
         },
       },
@@ -8630,13 +9109,18 @@
         id: 'compare-with',
         label: 'Compare with...',
         run: () => {
-          const base = window.prompt(
-            'Compare ' + short + ' with\nA branch, tag or commit',
-            'HEAD',
-          );
-          if (base && base.trim()) {
-            sendGitShow({sha: sha, base: base.trim()});
-          }
+          const target = gitTarget();
+          promptText({
+            id: 'git-compare-with',
+            message: 'Compare ' + short + ' with a branch, tag or commit',
+            placeholder: 'Branch, tag or commit',
+            value: 'HEAD',
+            submitLabel: 'Compare',
+            onSubmit: base => {
+              if (!base.trim()) return false;
+              sendGitShow({sha: sha, base: base.trim()}, target);
+            },
+          });
         },
       },
       {separator: true},
@@ -9080,11 +9564,18 @@
     el.hidden = !dir;
   }
 
-  /** Enable the panel's Open button only while its box holds text. */
+  /**
+   * Enable the panel's Open button only while its box holds text, and
+   * say why it is disabled otherwise.
+   */
   function syncWorkDirOpenBtn() {
     const btn = document.getElementById('workdir-open-btn');
     const input = document.getElementById('workdir-input');
-    if (btn && input) btn.disabled = !input.value.trim();
+    if (!btn || !input) return;
+    const empty = !input.value.trim();
+    btn.disabled = empty;
+    if (empty) btn.title = 'Pick or type a folder first';
+    else btn.removeAttribute('title');
   }
 
   /**
@@ -9729,6 +10220,7 @@
         p.classList.remove('chv-hidden');
         if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
         if (p.classList.contains('collapsed')) collapseNestedRunParallel(p);
+        syncCollapseAria(p);
         continue;
       }
       if (p.closest('.summary-sub')) {
@@ -10325,40 +10817,56 @@
     return d.innerHTML;
   }
 
+  // The custom tooltip for [data-tooltip] elements.  It opens after a
+  // 400 ms hover, or at once when the element takes keyboard focus (a
+  // hover-only tooltip is invisible to keyboard users), and closes on
+  // mouseout, focusout, scroll and Escape.
   const tooltipEl = document.createElement('div');
   tooltipEl.id = 'custom-tooltip';
+  tooltipEl.setAttribute('role', 'tooltip');
   document.body.appendChild(tooltipEl);
   let tooltipTimer = null;
+  function showTooltipFor(target) {
+    tooltipEl.textContent = target.dataset.tooltip;
+    tooltipEl.classList.toggle(
+      'task-panel-tooltip',
+      target.id === 'task-panel-text',
+    );
+    const rect = target.getBoundingClientRect();
+    tooltipEl.style.left = rect.left + 'px';
+    tooltipEl.style.top = rect.bottom + 4 + 'px';
+    tooltipEl.classList.add('visible');
+  }
+  function hideTooltip() {
+    clearTimeout(tooltipTimer);
+    tooltipEl.classList.remove('visible');
+  }
   document.addEventListener('mouseover', e => {
     const target = e.target.closest('[data-tooltip]');
     if (!target) return;
     clearTimeout(tooltipTimer);
-    tooltipTimer = setTimeout(() => {
-      tooltipEl.textContent = target.dataset.tooltip;
-      tooltipEl.classList.toggle(
-        'task-panel-tooltip',
-        target.id === 'task-panel-text',
-      );
-      const rect = target.getBoundingClientRect();
-      tooltipEl.style.left = rect.left + 'px';
-      tooltipEl.style.top = rect.bottom + 4 + 'px';
-      tooltipEl.classList.add('visible');
-    }, 400);
+    tooltipTimer = setTimeout(() => showTooltipFor(target), 400);
   });
   document.addEventListener('mouseout', e => {
+    if (!e.target.closest('[data-tooltip]')) return;
+    hideTooltip();
+  });
+  document.addEventListener('focusin', e => {
     const target = e.target.closest('[data-tooltip]');
     if (!target) return;
     clearTimeout(tooltipTimer);
-    tooltipEl.classList.remove('visible');
+    showTooltipFor(target);
   });
-  document.addEventListener(
-    'scroll',
-    () => {
-      clearTimeout(tooltipTimer);
-      tooltipEl.classList.remove('visible');
-    },
-    true,
-  );
+  document.addEventListener('focusout', e => {
+    if (!e.target.closest('[data-tooltip]')) return;
+    hideTooltip();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && tooltipEl.classList.contains('visible')) {
+      hideTooltip();
+    }
+  });
+  document.addEventListener('scroll', hideTooltip, true);
   function mkEl(tag, cls) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -10851,9 +11359,41 @@
 
   function toggleThink(el) {
     const p = el.parentElement;
-    p.querySelector('.cnt').classList.toggle('hidden');
-    el.querySelector('.arrow').classList.toggle('collapsed');
+    const hidden = p.querySelector('.cnt').classList.toggle('hidden');
+    el.querySelector('.arrow').classList.toggle('collapsed', hidden);
+    el.setAttribute('aria-expanded', hidden ? 'false' : 'true');
   }
+
+  /**
+   * Enter / Space on a focused disclosure header (a thinking block's
+   * label or a collapsible panel's header) act like a click, so the
+   * header is operable without a mouse.
+   */
+  function onDisclosureHeaderKey(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target !== e.currentTarget) return;
+    e.preventDefault();
+    e.currentTarget.click();
+  }
+
+  // The thinking block's label is rendered from an HTML string whose
+  // inline onclick="toggleThink(this)" the webview's CSP never runs
+  // (the shared, CSP-free page exported from this DOM still needs it),
+  // so its click is delegated here -- unless the inline handler is
+  // live (`onclick` reads null when CSP blocked it), which would make
+  // the click toggle twice.
+  document.addEventListener('click', e => {
+    if (!e.target || typeof e.target.closest !== 'function') return;
+    const lbl = e.target.closest('.ev.think > .lbl');
+    if (lbl && typeof lbl.onclick !== 'function') toggleThink(lbl);
+  });
+  document.addEventListener('keydown', e => {
+    if (!e.target || typeof e.target.matches !== 'function') return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (!e.target.matches('.ev.think > .lbl')) return;
+    e.preventDefault();
+    e.target.click();
+  });
 
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
@@ -10878,7 +11418,21 @@
     return out;
   }
 
+  /** Keep a collapsible panel's header aria-expanded true to its state. */
+  function syncCollapseAria(panelEl) {
+    const headers = panelEl.querySelectorAll('.collapse-header');
+    for (let i = 0; i < headers.length; i++) {
+      if (headers[i].closest('.collapsible') !== panelEl) continue;
+      headers[i].setAttribute(
+        'aria-expanded',
+        panelEl.classList.contains('collapsed') ? 'false' : 'true',
+      );
+      return;
+    }
+  }
+
   function collapsePreview(panelEl) {
+    syncCollapseAria(panelEl);
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
     if (panelEl.classList.contains('tc-summary')) {
@@ -10949,6 +11503,16 @@
     headerEl.classList.add('collapse-header');
     headerEl.style.cursor = 'pointer';
     headerEl.style.userSelect = 'none';
+    // Operable from the keyboard too: the header is a focusable button
+    // whose Enter / Space act as a click (onDisclosureHeaderKey).
+    headerEl.tabIndex = 0;
+    headerEl.setAttribute('role', 'button');
+    // Set directly: the header may not be attached to the panel yet.
+    headerEl.setAttribute(
+      'aria-expanded',
+      panelEl.classList.contains('collapsed') ? 'false' : 'true',
+    );
+    headerEl.addEventListener('keydown', onDisclosureHeaderKey);
     headerEl.addEventListener('click', e => {
       e.stopPropagation();
       panelEl.classList.toggle('collapsed');
@@ -11983,10 +12547,33 @@
 
   function updateUserScrollLock() {
     userScrollLock = distanceFromBottom(O) > 1;
+    if (!userScrollLock) setNewOutputBtnVisible(false);
   }
 
   function resetUserScrollLock() {
     userScrollLock = false;
+    setNewOutputBtnVisible(false);
+  }
+
+  // "New output ↓": while the lock holds the chat where the user is
+  // reading, output that arrives below stays out of sight.  This
+  // button (a sibling of the transcript, so it never scrolls away)
+  // appears the first time an auto-scroll is suppressed, jumps to the
+  // bottom and releases the lock on click, and hides once the user
+  // reaches the bottom on their own.
+  const newOutputBtn = document.createElement('button');
+  newOutputBtn.type = 'button';
+  newOutputBtn.className = 'new-output-btn';
+  newOutputBtn.textContent = 'New output ↓';
+  newOutputBtn.hidden = true;
+  if (O.parentNode) O.parentNode.insertBefore(newOutputBtn, O.nextSibling);
+  newOutputBtn.addEventListener('click', () => {
+    resetUserScrollLock();
+    scrollPanelToEnd(O);
+  });
+
+  function setNewOutputBtnVisible(visible) {
+    newOutputBtn.hidden = !visible;
   }
 
   // Per-subpanel user scroll lock: the same override applies to every
@@ -12062,6 +12649,7 @@
     // UNLOCKED state right after one would wrongly engage the lock.
     if (userScrollLock) updateUserScrollLock();
     if (!userScrollLock) scrollPanelToEnd(O);
+    else setNewOutputBtnVisible(true);
   }
 
   function autoScrollStreamed(el) {
@@ -12108,7 +12696,8 @@
       case 'thinking_start':
         tState.thinkEl = mkEl('div', 'ev think');
         tState.thinkEl.innerHTML =
-          '<div class="lbl" onclick="toggleThink(this)">' +
+          '<div class="lbl" onclick="toggleThink(this)" tabindex="0" ' +
+          'role="button" aria-expanded="true">' +
           '<span class="arrow">\u25BE</span> Thinking</div>' +
           '<div class="cnt"></div>';
         tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
@@ -12430,6 +13019,7 @@
             // summary; a fan-out panel among them must give its
             // sub-agent tabs up like any other collapsed fan-out.
             collapseNestedRunParallel(c);
+            syncCollapseAria(c);
           }
         }
         tState.lastToolCallEl = c;
@@ -13632,16 +14222,84 @@
   // just switched to (or over the tab strip while closing tabs), and
   // every reconnect's `focusInput` nudge would do the same.  Only the
   // user's own tap on the textbox opens the keyboard there.
-  function focusInputWithRetry() {
+  //
+  // Nor does code focus the composer while the user is typing somewhere
+  // else or has a sheet / overlay open: a task finishing in the
+  // background must not yank the caret out of the promptlet search box
+  // (or drop focus on a textbox hidden behind the settings sheet).
+  // `force` is for the user's own request to focus the composer (the
+  // host's focusInput / appendToInput commands).
+  function focusInputWithRetry(force) {
     cancelInputFocusRetry();
     if (isMobileRemote) return;
+    if (!force && composerFocusWouldSteal()) return;
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
+        if (!force && composerFocusWouldSteal()) return;
         inp.focus();
       }, ms),
     );
   }
+
+  /** Whether *el* is a text-entry control (typing goes into it). */
+  function isTextEntry(el) {
+    if (!el || el === document.body) return false;
+    if (el.isContentEditable) return true;
+    if (el.tagName === 'TEXTAREA') return true;
+    if (el.tagName !== 'INPUT') return false;
+    const type = (el.type || 'text').toLowerCase();
+    return (
+      [
+        'button',
+        'checkbox',
+        'radio',
+        'submit',
+        'reset',
+        'file',
+        'range',
+        'color',
+      ].indexOf(type) < 0
+    );
+  }
+
+  /**
+   * Whether focusing the composer now would take the keyboard away
+   * from something the user is using: another text field, or an open
+   * sheet / overlay (settings, promptlets, frequent tasks, working
+   * directory, server-reset confirm, a notification with a textbox).
+   */
+  function composerFocusWouldSteal() {
+    const active = document.activeElement;
+    if (active && active !== inp && isTextEntry(active)) return true;
+    if (openSheets.length) return true;
+    const workdirPanel = document.getElementById('workdir-panel');
+    if (workdirPanel && workdirPanel.classList.contains('open')) return true;
+    if (
+      serverResetConfirmModal &&
+      serverResetConfirmModal.classList.contains('open')
+    )
+      return true;
+    if (document.querySelector('.kiss-notification-input')) return true;
+    return false;
+  }
+
+  /**
+   * Set once the user presses a key, clicks or scrolls after submitting
+   * a task; cleared by every submit.  A task finishing in another tab
+   * pulls the user onto that tab only while this is false, i.e. when
+   * the switch away from it was the agent's (a sub-agent tab or a
+   * report opening), not the user's own.
+   */
+  let userInteractedSinceSubmit = false;
+  function noteUserInteraction() {
+    userInteractedSinceSubmit = true;
+  }
+  // (Scrolling is tracked through wheel / touch / keys: the transcript's
+  // own auto-scroll fires `scroll` events too.)
+  ['keydown', 'mousedown', 'click', 'wheel', 'touchstart'].forEach(type =>
+    document.addEventListener(type, noteUserInteraction, true),
+  );
 
   function cancelInputFocusRetry() {
     inputFocusRetryTimers.forEach(clearTimeout);
@@ -14014,7 +14672,10 @@
     // acknowledged.
     if (t === 'setTaskText' || t === 'prompt') {
       const echoed = getTab(ev.tabId || activeTabId);
-      if (echoed) echoed.unackedPrompt = '';
+      if (echoed) {
+        echoed.unackedPrompt = '';
+        echoed.unackedAttachments = [];
+      }
     }
     switch (t) {
       case 'daemonStatus':
@@ -14032,7 +14693,18 @@
           adjacentLoading = false;
           taskWheelPendingDir = '';
           removeAdjacentLoader();
-          pendingSidebarRequests.clear();
+          if (pendingSidebarRequests.size > 0) {
+            // The user asked for something and would otherwise wait
+            // forever for a reply that is never coming.
+            pendingSidebarRequests.clear();
+            updateNotification({
+              id: 'sidebar-action-error',
+              message:
+                'The server connection dropped; the pending Explorer/Git ' +
+                'action was not completed. Try again once it reconnects.',
+              severity: 'error',
+            });
+          }
           daemonWasDown = true;
           chatStayedOnScreen = ev.reconnecting === true;
         }
@@ -14153,7 +14825,7 @@
         // and that tab's share button can simply be clicked again.
         if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
         if (ev.error) {
-          addError('Share failed: ' + ev.error);
+          notifyShareFailed(ev.error);
           flashShareBtn(false);
           break;
         }
@@ -14170,8 +14842,12 @@
         flashShareBtn(!!ev.ok);
         // The saved-page banner belongs to the conversation that was
         // shared; a reply for a background tab must not write into the
-        // transcript on screen.
-        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        // transcript on screen.  A failure's toast is not transcript:
+        // it shows whichever tab is on screen.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) {
+          if (!ev.ok) notifyShareFailed(ev.error, false);
+          break;
+        }
         if (ev.ok) {
           const savedPath = typeof ev.path === 'string' ? ev.path : '';
           // The transcript banner below can sit far off screen on a
@@ -14204,7 +14880,7 @@
             );
           }
         } else {
-          addError('Share failed: ' + (ev.error || 'unknown error'));
+          notifyShareFailed(ev.error);
         }
         // share-coverage:end
         break;
@@ -14381,6 +15057,7 @@
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
         closeTrickEditor();
+        confirmTrickAdd(window.__TRICKS__);
         renderTricks(window.__TRICKS__);
         break;
       case 'taskUpdate':
@@ -14505,6 +15182,16 @@
         break;
       }
       case 'error':
+        // The daemon turned the prompt it was just sent away (a task is
+        // already running there, say): the composer gets it back.
+        if (ev.code === 'prompt_refused') {
+          // A refusal naming a tab this webview no longer has (closed,
+          // or another window's) restores nothing here.
+          const refusedTab = isAddressed(ev)
+            ? findTabByEvt(ev)
+            : getTab(activeTabId);
+          if (refusedTab) restoreRefusedPrompt(refusedTab);
+        }
         // tableak-coverage:start
         // Diagnostics are task output like any other: a message that names a
         // task or a tab belongs to that conversation and nowhere else.
@@ -14515,6 +15202,14 @@
         }
         // tableak-coverage:end
         addError(ev.text);
+        // An unaddressed error answers a window-level request: an
+        // update started from the settings sheet or a promptlet add
+        // from the promptlets sheet.  Both sheets cover the transcript,
+        // so the sheet that asked shows the answer too.
+        if (!isAddressed(ev)) {
+          relayUpdateStatus(ev.text, true);
+          relayTrickAddError(ev.text);
+        }
         break;
       case 'notice':
         // tableak-coverage:start
@@ -14525,6 +15220,7 @@
         }
         // tableak-coverage:end
         addNotice(ev.text);
+        if (!isAddressed(ev)) relayUpdateStatus(ev.text, false);
         break;
       case 'warning': {
         // tableak-coverage:start
@@ -15040,23 +15736,25 @@
         api.stop({tabId: stopTarget});
         break;
       }
+      // The user asked for the composer (an editor command or keybinding):
+      // focus it even while another field has the caret.
       case 'appendToInput':
         if (ev.text) {
           inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
           inp.dispatchEvent(new Event('input', {bubbles: true}));
         }
-        focusInputWithRetry();
+        focusInputWithRetry(true);
         break;
       case 'insertAndSubmit':
         if (ev.text) {
           inp.value = ev.text;
           inp.dispatchEvent(new Event('input', {bubbles: true}));
-          focusInputWithRetry();
+          focusInputWithRetry(true);
           sendMessage();
         }
         break;
       case 'focusInput':
-        focusInputWithRetry();
+        focusInputWithRetry(true);
         break;
 
       case 'measureSize':
@@ -15151,7 +15849,7 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWtTab = getTab(ev.tabId);
           if (bgWtTab) {
-            bgWtTab.worktreeBarEl = createWorktreeBar(ev.tabId);
+            bgWtTab.worktreeBarEl = createWorktreeBar(ev.tabId, ev.branch);
           }
           break;
         }
@@ -15745,6 +16443,11 @@
   function focusFinishedTab(tabId) {
     if (tabId === undefined || tabId === null) return;
     if (!getTab(tabId)) return;
+    // The user moved on (typed, clicked or scrolled) since submitting:
+    // their place is theirs to keep, whether that is another internal
+    // tab or another editor.  Only an agent-made switch (a sub-agent
+    // tab, a report tab) is undone.
+    if (userInteractedSinceSubmit) return;
     // Editor-tabs mode: the chat's tab is the EDITOR tab itself, so a
     // finishing task brings its panel forward through the host — the
     // same "switch to the tab that just finished" the internal strip
@@ -15779,8 +16482,9 @@
       removeSpinner();
       statusText.textContent = label || 'Ready';
       // A finished task (or its replay after a reconnect) must not raise
-      // the phone's keyboard; see focusInputWithRetry.
-      if (!isMobileRemote) inp.focus();
+      // the phone's keyboard, nor pull the caret out of a field the user
+      // is typing in; see focusInputWithRetry.
+      if (!isMobileRemote && !composerFocusWouldSteal()) inp.focus();
     }
     renderTabBar();
   }
@@ -15797,6 +16501,21 @@
 
   function addError(text) {
     return addBanner('err', 'Error:', text);
+  }
+
+  /**
+   * A failed share: the button's 2 s red flash is kept, but the button
+   * sits in the closed "..." menu, so a sticky error toast carries the
+   * reason too (and the transcript banner, for the record).
+   */
+  function notifyShareFailed(reason, withBanner) {
+    const text = 'Share failed: ' + (reason || 'unknown error');
+    if (withBanner !== false) addError(text);
+    showNotification({
+      id: 'share-failed',
+      severity: 'error',
+      message: text,
+    });
   }
 
   function addNotice(text) {
@@ -16772,6 +17491,18 @@
     applyChevronState(currentTaskName);
   }
 
+  /**
+   * Build a post-task action bar (worktree / main-tree choices).
+   *
+   * A button with a `confirm` message is destructive: its first click
+   * only swaps the row for an inline question naming what is about to
+   * be thrown away, with a same-labelled confirm button and a "Keep"
+   * button that puts the row back.  Nothing is sent until the confirm.
+   *
+   * @param {string} labelText The bar's question.
+   * @param {Array<{cls: string, text: string, msg: function(): object,
+   *   confirm?: string}>} buttons In display order.
+   */
   function createActionBar(labelText, buttons) {
     const bar = mkEl('div', 'wt-bar');
     const label = mkEl('span', 'wt-label');
@@ -16779,16 +17510,48 @@
     bar.appendChild(label);
 
     const btns = mkEl('div', 'wt-btns');
+    bar.appendChild(btns);
+    function perform(b) {
+      setActionBarBtnsDisabled(bar, true);
+      api.send(b.msg());
+    }
     buttons.forEach(b => {
       const btn = mkEl('button', 'wt-btn ' + b.cls);
       btn.textContent = b.text;
+      if (!b.confirm) {
+        btn.addEventListener('click', () => perform(b));
+        btns.appendChild(btn);
+        return;
+      }
+      const ask = mkEl('div', 'wt-confirm');
+      ask.hidden = true;
+      ask.setAttribute('role', 'group');
+      ask.setAttribute('aria-label', b.confirm);
+      const question = mkEl('span', 'wt-confirm-text');
+      question.textContent = b.confirm;
+      const yes = mkEl('button', 'wt-btn ' + b.cls + ' wt-confirm-yes');
+      yes.textContent = b.text;
+      const keep = mkEl('button', 'wt-btn wt-nothing wt-confirm-no');
+      keep.textContent = 'Keep';
+      ask.appendChild(question);
+      ask.appendChild(yes);
+      ask.appendChild(keep);
+      keep.setAttribute('data-inline-cancel', 'true');
+      ask.addEventListener('keydown', onInlineConfirmKey);
       btn.addEventListener('click', () => {
-        setActionBarBtnsDisabled(bar, true);
-        api.send(b.msg());
+        btns.hidden = true;
+        ask.hidden = false;
+        keep.focus();
+      });
+      yes.addEventListener('click', () => perform(b));
+      keep.addEventListener('click', () => {
+        ask.hidden = true;
+        btns.hidden = false;
+        btn.focus();
       });
       btns.appendChild(btn);
+      bar.appendChild(ask);
     });
-    bar.appendChild(btns);
     return bar;
   }
 
@@ -16923,8 +17686,11 @@
     worktreeBar = null;
   }
 
-  function createWorktreeBar(ownerTabId) {
-    return createActionBar('Auto-commit and merge, Discard, or Do nothing?', [
+  // Discard is the destructive choice: it sits last (away from the
+  // default "merge" click) and asks once more, naming the branch.
+  function createWorktreeBar(ownerTabId, branch) {
+    const what = branch ? "branch '" + branch + "'" : 'this worktree';
+    return createActionBar('Auto-commit and merge, Do nothing, or Discard?', [
       {
         cls: 'wt-merge',
         text: 'Auto-commit and merge',
@@ -16935,20 +17701,21 @@
         }),
       },
       {
-        cls: 'wt-discard',
-        text: 'Discard',
-        msg: () => ({
-          type: 'worktreeAction',
-          action: 'discard',
-          tabId: ownerTabId,
-        }),
-      },
-      {
         cls: 'wt-nothing',
         text: 'Do nothing',
         msg: () => ({
           type: 'worktreeAction',
           action: 'nothing',
+          tabId: ownerTabId,
+        }),
+      },
+      {
+        cls: 'wt-discard',
+        text: 'Discard',
+        confirm: 'Delete ' + what + " and all of the task's changes?",
+        msg: () => ({
+          type: 'worktreeAction',
+          action: 'discard',
           tabId: ownerTabId,
         }),
       },
@@ -16966,7 +17733,8 @@
   // main-tree-bar class so autocommit_done can tell it apart from a
   // worktree bar (which a Git Commit on the MAIN tree must not close).
   function createMainTreeBar(ownerTabId, workDir) {
-    const bar = createActionBar('Auto-commit, Discard, or Do nothing?', [
+    const where = workDir ? ' in ' + workDir : '';
+    const bar = createActionBar('Auto-commit, Do nothing, or Discard?', [
       {
         cls: 'wt-merge',
         text: 'Auto commit',
@@ -16977,21 +17745,22 @@
         }),
       },
       {
-        cls: 'wt-discard',
-        text: 'Discard',
-        msg: () => ({
-          type: 'mainTreeAction',
-          action: 'discard',
-          tabId: ownerTabId,
-          workDir: workDir,
-        }),
-      },
-      {
         cls: 'wt-nothing',
         text: 'Do nothing',
         msg: () => ({
           type: 'mainTreeAction',
           action: 'nothing',
+          tabId: ownerTabId,
+          workDir: workDir,
+        }),
+      },
+      {
+        cls: 'wt-discard',
+        text: 'Discard',
+        confirm: "Throw away the task's uncommitted changes" + where + '?',
+        msg: () => ({
+          type: 'mainTreeAction',
+          action: 'discard',
           tabId: ownerTabId,
           workDir: workDir,
         }),
@@ -17042,7 +17811,10 @@
 
   function showWorktreeActions(ev) {
     clearWorktreeBar();
-    worktreeBar = createWorktreeBar((ev && ev.tabId) || activeTabId);
+    worktreeBar = createWorktreeBar(
+      (ev && ev.tabId) || activeTabId,
+      ev && ev.branch,
+    );
     attachActionBar(worktreeBar);
   }
 
@@ -17133,7 +17905,20 @@
       clearTimeout(autocommitRearmTimer);
       autocommitRearmTimer = null;
     }
-    if (autocommitBtn) autocommitBtn.disabled = pending;
+    if (autocommitBtn) {
+      autocommitBtn.disabled = pending;
+      // A greyed-out button says why: its label reads "Committing…"
+      // and its tooltip / title carry the reason while it is disabled.
+      const label = autocommitBtn.querySelector('.more-item-label');
+      if (label) label.textContent = pending ? 'Committing…' : 'Git Commit';
+      if (pending) {
+        autocommitBtn.title = 'A commit is in progress';
+        autocommitBtn.dataset.tooltip = 'A commit is in progress';
+      } else {
+        autocommitBtn.removeAttribute('title');
+        autocommitBtn.dataset.tooltip = 'git commit';
+      }
+    }
     if (pending) {
       autocommitRearmTimer = setTimeout(() => {
         setAutocommitInFlight(false);
@@ -17489,6 +18274,12 @@
       updateBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        setSettingsUpdateStatus(
+          SIDEBAR_CHAT_MODE || EDITOR_TAB_MODE
+            ? 'Updating… progress is shown in the update terminal.'
+            : 'Updating…',
+          false,
+        );
         api.runUpdate();
       });
     }
@@ -17497,6 +18288,7 @@
       updateModelsBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        setSettingsUpdateStatus('Updating the model catalog…', false);
         api.updateModels();
       });
     }
@@ -17504,9 +18296,13 @@
     function openServerResetConfirm() {
       if (!serverResetConfirmModal) return;
       serverResetConfirmModal.classList.add('open');
-      if (serverResetConfirmOkBtn) {
+      // Enter must never abort the running task by default: the safe
+      // button (Cancel) takes focus, the destructive one is a deliberate
+      // Tab/click away.
+      const safeBtn = serverResetConfirmCancelBtn || serverResetConfirmOkBtn;
+      if (safeBtn) {
         try {
-          serverResetConfirmOkBtn.focus();
+          safeBtn.focus();
         } catch (_err) {}
       }
     }
@@ -18080,7 +18876,11 @@
       });
     }
     if (tricksAddInput) {
-      tricksAddInput.addEventListener('input', syncTricksAddBtn);
+      syncTricksAddBtn();
+      tricksAddInput.addEventListener('input', () => {
+        syncTricksAddBtn();
+        setTricksAddError('');
+      });
       tricksAddInput.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           e.preventDefault();
@@ -18100,6 +18900,7 @@
     if (settingsPanel) {
       const noteSettingsEdit = e => {
         if (e.target && e.target.id) markSettingsFieldEdited(e.target.id);
+        if (e.target && e.target.id === 'cfg-max-budget') syncMaxBudgetNote();
       };
       settingsPanel.addEventListener('input', noteSettingsEdit);
       settingsPanel.addEventListener('change', noteSettingsEdit);
@@ -18362,6 +19163,12 @@
     window.addEventListener('kiss-voice-post', event => {
       const detail = event && event.detail;
       if (detail && detail.type) api.send(detail);
+    });
+    // tips.js's "Don't show tips again": relayed to the host as a
+    // `tipsOptOut` message so the choice outlives the webview.
+    window.addEventListener('kiss-tips-opt-out', event => {
+      const detail = event && event.detail;
+      if (detail && detail.type === 'tipsOptOut') api.send(detail);
     });
 
     // tableak-coverage:start
@@ -18780,6 +19587,9 @@
   async function sendMessage() {
     let prompt = inp.value.trim();
     if (!prompt) return;
+    // A fresh submit: until the user touches the UI again, a finishing
+    // task may pull them onto its tab (focusFinishedTab).
+    userInteractedSinceSubmit = false;
     // Daemon unreachable (the remote webapp shows the app under its
     // "Reconnecting ..." banner): a submit now would only sit in the
     // shim's queue with no feedback, and the task's own transcript
@@ -18849,7 +19659,10 @@
     const curTab = getTab(activeTabId);
 
     if (isRunning) {
-      if (curTab) curTab.unackedPrompt = prompt;
+      if (curTab) {
+        curTab.unackedPrompt = prompt;
+        curTab.unackedAttachments = attachments;
+      }
       api.appendUserMessage({prompt: prompt, tabId: activeTabId});
       resetComposerAfterSend();
       return;
@@ -18903,6 +19716,7 @@
       if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
       // tableak-coverage:end
       curTab.unackedPrompt = prompt;
+      curTab.unackedAttachments = attachments;
     }
     resetComposerAfterSend();
   }
@@ -18966,6 +19780,31 @@
     } else {
       tab.inputValue = text;
     }
+  }
+
+  /**
+   * Put the prompt the daemon refused (error code 'prompt_refused') back
+   * into `tab`'s composer, text and attachments, so the user can fix or
+   * resend it instead of retyping.  A composer the user has already
+   * started a new draft in (any text or attachment) is left alone.
+   */
+  function restoreRefusedPrompt(tab) {
+    if (!tab || !tab.unackedPrompt) return;
+    const text = tab.unackedPrompt;
+    const files = tab.unackedAttachments || [];
+    tab.unackedPrompt = '';
+    tab.unackedAttachments = [];
+    const onScreen = tab.id === activeTabId;
+    const parked = onScreen ? attachments : tab.attachments || [];
+    if (composerTextOf(tab).trim() || parked.length) return;
+    if (onScreen) {
+      attachments = files;
+      renderFileChips();
+      updateInputDisabled();
+    } else {
+      tab.attachments = files;
+    }
+    setComposerTextOf(tab, text);
   }
 
   // Entering answer mode: whatever the user had typed was a prompt, so it
@@ -19216,13 +20055,17 @@
     cancelBtn.className = 'sidebar-confirm-no';
     cancelBtn.dataset.tooltip = 'Cancel';
     cancelBtn.textContent = 'Cancel';
+    cancelBtn.setAttribute('data-inline-cancel', 'true');
     confirmWrap.appendChild(confirmBtn);
     confirmWrap.appendChild(cancelBtn);
+    confirmWrap.addEventListener('keydown', onInlineConfirmKey);
     delBtn.addEventListener('click', e => {
       e.stopPropagation();
       delBtn.style.display = 'none';
       confirmWrap.style.display = '';
       if (opts.onShowConfirm) opts.onShowConfirm();
+      // The safe choice holds focus, so Enter keeps and Escape cancels.
+      cancelBtn.focus();
     });
     confirmBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -19233,6 +20076,7 @@
       confirmWrap.style.display = 'none';
       delBtn.style.display = '';
       if (opts.onCancel) opts.onCancel();
+      if (delBtn.isConnected) delBtn.focus();
     });
     return {delBtn: delBtn, confirmWrap: confirmWrap};
   }
@@ -20961,14 +21805,170 @@
     sidebarOverlay.classList.remove('open');
   }
 
-  function setPanelOpen(panel, overlay, open) {
-    if (panel) panel.classList.toggle('open', open);
+  /**
+   * Sheets (settings / promptlets / frequent tasks) in the order they
+   * were opened; the last entry is the topmost one Escape closes.
+   * Each entry remembers the control that opened the sheet so closing
+   * it can hand keyboard focus back instead of dropping it on <body>.
+   */
+  const openSheets = [];
+
+  /**
+   * Open or close a sheet and its backdrop.
+   *
+   * @param {Element|null} panel The sheet.
+   * @param {Element|null} overlay Its backdrop.
+   * @param {boolean} open Whether to open it.
+   * @param {Element} [opener] The control that opened it, for the
+   *   focus hand-back on close.  Passed explicitly by the toolbar
+   *   buttons because a mouse click blurs them before their handler
+   *   runs (see BLUR_AFTER_CLICK_SELECTOR); defaults to the focused
+   *   element.
+   */
+  function setPanelOpen(panel, overlay, open, opener) {
+    if (panel) {
+      const wasOpen = panel.classList.contains('open');
+      panel.classList.toggle('open', open);
+      const idx = openSheets.findIndex(s => s.panel === panel);
+      if (open && !wasOpen && idx < 0) {
+        openSheets.push({panel, opener: opener || document.activeElement});
+      } else if (!open && idx >= 0) {
+        const {opener} = openSheets.splice(idx, 1)[0];
+        // A Delete / Cancel question left open in the sheet must not
+        // still be there, trash icon gone, when the sheet reopens.
+        resetInlineConfirms(panel);
+        if (wasOpen) focusSheetOpener(panel, opener);
+      }
+    }
     if (overlay) overlay.classList.toggle('open', open);
+    if (panel === tricksPanel && tricksBtn) {
+      tricksBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+  }
+
+  /**
+   * Hand focus back to the control that opened a sheet, when the close
+   * would otherwise strand it (focus inside the closing sheet, or on
+   * <body>).  Focus already somewhere else is left alone.  An opener
+   * hidden in the (now closed) "..." menu cannot take focus, so its
+   * trigger button gets it; anything else falls back to the composer.
+   */
+  function focusSheetOpener(panel, opener) {
+    const active = document.activeElement;
+    if (
+      active &&
+      active !== document.body &&
+      !(panel && panel.contains(active))
+    )
+      return;
+    let target = opener;
+    if (!target || target === document.body || !target.isConnected) {
+      target = null;
+    } else if (panel && panel.contains(target)) {
+      target = null;
+    } else if (target.closest && target.closest('#more-menu')) {
+      target = document.getElementById('more-btn');
+    }
+    if (!target) target = inp;
+    try {
+      target.focus();
+    } catch (_err) {}
+  }
+
+  /**
+   * Whether an inner popup sits on top of the open sheet and owns the
+   * Escape key: the date picker, an in-place promptlet editor, the
+   * model dropdown, the server-reset confirm, a confirm/prompt dialog or
+   * an open inline Delete / Cancel confirm inside `panel`.
+   */
+  function sheetHasInnerPopup(panel) {
+    if (editingTrickIndex >= 0) return true;
+    if (openInlineConfirm(panel)) return true;
+    if (document.getElementById('kiss-datepicker-pop')) return true;
+    if (modelDropdown && modelDropdown.classList.contains('open')) return true;
+    if (
+      serverResetConfirmModal &&
+      serverResetConfirmModal.classList.contains('open')
+    )
+      return true;
+    if (document.querySelector('[data-dialog-cancel]')) return true;
+    return false;
+  }
+
+  /**
+   * Escape closes the topmost open sheet like every other popup.  It
+   * runs in the capture phase so the inner-popup check above sees the
+   * popup BEFORE its own Escape handler has closed it (otherwise one
+   * Escape would close both the editor and the sheet under it).
+   */
+  function onSheetEscape(e) {
+    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+    if (!openSheets.length) return;
+    const {panel} = openSheets[openSheets.length - 1];
+    if (sheetHasInnerPopup(panel)) return;
+    // Other sheets that go through setPanelOpen (the working-directory
+    // panel) keep their own Escape handling.
+    if (panel === settingsPanel) closeSettingsPanel();
+    else if (panel === tricksPanel) closeTricksPanel();
+    else if (panel === frequentPanel) closeFrequentPanel();
+    else return;
+    e.preventDefault();
+  }
+  document.addEventListener('keydown', onSheetEscape, true);
+
+  /**
+   * The status line under the settings sheet's Update / Update Models
+   * buttons.  Created on first use (the sheet's markup is static);
+   * `setSettingsUpdateStatus` writes "Updating…" on click and the
+   * daemon's notice / error text when it arrives, so progress is
+   * visible without closing the sheet to look at the transcript.
+   */
+  let settingsUpdatePending = false;
+
+  function settingsUpdateStatusEl() {
+    let el = document.getElementById('settings-update-status');
+    if (el) return el;
+    const row =
+      settingsPanel && settingsPanel.querySelector('.config-update-row');
+    if (!row || !row.parentNode) return null;
+    el = document.createElement('div');
+    el.id = 'settings-update-status';
+    el.className = 'config-field-note';
+    el.setAttribute('role', 'status');
+    el.hidden = true;
+    row.parentNode.insertBefore(el, row.nextSibling);
+    return el;
+  }
+
+  function setSettingsUpdateStatus(text, isError) {
+    const el = settingsUpdateStatusEl();
+    if (!el) return;
+    settingsUpdatePending = !!text;
+    el.textContent = text || '';
+    el.hidden = !text;
+    el.classList.toggle('config-field-note-error', !!isError);
+  }
+
+  /**
+   * Mirror an unaddressed notice / error into the settings status line
+   * while an update requested from that sheet is in flight and the
+   * sheet is still open.
+   */
+  function relayUpdateStatus(text, isError) {
+    if (!settingsUpdatePending) return;
+    if (!settingsPanel || !settingsPanel.classList.contains('open')) return;
+    if (typeof text !== 'string' || !text) return;
+    setSettingsUpdateStatus(text, isError);
   }
 
   function openSettingsPanel() {
     if (!settingsPanel) return;
-    setPanelOpen(settingsPanel, settingsOverlay, true);
+    setPanelOpen(
+      settingsPanel,
+      settingsOverlay,
+      true,
+      document.getElementById('settings-btn'),
+    );
     configFormPopulated = false;
     settingsEditedFields.clear();
     // The API Keys / Custom Models subpanels START collapsed on every
@@ -20979,18 +21979,36 @@
   }
 
   function closeSettingsPanel() {
+    // A custom-model edit the user has typed into is not thrown away
+    // by a stray click on the backdrop or an Escape: ask first.
+    if (customModelEditIsDirty()) {
+      confirmAction({
+        id: 'settings-discard-model-edit',
+        message:
+          'The custom model "' + customModelEditName + '" has unsaved changes.',
+        confirmLabel: 'Discard changes',
+        cancelLabel: 'Keep editing',
+        danger: true,
+        onConfirm: () => {
+          cancelCustomModelEdit();
+          closeSettingsPanel();
+        },
+      });
+      return;
+    }
     // An abandoned in-place edit must not leak the edited model's
     // endpoint / key / headers into the saved config: restore the
     // boxes to what the user last typed BEFORE flushing the form.
     cancelCustomModelEdit();
     saveSettingsIfPopulated();
     settingsEditedFields.clear();
+    setSettingsUpdateStatus('', false);
     setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
   function openFrequentPanel() {
     if (!frequentPanel) return;
-    setPanelOpen(frequentPanel, frequentOverlay, true);
+    setPanelOpen(frequentPanel, frequentOverlay, true, frequentTasksBtn);
     api.getFrequentTasks({limit: 50});
   }
 
@@ -21000,7 +22018,7 @@
 
   function openTricksPanel() {
     if (!tricksPanel) return;
-    setPanelOpen(tricksPanel, tricksOverlay, true);
+    setPanelOpen(tricksPanel, tricksOverlay, true, tricksBtn);
     renderTricks(window.__TRICKS__ || []);
   }
 
@@ -21008,27 +22026,93 @@
     setPanelOpen(tricksPanel, tricksOverlay, false);
   }
 
-  /** Enable the panel's Add button only while its box holds text. */
+  /**
+   * Enable the panel's Add button only while its box holds text, and
+   * say why it is disabled otherwise (a greyed-out button with no
+   * explanation reads as broken).
+   */
   function syncTricksAddBtn() {
     if (!tricksAddBtn || !tricksAddInput) return;
-    tricksAddBtn.disabled = !tricksAddInput.value.trim();
+    const empty = !tricksAddInput.value.trim();
+    tricksAddBtn.disabled = empty;
+    if (empty) {
+      tricksAddBtn.title = 'Type a name and prompt to add a promptlet';
+    } else {
+      tricksAddBtn.removeAttribute('title');
+    }
+  }
+
+  /**
+   * The promptlet text posted as `addTrick` whose `tricksData`
+   * confirmation has not arrived yet ('' when none is pending).  The
+   * Add box keeps the text until then: a rejection must not lose it.
+   */
+  let pendingTrickAdd = '';
+
+  /** The error line under the promptlet Add box (created on first use). */
+  function tricksAddErrorEl() {
+    let el = document.getElementById('tricks-add-error');
+    if (el) return el;
+    const row = document.getElementById('tricks-add-row');
+    if (!row || !row.parentNode) return null;
+    el = document.createElement('div');
+    el.id = 'tricks-add-error';
+    el.className = 'config-field-note config-field-note-error';
+    el.setAttribute('role', 'alert');
+    el.hidden = true;
+    row.parentNode.insertBefore(el, row.nextSibling);
+    return el;
+  }
+
+  function setTricksAddError(text) {
+    const el = tricksAddErrorEl();
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !text;
   }
 
   /**
    * Post the Add box's promptlet as `addTrick`: the daemon appends it
    * to ~/.kiss/MY_INJECTION.md and answers every window with a
    * `tricksData` list (or the sender alone with an `error`).  The box
-   * is cleared right away; a rejected promptlet is reported through
-   * the error banner, not by keeping the text.
+   * is cleared only when that confirmation arrives (`confirmTrickAdd`);
+   * a rejection is shown under the box (`relayTrickAddError`) and the
+   * text stays for the user to fix.
    */
   function submitNewTrick() {
     if (!tricksAddInput) return;
     const text = tricksAddInput.value.trim();
     if (!text) return;
+    pendingTrickAdd = text;
+    setTricksAddError('');
     api.addTrick({text});
+    tricksAddInput.focus();
+  }
+
+  /**
+   * `tricksData` arrived: clear the box once it lists the pending add.
+   * Text the user typed after the Add click (a newer promptlet in the
+   * making) is not the acknowledged submission and stays.
+   */
+  function confirmTrickAdd(tricks) {
+    if (!pendingTrickAdd || !tricksAddInput) return;
+    if (tricks.indexOf(pendingTrickAdd) < 0) return;
+    const acknowledged = tricksAddInput.value.trim() === pendingTrickAdd;
+    pendingTrickAdd = '';
+    if (!acknowledged) return;
     tricksAddInput.value = '';
     syncTricksAddBtn();
-    tricksAddInput.focus();
+  }
+
+  /**
+   * An unaddressed `error` arrived while a promptlet add was pending:
+   * it is the daemon's rejection, shown inside the sheet (which covers
+   * the transcript's error banner).
+   */
+  function relayTrickAddError(text) {
+    if (!pendingTrickAdd) return;
+    pendingTrickAdd = '';
+    setTricksAddError(text || 'The promptlet could not be added.');
   }
 
   /**
@@ -21234,17 +22318,16 @@
           openTrickEditor(index);
         });
         div.appendChild(editBtn);
-        const delBtn = document.createElement('button');
-        delBtn.type = 'button';
-        delBtn.className = 'sidebar-item-delete';
-        delBtn.dataset.tooltip = 'Delete promptlet';
-        delBtn.setAttribute('aria-label', 'Delete promptlet');
-        delBtn.innerHTML = SIDEBAR_DELETE_SVG;
-        delBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          deleteTrick(index);
+        // Same two-step inline confirm as a frequent task's delete: the
+        // trash icon only reveals Delete / Cancel, nothing is posted yet.
+        const del = makeSidebarDeleteConfirm({
+          ariaLabel: 'Delete promptlet',
+          onConfirm: () => deleteTrick(index),
         });
-        div.appendChild(delBtn);
+        del.delBtn.type = 'button';
+        del.delBtn.dataset.tooltip = 'Delete promptlet';
+        div.appendChild(del.delBtn);
+        div.appendChild(del.confirmWrap);
       }
       div.addEventListener('click', () => {
         const current = inp.value;
@@ -21324,15 +22407,33 @@
       div.appendChild(confirmWrap);
 
       div.addEventListener('click', () => {
-        inp.value = text;
-        syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = inp.scrollHeight + 'px';
-        inp.focus();
-        closeFrequentPanel();
+        // A draft the user is composing is not overwritten silently:
+        // ask whether the frequent task replaces it.
+        if (inp.value.trim() && inp.value.trim() !== text) {
+          confirmAction({
+            id: 'frequent-replace-draft',
+            message:
+              'Replace the text in the composer with this frequent task?',
+            confirmLabel: 'Replace draft',
+            cancelLabel: 'Keep draft',
+            onConfirm: () => useFrequentTask(text),
+          });
+          return;
+        }
+        useFrequentTask(text);
       });
       frequentList.appendChild(div);
     });
+  }
+
+  /** Put frequent task *text* in the composer and close the sheet. */
+  function useFrequentTask(text) {
+    inp.value = text;
+    syncClearBtn();
+    inp.style.height = 'auto';
+    inp.style.height = inp.scrollHeight + 'px';
+    closeFrequentPanel();
+    inp.focus();
   }
   function setupPasswordToggle(toggleId, inputId, secretName) {
     const btn = document.getElementById(toggleId);
@@ -21429,6 +22530,10 @@
   // "user-edited" nor keep a fresher configData from repainting boxes
   // the user never touched.
   let customModelPreEditDirty = null;
+  // The values `startCustomModelEdit` loaded into the boxes: the edit
+  // has unsaved changes while the boxes differ from them (see
+  // `customModelEditIsDirty`).
+  let customModelEditLoaded = null;
   // The last configData's custom-endpoint values. Recorded even while
   // an edit skips repainting the boxes, so cancelling the edit can
   // restore the AUTHORITATIVE values instead of a stale pre-edit
@@ -21501,8 +22606,16 @@
       apiKey: model.api_key || '',
       headers: model.headers || '',
     });
+    customModelEditLoaded = readCustomModelBoxes();
     setCustomModelEditMode(true);
     renderCustomModels();
+  }
+
+  /** Whether the open custom-model edit has changes the user typed. */
+  function customModelEditIsDirty() {
+    if (customModelEditName === null || !customModelEditLoaded) return false;
+    const now = readCustomModelBoxes();
+    return Object.keys(now).some(k => now[k] !== customModelEditLoaded[k]);
   }
 
   /**
@@ -21519,6 +22632,7 @@
   function cancelCustomModelEdit() {
     if (customModelEditName === null) return;
     customModelEditName = null;
+    customModelEditLoaded = null;
     if (customModelBoxSnapshot) {
       const snap = customModelBoxSnapshot;
       const dirty = customModelPreEditDirty || new Set();
@@ -21672,24 +22786,19 @@
     editBtn.addEventListener('click', () => startCustomModelEdit(model));
     row.appendChild(editBtn);
 
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.className = 'custom-model-btn custom-model-delete-btn';
-    delBtn.setAttribute('aria-label', 'Delete ' + model.name);
-    delBtn.title = 'Delete';
-    delBtn.innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
-      'stroke-linejoin="round" aria-hidden="true">' +
-      '<polyline points="3 6 5 6 21 6"/>' +
-      '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 ' +
-      '1 2-2h4a2 2 0 0 1 2 2v2"/>' +
-      '</svg>';
-    delBtn.addEventListener('click', () => {
-      if (model.name === customModelEditName) cancelCustomModelEdit();
-      api.deleteMyModel({name: model.name});
+    // Two-step inline confirm (as for frequent tasks and promptlets):
+    // the trash icon reveals Delete / Cancel, nothing is posted yet.
+    const del = makeSidebarDeleteConfirm({
+      ariaLabel: 'Delete ' + model.name,
+      onConfirm: () => {
+        if (model.name === customModelEditName) cancelCustomModelEdit();
+        api.deleteMyModel({name: model.name});
+      },
     });
-    row.appendChild(delBtn);
+    del.delBtn.type = 'button';
+    del.delBtn.classList.add('custom-model-btn', 'custom-model-delete-btn');
+    row.appendChild(del.delBtn);
+    row.appendChild(del.confirmWrap);
     return row;
   }
 
@@ -21829,6 +22938,37 @@
    *   stored settings.
    * @returns {{config: object, apiKeys: object}} The payload.
    */
+  /**
+   * Tell the user, under the Max budget box, when what they typed is
+   * not a number and so will be ignored (the saved budget stays).  The
+   * note is created on first use and hidden again once the box parses.
+   */
+  function syncMaxBudgetNote() {
+    const box = document.getElementById('cfg-max-budget');
+    if (!box) return;
+    let note = document.getElementById('cfg-max-budget-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.id = 'cfg-max-budget-note';
+      note.className = 'config-field-note config-field-note-error';
+      note.hidden = true;
+      const label = box.closest('label') || box;
+      label.parentNode.insertBefore(note, label.nextSibling);
+      box.setAttribute('aria-describedby', note.id);
+    }
+    const bad =
+      (box.validity && box.validity.badInput) ||
+      (box.value.trim() !== '' && !Number.isFinite(parseFloat(box.value)));
+    const empty = !bad && box.value.trim() === '';
+    note.textContent = bad
+      ? 'Not a number: this is ignored and the saved budget is kept.'
+      : empty
+        ? 'Empty: the saved budget is kept.'
+        : '';
+    note.hidden = !note.textContent;
+    box.setAttribute('aria-invalid', bad ? 'true' : 'false');
+  }
+
   function collectConfigForm(onlyIds) {
     const el = id => document.getElementById(id);
     const want = id => !onlyIds || onlyIds.has(id);
@@ -21842,6 +22982,7 @@
       // on a 250 budget silently ended up back on 100.
       const budget = parseFloat(el('cfg-max-budget').value);
       if (Number.isFinite(budget)) cfg.max_budget = budget;
+      else if (settingsEditedFields.has('cfg-max-budget')) syncMaxBudgetNote();
     }
     if (want('cfg-auto-commit')) {
       cfg.auto_commit_mode = !!(

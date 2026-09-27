@@ -492,8 +492,8 @@ class TestM7CapsAttachments(IsolatedAsyncioTestCase):
         self.assertEqual(len(captured[0]["attachments"]), 4)
 
 
-class TestM7TruncatesPrompt(IsolatedAsyncioTestCase):
-    """An oversize prompt is truncated before being broadcast / dispatched."""
+class TestM7RefusesOversizePrompt(IsolatedAsyncioTestCase):
+    """An oversize prompt is refused with the limit spelled out, never truncated."""
 
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
@@ -509,7 +509,7 @@ class TestM7TruncatesPrompt(IsolatedAsyncioTestCase):
         ws_mod._MAX_PROMPT_BYTES = self._old_cap
         self._snap.__exit__()
 
-    async def test_handle_submit_truncates_prompt(self) -> None:
+    async def test_handle_submit_refuses_oversize_prompt(self) -> None:
         captured: list[dict[str, Any]] = []
 
         async def _capture(c: dict[str, Any]) -> None:
@@ -517,12 +517,8 @@ class TestM7TruncatesPrompt(IsolatedAsyncioTestCase):
 
         self.server._run_cmd = _capture  # type: ignore[assignment]
         self.server._loop = asyncio.get_running_loop()
-        big = "X" * 5000
-        await self.server._handle_submit({
-            "tabId": "t1", "prompt": big,
-        })
-        self.assertEqual(len(captured), 1)
-        self.assertLessEqual(len(captured[0]["prompt"]), 100)
+        await self.server._handle_submit({"tabId": "t1", "prompt": "X" * 5000})
+        self.assertEqual(captured, [], "a refused prompt must not start a task")
 
 
 

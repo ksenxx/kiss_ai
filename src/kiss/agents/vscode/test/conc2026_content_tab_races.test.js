@@ -165,6 +165,19 @@ function contentTabStrips(win) {
   return win.document.querySelectorAll('.chat-tab.content-tab');
 }
 
+/**
+ * Answer the in-webview "unsaved changes" question (it replaced
+ * window.confirm, which the VS Code webview sandbox never showed) with
+ * "Don't save".
+ */
+function discardEditsAndClose(win) {
+  const toast = win.document.querySelector(
+    '[data-notification-id^="close-dirty-"]',
+  );
+  assert.ok(toast, 'closing a dirty tab must ask in-webview first');
+  clickEl(win, toastActionButton(win, toast, "Don't save"));
+}
+
 const FILE_PATH = '/shared/notes.txt';
 
 // Drives a webview into the state every test here starts from: two chat
@@ -330,13 +343,13 @@ async function testClosingTabRemovesConflictToast() {
   const {win} = ctx;
   await openDirtyConflictedTab(ctx);
 
-  // Close the (dirty) content tab, confirming the unsaved-edits prompt.
-  win.confirm = () => true;
+  // Close the (dirty) content tab, discarding the edits when asked.
   const strip = win.document.querySelector('.chat-tab.content-tab');
   assert.ok(strip, 'the content tab must have a strip in the tab bar');
   const closeBtn = strip.querySelector('.chat-tab-close');
   assert.ok(closeBtn, 'the content tab strip must have a close button');
   clickEl(win, closeBtn);
+  discardEditsAndClose(win);
   assert.strictEqual(
     contentTabStrips(win).length,
     0,
@@ -361,11 +374,11 @@ async function testDeadConflictActionsOpenNoSurpriseTabs() {
   const {win, posted} = ctx;
   await openDirtyConflictedTab(ctx);
 
-  win.confirm = () => true;
   const closeBtn = win.document.querySelector(
     '.chat-tab.content-tab .chat-tab-close',
   );
   clickEl(win, closeBtn);
+  discardEditsAndClose(win);
   assert.strictEqual(contentTabStrips(win).length, 0);
 
   // If the toast (wrongly) survived the close, exercise its actions

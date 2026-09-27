@@ -345,6 +345,8 @@ export type FromWebviewMessage =
   | {type: 'snoozeUpdate'; latest?: string}
   | {type: 'updateWhenIdle'; cancel?: boolean}
   | {type: 'serverReset'}
+  // tips.js "Don't show tips again" checkbox: optOut false re-enables the tips.
+  | {type: 'tipsOptOut'; optOut?: boolean}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   // In-page (browser-mic) capture fallback: the webview recorded the

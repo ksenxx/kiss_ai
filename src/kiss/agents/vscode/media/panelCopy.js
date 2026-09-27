@@ -17,6 +17,11 @@
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
     'stroke-linejoin="round" aria-hidden="true">' +
     '<polyline points="20 6 9 17 4 12"/></svg>';
+  const PANEL_FAIL_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   const PANEL_STOP_SVG =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" ' +
     'stroke="currentColor" stroke-width="2" stroke-linejoin="round" ' +
@@ -277,28 +282,39 @@
     // copy: a bare setTimeout let a rapid second click's flash be cut
     // short by the first click's stale timer.
     let flashTimer = null;
+    // Show the copy outcome on the button for 1.5 s: a check mark
+    // (`copied`) or, when both the async clipboard and the execCommand
+    // fallback failed, a cross with a "Copy failed" title (`copy-failed`)
+    // so the failure is never silent.
+    const flash = ok => {
+      btn.innerHTML = ok ? PANEL_CHECK_SVG : PANEL_FAIL_SVG;
+      btn.classList.toggle('copied', ok);
+      btn.classList.toggle('copy-failed', !ok);
+      btn.title = ok
+        ? 'Copied'
+        : 'Copy failed: select the text and copy it with the keyboard';
+      if (flashTimer) clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => {
+        flashTimer = null;
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied', 'copy-failed');
+        btn.title = 'Copy panel text';
+      }, 1500);
+    };
     btn.addEventListener('click', e => {
       e.stopPropagation();
       e.preventDefault();
       const text = normalise(getRawText(panelEl));
-      const done = () => {
-        btn.innerHTML = PANEL_CHECK_SVG;
-        btn.classList.add('copied');
-        if (flashTimer) clearTimeout(flashTimer);
-        flashTimer = setTimeout(() => {
-          flashTimer = null;
-          btn.innerHTML = PANEL_COPY_SVG;
-          btn.classList.remove('copied');
-        }, 1500);
-      };
+      const done = () => flash(true);
+      const failed = () => flash(fallbackCopyText(text, doc));
       // copyflash0903-coverage:end
       const win =
         doc.defaultView || (typeof window !== 'undefined' ? window : null);
       const nav = win ? win.navigator : null;
       if (nav && nav.clipboard && nav.clipboard.writeText) {
-        nav.clipboard.writeText(text).then(done, () => {});
-      } else if (fallbackCopyText(text, doc)) {
-        done();
+        nav.clipboard.writeText(text).then(done, failed);
+      } else {
+        failed();
       }
     });
     panelEl.appendChild(btn);

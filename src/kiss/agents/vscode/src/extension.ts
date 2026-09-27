@@ -12,7 +12,11 @@ import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 import {syncEditorActionsLocation} from './editorActionsLocation';
 
-import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
+import {
+  ensureDependencies,
+  ensureLocalBinInPath,
+  promptApiKeysNow,
+} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
 import {kissHomeDir, sorcarSockPath} from './userAssets';
 import {
@@ -20,10 +24,10 @@ import {
   historyPanelBodyAttrs,
   META_PANEL_TAB_ID,
   metaPanelBodyAttrs,
-  resetTipsOnExtensionUpdate,
 } from './SorcarTab';
 import {
   checkForExtensionUpdate,
+  skipUpdateVersion,
   snoozeUpdateNotification,
 } from './UpdateChecker';
 import {
@@ -41,6 +45,57 @@ let metaView: SorcarSidebarView | undefined;
 // workspaceState key: root tab ids of the chat editor panels open at
 // the previous session's shutdown (see priorPanelTabIds in activate).
 const PANEL_TAB_IDS_KEY = 'kissSorcar.editorPanelTabIds';
+
+/** The `kissSorcar.checkForUpdates` setting (default true). */
+function updateChecksEnabled(): boolean {
+  // Guarded like the other optional host APIs (test stubs may not
+  // model configuration); the check is then on, as by default.
+  if (typeof vscode.workspace?.getConfiguration !== 'function') return true;
+  return (
+    vscode.workspace
+      .getConfiguration('kissSorcar')
+      .get<boolean>('checkForUpdates') !== false
+  );
+}
+
+/**
+ * Open the dependency-install log (`$KISS_HOME/install.log`) in an
+ * editor tab — the full raw output the failure toast only summarises.
+ * Falls back to an untitled document carrying *fallbackText* when the
+ * log does not exist yet (the failure happened before anything ran).
+ */
+async function openInstallLog(fallbackText: string): Promise<void> {
+  const logPath = path.join(kissHomeDir(), 'install.log');
+  try {
+    const doc = fs.existsSync(logPath)
+      ? await vscode.workspace.openTextDocument(vscode.Uri.file(logPath))
+      : await vscode.workspace.openTextDocument({content: fallbackText});
+    await vscode.window.showTextDocument(doc, {preview: false});
+  } catch (err) {
+    console.error('[KISS Sorcar] could not open install log:', err);
+  }
+}
+
+/**
+ * Run (or re-run) the dependency setup.  A failure is reported as ONE
+ * sticky error toast with the one-line cause (the installer keeps its
+ * messages to the failing step's first meaningful output line) and
+ * the actions 'Open log' (the full output) and 'Retry'.
+ */
+function runSetup(): void {
+  ensureDependencies().catch(err => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[KISS Sorcar] Dependency setup error:', err);
+    void showErrorNotification(
+      `${PRODUCT_NAME}: Setup failed. ${msg}`,
+      'Open log',
+      'Retry',
+    ).then(action => {
+      if (action === 'Open log') void openInstallLog(msg);
+      else if (action === 'Retry') runSetup();
+    });
+  });
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
@@ -729,6 +784,12 @@ export function activate(context: vscode.ExtensionContext): void {
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
 
+  // The update finished and the new bundle is stable: OFFER the reload
+  // instead of yanking the window away from the user (who may be
+  // mid-edit or reading a task's output).  Only 'Reload now' reloads;
+  // 'Later' or dismissing keeps the window as it is — the new code is
+  // picked up by whatever reload the user does next, and the marker
+  // consumed at the next activation replays the chat open.
   const doReload = () => {
     if (reloadTriggered) return;
     reloadTriggered = true;
@@ -737,7 +798,15 @@ export function activate(context: vscode.ExtensionContext): void {
       settleTimer = undefined;
     }
     fs.unwatchFile(markerPath);
-    vscode.commands.executeCommand('workbench.action.reloadWindow');
+    void showInformationNotification(
+      `${PRODUCT_NAME} was updated.`,
+      'Reload now',
+      'Later',
+    ).then(action => {
+      if (action === 'Reload now') {
+        void vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }
+    });
   };
 
   const RELOAD_SETTLE_INTERVAL_MS = 500;
@@ -836,7 +905,6 @@ export function activate(context: vscode.ExtensionContext): void {
     shouldAutoOpen = true;
     void context.workspaceState.update('firstLaunchDone', undefined);
   }
-  resetTipsOnExtensionUpdate();
 
   if (shouldAutoOpen) {
     const autoOpenTimer = setTimeout(async () => {
@@ -876,16 +944,25 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
   }
 
-  ensureDependencies().catch(err => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[KISS Sorcar] Dependency setup error:', err);
-    showErrorNotification(
-      `${PRODUCT_NAME}: Setup failed — ${msg}. ` +
-        `Check ${path.join(kissHomeDir(), 'install.log')} for details.`,
-    );
-  });
+  // "KISS Sorcar: Retry Setup" — re-runs the dependency install after a
+  // failure or a cancelled first run; the setup-cancelled message and
+  // the failure toast's 'Retry' both route here.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.retrySetup', runSetup),
+  );
+  // "KISS Sorcar: Enter API Key" — reopens the API-key prompt the user
+  // skipped earlier (the skip is remembered, so this is the way back).
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.enterApiKey', () => {
+      void promptApiKeysNow().catch(err => {
+        console.error('[KISS Sorcar] API key prompt failed:', err);
+      });
+    }),
+  );
+  runSetup();
 
   void checkForExtensionUpdate({
+    enabled: updateChecksEnabled(),
     kissProjectPath: findKissProject() || undefined,
     notify: ({latest, current}: {latest: string; current: string}) => {
       void showInformationNotification(
@@ -894,12 +971,17 @@ export function activate(context: vscode.ExtensionContext): void {
         'Update now',
         'Update when idle',
         'Remind me later',
+        'Skip this version',
       ).then(action => {
         if (action === 'Update now') {
           sidebarView?.runUpdate();
         } else if (action === 'Update when idle') {
           sidebarView?.updateWhenIdle();
-        } else if (action === 'Remind me later') {
+        } else if (action === 'Skip this version') {
+          skipUpdateVersion({latest});
+        } else {
+          // 'Remind me later' AND closing the toast: dismissing is a
+          // "not now", never a "show me again at the next activation".
           snoozeUpdateNotification({latest});
         }
       });

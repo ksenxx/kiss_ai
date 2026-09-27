@@ -133,7 +133,11 @@ async function runPanel() {
   assert.strictEqual(posted.filter(m => m.type === 'deleteTrick').length, 0);
 
   // --- delete posts deleteTrick with the row's text and drops the row now
+  // (after the inline Delete confirm the trash icon reveals; see
+  // ui_antipattern_destructive_confirm.test.js)
   click(win, rows(doc)[1].querySelector('.sidebar-item-delete'));
+  assert.strictEqual(posted.filter(m => m.type === 'deleteTrick').length, 0);
+  click(win, rows(doc)[1].querySelector('.sidebar-confirm-yes'));
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(posted.filter(m => m.type === 'deleteTrick'))),
     [{type: 'deleteTrick', text: 'Mine two'}],
@@ -173,6 +177,7 @@ async function runPanel() {
   );
   // ...and the row can be deleted again once the daemon accepts it
   click(win, rows(doc)[1].querySelector('.sidebar-item-delete'));
+  click(win, rows(doc)[1].querySelector('.sidebar-confirm-yes'));
   assert.deepStrictEqual(
     posted.filter(m => m.type === 'deleteTrick').map(m => m.text),
     ['Mine two', 'Mine two'],
@@ -186,6 +191,7 @@ async function runPanel() {
   input(win, doc.getElementById('tricks-search'), 'mine');
   assert.deepStrictEqual(texts(doc), ['Mine one']);
   click(win, rows(doc)[0].querySelector('.sidebar-item-delete'));
+  click(win, rows(doc)[0].querySelector('.sidebar-confirm-yes'));
   assert.deepStrictEqual(
     posted.filter(m => m.type === 'deleteTrick').map(m => m.text),
     ['Mine two', 'Mine two', 'Mine one'],

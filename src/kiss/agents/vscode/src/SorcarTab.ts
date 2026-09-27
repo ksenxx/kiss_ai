@@ -119,7 +119,46 @@ export function getTips(): string[] {
   return parseTipSections(renderBrand(text));
 }
 
+/** The persisted "don't show tips again" flag, under `$KISS_HOME`. */
+function tipsOptOutPath(): string {
+  return path.join(kissHomeDir(), 'TIPS_DISABLED');
+}
+
+/** Whether the user opted out of the tips window ("Don't show again"). */
+export function tipsDisabled(): boolean {
+  return fs.existsSync(tipsOptOutPath());
+}
+
+/**
+ * Persist the user's "don't show tips again" choice — the host side of
+ * the webview's `{type: 'tipsOptOut'}` message (tips.js).  Idempotent;
+ * an unwritable `$KISS_HOME` is ignored (the in-session tips window is
+ * already closed, the choice simply is not remembered).
+ */
+export function recordTipsOptOut(): void {
+  try {
+    fs.mkdirSync(kissHomeDir(), {recursive: true});
+    fs.writeFileSync(tipsOptOutPath(), new Date().toISOString() + '\n');
+  } catch {
+    // Nothing to do: see the docstring.
+  }
+}
+
+/** Forget a persisted "don't show tips again" choice (tips.js unticks the box). */
+export function clearTipsOptOut(): void {
+  fs.rmSync(tipsOptOutPath(), {force: true});
+}
+
+/**
+ * Claim the one-time first-run tips popup.  The popup opens exactly
+ * once per `$KISS_HOME`, on the very first run: an extension update
+ * never re-opens it (the "what's new" nag was removed), and a persisted
+ * opt-out (recordTipsOptOut) keeps it closed for good.
+ *
+ * @returns true for the single caller that may open the popup.
+ */
 export function consumeTipsFirstRun(): boolean {
+  if (tipsDisabled()) return false;
   const marker = path.join(kissHomeDir(), 'TIPS_SHOWN');
   // audit0903-coverage:start
   try {
@@ -134,59 +173,6 @@ export function consumeTipsFirstRun(): boolean {
     return true;
   } catch {
     return false;
-  }
-  // audit0903-coverage:end
-}
-
-/**
- * Read the update stamp the installer wrote into `.extension-updated`.
- *
- * @param home The `$KISS_HOME` directory.
- * @returns The stamp (a UTC timestamp; 'unknown' for an empty marker
- *     from an interrupted install), or null when there is no marker.
- */
-function readExtensionUpdateStamp(home: string): string | null {
-  // audit0903-coverage:start
-  try {
-    const raw = fs
-      .readFileSync(path.join(home, '.extension-updated'), 'utf-8')
-      .trim();
-    return raw || 'unknown';
-  } catch {
-    return null;
-  }
-  // audit0903-coverage:end
-}
-
-export function resetTipsOnExtensionUpdate(): void {
-  const home = kissHomeDir();
-  // audit0903-coverage:start
-  try {
-    const stamp = readExtensionUpdateStamp(home);
-    if (stamp === null) return;
-    // ONE window per update may reset the tips claim.  Every window
-    // that sees `.extension-updated` runs this, and the shared marker
-    // is only unlinked later by asynchronous dependency setup — so an
-    // unconditional remove let window B wipe the TIPS_SHOWN that
-    // window A had just reset AND re-claimed, giving two popups for
-    // one update.  The reset owner is elected by atomically ('wx')
-    // creating a claim file named after the update stamp; losers (and
-    // every later run for the same stamp) fail with EEXIST and leave
-    // the tips claim alone.
-    const claim =
-      '.tips-reset-' + stamp.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
-    for (const name of fs.readdirSync(home)) {
-      // Claims of older updates are spent; drop them so the home
-      // directory keeps exactly one.
-      if (name.startsWith('.tips-reset-') && name !== claim) {
-        fs.rmSync(path.join(home, name), {force: true});
-      }
-    }
-    fs.writeFileSync(path.join(home, claim), stamp + '\n', {flag: 'wx'});
-    fs.rmSync(path.join(home, 'TIPS_SHOWN'), {force: true});
-  } catch {
-    // Lost the election (EEXIST) or the home is unreadable: this
-    // window must not reset, and activation must never break.
   }
   // audit0903-coverage:end
 }

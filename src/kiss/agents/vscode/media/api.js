@@ -77,6 +77,7 @@
     'notificationAction',
     'sizeReport',
     'resolveDroppedPaths',
+    'tipsOptOut',
   ];
 
   function createSorcarApi(post) {

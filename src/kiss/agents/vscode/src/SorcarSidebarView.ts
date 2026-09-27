@@ -192,7 +192,7 @@ import {
   provisionalDefaultModel,
   resolveDefaultModel,
 } from './DependencyInstaller';
-import {buildChatHtml} from './SorcarTab';
+import {buildChatHtml, clearTipsOptOut, recordTipsOptOut} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
@@ -1869,6 +1869,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'serverReset':
         this._getApi().serverReset();
+        break;
+
+      case 'tipsOptOut':
+        if (message.optOut === false) {
+          clearTipsOptOut();
+        } else {
+          recordTipsOptOut();
+        }
         break;
 
       case 'notificationAction':

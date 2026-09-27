@@ -352,6 +352,11 @@
     );
     el.classList.add('voice-' + lastUiState);
     if (lastUiState === 'listening') el.classList.add('active');
+    // The toggle's on/off state for assistive tech, not just a CSS class.
+    el.setAttribute(
+      'aria-pressed',
+      lastUiState === 'listening' ? 'true' : 'false',
+    );
     el.setAttribute('data-tooltip', lastUiTip);
   }
 
@@ -364,16 +369,86 @@
     applyFlashClasses(btn);
   }
 
+  // The one toast id every voice failure reuses, so a repeated failure
+  // updates the visible notification instead of stacking a second one,
+  // and a later successful start can close it.
+  const VOICE_NOTIFICATION_ID = 'voice-trigger-error';
+
+  /**
+   * Show (or close) the voice trigger's visible notification.
+   *
+   * voice.js runs in its own closure and cannot call main.js's
+   * showNotification directly, so it hands main.js the same
+   * `{type: 'notification'}` message the host would send: main.js's
+   * window 'message' handler routes an untagged notification to the
+   * window-level toast container.  Errors are sticky: the user closes
+   * them once they have read the remedy.
+   */
+  function notifyUser(severity, message) {
+    const data = message
+      ? {
+          type: 'notification',
+          id: VOICE_NOTIFICATION_ID,
+          severity: severity,
+          sticky: true,
+          message: message,
+        }
+      : {type: 'notification', id: VOICE_NOTIFICATION_ID, close: true};
+    window.dispatchEvent(new window.MessageEvent('message', {data: data}));
+  }
+
+  /**
+   * Translate a capture failure into plain language with a remedy.
+   *
+   * `err` is the getUserMedia / AudioContext / model-load rejection (an
+   * Error with `name`, or a string from the server).
+   */
+  function describeVoiceError(err) {
+    const name = (err && err.name) || '';
+    const text = String((err && err.message) || err || '').trim();
+    if (
+      name === 'NotAllowedError' ||
+      name === 'SecurityError' ||
+      /denied|not allowed|permission/i.test(text)
+    ) {
+      return (
+        'Microphone access was denied. Allow the microphone for this ' +
+        'site in the browser settings, then turn the voice trigger on again.'
+      );
+    }
+    if (name === 'NotFoundError' || /not found|no device/i.test(text)) {
+      return (
+        'No microphone was found. Connect a microphone, then turn the ' +
+        'voice trigger on again.'
+      );
+    }
+    if (name === 'NotReadableError' || /in use|could not start/i.test(text)) {
+      return (
+        'The microphone could not be started; another application may ' +
+        'be using it. Close that application, then turn the voice trigger ' +
+        'on again.'
+      );
+    }
+    return (
+      'The voice trigger could not start' +
+      (text ? ' (' + text + ')' : '') +
+      '. Check the microphone, then turn the voice trigger on again.'
+    );
+  }
+
   function setUi(state, message) {
     let tip;
     if (state === 'listening') {
       tip =
         "Voice trigger on: say 'Hey Sorcar' and pause briefly " +
         '(click to turn off)';
+      notifyUser(null, null);
     } else if (state === 'loading') {
       tip = 'Voice trigger: starting ...';
     } else if (state === 'error') {
-      tip = 'Voice trigger error: ' + (message || 'unavailable');
+      const plain = describeVoiceError(message);
+      tip = 'Voice trigger error: ' + plain;
+      notifyUser('error', plain);
     } else if (state === 'unavailable') {
       // Calm, non-error state: the machine running KISS has no
       // microphone and this window's embedder refused in-page capture,
@@ -383,6 +458,7 @@
         'Voice capture unavailable in this window: the machine running ' +
         'KISS has no microphone. Use the remote web app to dictate with ' +
         "your browser's microphone.";
+      notifyUser('warning', tip);
     } else {
       tip = "Voice trigger: listen for the words 'Hey Sorcar'";
     }
@@ -1053,7 +1129,7 @@
           enabled = false;
           persist();
           paintedError = true;
-          setUi('error', err && err.message);
+          setUi('error', err);
         }
       })
       .then(() => {
