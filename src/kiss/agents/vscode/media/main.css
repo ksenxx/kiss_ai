@@ -2101,9 +2101,21 @@ body.meta-section-resizing {
   flex-direction: column;
   gap: 1px;
   padding: var(--space-1) var(--space-0-5);
+  border-radius: var(--radius-sm);
+}
+
+.sched-row:hover,
+.sched-row:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  outline: none;
 }
 
 .sched-row.paused { opacity: 0.6; }
+
+/* The copy button (the job's prompt or command) sits at the right edge
+   of the name line; it takes the line's own gap, not the task panels'
+   margin. */
+.sched-row .sidebar-item-copy { margin-left: 0; }
 
 .sidebar-panel-row-top,
 .app-row-main {
@@ -4403,6 +4415,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   font-size: var(--fs-sm); line-height: 1.4; white-space: pre-wrap;
   word-break: break-word; max-width: min(350px, calc(100vw - 20px)); pointer-events: none;
   opacity: 0; transition: opacity var(--dur-base); box-shadow: var(--shadow-sm);
+
+  /* Never taller than the viewport (main.js slides it to fit): a text
+     longer than a screen, such as a scheduled job's prompt, is cut at
+     the bottom edge; its copy button gives the whole of it. */
+  max-height: calc(100vh - 16px); overflow: hidden; box-sizing: border-box;
 }
 #custom-tooltip.visible { opacity: 1; }
 

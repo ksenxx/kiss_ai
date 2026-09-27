@@ -5883,9 +5883,13 @@
 
   /**
    * Render the daemon's `cronJobs` reply into the Schedule subpanel.
-   * Each row shows the job's name, a running / paused badge, its
-   * schedule and its next (or, when paused, last) run; the tooltip
-   * holds the prompt or command and the last run's outcome.
+   * Each row shows the job's name, a running / paused badge, a button
+   * that copies the scheduled task (the job's prompt, or its shell
+   * command) to the clipboard, its schedule and its next (or, when
+   * paused, last) run; the row's tooltip (the custom `data-tooltip`
+   * one: the native title truncates long prompts and never opens for
+   * keyboard users) shows that same task verbatim and the last run's
+   * outcome.
    *
    * @param {{jobs: Array<Object>}} ev The reply.
    */
@@ -5901,6 +5905,8 @@
       const li = document.createElement('li');
       li.className = 'sidebar-panel-row sched-row';
       li.classList.toggle('paused', !job.enabled);
+      li.tabIndex = 0;
+      const task = String(job.what == null ? '' : job.what);
       const top = document.createElement('div');
       top.className = 'sidebar-panel-row-top';
       top.appendChild(sidebarPanelSpan('sidebar-panel-name', job.name));
@@ -5910,6 +5916,15 @@
         );
       else if (!job.enabled)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'paused'));
+      const copyBtn = makeSidebarCopyButton(
+        task,
+        'Copy the scheduled ' +
+          (job.kind === 'command' ? 'command' : 'task') +
+          ' to clipboard',
+      );
+      copyBtn.dataset.tooltip =
+        'Copy the scheduled ' + (job.kind === 'command' ? 'command' : 'task');
+      top.appendChild(copyBtn);
       li.appendChild(top);
       const when = job.enabled
         ? job.nextRunAt && 'next ' + scheduleTimeText(job.nextRunAt)
@@ -5920,9 +5935,9 @@
           [job.schedule, when].filter(Boolean).join(' \u00b7 '),
         ),
       );
-      const tip = [(job.kind === 'command' ? '$ ' : '') + job.what];
+      const tip = [(job.kind === 'command' ? '$ ' : '') + task];
       if (job.lastStatus) tip.push('Last run: ' + job.lastStatus);
-      li.title = tip.join('\n');
+      li.dataset.tooltip = tip.join('\n\n');
       scheduleList.appendChild(li);
     }
     applyMetaSectionLayout();
@@ -10834,9 +10849,31 @@
       target.id === 'task-panel-text',
     );
     const rect = target.getBoundingClientRect();
-    tooltipEl.style.left = rect.left + 'px';
-    tooltipEl.style.top = rect.bottom + 4 + 'px';
+    // Measure at the origin first: a fixed box placed near the right
+    // edge shrinks to the room left of that edge (a right-sidebar
+    // tooltip came out one word wide), so its natural size is only
+    // known at left 0.
+    tooltipEl.style.left = '0px';
+    tooltipEl.style.top = '0px';
     tooltipEl.classList.add('visible');
+    const tip = tooltipEl.getBoundingClientRect();
+    // Below the target, left-aligned with it; kept on screen: a box
+    // past the right edge slides left, and a tall one (a scheduled
+    // job's whole prompt) below a row at the bottom of a sidebar goes
+    // above the row instead, or, when it fits on neither side, slides
+    // up to end at the bottom edge (the CSS caps its height at the
+    // viewport, so the top never goes negative).
+    let left = rect.left;
+    let top = rect.bottom + 4;
+    if (left + tip.width > window.innerWidth)
+      left = Math.max(0, window.innerWidth - tip.width - 8);
+    if (top + tip.height > window.innerHeight) {
+      const above = rect.top - 4 - tip.height;
+      top =
+        above >= 0 ? above : Math.max(0, window.innerHeight - tip.height - 8);
+    }
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
   }
   function hideTooltip() {
     clearTimeout(tooltipTimer);
