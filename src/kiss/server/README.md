@@ -794,7 +794,8 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` (`/autoroute`, `/merge`, `/sh`, `/skillopt`,
-  `/task_update`, `/write_paper`, `/review_paper`, `/git_extract_knowledge`; `dummy_sea.py`, an SEA with no getters, is what
+  `/task_update`, `/write_paper`, `/review_paper`, `/git_extract_knowledge`,
+  `/remember`, `/forget`; `dummy_sea.py`, an SEA with no getters, is what
   `run_agent` runs when its `agent` argument is empty) have the
   lowest precedence, so a `SEAS.md` folder can shadow them.  Syntax,
   precedence and the dispatch flow are
