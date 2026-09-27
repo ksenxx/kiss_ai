@@ -40,7 +40,7 @@ import pytest
 
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
-from kiss.agents.third_party_agents import ask_sea
+from kiss.agents.third_party_agents.ask import ask_sea
 from kiss.core.brand import BRAND, render_brand
 
 # The literal placeholder the /ask flow substitutes at dispatch time.
@@ -149,7 +149,8 @@ def test_ask_sea_lives_in_third_party_agents_package() -> None:
     were somewhere else the /ask command would silently disappear.
     """
     module_path = Path(ask_sea.__file__).resolve()
-    assert module_path.parent.name == "third_party_agents"
+    assert module_path.parent.name == "ask"
+    assert module_path.parents[1].name == "third_party_agents"
     assert module_path.name == "ask_sea.py"
 
 
@@ -203,7 +204,8 @@ def test_rewriter_leaves_unrelated_slash_commands_alone(
     """
     folder = tmp_path / "user-seas"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "notify_sea.py").write_text("# stub\n", encoding="utf-8")
+    (folder / "notify").mkdir()
+    (folder / "notify" / "notify_sea.py").write_text("# stub\n", encoding="utf-8")
     from kiss.core.config import kiss_home
 
     kiss_home().mkdir(parents=True, exist_ok=True)

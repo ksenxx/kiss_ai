@@ -10,7 +10,7 @@ passes :func:`resolve_merge_conflict` to
 as its ``conflict_resolver``; ``_do_merge`` calls it after the squash
 merge returned :attr:`~kiss.agents.sorcar.git_worktree.MergeResult.CONFLICT`.
 The branch is re-applied with the conflict markers left in the tree,
-:mod:`kiss.agents.seas.merge_sea` runs in-process as a sub-agent of the
+:mod:`kiss.agents.seas.merge.merge_sea` runs in-process as a sub-agent of the
 task whose merge failed (so the run shows up as a nested tab and its
 spend is attributed to that task through
 :func:`~kiss.agents.sorcar.sorcar_agent._attribute_sub_usage`), and the
@@ -29,7 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.seas import merge_sea
+from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
 
 logger = logging.getLogger(__name__)

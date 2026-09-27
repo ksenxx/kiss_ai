@@ -35,10 +35,15 @@ from kiss.agents.sorcar.git_worktree import (
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
+    _add_task,
     _append_chat_event,
     _load_last_model,
     _save_task_extra,
     _save_task_result,
+)
+from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_commands import (
+    help_text_if_command as _sea_help_text,
 )
 from kiss.agents.sorcar.sea_commands import (
     rewrite_prompt_if_command as _rewrite_sea_command_prompt,
@@ -1564,6 +1569,30 @@ class _TaskRunnerMixin:
             agent._chat_id = state.chat_id
         state.chat_id = getattr(agent, "chat_id", "") or state.chat_id
 
+        # ``/xxx help`` never runs the SEA (and needs no model): the
+        # task's result is the SEA's ``description()`` text, or the
+        # diagnostic when the script is broken or lacks the getter.
+        # Returning here is safe — ``_run_task``'s ``finally`` still
+        # broadcasts ``status running:False``.
+        if isinstance(prompt, str) and prompt:
+            try:
+                help_text = _sea_help_text(prompt)
+                help_ok = True
+            except SeaScriptError as exc:
+                help_text, help_ok = str(exc), False
+            if help_text is not None:
+                self._finish_sea_help_task(
+                    state,
+                    prompt=prompt,
+                    text=help_text,
+                    success=help_ok,
+                    tab_id=tab_id,
+                    model=str(model or ""),
+                    work_dir=str(work_dir or ""),
+                    start_ms=start_ms or int(time.time() * 1000),
+                )
+                return
+
         available = get_available_models()
         if not available or (model and model not in available):
             no_model_msg = "No model available.  Set at least one API key in the environment."
@@ -2694,6 +2723,78 @@ class _TaskRunnerMixin:
             # subtask's id, so this one's retired recording would leak.
             if cleanup and task_id is not None:
                 self.printer.cleanup_task(task_id)
+
+    def _finish_sea_help_task(
+        self,
+        state: AgentState,
+        *,
+        prompt: str,
+        text: str,
+        success: bool,
+        tab_id: str,
+        model: str,
+        work_dir: str,
+        start_ms: int,
+    ) -> None:
+        """Record and answer a ``/xxx help`` prompt without running an agent.
+
+        The exchange gets a real ``task_history`` row in the tab's chat
+        (prompt, ``result`` and ``task_done`` chat events plus the usual
+        ``extra`` payload with zero usage) so it survives a reload and
+        shows up in the history sidebar like any other task, and the
+        launcher tab receives the terminal ``result`` event addressed
+        by task id — the printer records and persists it under that
+        row (see :meth:`JsonPrinter._keep_tab_stamped_task_event`).
+
+        Args:
+            state: The launching tab's agent state; its ``chat_id`` is
+                continued (or created) by the new row.
+            prompt: The raw ``/xxx help`` prompt.
+            text: The SEA's ``description()`` text, or the diagnostic.
+            success: ``False`` when *text* is a ``SeaScriptError`` message.
+            tab_id: The launcher tab id.
+            model: The model the run would have used (for the row's extra).
+            work_dir: The run's working directory (for the row's extra).
+            start_ms: The run's start timestamp (ms since epoch).
+        """
+        from kiss.core._version import __version__
+
+        end_ms = int(time.time() * 1000)
+        extra = build_task_extra_payload(
+            model=model,
+            work_dir=work_dir,
+            version=__version__,
+            tokens=0,
+            cost=0.0,
+            steps=0,
+            is_parallel=state.use_parallel,
+            is_worktree=False,
+            auto_commit_mode=state.auto_commit_mode,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
+        agent = state.agent
+        if agent is not None:
+            agent._chat_id = state.chat_id
+        _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
+        result: dict[str, Any] = {
+            "type": "result",
+            "text": text,
+            "success": success,
+            "total_tokens": 0,
+            "cost": "$0.0000",
+            "step_count": 0,
+            "taskId": str(task_id),
+            "tabId": tab_id,
+        }
+        self.printer.broadcast(result)
+        _append_chat_event(
+            {"type": "task_done"} if success else {"type": "task_error"},
+            task_id=task_id,
+        )
+        _save_task_result(result=text, task_id=task_id, task=prompt)
+        self.printer.cleanup_task(str(task_id))
 
     def _broadcast_failure_result(
         self,

@@ -30,9 +30,14 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import git_extract_knowledge_sea as sea
-from kiss.agents.seas import git_knowledge_index as index
-from kiss.agents.seas.git_knowledge_store import KINDS, Block, KnowledgeStore, query_tokens
+from kiss.agents.seas.git_extract_knowledge import git_extract_knowledge_sea as sea
+from kiss.agents.seas.git_extract_knowledge import git_knowledge_index as index
+from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
+    KINDS,
+    Block,
+    KnowledgeStore,
+    query_tokens,
+)
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import cron_job, load_jobs

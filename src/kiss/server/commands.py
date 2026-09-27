@@ -30,6 +30,10 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
 )
+from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_commands import (
+    help_text_if_command as sea_help_text,
+)
 from kiss.agents.sorcar.sea_commands import (
     list_commands as list_sea_commands,
 )
@@ -1368,7 +1372,7 @@ class _CommandsMixin:
         """
         from kiss.agents.sorcar import daemon_client, sea_commands
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
-        from kiss.agents.third_party_agents import ask_sea
+        from kiss.agents.third_party_agents.ask import ask_sea
 
         sea_path = sea_commands.get_command("ask")
         if sea_path is None:
@@ -1574,6 +1578,22 @@ class _CommandsMixin:
             # in the running task's history stream, right where the
             # answer will land.
             self._echo_injected_prompt(tab_id, prompt, owner_task)
+            if ask_question.lower() == "help":
+                # ``/ask help`` is the SEA's ``description()``, like
+                # every ``/xxx help`` — answered here, no dispatch.
+                try:
+                    help_text, help_ok = sea_help_text(prompt), True
+                except SeaScriptError as exc:
+                    help_text, help_ok = str(exc), False
+                if help_text is not None:
+                    self._broadcast_ask_answer(
+                        tab_id=tab_id,
+                        owner_task_id=owner_task,
+                        question=ask_question,
+                        text=help_text,
+                        success=help_ok,
+                    )
+                    return
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,

@@ -1129,7 +1129,7 @@ class ServerApi:
         panels (editor-tabs mode, whose reports fill the secondary
         sidebar's Task Info view) poll this command while the visible
         tab's task runs: the info subpanel shows what the
-        :mod:`~kiss.agents.seas.task_update_sea` agent reports about that
+        :mod:`~kiss.agents.seas.task_update.task_update_sea` agent reports about that
         task.  The first poll for a task runs the agent (as a sub-agent
         of the task, in the task's chat; its cost counts towards the
         task), later polls re-run it every 10 minutes, and a poll with

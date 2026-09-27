@@ -48,7 +48,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import daemon_client, sea_commands
-from kiss.agents.third_party_agents import ask_sea
+from kiss.agents.third_party_agents.ask import ask_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
@@ -214,6 +214,45 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "tabId": "tab-1",
         "taskId": "task-abc",
     }]
+
+
+def test_ask_help_answers_with_the_description_without_dispatch() -> None:
+    """``/ask help`` on a live tab is answered with ``ask_sea.description()``.
+
+    Like every ``/xxx help``, it never launches the answering agent:
+    the echo and ONE ``ask_answer`` carrying the bundled ``ask`` SEA's
+    description (stamped with the owner task) are broadcast, and the
+    steering queue stays empty.  ``/ask help me`` is a real question
+    and is dispatched as before.
+    """
+    from kiss.agents.third_party_agents.ask import ask_sea
+
+    server, events = _make_server()
+    _register_running_task("task-abc", "tab-1", chat_id="chat-1")
+    calls = _install_dispatch_capture(server)
+    sea_commands.refresh_registry()
+
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": "/ask HELP"})
+
+    st = agent_state.find_by_tab("tab-1")
+    assert st is not None
+    assert st.pending_user_messages == []
+    assert calls == []
+    assert [e for e in events if e.get("type") == "prompt"] == [{
+        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "taskId": "task-abc",
+    }]
+    assert [e for e in events if e.get("type") == "ask_answer"] == [{
+        "type": "ask_answer",
+        "question": "HELP",
+        "text": ask_sea.description(),
+        "success": True,
+        "tabId": "tab-1",
+        "taskId": "task-abc",
+    }]
+
+    # ``/ask help me`` is a real question: dispatched as before.
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": "/ask help me"})
+    assert [c["question"] for c in calls] == ["help me"]
 
 
 def test_non_ask_message_still_queues_and_does_not_dispatch() -> None:

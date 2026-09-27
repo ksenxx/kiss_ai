@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kiss.agents.third_party_agents import ask_sea
+from kiss.agents.third_party_agents.ask import ask_sea
 from kiss.core import brand as brand_module
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.brand import (

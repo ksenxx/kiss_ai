@@ -1,0 +1,359 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Tlon/Urbit Agent — channel agent with Tlon/Urbit Eyre HTTP tools.
+
+Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
+in ``~/.kiss/third_party_agents/tlon/config.json``.
+
+Usage::
+
+    agent = TlonAgent()
+    agent.run(prompt_template="List my Urbit groups")
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from kiss.agents.third_party_agents._channel_agent_utils import (
+    BaseChannelAgent,
+    ChannelConfig,
+    ToolMethodBackend,
+    channel_main,
+)
+
+_TLON_DIR = Path.home() / ".kiss" / "third_party_agents" / "tlon"
+_config = ChannelConfig(_TLON_DIR, ("ship_url", "code"))
+
+
+def description() -> str:
+    """Return the one-sentence help text shown by ``/tlon help``."""
+    return (
+        "Lists groups and channels, reads and posts messages, reads profiles and runs pokes "
+        "and scries on an Urbit ship (Tlon) through its Eyre HTTP server; use it with "
+        '`run_agent(agent="tlon", task="...")` or the `kiss-tlon -t \'...\'` CLI.'
+    )
+
+
+class TlonChannelBackend(ToolMethodBackend):
+    """Channel backend for Tlon/Urbit Eyre HTTP."""
+
+    def __init__(self) -> None:
+        self._ship_url: str = ""
+        self._ship: str = ""
+        self._session: requests.Session = requests.Session()
+        self._channel_uid: str = ""
+        self._poke_id: int = 0
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Authenticate with Urbit ship."""
+        cfg = _config.load()
+        if not cfg:  # pragma: no branch
+            self._connection_info = "No Tlon config found."
+            return False
+        self._ship_url = cfg["ship_url"]
+        self._ship = cfg.get("ship", "").strip().lstrip("~")
+        try:
+            resp = self._session.post(
+                f"{self._ship_url}/~/login",
+                data={"password": cfg["code"]},
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):  # pragma: no branch
+                self._connection_info = f"Connected to {self._ship_url}"
+                return True
+            self._connection_info = f"Tlon login failed: {resp.status_code}"
+            return False
+        except Exception as e:
+            self._connection_info = f"Tlon connection failed: {e}"
+            return False
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Return no messages: Tlon inbound polling is unsupported.
+
+        Receiving would require an Eyre SSE subscription feeding an
+        event queue, which this outbound-only adapter does not
+        implement, so poll mode always yields zero messages.
+        """
+        return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a Tlon/Urbit poke."""
+        parts = channel_id.split("/", 2)
+        if len(parts) >= 3:  # pragma: no branch
+            group_path, channel_name = "/".join(parts[:2]), parts[2]
+            self.post_message(group_path, channel_name, text)
+
+    def list_groups(self) -> str:
+        """List Urbit groups.
+
+        Returns:
+            JSON string with group list.
+        """
+        try:
+            result = self.scry("groups", "/groups/light")
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_third_party_agents(self, group_path: str) -> str:
+        """List channels in an Urbit group.
+
+        Args:
+            group_path: Group path (e.g. "~sampel/my-group").
+
+        Returns:
+            JSON string with channel list.
+        """
+        try:
+            result = self.scry("channels", f"/channels/{group_path}/light")
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_messages(self, group_path: str, channel_name: str, count: int = 20) -> str:
+        """Get recent messages from a Tlon channel.
+
+        Args:
+            group_path: Group path.
+            channel_name: Channel name within the group.
+            count: Number of messages to retrieve. Default: 20.
+
+        Returns:
+            JSON string with messages.
+        """
+        try:
+            path = f"/channel/{group_path}/{channel_name}/posts/newest/{count}/15"
+            result = self.scry("channels", path)
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def post_message(self, group_path: str, channel_name: str, content: str) -> str:
+        """Post a message to a Tlon channel.
+
+        Args:
+            group_path: Group path (e.g. "~sampel/my-group").
+            channel_name: Channel name within the group.
+            content: Message content text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        try:
+            result = self.poke(
+                "channels",
+                "channel-action",
+                json.dumps(
+                    {
+                        "channel-action": {
+                            "post": {
+                                "group": group_path,
+                                "channel": channel_name,
+                                "action": {
+                                    "add": {
+                                        "memo": {
+                                            "content": [{"inline": [content]}],
+                                            "author": f"~{self._ship}",
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                ),
+            )
+            return result
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_profile(self) -> str:
+        """Get the current ship's profile.
+
+        Returns:
+            JSON string with profile info.
+        """
+        try:
+            return self.scry("contacts", "/profile")
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def poke(self, app: str, mark: str, json_body: str) -> str:
+        """Send a poke to an Urbit app via the Eyre channel protocol.
+
+        Issues a PUT to ``/~/channel/{uid}`` with a JSON array containing a
+        single poke action addressed to the configured ship.
+
+        Args:
+            app: Gall agent name (e.g. "groups").
+            mark: Mark name (e.g. "groups-action").
+            json_body: JSON string of the poke body.
+
+        Returns:
+            JSON string with ok status.
+
+        Raises:
+            RuntimeError: If no ship name is configured.
+        """
+        if not self._ship:
+            raise RuntimeError(
+                "Tlon ship name not configured. Re-run authenticate_tlon with the "
+                "ship parameter (e.g. '~sampel-palnet')."
+            )
+        if not self._channel_uid:
+            self._channel_uid = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
+        self._poke_id += 1
+        try:
+            resp = self._session.put(
+                f"{self._ship_url}/~/channel/{self._channel_uid}",
+                json=[
+                    {
+                        "id": self._poke_id,
+                        "action": "poke",
+                        "ship": self._ship,
+                        "app": app,
+                        "mark": mark,
+                        "json": json.loads(json_body),
+                    }
+                ],
+                timeout=30,
+            )
+            return json.dumps({"ok": resp.status_code in (200, 204)})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def scry(self, app: str, path: str) -> str:
+        """Perform a scry request on an Urbit app.
+
+        Args:
+            app: Gall agent name.
+            path: Scry path (starting with /).
+
+        Returns:
+            JSON string with scry result.
+        """
+        try:
+            resp = self._session.get(
+                f"{self._ship_url}/~/scry/{app}{path}.json",
+                timeout=30,
+            )
+            if resp.status_code == 200:  # pragma: no branch
+                return json.dumps({"ok": True, "data": resp.json()}, indent=2)[:8000]
+            return json.dumps({"ok": False, "error": f"HTTP {resp.status_code}"})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+
+class TlonAgent(BaseChannelAgent):
+    """Channel agent with Tlon/Urbit Eyre HTTP tools."""
+
+    def __init__(self) -> None:
+        super().__init__("Tlon Agent")
+        self._backend = TlonChannelBackend()
+        cfg = _config.load()
+        if cfg:  # pragma: no branch
+            self._backend._ship_url = cfg["ship_url"]
+            self._backend._ship = cfg.get("ship", "").strip().lstrip("~")
+
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._ship_url)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
+        agent = self
+
+        def check_tlon_auth() -> str:
+            """Check if Tlon/Urbit is configured.
+
+            Returns:
+                Configuration status or instructions.
+            """
+            if not agent._backend._ship_url:  # pragma: no branch
+                return (
+                    "Not configured for Tlon/Urbit. "
+                    "Use authenticate_tlon(ship_url=..., code=...) to configure.\n"
+                    "You need your ship URL (e.g. http://localhost:8080) and "
+                    "the access code from running +code in your Urbit dojo terminal."
+                )
+            return json.dumps({"ok": True, "ship_url": agent._backend._ship_url})
+
+        def authenticate_tlon(ship_url: str, code: str, ship: str = "") -> str:
+            """Configure Tlon/Urbit connection.
+
+            Args:
+                ship_url: URL of your Urbit ship (e.g. "http://localhost:8080").
+                code: Urbit access code from running +code in the terminal.
+                ship: Your ship name (e.g. "~sampel-palnet"). Required for
+                    sending pokes/messages.
+
+            Returns:
+                Authentication result or error message.
+            """
+            for val, name in [(ship_url, "ship_url"), (code, "code")]:  # pragma: no branch
+                if not val.strip():  # pragma: no branch
+                    return f"{name} cannot be empty."
+            agent._backend._ship_url = ship_url.strip().rstrip("/")
+            agent._backend._ship = ship.strip().lstrip("~")
+            try:
+                resp = agent._backend._session.post(
+                    f"{agent._backend._ship_url}/~/login",
+                    data={"password": code.strip()},
+                    timeout=10,
+                )
+                if resp.status_code in (200, 204):  # pragma: no branch
+                    _config.save(
+                        {
+                            "ship_url": ship_url.strip().rstrip("/"),
+                            "code": code.strip(),
+                            "ship": ship.strip().lstrip("~"),
+                        }
+                    )
+                    return json.dumps({"ok": True, "message": "Tlon configured."})
+                return json.dumps({"ok": False, "error": f"Login failed: {resp.status_code}"})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_tlon_auth() -> str:
+            """Clear the stored Tlon configuration.
+
+            Returns:
+                Status message.
+            """
+            _config.clear()
+            agent._backend._ship_url = ""
+            agent._backend._ship = ""
+            return "Tlon configuration cleared."
+
+        return [check_tlon_auth, authenticate_tlon, clear_tlon_auth]
+
+
+def main() -> None:
+    """Run the TlonAgent from the command line with chat persistence."""
+    channel_main(TlonAgent, "kiss-tlon")
+
+
+def tools() -> list:
+    """Return the Tlon/Urbit channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return TlonAgent()._get_tools()
+
+
+if __name__ == "__main__":
+    main()

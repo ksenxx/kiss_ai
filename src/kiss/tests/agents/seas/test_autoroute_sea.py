@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import autoroute_sea
+from kiss.agents.seas.autoroute import autoroute_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models

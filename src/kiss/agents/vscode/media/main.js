@@ -5226,7 +5226,7 @@
   // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
   // TASK UPDATE: what the task-update agent
-  // (src/kiss/agents/seas/task_update_sea.py) reports the task running
+  // (src/kiss/agents/seas/task_update/task_update_sea.py) reports the task running
   // in the visible tab has done so far and its partial results.  The
   // daemon owns the report (kiss.server.task_update): it runs the agent
   // when the tab's task has no report yet, again every 10 minutes while

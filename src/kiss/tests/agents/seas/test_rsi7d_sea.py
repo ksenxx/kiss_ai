@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the bundled rsi7d agent (:mod:`kiss.agents.seas.rsi7d_sea`).
+"""End-to-end tests of the bundled rsi7d agent (:mod:`kiss.agents.seas.rsi7d.rsi7d_sea`).
 
 The mining tools run against tasks persisted in the test session's real
 SQLite history (``KISS_HOME`` is a temporary directory, see
@@ -27,8 +27,8 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import autoroute_sea
-from kiss.agents.seas import rsi7d_sea as sea
+from kiss.agents.seas.autoroute import autoroute_sea
+from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
@@ -45,7 +45,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
 )
 
 _SEA_PATH = Path(sea.__file__).resolve()
-_SEAS_DIR = _SEA_PATH.parent
+_SEAS_DIR = _SEA_PATH.parents[1]
 
 _PLAIN_SEA = '''"""Demo SEA with a plain prompt constant."""
 
@@ -102,13 +102,15 @@ def tools() -> list:
 def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A fake KISS checkout in *tmp_path* that ``_seas_dir`` resolves through the cwd."""
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
-    seas.mkdir(parents=True)
-    shutil.copy(_SEA_PATH, seas / "rsi7d_sea.py")
-    shutil.copy(_SEAS_DIR / "autoroute_sea.py", seas / "autoroute_sea.py")
-    (seas / "demo_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
-    (seas / "fdemo_sea.py").write_text(_FSTRING_SEA, encoding="utf-8")
-    (seas / "tdemo_sea.py").write_text(_TEMPLATE_SEA, encoding="utf-8")
-    (seas / "noprompt_sea.py").write_text(_NOPROMPT_SEA, encoding="utf-8")
+    for name in ("rsi7d", "autoroute", "demo", "fdemo", "tdemo", "noprompt"):
+        (seas / name).mkdir(parents=True)
+    shutil.copy(_SEA_PATH, seas / "rsi7d" / "rsi7d_sea.py")
+    autoroute = _SEAS_DIR / "autoroute" / "autoroute_sea.py"
+    shutil.copy(autoroute, seas / "autoroute" / "autoroute_sea.py")
+    (seas / "demo" / "demo_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
+    (seas / "fdemo" / "fdemo_sea.py").write_text(_FSTRING_SEA, encoding="utf-8")
+    (seas / "tdemo" / "tdemo_sea.py").write_text(_TEMPLATE_SEA, encoding="utf-8")
+    (seas / "noprompt" / "noprompt_sea.py").write_text(_NOPROMPT_SEA, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     return seas
 
@@ -199,7 +201,7 @@ def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
 def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -> None:
     """Bundled SEAs are editable with their prompt shape; registered foreign SEAs are not."""
     rows = {r["name"]: r for r in json.loads(sea.indexed_seas())}
-    assert rows["demo"]["editable_path"] == str(checkout / "demo_sea.py")
+    assert rows["demo"]["editable_path"] == str(checkout / "demo" / "demo_sea.py")
     assert (rows["demo"]["prompt_getter"], rows["demo"]["prompt_constant"]) == (
         "system_prompt",
         "SYSTEM_PROMPT",
@@ -225,7 +227,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     sub-agent child (no ``agent``) is ignored.  A side-channel child whose
     system prompt starts with ``fdemo``'s prompt is matched by signature.
     """
-    agent_path = str(checkout / "demo_sea.py")
+    agent_path = str(checkout / "demo" / "demo_sea.py")
     parent = _persist(
         "/demo do the thing",
         [
@@ -252,7 +254,8 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
         model="model-b",
     )
     _persist("plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5)
-    fdemo_prompt = sea._execute_sea(checkout / "fdemo_sea.py")["append_to_system_prompt"]()
+    fdemo = checkout / "fdemo" / "fdemo_sea.py"
+    fdemo_prompt = sea._execute_sea(fdemo)["append_to_system_prompt"]()
     side = _persist(
         "What have the task done so far?",
         [
@@ -379,7 +382,7 @@ def test_sea_findings_aggregates_signals_over_a_seas_runs(checkout: Path) -> Non
     Dispatches ``noprompt`` (no other test does, and it has no prompt
     signature) so the shared session history cannot add runs.
     """
-    agent_path = str(checkout / "noprompt_sea.py")
+    agent_path = str(checkout / "noprompt" / "noprompt_sea.py")
     parent = _persist(
         "/noprompt twice", [_dispatch(agent_path, "run 1"), _dispatch(agent_path, "run 2")]
     )
@@ -491,17 +494,18 @@ def test_patch_sea_prompt_edits_plain_constants_through_the_gate(checkout: Path)
     """Appending and replacing inside a plain constant rewrites the literal; the SEA still loads."""
     before = sea.sea_prompt("demo")
     assert before.startswith(
-        f"# {checkout / 'demo_sea.py'}\n# system_prompt() returns SYSTEM_PROMPT, a plain string"
+        f"# {checkout / 'demo' / 'demo_sea.py'}\n"
+        "# system_prompt() returns SYSTEM_PROMPT, a plain string"
     )
     section = "## Lessons from recent runs (rsi7d)\n- Batch independent greps into one Bash call."
     report = sea.patch_sea_prompt("demo", "", section)
     assert report.startswith("Patched SYSTEM_PROMPT of") and "+3 lines" in report
-    prompt = sea._execute_sea(checkout / "demo_sea.py")["system_prompt"]()
+    prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
     assert prompt.endswith("Never guess: read the file before editing it. \n\n" + section + "\n")
     assert sea.patch_sea_prompt(
         "demo", "one Bash call.", "one Bash call, never one per grep."
     ).startswith("Patched")
-    prompt = sea._execute_sea(checkout / "demo_sea.py")["system_prompt"]()
+    prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
     assert "one Bash call, never one per grep." in prompt
     assert sea.sea_prompt("demo").endswith(prompt)
     assert (
@@ -528,7 +532,7 @@ def test_patch_sea_prompt_edits_plain_constants_through_the_gate(checkout: Path)
 
 def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Path) -> None:
     """An f-string prompt is edited in its source literal; new text can never add a placeholder."""
-    path = checkout / "fdemo_sea.py"
+    path = checkout / "fdemo" / "fdemo_sea.py"
     shown = sea.sea_prompt("fdemo")
     assert "an f-string: the text below is its source literal" in shown
     assert 'f"""\\\n# Demo f-string agent' in shown
@@ -570,14 +574,15 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
     )
     assert path.read_text(encoding="utf-8") == ok_source
     # A single-quoted f-string takes an appended paragraph too.
-    (checkout / "sdemo_sea.py").write_text(
+    (checkout / "sdemo").mkdir()
+    (checkout / "sdemo" / "sdemo_sea.py").write_text(
         'GATE = "make test"\nSYSTEM_PROMPT = f"Run {GATE}. Be brief."\n\n\n'
         'def system_prompt() -> str:\n    """Prompt."""\n    return SYSTEM_PROMPT\n',
         encoding="utf-8",
     )
     assert sea.patch_sea_prompt("sdemo", "", "- Cite files by path.").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "sdemo_sea.py")["system_prompt"]()
+        sea._execute_sea(checkout / "sdemo" / "sdemo_sea.py")["system_prompt"]()
         == "Run make test. Be brief.\n\n- Cite files by path.\n"
     )
     # Replacing text that lives in the appended plain segment must not double
@@ -585,7 +590,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
     assert sea.patch_sea_prompt("sdemo", "files by path", "files {by} path").startswith("Patched")
     assert sea.patch_sea_prompt("sdemo", "Be brief", "Be {brief}").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "sdemo_sea.py")["system_prompt"]()
+        sea._execute_sea(checkout / "sdemo" / "sdemo_sea.py")["system_prompt"]()
         == "Run make test. Be {brief}.\n\n- Cite files {by} path.\n"
     )
     joined = sea.sea_prompt("sdemo")
@@ -608,12 +613,13 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
     )
     assert sea.patch_sea_prompt("tdemo", "Be brief.", "Be very brief.").startswith("Patched")
     assert (
-        sea._execute_sea(checkout / "tdemo_sea.py")["system_prompt"]()
+        sea._execute_sea(checkout / "tdemo" / "tdemo_sea.py")["system_prompt"]()
         == "You help {user}. Answer in {language}. Be very brief."
     )
     # A SEA whose prompt getter raises when the prompt contains a marker
     # word loads as a module but fails as a SEA: the file must be restored.
-    fragile = checkout / "fragile_sea.py"
+    fragile = checkout / "fragile" / "fragile_sea.py"
+    fragile.parent.mkdir()
     fragile.write_text(
         'SYSTEM_PROMPT = "Be good."\n\n\n'
         'def system_prompt() -> str:\n    """Prompt."""\n'
@@ -631,7 +637,7 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
 
 def test_write_autoroute_evidence_replaces_the_marker_block(checkout: Path) -> None:
     """The evidence block is replaced in place, stamped, and never duplicated."""
-    path = checkout / "autoroute_sea.py"
+    path = checkout / "autoroute" / "autoroute_sea.py"
     assert (
         sea.EVIDENCE_START in autoroute_sea.SYSTEM_PROMPT
         and sea.EVIDENCE_END in autoroute_sea.SYSTEM_PROMPT
@@ -722,7 +728,7 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     """Outside a KISS checkout (no task, no ``src/kiss/agents/seas`` in cwd) the SEA's dir wins."""
     monkeypatch.chdir(tmp_path)
     assert sea._seas_dir() == _SEAS_DIR
-    assert sea._editable_path("sh") == _SEAS_DIR / "sh_sea.py"
+    assert sea._editable_path("sh") == _SEAS_DIR / "sh" / "sh_sea.py"
     assert sea._editable_path("no-such") is None
     signatures = sea._signatures()
     assert signatures["sh"] == ast.literal_eval(repr(signatures["sh"]))  # plain text
@@ -776,4 +782,5 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert '"name": "demo"' in str(listing["content"])
     patched = [m for m in agentic[2]["messages"] if m["role"] == "tool"][-1]
     assert str(patched["content"]).startswith("Patched SYSTEM_PROMPT of")
-    assert sea._execute_sea(checkout / "demo_sea.py")["system_prompt"]().endswith(section + "\n")
+    demo_prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
+    assert demo_prompt.endswith(section + "\n")

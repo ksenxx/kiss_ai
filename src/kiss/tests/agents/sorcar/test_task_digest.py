@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests of :mod:`kiss.agents.sorcar.task_digest` through the
-``/ask`` SEA's tools (:mod:`kiss.agents.third_party_agents.ask_sea`).
+``/ask`` SEA's tools (:mod:`kiss.agents.third_party_agents.ask.ask_sea`).
 
 Tasks are persisted in the test session's real SQLite history
 (``KISS_HOME`` is a temporary directory, see ``conftest.py``) and read
@@ -27,7 +27,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
-from kiss.agents.third_party_agents import ask_sea
+from kiss.agents.third_party_agents.ask import ask_sea
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,

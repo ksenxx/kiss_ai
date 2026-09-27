@@ -7867,7 +7867,7 @@ class RemoteAccessServer:
 
         Handles the ``getTaskUpdate`` command polled by ``media/main.js``
         for the info subpanel of the task-info panel: the subpanel shows
-        the report the :mod:`~kiss.agents.seas.task_update_sea` agent
+        the report the :mod:`~kiss.agents.seas.task_update.task_update_sea` agent
         wrote about the task RUNNING in the tab (:meth:`_tab_task_agent`),
         never a file the task left on disk.  :class:`TaskUpdateRunner`
         owns the reports: this poll makes it run the agent when the tab's

@@ -9,31 +9,31 @@
   "reportUnsupportedDunderAll": "none",
   "executionEnvironments": [
     {
-      "root": "src/kiss/agents/third_party_agents/feishu_sea.py",
+      "root": "src/kiss/agents/third_party_agents/feishu/feishu_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/line_sea.py",
+      "root": "src/kiss/agents/third_party_agents/line/line_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/matrix_sea.py",
+      "root": "src/kiss/agents/third_party_agents/matrix/matrix_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/mattermost_sea.py",
+      "root": "src/kiss/agents/third_party_agents/mattermost/mattermost_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/nostr_sea.py",
+      "root": "src/kiss/agents/third_party_agents/nostr/nostr_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/sms_sea.py",
+      "root": "src/kiss/agents/third_party_agents/sms/sms_sea.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/telegram_sea.py",
+      "root": "src/kiss/agents/third_party_agents/telegram/telegram_sea.py",
       "reportMissingImports": "none"
     },
     {
@@ -45,11 +45,11 @@
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/gmail_sea.py",
+      "root": "src/kiss/agents/third_party_agents/gmail/gmail_sea.py",
       "reportAttributeAccessIssue": "none"
     },
     {
-      "root": "src/kiss/agents/third_party_agents/googlechat_sea.py",
+      "root": "src/kiss/agents/third_party_agents/googlechat/googlechat_sea.py",
       "reportAttributeAccessIssue": "none"
     }
   ]

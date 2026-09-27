@@ -249,7 +249,9 @@ class TestAuthStatusProbe(_StoreTestCase):
         import kiss.agents.third_party_agents as pkg
 
         with tempfile.TemporaryDirectory() as extra:
-            Path(extra, "zz_empty_probe_sea.py").write_text(
+            Path(extra, "zz_empty_probe").mkdir()
+            Path(extra, "zz_empty_probe", "__init__.py").write_text("")
+            Path(extra, "zz_empty_probe", "zz_empty_probe_sea.py").write_text(
                 '"""A channel module that defines no agent."""\n'
             )
             pkg.__path__.append(extra)

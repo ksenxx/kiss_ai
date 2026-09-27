@@ -4,12 +4,17 @@
 # add your name here
 """Slash-command registry for Sorcar Extension Agents (SEAs).
 
-Every ``*_sea.py`` script visible to the daemon is exposed as a chat
-command named ``/<stem>`` (stem = filename minus ``_sea.py``).  When a
-user submits a prompt that starts with ``/xxx`` — optionally followed
-by whitespace and free-form text — the daemon rewrites the prompt so
-the agent immediately calls ``run_agent`` with the absolute path of
-the resolved ``xxx_sea.py`` and the trailing text as the sub-task.
+A SEA named ``xxx`` is a folder ``xxx/`` that contains the script
+``xxx_sea.py`` plus whatever helper modules and data files the SEA
+needs.  Every such folder visible to the daemon is exposed as a chat
+command named after the folder: ``/xxx``.  When a user submits a
+prompt that starts with ``/xxx`` — optionally followed by whitespace
+and free-form text — the daemon rewrites the prompt so the agent
+immediately calls ``run_agent`` with the absolute path of the resolved
+``xxx/xxx_sea.py`` and the trailing text as the sub-task.  The special
+prompt ``/xxx help`` does not run the SEA: the daemon answers with the
+return value of the script's mandatory ``description()`` function (see
+:func:`help_text_if_command`).
 
 The registry is built from three sources, in decreasing precedence:
 
@@ -29,7 +34,7 @@ The registry is built from three sources, in decreasing precedence:
 The registry is refreshed lazily on every lookup and, in the daemon,
 proactively by a background polling watcher (see
 :func:`start_registry_watcher`) so edits to ``SEAS.md`` — or the
-appearance/removal of ``*_sea.py`` files in any of its folders — take
+appearance/removal of SEA folders in any of its folders — take
 effect while the daemon is running.
 
 Locking: two module locks, always acquired in the order
@@ -143,44 +148,59 @@ def _seas_dir() -> Path | None:
     return _package_dir("kiss.agents.seas")
 
 
+def sea_script_in(sea_dir: Path) -> Path:
+    """Return the path of the SEA script that *sea_dir* must contain.
+
+    Under the folder convention a SEA named ``xxx`` lives in a folder
+    ``xxx/`` together with its helper modules and data files, and its
+    entry script is ``xxx/xxx_sea.py``.
+
+    Args:
+        sea_dir: The SEA's folder; its name is the command name.
+
+    Returns:
+        ``sea_dir / "<folder name>_sea.py"`` (not checked for existence).
+    """
+    return sea_dir / f"{sea_dir.name}{_SEA_SUFFIX}"
+
+
 def _scan_folder(folder: Path) -> dict[str, Path]:
     """Return ``{command_name: absolute_path}`` for every SEA in *folder*.
 
-    Silently skips folders that are missing, unreadable, or not a
-    directory: a stale ``SEAS.md`` entry must not break the daemon.
+    A SEA is a sub-folder ``xxx/`` of *folder* that contains the script
+    ``xxx_sea.py`` (see :func:`sea_script_in`); the sub-folder's name is
+    the command name.  Loose ``*_sea.py`` files directly inside
+    *folder* are NOT commands.  Silently skips folders that are
+    missing, unreadable, or not a directory: a stale ``SEAS.md`` entry
+    must not break the daemon.
 
     Args:
         folder: The directory to scan.
 
     Returns:
-        Mapping from command name (filename minus ``_sea.py``) to the
-        absolute, resolved SEA-script path.  An underscore-prefixed
-        stem is a valid command (``_helper_sea.py`` becomes
-        ``/_helper``); only stems outside ``[A-Za-z0-9_-]`` are
-        skipped.
+        Mapping from command name (sub-folder name) to the absolute,
+        resolved SEA-script path.  An underscore-prefixed folder is a
+        valid command (``_helper/_helper_sea.py`` becomes ``/_helper``);
+        only names outside ``[A-Za-z0-9_-]`` are skipped.
     """
     out: dict[str, Path] = {}
     try:
         entries = list(folder.iterdir())
     except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
         return out
-    for path in entries:
-        name = path.name
-        if not name.endswith(_SEA_SUFFIX):
+    for sea_dir in entries:
+        command = sea_dir.name
+        # Reject folder names that would produce a command name outside
+        # the ``[A-Za-z0-9_-]`` alphabet the parser and the autocomplete
+        # accept — ``foo.bar/`` and ``space name/`` are silently skipped
+        # rather than surfacing as commands that cannot be typed.
+        if not _COMMAND_NAME_RE.match(command):
             continue
+        path = sea_script_in(sea_dir)
         try:
             if not path.is_file():
                 continue
         except OSError:
-            continue
-        stem = name[: -len(".py")]
-        command = stem[: -len("_sea")]
-        # Reject stems that would produce a command name outside the
-        # ``[A-Za-z0-9_-]`` alphabet the parser and the autocomplete
-        # accept — ``foo.bar_sea.py`` and ``space name_sea.py`` are
-        # silently skipped rather than surfacing as commands that
-        # cannot be typed.
-        if not command or not _COMMAND_NAME_RE.match(command):
             continue
         try:
             out[command] = path.resolve()
@@ -480,6 +500,72 @@ def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
             f"SEA {sea_path} failed while evaluating {getter}(): "
             f"{type(exc).__name__}: {exc}"
         ) from exc
+
+
+def sea_description(sea_path: Path) -> str:
+    """Return the ``description()`` text of the SEA at *sea_path*.
+
+    Every SEA must define a zero-argument ``description()`` returning
+    one sentence that says what the SEA does and how to use it; this
+    is the text ``/xxx help`` shows the user.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+
+    Returns:
+        The stripped, non-empty string ``description()`` returned.
+
+    Raises:
+        SeaScriptError: When the script fails to import, does not define
+            a callable ``description``, ``description()`` raises, or it
+            returns anything but a non-empty string.
+    """
+    try:
+        with _load_sea_module(sea_path) as module:
+            fn = getattr(module, "description", None)
+            if not callable(fn):
+                raise TypeError("description must be a zero-argument function")
+            text = fn()
+    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        raise SeaScriptError(
+            f"SEA {sea_path} failed while evaluating description(): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(text, str) or not text.strip():
+        raise SeaScriptError(
+            f"SEA {sea_path}: description() must return a non-empty "
+            f"string, got {type(text).__name__}"
+        )
+    return text.strip()
+
+
+def help_text_if_command(prompt: str) -> str | None:
+    """Return the SEA description when *prompt* is ``/xxx help``.
+
+    ``help`` (case-insensitive, nothing after it) is the one sub-task
+    every command reserves: instead of relaying it to the SEA, the
+    daemon answers with the return value of the SEA's ``description()``.
+
+    Args:
+        prompt: The raw user prompt (as submitted by the client).
+
+    Returns:
+        The description text when *prompt* is ``/xxx help`` for a
+        registered command ``xxx``, else ``None``.
+
+    Raises:
+        SeaScriptError: Propagated from :func:`sea_description` when the
+            SEA is broken or lacks ``description()``.
+    """
+    if not isinstance(prompt, str):
+        return None
+    parsed = _split_slash_command(prompt)
+    if parsed is None or parsed[1].lower() != "help":
+        return None
+    sea_path = get_command(parsed[0])
+    if sea_path is None:
+        return None
+    return sea_description(sea_path)
 
 
 def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
