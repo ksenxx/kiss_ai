@@ -19,14 +19,15 @@ CodexModel surfaces ``command_execution`` events.
 
 Claude Code is a full coding agent, so ``runs_task_to_completion``
 (inherited from :class:`~kiss.core.models.model.CLITextModel`) is True:
-:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task — with the
-KISS system prompt appended after
-:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER` — in one
+:class:`~kiss.core.kiss_agent.KISSAgent` hands it the whole task in one
 ``generate()`` call and returns its final output, instead of driving a
-turn-by-turn KISS tool loop.
+turn-by-turn KISS tool loop.  The KISS system prompt travels as a real
+system prompt through ``--append-system-prompt`` (unlike Codex, whose CLI
+has no such flag and gets it appended to the task after
+:data:`~kiss.core.models.model.CLI_SYSTEM_PROMPT_HEADER`).
 
 For direct (non-KISSAgent) KISS-level tool calling, tool descriptions are
-injected into the prompt and the model's text output is parsed for
+injected into that system prompt and the model's text output is parsed for
 tool-call JSON — the same approach used by
 :class:`kiss.core.models.codex_model.CodexModel` and for DeepSeek R1 in
 :mod:`kiss.core.models.openai_compatible_model`.
@@ -237,9 +238,9 @@ class ClaudeCodeModel(CLITextModel):
         Args:
             model_name: Full model name including ``cc/`` prefix (e.g. ``cc/opus``).
             model_config: Optional configuration. Recognised keys:
-                - ``system_instruction`` (str): Appended to the task prompt
-                  after ``CLI_SYSTEM_PROMPT_HEADER`` (the CLI keeps its own
-                  native system prompt).
+                - ``system_instruction`` (str): Passed to the CLI as
+                  ``--append-system-prompt`` (the CLI keeps its own native
+                  system prompt and appends this one).
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed text token.
             thinking_callback: Optional callback invoked with ``True`` when a
@@ -286,7 +287,25 @@ class ClaudeCodeModel(CLITextModel):
             "--verbose",
             "--include-partial-messages",
         ]
+        system_instruction = self.model_config.get("system_instruction")
+        if system_instruction:
+            args += ["--append-system-prompt", system_instruction]
         return args
+
+    def _build_prompt(self) -> str:
+        """Return the task text alone: the system instruction goes to the CLI.
+
+        ``claude --print`` accepts ``--append-system-prompt``, so KISS's
+        system prompt (and the KISS tool protocol on a tool-bearing turn)
+        is delivered as genuine system text by :meth:`_build_cli_args`
+        rather than embedded in the user prompt.  Claude models treat a
+        "system prompt" that arrives inside the user turn as a prompt
+        injection and refuse the plain-text ``tool_calls`` protocol.
+
+        Returns:
+            The task text (see :meth:`CLITextModel._task_text`).
+        """
+        return self._task_text()
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.

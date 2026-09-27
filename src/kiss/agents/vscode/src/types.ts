@@ -42,6 +42,59 @@ export interface TaskUpdateState {
 }
 
 /**
+ * One scheduled cron job in the right sidebar's Schedule subpanel (see
+ * cron_jobs_report in kiss/server/sidebar_panels.py).
+ */
+export interface CronJobRow {
+  id: string;
+  name: string;
+  /** The job's schedule expression (cron syntax or "every 30m"). */
+  schedule: string;
+  kind: 'prompt' | 'command';
+  /** The prompt or shell command the job runs. */
+  what: string;
+  enabled: boolean;
+  /** Whether a run of the job is in progress now. */
+  running: boolean;
+  /** Epoch ms of the next / last run, 0 when none. */
+  nextRunAt: number;
+  lastRunAt: number;
+  lastStatus: string;
+  workDir: string;
+}
+
+/**
+ * One third-party agent in the right sidebar's Apps subpanel (see
+ * kiss/agents/third_party_agents/auth_status.py).
+ */
+export interface AppStatusRow {
+  /** Channel name (`<name>_sea.py`), e.g. "slack". */
+  name: string;
+  /** Display name, e.g. "Slack". */
+  label: string;
+  /** Connected, not connected, or null when the check failed. */
+  authenticated: boolean | null;
+  /** Why the check failed, '' otherwise. */
+  error: string;
+}
+
+/**
+ * One cost/token/task-count sum in the right sidebar's Spend subpanel
+ * (see kiss/server/sidebar_panels.py spend_report): the all-time
+ * total, one calendar day (`date`), one model (`model`), or one model
+ * within one day.
+ */
+export interface SpendSum {
+  cost: number;
+  tokens: number;
+  tasks: number;
+  /** Local calendar day, "YYYY-MM-DD" (per-day sums only). */
+  date?: string;
+  /** The task rows' model column, "unknown" when empty (per-model sums only). */
+  model?: string;
+}
+
+/**
  * The task-info values a chat editor panel mirrors to the secondary
  * sidebar's Task Info view (editor-tabs mode): the display strings of
  * the panel's own #meta-list items in media/chat.html. All values are
@@ -205,6 +258,9 @@ export type FromWebviewMessage =
   | {
       type: 'ready';
       tabId?: string;
+      /** The only registry tab this client shows (editor-tab panel):
+       *  the daemon replays just that tab instead of every bound one. */
+      singleTabId?: string;
       restoredTabs?: Array<{
         tabId: string;
         chatId: string;
@@ -220,7 +276,7 @@ export type FromWebviewMessage =
       taskId?: string | number | null;
       tabId?: string;
     }
-  | {type: 'getWelcomeSuggestions'}
+  | {type: 'getWelcomeInfo'}
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
@@ -276,12 +332,21 @@ export type FromWebviewMessage =
   | {type: 'deleteMyModel'; name: string}
   /** Inject promptlet panel: append `text` to ~/.kiss/MY_INJECTION.md. */
   | {type: 'addTrick'; text: string}
+  /** Inject promptlet panel: drop `text` from ~/.kiss/MY_INJECTION.md. */
+  | {type: 'deleteTrick'; text: string}
+  /**
+   * Inject promptlet panel: rewrite the ~/.kiss/MY_INJECTION.md section
+   * whose body is `text` so it reads `newText`.
+   */
+  | {type: 'editTrick'; text: string; newText: string}
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
   | {type: 'snoozeUpdate'; latest?: string}
   | {type: 'updateWhenIdle'; cancel?: boolean}
   | {type: 'serverReset'}
+  // tips.js "Don't show tips again" checkbox: optOut false re-enables the tips.
+  | {type: 'tipsOptOut'; optOut?: boolean}
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   // In-page (browser-mic) capture fallback: the webview recorded the
@@ -318,6 +383,10 @@ export type FromWebviewMessage =
       // stamped onto the new panel as data-kiss-pending-text so the new
       // chat's textarea starts out with the same text.
       pendingText?: string;
+      // Fresh conversations only: submit pendingText as the new chat's
+      // first task as soon as the panel is ready (the Apps subpanel's
+      // "connect this app" launch).
+      autoSubmit?: boolean;
     }
   // Editor-tabs mode: close this panel — because the daemon's registry
   // no longer lists its chat tab (another client closed it; retire
@@ -348,6 +417,15 @@ export type FromWebviewMessage =
       token?: string;
       refresh?: boolean;
     }
+  // The right sidebar's Schedule / Apps subpanels (sidebarpanels block
+  // in main.js): forwarded to the daemon, which answers with a direct
+  // `cronJobs` / `appsStatus` reply. `refresh` re-probes the apps'
+  // authentication state instead of serving the daemon's cached one.
+  | {type: 'getCronJobs'}
+  | {type: 'getAppsStatus'; refresh?: boolean}
+  // The right sidebar's Spend subpanel: the daemon answers with a
+  // direct `spendReport` reply.
+  | {type: 'getSpendReport'}
   // Editor-tabs mode (host-only): this panel's live task-info values —
   // the mirror the secondary sidebar's Task Info view renders for the
   // ACTIVE panel. taskUpdate is the running task's task-update report
@@ -722,8 +800,12 @@ type ToWebviewMessageBody =
         headers: string;
       }>;
     }
-  /** The full Inject promptlet list after an `addTrick` succeeded. */
-  | {type: 'tricksData'; tricks: string[]}
+  /**
+   * The full Inject promptlet list after an `addTrick` / `deleteTrick`
+   * succeeded; the first `userCount` entries come from the user's own
+   * ~/.kiss/MY_INJECTION.md and are the ones the panel can delete.
+   */
+  | {type: 'tricksData'; tricks: string[]; userCount: number}
   | {
       type: 'history';
       sessions: SessionInfo[];
@@ -742,7 +824,6 @@ type ToWebviewMessageBody =
   | {type: 'error'; text: string}
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
-  | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
   | {
       type: 'remote_url';
       url: string;
@@ -998,6 +1079,23 @@ type ToWebviewMessageBody =
       values: MetaPanelValues | null;
       taskUpdate: TaskUpdateState | null;
     }
+  // The daemon's direct reply to `getCronJobs`: the scheduled cron jobs
+  // (kiss/server/sidebar_panels.py cron_jobs_report).
+  | {type: 'cronJobs'; jobs: CronJobRow[]}
+  // The daemon's direct reply to `getAppsStatus`: every third-party
+  // agent's authentication state and the epoch ms it was probed (0
+  // before the first successful probe).
+  | {type: 'appsStatus'; apps: AppStatusRow[]; checkedAt: number}
+  // The daemon's direct reply to `getSpendReport`: the task history's
+  // spend all time, per local day (ascending), per model (dearest
+  // first) and per model within each day (dearest first).
+  | {
+      type: 'spendReport';
+      total: SpendSum;
+      days: SpendSum[];
+      totalByModel: SpendSum[];
+      daysByModel: Record<string, SpendSum[]>;
+    }
   // Host relay to the ACTIVE chat panel: the Task Info view's refresh
   // button was pressed — poll `getTaskUpdate` with `refresh: true`.
   | {type: 'refreshTaskUpdate'}
@@ -1040,12 +1138,17 @@ export interface AgentCommand {
     | 'saveMyModel'
     | 'deleteMyModel'
     | 'addTrick'
+    | 'deleteTrick'
+    | 'editTrick'
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
     | 'snoozeUpdate'
     | 'updateWhenIdle'
-    | 'getTaskUpdate';
+    | 'getTaskUpdate'
+    | 'getCronJobs'
+    | 'getAppsStatus'
+    | 'getSpendReport';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -1087,14 +1190,18 @@ export interface AgentCommand {
   headers?: string;
   /** saveMyModel: the entry's name before an edit-and-rename. */
   originalName?: string;
-  /** addTrick: the promptlet body to append. */
+  /** addTrick / deleteTrick / editTrick: the promptlet body to append, remove or edit. */
   text?: string;
+  /** editTrick: the promptlet body that replaces `text`. */
+  newText?: string;
   /** getTaskUpdate: fingerprint of the report state the client holds. */
   knownSig?: string;
   /** getTaskUpdate: generation token echoed on the `taskUpdate` reply. */
   token?: string;
-  /** getTaskUpdate: run the task-update agent now. */
+  /** getTaskUpdate: run the task-update agent now; getAppsStatus: re-probe. */
   refresh?: boolean;
+  /** ready: the only registry tab an editor-tab panel shows. */
+  singleTabId?: string;
   restoredTabs?: Array<{
     tabId: string;
     chatId: string;

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.core import config as config_module
-from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
 
@@ -273,13 +273,8 @@ def _read_my_models() -> dict[str, dict[str, Any]]:
     example entries) and any value that is not a JSON object, so
     documentation lists and stray scalars never reach the model table.
     """
-    _seed_my_models_file()
-    try:
-        raw = json.loads(USER_MY_MODELS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.debug("Ignoring unreadable or corrupt %s", USER_MY_MODELS_PATH, exc_info=True)
-        return {}
-    if not isinstance(raw, dict):
+    raw = _read_my_models_file()
+    if raw is None:
         return {}
     return {
         name: entry
@@ -317,14 +312,8 @@ def _my_models_flock() -> Iterator[None]:
     Callers must already hold :data:`_MY_MODELS_EDIT_LOCK`.
     """
     path = USER_MY_MODELS_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name("." + path.name + ".kiss.lock")
-    with open(lock_path, "w", encoding="utf-8") as lock_file:
-        lock_exclusive(lock_file)
-        try:
-            yield
-        finally:
-            unlock(lock_file)
+    with exclusive_file_lock(path.with_name("." + path.name + ".kiss.lock")):
+        yield
 
 _CUSTOM_MODEL_DEFAULTS: dict[str, Any] = {
     "context_length": 128000,

@@ -1020,6 +1020,11 @@ class TestPerTabT0(unittest.TestCase):
         # setTabRunning helper; renderStopButton (its active-tab UI
         # side-effect) is stubbed out.
         set_tab_running_src = _extract_function(self.js, "setTabRunning")
+        # Completing the ACTIVE tab refocuses the composer unless the
+        # real composerFocusWouldSteal (and its isTextEntry helper) says
+        # another field or an open sheet owns the keyboard.
+        focus_steal_src = _extract_function(self.js, "composerFocusWouldSteal")
+        is_text_entry_src = _extract_function(self.js, "isTextEntry")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
@@ -1037,12 +1042,20 @@ class TestPerTabT0(unittest.TestCase):
             function renderTabBar() {}
             function renderStopButton() {}
             var statusText = { textContent: '' };
-            var inp = { focus: function() {} };
+            var focusCalls = 0;
+            var inp = { focus: function() { focusCalls++; } };
             // setReady() only refocuses the composer on desktop clients
-            // (main.js: `if (!isMobileRemote) inp.focus();`).
+            // and only when nothing else owns the keyboard (main.js:
+            // `if (!isMobileRemote && !composerFocusWouldSteal()) inp.focus();`).
             var isMobileRemote = false;
+            var openSheets = [];
+            var serverResetConfirmModal = null;
+            document.activeElement = document.body;
+            document.querySelector = function() { return null; };
             """
             + set_tab_running_src
+            + is_text_entry_src
+            + focus_steal_src
             + set_ready_src
             + r"""
             setReady('Done (4s)', 1, 1000, 5000);
@@ -1063,12 +1076,22 @@ class TestPerTabT0(unittest.TestCase):
                 process.stdout.write('FAIL: status label not rendered');
                 process.exit(1);
             }
+            if (focusCalls !== 1) {
+                process.stdout.write('FAIL: composer not refocused: ' + focusCalls);
+                process.exit(1);
+            }
             // Legacy fallback: no agent timestamps — keep t0, anchor
-            // endTs to the local clock.
+            // endTs to the local clock.  The user is typing in another
+            // field now, so the composer must not steal focus.
             tabs[0].isRunning = true;
             timerRunning = true;
             endTs = 0;
+            document.activeElement = _makeEl('INPUT');
             setReady('Done', 1);
+            if (focusCalls !== 1) {
+                process.stdout.write('FAIL: composer stole focus: ' + focusCalls);
+                process.exit(1);
+            }
             if (t0 !== 1000) {
                 process.stdout.write('FAIL: t0 not preserved: ' + t0);
                 process.exit(1);

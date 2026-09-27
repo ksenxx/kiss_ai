@@ -95,6 +95,8 @@ class TestF419InternalStillGuardsMainTree:
 
         tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-419")
         _commit_in_worktree(wt_dir, "work.txt", "agent work\n")
+        # The direct task has edited a tracked file of the main tree.
+        (repo / "README.md").write_text("# Test\nedited by the direct task\n")
 
         non_wt_state = agent_state.AgentState(
             "direct-419-key", tab_id="direct-419", server_owned=True,
@@ -121,6 +123,44 @@ class TestF419InternalStillGuardsMainTree:
             non_wt_state.is_running_non_wt = False
             non_wt_state.non_wt_repo_root = None
             wt_agent.discard()
+            agent_state.agent_states.clear()
+
+    def test_internal_merge_proceeds_when_non_wt_left_tracked_files_alone(
+        self, tmp_path: Path,
+    ) -> None:
+        """A direct task that has not changed any tracked file of the
+        main tree (it only reads the repo, or wrote an untracked
+        scratch file) does not block the post-task auto-merge."""
+        repo = _make_repo(tmp_path / "repo")
+        server = VSCodeServer(printer=MemoryPrinter())
+        server.work_dir = str(repo)
+
+        tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-419b")
+        _commit_in_worktree(wt_dir, "work.txt", "agent work\n")
+        (repo / "scratch.txt").write_text("untracked scratch\n")
+
+        non_wt_state = agent_state.AgentState(
+            "direct-419b-key", tab_id="direct-419b", server_owned=True,
+        )
+        non_wt_state.is_running_non_wt = True
+        non_wt_state.non_wt_repo_root = repo.resolve()
+        agent_state.register(non_wt_state)
+        try:
+            result = server._handle_worktree_action(
+                "merge", "wt-419b", internal=True,
+            )
+            assert result["success"] is True, result
+            assert (repo / "work.txt").exists(), (
+                "the worktree branch must be merged into the main tree"
+            )
+            assert (repo / "scratch.txt").read_text() == "untracked scratch\n", (
+                "the direct task's untracked file must survive the merge"
+            )
+        finally:
+            non_wt_state.is_running_non_wt = False
+            non_wt_state.non_wt_repo_root = None
+            if wt_agent._wt_pending:
+                wt_agent.discard()
             agent_state.agent_states.clear()
 
 

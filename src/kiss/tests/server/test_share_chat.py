@@ -12,7 +12,7 @@ webview assembles those transcripts (plus the live screen) into one
 page body and sends it back via ``shareChat``; the daemon wraps it
 into a standalone page
 (``kiss.server.web_server._build_share_page``) and writes it to
-``<workDir>/reports/chat-<chatId>.html``.  These tests drive the REAL
+``<workDir>/reports/chat-<title-slug>-<chatId>.html``.  These tests drive the REAL
 production path — a live :class:`RemoteAccessServer` dispatcher over a
 real Unix-domain socket, exactly how the VS Code extension host
 forwards the webview's commands, and over real WSS exactly like the
@@ -179,7 +179,7 @@ class TestShareChatOverUds(_UdsServerTestCase):
         )
         self.assertTrue(event["ok"], event)
         self.assertEqual(event["tabId"], "tab-1")
-        out = Path(self.work_dir) / "reports" / "chat-chat-42.html"
+        out = Path(self.work_dir) / "reports" / "chat-my-chat-chat-42.html"
         self.assertEqual(event["path"], str(out))
         page = out.read_text(encoding="utf-8")
         # The transcript body travels verbatim.
@@ -634,7 +634,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
                     break
         self.assertTrue(event["ok"], event)
         self.assertEqual(event["tabId"], "tab-wss")
-        out = Path(self._work_dir) / "reports" / "chat-wss-chat.html"
+        out = Path(self._work_dir) / "reports" / "chat-remote-chat-wss-chat.html"
         self.assertEqual(event["path"], str(out))
         page = out.read_text(encoding="utf-8")
         self.assertIn(TestShareChatOverUds.BODY, page)

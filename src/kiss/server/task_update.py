@@ -144,10 +144,13 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         _live_agent_usage,
         _notify_subagent_done,
         _persisted_task_id,
+        subagent_parent_tab_id_of,
     )
 
     printer = getattr(parent_agent, "printer", None)
-    parent_tab_id = str(getattr(parent_agent, "_tab_id", "") or "")
+    # The tab the webviews show the parent under — for a sub-agent
+    # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
+    parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
     model_getter = getattr(task_update_sea, "model", None)
     model_name = str(

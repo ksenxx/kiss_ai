@@ -4,10 +4,12 @@
 # add your name here
 """Integration tests for assorted vscode-backend bugs (audit findings C1-C4).
 
-C1  ``diff_merge._load_gitignore_dirs`` keeps the leading ``/`` of a
-    root-anchored .gitignore entry (``/node_modules``), so
-    ``_scan_files`` never matches the directory name and wrongly
-    returns files inside it.
+C1  the ``@``-mention scan used to keep the leading ``/`` of a
+    root-anchored .gitignore entry (``/node_modules``), so it never
+    matched the directory name and wrongly returned files inside it.
+    ``file_index.FileIndex.scan`` must honour such entries.  The test
+    uses ``/generated`` because ``node_modules`` is now skipped
+    unconditionally (``JUNK_DIR_NAMES``) and would pass regardless.
 
 C2  (obsolete) ``diff_merge._write_base_copy`` was removed together
     with the interactive diff/merge review workflow.
@@ -39,12 +41,12 @@ from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
-from kiss.server.diff_merge import _scan_files
+from kiss.server.file_index import FileIndex
 from kiss.server.server import VSCodeServer
 
 
 class TestGitignoreRootAnchoredEntry(unittest.TestCase):
-    """C1: ``/node_modules`` in .gitignore must skip ``node_modules/``."""
+    """C1: ``/generated`` in .gitignore must skip ``generated/``."""
 
     def setUp(self) -> None:
         self._tmp = Path(tempfile.mkdtemp(prefix="kiss-c1-"))
@@ -53,17 +55,17 @@ class TestGitignoreRootAnchoredEntry(unittest.TestCase):
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_root_anchored_gitignore_dir_is_skipped(self) -> None:
-        (self._tmp / ".gitignore").write_text("/node_modules\n")
-        nm = self._tmp / "node_modules"
-        nm.mkdir()
-        (nm / "x.js").write_text("ignored\n")
+        (self._tmp / ".gitignore").write_text("/generated\n")
+        gen = self._tmp / "generated"
+        gen.mkdir()
+        (gen / "x.js").write_text("ignored\n")
         (self._tmp / "keep.txt").write_text("kept\n")
 
-        paths = _scan_files(str(self._tmp))
+        paths = FileIndex.scan(str(self._tmp)).paths
 
         self.assertIn("keep.txt", paths)
-        self.assertNotIn("node_modules/x.js", paths)
-        self.assertNotIn("node_modules/", paths)
+        self.assertNotIn("generated/x.js", paths)
+        self.assertNotIn("generated/", paths)
 
     def test_plain_gitignore_dir_still_skipped(self) -> None:
         (self._tmp / ".gitignore").write_text("build/\n")
@@ -72,7 +74,7 @@ class TestGitignoreRootAnchoredEntry(unittest.TestCase):
         (b / "out.o").write_text("obj\n")
         (self._tmp / "keep.txt").write_text("kept\n")
 
-        paths = _scan_files(str(self._tmp))
+        paths = FileIndex.scan(str(self._tmp)).paths
 
         self.assertIn("keep.txt", paths)
         self.assertNotIn("build/out.o", paths)

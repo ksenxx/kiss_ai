@@ -10,6 +10,7 @@ autocomplete feature.  Split out of ``server.py`` for organisation.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import queue
@@ -30,7 +31,6 @@ from kiss.server.helpers import (
 from kiss.server.helpers import (
     clip_autocomplete_suggestion,
     model_vendor,
-    rank_file_suggestions,
 )
 from kiss.server.tricks import (
     current_sentence_partial,
@@ -38,6 +38,7 @@ from kiss.server.tricks import (
 )
 
 if TYPE_CHECKING:
+    from kiss.server.file_index import FileIndexRegistry
     from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,7 @@ class _AutocompleteMixin:
         )
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
-        _file_cache: dict[str, list[str]]
+        _file_index: FileIndexRegistry
         _files_latest_request: dict[str, object]
 
     def _active_file_identifier_matches(
@@ -554,7 +555,7 @@ class _AutocompleteMixin:
         Maps a connection id to a unique token identifying its most
         recent ``getFiles`` request.  Entries are SHORT-LIVED: each is
         removed as soon as the request it names has been answered (see
-        :meth:`_get_files` and :meth:`_refresh_file_cache`), so the map
+        :meth:`_get_files` and :meth:`_emit_indexed_files`), so the map
         never accumulates departed connections and needs no teardown
         wiring.  Created lazily on first use (the daemon's ``__init__``
         predates this guard).  Callers must hold ``_state_lock``.
@@ -565,140 +566,16 @@ class _AutocompleteMixin:
             self._files_latest_request = reqs
         return reqs
 
-    def _refresh_file_cache(
-        self,
-        then_emit_for_prefix: str,
-        work_dir: str = "",
-        conn_id: str = "",
-        tab_id: str = "",
-    ) -> None:
-        """Refresh the file cache for *work_dir* in a background thread.
-
-        Broadcasts a ``files`` event ranked for ``then_emit_for_prefix``
-        once the scan finishes.  This lets the only caller
-        (``_get_files``) kick off a non-blocking refresh and still
-        deliver suggestions to the UI.
-
-        ``work_dir`` selects which directory to scan; an empty value
-        defaults to ``self.work_dir`` so existing callers that omit it
-        keep the daemon-wide behaviour.  Each work_dir has its own
-        entry in ``self._file_cache`` (keyed by the resolved path) so
-        tabs with different working directories never share file lists.
-
-        Race protection (two layers):
-
-        * Cache publication preserves the double-check pattern from
-          commit ``e49d867c`` — the scan result is only published if
-          the cache is still empty when the scan finishes, so a slow
-          scan never clobbers a fresher result published by a
-          concurrent refresh thread.
-        * Emission is guarded by the per-connection request token
-          captured at call time: if the connection has since issued a
-          newer ``getFiles`` (e.g. the same typed prefix from a
-          different tab/work_dir), the stale scan's reply is dropped
-          instead of overwriting the newer picker contents.  When the
-          reply IS still the latest, its token entry is removed — the
-          request is answered, so the map stays empty for idle
-          connections (no per-connection teardown needed).
-
-        ``tab_id`` is carried through to the deferred ``files`` event
-        so the late reply still names the chat tab that typed ``@``.
-        """
-        from kiss.server.diff_merge import _scan_files
-
-        wd = self._resolve_work_dir(work_dir)
-        with self._state_lock:
-            request_token = self._files_request_map().get(conn_id)
-
-        def _do_refresh() -> None:
-            # The whole body is guarded (A-C1): this runs on a daemon
-            # thread with no caller to report to, so an unhandled raise
-            # — e.g. ``_load_file_usage`` hitting a corrupt or
-            # unopenable ``sorcar.db`` — used to kill the thread via
-            # the default excepthook, leaving the picker stuck on its
-            # ``loading`` placeholder AND leaking the connection's
-            # ``_files_latest_request`` token forever (the map's
-            # short-lived contract relies on this function always
-            # reaching its pop).  On failure the token is released so
-            # the connection's next ``getFiles`` completes normally.
-            try:
-                result = _scan_files(wd)
-                with self._state_lock:
-                    existing = self._file_cache.get(wd)
-                    if existing is not None:
-                        result = existing
-                    else:
-                        self._file_cache[wd] = result
-                # Rank OUTSIDE the lock (usage is a database read), then
-                # re-verify the token and emit UNDER the lock, removing
-                # the token only after the emission (audit0903 F5).  The
-                # old order — token removed under the lock, emission
-                # after releasing it — let a newer ``getFiles`` from the
-                # same connection (same typed prefix, different work
-                # dir) emit first and this superseded old-workspace list
-                # land LAST; the frontend validates replies only by tab
-                # and prefix, so the picker showed paths from the wrong
-                # repository.  Serialized against ``_get_files``'s token
-                # installation, a stale reply is either suppressed here
-                # or provably precedes the newer request's own emission.
-                usage = _load_file_usage()
-                ranked = rank_file_suggestions(
-                    result, then_emit_for_prefix, usage,
-                )
-                with self._state_lock:
-                    reqs = self._files_request_map()
-                    if reqs.get(conn_id) is not request_token:
-                        return
-                    self._emit_files(
-                        ranked,
-                        conn_id,
-                        prefix=then_emit_for_prefix,
-                        tab_id=tab_id,
-                    )
-                    reqs.pop(conn_id, None)
-            except Exception:
-                logger.exception(
-                    "background file-cache refresh failed for %s", wd,
-                )
-                with self._state_lock:
-                    reqs = self._files_request_map()
-                    if reqs.get(conn_id) is request_token:
-                        reqs.pop(conn_id, None)
-
-        try:
-            threading.Thread(target=_do_refresh, daemon=True).start()
-        except RuntimeError:
-            # Thread exhaustion (``can't start new thread``): no
-            # worker will ever run ``_do_refresh``'s cleanup, so
-            # release the request token here — leaving it installed
-            # wedged the connection's picker on its loading
-            # placeholder forever (gpt-5.6-sol conc review, finding 9).
-            logger.exception(
-                "file-cache refresh thread failed to start for %s", wd,
-            )
-            with self._state_lock:
-                reqs = self._files_request_map()
-                if reqs.get(conn_id) is request_token:
-                    reqs.pop(conn_id, None)
-
     def _refresh_files_after_task(self, work_dir: str = "") -> None:
-        """Refresh the ``@``-mention file cache after an agent task ends.
+        """Rescan the ``@``-mention index covering *work_dir* after a task.
 
-        The cache is populated lazily on the first ``getFiles`` for a
-        ``work_dir`` and is otherwise only refreshed on a daemon-wide
-        ``setWorkDir`` or an explicit refresh request.  When an agent
-        creates or deletes files during its turn those changes never
-        reach the cache, so the next ``@``-mention serves stale
-        suggestions: brand-new files (e.g. the test file the agent
-        just authored) are invisible and deleted files linger.
-
-        This hook is invoked by :meth:`_TaskRunnerMixin._run_task_inner`
-        at the tail of every task's cleanup ``finally``.  It rescans
-        *work_dir* in a background thread (no caller blocking) and
-        only updates the cache when the *set* of files actually
-        changed — pure modifications never alter the picker's list so
-        the rescan is a no-op.  The next ``getFiles`` (every picker
-        keystroke issues one) serves the refreshed list.
+        Invoked by :meth:`_TaskRunnerMixin._run_task_inner` at the tail
+        of every task's cleanup ``finally``: an agent creates and
+        deletes files during its turn, and the picker should list the
+        new ones (and drop the deleted ones) on the very next ``@``
+        rather than after the index's next staleness refresh.  The
+        rescan runs on the registry's worker thread and re-lists only
+        directories whose mtime changed.
 
         No ``files`` event is broadcast: an unsolicited reply stamped
         ``conn_id="", prefix=""`` would be accepted by every client
@@ -706,50 +583,10 @@ class _AutocompleteMixin:
         roots at a DIFFERENT work_dir — overwriting their picker with
         files from this task's workspace (fixer-5 F5-03/R5-03).
 
-        When *work_dir* has no cache entry (no ``@``-mention picker
-        has ever opened there) the hook is a no-op: there is nothing
-        to keep fresh, and the next ``getFiles`` will scan from
-        scratch anyway.  This avoids paying a directory-scan cost
-        for tabs whose picker was never used.
+        A work_dir whose covering root was never indexed is left
+        alone: the first ``getFiles`` there scans it from scratch.
         """
-        from kiss.server.diff_merge import _scan_files
-
-        wd = self._resolve_work_dir(work_dir)
-        with self._state_lock:
-            cached = self._file_cache.get(wd)
-        if cached is None:
-            return
-        cached_set = set(cached)
-
-        def _do_refresh() -> None:
-            # Guarded like ``_refresh_file_cache._do_refresh`` (A-C1):
-            # no token is held and no reply is owed here, but a raise
-            # (disk error during the scan) would otherwise kill the
-            # daemon thread through the silent default excepthook.
-            try:
-                result = _scan_files(wd)
-                if set(result) == cached_set:
-                    return
-                with self._state_lock:
-                    if self._file_cache.get(wd) is not cached:
-                        return
-                    self._file_cache[wd] = result
-            except Exception:
-                logger.exception(
-                    "post-task file-cache refresh failed for %s", wd,
-                )
-
-        try:
-            threading.Thread(target=_do_refresh, daemon=True).start()
-        except RuntimeError:
-            # Thread exhaustion must not propagate into the task
-            # runner's cleanup ``finally`` (this hook's only caller);
-            # the cache merely stays as it was until the next
-            # ``getFiles`` rescans (gpt-5.6-sol conc review, finding 9).
-            logger.exception(
-                "post-task file-cache refresh thread failed to start "
-                "for %s", wd,
-            )
+        self._file_index.refresh(self._resolve_work_dir(work_dir))
 
     def _emit_files(
         self,
@@ -811,48 +648,115 @@ class _AutocompleteMixin:
         so tabs with different working directories see their own files,
         independent of the daemon-wide default.
 
-        H9 — must not block the message-handling thread.  When the
-        cache for the resolved work_dir is empty, kick off a background
-        refresh and respond immediately with an empty ``loading=true``
-        list; the same scan then emits a second ``files`` event with
-        the populated list once it finishes, so the frontend gets
-        results without the caller blocking.
+        Must not block the message-handling thread (H9).  When the
+        index covering the work_dir is ready the reply is a few
+        milliseconds of substring search and is emitted synchronously.
+        Otherwise an empty ``loading=true`` list is emitted at once and
+        :meth:`FileIndexRegistry.ensure` builds the index on its worker
+        thread, which then runs :meth:`_emit_indexed_files` to deliver
+        the populated reply.
+
+        Replies are guarded by a per-connection request token
+        (:meth:`_files_request_map`): a newer ``getFiles`` from the
+        same connection (a later keystroke, or the same prefix typed in
+        a tab rooted elsewhere) supersedes this one, so a slow build's
+        reply is dropped instead of overwriting the newer picker
+        contents.  The token is removed once the request is answered
+        or abandoned, so the map only ever holds connections with a
+        build in flight.
         """
         wd = self._resolve_work_dir(work_dir)
         token: object = object()
         with self._state_lock:
             reqs = self._files_request_map()
             reqs[conn_id] = token
-            cache = self._file_cache.get(wd)
-        if cache is None:
-            # The placeholder must be emitted BEFORE the scan is
-            # started.  Both events belong to the same request and
+        view = self._file_index.view_for(wd)
+        if view is None:
+            # The placeholder must be emitted BEFORE the build is
+            # requested.  Both events belong to the same request and
             # carry the same prefix, so the client cannot tell a stale
             # one from a fresh one; starting the producer first lets a
-            # quick scan's populated reply be overwritten by the empty
+            # quick build's populated reply be overwritten by the empty
             # placeholder that follows it (R09-3).
             self._emit_files(
                 [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
             )
-            self._refresh_file_cache(
-                then_emit_for_prefix=prefix,
-                work_dir=wd,
-                conn_id=conn_id,
-                tab_id=tab_id,
+            queued = self._file_index.ensure(
+                wd,
+                functools.partial(
+                    self._emit_indexed_files, prefix, wd, conn_id, tab_id, token,
+                ),
             )
+            if not queued:
+                # Registry stopped or its worker could not start: nobody
+                # will answer, so do not leave the token behind.
+                self._release_files_token(conn_id, token)
             return
         try:
-            usage = _load_file_usage()
-            ranked = rank_file_suggestions(cache, prefix, usage)
+            ranked = view.search(prefix, _load_file_usage())
             self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
         finally:
             # This request is answered (or has failed for good — e.g.
-            # ``_load_file_usage`` hit an unopenable database on this
-            # synchronous cache-hit path, which used to strand the
-            # token and wedge the picker; gpt-5.6-sol conc review,
-            # finding 9); drop its token either way so the map only
-            # ever holds connections with a scan still in flight.  The
-            # identity check keeps a newer request's token intact.
+            # ``_load_file_usage`` hit an unopenable database, which
+            # used to strand the token and wedge the picker;
+            # gpt-5.6-sol conc review, finding 9); drop its token
+            # either way.  The identity check keeps a newer request's
+            # token intact.
+            self._release_files_token(conn_id, token)
+
+    def _emit_indexed_files(
+        self,
+        prefix: str,
+        work_dir: str,
+        conn_id: str,
+        tab_id: str,
+        token: object,
+    ) -> None:
+        """Deliver the populated reply of a ``getFiles`` that hit a cold index.
+
+        Runs on the :class:`FileIndexRegistry` worker thread once the
+        root it built is ready.  The view is resolved again: a work_dir
+        below the home directory is served by the home index unless the
+        home scan turned out to skip it (gitignored, collapsed bulk
+        data), in which case the work_dir becomes a root of its own and
+        one more build round is requested with the same callback.  The
+        reply is emitted only while ``token`` is still the connection's
+        latest request; ranking happens outside ``_state_lock`` (the
+        usage read is a database query) and the token check plus
+        emission happen under it, so a superseding request's own
+        emission can never be followed by this stale one (audit0903 F5).
+        """
+        try:
+            view = self._file_index.view_for(work_dir)
+            if view is None:
+                with self._state_lock:
+                    superseded = self._files_request_map().get(conn_id) is not token
+                if not superseded and not self._file_index.ensure(
+                    work_dir,
+                    functools.partial(
+                        self._emit_indexed_files,
+                        prefix, work_dir, conn_id, tab_id, token,
+                    ),
+                ):
+                    self._release_files_token(conn_id, token)
+                return
+            ranked = view.search(prefix, _load_file_usage())
             with self._state_lock:
-                if reqs.get(conn_id) is token:
-                    del reqs[conn_id]
+                reqs = self._files_request_map()
+                if reqs.get(conn_id) is not token:
+                    return
+                self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
+                reqs.pop(conn_id, None)
+        except Exception:
+            # ``_load_file_usage`` hitting a corrupt ``sorcar.db`` must
+            # not strand the token: the connection's next ``getFiles``
+            # has to complete normally (A-C1).
+            logger.exception("indexed file-picker reply failed for %s", work_dir)
+            self._release_files_token(conn_id, token)
+
+    def _release_files_token(self, conn_id: str, token: object) -> None:
+        """Forget *token* if it is still *conn_id*'s latest ``getFiles`` request."""
+        with self._state_lock:
+            reqs = self._files_request_map()
+            if reqs.get(conn_id) is token:
+                del reqs[conn_id]

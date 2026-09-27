@@ -68,7 +68,11 @@ def _write_fake_cloudflared(
     body = "#!/bin/sh\n"
     for line in stderr_lines:
         body += f"printf '%s\\n' {json.dumps(line)} >&2\n"
-    if sleep_after > 0:
+    if sleep_after > 0 and exit_code == 0:
+        # ``exec`` so the fake is one process, like the real cloudflared:
+        # a SIGTERM to the tracked pid must not leave an orphaned ``sleep``.
+        body += f"exec sleep {sleep_after}\n"
+    elif sleep_after > 0:
         body += f"sleep {sleep_after}\n"
     body += f"exit {exit_code}\n"
     script = tmpdir / "cloudflared"

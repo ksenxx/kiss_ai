@@ -115,6 +115,7 @@ export default [
         navigator: "readonly",
         localStorage: "readonly",
         CustomEvent: "readonly",
+        MessageEvent: "readonly",
         location: "readonly",
         console: "readonly",
         fetch: "readonly",

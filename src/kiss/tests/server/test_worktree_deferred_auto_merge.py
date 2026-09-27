@@ -77,6 +77,13 @@ class _DeferredMergeBase(_RepoAwareGuardBase):
         self.events.clear()
 
     def _unmark_non_wt_task(self) -> None:
+        """End the occupant task, dropping its tracked edit again.
+
+        Reverting ``seed.txt`` stands in for the occupant's own end
+        of run with its changes committed or discarded: the tracked
+        file is clean again, which is what lets a later trigger merge.
+        """
+        _run_git(self.repo, "checkout", "--", "seed.txt")
         with self.server._state_lock:
             state = agent_state.find_by_tab(_OTHER_TAB)
             assert state is not None
@@ -89,11 +96,18 @@ class _DeferredMergeBase(_RepoAwareGuardBase):
         assert state is not None and state.agent is not None
         return state
 
-    def _run_direct_task(self, *, auto_commit: bool) -> None:
-        """Run a real non-worktree task in the main tree of ``self.repo``."""
+    def _run_direct_task(
+        self, *, auto_commit: bool, filename: str = "direct_out.txt",
+    ) -> None:
+        """Run a real non-worktree task in the main tree of ``self.repo``.
+
+        The task writes *filename* there: a new (untracked) file by
+        default, or an edit of a tracked file when *filename* names
+        one (``seed.txt``).
+        """
         # Re-patching: the FIRST patch (in ``_strand_worktree``) saved
         # the real ``run`` for tearDown; keep that, not this stub.
-        _patch_parent_run_create_file("direct_out.txt")
+        _patch_parent_run_create_file(filename)
         self.server._run_task_inner({
             "prompt": "direct task on the main tree",
             "workDir": self.repo,
@@ -205,15 +219,33 @@ class TestDirectTaskEndTriggersMerge(_DeferredMergeBase):
         )
 
     def test_uncommitted_direct_task_keeps_the_worktree_waiting(self) -> None:
-        """Auto-commit off: the main tree stays dirty, so the merge
-        must wait for the user's commit/discard decision."""
+        """Auto-commit off: the direct task's edit of a tracked file
+        stays uncommitted, so the merge must wait for the user's
+        commit/discard decision."""
+        self._strand_worktree()
+
+        self._run_direct_task(auto_commit=False, filename="seed.txt")
+
+        assert (Path(self.repo) / "seed.txt").read_text() == "agent output\n"
+        assert self.server._main_dirty_files(self.repo), "precondition"
+        self._assert_still_waiting()
+
+    def test_uncommitted_untracked_leftovers_do_not_keep_it_waiting(
+        self,
+    ) -> None:
+        """Auto-commit off, but the direct task only CREATED a file: no
+        tracked file is modified, so the tree counts as committed and
+        the waiting worktree is merged at the task's end."""
         self._strand_worktree()
 
         self._run_direct_task(auto_commit=False)
 
         assert (Path(self.repo) / "direct_out.txt").exists()
-        assert self.server._main_dirty_files(self.repo), "precondition"
-        self._assert_still_waiting()
+        assert _run_git(self.repo, "status", "--porcelain", "-uno").stdout == ""
+        self._assert_merged()
+        assert (Path(self.repo) / "direct_out.txt").exists(), (
+            "the stash/pop around the merge must give the untracked file back"
+        )
 
     def test_merge_runs_even_when_post_commit_cleanup_crashes(self) -> None:
         """The trigger lives in the run's mandatory-cleanup ``finally``:
@@ -276,7 +308,7 @@ class TestManualCommitAndDiscardTriggerMerge(_DeferredMergeBase):
 
     def test_manual_git_commit_merges_the_waiting_worktree(self) -> None:
         self._strand_worktree()
-        self._run_direct_task(auto_commit=False)
+        self._run_direct_task(auto_commit=False, filename="seed.txt")
         self._assert_still_waiting()
         self.events.clear()
 
@@ -284,11 +316,11 @@ class TestManualCommitAndDiscardTriggerMerge(_DeferredMergeBase):
 
         assert not self.server._main_dirty_files(self.repo)
         self._assert_merged()
-        assert (Path(self.repo) / "direct_out.txt").exists()
+        assert (Path(self.repo) / "seed.txt").read_text() == "agent output\n"
 
     def test_main_tree_discard_merges_the_waiting_worktree(self) -> None:
         self._strand_worktree()
-        self._run_direct_task(auto_commit=False)
+        self._run_direct_task(auto_commit=False, filename="seed.txt")
         self._assert_still_waiting()
         self.events.clear()
 
@@ -298,12 +330,12 @@ class TestManualCommitAndDiscardTriggerMerge(_DeferredMergeBase):
 
         main_results = [e for e in self.events if e["type"] == "main_tree_result"]
         assert main_results and main_results[-1]["success"], main_results
-        assert not (Path(self.repo) / "direct_out.txt").exists()
+        assert (Path(self.repo) / "seed.txt").read_text() == "seed\n"
         self._assert_merged()
 
     def test_main_tree_do_nothing_keeps_the_worktree_waiting(self) -> None:
         self._strand_worktree()
-        self._run_direct_task(auto_commit=False)
+        self._run_direct_task(auto_commit=False, filename="seed.txt")
         self.events.clear()
 
         self.server._cmd_main_tree_action({

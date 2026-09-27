@@ -172,7 +172,9 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
             f.write(
                 "#!/bin/bash\n"
                 'echo "INF https://isolation-e2e.trycloudflare.com" >&2\n'
-                "sleep 60\n"
+                # exec: SIGTERM to the tunnel pid must end the whole
+                # fake, not orphan a ``sleep`` child in its session.
+                "exec sleep 60\n"
             )
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path

@@ -73,6 +73,29 @@ def anthropic_models() -> dict[str, Any]:
     return {m.id: m for m in page.data}
 
 
+def capabilities_of(api_model: Any) -> dict[str, Any]:
+    """Return the model's ``capabilities`` block as the nested dict the REST API sends.
+
+    anthropic >= 1.0 parses it into a typed ``ModelCapabilities`` pydantic
+    model; ``model_dump()`` recovers the wire shape (``{"thinking":
+    {"supported": ..., "types": {...}}, "structured_outputs": {...}}``).
+
+    Args:
+        api_model: One entry of the ``/v1/models`` listing.
+
+    Returns:
+        The capabilities as plain dicts, ``{}`` when the API sent none.
+    """
+    caps = api_model.capabilities
+    if caps is None:
+        return {}
+    assert isinstance(caps, anthropic.types.ModelCapabilities), (
+        f"unexpected capabilities shape for {api_model.id!r}: {type(caps).__name__}"
+    )
+    dumped: dict[str, Any] = caps.model_dump()
+    return dumped
+
+
 @pytest.mark.live_api
 class TestClaudeFableSonnet5MatchLiveAPI:
     """Every ``MODEL_INFO`` field must match Anthropic's live capabilities.
@@ -154,12 +177,7 @@ class TestClaudeFableSonnet5MatchLiveAPI:
         turn that ``KISSAgent`` misreads as "empty response". Conversely
         we must not force ``thinking=True`` for a model that rejects it.
         """
-        api_model = anthropic_models[model_id]
-        caps = api_model.capabilities
-        assert isinstance(caps, dict), (
-            f"unexpected capabilities shape for {model_id!r}: "
-            f"{type(caps).__name__}"
-        )
+        caps = capabilities_of(anthropic_models[model_id])
         thinking = caps.get("thinking") or {}
         api_supports_thinking = bool(thinking.get("supported"))
         info_flag = MODEL_INFO[model_id].extended_thinking
@@ -187,8 +205,7 @@ class TestClaudeFableSonnet5MatchLiveAPI:
         returns True and the adapter emits ``thinking={'type':
         'adaptive'}``.
         """
-        api_model = anthropic_models[model_id]
-        caps = api_model.capabilities
+        caps = capabilities_of(anthropic_models[model_id])
         thinking = caps.get("thinking") or {}
         types = thinking.get("types") or {}
         adaptive_supported = bool((types.get("adaptive") or {}).get("supported"))
@@ -216,8 +233,7 @@ class TestClaudeFableSonnet5MatchLiveAPI:
         must never fall back to ``thinking={'type': 'enabled', ...}``
         for these IDs, so this test pins the current state.
         """
-        api_model = anthropic_models[model_id]
-        caps = api_model.capabilities
+        caps = capabilities_of(anthropic_models[model_id])
         thinking = caps.get("thinking") or {}
         types = thinking.get("types") or {}
         enabled_supported = bool((types.get("enabled") or {}).get("supported"))
@@ -242,8 +258,7 @@ class TestClaudeFableSonnet5MatchLiveAPI:
         capability flag is the closest published proxy.  If it's False,
         KISS's tool-forcing logic will break.
         """
-        api_model = anthropic_models[model_id]
-        caps = api_model.capabilities
+        caps = capabilities_of(anthropic_models[model_id])
         structured = (caps.get("structured_outputs") or {}).get("supported")
         info_fc = MODEL_INFO[model_id].is_function_calling_supported
         assert info_fc is True and structured is True, (

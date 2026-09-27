@@ -47,13 +47,13 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.browser_handoff import open_in_default_browser
 from kiss.core.config import kiss_home
 from kiss.core.processes import kill_process_group, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive

@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -25,17 +26,12 @@ import yaml
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
-    REVIEW_BUDGET_REFUSAL,
-    REVIEW_CAP_REFUSAL,
-    REVIEWER_SPAWN_REFUSAL,
-    ReviewQuota,
     is_implementation_task,
     is_review_task,
     parse_tasks_json,
-    review_budget_for,
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
-from kiss.agents.sorcar.relentless_agent import DEFAULT_MAX_BUDGET, RelentlessAgent
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -53,7 +49,7 @@ from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import BudgetExceededError, KISSError
-from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
+from kiss.core.memoryfield.tools import MemoryTools
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -69,14 +65,6 @@ from kiss.core.tool_interrupt import ToolCallInterrupted
 from kiss.core.utils import substitute_prompt_args
 
 logger = logging.getLogger(__name__)
-
-# Smallest per-child budget a ``run_parallel`` fan-out may hand out.
-# Every child resumes the parent's chat context, so even its FIRST LLM
-# step can cost a few cents; below this floor a child is killed by the
-# budget check after step 1 having produced nothing (observed in
-# recursive fan-outs that split a parent's remainder down to ~$0.03).
-# See :meth:`SorcarAgent._subagent_budget_share`.
-MIN_SUBAGENT_BUDGET = 0.50
 
 
 TOOL_PROFILES: dict[str, frozenset[str] | None] = {
@@ -226,6 +214,55 @@ def _memory_settings() -> tuple[bool, Path]:
     raw_dir = str(cfg.get("memory_dir", "")).strip()
     root = Path(raw_dir).expanduser() if raw_dir else kiss_home() / "memories"
     return enabled, root
+
+
+def _repo_memory_domains(work_dir: str) -> dict[str, str]:
+    """The domain memories a run in *work_dir* attaches: the memory of its repository.
+
+    A repository's memory is the sub-directory of the general memory named
+    after the repository's top-level directory (slugified).  The main
+    checkout, its sub-directories and its linked worktrees share one name:
+    ``git rev-parse --git-common-dir`` points at the main checkout's
+    ``.git`` even from a worktree, and that directory's parent is the
+    checkout.  When the common dir is not a ``.git`` directory (a
+    submodule's ``.git/modules/<name>``, a ``--separate-git-dir`` layout),
+    the current checkout's ``--show-toplevel`` names the repository
+    instead.  Pages about the repository's code, architecture and
+    conventions live there rather than in the general memory of daily work.
+
+    Args:
+        work_dir: The run's effective working directory
+            (:func:`resolve_work_dir`).  It may not exist yet (the run
+            creates it); the nearest existing ancestor decides.  A
+            directory outside any git work tree attaches no domain memory.
+
+    Returns:
+        ``{memory_name: description}`` for :class:`MemoryTools`'s *domains*.
+    """
+    from kiss.core.memoryfield.pages import slugify
+    from kiss.core.memoryfield.tools import GENERAL
+
+    cwd = Path(work_dir)
+    while not cwd.is_dir():
+        if cwd.parent == cwd:
+            return {}
+        cwd = cwd.parent
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir", "--show-toplevel"],
+            cwd=cwd, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 2:
+        return {}  # not a repository, or a bare one (no work tree)
+    common_dir = (cwd / lines[0]).resolve()
+    repo = common_dir.parent if common_dir.name == ".git" else Path(lines[1]).resolve()
+    name = slugify(repo.name)
+    if name == GENERAL:
+        name = f"{GENERAL}-repo"  # the general memory's own name is reserved
+    return {name: f"memory of the repository {repo}"}
 
 
 def _generate_commit_message(
@@ -859,6 +896,29 @@ class _AbandonedSubagent:
         return delta
 
 
+def subagent_parent_tab_id_of(parent_agent: Any) -> str:
+    """Return the frontend tab id children of *parent_agent* hang off.
+
+    The daemon's helper sub-agents (task update, merge-conflict
+    resolver, ``run_agent`` dispatches) stamp this as their
+    ``parent_tab_id``; it is :meth:`SorcarAgent._subagent_parent_tab_id`
+    when the parent has it, else the parent's raw ``_tab_id`` (a
+    duck-typed parent).  A parent that is itself a sub-agent carries a
+    synthetic ``_tab_id`` no webview has, so stamping that raw id
+    would make every surface drop the child's ``new_tab``.
+
+    Args:
+        parent_agent: The agent spawning the child.
+
+    Returns:
+        The tab id, or ``""`` when the parent runs headless.
+    """
+    resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
+    if callable(resolve_tab):
+        return str(resolve_tab() or "")
+    return str(getattr(parent_agent, "_tab_id", "") or "")
+
+
 def _persisted_task_id(agent: Any) -> str:
     """Return *agent*'s persisted ``task_history`` row id, or ``""``.
 
@@ -1364,12 +1424,6 @@ class SorcarAgent(RelentlessAgent):
         # the agent (not the per-run UsefulTools) so a follow-up prompt
         # in the same chat can still wait on, tail or kill them.
         self._background_jobs: dict[str, BackgroundJob] = {}
-        # Task-tree-wide budget of review fan-outs (see
-        # :class:`fanout_guard.ReviewQuota`).  A top-level :meth:`run`
-        # creates a fresh one; the fan-out engine hands the parent's
-        # instance to every child, so the whole in-process tree draws
-        # from ONE budget of ``MAX_REVIEW_ROUNDS`` rounds.
-        self._review_quota: ReviewQuota | None = None
         # Explicit tool profile named by the fan-out (a TOOL_PROFILES key)
         # or "" to let _tool_profile() decide from the reviewer marker.
         self._tool_profile_name: str = ""
@@ -1502,18 +1556,6 @@ class SorcarAgent(RelentlessAgent):
         agent enough budget to process the results and finish; importantly,
         even a one-item fan-out cannot consume the parent's entire remainder.
 
-        A share below :data:`MIN_SUBAGENT_BUDGET` is refused instead of
-        spawned: each sub-agent resumes the parent's whole chat context,
-        so its very first LLM step can cost a few cents, and a child
-        whose budget cannot cover even that step is killed on step 1
-        having done nothing.  Recursive fan-outs used to divide the
-        remainder into such doomed slivers (each nesting level splits by
-        ``num_tasks + 1``), burning budget on children that all returned
-        "Task failed".  Refusing with a plain :class:`KISSError` — not
-        :class:`BudgetExceededError`, which aborts the whole agent —
-        surfaces an actionable tool error so the parent model does the
-        work inline instead.
-
         Args:
             num_tasks: Number of parallel sub-agent tasks about to spawn.
 
@@ -1525,8 +1567,6 @@ class SorcarAgent(RelentlessAgent):
 
         Raises:
             BudgetExceededError: If the task has no remaining budget.
-            KISSError: If the per-child share would be below
-                :data:`MIN_SUBAGENT_BUDGET`.
         """
         raw_max_budget = getattr(self, "max_budget", None)
         if raw_max_budget is None:
@@ -1543,21 +1583,7 @@ class SorcarAgent(RelentlessAgent):
             )
         if num_tasks <= 0:
             return remaining
-        share = remaining / (num_tasks + 1)
-        # 1e-9 tolerance: budget arithmetic is float subtraction, so a
-        # mathematically exact floor share (e.g. (1.13-0.13)/2 per child)
-        # can land a few ULPs below 0.50 and must not be refused with a
-        # self-contradictory "$0.50 is below the $0.50 minimum" message.
-        if share < MIN_SUBAGENT_BUDGET - 1e-9:
-            raise KISSError(
-                f"Refusing to spawn {num_tasks} parallel sub-agent(s): the "
-                f"remaining budget ${remaining:.2f} gives each sub-agent "
-                f"only ${share:.2f}, below the ${MIN_SUBAGENT_BUDGET:.2f} "
-                "minimum a sub-agent needs to do useful work. Do the work "
-                "inline yourself (without run_parallel), or fan out fewer "
-                "tasks."
-            )
-        return share
+        return remaining / (num_tasks + 1)
 
     def _is_reviewer_subagent(self) -> bool:
         """Return whether this agent runs inside a reviewer's sub-tree.
@@ -1580,27 +1606,41 @@ class SorcarAgent(RelentlessAgent):
         itself a sub-agent (nested ``run_parallel``, or a ``run_agent``
         dispatch), its ``_tab_id`` is a synthetic id — the fan-out's
         invented one, or the daemon dispatch's ``api-…`` id — which no
-        webview has opened; the printer's viewer registry knows which
-        tab is really watching this task, so that one wins.  The
-        agent's own synthetic id is excluded from the candidates: a
-        ``run_agent`` dispatch registers it as a subscriber too (see
-        ``register_task_ui``), and picking it would parent the nested
-        children under a tab no client has, dropping their tabs.
+        webview has opened.  Every webview opens a sub-agent's tab
+        under the deterministic id ``{parent_tab_id}__sub_{task_id}``
+        (``subagentTabIdFor`` in ``media/main.js``; ``task`` stands in
+        for a missing parent), and the daemon replays it under the
+        same id, so that id is derived here: a sub-agent that fans out
+        right away — before any client's ``resumeSession`` for its tab
+        has arrived — has no viewer registered yet, and parenting its
+        children under the synthetic id would keep every surface from
+        opening their tabs.  Once viewers ARE registered in the
+        printer's fan-out registry they are authoritative: a parent
+        chat reopened under another tab id shows this sub-agent as
+        ``{new_tab}__sub_{task_id}``, which only the registry knows.
+        The agent's own synthetic id is never a candidate (a
+        ``run_agent`` dispatch registers it as a subscriber too, see
+        ``register_task_ui``).
 
         Returns:
             The tab id, or ``""`` when running headless.
         """
         tab_id = str(getattr(self, "_tab_id", "") or "")
-        if getattr(self, "_subagent_info", None) is None or self.printer is None:
-            return tab_id
-        fanout = getattr(self.printer, "_fanout_targets", None)
+        info = getattr(self, "_subagent_info", None)
         own_task_id = _persisted_task_id(self)
-        if fanout is None or not own_task_id:
+        if info is None or not own_task_id:
             return tab_id
+        parent_tab_id = str(info.get("parent_tab_id") or "") or "task"
+        derived = f"{parent_tab_id}__sub_{own_task_id}"
+        fanout = getattr(self.printer, "_fanout_targets", None)
         viewer_ids = sorted(
-            v for v in fanout(own_task_id) if v and v != tab_id
+            str(v) for v in (fanout(own_task_id) if fanout else [])
+            if v and v != tab_id
         )
-        return viewer_ids[0] if viewer_ids else tab_id
+        if not viewer_ids or derived in viewer_ids:
+            return derived
+        return viewer_ids[0]
+
 
     def _run_tasks_parallel(
         self,
@@ -1608,8 +1648,6 @@ class SorcarAgent(RelentlessAgent):
         max_workers: int | None = None,
         model_name: str | None = None,
         tool_profile: str = "",
-        review_budget: float | None = None,
-        review_flags: list[bool] | None = None,
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
@@ -1638,54 +1676,18 @@ class SorcarAgent(RelentlessAgent):
                 since its endpoint and key belong to this agent's model).
             tool_profile: Explicit tool profile for the children (a key
                 of :data:`TOOL_PROFILES`); ``""`` lets each child pick.
-            review_budget: USD already reserved from the review quota
-                for this fan-out's reviewer children; each reviewer's
-                budget is clipped to its share of it and the part the
-                reviewers did not spend is released afterwards (also
-                when the fan-out raises).
-            review_flags: Which of *tasks* are reviewer children (same
-                length as *tasks*); ``None`` means none.
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
         """
-        totals: dict[str, float | list[float]] = {}
-        flags = review_flags or [False] * len(tasks)
-        try:
-            return self._run_tasks_parallel_inner(
-                tasks, max_workers, model_name, tool_profile, review_budget, flags, totals,
-            )
-        finally:
-            if review_budget is not None and self._review_quota is not None:
-                per_task = totals.get("budget_used_per_task")
-                spent_by_reviewers = (
-                    sum(u for u, flag in zip(per_task, flags, strict=True) if flag)
-                    if isinstance(per_task, list) else 0.0
-                )
-                self._review_quota.release(review_budget - spent_by_reviewers)
-
-    def _run_tasks_parallel_inner(
-        self,
-        tasks: list[str],
-        max_workers: int | None,
-        model_name: str | None,
-        tool_profile: str,
-        review_budget: float | None,
-        review_flags: list[bool],
-        totals: dict[str, float | list[float]],
-    ) -> list[str]:
-        """Body of :meth:`_run_tasks_parallel`; *totals* receives the engine's usage."""
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
         self.reclaim_abandoned_subagents()
         monitor = _LiveUsageMonitor(self, self.printer)
         share = self._subagent_budget_share(len(tasks))
-        child_budgets: list[float | None] | None = None
-        if review_budget is not None and share is not None:
-            review_share = min(share, review_budget / max(1, sum(review_flags)))
-            child_budgets = [review_share if flag else share for flag in review_flags]
         child_model = model_name or self.model_name
+        totals: dict[str, float | list[float]] = {}
         # Sub-agents act in the parent's live container, not on the host
         # and not in a fresh container of their own.
         child_docker_image: str | None = None
@@ -1708,7 +1710,6 @@ class SorcarAgent(RelentlessAgent):
                 totals_out=totals,
                 usage_monitor=monitor,
                 max_budget=share,
-                child_budgets=child_budgets,
                 model_config=(
                     getattr(self, "model_config", None)
                     if child_model == self.model_name else None
@@ -2020,16 +2021,6 @@ class SorcarAgent(RelentlessAgent):
             - ``tasks`` must be a literal JSON array; shell substitutions
               such as ``"$(cat tasks.json)"`` are not expanded and are
               rejected.
-            - At most 3 fan-outs per task tree may contain review/audit
-              tasks (the budget is shared with every sub-agent); the 4th
-              is refused, so verify the last fixes yourself.
-            - A reviewer sub-agent (and anything it spawns) may not spawn
-              further reviewers.
-            - When the user's task names a review share ("at most 40%
-              of the budget for reviewing"), reviewers may be handed at
-              most that share of the top-level budget in total; a
-              review fan-out is clipped to what is left and refused
-              once nothing useful is left.
 
             Args:
                 tasks: A JSON-encoded list of task description strings.
@@ -2085,36 +2076,9 @@ class SorcarAgent(RelentlessAgent):
                     f"Error: tool_profile must be one of "
                     f"{', '.join(TOOL_PROFILES)}, got {tool_profile!r}."
                 )
-            # Review intent: the task text, or an explicit review profile.
-            review_flags = [
-                tool_profile == "review" or is_review_task(t) for t in task_list
-            ]
-            review_budget: float | None = None
-            if any(review_flags):
-                if self._is_reviewer_subagent():
-                    return f"Error: {REVIEWER_SPAWN_REFUSAL}"
-                # Zero-child preflight BEFORE reserving a round: a
-                # fan-out refused for budget must not burn the review
-                # quota (it spawned no reviewer).  Raises the same
-                # error the dispatch itself would.
-                share = self._subagent_budget_share(len(task_list))
-                if self._review_quota is None:
-                    self._review_quota = ReviewQuota()
-                if share is not None:
-                    n_review = sum(review_flags)
-                    granted = self._review_quota.reserve_budget(share * n_review)
-                    if granted / n_review < MIN_SUBAGENT_BUDGET - 1e-9:
-                        self._review_quota.release(granted)
-                        return f"Error: {REVIEW_BUDGET_REFUSAL}"
-                    review_budget = granted
-                if not self._review_quota.try_reserve():
-                    if review_budget is not None:
-                        self._review_quota.release(review_budget)
-                    return f"Error: {REVIEW_CAP_REFUSAL}"
             results = self._run_tasks_parallel(
                 task_list, max_workers=workers, model_name=model_name or None,
-                tool_profile=tool_profile, review_budget=review_budget,
-                review_flags=review_flags,
+                tool_profile=tool_profile,
             )
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
@@ -2286,9 +2250,11 @@ class SorcarAgent(RelentlessAgent):
         if skill_tool is not None:
             tools.append(skill_tool)
         try:
+            from kiss.agents.sorcar.mcp_oauth import make_mcp_auth_tools
             from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 
             tools.extend(make_mcp_tools(self.work_dir or "."))
+            tools.extend(make_mcp_auth_tools(self.work_dir or "."))
         except Exception:
             logger.warning("MCP tool setup failed", exc_info=True)
         from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
@@ -2587,7 +2553,7 @@ class SorcarAgent(RelentlessAgent):
             )
         return self._task_classification
 
-    def _fold_classifier_usage(self) -> None:
+    def _fold_classifier_usage(self) -> bool:
         """Bank the pre-run classifier's spend into this run's totals.
 
         Runs from :meth:`run`'s ``finally``, AFTER ``super().run`` — the
@@ -2615,6 +2581,10 @@ class SorcarAgent(RelentlessAgent):
         way (round-4 finding 2b: the previous unkeyed append-once
         design lost the spend on a pre-append stop and could not be
         retried safely).
+
+        Returns:
+            True when non-zero classifier spend was banked, i.e. the
+            run's last usage event no longer shows the task's total.
         """
         spend = self._classifier_spend
         if spend is not None:
@@ -2626,6 +2596,7 @@ class SorcarAgent(RelentlessAgent):
             )
             self._classifier_spend = None
         self._reset_task_classification()
+        return spend is not None and bool(spend.budget or spend.tokens)
 
     def run(  # type: ignore[override]
         self,
@@ -2759,15 +2730,6 @@ class SorcarAgent(RelentlessAgent):
         self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
-        # A top-level task starts with a fresh review budget; a
-        # sub-agent keeps the quota the fan-out engine inherited from
-        # its parent (falling back to a fresh one when spawned outside
-        # the engine).
-        if getattr(self, "_subagent_info", None) is None or self._review_quota is None:
-            self._review_quota = ReviewQuota(budget=review_budget_for(
-                max_budget if max_budget is not None else DEFAULT_MAX_BUDGET,
-                prompt_template,
-            ))
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.
@@ -2829,8 +2791,10 @@ class SorcarAgent(RelentlessAgent):
                 use_memory_override=use_memory,
             )
             if memory_root is not None:
-                self._memory_tools = MemoryTools(memory_root)
-                system_instructions += "\n\n" + MEMORY_PROTOCOL
+                self._memory_tools = MemoryTools(
+                    memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
+                )
+                system_instructions += "\n\n" + self._memory_tools.protocol()
             prompt = prompt_template
             if attachments:
                 parts = _attachment_parts(attachments)
@@ -2867,7 +2831,7 @@ class SorcarAgent(RelentlessAgent):
                 tool_call_hook=tool_call_hook,
             )
         finally:
-            self._fold_classifier_usage()
+            classifier_spend_folded = self._fold_classifier_usage()
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
@@ -2875,6 +2839,11 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
+            if classifier_spend_folded:
+                # The run's last event predates the fold, so the UI's
+                # cost would omit the classifier.  Emitted after the
+                # cleanup: printing raises the task's stop when it is set.
+                self._emit_usage_totals()
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -3012,7 +2981,6 @@ def run_tasks_parallel(
     web_tools: bool = True,
     use_memory: bool | None = None,
     tool_profile: str = "",
-    child_budgets: list[float | None] | None = None,
     docker_image: str | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
@@ -3061,8 +3029,7 @@ def run_tasks_parallel(
             ``"budget_used"``, ``"total_tokens_used"`` and
             ``"total_steps"`` so the caller can attribute sub-agent
             usage back to the parent task (see
-            :func:`_attribute_sub_usage`), plus the per-child spend
-            list ``"budget_used_per_task"`` (same order as *tasks*).
+            :func:`_attribute_sub_usage`).
         max_budget: Per-sub-agent budget cap in USD, forwarded to each
             sub-agent's ``run``.  Callers spawning sub-agents on behalf
             of a parent task pass each child one share of the parent's
@@ -3117,10 +3084,6 @@ def run_tasks_parallel(
             :data:`TOOL_PROFILES`).  ``""`` (default) lets each child
             pick its own: ``review`` for reviewer-marked children when
             ``DEFAULT_CONFIG.tool_profiles`` is on, ``full`` otherwise.
-        child_budgets: Per-child ``max_budget`` overrides (same length
-            as *tasks*); an entry of ``None`` falls back to *max_budget*.
-            Used to clip reviewer children to the review allowance
-            without touching their non-review siblings.
         docker_image: ``docker_image`` for every child (normally the
             parent's live container as ``container:<id>``, so the
             children's tools act inside the same container); ``None``
@@ -3157,7 +3120,6 @@ def run_tasks_parallel(
     parent_is_reviewer = bool(
         (getattr(parent_agent, "_subagent_info", None) or {}).get("reviewer")
     )
-    parent_quota = getattr(parent_agent, "_review_quota", None)
     # Stable for the whole fan-out: the children's synthetic tab ids
     # must not change between submission and the subagentDone
     # broadcast, even though the parent's persisted id can appear late.
@@ -3202,9 +3164,6 @@ def run_tasks_parallel(
         if tl is not None:
             tl.stop_event = sub_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
-        # The parent's review budget, BEFORE run() (which keeps an
-        # inherited quota): the whole in-process tree shares one cap.
-        agent._review_quota = parent_quota
         # Decided here, on the bare task text: the child's own prompt
         # will carry the whole chat history, whose earlier tasks would
         # make every implementation-word heuristic fire.
@@ -3226,8 +3185,8 @@ def run_tasks_parallel(
             "parent_task_id": _persisted_task_id(parent_agent)
             or fanout_parent_id,
             "parent_tab_id": parent_tab_id,
-            # Inherited down the whole sub-tree so a reviewer cannot
-            # launch reviewers through an intermediate helper child.
+            # Inherited down the whole sub-tree so a reviewer's helper
+            # children get the same read-only tool profile.
             "reviewer": reviewer,
         }
         if usage_monitor is not None:
@@ -3239,10 +3198,7 @@ def run_tasks_parallel(
                 work_dir=work_dir,
                 printer=printer,
                 is_parallel=True,
-                max_budget=(
-                    child_budgets[idx] if child_budgets and child_budgets[idx] is not None
-                    else max_budget
-                ),
+                max_budget=max_budget,
                 model_config=model_config,
                 base_system_prompt=base_system_prompt,
                 system_prompt=system_prompt_suffix or None,
@@ -3349,7 +3305,6 @@ def run_tasks_parallel(
                 totals_out["budget_used"] = sum(u[0] for u in sub_usage)
                 totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
                 totals_out["total_steps"] = sum(u[2] for u in sub_usage)
-                totals_out["budget_used_per_task"] = [u[0] for u in sub_usage]
     return results
 
 

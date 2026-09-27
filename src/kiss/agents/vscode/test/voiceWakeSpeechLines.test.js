@@ -52,7 +52,7 @@ Module._resolveFilename = function (request, ...rest) {
 const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-voice-'));
 const aiff = path.join(tmpdir, 'wake.aiff');
 const wav = path.join(tmpdir, 'wake.wav');
-spawnSync('say', ['Sorcar [[slnc 8000]]', '-o', aiff], {stdio: 'inherit'});
+spawnSync('say', ['Hey Sorcar [[slnc 8000]]', '-o', aiff], {stdio: 'inherit'});
 spawnSync(
   'afconvert',
   ['-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1', aiff, wav],

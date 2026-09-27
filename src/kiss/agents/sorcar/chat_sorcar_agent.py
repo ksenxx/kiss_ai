@@ -524,8 +524,23 @@ class ChatSorcarAgent(SorcarAgent):
         # A task that is only a filesystem path means "open it"; the
         # directive is added here, AFTER ``history_prompt`` was taken,
         # so history and the tab keep the raw path the user typed.
+        # Only for a task the user typed into a chat box, though: the
+        # task runner passes ``_open_bare_path=False`` for a run it
+        # starts on behalf of an agent script (``agentPath``: an SEA
+        # dispatched by ``/git_extract_knowledge /path/to/repo`` or
+        # ``/review_paper /path/to/paper.pdf`` receives the path as its
+        # whole task and defines what it means) or of another agent
+        # (``parentTaskId``: a ``run_agent`` sub-task), and a custom
+        # base system prompt (an SEA's ``system_prompt()``) suppresses
+        # it as well, so a direct ``ChatSorcarAgent.run`` of an agent
+        # script is not sent off to ``xdg-open`` the path either.
+        open_bare_path = bool(kwargs.pop("_open_bare_path", True)) and not str(
+            kwargs.get("base_system_prompt") or "",
+        ).strip()
         agent_prompt = self.build_chat_prompt(
-            with_open_directive(prompt_template, kwargs.get("work_dir") or "."),
+            with_open_directive(prompt_template, kwargs.get("work_dir") or ".")
+            if open_bare_path
+            else prompt_template,
         )
 
         # Consumed, never believed: ``SorcarAgent.run`` has no such

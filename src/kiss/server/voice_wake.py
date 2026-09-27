@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Always-on local "Sorcar" wake-word listener with GPT translation.
+"""Always-on local "Hey Sorcar" wake-word listener with GPT translation.
 
 Runs the lightweight offline Vosk small English model
 (``vosk-model-small-en-us-0.15``, ~40MB, Apache-2.0) against the
@@ -10,7 +10,7 @@ microphone and prints one line per event on stdout so a supervising
 process (the VS Code extension host) can react:
 
 - ``READY``        — model loaded and microphone open; listening began.
-- ``WAKE``         — the wake word "Sorcar" was heard.
+- ``WAKE``         — the wake word "Hey Sorcar" was heard.
 - ``TRANSCRIBING`` — speech capture ended; the gpt-audio call started.
 - ``SPEECH <json>``— the speech following the wake word, as a JSON
   object ``{"text": <english translation>, "speaker": <int or null>,
@@ -29,10 +29,12 @@ as speech capture ends, so a new ``WAKE`` may be printed before the
 previous utterance's ``SPEECH``/``NO_SPEECH`` line.
 
 Recognition is grammar-constrained: the recognizer only searches for a
-small set of phrases that sound like "Sorcar" plus the mandatory
+small set of phrases that sound like "Hey Sorcar" plus the mandatory
 ``[unk]`` catch-all (without ``[unk]`` the Kaldi WFST search stalls on
 out-of-grammar audio).  "sorcar" itself is not in the model vocabulary,
-so in-vocabulary phonetic aliases act as the trigger.
+so in-vocabulary phonetic aliases ("hey sore car", ...) act as the
+trigger.  The decoder can still emit a bare "sore car", but a lone
+"Sorcar" without "hey" never equals an alias and never wakes.
 
 Because the grammar forces every sound into an alias or ``[unk]``,
 naive substring matching is far too sensitive: everyday sentences such
@@ -55,8 +57,8 @@ The settings-panel sensitivity slider adjusts those gates.  Lower
 values raise the confidence floor and lengthen the required pause and
 (below ``SUFFIX_MATCH_SENSITIVITY``) drop trailing-alias acceptance;
 higher values lower the floor, shorten the pause, and accept
-utterances that *end* with an alias (for example "hey there Sorcar",
-decoded as ``[unk] sore car``).  An alias followed by more
+utterances that *end* with an alias (for example "okay, hey Sorcar",
+decoded as ``[unk] hey sore car``).  An alias followed by more
 speech/``[unk]`` still never wakes.
 
 Wake-word detection runs locally.  After a wake, the utterance that
@@ -68,7 +70,7 @@ that takes the audio directly — which returns the English translation
 of whatever language was spoken TOGETHER with the language of the
 speech.  The transcript then completes a DUAL wake check: it must
 begin (within its first few words) with something that sounds like
-"Sorcar" (see :func:`split_wake_prefix`), re-confirming the local
+"Sorcar", the name part of "Hey Sorcar" (see :func:`split_wake_prefix`), re-confirming the local
 Vosk detection with gpt-audio's ears; the confirmed prefix is cut
 and only the rest is reported, while an unconfirmed transcript is
 rejected as a false wake (``NO_SPEECH``) — except for speech
@@ -77,7 +79,7 @@ word in translation and the local check alone decides.  Translation
 calls run on one background worker thread with a hard per-attempt
 timeout: wake-word listening resumes the moment the capture ends, so
 a slow (or hung) translation API can never deafen the listener —
-saying "Sorcar" again works even while a previous transcription is
+saying "Hey Sorcar" again works even while a previous transcription is
 still in flight.  The worker reports utterances strictly in spoken
 order (FIFO), so a quick second utterance can never have its text
 inserted before a slow first one.
@@ -119,12 +121,16 @@ from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
 if TYPE_CHECKING:
     import sounddevice
 
-WAKE_ALIASES = [
+#: In-vocabulary sound-alikes of the name "Sorcar" (the model has no
+#: "sorcar" entry); the transcript-side check matches these alone.
+WAKE_NAME_ALIASES = [
     "sorcar",
     "sir car",
     "sore car",
     "sar car",
 ]
+#: The Vosk wake phrases: "hey" followed by a name alias.
+WAKE_ALIASES = [f"hey {alias}" for alias in WAKE_NAME_ALIASES]
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_ZIP_URL_TEMPLATE = "https://alphacephei.com/vosk/models/{}.zip"
@@ -184,7 +190,7 @@ def sensitivity_min_word_conf(sensitivity: int) -> float:
     confidences up to 0.838/1.0 (measured, 250ms blocks), sailing
     over the old sensitivity-10 gate of 0.72.  The steeper map gives
     sensitivity 10 a 0.88 floor, above every observed force-fit,
-    while a genuine crisp "Sorcar" (conf 1.0) still wakes.
+    while a genuine crisp "Hey Sorcar" (conf 1.0) still wakes.
     """
     if sensitivity <= 50:
         return 1.0 - 0.012 * sensitivity
@@ -208,7 +214,7 @@ def sensitivity_allows_trailing_alias(sensitivity: int) -> bool:
     """Whether an utterance merely ENDING with an alias may wake.
 
     Enabled at or above SUFFIX_MATCH_SENSITIVITY so phrases like
-    "hey there Sorcar" (decoded ``[unk] sore car``) wake at the top of
+    "okay, hey Sorcar" (decoded ``[unk] hey sore car``) wake at the top of
     the slider while the strict default keeps rejecting them.
     """
     return sensitivity >= SUFFIX_MATCH_SENSITIVITY
@@ -248,15 +254,16 @@ TRANSCRIPTION_USER_PROMPT = (
     "the speech and translate it into English. If it is already "
     "English, output the exact words verbatim. Do not answer it, act "
     "on it, or add anything. The dictation may begin with the spoken "
-    'wake word "Sorcar" (a proper name); when you hear it, write it '
-    'verbatim as "Sorcar" at the start of the text — never translate, '
+    'wake word "Hey Sorcar" (Sorcar is a proper name); when you hear '
+    'it, write it verbatim as "Hey Sorcar" at the start of the text — '
+    "never translate, "
     "merge, or drop it, and never add it when it was not spoken. "
     "Output exactly two lines: line 1 is "
     "only the language tag of the spoken language (e.g. en, fr, es); "
     "line 2 is only the English text of what was said."
 )
 _TRANSCRIPT_WAKE_ALIASES = [
-    *WAKE_ALIASES,
+    *WAKE_NAME_ALIASES,
     "soccer",
     "circa",
     "so car",
@@ -267,7 +274,7 @@ _TRANSCRIPT_WAKE_ALIASES = [
     "sorcerer",
 ]
 _WAKE_PREFIX_RE = re.compile(
-    r"^\s*(?:"
+    r"^\s*(?:hey\b[\s,.:;!?\-—–]*)?(?:"
     + "|".join(
         re.escape(alias).replace(r"\ ", r"\s+")
         for alias in sorted(_TRANSCRIPT_WAKE_ALIASES, key=len, reverse=True)
@@ -284,7 +291,8 @@ _QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 
 
 def strip_leading_wake_word(text: str) -> str:
-    """Remove a leading wake-word alias from a transcript, if present."""
+    """Remove a leading wake word ("Hey Sorcar", or just a name alias
+    such as "Sorcar"/"soccer") from a transcript, if present."""
     stripped = text.strip()
     while True:
         next_text = _WAKE_PREFIX_RE.sub("", stripped, count=1).strip()
@@ -293,7 +301,11 @@ def strip_leading_wake_word(text: str) -> str:
         stripped = next_text
 
 
+#: The name part of the "Hey Sorcar" wake phrase, matched in transcripts.
 WAKE_WORD = "sorcar"
+#: Greetings gpt-audio writes for the spoken "Hey" of "Hey Sorcar"; a
+#: clipped onset (SHORT_WAKE_ONSETS) may follow one of them.
+WAKE_GREETINGS = frozenset({"hey", "hay"})
 MAX_WAKE_PREFIX_WORDS = 8
 MAX_WAKE_PREFIX_DISTANCE = 2
 _COLLAPSED_WAKE_ALIASES = frozenset(
@@ -307,8 +319,9 @@ _COLLAPSED_WAKE_ALIASES = frozenset(
 # Clipped onsets gpt-audio produces when it merges the wake word into
 # the sentence (measured live: "Sorcar, what is the weather" came back
 # as "So, what is the weather").  Too short for the fuzzy gate, so they
-# are accepted only as the transcript's VERY FIRST word — the one
-# position the prepended wake-word audio guarantees.
+# are accepted only as the transcript's VERY FIRST word, or right after
+# a leading "Hey" (WAKE_GREETINGS) — the positions the prepended
+# wake-word audio guarantees.
 SHORT_WAKE_ONSETS = frozenset({"so", "sor", "sir", "saw", "sar", "zor"})
 _TOKEN_RE = re.compile(r"\S+")
 _NON_LETTER_RE = re.compile(r"[^a-z]")
@@ -368,10 +381,10 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
 
     The wake-word audio is prepended to every post-wake capture (see
     :class:`WakeSession`), so a genuine wake's transcript carries
-    "Sorcar" — as heard by gpt-audio: "Sorcar", "soccer", "sir car",
-    "Sarkar", ... — at or near the beginning (near, not necessarily
-    first: the preamble ring may pick up a breath, a stray word, or
-    the "hey there" of a trailing-alias wake before the alias).  The
+    "Hey Sorcar" — the name as heard by gpt-audio: "Sorcar", "soccer",
+    "sir car", "Sarkar", ... — at or near the beginning (near, not
+    necessarily first: the "Hey" itself, a breath, a stray word, or
+    the "okay" of a trailing-alias wake precede the name).  The
     first :data:`MAX_WAKE_PREFIX_WORDS` words are therefore scanned
     for a word (or two adjacent words, e.g. "sir car") that
     :func:`sounds_like_wake_word`; everything up to and including the
@@ -383,7 +396,8 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
     "Sorry"): an exact ``sorcar`` beats a known alias, which beats a
     single-word fuzzy match, and a clipped onset
     (:data:`SHORT_WAKE_ONSETS`, e.g. the measured "So," for a merged
-    "Sorcar,") counts last and only as the very first word.
+    "Sorcar,") counts last and only as the very first word or right
+    after a leading "Hey" (:data:`WAKE_GREETINGS`).
 
     Args:
         text: The cleaned transcript of a wake-prefixed utterance.
@@ -412,10 +426,12 @@ def split_wake_prefix(text: str) -> tuple[bool, str]:
     # No full wake word anywhere near the start: fall back to a clipped
     # onset, checked LAST so it can never shadow a real alias ("So car"
     # must be cut whole, not just its "So").
-    if tokens:
-        first = _NON_LETTER_RE.sub("", tokens[0].group().lower())
-        if first in SHORT_WAKE_ONSETS:
-            return True, _text_after_token(text, tokens[0])
+    for token in tokens[:2]:
+        word = _NON_LETTER_RE.sub("", token.group().lower())
+        if word in SHORT_WAKE_ONSETS:
+            return True, _text_after_token(text, token)
+        if word not in WAKE_GREETINGS:
+            break
     return False, text.strip()
 
 
@@ -531,7 +547,7 @@ class SpeechCapture:
     """Captures the utterance that follows the wake word.
 
     The Vosk wake event is emitted before this object is created, so
-    blocks fed here are the audio *after* "Sorcar" (and after the
+    blocks fed here are the audio *after* "Hey Sorcar" (and after the
     brief pause that strict wake detection requires).  Leading silence
     is ignored, speech is captured as soon as a loud block arrives,
     and capture ends after trailing silence, a no-speech timeout, or a
@@ -757,7 +773,7 @@ def transcribe_pcm(
     With *expect_wake_prefix* the caller prepended the wake-word audio
     itself to *pcm* (see :class:`WakeSession`), so the transcript is
     the second half of the dual wake check: it must START with
-    something that sounds like "Sorcar" (:func:`split_wake_prefix`).
+    something that sounds like "(Hey) Sorcar" (:func:`split_wake_prefix`).
     When it does, the confirmed prefix is cut and the rest is
     returned; when it does not, the local wake detection was a false
     positive and the whole utterance is rejected (empty ``text``,
@@ -875,7 +891,7 @@ class WakeSession:
     :func:`transcribe_pcm`).  Once the
     utterance ends, its PCM is queued for one background worker thread
     that translates and reports on stdout — the audio loop goes
-    straight back to wake detection, so "Sorcar" keeps working even
+    straight back to wake detection, so "Hey Sorcar" keeps working even
     while a slow transcription is still in flight.  The single FIFO
     worker bounds API concurrency to one call and reports utterances
     in spoken order.
@@ -1270,8 +1286,8 @@ def matches_wake(text: str, allow_trailing: bool = False) -> bool:
     not wake the listener.
 
     With *allow_trailing* (high wake-word sensitivity) an utterance
-    that ENDS with an alias also matches — "hey there Sorcar" decodes
-    to ``[unk] sore car`` — but a mid-utterance alias (anything after
+    that ENDS with an alias also matches — "okay, hey Sorcar" decodes
+    to ``[unk] hey sore car`` — but a mid-utterance alias (anything after
     it, e.g. a trailing ``[unk]``) still never matches.
     """
     normalized = " ".join(text.lower().split())
@@ -1320,16 +1336,16 @@ def wake_with_leading_noise(words: list[dict] | None) -> bool:
     """Return True when *words* is one wake alias preceded only by
     brief ``[unk]`` noise.
 
-    Quietly spoken "Sorcar" carries a breathy onset that the grammar
-    decodes as a short leading ``[unk]`` before the alias
-    ("[unk] sore car" with a ~60ms [unk], measured with whispered
+    Quietly spoken "Hey Sorcar" carries a breathy onset that the
+    grammar decodes as a short leading ``[unk]`` before the alias
+    ("[unk] hey sore car"; a ~60ms [unk] was measured with whispered
     speech); exact whole-utterance matching rejected those wakes, so
     the wake word seemed to need a loud voice.  This companion to
     :func:`matches_wake` accepts them: every word before the alias
     must be ``[unk]``, their spans must total at most
     :data:`MAX_LEADING_NOISE_SECONDS`, and the alias must end the
     utterance.  Spoken-word prefixes decode to [unk] spans of ~0.5s
-    and up, so sentences and "hey there Sorcar" stay rejected, as
+    and up, so sentences and "okay, hey Sorcar" stay rejected, as
     does anything after the alias.  Word entries without numeric
     start/end timings reject — the gate only ever opens on evidence.
 
@@ -1679,7 +1695,9 @@ def run_mic(
 
 def main() -> int:
     """CLI entry point for the wake-word listener."""
-    parser = argparse.ArgumentParser(description="Sorcar wake-word listener")
+    parser = argparse.ArgumentParser(
+        description='"Hey Sorcar" wake-word listener'
+    )
     parser.add_argument(
         "--wav",
         type=Path,

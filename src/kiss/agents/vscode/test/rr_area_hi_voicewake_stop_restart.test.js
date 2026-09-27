@@ -205,7 +205,13 @@ async function testFireAndForgetStopThenStartDoesNotOverlap() {
   );
   const before = spawnedCount();
   service.start();
-  await waitFor(() => fs.existsSync(lockDir), 'listener never started');
+  // Wait for the PID record, not just the lock: the fake listener writes
+  // its PID after mkdir, and a SIGTERM landing in between would leave the
+  // spawn uncounted and the assertions below off by one.
+  await waitFor(
+    () => spawnedCount() === before + 1 && fs.existsSync(lockDir),
+    'listener never started',
+  );
 
   void service.stop();
   service.start();
@@ -241,7 +247,11 @@ async function testStopCancelsQueuedStart() {
   );
   const before = spawnedCount();
   service.start();
-  await waitFor(() => fs.existsSync(lockDir), 'listener never started');
+  // Same as above: the PID record is what spawnedCount() compares against.
+  await waitFor(
+    () => spawnedCount() === before + 1 && fs.existsSync(lockDir),
+    'listener never started',
+  );
 
   void service.stop();
   service.start();

@@ -719,13 +719,22 @@ class DockerManager:
         container = self.container
         if container is None:
             return
+        # Collect the whole tree first, freeze it, then kill it.  Killing
+        # one process per scan step let ``bash -c "sleep 20; touch f"``
+        # continue to ``touch f`` when the glob visited ``sleep`` before
+        # its parent shell (``/proc/[0-9]*`` sorts lexically, not by
+        # pid); SIGSTOP on every member first closes that window.
         script = (
+            "pids=\n"
             "for d in /proc/[0-9]*; do\n"
             '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
             f'  case "$env" in *"{_EXEC_TOKEN_VAR}={token}"*)\n'
-            '    kill -9 "${d#/proc/}" 2>/dev/null;;\n'
+            '    pids="$pids ${d#/proc/}";;\n'
             "  esac\n"
-            "done"
+            "done\n"
+            '[ -n "$pids" ] || exit 0\n'
+            "kill -STOP $pids 2>/dev/null\n"
+            "kill -9 $pids 2>/dev/null"
         )
         try:
             container.exec_run(["/bin/sh", "-c", script])

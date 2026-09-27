@@ -53,7 +53,15 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
   return items;
 }
 
-export function getTricks(): string[] {
+/**
+ * The Inject promptlet list plus how many leading entries the user owns.
+ *
+ * `tricks` is ~/.kiss/MY_INJECTION.md's `## Trick` sections followed by
+ * the bundled INJECTIONS.md ones; `userCount` is the length of the first
+ * part, the rows the panel shows a delete button on.  Same shape as the
+ * daemon's `tricksData` event.
+ */
+export function getTricksData(): {tricks: string[]; userCount: number} {
   const items: string[] = [];
 
   const myInjectionPath = ensureUserAssetFromDefault(
@@ -63,6 +71,7 @@ export function getTricks(): string[] {
   if (myInjectionPath !== null) {
     items.push(...readMarkdownSections(myInjectionPath, 'Trick'));
   }
+  const userCount = items.length;
 
   const bundledOverride = process.env.KISS_INJECTIONS_PATH;
   let bundledPath: string | null = bundledOverride || null;
@@ -76,7 +85,12 @@ export function getTricks(): string[] {
     items.push(...readMarkdownSections(bundledPath, 'Trick'));
   }
 
-  return items;
+  return {tricks: items, userCount};
+}
+
+/** The Inject promptlet list alone (see `getTricksData`). */
+export function getTricks(): string[] {
+  return getTricksData().tricks;
 }
 
 function parseTipSections(text: string): string[] {
@@ -105,7 +119,46 @@ export function getTips(): string[] {
   return parseTipSections(renderBrand(text));
 }
 
+/** The persisted "don't show tips again" flag, under `$KISS_HOME`. */
+function tipsOptOutPath(): string {
+  return path.join(kissHomeDir(), 'TIPS_DISABLED');
+}
+
+/** Whether the user opted out of the tips window ("Don't show again"). */
+export function tipsDisabled(): boolean {
+  return fs.existsSync(tipsOptOutPath());
+}
+
+/**
+ * Persist the user's "don't show tips again" choice — the host side of
+ * the webview's `{type: 'tipsOptOut'}` message (tips.js).  Idempotent;
+ * an unwritable `$KISS_HOME` is ignored (the in-session tips window is
+ * already closed, the choice simply is not remembered).
+ */
+export function recordTipsOptOut(): void {
+  try {
+    fs.mkdirSync(kissHomeDir(), {recursive: true});
+    fs.writeFileSync(tipsOptOutPath(), new Date().toISOString() + '\n');
+  } catch {
+    // Nothing to do: see the docstring.
+  }
+}
+
+/** Forget a persisted "don't show tips again" choice (tips.js unticks the box). */
+export function clearTipsOptOut(): void {
+  fs.rmSync(tipsOptOutPath(), {force: true});
+}
+
+/**
+ * Claim the one-time first-run tips popup.  The popup opens exactly
+ * once per `$KISS_HOME`, on the very first run: an extension update
+ * never re-opens it (the "what's new" nag was removed), and a persisted
+ * opt-out (recordTipsOptOut) keeps it closed for good.
+ *
+ * @returns true for the single caller that may open the popup.
+ */
 export function consumeTipsFirstRun(): boolean {
+  if (tipsDisabled()) return false;
   const marker = path.join(kissHomeDir(), 'TIPS_SHOWN');
   // audit0903-coverage:start
   try {
@@ -122,88 +175,6 @@ export function consumeTipsFirstRun(): boolean {
     return false;
   }
   // audit0903-coverage:end
-}
-
-/**
- * Read the update stamp the installer wrote into `.extension-updated`.
- *
- * @param home The `$KISS_HOME` directory.
- * @returns The stamp (a UTC timestamp; 'unknown' for an empty marker
- *     from an interrupted install), or null when there is no marker.
- */
-function readExtensionUpdateStamp(home: string): string | null {
-  // audit0903-coverage:start
-  try {
-    const raw = fs
-      .readFileSync(path.join(home, '.extension-updated'), 'utf-8')
-      .trim();
-    return raw || 'unknown';
-  } catch {
-    return null;
-  }
-  // audit0903-coverage:end
-}
-
-export function resetTipsOnExtensionUpdate(): void {
-  const home = kissHomeDir();
-  // audit0903-coverage:start
-  try {
-    const stamp = readExtensionUpdateStamp(home);
-    if (stamp === null) return;
-    // ONE window per update may reset the tips claim.  Every window
-    // that sees `.extension-updated` runs this, and the shared marker
-    // is only unlinked later by asynchronous dependency setup — so an
-    // unconditional remove let window B wipe the TIPS_SHOWN that
-    // window A had just reset AND re-claimed, giving two popups for
-    // one update.  The reset owner is elected by atomically ('wx')
-    // creating a claim file named after the update stamp; losers (and
-    // every later run for the same stamp) fail with EEXIST and leave
-    // the tips claim alone.
-    const claim =
-      '.tips-reset-' + stamp.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
-    for (const name of fs.readdirSync(home)) {
-      // Claims of older updates are spent; drop them so the home
-      // directory keeps exactly one.
-      if (name.startsWith('.tips-reset-') && name !== claim) {
-        fs.rmSync(path.join(home, name), {force: true});
-      }
-    }
-    fs.writeFileSync(path.join(home, claim), stamp + '\n', {flag: 'wx'});
-    fs.rmSync(path.join(home, 'TIPS_SHOWN'), {force: true});
-  } catch {
-    // Lost the election (EEXIST) or the home is unreadable: this
-    // window must not reset, and activation must never break.
-  }
-  // audit0903-coverage:end
-}
-
-export function readSampleTasks(extensionRoot: string): Array<{text: string}> {
-  const items: Array<{text: string}> = [];
-
-  const myTasksPath = ensureUserAssetFromDefault(
-    'MY_TASK_TEMPLATES.md',
-    '## Task\n\nHi!\n',
-  );
-  if (myTasksPath !== null) {
-    for (const text of readMarkdownSections(myTasksPath, 'Task')) {
-      items.push({text});
-    }
-  }
-
-  const packagePath = path.join(
-    extensionRoot,
-    'kiss_project',
-    'src',
-    'kiss',
-    'SAMPLE_TASKS.md',
-  );
-  const sourcePath = path.join(extensionRoot, '..', '..', 'SAMPLE_TASKS.md');
-  const bundledPath = fs.existsSync(packagePath) ? packagePath : sourcePath;
-  for (const text of readMarkdownSections(bundledPath, 'Task')) {
-    items.push({text});
-  }
-
-  return items;
 }
 
 export function getNonce(): string {
@@ -369,7 +340,8 @@ export function buildChatHtml(
 ): string {
   const nonce = getNonce();
   const version = getVersion();
-  const tricksJson = JSON.stringify(getTricks()).replace(/<\//g, '<\\/');
+  const tricksData = getTricksData();
+  const tricksJson = JSON.stringify(tricksData.tricks).replace(/<\//g, '<\\/');
   const tips = getTips();
   const tipsJson = JSON.stringify({
     tips,
@@ -415,7 +387,11 @@ export function buildChatHtml(
     CSP_META: csp,
     STYLE_HREF: u('main.css'),
     BRAND_STYLE_HREF: u('brand.css'),
-    HLJS_CSS_HREF: u('highlight-github-dark.min.css'),
+    WELCOME_LOGO_SRC: u('welcome-logo.png'),
+    WELCOME_LOGO_DARK_SRC: u('welcome-logo-dark.png'),
+    // The dark sheet is the initial one; main.js (followVscodeTheme)
+    // swaps in the light sheet whenever the editor theme is light.
+    HLJS_CSS_HREF: u('highlight-vscode-dark.css'),
     HEAD_STYLE: '',
     BODY_CLASS_ATTR: bodyAttrs || '',
     PRODUCT_NAME: escapeHtml(BRAND.productName),
@@ -439,8 +415,15 @@ export function buildChatHtml(
     CTX_MENU_SRC: u('contentContextMenu.js'),
     TREE_MENU_SRC: u('treeContextMenu.js'),
     MAIN_SRC: u('main.js'),
-    SHIM_SCRIPT: '',
+    SHIM_SCRIPT:
+      `<script nonce="${nonce}">window.__HLJS_THEME_CSS__ = ` +
+      JSON.stringify({
+        dark: u('highlight-vscode-dark.css'),
+        light: u('highlight-vscode-light.css'),
+      }).replace(/<\//g, '<\\/') +
+      ';</script>',
     TRICKS_JSON: tricksJson,
+    MY_TRICKS_COUNT: String(tricksData.userCount),
     TIPS_JSON: tipsJson,
     TIPS_SRC: u('tips.js'),
     VOICE_SRC: u('voice.js'),

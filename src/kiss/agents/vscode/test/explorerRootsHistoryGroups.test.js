@@ -95,8 +95,14 @@ function makeWebview(beforeMain) {
     },
     configurable: true,
   });
-  win.prompt = () => '';
-  win.confirm = () => true;
+  // Native dialogs are gone from main.js (the VS Code webview sandbox
+  // never showed them); any call is a regression.
+  win.prompt = () => {
+    throw new Error('window.prompt must not be called');
+  };
+  win.confirm = () => {
+    throw new Error('window.confirm must not be called');
+  };
   if (beforeMain) beforeMain(win);
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
@@ -155,6 +161,18 @@ function ofType(posted, type) {
 
 function all(win, sel) {
   return Array.from(win.document.querySelectorAll(sel));
+}
+
+/** Answer the in-webview Delete question (it replaced window.confirm). */
+function confirmDelete(win) {
+  const toast = win.document.querySelector(
+    '[data-notification-id="fs-delete"]',
+  );
+  assert.ok(toast, 'Delete asks in-webview first');
+  const btn = Array.from(
+    toast.querySelectorAll('.kiss-notification-action'),
+  ).find(b => b.textContent.trim() === 'Delete');
+  click(win, btn);
 }
 
 function menuItem(win, label) {
@@ -576,11 +594,13 @@ async function main() {
     // nested copy to the working directory.
     rightClick(win, rowFor(win, SUB + '/x.txt', SUB));
     click(win, menuItem(win, 'Delete'));
+    confirmDelete(win);
     let fsReq = ofType(posted, 'fsAction').pop();
     assert.strictEqual(fsReq.action, 'delete');
     assert.strictEqual(fsReq.workDir, SUB);
     rightClick(win, rowFor(win, SUB + '/x.txt', WD));
     click(win, menuItem(win, 'Delete'));
+    confirmDelete(win);
     fsReq = ofType(posted, 'fsAction').pop();
     assert.strictEqual(fsReq.workDir, WD);
     // Copy Relative Path is relative to the row's own top-level folder.
@@ -2501,6 +2521,7 @@ async function main() {
     const tabsBefore = all(win, '.chat-tab').length;
     rightClick(win, rowFor(win, WWD + '\\folder'));
     click(win, menuItem(win, 'Delete'));
+    confirmDelete(win);
     const del = ofType(posted, 'fsAction').pop();
     assert.strictEqual(del.action, 'delete');
     assert.strictEqual(del.workDir, WWD);

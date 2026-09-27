@@ -6,18 +6,19 @@
 
 Real audio (macOS TTS), real speech models, no mocks.  The sensitivity
 slider (0..100, default 80) must ACTUALLY change how eagerly the
-"Sorcar" wake word fires, in both listener implementations:
+"Hey Sorcar" wake word fires, in both listener implementations:
 
 - The Python listener (``kiss.server.voice_wake``) used by the
   VS Code extension host accepts ``--sensitivity N``:
 
-  * Spoken "Sorcar" wakes at the default sensitivity.
-  * Spoken "soccer" force-fits onto an alias with word confidences of
-    only ~0.55-0.69 (measured live); it wakes at the default
-    sensitivity but a LOW sensitivity raises the confidence gate above
-    the force-fit scores and rejects it.
-  * Spoken "hey there Sorcar" decodes to ``[unk] sore car`` — the
-    alias at the END of the utterance.  Strict whole-utterance
+  * Spoken "Hey Sorcar" wakes at the default sensitivity.
+  * "hey sucker" in the macOS *Fred* voice force-fits onto an alias
+    with a low confidence on the middle word (measured: ``hey sore
+    car`` with "sore" at 0.37); it wakes at the default sensitivity
+    but a LOW sensitivity raises the confidence gate above the
+    force-fit score and rejects it.
+  * Spoken "hey there, Hey Sorcar" decodes to ``[unk] hey sore car``
+    — the alias at the END of the utterance.  Strict whole-utterance
     matching rejects it at a LOW sensitivity (< 75), while the
     default (80) accepts a trailing alias and wakes.
   * Ordinary sentences containing alias-sounding words never wake at
@@ -46,11 +47,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
 
 
-def _say_wav(directory: Path, name: str, text: str) -> Path:
+def _say_wav(
+    directory: Path, name: str, text: str, voice: str | None = None
+) -> Path:
     """Synthesize *text* as a 16kHz mono 16-bit WAV via macOS TTS."""
     aiff = directory / f"{name}.aiff"
     wav = directory / f"{name}.wav"
-    subprocess.run(["say", text, "-o", str(aiff)], check=True)
+    voice_args = ["-v", voice] if voice else []
+    subprocess.run(["say", *voice_args, text, "-o", str(aiff)], check=True)
     subprocess.run(
         ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
          str(aiff), str(wav)],
@@ -92,18 +96,19 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
         cls.sorcar_wav = _say_wav(
             cls.tmpdir,
             "sorcar",
-            "Sorcar [[slnc 1500]] Sorcar [[slnc 1500]] Sorcar [[slnc 1500]]",
+            "Hey Sorcar [[slnc 1500]] Hey Sorcar [[slnc 1500]] Hey Sorcar [[slnc 1500]]",
         )
         cls.soccer_wav = _say_wav(
             cls.tmpdir,
             "soccer",
-            "soccer [[slnc 1500]] soccer [[slnc 1500]] soccer [[slnc 1500]]",
+            "[[slnc 500]] hey sucker [[slnc 1500]] hey sucker [[slnc 1500]]",
+            voice="Fred",
         )
         cls.hey_wav = _say_wav(
             cls.tmpdir,
             "hey",
-            "hey there [[slnc 300]] Sorcar [[slnc 1500]] "
-            "hey there [[slnc 300]] Sorcar [[slnc 1500]]",
+            "hey there [[slnc 300]] Hey Sorcar [[slnc 1500]] "
+            "hey there [[slnc 300]] Hey Sorcar [[slnc 1500]]",
         )
         cls.sentences_wav = _say_wav(
             cls.tmpdir,
@@ -113,6 +118,7 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
                     "I watched the soccer game yesterday with my friends",
                     "yes sir the car is ready to go",
                     "soccer is my favorite sport",
+                    "hey soccer is fun to watch",
                     "so called experts say otherwise",
                 ]
             ),

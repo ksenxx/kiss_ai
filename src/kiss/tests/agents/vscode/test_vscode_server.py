@@ -30,54 +30,6 @@ def _clean_registry():
     agent_state.agent_states.clear()
 
 
-class TestMainJsInfiniteScroll(unittest.TestCase):
-    """Test main.js has infinite scroll and chat_id color code."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls.js = (base / "vscode" / "media" / "main.js").read_text()
-
-
-
-
-
-
-
-
-
-    def test_chat_id_bg_colors_are_light(self) -> None:
-        """Verify the chatIdBgColor function produces light pastel colors.
-
-        Reimplements the JS djb2 hash + HSL logic in Python and checks that
-        the minimum RGB channel is >= 140 (i.e., clearly light) for
-        a wide range of chat_id strings.
-        """
-        import colorsys
-        import ctypes
-
-        def chat_id_bg_rgb(chat_id: str) -> tuple[int, int, int]:
-            h = 5381
-            for ch in chat_id:
-                h = ((h << 5) + h) + ord(ch)
-                h = ctypes.c_int32(h).value
-            hue = abs(h) % 360
-            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.75, 0.55)
-            return (round(r * 255), round(g * 255), round(b * 255))
-
-        test_ids = [
-            "abc123", "xyz789", "chat-001", "chat-002", "session-1",
-            "a", "test", "550e8400-e29b-41d4-a716-446655440000",
-            "f47ac10b-58cc-4372-a567-0e02b2c3d479", "z",
-        ]
-        for cid in test_ids:
-            r, g, b = chat_id_bg_rgb(cid)
-            assert min(r, g, b) >= 140, (
-                f"chat_id={cid!r} produced dark color rgb({r},{g},{b})"
-            )
-
 class TestHistoryPanelSearchOnOpen(unittest.TestCase):
     """Test that opening the history panel uses existing search text.
 

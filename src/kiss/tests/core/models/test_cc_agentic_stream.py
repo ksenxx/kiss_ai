@@ -326,10 +326,10 @@ class TestKissToolsPromptNote:
     """The not-native clarification must reach the CLI and never leak."""
 
     def test_note_reaches_prompt_and_is_restored(self) -> None:
-        """During a tool-bearing turn the prompt sent on stdin carries the
-        warning that KISS tools are not native tools (appended to the task
-        after ``CLI_SYSTEM_PROMPT_HEADER``, never as a ``--system-prompt``
-        argument); the model_config is restored afterwards."""
+        """During a tool-bearing turn the ``--append-system-prompt`` argument
+        carries the tool descriptions and the warning that KISS tools are
+        not native tools (never a ``--system-prompt`` argument, never the
+        task prompt on stdin); the model_config is restored afterwards."""
         import os
         import subprocess
         import threading
@@ -413,12 +413,13 @@ class TestKissToolsPromptNote:
         assert captured_args, "CLI was never invoked"
         args = captured_args[0]
         assert "--system-prompt" not in args
+        system_prompt = args[args.index("--append-system-prompt") + 1]
+        assert "NOT part of your native tool set" in system_prompt
+        assert "finish" in system_prompt
         drainer.join(timeout=30)
         assert not drainer.is_alive(), "the prompt pipe was never closed"
         prompt = b"".join(prompt_chunks).decode("utf-8")
-        assert "# You new system prompt follows:" in prompt
-        assert "NOT part of your native tool set" in prompt
-        assert "finish" in prompt
+        assert prompt == "hi"
         # Restored: the note must not leak into subsequent plain turns.
         assert "system_instruction" not in m.model_config
 

@@ -134,6 +134,30 @@ def test_remote_css_colour_literals_are_dark_modern_fallbacks() -> None:
     assert not leaked, f"colour literals outside the theme mapping: {leaked}"
 
 
+def test_theme_dependent_root_tokens_are_rederived_on_the_remote_body() -> None:
+    """A main.css ``:root`` token that reads a ``--vscode-*`` variable
+    resolves on the root, before ``body.remote-chat.light-theme`` swaps
+    the variable, so it would keep its dark value in the light theme
+    unless ``body.remote-chat`` declares the token again (e.g.
+    ``--menu-selected-bg`` on the content-tab menu hover)."""
+    main_css = re.sub(
+        r"/\*.*?\*/", "", (MEDIA_DIR / "main.css").read_text(encoding="utf-8"), flags=re.S
+    )
+    root_block = re.search(r":root\s*\{(.*?)\n\}", main_css, re.S)
+    body_block = re.search(r"body\.remote-chat\s*\{(.*?)\n\}", _stripped_codex_css(), re.S)
+    assert root_block and body_block, "token blocks not found"
+    root, body = root_block.group(1), body_block.group(1)
+    theme_dependent = [
+        name
+        for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", root)
+        if "--vscode-" in value
+    ]
+    assert theme_dependent, "main.css :root must derive tokens from --vscode-* variables"
+    rederived = set(re.findall(r"(--[\w-]+)\s*:", body))
+    missing = [name for name in theme_dependent if name not in rederived]
+    assert not missing, f"not re-derived on body.remote-chat: {missing}"
+
+
 def test_every_vscode_variable_the_page_uses_is_injected() -> None:
     """main.css, remote-codex.css and main.js may only reference
     ``--vscode-*`` names that both theme blocks define (plus the font

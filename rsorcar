@@ -100,10 +100,14 @@
 #      first as a tar stream over ssh, then this machine's go there, and on
 #      each side src/kiss/scripts/merge_memory_pages.py folds them in -- a
 #      page one machine lacks is added, a page both have keeps whichever copy
-#      was updated last, a page changed on both in the same second is named
-#      and left as each machine has it, and no page is ever deleted.  The
-#      vector index next to the pages is a cache and does not travel; the
-#      next agent to open the memory rebuilds it from the pages.
+#      was updated last, a page one machine deleted after its last change
+#      is deleted on the other (deletions leave tombstones that travel
+#      too), and a page changed on both at the same moment is named and left
+#      as each machine has it.  A difference between the two clocks, measured
+#      first, widens "the same moment" so that it never orders two changes
+#      the wrong way round.  The vector index next to the pages is a cache
+#      and does not travel; the next agent to open the memory rebuilds it
+#      from the pages.
 #   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
 #      build).  A ``code`` CLI is required by install.sh, so code-server is
 #      installed (standalone, no sudo) when the host has no editor CLI.
@@ -579,10 +583,11 @@ bash "$SCRIPT_DIR/scripts/sync-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" 
 #     remembers what the agent on the other learned.  scripts/sync-memory.sh
 #     brings the remote's pages here first and then sends this machine's
 #     there; on each side src/kiss/scripts/merge_memory_pages.py adds the
-#     pages that are missing and keeps, for a page both have, the copy
-#     updated last.  No page is deleted anywhere, the vector index is left
-#     to rebuild itself, and a memory that could not be synced is -- like the
-#     task database above -- a warning, not a failed deploy.
+#     pages that are missing, keeps, for a page both have, the copy updated
+#     last, and carries out a deletion the other machine made after the
+#     page's last change.  The vector index is left to rebuild itself, and a
+#     memory that could not be synced is -- like the task database above --
+#     a warning, not a failed deploy.
 # ---------------------------------------------------------------------------
 step "Syncing the agent's memory with $TARGET (both ways) ..."
 bash "$SCRIPT_DIR/scripts/sync-memory.sh" "$TARGET" \

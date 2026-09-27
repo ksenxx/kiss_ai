@@ -22,10 +22,33 @@
 // closing must not strip the title-bar buttons from the user's other
 // windows. The restore instead happens when the user turns the mode
 // off (or disables the custom title bar) in a running window.
+//
+// The setting is the USER's: it is never rewritten silently. The first
+// time the move is wanted the user is asked once (an information
+// message with 'Move actions to title bar' / 'Keep my setting'); the
+// answer is remembered in globalState and honoured in every later
+// window and session. Dismissing the message counts as 'Keep my
+// setting' — the extension does not ask again, and the user can set
+// `workbench.editor.editorActionsLocation` to "titleBar" by hand.
 
 import * as vscode from 'vscode';
+import {showInformationNotification} from './WebviewNotifications';
+import {PRODUCT_NAME} from './brand';
 
 const EDITOR_ACTIONS_SETTING = 'workbench.editor.editorActionsLocation';
+
+/**
+ * globalState key remembering the user's answer to the one-time
+ * "move the editor actions to the title bar?" question:
+ * 'move' or 'keep'.
+ */
+export const LOCATION_CONSENT_KEY = 'kissSorcar.editorActionsLocationConsent';
+export const MOVE_ACTION = 'Move actions to title bar';
+export const KEEP_ACTION = 'Keep my setting';
+
+// The open consent prompt, so repeated syncs (activation followed by a
+// mode flip) never stack a second copy of the question.
+let consentPrompt: Promise<void> | null = null;
 
 /**
  * globalState key remembering the user's own global value of
@@ -106,6 +129,15 @@ async function applyEditorActionsLocation(
     // user's own hand) — nothing to move, and any existing restore
     // record must survive for the eventual switch back.
     if (globalValue === 'titleBar') return;
+    const consent = context.globalState.get<string>(LOCATION_CONSENT_KEY);
+    if (consent === 'keep') return;
+    if (consent !== 'move') {
+      // Never asked: ask once, off the chain (an answer can take
+      // minutes and must not hold up later mode flips), and re-sync
+      // when the user agrees.
+      askEditorActionsConsent(context);
+      return;
+    }
     await context.globalState.update(PRIOR_LOCATION_KEY, {
       prior: globalValue ?? null,
     });
@@ -133,4 +165,42 @@ async function applyEditorActionsLocation(
     );
   }
   await context.globalState.update(PRIOR_LOCATION_KEY, undefined);
+}
+
+/**
+ * Show the one-time consent question (unless it is already open) and
+ * record the answer.  'Move actions to title bar' re-queues a sync for
+ * the mode's CURRENT state, so the move happens right away; 'Keep my
+ * setting' — and dismissing the message — is remembered as 'keep'.
+ *
+ * @param context The extension context whose globalState keeps the answer.
+ */
+function askEditorActionsConsent(context: vscode.ExtensionContext): void {
+  if (consentPrompt) return;
+  consentPrompt = Promise.resolve(
+    showInformationNotification(
+      `${PRODUCT_NAME}: move the editor actions toolbar into the window ` +
+        'title bar? Its chat buttons (new chat, commit, settings, history) ' +
+        'then stay visible above every editor.',
+      MOVE_ACTION,
+      KEEP_ACTION,
+    ),
+  )
+    .then(async action => {
+      const choice = action === MOVE_ACTION ? 'move' : 'keep';
+      await context.globalState.update(LOCATION_CONSENT_KEY, choice);
+      if (choice !== 'move') return;
+      // Same reading as SorcarPanelManager.modeEnabled().
+      const modeOn =
+        vscode.workspace
+          .getConfiguration('kissSorcar')
+          .get<boolean>('editorTabsMode') === true;
+      await syncEditorActionsLocation(context, modeOn);
+    })
+    .catch(err => {
+      console.error('KISS Sorcar: editor-actions consent prompt failed', err);
+    })
+    .finally(() => {
+      consentPrompt = null;
+    });
 }

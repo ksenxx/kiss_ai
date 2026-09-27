@@ -40,7 +40,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.web_server import WebPrinter
+from kiss.server.web_server import Payload, WebPrinter
 
 
 class _WireCapturingWebPrinter(WebPrinter):
@@ -51,7 +51,10 @@ class _WireCapturingWebPrinter(WebPrinter):
         self.wire: list[str] = []
         self._wire_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
+        # A replay slot (``replay_snapshot``) is never sent here: these
+        # tests do not replay a running task.
+        assert isinstance(data, str)
         with self._wire_lock:
             self.wire.append(data)
 

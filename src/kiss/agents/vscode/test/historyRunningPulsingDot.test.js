@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -54,7 +55,7 @@ function makeWebview() {
     };
   };
 
-  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   const styleEl = win.document.createElement('style');
   styleEl.textContent = cssText;
   win.document.head.appendChild(styleEl);
@@ -181,8 +182,8 @@ function testDotRendersForRunningRow() {
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
     cs.color,
-    'rgb(46, 125, 50)',
-    `spinner colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
+    'var(--green)',
+    `spinner colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
@@ -198,7 +199,7 @@ function testDotRendersForRunningRow() {
     'the running indicator must spin, not pulse',
   );
 
-  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   assert.ok(
     /@keyframes\s+status-spin\b/.test(cssText),
     'main.css must define @keyframes status-spin',

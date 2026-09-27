@@ -69,13 +69,13 @@ These are unique features of {{PRODUCT_NAME}}. These two **IPs (intellectual pro
 
 ## You Can Now Have Voice Chat with {{PRODUCT_NAME}}
 
-If you have an **OPENAI_API_KEY**, with the __sorcar__ wake word, {{PRODUCT_NAME}} starts behaving like a super-intelligent **Alexa**.
+If you have an **OPENAI_API_KEY**, with the __Hey Sorcar__ wake word, {{PRODUCT_NAME}} starts behaving like a super-intelligent **Alexa**.
 
 ```
-Speak 'sorcar', your task ...
+Speak 'Hey Sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'sorcar' followed by your task, and {{PRODUCT_NAME}} will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'Hey Sorcar' followed by your task, and {{PRODUCT_NAME}} will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 You can also steer the agent's execution and ask for status when an agent is running using voice.
 

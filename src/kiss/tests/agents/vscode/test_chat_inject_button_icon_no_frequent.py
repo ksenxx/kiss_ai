@@ -94,6 +94,7 @@ def _render_chat_html() -> str:
         "MAIN_SRC": "about:blank",
         "SHIM_SCRIPT": "",
         "TRICKS_JSON": "[]",
+        "MY_TRICKS_COUNT": "0",
     }
     for key, value in subs.items():
         tpl = tpl.replace("{{" + key + "}}", value)

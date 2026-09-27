@@ -61,6 +61,7 @@ ALL_CHANNEL_AGENTS = [
     ("NotionAgent", "kiss.agents.third_party_agents.notion_sea"),
     ("NtfyAgent", "kiss.agents.third_party_agents.ntfy_sea"),
     ("OpenAICompatAgent", "kiss.agents.third_party_agents.oai_sea"),
+    ("OverleafAgent", "kiss.agents.third_party_agents.overleaf_sea"),
     ("PhoneControlAgent", "kiss.agents.third_party_agents.phone_sea"),
     ("PostgresAgent", "kiss.agents.third_party_agents.postgres_sea"),
     ("QQAgent", "kiss.agents.third_party_agents.qq_sea"),

@@ -426,8 +426,8 @@ def run(
             reviewer's sub-tree — the caller is a reviewer sub-agent,
             or *prompt* itself is a review task (see
             :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
-            child's ``_subagent_info`` so its own ``run_parallel``
-            refuses to spawn further reviewers.  Only meaningful with
+            child's ``_subagent_info`` so it and its helpers keep the
+            read-only ``review`` tool profile.  Only meaningful with
             *parent_task_id*; no agent-script getter, for the same
             reason as *parent_task_id*.
         side_channel: Whether the run is a side channel of the parent

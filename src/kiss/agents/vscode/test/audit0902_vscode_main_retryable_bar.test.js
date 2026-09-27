@@ -85,13 +85,20 @@ function bar(win) {
 }
 
 function barButtons(win) {
-  return Array.from(win.document.querySelectorAll('.wt-bar .wt-btn'));
+  return Array.from(win.document.querySelectorAll('.wt-bar .wt-btns .wt-btn'));
 }
 
 function clickBarButton(win, text) {
   const btn = barButtons(win).find(b => b.textContent === text);
   assert.ok(btn, `the bar must have a "${text}" button`);
   btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  // Discard is destructive: its first click only reveals an inline
+  // confirm (ui_antipattern_destructive_confirm.test.js); the confirm
+  // button is what posts the action.
+  const confirmBtn = win.document.querySelector('.wt-bar .wt-confirm-yes');
+  if (text === 'Discard' && confirmBtn) {
+    confirmBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  }
 }
 
 function assertAllEnabled(win, why) {

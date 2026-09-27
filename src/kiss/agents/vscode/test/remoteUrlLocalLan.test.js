@@ -3,12 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Wherever the Cloudflare tunnel URL is shown (the settings panel's
-// #remote-url and the welcome page's #welcome-remote-url), the webview
-// must also show the 127.0.0.1 URL for the local machine and the
-// https://<lan-ip>:PORT URL(s) for other devices on the LAN.  These
-// tests drive the real `remote_url` message through main.js inside
-// jsdom and assert on the rendered DOM of BOTH containers.
+// Where the Cloudflare tunnel URL is shown (the settings panel's
+// #remote-url), the webview must also show the 127.0.0.1 URL for the
+// local machine and the https://<lan-ip>:PORT URL(s) for other devices
+// on the LAN.  These tests drive the real `remote_url` message through
+// main.js inside jsdom and assert on the rendered DOM.
 
 'use strict';
 
@@ -87,7 +86,7 @@ function barsIn(win, containerId) {
   );
 }
 
-test('tunnel URL is shown together with 127.0.0.1 and LAN URLs in both containers', () => {
+test('tunnel URL is shown together with 127.0.0.1 and LAN URLs', () => {
   const {win} = makeWebview();
   send(win, {
     type: 'remote_url',
@@ -96,7 +95,7 @@ test('tunnel URL is shown together with 127.0.0.1 and LAN URLs in both container
     loopbackUrl: 'https://127.0.0.1:8787',
     lanUrls: ['https://192.168.1.42:8787', 'https://10.0.0.7:8787'],
   });
-  for (const id of ['remote-url', 'welcome-remote-url']) {
+  for (const id of ['remote-url']) {
     const bars = barsIn(win, id);
     assert.strictEqual(bars.length, 4, `#${id} must show 4 URL bars`);
     assert.strictEqual(bars[0].url, 'https://random-words.trycloudflare.com');
@@ -215,7 +214,7 @@ test('a trust-the-CA hint linking /ca.crt on the LAN URL follows the bars', () =
     lanUrls: ['https://192.168.0.5:8787/', 'https://10.0.0.7:8787'],
     localCa: true,
   });
-  for (const id of ['remote-url', 'welcome-remote-url']) {
+  for (const id of ['remote-url']) {
     const hint = hintIn(win, id);
     assert.ok(hint, `#${id} shows exactly one TLS hint`);
     assert.ok(hint.textContent.includes('kiss-web --trust-ca'));

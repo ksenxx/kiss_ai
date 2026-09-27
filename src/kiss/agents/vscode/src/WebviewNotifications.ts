@@ -17,6 +17,13 @@ type NotificationPost = (message: NotificationMessage) => void;
 let poster: NotificationPost | undefined;
 let nextId = 1;
 const pendingActions = new Map<string, (value: string | undefined) => void>();
+// Cancellation sources of the progress operations still running, keyed
+// by toast id.  Unlike pendingActions these are not one-shot: closing
+// the toast (action undefined) does not end the operation, whose next
+// report re-posts the toast with its Cancel button, and that button
+// must still cancel.  They also outlive a poster replacement, so the
+// surface that receives the re-posted toast can cancel too.
+const progressSources = new Map<string, vscode.CancellationTokenSource>();
 
 function resolveAllPendingActions(): void {
   const resolvers = Array.from(pendingActions.values());
@@ -53,10 +60,23 @@ export function clearWebviewNotificationPoster(
   }
 }
 
+/**
+ * Deliver the webview's answer to a toast: the clicked action's label,
+ * or undefined when the toast was closed without choosing one.
+ *
+ * A message toast resolves its pending show*Notification() promise once.
+ * A progress toast's Cancel cancels the running operation; closing it
+ * leaves the operation (and its Cancel) alone.
+ */
 export function resolveWebviewNotificationAction(
   id: string,
   action: string | undefined,
 ): void {
+  const source = progressSources.get(id);
+  if (source) {
+    if (action === 'Cancel') source.cancel();
+    return;
+  }
   const resolve = pendingActions.get(id);
   if (!resolve) return;
   pendingActions.delete(id);
@@ -114,7 +134,9 @@ function showNotification(
     severity,
     message,
     actions,
-    sticky: !!options?.modal || actions.length > 0,
+    // Errors never auto-dismiss: the user must be able to read the cause
+    // and act on it however long the failure takes to notice.
+    sticky: severity === 'error' || !!options?.modal || actions.length > 0,
   });
   if (actions.length === 0) return Promise.resolve(undefined);
   return new Promise(resolve => {
@@ -155,11 +177,21 @@ export function withWebviewNotificationProgress<R>(
   }
   const id = String(nextId++);
   const title = options.title || PRODUCT_NAME;
+  // A cancellable progress toast carries a 'Cancel' action wired to the
+  // token the task receives, exactly like the native progress
+  // notification's Cancel button.  Every re-post must repeat the
+  // actions: the webview re-renders the action row from each event.
+  // The source stays registered until the task ends (see
+  // progressSources), not until the first click or dismissal.
+  const actions = options.cancellable ? ['Cancel'] : [];
+  const source = new vscode.CancellationTokenSource();
+  if (options.cancellable) progressSources.set(id, source);
   poster({
     type: 'notification',
     id,
     severity: 'info',
     message: title,
+    actions,
     progress: true,
     sticky: true,
   });
@@ -170,16 +202,17 @@ export function withWebviewNotificationProgress<R>(
         id,
         severity: 'info',
         message: title,
+        actions,
         progress: true,
         progressMessage: value.message || '',
         sticky: true,
       });
     },
   };
-  const source = new vscode.CancellationTokenSource();
   return Promise.resolve()
     .then(() => task(progress, source.token))
     .finally(() => {
+      progressSources.delete(id);
       poster?.({type: 'notification', id, close: true});
       source.dispose();
     });

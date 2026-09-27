@@ -7,19 +7,19 @@
 
 Three tints must read at a glance in a real Chromium:
 
-* the collapsible chat panel's header in the task-history panel: the
-  cyan of a Bash tool call's header, strong enough to stand out from
-  the sidebar background;
+* the collapsible chat panel's header in the task-history panel: a
+  plain row with no fill of its own and a quiet NEUTRAL tint (no hue)
+  under the pointer, so a list of many chats does not become a stack
+  of bands and the accent stays reserved for the active row below;
 * the task panel whose chat webview is on screen
-  (``.running-item.history-active-task``): a green tint and border;
+  (``.running-item.history-active-task``): an accent tint and border;
 * a sub-agent's tab in the chat tab strip: purple tint, purple text,
   purple spinner while it runs and purple tick once it is done.
 
-The harness ``:root`` maps ``--cyan`` / ``--green`` / ``--purple`` to
-``#4ec9b0`` / ``#6a9955`` / ``#c586c0`` (see
-``test_history_failed_red_cross._build_test_page``); the tests compare
-hues against the page's own computed variables and require an alpha
-well above the 8% at which the tints used to vanish.
+The harness ``:root`` maps ``--accent`` / ``--purple`` to ``#3794ff`` /
+``#c586c0`` (see ``test_history_failed_red_cross._build_test_page``);
+the tests compare hues against the page's own computed variables and
+require an alpha well above the 8% at which the tints used to vanish.
 """
 
 from __future__ import annotations
@@ -29,10 +29,12 @@ from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.test_codex_task_panel_style import (
     _alpha_of,
+    _chroma_of,
     _hue_of,
 )
 from kiss.tests.agents.vscode.test_history_failed_red_cross import (
     _MEDIA_DIR,
+    _build_test_page,
     _open_history_page,
     _post_history,
     _sample_sessions,
@@ -42,6 +44,10 @@ _REMOTE_CSS = _MEDIA_DIR / "remote-codex.css"
 
 # Below this alpha a tint over the sidebar background is barely visible.
 _MIN_ALPHA = 0.2
+
+# A sub-agent tab is lighter than the history cues: purple text and
+# underline carry most of the signal, the fill only has to be visible.
+_MIN_TAB_ALPHA = 0.15
 
 
 @pytest.fixture(scope="module")
@@ -81,26 +87,198 @@ def _style(page, selector: str, prop: str) -> str:
     )
 
 
-def _assert_tint(color: str, hue_of: str, what: str) -> None:
+def _assert_tint(color: str, hue_of: str, what: str, min_alpha: float = _MIN_ALPHA) -> None:
     assert _hue_of(color) == pytest.approx(_hue_of(hue_of), abs=2), (
         f"{what} has the wrong hue: {color} vs {hue_of}"
     )
-    assert _alpha_of(color) >= _MIN_ALPHA, f"{what} is barely visible: {color}"
+    assert _alpha_of(color) >= min_alpha, f"{what} is barely visible: {color}"
 
 
-def test_chat_panel_header_is_a_visible_cyan(_browser) -> None:
-    """Every chat panel's header carries a cyan tint strong enough to
-    see, and darkens further on hover."""
+def test_chat_panel_header_is_a_quiet_neutral(_browser) -> None:
+    """Every chat panel's header is a plain row (no fill of its own),
+    takes a faint neutral tint of the foreground (no hue) under the
+    pointer, and never borrows the accent that marks the active task row
+    (that row's tint is checked by test_active_task_panel_is_a_visible_accent)."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
-        cyan = _var_color(page, "--cyan")
         idle = _style(page, ".history-chat-header", "backgroundColor")
-        _assert_tint(idle, cyan, "the chat panel header")
+        assert _alpha_of(idle) == 0, f"the idle header has a fill: {idle}"
         page.hover(".history-chat-header")
+        _settle(page, ".history-chat-header:hover")
         hovered = _style(page, ".history-chat-header:hover", "backgroundColor")
-        _assert_tint(hovered, cyan, "the hovered chat panel header")
-        assert _alpha_of(hovered) > _alpha_of(idle), (idle, hovered)
+        assert _chroma_of(hovered) <= 8, f"the hovered header has a hue: {hovered}"
+        assert 0.03 <= _alpha_of(hovered) <= 0.1, f"the hover tint is off: {hovered}"
+    finally:
+        context.close()
+
+
+_HEADER_INSET_JS = r"""(expand) => {
+  const g = document.querySelector('#history-list .history-chat-group');
+  if (g.classList.contains('collapsed') === expand) {
+    g.querySelector('.history-chat-header').click();
+  }
+  const h = g.querySelector('.history-chat-header');
+  const gr = g.getBoundingClientRect();
+  const hr = h.getBoundingClientRect();
+  const hcs = getComputedStyle(h);
+  const row = g.querySelector('.history-chat-body > .sidebar-item');
+  const rr = row ? row.getBoundingClientRect() : null;
+  return {
+    collapsed: g.classList.contains('collapsed'),
+    top: hr.top - (gr.top + g.clientTop),
+    left: hr.left - (gr.left + g.clientLeft),
+    right: gr.left + g.clientLeft + g.clientWidth - hr.right,
+    bottom: gr.top + g.clientTop + g.clientHeight - hr.bottom,
+    radii: [hcs.borderTopLeftRadius, hcs.borderTopRightRadius,
+            hcs.borderBottomRightRadius, hcs.borderBottomLeftRadius],
+    rowLeft: rr ? rr.left - (gr.left + g.clientLeft) : null,
+    rowGapBelowHeader: rr ? rr.top - hr.bottom : null,
+  };
+}"""
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
+    """The header row spans the panel on every side it borders (no strip
+    of bare sidebar between them), its corners follow the square panel
+    (no rounding), and the task rows are indented behind the nesting
+    guide."""
+    context, page = _open_history_page(_browser)
+    try:
+        _post_history(page, _sample_sessions())
+        probe = page.evaluate(_HEADER_INSET_JS, expand)
+        assert probe["collapsed"] is not expand, probe
+        assert probe["top"] == pytest.approx(0, abs=0.5), probe
+        assert probe["left"] == pytest.approx(0, abs=0.5), probe
+        assert probe["right"] == pytest.approx(0, abs=0.5), probe
+        assert probe["radii"] == ["0px"] * 4, probe
+        if expand:
+            # .history-chat-body: a 12px margin, the 1px guide line and
+            # an 8px padding (--space-3 + 1px + --space-2).
+            assert probe["rowLeft"] == pytest.approx(21, abs=0.5), probe
+            assert probe["rowGapBelowHeader"] == pytest.approx(0, abs=0.5), probe
+        else:
+            assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
+    finally:
+        context.close()
+
+
+# The chat panels' edges against the history panel's boundaries: the
+# left boundary is the activity bar's right edge where the bar shows
+# (remote webapp), else the panel's inner left edge.
+_PANEL_EDGES_JS = r"""() => {
+  const sb = document.getElementById('sidebar');
+  const sr = sb.getBoundingClientRect();
+  const bar = document.getElementById('activity-bar');
+  const barShown = getComputedStyle(bar).display !== 'none';
+  const inner = sr.left + sb.clientLeft;
+  const search = document.querySelector('.history-search-row')
+    .getBoundingClientRect();
+  const sep = document.querySelector('#history-list > .history-day-sep')
+    .getBoundingClientRect();
+  const groups = [...document.querySelectorAll(
+    '#history-list > .history-chat-group')];
+  const rects = groups.map(g => g.getBoundingClientRect());
+  const leftBoundary = barShown ? bar.getBoundingClientRect().right : inner;
+  const rightBoundary = inner + sb.clientWidth;
+  // Rects alone miss clipping by an ancestor: probe what is painted
+  // 1px inside each boundary, halfway down every header (looking
+  // through the transparent drag handle on the docked panel's edge).
+  const painted = groups.map(g => {
+    const hr = g.querySelector('.history-chat-header').getBoundingClientRect();
+    const y = (hr.top + hr.bottom) / 2;
+    return [leftBoundary + 1, rightBoundary - 1].map(x => {
+      const el = document.elementsFromPoint(x, y)
+        .find(e => e.id !== 'sidebar-resizer');
+      return !!el && el.closest('.history-chat-group') === g;
+    });
+  });
+  return {
+    painted,
+    leftBoundary,
+    rightBoundary,
+    lefts: rects.map(r => r.left),
+    rights: rects.map(r => r.right),
+    gaps: rects.slice(1).map((r, i) => r.top - rects[i].bottom),
+    radii: groups.map(g => getComputedStyle(g).borderRadius),
+    borderTops: groups.map(g => getComputedStyle(g).borderTopWidth),
+    borderSides: groups.map(g => {
+      const cs = getComputedStyle(g);
+      return [cs.borderLeftWidth, cs.borderRightWidth];
+    }),
+    insetL: search.left,
+    insetR: search.right,
+    sepL: sep.left,
+    sepR: sep.right,
+  };
+}"""
+
+
+def _assert_seamless_panels(page, what: str) -> None:
+    _post_history(page, _sample_sessions())
+    page.wait_for_function(
+        "document.querySelectorAll('#history-list > .history-chat-group')"
+        ".length === 3",
+        timeout=5000,
+    )
+    e = page.evaluate(_PANEL_EDGES_JS)
+    assert e["leftBoundary"] < e["insetL"], (what, e)
+    for left, right in zip(e["lefts"], e["rights"], strict=True):
+        assert left == pytest.approx(e["leftBoundary"], abs=0.5), (what, e)
+        assert right == pytest.approx(e["rightBoundary"], abs=0.5), (what, e)
+    assert e["painted"] == [[True, True]] * 3, (what, e)
+    assert e["gaps"] == [pytest.approx(0, abs=0.5)] * 2, (what, e)
+    assert e["radii"] == ["0px"] * 3, (what, e)
+    # One shared 1px line between neighbours, none on the sides.
+    assert e["borderTops"] == ["0px", "1px", "1px"], (what, e)
+    assert e["borderSides"] == [["0px", "0px"]] * 3, (what, e)
+    # The day separator keeps the panel's usual inset.
+    assert e["sepL"] == pytest.approx(e["insetL"], abs=0.5), (what, e)
+    assert e["sepR"] == pytest.approx(e["insetR"], abs=0.5), (what, e)
+
+
+def test_chat_panels_are_seamless_in_the_vscode_sidebar(_browser) -> None:
+    """VS Code chat webview's history drawer (16px panel padding): the
+    chat panels span the panel edge to edge with no gap between them;
+    the legacy flat list keeps its rows inset."""
+    context, page = _open_history_page(_browser)
+    try:
+        _assert_seamless_panels(page, "the VS Code history drawer")
+        page.click("#history-view-toggle")
+        page.wait_for_selector("#history-list.legacy-view > .running-item")
+        e = page.evaluate(
+            "() => { const r = document.querySelector("
+            "'#history-list > .running-item').getBoundingClientRect();"
+            " const s = document.querySelector('.history-search-row')"
+            ".getBoundingClientRect();"
+            " return [r.left - s.left, s.right - r.right]; }"
+        )
+        assert e == [pytest.approx(0, abs=0.5)] * 2, e
+    finally:
+        context.close()
+
+
+def test_chat_panels_are_seamless_in_history_panel_mode(_browser) -> None:
+    """The primary-sidebar history view (10px panel padding)."""
+    context, page = _open_history_page(_browser)
+    try:
+        page.evaluate("() => document.body.classList.add('history-panel-mode')")
+        _assert_seamless_panels(page, "the history-panel-mode view")
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize("desktop", [False, True])
+def test_chat_panels_are_seamless_on_the_remote_page(_browser, desktop: bool) -> None:
+    """The remote webapp: the phone drawer and the docked desktop panel
+    (collapsing padding), both beside the activity bar."""
+    context, page = _open_history_page(_browser, width=1200 if desktop else 480)
+    try:
+        _use_remote_surface(page)
+        if desktop:
+            page.evaluate("() => document.body.classList.add('remote-desktop')")
+        _assert_seamless_panels(page, f"the remote page (desktop={desktop})")
     finally:
         context.close()
 
@@ -121,12 +299,12 @@ def _settle(page, selector: str) -> None:
     )
 
 
-def _assert_active_row_green(page, what: str) -> None:
-    green = _var_color(page, "--green")
+def _assert_active_row_accent(page, what: str) -> None:
+    accent = _var_color(page, "--accent")
     _settle(page, _ACTIVE_ROW)
-    _assert_tint(_style(page, _ACTIVE_ROW, "backgroundColor"), green, what)
+    _assert_tint(_style(page, _ACTIVE_ROW, "backgroundColor"), accent, what)
     border = _style(page, _ACTIVE_ROW, "borderTopColor")
-    _assert_tint(border, green, what + "'s border")
+    _assert_tint(border, accent, what + "'s border")
     assert _alpha_of(border) >= 0.5, border
 
 
@@ -154,14 +332,14 @@ def _use_remote_surface(page) -> None:
     )
 
 
-def test_active_task_panel_is_a_visible_green(_browser) -> None:
+def test_active_task_panel_is_a_visible_accent(_browser) -> None:
     """The task panel of the task the visible tab shows is painted in a
-    clearly visible green tint with a green border, hovered or not; the
-    other panels are not tinted."""
+    clearly visible accent tint with an accent border, hovered or not;
+    the other panels are not tinted."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
-        _assert_active_row_green(page, "the active task panel")
+        _assert_active_row_accent(page, "the active task panel")
         others = page.evaluate(
             "() => [...document.querySelectorAll('.running-item:not(.history-active-task)')]"
             ".map(el => getComputedStyle(el).backgroundColor)"
@@ -171,21 +349,21 @@ def test_active_task_panel_is_a_visible_green(_browser) -> None:
             assert _alpha_of(bg) < _MIN_ALPHA, f"an inactive panel is tinted: {bg}"
         # The generic .sidebar-item:hover rule must not take the cue away.
         page.hover(_ACTIVE_ROW)
-        _assert_active_row_green(page, "the hovered active task panel")
+        _assert_active_row_accent(page, "the hovered active task panel")
     finally:
         context.close()
 
 
-def test_active_task_panel_is_a_visible_green_on_the_remote_page(_browser) -> None:
+def test_active_task_panel_is_a_visible_accent_on_the_remote_page(_browser) -> None:
     """The remote webapp's own row and hover rules (``remote-codex.css``)
-    must not take the green cue away either."""
+    must not take the accent cue away either."""
     context, page = _open_history_page(_browser)
     try:
         _show_active_task(page)
         _use_remote_surface(page)
-        _assert_active_row_green(page, "the remote active task panel")
+        _assert_active_row_accent(page, "the remote active task panel")
         page.hover(_ACTIVE_ROW)
-        _assert_active_row_green(page, "the hovered remote active task panel")
+        _assert_active_row_accent(page, "the hovered remote active task panel")
     finally:
         context.close()
 
@@ -226,7 +404,7 @@ def _assert_purple_tabs(page) -> None:
     page.click(_DONE_TAB)
     page.wait_for_selector(_DONE_TAB + ".active", state="attached")
     for sel in (_RUNNING_TAB, _DONE_TAB):
-        _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}")
+        _assert_tint(_style(page, sel, "backgroundColor"), purple, f"tab {sel}", _MIN_TAB_ALPHA)
     assert _alpha_of(_style(page, _DONE_TAB, "backgroundColor")) > _alpha_of(
         _style(page, _RUNNING_TAB, "backgroundColor")
     ), "the active sub-agent tab is tinted more strongly"
@@ -271,3 +449,112 @@ def test_subagent_tab_is_purple_on_the_remote_page(_browser) -> None:
         _assert_purple_tabs(page)
     finally:
         context.close()
+
+
+def _open_remote_desktop_page(browser):
+    """The remote desktop page with ``body.remote-chat`` set BEFORE
+    main.js runs, so its remote-only wiring (the panel resizer) is live,
+    and a history list long enough to scroll."""
+    context = browser.new_context(viewport={"width": 1200, "height": 500})
+    page = context.new_page()
+    html = _build_test_page().replace("<body>", '<body class="remote-chat">', 1)
+    remote_css = "<style>" + _REMOTE_CSS.read_text(encoding="utf-8") + "</style>"
+    page.set_content(html.replace("</head>", remote_css + "</head>", 1))
+    page.evaluate(
+        "() => { document.getElementById('app').style.display = '';"
+        " const ov = document.getElementById('kiss-server-loading');"
+        " if (ov) ov.style.display = 'none'; }"
+    )
+    page.wait_for_selector("body.remote-desktop #sidebar.open", state="attached")
+    assert page.evaluate("() => window.__iifeError") is None
+    template = _sample_sessions()[0]
+    sessions = [
+        dict(template, id=f"chat-{i}", task_id=5000 + i,
+             timestamp=1700000000 - i, preview=f"task {i}")
+        for i in range(40)
+    ]
+    generation = page.evaluate(
+        "() => window.__postedMessages.filter(m => m.type === 'getHistory')"
+        ".at(-1)?.generation || 0"
+    )
+    _post_history(page, sessions, generation=generation)
+    return context, page
+
+
+def test_remote_scrollbar_and_resize_handle_do_not_overlap(_browser) -> None:
+    """On the docked remote panel the flush history list's scrollbar
+    runs along the panel's right edge; the resize handle sits just
+    outside it.  Dragging the scrollbar thumb scrolls the list without
+    resizing, and dragging the handle still resizes the panel."""
+    # Real (non-overlay) scrollbars, as on a desktop browser.
+    browser = _browser.browser_type.launch(ignore_default_args=["--hide-scrollbars"])
+    try:
+        context, page = _open_remote_desktop_page(browser)
+        geo = page.evaluate(
+            """() => {
+              const l = document.getElementById('history-list');
+              const lr = l.getBoundingClientRect();
+              const hr = document.getElementById('sidebar-resizer')
+                .getBoundingClientRect();
+              return {listRight: lr.right, top: lr.top,
+                      bar: l.offsetWidth - l.clientWidth,
+                      overflow: l.scrollHeight > l.clientHeight,
+                      handleLeft: hr.left, handleW: hr.width,
+                      width: document.getElementById('sidebar')
+                        .getBoundingClientRect().width};
+            }"""
+        )
+        assert geo["overflow"] and geo["bar"] > 0, geo
+        assert geo["handleLeft"] >= geo["listRight"] - 1, geo
+        # The thumb, at the top of the scrollbar.
+        x, y = geo["listRight"] - geo["bar"] / 2, geo["top"] + 10
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 100, steps=8)
+        page.mouse.up()
+        assert page.evaluate(
+            "() => document.getElementById('history-list').scrollTop"
+        ) > 0
+        assert page.evaluate(
+            "() => document.getElementById('sidebar')"
+            ".getBoundingClientRect().width"
+        ) == geo["width"]
+        # The handle outside the edge is painted and clickable.
+        hx = geo["handleLeft"] + geo["handleW"] / 2
+        assert page.evaluate(
+            "([x, y]) => document.elementFromPoint(x, y).id", [hx, 250]
+        ) == "sidebar-resizer"
+        page.mouse.move(hx, 250)
+        page.mouse.down()
+        page.mouse.move(hx + 60, 250, steps=8)
+        page.mouse.up()
+        assert page.evaluate(
+            "() => document.getElementById('sidebar')"
+            ".getBoundingClientRect().width"
+        ) == pytest.approx(geo["width"] + 60, abs=2)
+        # Dragged down to its 10px minimum, the panel's content (the
+        # 40px activity bar, the history rows) stays clipped at the
+        # panel's edge: nothing of it shows or takes clicks beside it.
+        page.mouse.move(hx + 60, 250)
+        page.mouse.down()
+        page.mouse.move(0, 250, steps=8)
+        page.mouse.up()
+        leaks = page.evaluate(
+            """() => {
+              const sb = document.getElementById('sidebar');
+              const right = sb.getBoundingClientRect().right;
+              const out = [];
+              for (const y of [60, 250]) {
+                for (let x = right + 0.5; x < right + 12; x += 1) {
+                  const el = document.elementsFromPoint(x, y)
+                    .find(e => e.id !== 'sidebar-resizer');
+                  if (el && sb.contains(el)) out.push([x, y, el.id || el.tagName]);
+                }
+              }
+              return {right, out};
+            }"""
+        )
+        assert leaks["right"] < 20 and leaks["out"] == [], leaks
+        context.close()
+    finally:
+        browser.close()

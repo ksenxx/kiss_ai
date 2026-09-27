@@ -15,7 +15,10 @@ without a word.  The same dict therefore behaved in three ways.
 These tests pin one policy for every adapter:
 
 1. Portable generation parameters (``temperature``, ``top_p``, ``stop``,
-   ``max_tokens``) reach the wire in that provider's own spelling.
+   ``max_tokens``) reach the wire in that provider's own spelling.  The one
+   exception is a parameter the vendor SDK itself no longer accepts
+   (Anthropic dropped ``temperature``/``top_p``/``top_k`` in SDK 1.0), which
+   falls under rule 3.
 2. A parameter the provider supports but the adapter never named
    explicitly (``seed``) still reaches the wire.
 3. A parameter the provider does **not** support is dropped with a
@@ -212,15 +215,20 @@ def gemini_request_body(
 class TestPortableParametersReachEveryProvider:
     """The four portable generation parameters must never be lost."""
 
-    def test_anthropic_uses_its_own_spelling(self) -> None:
-        """Anthropic gets ``stop_sequences`` and the rest verbatim."""
-        body = anthropic_request_body(
-            {"temperature": 0.25, "top_p": 0.9, "stop": ["END"], "max_tokens": 321}
-        )
-        assert body["temperature"] == 0.25
-        assert body["top_p"] == 0.9
+    def test_anthropic_uses_its_own_spelling(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Anthropic gets ``stop_sequences`` and ``max_tokens``; the sampling
+        knobs it dropped in SDK 1.0 (``temperature``, ``top_p``) are announced,
+        not sent and not crashed on (see anthropic-sdk-python MIGRATION.md)."""
+        with caplog.at_level(logging.WARNING):
+            body = anthropic_request_body(
+                {"temperature": 0.25, "top_p": 0.9, "stop": ["END"], "max_tokens": 321}
+            )
         assert body["stop_sequences"] == ["END"]
         assert body["max_tokens"] == 321
+        assert "temperature" not in body and "top_p" not in body
+        assert "temperature" in caplog.text and "top_p" in caplog.text
 
     def test_chat_completions_uses_its_own_spelling(self) -> None:
         """Chat Completions keeps ``stop`` as ``stop``."""

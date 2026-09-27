@@ -536,6 +536,35 @@ class OpenAICompatibleBase(Model):
                 f"Embedding generation failed for model {model_to_use}: {e}"
             ) from e
 
+    def get_embeddings(
+        self, texts: list[str], embedding_model: str | None = None
+    ) -> list[list[float]]:
+        """Generate embedding vectors for several texts in one request.
+
+        Args:
+            texts: The texts to embed (at most 2048, 300k tokens in total).
+            embedding_model: Optional model name for embedding generation. Uses the
+                model's name if not specified.
+
+        Returns:
+            The embedding vectors, in the order of *texts*.
+
+        Raises:
+            KISSError: If the embedding generation fails.
+        """
+        if not texts:
+            return []
+        model_to_use = embedding_model or self.model_name
+        try:
+            response = self.client.embeddings.create(model=model_to_use, input=texts)
+            ordered = sorted(response.data, key=lambda item: item.index)
+            return [list(item.embedding) for item in ordered]
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            raise KISSError(
+                f"Embedding generation failed for model {model_to_use}: {e}"
+            ) from e
+
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
         """Convert one :class:`Attachment` to this transport's content part.
@@ -595,12 +624,16 @@ class OpenAICompatibleBase(Model):
     def extract_cost_from_response(self, response: Any) -> float | None:
         """Return the USD amount OpenRouter reports it charged for *response*.
 
-        OpenRouter attaches ``usage.cost`` (credits charged, in USD) and
+        OpenRouter attaches ``usage.cost`` (the total charged to the
+        OpenRouter account, in USD), ``usage.is_byok`` and
         ``usage.cost_details.upstream_inference_cost`` (the upstream
-        provider's charge, billed to the user directly under BYOK and
-        zero otherwise) to every response and to the final usage chunk
+        provider's charge) to every response and to the final usage chunk
         of a stream:
         https://openrouter.ai/docs/cookbook/administration/usage-accounting.
+        Without BYOK the upstream charge is already inside ``cost`` (live
+        responses report ``upstream_inference_cost == cost``); only under
+        BYOK is it a separate bill on the user's own provider key, with
+        ``cost`` being OpenRouter's fee.
         The same model id is billed at different rates depending on the
         upstream OpenRouter routes to, so this figure is the actual bill
         while the catalog rate is only the headline estimate.  Other
@@ -611,8 +644,9 @@ class OpenAICompatibleBase(Model):
                 chunk, or the dict form of any of them.
 
         Returns:
-            ``cost + upstream_inference_cost`` for an ``openrouter/``
-            model whose response carries a numeric ``usage.cost``, else
+            ``cost`` (plus ``upstream_inference_cost`` when
+            ``usage.is_byok`` is true) for an ``openrouter/`` model whose
+            response carries a numeric ``usage.cost``, else
             ``None`` so the agent falls back to ``calculate_cost``.
         """
         if not self.model_name.startswith("openrouter/"):
@@ -622,7 +656,11 @@ class OpenAICompatibleBase(Model):
         if isinstance(cost, bool) or not isinstance(cost, int | float):
             return None
         upstream = _usage_field(_usage_field(usage, "cost_details"), "upstream_inference_cost")
-        if isinstance(upstream, bool) or not isinstance(upstream, int | float):
+        if (
+            _usage_field(usage, "is_byok") is not True
+            or isinstance(upstream, bool)
+            or not isinstance(upstream, int | float)
+        ):
             upstream = 0.0
         return float(cost) + float(upstream)
 
@@ -1078,8 +1116,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         )
         return str(message or err)
 
-    @staticmethod
-    def _raise_for_finish_reason(finish_reason: str | None) -> None:
+    def _raise_for_finish_reason(self, finish_reason: str | None, response: Any) -> None:
         """Reject a truncated completion instead of using its partial output.
 
         ``finish_reason="length"`` means the model hit its output-token
@@ -1090,13 +1127,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         a reason unrelated to the real cause.  The Responses transport
         already refuses the equivalent ``status="incomplete"`` response.
 
+        The truncated completion was still billed, so *response* is kept
+        for :meth:`take_partial_usage_response`.
+
         Args:
             finish_reason: The choice's ``finish_reason``, if any.
+            response: The completion (or final stream chunk) carrying usage.
 
         Raises:
             KISSError: When the completion was truncated.
         """
         if finish_reason == "length":
+            self._rejected_response = response
             raise KISSError(
                 "Chat Completions response was truncated "
                 "(finish_reason='length'): the model hit its output-token "
@@ -1104,8 +1146,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 "incomplete. Raise max_tokens or lower reasoning_effort."
             )
 
-    @classmethod
-    def _raise_for_failed_completion(cls, response: Any) -> None:
+    def _raise_for_failed_completion(self, response: Any) -> None:
         """Reject a non-streamed response that carries no usable choice.
 
         The counterpart of
@@ -1121,12 +1162,14 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         choices = getattr(response, "choices", None) or []
         if not choices:
-            message = cls._response_error_message(response)
+            message = self._response_error_message(response)
+            # Any usage the gateway reported alongside the error was billed.
+            self._rejected_response = response
             raise KISSError(
                 "Chat Completions returned no choices"
                 + (f": {message}" if message else "")
             )
-        cls._raise_for_finish_reason(getattr(choices[0], "finish_reason", None))
+        self._raise_for_finish_reason(getattr(choices[0], "finish_reason", None), response)
 
     def _stream_chat_completion(
         self, kwargs: dict[str, Any], adaptive: bool
@@ -1263,7 +1306,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         content, _accum, response, finish_reason = self._stream_chat_completion(
             kwargs, adaptive=False
         )
-        self._raise_for_finish_reason(finish_reason)
+        self._raise_for_finish_reason(finish_reason, response)
         return content, response
 
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1386,7 +1429,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 response,
                 finish_reason,
             ) = self._stream_chat_completion(kwargs, adaptive=True)
-            self._raise_for_finish_reason(finish_reason)
+            self._raise_for_finish_reason(finish_reason, response)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
             response = self._create_chat_completion_adaptive(kwargs)
@@ -1745,9 +1788,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         input_items = self._chat_conversation_to_responses_input()
         delegate.conversation = list(input_items)
 
-        function_calls, content, response = delegate.generate_and_process_with_tools(
-            function_map, tools
-        )
+        try:
+            function_calls, content, response = delegate.generate_and_process_with_tools(
+                function_map, tools
+            )
+        except Exception:
+            # A rejected delegated response was still billed; the agent
+            # drains this model's hook, not the delegate's.
+            rejected = delegate.take_partial_usage_response()
+            if rejected is not None:
+                self._rejected_response = rejected
+            raise
 
         new_items = [
             item

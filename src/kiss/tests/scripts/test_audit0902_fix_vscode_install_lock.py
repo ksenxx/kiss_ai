@@ -547,6 +547,30 @@ class InstallLockTest(unittest.TestCase):
             os.close(holder)
         self.assertTrue(_lock_is_free(self.lock_file))
 
+    def test_refusal_names_the_live_holder_not_the_previous_runs_pid(self) -> None:
+        # A finished run leaves its pid in the lock file: the kernel released
+        # its flock on exit but nothing rewrites the file.  A contender that
+        # loses the lock before the new holder has written its own pid must
+        # keep polling instead of reporting that dead pid.  Here the holder is
+        # this test process, which writes its pid 0.2 s after the contender
+        # starts -- long after bash reaches acquire_update_lock.
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        self.lock_file.parent.mkdir(exist_ok=True)
+        self.lock_file.write_text(f"{dead.pid}\n")
+        holder = os.open(self.lock_file, os.O_RDWR)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            loser = self._start()
+            time.sleep(0.2)
+            self.lock_file.write_text(f"{os.getpid()}\n")
+            lost, _ = loser.communicate(timeout=60)
+        finally:
+            os.close(holder)
+        self.assertEqual(loser.returncode, 1, lost)
+        self.assertIn(f"{REFUSED}{os.getpid()}); exiting.", lost)
+        self.assertEqual(self._count("started"), 0)
+
     def test_launched_background_child_does_not_keep_the_lock(self) -> None:
         # The installer leaves long-lived processes behind (the restarted
         # kiss-web daemon, VS Code).  They must not inherit fd 9, or the

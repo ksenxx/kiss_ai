@@ -130,7 +130,7 @@ class TestDiscordBackendBugs:
         self._backup = _config.path.read_text() if _config.path.exists() else None
         _config.save({"bot_token": "test-token"})
         self.backend = DiscordChannelBackend(api_base=self.api_base)
-        self.backend._bot_token = "test-token"
+        self.backend._token = "test-token"
 
     def teardown_method(self) -> None:
         if self._backup is not None:

@@ -2,322 +2,189 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for the shared Google Workspace OAuth helpers.
+"""End-to-end tests for the shared Google sign-in tools.
 
-Exercises ``_google_workspace_utils`` against the real filesystem and
-real ``google.oauth2.credentials.Credentials`` objects — no mocks,
-patches, or fakes.  Each test isolates its state by pointing
-``KISS_HOME`` at a fresh temporary directory (the helpers resolve
-``KISS_HOME`` lazily on every call).  Token refreshes are exercised
-against a REAL local OAuth token endpoint (stdlib HTTP server).
-
-Deliberately untested branches (unreachable without test doubles):
-
-* ``load_google_credentials``'s expired-token refresh: credentials
-  loaded via ``Credentials.from_authorized_user_file`` carry the
-  hard-coded ``https://oauth2.googleapis.com/token`` endpoint, so
-  exercising that refresh would require real network access to Google.
-* The consent-success path of ``start_google_consent`` /
-  ``finish_<service>_auth`` needs Google to issue a real authorization
-  code; ``test_muse_auth.py`` drives the loopback redirect with a
-  forged code instead and checks the error path.
+Drives ``make_google_auth_tools`` through the real Composio SDK against
+a real local Composio API emulator (``composio_test_utils``) — no mocks
+or patches.  The session conftest points ``KISS_HOME`` at a temporary
+directory; an autouse fixture forgets the connection and any saved API
+key around every test.
 """
 
 from __future__ import annotations
 
 import json
 import stat
-import sys
-import threading
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler
-from pathlib import Path
-from typing import Any, cast
 
-from google.oauth2.credentials import Credentials
+import pytest
 
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
+from kiss.agents.third_party_agents import _composio_google as composio_google
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    clear_google_credentials,
-    credentials_path,
-    fresh_access_token,
-    google_service_dir,
-    load_google_credentials,
+    google_auth_prompt,
     make_google_auth_tools,
-    save_google_credentials,
-    start_google_consent,
-    token_path,
 )
-from kiss.agents.third_party_agents.gcal_sea import (
-    _SCOPES,
-    _SERVICE,
-    GoogleCalendarAgent,
+from kiss.agents.third_party_agents.gcal_sea import _SERVICE, GoogleCalendarAgent
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    API_KEY,
+    connect,
+    reset_state,
+    start_fake_composio,
 )
 
-_SYNTHETIC_INFO = {
-    "token": "synthetic-access-token",
-    "refresh_token": "synthetic-refresh-token",
-    "client_id": "synthetic-client-id",
-    "client_secret": "synthetic-client-secret",
-    "scopes": _SCOPES,
-    "expiry": "2099-01-01T00:00:00Z",
-}
+
+@pytest.fixture(autouse=True)
+def _fresh_state():
+    """Start and end every test with no connection and no saved API key."""
+    reset_state(_SERVICE)
+    yield
+    reset_state(_SERVICE)
 
 
-def _synthetic_creds() -> Credentials:
-    """Build valid (non-expired) synthetic Google OAuth2 credentials."""
-    return cast(
-        Credentials, Credentials.from_authorized_user_info(dict(_SYNTHETIC_INFO), _SCOPES)
-    )
+@pytest.fixture()
+def composio(monkeypatch):
+    """Run the local Composio API emulator and point the SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
-def _write_token(service: str, text: str) -> Path:
-    """Write raw *text* as the service's token.json and return its path."""
-    path = token_path(service)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
+def _tools(calls: list[str]) -> dict:
+    """Build the Calendar auth tools recording each on_connected call in *calls*."""
+    agent = GoogleCalendarAgent()
+
+    def on_connected() -> bool:
+        calls.append("connected")
+        return True
+
+    tools = make_google_auth_tools(agent, _SERVICE, "Google Calendar", on_connected)
+    return {t.__name__: t for t in tools}
 
 
-def test_service_dir_and_token_path_follow_kiss_home(isolated_kiss_home) -> None:
-    """google_service_dir and token_path live under $KISS_HOME."""
-    assert google_service_dir("gsvc") == isolated_kiss_home / "third_party_agents" / "gsvc"
-    assert token_path("gsvc") == isolated_kiss_home / "third_party_agents" / "gsvc" / "token.json"
-
-
-def test_credentials_path_fallback_order(isolated_kiss_home) -> None:
-    """credentials_path prefers service dir > google dir > gmail dir > own path."""
-    own = google_service_dir(_SERVICE) / "credentials.json"
-    shared = google_service_dir("google") / "credentials.json"
-    gmail = google_service_dir("gmail") / "credentials.json"
-
-    # No candidate exists: the service's own (not yet created) path is returned.
-    assert credentials_path(_SERVICE) == own
-    assert not own.exists()
-
-    gmail.parent.mkdir(parents=True, exist_ok=True)
-    gmail.write_text("{}", encoding="utf-8")
-    assert credentials_path(_SERVICE) == gmail
-
-    shared.parent.mkdir(parents=True, exist_ok=True)
-    shared.write_text("{}", encoding="utf-8")
-    assert credentials_path(_SERVICE) == shared
-
-    own.parent.mkdir(parents=True, exist_ok=True)
-    own.write_text("{}", encoding="utf-8")
-    assert credentials_path(_SERVICE) == own
-
-
-def test_load_credentials_missing_file(isolated_kiss_home) -> None:
-    """load_google_credentials returns None when no token.json exists."""
-    assert load_google_credentials(_SERVICE, _SCOPES) is None
-
-
-def test_load_credentials_corrupt_file(isolated_kiss_home) -> None:
-    """load_google_credentials returns None for unparseable token files."""
-    _write_token(_SERVICE, "this is not json {")
-    assert load_google_credentials(_SERVICE, _SCOPES) is None
-    _write_token(_SERVICE, json.dumps({"token": "x"}))  # missing required OAuth keys
-    assert load_google_credentials(_SERVICE, _SCOPES) is None
-
-
-def test_load_credentials_wrong_shape_json_returns_none(isolated_kiss_home) -> None:
-    """Valid JSON of the wrong shape ([], null, bare string) yields None, not a crash.
-
-    Credentials.from_authorized_user_file raises AttributeError on
-    non-dict JSON; the loader must swallow that and return None.
-    """
-    for wrong_shape in ("[]", "null", '"just-a-string"'):
-        _write_token(_SERVICE, wrong_shape)
-        assert load_google_credentials(_SERVICE, _SCOPES) is None
-
-
-def test_tools_survives_wrong_shape_token_files(isolated_kiss_home) -> None:
-    """Each Google agent module's tools() works with a wrong-shape token.json."""
-    import kiss.agents.third_party_agents.gcal_sea as gcal_mod
-    import kiss.agents.third_party_agents.gdocs_sea as gdocs_mod
-    import kiss.agents.third_party_agents.gdrive_sea as gdrive_mod
-
-    modules = {
-        "google_calendar": gcal_mod,
-        "google_drive": gdrive_mod,
-        "google_docs": gdocs_mod,
+def test_finish_reports_a_failing_backend(composio) -> None:
+    """A finished connection whose first API call fails is reported as an error."""
+    agent = GoogleCalendarAgent()
+    agent._backend._connection_info = "Calendar auth failed: 401"
+    tools = {
+        t.__name__: t
+        for t in make_google_auth_tools(agent, _SERVICE, "Google Calendar", lambda: False)
     }
-    for wrong_shape in ("[]", "null", '"just-a-string"'):
-        for service, module in modules.items():
-            _write_token(service, wrong_shape)
-            tools = module.tools()
-            assert tools, f"{service} tools() returned no tools for {wrong_shape!r}"
-            assert all(callable(t) for t in tools)
+    started = json.loads(tools["authenticate_google_calendar"]())
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    result = json.loads(tools["finish_google_calendar_auth"]())
+    assert result["ok"] is False
+    assert result["error"].endswith("first API call failed: Calendar auth failed: 401")
 
 
-def test_authenticate_with_malformed_credentials_json_returns_ok_false(isolated_kiss_home) -> None:
-    """A malformed credentials.json makes authenticate return ok:false — no raise."""
-    agent = GoogleCalendarAgent()
-    creds_file = google_service_dir(_SERVICE) / "credentials.json"
-    creds_file.parent.mkdir(parents=True, exist_ok=True)
-    for malformed in ("not json", "[]"):
-        creds_file.write_text(malformed, encoding="utf-8")
-        tools = {t.__name__: t for t in agent._get_auth_tools()}
-        result = json.loads(tools["authenticate_google_calendar"]())
-        assert result["ok"] is False
-        assert result["error"]
-        assert "OAuth flow failed" in result["error"]
-
-
-def test_load_credentials_valid_synthetic_token(isolated_kiss_home) -> None:
-    """A synthetic non-expired token.json loads as valid credentials."""
-    _write_token(_SERVICE, json.dumps(_SYNTHETIC_INFO))
-    creds = load_google_credentials(_SERVICE, _SCOPES)
-    assert creds is not None
-    assert creds.valid is True
-    assert creds.token == "synthetic-access-token"
-
-
-def test_save_credentials_writes_0600(isolated_kiss_home) -> None:
-    """save_google_credentials persists the token with owner-only permissions."""
-    save_google_credentials(_SERVICE, _synthetic_creds())
-    path = token_path(_SERVICE)
-    assert path.exists()
-    if sys.platform != "win32":
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    reloaded = load_google_credentials(_SERVICE, _SCOPES)
-    assert reloaded is not None
-    assert reloaded.token == "synthetic-access-token"
-
-
-def test_clear_credentials_removes_and_tolerates_absence(isolated_kiss_home) -> None:
-    """clear_google_credentials deletes the token and is a no-op when absent."""
-    _write_token(_SERVICE, json.dumps(_SYNTHETIC_INFO))
-    clear_google_credentials(_SERVICE)
-    assert not token_path(_SERVICE).exists()
-    clear_google_credentials(_SERVICE)  # second call must not raise
-    assert not token_path(_SERVICE).exists()
-
-
-def test_fresh_access_token(isolated_kiss_home) -> None:
-    """fresh_access_token returns '' for None and the token for valid creds."""
-    assert fresh_access_token(None) == ""
-    assert fresh_access_token(_synthetic_creds()) == "synthetic-access-token"
-
-
-class _TokenEndpointHandler(BaseHTTPRequestHandler):
-    """Emulates the OAuth2 token endpoint for refresh-token grants."""
-
-    def do_POST(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        payload = json.dumps(
-            {"access_token": "refreshed-token", "expires_in": 3600, "token_type": "Bearer"}
-        ).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
-
-
-def _expired_creds(token_uri: str) -> Credentials:
-    """Build real expired credentials whose refresh hits *token_uri*."""
-    return Credentials(
-        token="stale-token",
-        refresh_token="synthetic-refresh-token",
-        token_uri=token_uri,
-        client_id="synthetic-client-id",
-        client_secret="synthetic-client-secret",
-        scopes=_SCOPES,
-        expiry=datetime(2000, 1, 1),
-    )
-
-
-def test_fresh_access_token_refreshes_expired_creds(isolated_kiss_home) -> None:
-    """Expired creds are refreshed against a real local token endpoint."""
-    server = ThreadedHTTPServer(("127.0.0.1", 0), _TokenEndpointHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        creds = _expired_creds(f"http://127.0.0.1:{server.server_address[1]}/token")
-        assert creds.valid is False
-        assert fresh_access_token(creds) == "refreshed-token"
-    finally:
-        stop_http_server(server, thread)
-
-
-def test_fresh_access_token_returns_empty_when_refresh_fails(isolated_kiss_home) -> None:
-    """A refresh against an unreachable token endpoint yields '' — no exception."""
-    creds = _expired_creds("http://127.0.0.1:9/token")  # discard port; nothing listens
-    assert fresh_access_token(creds) == ""
-
-
-def test_start_google_consent_without_credentials_json(isolated_kiss_home) -> None:
-    """start_google_consent returns None when no credentials.json exists."""
-    assert start_google_consent(_SERVICE, "Google Calendar", _SCOPES) is None
-
-
-def test_make_google_auth_tools_names_and_docstrings(isolated_kiss_home) -> None:
-    """make_google_auth_tools builds the 5 named tools with real docstrings."""
-    agent = GoogleCalendarAgent()
-
-    def on_credentials(creds) -> None:
-        agent._backend._creds = creds
-
-    tools = make_google_auth_tools(
-        agent, _SERVICE, "Google Calendar", _SCOPES, on_credentials=on_credentials
-    )
-    names = [t.__name__ for t in tools]
-    assert names == [
+def test_tool_names_and_docstrings() -> None:
+    """The four tools carry per-service names and real docstrings."""
+    tools = _tools([])
+    assert list(tools) == [
         "check_google_calendar_auth",
         "authenticate_google_calendar",
         "clear_google_calendar_auth",
-        "start_google_calendar_browser_setup",
         "finish_google_calendar_auth",
     ]
-    for tool in tools:
-        assert tool.__doc__ is not None
-        assert "Returns:" in tool.__doc__
-        assert "Google Calendar" in tool.__doc__
+    assert all("Google Calendar" in (t.__doc__ or "") for t in tools.values())
+    assert "api_key" in (tools["authenticate_google_calendar"].__doc__ or "")
 
 
-def test_auth_tools_end_to_end_flow(isolated_kiss_home) -> None:
-    """The generated auth tools work end-to-end on a real agent."""
-    agent = GoogleCalendarAgent()
-    tools = {t.__name__: t for t in agent._get_auth_tools()}
+def test_check_without_api_key_asks_for_one(monkeypatch) -> None:
+    """With no Composio key configured, check explains how to supply one."""
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    msg = _tools([])["check_google_calendar_auth"]()
+    assert "Not authenticated with Google Calendar" in msg
+    assert "authenticate_google_calendar(api_key='...')" in msg
 
-    # Unauthenticated, no credentials.json anywhere: check points at browser setup.
-    msg = tools["check_google_calendar_auth"]()
-    assert "start_google_calendar_browser_setup" in msg
 
-    # authenticate without credentials.json explains where to put the file.
-    result = tools["authenticate_google_calendar"]()
-    assert "credentials.json not found" in result
-    assert str(google_service_dir(_SERVICE) / "credentials.json") in result
+def test_check_with_api_key_skips_key_hint(composio) -> None:
+    """With a key configured, check only points at authenticate/finish."""
+    msg = _tools([])["check_google_calendar_auth"]()
+    assert "finish_google_calendar_auth()" in msg
+    assert "No Composio API key" not in msg
 
-    # With a credentials.json present, check names its path instead.
-    creds_file = google_service_dir(_SERVICE) / "credentials.json"
-    creds_file.parent.mkdir(parents=True, exist_ok=True)
-    creds_file.write_text("{}", encoding="utf-8")
-    msg = tools["check_google_calendar_auth"]()
-    assert "credentials.json exists" in msg
-    assert "authenticate_google_calendar" in msg
 
-    # Authenticated agent: check reports ok.
-    _write_token(_SERVICE, json.dumps(_SYNTHETIC_INFO))
-    agent._backend._creds = load_google_credentials(_SERVICE, _SCOPES)
-    assert json.loads(tools["check_google_calendar_auth"]())["ok"] is True
+def test_authenticate_without_any_key_fails(monkeypatch) -> None:
+    """authenticate reports the missing key instead of raising."""
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    result = json.loads(_tools([])["authenticate_google_calendar"]())
+    assert result["ok"] is False
+    assert "No Composio API key" in result["error"]
 
-    # start_browser_setup returns Google Cloud Console instructions.
-    setup = tools["start_google_calendar_browser_setup"]()
-    assert "console.cloud.google.com" in setup
-    assert "authenticate_google_calendar" in setup
 
-    # clear removes the token and detaches the backend credentials.
-    cleared = tools["clear_google_calendar_auth"]()
-    assert "cleared" in cleared.lower()
-    assert not token_path(_SERVICE).exists()
-    assert agent._backend._creds is None
-    assert agent._is_authenticated() is False
+def test_authenticate_saves_api_key_then_links(composio, monkeypatch) -> None:
+    """An api_key argument is saved (0600) and used for the Connect Link."""
+    monkeypatch.delenv("COMPOSIO_API_KEY")
+    result = json.loads(_tools([])["authenticate_google_calendar"](api_key=f" {API_KEY} "))
+    assert result["status"] == "consent_required"
+    assert result["verification_uri"].startswith("https://connect.composio.dev/link/")
+    assert composio_google.composio_api_key() == API_KEY
+    mode = composio_google._api_key_path().stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_finish_connects_and_calls_on_connected(composio) -> None:
+    """finish records an approved connection and wires the backend once."""
+    calls: list[str] = []
+    tools = _tools(calls)
+    started = json.loads(tools["authenticate_google_calendar"]())
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    result = json.loads(tools["finish_google_calendar_auth"]())
+    assert result["ok"] is True
+    assert calls == ["connected"]
+    assert json.loads(tools["check_google_calendar_auth"]()) == {
+        "ok": True, "message": "Google Calendar is connected."
+    }
+
+
+def test_finish_pending_and_failed_do_not_call_on_connected(composio) -> None:
+    """Unapproved or failed sign-ins leave the agent unconnected."""
+    calls: list[str] = []
+    tools = _tools(calls)
+    started = json.loads(tools["authenticate_google_calendar"]())
+    pending = json.loads(tools["finish_google_calendar_auth"]())
+    assert pending["status"] == "pending"
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "FAILED"
+    failed = json.loads(tools["finish_google_calendar_auth"]())
+    assert failed["ok"] is False
+    assert "FAILED" in failed["error"]
+    assert calls == []
+
+
+def test_finish_without_authenticate_explains(composio) -> None:
+    """finish before authenticate says to call authenticate first."""
+    result = json.loads(_tools([])["finish_google_calendar_auth"]())
+    assert result["ok"] is False
+    assert "authenticate_google_calendar()" in result["error"]
+
+
+def test_clear_deletes_connection(composio) -> None:
+    """clear deletes the Composio account and forgets it locally."""
+    account = connect(composio, _SERVICE)
+    assert _tools([])["clear_google_calendar_auth"]() == "Google Calendar connection cleared."
+    assert composio.deleted == [account]
+    assert composio_google.connected_account_id(_SERVICE) == ""
+
+
+def test_sidebar_probe_follows_the_composio_state(composio) -> None:
+    """The sidebar probe reflects the Composio connection, not the vault.
+
+    Without a recorded connected account the channel is unauthenticated
+    even when a stale ``google_calendar`` vault enrollment exists;
+    connecting through Composio makes it authenticated.
+    """
+    from kiss.agents.third_party_agents import auth_status
+
+    assert not composio_google._state_path(_SERVICE).exists()
+    for enrolled in (None, set(), {"google_calendar"}):
+        status = auth_status.channel_status("gcal", enrolled)
+        assert (status["authenticated"], status["error"]) == (False, "")
+    connect(composio, _SERVICE)
+    assert auth_status.channel_status("gcal", {"google_calendar"})["authenticated"] is True
+    reset_state(_SERVICE)
+    assert auth_status.channel_status("gcal", set())["authenticated"] is False
+
+
+def test_google_auth_prompt_names_the_service_tools() -> None:
+    """The shared prompt section names the service's own tools in order."""
+    prompt = google_auth_prompt("gmail", "Gmail")
+    assert prompt.startswith("\n\n## Gmail Authentication\n")
+    assert prompt.index("check_gmail_auth()") < prompt.index("authenticate_gmail(")
+    assert prompt.index("authenticate_gmail(") < prompt.index("finish_gmail_auth()")

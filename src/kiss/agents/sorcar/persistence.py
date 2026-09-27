@@ -469,6 +469,11 @@ _MAX_FREQUENT_TASKS = 100
 # task's composer, kept only so autocomplete can offer them again).
 _MAX_STEER_INPUTS = 1000
 
+# Cap on the composer's ArrowUp history sent to every (re)connecting
+# client.  Unbounded, a long-lived install ships every prompt ever
+# typed (tens of thousands of rows, megabytes) on each connect.
+_MAX_INPUT_HISTORY = 500
+
 _OWNER_DIR_NAME = "task-owners"
 
 _owner_state: tuple[str, str, IO[Any]] | None = None
@@ -1996,6 +2001,44 @@ def _history_date_range() -> tuple[float | None, float | None]:
     return (float(row["mn"]), float(row["mx"]))
 
 
+def _spend_by_day_and_model() -> list[dict[str, object]]:
+    """Aggregate cost, tokens and task count per local calendar day and model.
+
+    Groups the same row set the History sidebar lists (i.e. excluding
+    sub-agent rows, whose usage is already folded into their parent's
+    totals) by the daemon's local date and the task's ``model`` column
+    over the whole history, so the sidebar's Spend subpanel can draw
+    its daily heatmap and cost-by-model bars.  An empty or NULL model
+    is reported as ``"unknown"``.  Thread-safe.
+
+    Returns:
+        ``{"date": "YYYY-MM-DD", "model": str, "cost": float,
+        "tokens": int, "tasks": int}`` dicts in ascending date order;
+        a day's models in descending cost order.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT date(timestamp, 'unixepoch', 'localtime') AS d, "
+            "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
+            "COALESCE(SUM(cost), 0) AS c, "
+            "COALESCE(SUM(tokens), 0) AS t, COUNT(*) AS n "
+            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT} "
+            "GROUP BY d, m ORDER BY d ASC, c DESC"
+        ).fetchall()
+    return [
+        {
+            "date": str(row["d"]),
+            "model": str(row["m"]),
+            "cost": float(row["c"] or 0.0),
+            "tokens": int(row["t"] or 0),
+            "tasks": int(row["n"] or 0),
+        }
+        for row in rows
+        if row["d"]
+    ]
+
+
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     """Find recent unique tasks starting with *query* (case-sensitive).
 
@@ -2033,13 +2076,17 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     return [row["task"] for row in rows]
 
 
-def _load_input_history() -> list[str]:
-    """Return every distinct text the user ever typed into the composer.
+def _load_input_history(limit: int = _MAX_INPUT_HISTORY) -> list[str]:
+    """Return the most recent distinct texts the user typed into the composer.
 
     Combines the listable ``task_history`` rows (sub-agent rows
     excluded) with the ``steer_inputs`` table, most recent first —
     a text's position is that of its most recent use in either
     table.  Feeds the composer's ArrowUp history.  Thread-safe.
+
+    Args:
+        limit: Maximum number of texts returned (the most recent ones);
+            defaults to :data:`_MAX_INPUT_HISTORY`.
     """
     with _rw_lock.read_lock():
         db = _get_db()
@@ -2050,7 +2097,9 @@ def _load_input_history() -> list[str]:
             "UNION ALL "
             "SELECT text AS task, timestamp, 0 AS rid FROM steer_inputs"
             ") GROUP BY task "
-            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC",
+            "ORDER BY MAX(timestamp) DESC, MAX(rid) DESC "
+            "LIMIT ?",
+            (int(limit),),
         ).fetchall()
     return [row["task"] for row in rows]
 
@@ -2214,6 +2263,7 @@ def _log_orphaned_task_forensics(
 _USAGE_STEPS_RE = re.compile(r"Steps:\s*(\d+)")
 _USAGE_TOKENS_RE = re.compile(r"Total tokens:\s*([\d,]+)")
 _USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
+_COST_FIELD_RE = re.compile(r"\$?(\d+(?:\.\d+)?)")
 
 
 def _recovered_progress_from_events(
@@ -2234,9 +2284,11 @@ def _recovered_progress_from_events(
         db: Active database connection (caller holds the write lock).
         task_id: Task whose events should be inspected.
 
-    Only the per-task counter text emitted once per agent step
-    (``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
-    $56.4682/$1000.00"``) is trusted.  The live-usage monitor's
+    Only the per-task counter events emitted once per agent step
+    (text ``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
+    $56.4682/$1000.00"``) are trusted; their structured
+    ``total_steps``/``total_tokens``/``cost`` fields (task totals across
+    continuation sessions) win over the session-relative text.  The live-usage monitor's
     ``usage_info`` events carry a different text form and structured
     ``total_tokens``/``total_steps``/``cost`` fields, but those are
     CROSS-TASK aggregates ("incl. parallel sub-agents") — writing them
@@ -2295,9 +2347,39 @@ def _recovered_progress_from_events(
             # unconvertible digit groups; a corrupt event must not
             # abort the recovery sweep.
             continue
+        # The text is the executor's own session-relative counter, but
+        # the printer rewrites the structured fields of the same event
+        # to task totals (sessions banked by earlier continuations
+        # added), which is what the task actually spent.
+        found.update(_structured_usage_totals(event))
         progress.update(found)
         break
     return progress
+
+
+def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
+    """Return the task-total counters carried by a per-step ``usage_info`` event.
+
+    Args:
+        event: A decoded ``usage_info`` event whose text is the per-step
+            counter form.
+
+    Returns:
+        The subset of ``steps``/``tokens``/``cost`` present as valid
+        ``total_steps``/``total_tokens``/``cost`` fields (events written
+        by versions that predate these fields contribute nothing).
+    """
+    totals: dict[str, int | float] = {}
+    steps = event.get("total_steps")
+    tokens = event.get("total_tokens")
+    if isinstance(steps, int) and not isinstance(steps, bool):
+        totals["steps"] = steps
+    if isinstance(tokens, int) and not isinstance(tokens, bool):
+        totals["tokens"] = tokens
+    cost_m = _COST_FIELD_RE.fullmatch(str(event.get("cost", "")))
+    if cost_m:
+        totals["cost"] = float(cost_m.group(1))
+    return totals
 
 
 def _backfill_orphan_progress(
@@ -3586,7 +3668,7 @@ def _write_event_batch_locked(
 
 
 def _queue_chat_event(
-    event: dict[str, object],
+    event: dict[str, object] | str,
     task_id: str,
     origin_db_path: str | None = None,
 ) -> None:
@@ -3601,7 +3683,8 @@ def _queue_chat_event(
     must call ``_flush_chat_events()`` first.
 
     Args:
-        event: The event dict to persist.
+        event: The event dict to persist, or its ``json.dumps``
+            encoding (lets a caller encode before taking a lock).
         task_id: Stable ``task_history`` row id.  Must be non-None.
         origin_db_path: Database path *task_id* was resolved against.
             Defaults to the active ``_DB_PATH``.  The background
@@ -3616,7 +3699,7 @@ def _queue_chat_event(
     # ``_flush_chat_events(task_id)`` would then spin forever.
     item = (
         task_id,
-        json.dumps(event),
+        event if isinstance(event, str) else json.dumps(event),
         time.time(),
         origin_db_path or _current_db_path(),
     )

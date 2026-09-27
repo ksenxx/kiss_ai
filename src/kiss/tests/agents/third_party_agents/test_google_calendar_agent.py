@@ -5,13 +5,15 @@
 """End-to-end tests for the Google Calendar channel agent.
 
 Runs a REAL local HTTP server (stdlib ``ThreadedHTTPServer``) emulating
-the Google Calendar v3 REST API — no mocks, patches, or fakes.  The
-server asserts the ``Authorization: Bearer`` header on every call,
-returns canned JSON, and records every request for verification.
+the Google Calendar v3 REST API, reached through a real local Composio
+API emulator (``composio_test_utils``) whose proxy injects the bearer
+token — no mocks or patches.  The Calendar server asserts the
+``Authorization: Bearer`` header on every call, returns canned JSON,
+and records every request for verification.
 
-Token state is isolated because the session conftest points
-``KISS_HOME`` at a temporary directory; an autouse fixture additionally
-clears the google_calendar token around every test.
+State is isolated because the session conftest points ``KISS_HOME`` at
+a temporary directory; an autouse fixture additionally forgets the
+google_calendar Composio connection around every test.
 """
 
 from __future__ import annotations
@@ -30,18 +32,19 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents._google_workspace_utils import (
-    clear_google_credentials,
-    token_path,
-)
 from kiss.agents.third_party_agents.gcal_sea import (
-    _SCOPES,
     _SERVICE,
     GoogleCalendarAgent,
     GoogleCalendarChannelBackend,
 )
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    TOKEN,
+    connect,
+    reset_state,
+    start_fake_composio,
+)
 
-_TOKEN = "test-token"
+_TOKEN = TOKEN
 
 _EVENT = {
     "id": "ev1",
@@ -80,28 +83,8 @@ _AUTH_TOOL_NAMES = [
     "check_google_calendar_auth",
     "authenticate_google_calendar",
     "clear_google_calendar_auth",
-    "start_google_calendar_browser_setup",
     "finish_google_calendar_auth",
 ]
-
-
-def write_synthetic_token() -> None:
-    """Persist a synthetic, never-expiring OAuth token for google_calendar."""
-    path = token_path(_SERVICE)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "token": "synthetic-access-token",
-                "refresh_token": "synthetic-refresh-token",
-                "client_id": "synthetic-client-id",
-                "client_secret": "synthetic-client-secret",
-                "scopes": _SCOPES,
-                "expiry": "2099-01-01T00:00:00Z",
-            }
-        ),
-        encoding="utf-8",
-    )
 
 
 class _CalendarRequestHandler(BaseHTTPRequestHandler):
@@ -201,11 +184,17 @@ class _CalendarServer(ThreadedHTTPServer):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_token():
-    """Start and end every test with no persisted google_calendar token."""
-    clear_google_credentials(_SERVICE)
+def _fresh_state():
+    """Start and end every test with no recorded google_calendar connection."""
+    reset_state(_SERVICE)
     yield
-    clear_google_credentials(_SERVICE)
+    reset_state(_SERVICE)
+
+
+@pytest.fixture()
+def composio(monkeypatch):
+    """Run the local Composio API emulator and point the SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
 @pytest.fixture()
@@ -222,12 +211,12 @@ def gcal_server():
 
 
 @pytest.fixture()
-def backend(gcal_server):
-    """A backend pointed at the emulated server with the valid token."""
+def backend(gcal_server, composio):
+    """A connected backend pointed at the emulated Calendar server."""
     base_url, server = gcal_server
+    connect(composio, _SERVICE)
     b = GoogleCalendarChannelBackend()
     b._base_url = base_url
-    b._token = _TOKEN
     return b, server
 
 
@@ -249,15 +238,20 @@ def test_check_auth_unauthenticated_explains_setup() -> None:
     tools = {t.__name__: t for t in agent._get_tools()}
     msg = tools["check_google_calendar_auth"]()
     assert "Not authenticated with Google Calendar" in msg
-    assert "start_google_calendar_browser_setup" in msg
     assert "authenticate_google_calendar" in msg
+    assert "No Composio API key" in msg
 
 
-def test_synthetic_token_authenticates_new_agent() -> None:
-    """A synthetic token.json makes a new agent authenticated end-to-end."""
-    write_synthetic_token()
+def test_connect_link_flow_authenticates_agent(composio) -> None:
+    """authenticate -> user approves -> finish unlocks the Calendar tools."""
     agent = GoogleCalendarAgent()
+    tools = {t.__name__: t for t in agent._get_tools()}
+    started = json.loads(tools["authenticate_google_calendar"]())
+    assert started["status"] == "consent_required"
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    assert json.loads(tools["finish_google_calendar_auth"]())["ok"] is True
     assert agent._is_authenticated() is True
+    assert agent._backend.connection_info == "Google Calendar connected through Composio."
     names = {t.__name__ for t in agent._get_tools()}
     assert set(_AUTH_TOOL_NAMES) <= names
     assert {
@@ -274,14 +268,14 @@ def test_synthetic_token_authenticates_new_agent() -> None:
     assert json.loads(tools["check_google_calendar_auth"]())["ok"] is True
 
 
-def test_clear_auth_removes_token_and_relocks_tools() -> None:
-    """clear_google_calendar_auth deletes the token and re-locks backend tools."""
-    write_synthetic_token()
+def test_clear_auth_removes_connection_and_relocks_tools(composio) -> None:
+    """clear_google_calendar_auth deletes the connection and re-locks backend tools."""
+    account = connect(composio, _SERVICE)
     agent = GoogleCalendarAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools["clear_google_calendar_auth"]()
     assert "cleared" in result.lower()
-    assert not token_path(_SERVICE).exists()
+    assert composio.deleted == [account]
     assert agent._is_authenticated() is False
     assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
 
@@ -297,24 +291,15 @@ def test_connect_without_token_fails() -> None:
     """connect() fails cleanly when no token is persisted."""
     b = GoogleCalendarChannelBackend()
     assert b.connect() is False
-    assert "No Google Calendar credentials" in b.connection_info
+    assert "not connected" in b.connection_info
 
 
-def test_connect_with_synthetic_token_succeeds() -> None:
-    """connect() loads persisted synthetic credentials."""
-    write_synthetic_token()
+def test_connect_with_composio_connection_succeeds(composio) -> None:
+    """connect() succeeds once a Composio connection is recorded."""
+    connect(composio, _SERVICE)
     b = GoogleCalendarChannelBackend()
     assert b.connect() is True
-    assert b._creds is not None
-    assert "credentials loaded" in b.connection_info
-
-
-def test_headers_use_stored_credentials_when_no_token_override() -> None:
-    """Without a _token override, the bearer comes from the stored credentials."""
-    write_synthetic_token()
-    b = GoogleCalendarChannelBackend()
-    assert b.connect() is True
-    assert b._headers() == {"Authorization": "Bearer synthetic-access-token"}
+    assert "connected through Composio" in b.connection_info
 
 
 def test_list_calendars(backend) -> None:
@@ -514,12 +499,10 @@ def test_path_unsafe_ids_rejected_before_any_request(backend) -> None:
     assert server.requests == []
 
 
-def test_wrong_token_returns_ok_false(gcal_server) -> None:
+def test_wrong_token_returns_ok_false(backend, composio) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = gcal_server
-    b = GoogleCalendarChannelBackend()
-    b._base_url = base_url
-    b._token = "wrong-token"
+    b, _ = backend
+    composio.token = "wrong-token"
     for call in (
         b.gcal_list_calendars,
         b.gcal_list_events,
@@ -557,11 +540,10 @@ def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
     assert "Usage: kiss-gcal" in capsys.readouterr().out
 
 
-def test_connection_refused_returns_ok_false() -> None:
+def test_connection_refused_returns_ok_false(backend) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
-    b = GoogleCalendarChannelBackend()
+    b, _ = backend
     b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
-    b._token = _TOKEN
     for call in (
         b.gcal_list_calendars,
         b.gcal_list_events,

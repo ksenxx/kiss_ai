@@ -45,9 +45,12 @@ function hashFor(name) {
   return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 }
 
-function hrefsAndSrcs(html) {
+// Every media URL in the page: href / src attributes and the quoted
+// URLs handed to main.js in the inline shim (the theme highlight sheets
+// in window.__HLJS_THEME_CSS__).
+function mediaUrls(html) {
   const values = [];
-  const re = /(?:href|src)="([^"]+)"/g;
+  const re = /"([^"]*\/media\/[^"]+)"/g;
   let m;
   while ((m = re.exec(html)) !== null) values.push(m[1]);
   return values;
@@ -55,18 +58,16 @@ function hrefsAndSrcs(html) {
 
 function assertAssetUrl(html, name) {
   const expectedVersion = hashFor(name);
-  const matching = hrefsAndSrcs(html).filter(u => u.includes('/media/' + name));
-  assert.strictEqual(
-    matching.length,
-    1,
-    `expected exactly one generated URL for ${name}; got ${matching}`,
-  );
-  const url = new URL(matching[0], 'https://webview.invalid/');
-  assert.strictEqual(
-    url.searchParams.get('v'),
-    expectedVersion,
-    `${name} must carry a content hash cache-buster`,
-  );
+  const matching = mediaUrls(html).filter(u => u.includes('/media/' + name));
+  assert.ok(matching.length >= 1, `expected a generated URL for ${name}`);
+  for (const u of matching) {
+    const url = new URL(u, 'https://webview.invalid/');
+    assert.strictEqual(
+      url.searchParams.get('v'),
+      expectedVersion,
+      `${name} must carry a content hash cache-buster`,
+    );
+  }
 }
 
 function testBuildChatHtmlUsesContentVersionedMediaUrls() {
@@ -83,7 +84,10 @@ function testBuildChatHtmlUsesContentVersionedMediaUrls() {
 
   [
     'main.css',
-    'highlight-github-dark.min.css',
+    'highlight-vscode-dark.css',
+    'highlight-vscode-light.css',
+    'welcome-logo.png',
+    'welcome-logo-dark.png',
     'highlight.min.js',
     'marked.min.js',
     'api.js',

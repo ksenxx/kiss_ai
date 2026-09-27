@@ -424,7 +424,7 @@ class TestListenerSpeechLanguage(unittest.TestCase):
     def test_speech_payload_has_text_speaker_and_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            wake = _tts_wav(tmp_path, "wake", "Sorcar")
+            wake = _tts_wav(tmp_path, "wake", "Hey Sorcar")
             speech = _tts_wav(
                 tmp_path, "speech", "Please summarize the latest changes."
             )

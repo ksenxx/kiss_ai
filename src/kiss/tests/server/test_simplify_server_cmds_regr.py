@@ -34,7 +34,7 @@ class _CapturePrinter(JsonPrinter):
         """Record *event* instead of writing it to stdout."""
         self.events.append(event)
 
-    def cleanup_tab(self, tab_id: str) -> None:
+    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
         """Record per-tab cleanup calls."""
         self.cleaned_tabs.append(tab_id)
 

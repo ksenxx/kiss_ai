@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
-  "version": "2026.9.24",
+  "version": "2026.9.25",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -125,6 +125,14 @@
         "command": "kissSorcar.showHistory",
         "title": "KISS: Show Chat History",
         "icon": "media/kiss-icon.png"
+      },
+      {
+        "command": "kissSorcar.retrySetup",
+        "title": "KISS: Retry Setup"
+      },
+      {
+        "command": "kissSorcar.enterApiKey",
+        "title": "KISS: Enter API Key"
       }
     ],
     "menus": {
@@ -206,6 +214,11 @@
           "type": "boolean",
           "default": true,
           "description": "Open each KISS Sorcar chat as an editor tab instead of the secondary-sidebar chat view (toggleable from the chat's settings panel)"
+        },
+        "kissSorcar.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check PyPI for a newer KISS Sorcar release when a window opens (at most once every 6 hours) and show a notification when one is available. Turn off to never be notified about updates; you can still update from the chat's settings panel."
         }
       }
     }

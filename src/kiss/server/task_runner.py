@@ -47,7 +47,6 @@ from kiss.agents.sorcar.sea_commands import (
     sea_getter_is_false as _sea_getter_is_false,
 )
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _notify_subagent_done
-from kiss.agents.sorcar.task_classifier import classification_will_call_model
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _WorktreeCleanupOutcome,
@@ -448,8 +447,9 @@ def _release_worktree_without_merging(
 
     Used when a new task starts on a tab that still holds a pending
     worktree while another tab runs a task directly on the main
-    working tree.  Auto-merging is unsafe then (it would stash,
-    checkout and merge the tree that other task is writing), but
+    working tree and has already changed tracked files there.
+    Auto-merging is unsafe then (it would stash, checkout and merge
+    the tree that other task is writing), but
     simply dropping ``agent._wt`` is worse: that handle is the only
     in-memory reference to the worktree, so the directory, the
     ``kiss/wt-*`` branch and its ``branch.<name>.*`` config section
@@ -501,7 +501,8 @@ def _release_worktree_without_merging(
         return
     reason = (
         f"Could not auto-merge branch '{branch}' because another task "
-        "is running on the main working tree."
+        "is running on the main working tree and has uncommitted "
+        "changes to tracked files."
     )
     if agent._last_preserve_outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED:
         agent._set_warnings(merge=(
@@ -682,8 +683,15 @@ class _TaskRunnerMixin:
         def _main_tree_claim_reason(
             self, repo_root: Path | None,
         ) -> str | None: ...
+        def _main_tree_blocks_merge(self, repo_root: Path | None) -> bool: ...
+        def _claim_main_tree(
+            self, repo_root: Path, reason: str,
+            holder: list[Any] | None = None,
+        ) -> bool: ...
+        def _release_main_tree_claim(self, claim: Any) -> None: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _cmd_run(self, cmd: dict[str, Any]) -> None: ...
+        def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None: ...
         def _user_answer_clear_tabs(
             self, ans_tab: str, answered_task_id: str,
         ) -> list[str]: ...
@@ -846,6 +854,9 @@ class _TaskRunnerMixin:
                         "chat_id": override_chat_id,
                         "tabId": tab_id,
                     })
+                    # That ``clear`` wipes the transcript again, so the
+                    # run's notice (dropped attachments) must follow it.
+                    self._broadcast_run_notice(cmd, tab_id)
             status_start: dict[str, Any] = {
                 "type": "status",
                 "running": True,
@@ -940,7 +951,33 @@ class _TaskRunnerMixin:
                         state.task_id, exc_info=True,
                     )
                     self.printer.cleanup_task(state.task_id)
-            self.printer.broadcast(setup_result)
+            # Recording the result (the launcher's copy) and choosing
+            # the viewers that get live copies form one step under
+            # ``delivery_lock``: a viewer's replay snapshot then either
+            # holds the result and supersedes the live copy, or lacks
+            # it and is followed by it — never both.
+            with self.printer.delivery_lock:
+                self.printer.broadcast(setup_result)
+                if state is not None and state.task_id:  # pragma: no branch
+                    # Viewers that attached during setup are subscribed
+                    # to the provisional task id (the launcher is not:
+                    # it is subscribed only once a task id is
+                    # allocated).  Give each one live copy, as the
+                    # normal end-of-run result fan-out does.  The copies
+                    # drop ``taskId`` so they stay transient: the
+                    # launcher's copy above already recorded the result
+                    # once for replay.
+                    viewer_result = {
+                        k: v for k, v in setup_result.items()
+                        if k not in ("tabId", "taskId")
+                    }
+                    for viewer_tab_id in self.printer._fanout_targets(
+                        state.task_id,
+                    ):
+                        if viewer_tab_id != tab_id:
+                            self.printer.broadcast(
+                                {**viewer_result, "tabId": viewer_tab_id},
+                            )
         finally:
             if state is None:
                 # The interrupt (or an override crash) landed before
@@ -1424,6 +1461,18 @@ class _TaskRunnerMixin:
             _raw_parent_task_id.strip()
             if isinstance(_raw_parent_task_id, str) else ""
         )
+        # An agent-script run (``agentPath``, e.g. the SEA an
+        # ``/xxx text`` relay dispatches) or another agent's sub-task
+        # (``parentTaskId``) is not a user typing into a chat box: a
+        # task that is nothing but a path is the script's/parent's
+        # business (``/git_extract_knowledge /path/to/repo`` indexes
+        # the repository), not a request to open it — see
+        # ``ChatSorcarAgent.run`` and ``bare_path_task``.
+        _raw_agent_path = cmd.get("agentPath")
+        _agent_script_run = bool(
+            _raw_agent_path.strip() if isinstance(_raw_agent_path, str) else "",
+        )
+        _open_bare_path = not _agent_script_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = (
             _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
@@ -1433,11 +1482,11 @@ class _TaskRunnerMixin:
                 "parent_task_id": parent_task_id,
                 "parent_tab_id": parent_tab_id,
                 # Reviewer sub-tree marker (see fanout_guard): a
-                # daemon-dispatched child of a reviewer must not be
-                # able to spawn reviewers via run_parallel either.
-                # The EFFECTIVE prompt is re-checked here because an
-                # agent script's ``prompt()`` override (applied above
-                # by ``apply_agent_overrides``) can turn an innocuous
+                # daemon-dispatched child of a reviewer gets the same
+                # read-only ``review`` tool profile.  The EFFECTIVE
+                # prompt is re-checked here because an agent script's
+                # ``prompt()`` override (applied above by
+                # ``apply_agent_overrides``) can turn an innocuous
                 # dispatch into a review task after the caller-side
                 # check in ``agent_dispatch._dispatch`` already passed.
                 "reviewer": bool(cmd.get("parentReviewer"))
@@ -1548,25 +1597,28 @@ class _TaskRunnerMixin:
         _classify_enabled = (
             _raw_classify if isinstance(_raw_classify, bool) else None
         )
-        # When a classifier round trip (~2 s) is about to happen, start
-        # preparing a spare worktree NOW on a background thread so the
-        # ~1.5 s full checkout of ``git worktree add`` overlaps that
-        # wait instead of following it.  ``_acquire_task_worktree``
-        # consumes the spare (a near-instant reset) when this run does
-        # use a worktree; otherwise it stays pooled for the next one.
-        # Maintenance passes are skipped (``exclude_branches_fn=None``):
-        # the orphan reclaim can squash-merge into the main branch,
-        # which must not happen underneath a run that is about to work
-        # in the main tree.  The post-acquisition refill keeps its
-        # maintenance pass.  Gated three ways: the client asked for
-        # worktrees (a user who turned them off gets no spare checkout
-        # on disk they did not ask for — and no worktree at all, since
-        # a verdict can only demote, never promote); a classifier call is really
-        # imminent (without one there is nothing to overlap, and the
-        # run would only wait on a checkout it just started); and the
-        # run is not itself inside a kiss worktree (a nested sub-agent
-        # run keeps today's acquire-then-refill path so no extra spare
-        # is nested under a worktree that is about to be removed).
+        # Start preparing a spare worktree NOW on a background thread
+        # (a no-op when one is pooled or already being created), before
+        # classification, whether the verdict will come from an LLM
+        # round trip, from the verdict cache, or not at all.  A
+        # classifier call overlaps the full checkout of
+        # ``git worktree add``.  Without one, the refill thread already
+        # holds ``repo_lock`` when ``_acquire_task_worktree`` asks for
+        # it, so the run waits for this checkout and consumes its
+        # spare instead of running a second checkout plus the orphan
+        # maintenance pass inline.  A run the verdict keeps out of a worktree leaves
+        # the spare pooled for the next one.  Maintenance passes are
+        # skipped (``exclude_branches_fn=None``): the orphan reclaim
+        # can squash-merge into the main branch, which must not happen
+        # underneath a run that is about to work in the main tree.  The
+        # post-acquisition refill keeps its maintenance pass.  Gated
+        # two ways: the client asked for worktrees (a user who turned
+        # them off gets no spare checkout on disk they did not ask for
+        # — and no worktree at all, since a verdict can only demote,
+        # never promote); and the run is not itself inside a kiss
+        # worktree (a nested sub-agent run keeps the acquire-then-
+        # refill path so no extra spare is nested under a worktree
+        # that is about to be removed).
         _classify_task_text = prompt + append_to_prompt
         _classify_model_config = (
             _raw_mc_early
@@ -1578,12 +1630,6 @@ class _TaskRunnerMixin:
             use_worktree
             and repo is not None
             and _WORKTREE_SUBDIR not in repo.parts
-            and classification_will_call_model(
-                _classify_task_text,
-                agent._resolve_model_name(model),
-                _classify_model_config,
-                _classify_enabled,
-            )
         ):
             worktree_pool.prewarm_async(repo, None)
         _classify_verdict = agent.classify_task_for_run(
@@ -1655,34 +1701,80 @@ class _TaskRunnerMixin:
             # release for those runs orphaned the worktree with no
             # owner and no preserve marker, which let a later reclaim
             # sweep publish work the user declined to merge (R09-1).
-            with self._state_lock:
-                main_tree_busy = self._any_non_wt_running(
-                    getattr(agent, "_repo_root", None),
-                )
-                wt_occupied = self._any_non_wt_running(
-                    getattr(agent, "_wt_dir", None),
-                )
-            if main_tree_busy and wt_occupied:
-                # A task on another tab is running INSIDE the pending
-                # worktree itself.  Every disposal — discard and the
-                # commit-and-remove preserve alike — deletes that
-                # directory out from under the running task, so leave
-                # the worktree pending; a later retire retries.
-                agent._set_warnings(merge=(
-                    f"Worktree '{agent._wt_branch}' was left pending: "
-                    "another tab is running a task inside it."
-                ))
-            elif main_tree_busy:
-                # Retiring the previous worktree is an automatic path,
-                # so it obeys the toggle as it stands NOW — the value
-                # this run carried, not the one the run that created
-                # the worktree carried.  ``agent.run`` binds the same
-                # attribute for every cleanup that happens later, but
-                # this release runs before it.
-                agent.auto_commit_enabled = state.auto_commit_mode
-                _release_worktree_without_merging(
-                    agent, bool(self._get_worktree_changed_files(tab_id)),
-                )
+            # "Busy" blocks the merge only once the occupant has
+            # changed a tracked file of the main tree: an occupant
+            # that has left every tracked file untouched (this run
+            # itself, which has not started writing yet, or another
+            # tab's read-only task) does not stand in the way.
+            # Merging here rewrites the main tree without an
+            # ``is_merging`` flag (the tab's run is starting, not a
+            # merge_flow merge), so the merge publishes a main-tree
+            # claim in the same locked section as the check: direct-run
+            # admission on another tab refuses while it is held,
+            # instead of starting to write the tree mid-merge.  A
+            # worktree run retires here too, under the same claim —
+            # left to ``_try_setup_worktree`` the merge ran with no
+            # claim at all.
+            # A worktree run enters setup only when its work_dir is in
+            # a git repository — the same ``discover_repo`` condition
+            # ``WorktreeSorcarAgent.run`` applies; otherwise the agent
+            # runs the task directly outside any repository and the
+            # pending worktree stays pending, as it did before.
+            wt_setup = use_worktree and repo is not None
+            retires = wt_setup or not use_worktree
+            wt_repo_root = getattr(agent, "_repo_root", None)
+            retire_claims: list[Any] = []
+            try:
+                with self._state_lock:
+                    main_tree_busy = self._any_non_wt_running(wt_repo_root)
+                    wt_occupied = self._any_non_wt_running(
+                        getattr(agent, "_wt_dir", None),
+                    )
+                    merge_blocked = self._main_tree_blocks_merge(wt_repo_root)
+                    if (
+                        wt_repo_root is not None
+                        and (main_tree_busy or wt_setup) and retires
+                        and not wt_occupied and not merge_blocked
+                    ):
+                        merge_blocked = not self._claim_main_tree(
+                            wt_repo_root, "worktree merge",
+                            holder=retire_claims,
+                        )
+                if main_tree_busy and wt_occupied:
+                    # A task on another tab is running INSIDE the pending
+                    # worktree itself.  Every disposal — discard and the
+                    # commit-and-remove preserve alike — deletes that
+                    # directory out from under the running task, so leave
+                    # the worktree pending; a later retire retries.
+                    agent._set_warnings(merge=(
+                        f"Worktree '{agent._wt_branch}' was left pending: "
+                        "another tab is running a task inside it."
+                    ))
+                elif main_tree_busy or (wt_setup and not wt_occupied):
+                    # Retiring the previous worktree is an automatic path,
+                    # so it obeys the toggle as it stands NOW — the value
+                    # this run carried, not the one the run that created
+                    # the worktree carried.  ``agent.run`` binds the same
+                    # attribute for every cleanup that happens later, but
+                    # this release runs before it.
+                    agent.auto_commit_enabled = state.auto_commit_mode
+                    if merge_blocked:
+                        _release_worktree_without_merging(
+                            agent, bool(self._get_worktree_changed_files(tab_id)),
+                        )
+                    elif retires:
+                        # The main tree is unoccupied, or occupied but
+                        # untouched, so the carried-over worktree can
+                        # still be merged — and it must be merged NOW,
+                        # under the claim, before this run starts (a
+                        # direct run writes the tree next; a worktree
+                        # run's ``_try_setup_worktree`` then finds
+                        # nothing pending).
+                        agent._retire_previous_worktree()
+            finally:
+                for claim in retire_claims:
+                    with self._state_lock:
+                        self._release_main_tree_claim(claim)
 
         with self._state_lock:
             opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")
@@ -1726,6 +1818,16 @@ class _TaskRunnerMixin:
                 # user-visible ``prompt`` intact for classification,
                 # persistence and the tab's task-panel echo.
                 subtasks = [_sea_dispatch[0]]
+            elif _agent_script_run and isinstance(prompt, str):
+                # The run the ``run_agent`` directive then starts
+                # against the SEA itself (``agentPath``) gets the
+                # user's trailing text as its whole task — the same
+                # text, so the same rule: ``<task>`` blocks in it are
+                # the SEA's to interpret, and splitting them here would
+                # hand the SEA one fragment (``hello`` out of ``ask
+                # /repo what does <task>hello</task> mean?``) and lose
+                # the rest.
+                subtasks = [prompt]
             if append_to_prompt:
                 # The suffix is part of the EXECUTED prompt: appending
                 # here (once per subtask, before the loop) keeps the
@@ -1898,6 +2000,7 @@ class _TaskRunnerMixin:
                         tools=client_tools,
                         append_basic_tools=_append_basic_tools,
                         base_system_prompt=system_prompt_override,
+                        _open_bare_path=_open_bare_path,
                         # ``SorcarAgent.run``'s ``system_prompt`` is an
                         # append-only suffix on the base system prompt
                         # — exactly the ``appendToSystemPrompt``
@@ -2135,6 +2238,20 @@ class _TaskRunnerMixin:
             # over and its changes are committed (mandatory finally).
             freed_repo: Path | None = None
             try:
+                # Warnings left by the pre-run retirement of a
+                # carried-over worktree (``_retire_previous_worktree``
+                # / ``_release_worktree_without_merging`` above) are
+                # normally broadcast by ``agent.run``.  A failure
+                # BEFORE the first ``agent.run`` (tool profile, config,
+                # tools file) would otherwise swallow them and the user
+                # would never learn where that worktree's work went.
+                # The flush is a take-and-clear, so it never
+                # re-delivers what ``run`` already broadcast; it sits
+                # inside this guarded block so a stop interrupt landing
+                # in the broadcast cannot skip the mandatory cleanup.
+                _flush_warnings = getattr(agent, "_flush_warnings", None)
+                if _flush_warnings is not None:
+                    _flush_warnings(self.printer)
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
                     _agent_parsed and _agent_parsed.get("success") is False
@@ -2462,7 +2579,8 @@ class _TaskRunnerMixin:
             end_ms: End timestamp (ms epoch) for the ``extra``
                 payload; defaults to now.
             cleanup: Release the printer's per-task resources via
-                ``cleanup_task`` after persisting.
+                ``cleanup_task`` after persisting, also when persisting
+                fails.
             reraise: Propagate persistence errors instead of logging
                 and swallowing them.
 
@@ -2504,8 +2622,6 @@ class _TaskRunnerMixin:
                 task_id=task_id,
             )
             self.printer.broadcast({"type": "tasks_updated"})
-            if cleanup and task_id is not None:
-                self.printer.cleanup_task(task_id)
             logger.info(
                 "Task result persisted: task_id=%s result=%r",
                 task_id,
@@ -2519,6 +2635,12 @@ class _TaskRunnerMixin:
                 task_id,
                 exc_info=True,
             )
+        finally:
+            # Even when persisting failed: the run moves on to its next
+            # subtask, and the end-of-run cleanup frees only the last
+            # subtask's id, so this one's retired recording would leak.
+            if cleanup and task_id is not None:
+                self.printer.cleanup_task(task_id)
 
     def _broadcast_failure_result(
         self,

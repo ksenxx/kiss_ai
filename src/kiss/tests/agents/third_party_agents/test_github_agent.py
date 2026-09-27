@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import base64
 import json
-import shutil
-import stat
 import subprocess
 import sys
 import threading
@@ -40,6 +38,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
+from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
 from kiss.agents.third_party_agents.github_sea import (
     GitHubAgent,
     GitHubChannelBackend,
@@ -396,95 +395,25 @@ def test_agent_instantiation_unauthenticated() -> None:
 
 
 def test_check_auth_unauthenticated_message() -> None:
-    """check_github_auth explains how to get a token when unauthenticated."""
+    """check_github_auth points at the device-flow sign-in when unauthenticated."""
     agent = GitHubAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     msg = tools["check_github_auth"]()
-    assert "authenticate_github" in msg
-    assert "https://github.com/settings/tokens" in msg
-    assert "gh auth token" in msg
+    assert "authenticate_github()" in msg
+    assert "https://github.com/login/device" in msg
+    assert "settings/tokens" not in msg
 
 
-def test_authenticate_persists_config_and_exposes_tools() -> None:
-    """authenticate_github persists config (0600) and unlocks backend tools."""
+def test_authenticate_without_client_id_explains_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no embedded or overriding client ID, sign-in reports the setup error."""
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "")
     agent = GitHubAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    result = json.loads(tools["authenticate_github"](_TOKEN))
-    assert result["ok"] is True
-
-    assert _config.path.exists()
-    if sys.platform != "win32":
-        assert stat.S_IMODE(_config.path.stat().st_mode) == 0o600
-    saved = json.loads(_config.path.read_text(encoding="utf-8"))
-    assert saved == {"token": _TOKEN, "read_only": "false"}
-
-    assert agent._is_authenticated() is True
-    checked = json.loads(tools["check_github_auth"]())
-    assert checked == {"ok": True, "read_only": False}
-
-    names = [t.__name__ for t in agent._get_tools()]
-    assert names[:4] == [
-        "check_github_auth",
-        "authenticate_github",
-        "finish_github_auth",
-        "clear_github_auth",
-    ]
-    assert sorted(names[4:]) == sorted(_READ_TOOLS + _WRITE_TOOLS)
-    assert "connect" not in names  # channel protocol method, not an LLM tool
-
-    cleared = tools["clear_github_auth"]()
-    assert "cleared" in cleared.lower()
-    assert not _config.path.exists()
-    assert agent._is_authenticated() is False
-    assert len(agent._get_tools()) == 4
-
-
-def test_authenticate_read_only_persisted_as_string() -> None:
-    """read_only=True is persisted as the string 'true' and reported by check."""
-    agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    json.loads(tools["authenticate_github"](_TOKEN, read_only=True))
-    saved = json.loads(_config.path.read_text(encoding="utf-8"))
-    assert saved == {"token": _TOKEN, "read_only": "true"}
-    assert agent._backend._read_only is True
-    checked = json.loads(tools["check_github_auth"]())
-    assert checked == {"ok": True, "read_only": True}
-
-
-def test_authenticate_persistence_failure_returns_ok_false() -> None:
-    """authenticate_github reports ok:false and stays unauthenticated when saving fails.
-
-    A regular FILE occupying the config *directory* location makes
-    ``ChannelConfig.save`` raise (``mkdir`` cannot replace a file), so
-    persistence fails before the backend is ever marked authenticated.
-    """
-    agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    blocker = _config.path.parent  # .../third_party_agents/github
-    if blocker.is_dir():
-        shutil.rmtree(blocker)
-    blocker.parent.mkdir(parents=True, exist_ok=True)
-    blocker.write_text("not a directory", encoding="utf-8")
-    try:
-        result = json.loads(tools["authenticate_github"](_TOKEN))
-        assert result["ok"] is False
-        assert "failed to save GitHub config" in result["error"]
-        assert agent._is_authenticated() is False
-        assert agent._backend._token == ""
-        assert len(agent._get_tools()) == 4  # backend tools stay locked
-    finally:
-        blocker.unlink()
-
-
-def test_authenticate_rejects_empty_token() -> None:
-    """authenticate_github refuses an empty or blank token."""
-    agent = GitHubAgent()
-    tools = {t.__name__: t for t in agent._get_tools()}
-    assert "cannot be empty" in tools["authenticate_github"]("  ")
-    # No token at all (and no client ID anywhere) explains both ways to connect.
     result = json.loads(tools["authenticate_github"]())
     assert result["ok"] is False
-    assert "client_id" in result["error"] and "token=" in result["error"]
+    assert result["error"] == missing_client_id_error("github", "GitHub")
     assert not _config.path.exists()
 
 

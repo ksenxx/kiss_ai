@@ -29,13 +29,13 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.browser_handoff import portal_handoff
 
 logger = logging.getLogger(__name__)
 

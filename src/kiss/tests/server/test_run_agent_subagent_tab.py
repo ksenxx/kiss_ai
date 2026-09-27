@@ -48,7 +48,11 @@ from kiss.tests.conftest import requires_unix_sockets
 pytestmark = requires_unix_sockets
 
 PARENT_TAB_ID = "webtab-parent-1"
-VIEWER_SUB_TAB_ID = "webtab-parent-1__sub_child"
+
+
+def _viewer_sub_tab_id(child_task_id: str) -> str:
+    """The tab id every webview gives the child (``subagentTabIdFor``)."""
+    return f"{PARENT_TAB_ID}__sub_{child_task_id}"
 
 
 def _init_repo(repo: str) -> None:
@@ -362,13 +366,14 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             # 3. A client opening the sub-agent tab subscribes it to
             #    the child's stream (what media/main.js does on
             #    ``new_tab``): the fan-out then targets that tab.
+            viewer_sub_tab_id = _viewer_sub_tab_id(child_task_id)
             self._send_from_viewer({
                 "type": "resumeSession",
                 "taskId": child_task_id,
-                "tabId": VIEWER_SUB_TAB_ID,
+                "tabId": viewer_sub_tab_id,
             })
             self._wait_for(
-                lambda: VIEWER_SUB_TAB_ID
+                lambda: viewer_sub_tab_id
                 in self.server._printer._fanout_targets(child_task_id),
                 what="viewer sub-agent tab subscription",
             )
@@ -392,7 +397,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             }
 
         self._wait_for(
-            lambda: VIEWER_SUB_TAB_ID in _done_tabs()
+            lambda: viewer_sub_tab_id in _done_tabs()
             and any(t.startswith("api-") for t in _done_tabs()),
             what="subagentDone broadcasts for the viewer and api- tabs",
         )
@@ -408,19 +413,20 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
         )
 
         # 4b. A nested spawn made by the child must be parented under
-        #     the tab really watching the child — never the hidden
-        #     api-… dispatch id once a real viewer is subscribed
-        #     (before any viewer exists, the dispatch id is the only
-        #     candidate left and the resolver falls back to it).
-        assert str(
-            registry_during_child["nested_parent_before"],
-        ).startswith("api-")
+        #     the tab every webview gave the child — never the hidden
+        #     api-… dispatch id — and that holds BEFORE any viewer has
+        #     subscribed (a child fanning out right away) exactly as
+        #     after: the id is derived, not looked up.
         assert (
-            registry_during_child["nested_parent_after"]
-            == VIEWER_SUB_TAB_ID
+            registry_during_child["nested_parent_before"]
+            == registry_during_child["nested_parent_after"]
+            == viewer_sub_tab_id
         ), (
-            "nested spawns must be parented under the watching tab, "
-            f"got {registry_during_child['nested_parent_after']!r}"
+            "nested spawns must be parented under the child's webview "
+            f"tab {viewer_sub_tab_id!r}, got "
+            f"{registry_during_child['nested_parent_before']!r} before / "
+            f"{registry_during_child['nested_parent_after']!r} after the "
+            "viewer subscribed"
         )
 
         # 5. The child's history row nests under the calling task,
@@ -454,6 +460,10 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             json.loads(str(child_row.get("extra") or "{}")).get("startTs", 0),
         )
         assert row_start_ts > 0, f"child row has no startTs: {child_row!r}"
+        # The viewer's own resumeSession in step 3 already produced an
+        # ``openSubagentTab`` under this id (running); only events from
+        # the parent replay onwards count.
+        seen_before_replay = len(received)
         self._send_from_viewer({
             "type": "resumeSession",
             "chatId": parent.chat_id,
@@ -463,9 +473,9 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
         replayed = self._wait_for(
             lambda: next(
                 (
-                    e for e in list(received)
+                    e for e in list(received)[seen_before_replay:]
                     if e.get("type") == "openSubagentTab"
-                    and e.get("tab_id") == f"{PARENT_TAB_ID}__sub_{child_task_id}"
+                    and e.get("tab_id") == viewer_sub_tab_id
                 ),
                 None,
             ),

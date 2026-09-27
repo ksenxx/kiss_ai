@@ -226,6 +226,16 @@ class TestAdapterRaisesOnRefusal:
         with pytest.raises(ModelRefusalError):
             m.generate()
 
+    def test_refused_response_usage_stays_billable(self, refusal_server: str) -> None:
+        """The refused request was billed (live usage ``in=1 out=9``), so
+        its response is handed to the agent's accounting exactly once."""
+        m = self._make_model(refusal_server)
+        with pytest.raises(ModelRefusalError):
+            m.generate_and_process_with_tools({}, tools_schema=[_OPENAI_FINISH_TOOL])
+        refused = m.take_partial_usage_response()
+        assert m.extract_input_output_token_counts_from_response(refused)[:2] == (1, 9)
+        assert m.take_partial_usage_response() is None
+
     def test_refused_turn_is_not_appended_to_conversation(
         self, refusal_server: str
     ) -> None:

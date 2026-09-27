@@ -355,6 +355,63 @@ async function runTest() {
   );
   createdPanels[4].dispose();
 
+  // --- the Apps subpanel's connect launch auto-submits its prompt -------
+  // The host submits it once the new webview is ready (insertAndSubmit),
+  // never through the HTML, which a webview reload would replay.
+  panelA._recv.fire({
+    type: 'openChatPanel',
+    pendingText: 'Connect my Slack app',
+    autoSubmit: true,
+  });
+  await waitFor(
+    () => createdPanels.length === 6,
+    'an auto-submit open must create a panel',
+  );
+  assert.ok(
+    !createdPanels[5].webview.html.includes('data-kiss-pending-text'),
+    'the connect prompt is not stamped into the HTML',
+  );
+  // However long the first load takes, nothing is submitted (nor a
+  // tab-less run started) before the webview is ready.
+  await new Promise(r => setTimeout(r, 50));
+  assert.ok(
+    !createdPanels[5]._posted.some(m => m.type === 'insertAndSubmit'),
+    'no submit before the webview is ready',
+  );
+  createdPanels[5]._recv.fire({type: 'ready', tabId: 'x'});
+  await waitFor(
+    () =>
+      createdPanels[5]._posted.filter(
+        m => m.type === 'insertAndSubmit' && m.text === 'Connect my Slack app',
+      ).length === 1,
+    'the host submits the connect prompt once the webview is ready',
+  );
+  // A later `ready` (webview reload, daemon reconnect) submits nothing.
+  createdPanels[5]._recv.fire({type: 'ready', tabId: 'x'});
+  await new Promise(r => setTimeout(r, 50));
+  assert.strictEqual(
+    createdPanels[5]._posted.filter(m => m.type === 'insertAndSubmit').length,
+    1,
+  );
+  createdPanels[5].dispose();
+  panelA._recv.fire({
+    type: 'openChatPanel',
+    chatId: 'chat-D',
+    pendingText: 'x',
+    autoSubmit: true,
+  });
+  await waitFor(
+    () => createdPanels.length === 7,
+    'resume open must create a panel',
+  );
+  createdPanels[6]._recv.fire({type: 'ready', tabId: 'y'});
+  await new Promise(r => setTimeout(r, 50));
+  assert.ok(
+    !createdPanels[6]._posted.some(m => m.type === 'insertAndSubmit'),
+    'a resume never auto-submits',
+  );
+  createdPanels[6].dispose();
+
   // --- a user close retires the chat tab -------------------------------
   panelB.dispose();
   await waitFor(

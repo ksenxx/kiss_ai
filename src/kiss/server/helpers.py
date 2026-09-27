@@ -2,12 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Helper utilities for Sorcar agent backends (autocomplete, model info, file ranking)."""
+"""Helper utilities for Sorcar agent backends (autocomplete, model info)."""
 
 from __future__ import annotations
-
-import posixpath
-from collections import Counter
 
 # ``generate_commit_message_from_diff`` is re-exported: production
 # callers (``server.py``, ``merge_flow.py``) import it from here.
@@ -15,7 +12,6 @@ from kiss.agents.sorcar.commit_message import (
     generate_commit_message_from_diff,  # noqa: F401 — re-exported
 )
 from kiss.core.models.model_info import _OPENAI_PREFIXES
-from kiss.server.diff_merge import _is_under
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -101,107 +97,3 @@ def model_vendor(name: str) -> tuple[str, int]:
 
 
 SUGGESTION_LIMIT = 20
-
-# A directory with at least this many immediate subdirectories is a container
-# of generated runs (``artifacts/<run_id>/``, ``jobs/<date>/``): source trees
-# rarely have more than a couple of dozen sibling packages, while such
-# containers hold hundreds of near-identical copies of the same files.
-WIDE_DIR_MIN_CHILDREN = 50
-
-
-def _wide_dirs(file_cache: list[str]) -> set[str]:
-    """Find directories holding at least ``WIDE_DIR_MIN_CHILDREN`` subdirectories.
-
-    Args:
-        file_cache: Scanned relative paths; directory entries end with ``/``.
-
-    Returns:
-        Relative directory paths (no trailing ``/``) whose immediate
-        subdirectory count reaches the threshold.  The repository root is
-        never returned.
-    """
-    children = Counter(
-        posixpath.dirname(p.rstrip("/")) for p in file_cache if p.endswith("/")
-    )
-    return {d for d, n in children.items() if d and n >= WIDE_DIR_MIN_CHILDREN}
-
-
-def _path_depth(path: str) -> int:
-    """Return how many directories deep *path* sits.
-
-    Args:
-        path: Slash-separated relative path; directories end with ``/``.
-
-    Returns:
-        Number of parent directories: ``README.md`` and ``src/`` are 0,
-        ``src/kiss/`` and ``src/main.py`` are 1.
-    """
-    return path.rstrip("/").count("/")
-
-
-def rank_file_suggestions(
-    file_cache: list[str],
-    query: str,
-    usage: dict[str, int],
-    limit: int = SUGGESTION_LIMIT,
-) -> list[dict[str, str]]:
-    """Rank and filter file paths by query match, recency, and usage.
-
-    Files inside a wide container of generated runs (see ``_wide_dirs``)
-    rank after every other match, so ``@test`` lists the project's own
-    tests before the hundreds of ``tests/test_*.py`` copies under
-    ``artifacts/<run_id>/``; they still appear when nothing else matches.
-    Otherwise matches are ordered by how close to the end of the path
-    the query occurs, and equally good matches shallowest first, so
-    ``README.md`` precedes ``docs/guides/README.md``.
-
-    Args:
-        file_cache: List of file paths to search.
-        query: Case-sensitive substring to match against paths.
-        usage: File usage counts keyed by path (insertion order
-            encodes recency, last key = most recently used).
-        limit: Maximum number of results to return.
-
-    Returns:
-        Sorted list of dicts with ``type`` (``"frequent"`` or ``"file"``)
-        and ``text`` keys.
-    """
-    frequent: list[dict[str, str]] = []
-    rest: list[dict[str, str]] = []
-    for path in file_cache:
-        if not query or query in path:
-            item: dict[str, str] = {"type": "file", "text": path}
-            if usage.get(path, 0) > 0:
-                frequent.append(item)
-            else:
-                rest.append(item)
-
-    def _end_dist(text: str) -> int:
-        if not query:
-            return 0
-        pos = text.rfind(query)
-        if pos < 0:  # pragma: no cover — files are pre-filtered by query match
-            return len(text)
-        return len(text) - (pos + len(query))
-
-    _usage_keys = list(usage.keys())
-    _recency = {k: i for i, k in enumerate(reversed(_usage_keys))}
-    _n = len(_usage_keys)
-    frequent.sort(
-        key=lambda m: (
-            _end_dist(m["text"]),
-            _recency.get(m["text"], _n),
-            -usage.get(m["text"], 0),
-        )
-    )
-    wide = _wide_dirs(file_cache)
-    rest.sort(
-        key=lambda m: (
-            _is_under(m["text"], wide),
-            _end_dist(m["text"]),
-            _path_depth(m["text"]),
-        )
-    )
-    for f in frequent:
-        f["type"] = "frequent"
-    return (frequent + rest)[:limit]

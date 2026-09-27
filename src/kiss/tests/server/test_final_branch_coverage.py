@@ -6,7 +6,7 @@
 
 Targets:
   persistence.py: lines 125→129, 380→385, 403→404
-  helpers.py: lines 133→134, 157→158
+  file_index.py: ``FileView.search`` frequent (usage count > 0) branch
   server.py: lines 239→237, 241→237, 466→467, 670→671, 622 (remove pragma)
 
 No mocks, patches, fakes, or test doubles.
@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.server.helpers import rank_file_suggestions
+from kiss.server.file_index import FileIndex
 from kiss.server.server import VSCodeServer
 from kiss.tests.agents.sorcar.test_final_branch_coverage import (  # noqa: F401
     _redirect,
@@ -28,15 +29,21 @@ from kiss.tests.agents.sorcar.test_final_branch_coverage import (  # noqa: F401
 
 
 class TestRankFileSuggestionsWithUsage:
-    """Cover usage.get(path, 0) > 0 True branch and frequent loop."""
+    """Cover the ``usage`` count > 0 branch and the frequent loop of ``FileView.search``."""
 
-    def test_frequent_files_with_query(self) -> None:
+    def test_frequent_files_with_query(self, tmp_path: Path) -> None:
         """Frequent files are filtered by query and sorted by end distance."""
-        files = ["src/main.py", "src/main_test.py", "lib/main.py"]
-        usage = {"src/main.py": 3, "lib/main.py": 1}
-        result = rank_file_suggestions(files, "main", usage)
-        frequent = [r for r in result if r["type"] == "frequent"]
-        assert len(frequent) == 2
+        for rel in ("src/main.py", "src/main_test.py", "lib/main.py", "src/other.py"):
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+        usage = {"src/main.py": 3, "lib/main.py": 1, "src/other.py": 2}
+        result = FileIndex.scan(str(tmp_path)).view("").search("main", usage)
+        frequent = [r["text"] for r in result if r["type"] == "frequent"]
+        assert frequent == ["lib/main.py", "src/main.py"], (
+            "equal match position: the more recently used entry ranks first"
+        )
+        assert [r["text"] for r in result if r["type"] == "file"] == ["src/main_test.py"]
 
 
 class TestGetHistoryBranches:

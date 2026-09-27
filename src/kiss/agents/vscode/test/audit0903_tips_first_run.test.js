@@ -136,27 +136,20 @@ async function runRound(round) {
   return {r1, r2};
 }
 
-// ─── Post-update reset election ───
+// ─── Extension updates never re-arm the popup ───
 //
-// Every window that saw the `.extension-updated` marker independently
-// removed TIPS_SHOWN before consuming it, so window A could
-// reset-and-claim and window B could then reset A's fresh claim and
-// claim again: two "what's new" popups for one update.  The reset is
-// now an ELECTION: an atomically created (`wx`) claim file named by the
-// update stamp picks exactly one window that may remove TIPS_SHOWN;
-// every other window's reset is a no-op.
-//
-// The reproduction is the review's exact interleaving, run as two REAL
-// sequential extension-host processes against one home: each does
-// reset-then-consume; the second process's reset must NOT clear the
-// first one's claim.
+// The former "what's new" reset (every update cleared TIPS_SHOWN so the
+// popup came back) was a UI anti-pattern and is gone
+// (ui_antipattern_tips_reset.test.js): a home that already showed the
+// tips keeps them closed across an `.extension-updated` marker, in
+// every window.  Two REAL sequential extension-host processes against
+// one updated home: neither may claim the popup.
 
 const updateChildScript = path.join(tmpRoot, 'update-child.js');
 fs.writeFileSync(
   updateChildScript,
   `
 'use strict';
-const fs = require('fs');
 const Module = require('module');
 global.__kissVscodeStub = {
   workspace: {
@@ -173,27 +166,18 @@ Module._resolveFilename = function (request, ...rest) {
   return realResolve.call(this, request, ...rest);
 };
 const tab = require(${JSON.stringify(OUT_SORCAR_TAB)});
-const goFile = process.argv[2];
-if (goFile && goFile !== '-') {
-  // Barrier mode: race the reset+consume pair against the sibling.
-  fs.writeFileSync(process.argv[3], 'ready');
-  for (;;) {
-    if (fs.existsSync(goFile)) break;
-  }
-}
-tab.resetTipsOnExtensionUpdate();
 const won = tab.consumeTipsFirstRun();
-process.stdout.write(JSON.stringify({won}));
+process.stdout.write(
+  JSON.stringify({won, hasReset: typeof tab.resetTipsOnExtensionUpdate}),
+);
 `,
 );
 
-function runUpdateChild(kissHome, goFile, readyFile) {
+function runUpdateChild(kissHome) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [updateChildScript, goFile || '-', readyFile || '-'],
-      {env: Object.assign({}, process.env, {KISS_HOME: kissHome})},
-    );
+    const child = spawn(process.execPath, [updateChildScript], {
+      env: Object.assign({}, process.env, {KISS_HOME: kissHome}),
+    });
     let out = '';
     let errOut = '';
     child.stdout.on('data', c => (out += c));
@@ -206,111 +190,31 @@ function runUpdateChild(kissHome, goFile, readyFile) {
   });
 }
 
-function seedUpdatedHome(name, stamp) {
-  const kissHome = path.join(tmpRoot, name);
-  fs.mkdirSync(kissHome, {recursive: true});
+async function updateScenario() {
+  const home = path.join(tmpRoot, 'updated-home');
+  fs.mkdirSync(home, {recursive: true});
   // A previous run already showed the tips once...
-  fs.writeFileSync(path.join(kissHome, 'TIPS_SHOWN'), 'old-claim\n');
+  fs.writeFileSync(path.join(home, 'TIPS_SHOWN'), 'old-claim\n');
   // ...and then the installer wrote the update marker.
-  fs.writeFileSync(path.join(kissHome, '.extension-updated'), stamp);
-  return kissHome;
-}
-
-async function updateResetScenarios() {
-  // The review's interleaving, sequential and therefore deterministic:
-  // A resets and claims; B then resets and claims too on the old code.
-  const seqHome = seedUpdatedHome('update-seq', '2026-09-03T10:00:00Z\n');
-  const a = await runUpdateChild(seqHome);
-  const b = await runUpdateChild(seqHome);
-  const winners = (a.won ? 1 : 0) + (b.won ? 1 : 0);
-  assert.strictEqual(
-    winners,
-    1,
-    `post-update: ${winners} windows claimed the tips popup (want 1): ` +
-      JSON.stringify({a, b}),
+  fs.writeFileSync(path.join(home, '.extension-updated'), '2026-09-03T10:00:00Z\n');
+  const a = await runUpdateChild(home);
+  const b = await runUpdateChild(home);
+  assert.strictEqual(a.hasReset, 'undefined', 'no update-reset entry point');
+  assert.deepStrictEqual(
+    [a.won, b.won],
+    [false, false],
+    `post-update: the tips popup must stay closed: ${JSON.stringify({a, b})}`,
   );
-  console.log('  ✓ sequential post-update reset: one winner');
-
-  // The same pair raced through the barrier, several rounds.
-  for (let round = 0; round < 10; round++) {
-    const home = seedUpdatedHome(`update-race-${round}`, 'stamp-x\n');
-    const goFile = path.join(tmpRoot, `update-go-${round}`);
-    const ready1 = path.join(tmpRoot, `update-ready-${round}-1`);
-    const ready2 = path.join(tmpRoot, `update-ready-${round}-2`);
-    const p1 = runUpdateChild(home, goFile, ready1);
-    const p2 = runUpdateChild(home, goFile, ready2);
-    await waitForFile(ready1, 10_000);
-    await waitForFile(ready2, 10_000);
-    fs.writeFileSync(goFile, 'go');
-    const [r1, r2] = await Promise.all([p1, p2]);
-    const raceWinners = (r1.won ? 1 : 0) + (r2.won ? 1 : 0);
-    assert.strictEqual(
-      raceWinners,
-      1,
-      `update race round ${round}: ${raceWinners} winners: ` +
-        JSON.stringify({r1, r2}),
-    );
-  }
-  console.log('  ✓ 10 racing post-update rounds: one winner each');
-
-  // Branch scenarios, in-process (kissHomeDir reads $KISS_HOME per call).
-  const Module = require('module');
-  global.__kissVscodeStub = {
-    workspace: {
-      isTrusted: true,
-      workspaceFolders: [],
-      getConfiguration: () => ({get: () => undefined}),
-    },
-  };
-  const realResolve = Module._resolveFilename;
-  Module._resolveFilename = function (request, ...rest) {
-    if (request === 'vscode') return require.resolve('./_vscode-stub.js');
-    return realResolve.call(this, request, ...rest);
-  };
-  const tab = require(OUT_SORCAR_TAB);
-
-  // No update marker: the reset never touches TIPS_SHOWN.
-  const plainHome = path.join(tmpRoot, 'no-marker');
-  fs.mkdirSync(plainHome);
-  fs.writeFileSync(path.join(plainHome, 'TIPS_SHOWN'), 'claimed\n');
-  process.env.KISS_HOME = plainHome;
-  tab.resetTipsOnExtensionUpdate();
   assert.ok(
-    fs.existsSync(path.join(plainHome, 'TIPS_SHOWN')),
-    'reset removed TIPS_SHOWN without an update marker',
+    fs.existsSync(path.join(home, 'TIPS_SHOWN')),
+    'the first-run claim survives the update',
   );
-  assert.strictEqual(tab.consumeTipsFirstRun(), false);
-
-  // An EMPTY update marker (interrupted install) still elects one
-  // resetter instead of crashing or resetting forever.
-  const emptyHome = seedUpdatedHome('empty-marker', '');
-  process.env.KISS_HOME = emptyHome;
-  tab.resetTipsOnExtensionUpdate();
-  assert.strictEqual(tab.consumeTipsFirstRun(), true, 'empty-stamp reset lost');
-  tab.resetTipsOnExtensionUpdate(); // same stamp: must be a no-op now
-  assert.strictEqual(
-    tab.consumeTipsFirstRun(),
-    false,
-    'a repeat reset for the SAME update stamp re-cleared the claim',
-  );
-
-  // Claim files from older updates are cleaned up when a new stamp
-  // arrives, and the new stamp still resets exactly once.
-  const cleanHome = seedUpdatedHome('claim-cleanup', 'stamp-NEW\n');
-  fs.writeFileSync(path.join(cleanHome, '.tips-reset-stamp-OLD'), 'x');
-  process.env.KISS_HOME = cleanHome;
-  tab.resetTipsOnExtensionUpdate();
-  assert.ok(
-    !fs.existsSync(path.join(cleanHome, '.tips-reset-stamp-OLD')),
-    'an old update\u2019s reset claim was not cleaned up',
-  );
-  assert.strictEqual(tab.consumeTipsFirstRun(), true);
-  console.log('  ✓ reset branches: no marker, empty stamp, claim cleanup');
+  console.log('  ✓ an extension update never reopens the tips popup');
 }
 
 async function main() {
   try {
-    await updateResetScenarios();
+    await updateScenario();
     for (let round = 0; round < ROUNDS; round++) {
       const {r1, r2} = await runRound(round);
       const winners = (r1.won ? 1 : 0) + (r2.won ? 1 : 0);

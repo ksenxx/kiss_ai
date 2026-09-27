@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Performance stress tests for _scan_files with 5000+ files.
+"""Performance stress tests for ``FileIndex.scan`` with 5000+ files.
 
-Verifies that the file picker completes quickly and that a tree of a few
-thousand entries is returned in full: the cap is ``_SCAN_FILES_CAP``
+Verifies that the file picker's index builds quickly and that a tree of a
+few thousand entries is returned in full: the cap is ``_SCAN_FILES_CAP``
 (1,000,000), so no realistic workspace is truncated and deep subtrees such
 as ``src/`` are never crowded out by large sibling directories.
 """
@@ -16,7 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from kiss.server.diff_merge import _SCAN_FILES_CAP, _scan_files
+from kiss.server.file_index import _SCAN_FILES_CAP, FileIndex
 
 
 class TestScanFilesPerformance:
@@ -31,7 +31,7 @@ class TestScanFilesPerformance:
                 for j in range(25):
                     (sub / f"f{j:02d}.txt").touch()
             start = time.monotonic()
-            result = _scan_files(d)
+            result = FileIndex.scan(d).paths
             elapsed = time.monotonic() - start
             # 200 dirs + 200*25 files: well over the old 5000 cap, all kept.
             assert len(result) == 200 + 200 * 25
