@@ -347,7 +347,32 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    permission was not given), and ideas rejected with reasons. `git add` the report.
    Maintain `./tmp/PROGRESS.md` while you work.
 8. Finish with a summary that lists every changed file, every added instruction, and the
-   evaluation evidence."""
+   evaluation evidence.""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Call `sea_runs()` exactly once per sweep: it returns about 220k chars. Write the per-SEA
+  numbers into `tmp/rsi7d/baseline.md` in the next step and never call it again, with or
+  without `name`/`days`. A replay's task id comes from the `replay_task_id` field of the JSON
+  `replay_in_clone` returns; `run_agent` returns only success and summary, so after a
+  `run_agent` replay take the newest id in `sea_findings(name, runs=1)["runs_scanned"]`.
+  `run_findings(id)` then gives the replay's status and cost.
+- In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash command,
+  heredoc bodies included: the guard rejects the whole call. Read the main branch's copy
+  with `git show main:<path>` and quote such paths only in `Write`d notes.
+- Quote every dollar figure (this sweep, each replay, each past run) from `run_findings`
+  or `task_history`, never from the running `Budget:` line: the sweep-2 report said $69.5
+  and $8 where the records held $70.53 and $10.38, and needed a correction section.
+- Replay each SEA once per sweep with the final wording of its section; run a second
+  replay only when the first one regressed on status or signals. Do not A/B two wordings
+  of one bullet by replay.
+- Write "verified" for a bullet only when the replay transcript shows the behaviour it
+  asks for, and cite that entry; when the replay never reached the situation (a clause
+  about children's task text while the children received a task file), write "not
+  exercised".
+- Call `summary` every 10 steps; two sweeps ran 45 and 74 steps without one.
+"""
 
 
 DAY_S = 86_400
@@ -2060,6 +2085,20 @@ def replay_in_clone(
     what the replay changed with ``git -C <clone> status --short`` and
     delete the clone when done.
     """
+    if not hasattr(agent_dispatch, "dispatch_result"):
+        # The daemon imports its own installed kiss package (the VS Code
+        # extension's bundled copy), which can be older than this checkout.
+        return (
+            "Error: the daemon's installed kiss package predates "
+            "agent_dispatch.dispatch_result (commit 12ee8703c), so this tool cannot "
+            "dispatch the replay from inside the daemon. Reinstall the extension from "
+            "this checkout, or run the replay under this checkout's package with "
+            f"`uv run python -c \"from kiss.agents.seas.rsi7d import rsi7d_sea; "
+            f"print(rsi7d_sea.replay_in_clone({task_id!r}, {max_budget!r}, {timeout!r}, "
+            f"{name!r}, {model!r}))\"` "
+            "in the background; that replay has no parent task, so quote its cost "
+            "from run_findings(<replay_task_id>)."
+        )
     prepared = prepare_replay_clone(task_id, name)
     if isinstance(prepared, str):
         return prepared

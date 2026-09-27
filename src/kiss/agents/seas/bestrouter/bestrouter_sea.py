@@ -40,6 +40,15 @@ debugging of the other model's work. Thoroughly check whether the other model ha
 any code or wiring or introduced any bugs. Use at most 75% of the task budget in
 {REVIEW_MODEL} for reviewing and debugging, and ask the model not to invent new problems.
 Use the model names literally without hallucinating new model names.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- `Read` the region of a file before its first `Edit`, and after an `Edit` is rejected
+  with "has not been read in this session" send no further `Edit` of that file until the
+  `Read` is done; three rejected edits of one file fired in a single block are three
+  wasted steps.
 """
 """The routing protocol added to the system prompt of every run."""
 

@@ -240,7 +240,10 @@ anything the paper claims that you could not verify.
   `read_paper` or `check_review` call; the Bash guard rejects main-checkout paths.
 - A re-review overwrites an existing file at the output path: `Read` that file before
   the `Write` that replaces it. `Write` and `Edit` refuse a file you have not read, and
-  the retry repeats the whole review text."""
+  the retry repeats the whole review text.
+- `run_commands_parallel` takes a JSON array of strings: double every backslash, prefer
+  `grep -E 'a|b'` over `\\|`, and run multi-line Python through Bash with a heredoc; a
+  rejected array costs a step and resends every command."""
 """The reviewing rules, appended to the default system prompt."""
 
 _HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review")

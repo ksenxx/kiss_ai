@@ -262,9 +262,16 @@ paper claims that you could not verify.
   confirm the wording, and report that the score is capped by the evidence. Do not run a
   third fresh review for the same reason.
 - When the task names a writer model other than yours and you run the writing as a
-  sub-agent, copy the reviewer model name, the reviewer's budget share and the "do not
-  invent new problems" clause verbatim into each child's task text; the child cannot see
-  your task."""
+  sub-agent, either dispatch the reviewer yourself or copy the reviewer model name, the
+  reviewer's budget share and the "do not invent new problems" clause verbatim into the
+  child's task text; the child cannot see your task, so a child that is to run the review
+  without them reviews with the wrong model.
+- Decide who writes before the first edit: compare the writer model the task names with
+  the `Model name:` line of your Task Settings and record the decision in `tmp/PLAN.md`.
+  When they differ, the `run_parallel` writer sub-agent on that model is your first step
+  and you make no edit to the .tex yourself; do not discover at the end that you wrote it.
+  Tell the reviewer which model actually wrote the text: never describe your own edits as
+  another model's work."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table

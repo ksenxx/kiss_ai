@@ -70,6 +70,11 @@ Rules you MUST follow:
   block) before its first `Edit`. Looking at the file through `git diff`, `grep` or
   `cat` in Bash does not count: `Edit` rejects a file that was not read in the session
   and the call has to be repeated.
+- The same HEAD/theirs hunk can occur twice in one file (two functions destructuring the
+  same fields). When `Edit` answers "String appears N times (not unique)", `Read` the
+  other occurrence(s) and extend `old_string` with the unique line before or after the
+  conflict block; use `replace_all=True` only when every occurrence takes the same
+  resolution.
 """
 
 

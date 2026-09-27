@@ -228,47 +228,49 @@ keeps its tier-order position. Prices still come from `model_menu`, never from h
 <!-- rsi7d:model-evidence -->
 _Observed in the task history, refreshed 2026-09-27 by /rsi7d._
 
-Observed model evidence, 7-day window starting 2026-09-20 06:06:36 UTC (2,574 tasks; rsi7d
-sweep 2, 2026-09-27).
+Window: 2026-09-20 21:58 to 2026-09-27 21:58 UTC (`window_start` 2026-09-20 21:58:34 UTC),
+2,684 tasks. "$/step" and "s/step" are medians of a task's own cost and wall time per own
+step (sub-agents excluded); "roles" counts sub-agent/top-level/reviewer tasks; "tool-err"
+is the number of tool results that returned an error per own step (not per tool call).
 
-| model | tasks | sub/top/rev | fail | unsucc | med $/step | med s/step | tool-err |
+| model | tasks | roles sub/top/rev | fail | unsucc | $/step | s/step | tool-err |
 |---|---|---|---|---|---|---|---|
-| claude-fable-5-1 | 1711 | 1291/418/2 | 95 | 52 | 0.1028 | 10.9 | 1.11% |
-| claude-opus-5-5 | 365 | 292/73/0 | 8 | 4 | 0.0384 | 7.1 | 0.84% |
-| gpt-5.6-sol | 183 | 170/0/13 | 0 | 0 | 0.0604 | 11.9 | 2.08% |
-| gpt-6-astra | 138 | 132/1/5 | 5 | 1 | 0.1233 | 10.1 | 0.44% |
-| claude-opus-4-8 | 48 | 41/7/0 | 3 | 1 | 0.0632 | 8.1 | 2.11% |
-| gpt-6-sol | 38 | 37/0/1 | 0 | 1 | 0.0246 | 8.5 | 1.13% |
-| claude-fable-5 | 36 | 5/31/0 | 5 | 0 | 0.0838 | 8.5 | 3.46% |
-| claude-opus-4-7 | 30 | 0/30/0 | 1 | 1 | 0.0639 | 6.5 | 1.34% |
-| others (<10 tasks each) | 25 | - | - | - | insufficient data | - | - |
+| claude-fable-5-1 | 1809 | 1374/433/2 | 96 | 53 | 0.1015 | 10.8 | 1.05% |
+| claude-opus-5-5 | 396 | 310/86/0 | 10 | 4 | 0.0378 | 7.0 | 0.84% |
+| gpt-6-astra | 177 | 165/1/11 | 5 | 1 | 0.1185 | 10.3 | 0.32% |
+| gpt-5.6-sol | 147 | 134/0/13 | 0 | 0 | 0.0582 | 11.9 | 1.89% |
+| claude-opus-4-8 | 45 | 41/4/0 | 3 | 1 | 0.0630 | 8.1 | 2.61% |
+| gpt-6-sol | 42 | 41/0/1 | 0 | 1 | 0.0246 | 7.8 | 1.05% |
+| claude-fable-5 | 22 | 4/18/0 | 4 | 0 | 0.0822 | 9.8 | 3.78% |
+| claude-opus-4-7 | 20 | 1/19/0 | 1 | 1 | 0.0521 | 4.9 | 0.96% |
+| others (7 models) | 26 | | | | insufficient data | | |
 
-- claude-opus-5-5 is the best-measured frontier pick: cheapest and fastest of the large
-  models (median $0.038 and 7.1 s per step), 8 failed + 4 unsuccessful of 365, 0 task
-  errors. As the write_paper orchestrator it delegated writing and review correctly
-  (d618b056: $16.73, success; 41ae272d: unsuccessful only because the task needed
-  experiments it forbade).
-- claude-fable-5-1 carries the highest failure count (95 of 1711) but 34 of its 42 task
-  errors are task_update runs that exceeded a $1 budget and 20 more failures are paper-SEA
-  runs stopped externally at 300 s; on the paper SEAs it succeeded in 15 of the 15
-  review_paper runs that were not stopped (23 runs, 8 stopped), at a median $4.7 and 36
-  steps. Costliest per step of the large models ($0.103).
-- gpt-5.6-sol: 0 failed, 0 unsuccessful in 183 tasks, mostly read-only reviewer sub-agents
-  ($1.0-1.1 per second-opinion review of a 1000-word paper review, 16-22 steps); slowest per
-  step (11.9 s) with a 2.08% tool-error rate (third-highest in the table).
-- gpt-6-astra: 5 failed of 138, all five are OpenAI "no credits" billing errors, not model
-  faults; costliest per step ($0.123). As a fresh paper reviewer it cost $4.4-6.4 per ICLR
-  review with every headline number verified, but that is 8 reviews: insufficient data for
-  a routing claim.
-- gpt-6-sol: cheapest per step ($0.025), 0 failed of 38 read-only reviews (kiss_sorcar.tex
-  rounds at $0.8-2.3 each); sample small but consistent.
-- claude-fable-5 (36 tasks, 3.46% tool errors, 5 failed) and claude-opus-4-8 (48 tasks,
-  2.11% tool errors) are superseded by fable-5-1 and opus-5-5; route to them only when the
-  successor is unavailable.
-- claude-opus-4-7 (30 top-level tasks): fast (6.5 s/step) and cheap ($0.064), 1 failed, 1
-  unsuccessful; adequate evidence for interactive top-level chats.
-- Small models and openrouter/* variants: fewer than 10 tasks each in this window,
-  insufficient data.
+Others: openrouter/openai/gpt-6-astra 7, openrouter/openai/gpt-6-sol 6, claude-opus-4-6 6,
+gpt-4.1-nano-2025-04-14 3, claude-haiku-4-5 1, openrouter/moonshotai/kimi-k3 1, plus a
+broken repro profile (2 tasks, "Unknown model name").
+
+- claude-opus-5-5 is the best-measured frontier pick: cheapest and fastest large model
+  ($0.038/step, 7.0 s/step over 396 tasks), 0 task errors, 10 failed + 4 unsuccessful
+  (3.5%), and 86 top-level runs, so it is proven for long agentic work.
+- claude-fable-5-1 carries the most work (1809 tasks) and the most failures (96 + 53), but
+  its 42 task errors are 34 task_update $1-budget overruns (prompt fixed; 0 since
+  2026-09-27 08:10 UTC), 4 stream stalls, 2 billing errors, 1 other budget overrun ($100
+  cap) and 1 model refusal. Tool-error rate 1.05% is
+  low; it costs 2.7x claude-opus-5-5 per step.
+- gpt-5.6-sol: 0 failed / 0 unsuccessful in 147 tasks, all sub-agent or reviewer roles
+  (read-only second opinions at about $1 each), but the slowest (11.9 s/step) and the
+  third-highest tool-error rate in the table (1.89%).
+- gpt-6-astra: 5 failures, all OpenAI "no credits" billing errors; the lowest tool-error
+  rate (0.32%); costliest per step ($0.1185) with the biggest median context (50k
+  tokens/step). 20 review-role tasks (11 reviewer + 9 bestrouter review children) all
+  finished; fewer than 10 fresh paper reviews, insufficient data for that role.
+- gpt-6-sol: cheapest per step ($0.0246), 0 failed of 42, 1 unsuccessful; sub-agent role
+  only.
+- claude-opus-4-8 and claude-fable-5 are superseded: higher tool-error rates (2.61%, 3.78%)
+  and 3 and 4 failures in 45 and 22 tasks.
+- claude-opus-4-7: 20 tasks, mostly short top-level chats (median 2.5 steps); adequate, no
+  agentic evidence.
+- Small and openrouter/* models: insufficient data (26 tasks in total).
 <!-- /rsi7d:model-evidence -->
 
 ## Hard rules

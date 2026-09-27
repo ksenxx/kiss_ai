@@ -10,6 +10,13 @@ speaking the OpenAI wire format, reached through the daemon's
 ``custom_endpoint`` setting, so the child agent makes a genuine tool
 call: it writes a file into its work dir, which must be the clone at
 the task's base commit and never the task's repository.
+
+Not covered: the "daemon's installed kiss package predates
+``agent_dispatch.dispatch_result``" branch of ``replay_in_clone``.  It
+is reachable only when the daemon runs an older installed package than
+the checkout whose SEA file it loads (the VS Code extension's bundled
+copy before a release), which a test in this checkout cannot arrange
+without deleting the attribute from the imported module.
 """
 
 from __future__ import annotations
