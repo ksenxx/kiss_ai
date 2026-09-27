@@ -2534,12 +2534,51 @@ body.sidebar-chat-mode #meta-info-content {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
-/* The copy and (user-owned rows only) delete buttons sit at the right
-   edge of a promptlet row; they take the row's own gap, not the task
-   panels' margin. */
+/* The copy and (user-owned rows only) edit and delete buttons sit at
+   the right edge of a promptlet row; they take the row's own gap, not
+   the task panels' margin. */
 .tricks-item > .sidebar-item-copy,
+.tricks-item > .sidebar-item-edit,
 .tricks-item > .sidebar-item-delete {
   margin-left: 0;
+}
+
+/* A user-owned promptlet row while its pencil button's in-place editor
+   is open: the textarea takes the row's full width, the Save / Cancel
+   buttons sit below it at the right edge. */
+.tricks-item.editing {
+  flex-wrap: wrap;
+  cursor: default;
+}
+
+.tricks-item.editing:hover {
+  background: none;
+  filter: none;
+}
+
+.tricks-edit-input {
+  flex: 1 1 100%;
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-base);
+  padding: var(--space-1-5) var(--space-2-5);
+  outline: none;
+  box-sizing: border-box;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tricks-edit-actions {
+  display: flex;
+  gap: var(--space-1-5);
+  margin-left: auto;
 }
 
 .sidebar-tab-panel {
@@ -3902,6 +3941,7 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-item-delete,
 .sidebar-item-copy,
+.sidebar-item-edit,
 .sidebar-item-collapse,
 .sidebar-item-favorite {
   flex-shrink: 0; border: none; cursor: pointer; padding: var(--space-0-5) 0; margin-left: var(--space-0-5);
@@ -3919,6 +3959,7 @@ body.remote-chat .running-item.history-active-task:hover {
 
 .sidebar-item-delete:hover,
 .sidebar-item-copy:hover,
+.sidebar-item-edit:hover,
 .sidebar-item-collapse:hover,
 .sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 10%, transparent); }
 

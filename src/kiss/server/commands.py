@@ -12,6 +12,7 @@ class-level ``_HANDLERS`` dispatch table consumed by
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import platform
@@ -2266,6 +2267,30 @@ class _CommandsMixin:
 
         self._edit_my_injection(cmd, delete_my_injection_trick, "deleteTrick")
 
+    def _cmd_edit_trick(self, cmd: dict[str, Any]) -> None:
+        """Rewrite a promptlet of ``~/.kiss/MY_INJECTION.md`` in place.
+
+        Services the edit (pencil) button that the Inject promptlet panel
+        shows on user-added rows.  ``text`` is the promptlet body as
+        listed and ``newText`` its replacement; the section keeps its
+        position in the file.  A body that is not in the file, an
+        empty or ``##``-starting replacement, a replacement that
+        duplicates another promptlet, or a failed write answers the
+        sender with an ``error`` event.  Success rebroadcasts the full
+        list as an UNstamped ``tricksData`` event, like ``addTrick``.
+        """
+        from kiss.server.tricks import edit_my_injection_trick
+
+        new_text = cmd.get("newText", "")
+        self._edit_my_injection(
+            cmd,
+            functools.partial(
+                edit_my_injection_trick,
+                new_text=new_text if isinstance(new_text, str) else "",
+            ),
+            "editTrick",
+        )
+
     def _edit_my_injection(
         self,
         cmd: dict[str, Any],
@@ -2274,14 +2299,14 @@ class _CommandsMixin:
     ) -> None:
         """Run *edit* on ``cmd["text"]`` and answer the panel.
 
-        Shared tail of ``addTrick`` / ``deleteTrick``.  Success broadcasts
-        the fresh ``tricksData`` list (``tricks`` plus ``userCount``, the
-        number of leading user-owned rows) to every window, since the
-        file is shared by all of them.  A rejection or ``OSError`` goes
-        to the sender as an ``error`` event followed by a ``tricksData``
-        stamped for the sender alone: the panel drops a deleted row
-        before the answer arrives, so the list on disk is re-sent to put
-        the row back.
+        Shared tail of ``addTrick`` / ``deleteTrick`` / ``editTrick``.
+        Success broadcasts the fresh ``tricksData`` list (``tricks`` plus
+        ``userCount``, the number of leading user-owned rows) to every
+        window, since the file is shared by all of them.  A rejection or
+        ``OSError`` goes to the sender as an ``error`` event followed by
+        a ``tricksData`` stamped for the sender alone: the panel drops a
+        deleted row (or shows an edited one) before the answer arrives,
+        so the list on disk is re-sent to put the row back.
         """
         from kiss.server.tricks import read_tricks_data
 
@@ -2393,4 +2418,5 @@ class _CommandsMixin:
         "deleteMyModel": _cmd_delete_my_model,
         "addTrick": _cmd_add_trick,
         "deleteTrick": _cmd_delete_trick,
+        "editTrick": _cmd_edit_trick,
     }

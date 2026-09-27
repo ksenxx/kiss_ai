@@ -13904,13 +13904,16 @@
         renderCustomModels();
         break;
       case 'tricksData':
-        // The daemon's full promptlet list after an Add or Delete (from
-        // this or any other window): it replaces the list frozen into
-        // the page at load time so the panel repaints right away.  The
-        // first `userCount` entries are the user's own (deletable) rows.
+        // The daemon's full promptlet list after an Add, Edit or Delete
+        // (from this or any other window): it replaces the list frozen
+        // into the page at load time so the panel repaints right away.
+        // The first `userCount` entries are the user's own (editable,
+        // deletable) rows.  An in-place editor still open on a row is
+        // closed: its index may point at another promptlet now.
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
+        closeTrickEditor();
         renderTricks(window.__TRICKS__);
         break;
       case 'taskUpdate':
@@ -20568,6 +20571,9 @@
     const tricks = window.__TRICKS__ || [];
     api.deleteTrick({text: tricks[index]});
     tricks.splice(index, 1);
+    // The indices shift: an editor open on another row would now edit
+    // the wrong promptlet, so it is closed.
+    closeTrickEditor();
     window.__MY_TRICKS_COUNT__ = Math.max(
       0,
       (window.__MY_TRICKS_COUNT__ || 0) - 1,
@@ -20576,12 +20582,141 @@
   }
 
   /**
+   * Index into `window.__TRICKS__` of the user-owned promptlet whose
+   * row is currently an in-place editor (pencil button pressed), or -1.
+   * `renderTricks` paints that row as a textarea with Save / Cancel
+   * buttons instead of its text and buttons.
+   */
+  let editingTrickIndex = -1;
+
+  /**
+   * The row element holding the open editor, or null.  `renderTricks`
+   * re-attaches this very element on every repaint (a search keystroke
+   * repaints the list) so the draft and the focus survive; a fresh one
+   * is built only when the editor is opened.
+   */
+  let editingTrickRow = null;
+
+  /** Open the in-place editor on the promptlet at *index*. */
+  function openTrickEditor(index) {
+    closeTrickEditor();
+    editingTrickIndex = index;
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /** Forget the open editor (if any) without repainting. */
+  function closeTrickEditor() {
+    editingTrickIndex = -1;
+    editingTrickRow = null;
+  }
+
+  /** Close the promptlet editor without saving and repaint the list. */
+  function cancelTrickEdit() {
+    closeTrickEditor();
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /**
+   * Post `editTrick` for the user-owned promptlet at *index* so it reads
+   * *newText*, and show the new text right away: the daemon rewrites
+   * its section of ~/.kiss/MY_INJECTION.md in place and answers every
+   * window with a fresh `tricksData` (or the sender alone with an
+   * `error` followed by the list on disk, which puts the old text
+   * back).  An unchanged or emptied text only closes the editor.
+   */
+  function saveTrickEdit(index, newText) {
+    const tricks = window.__TRICKS__ || [];
+    const text = newText.trim();
+    closeTrickEditor();
+    if (text && text !== tricks[index]) {
+      api.editTrick({text: tricks[index], newText: text});
+      tricks[index] = text;
+    }
+    renderTricks(tricks);
+  }
+
+  const SIDEBAR_EDIT_SVG =
+    '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+
+  /**
+   * Build the promptlet row that is the in-place editor for the
+   * promptlet at *index*: a textarea holding *text* plus Save and
+   * Cancel buttons.  Enter (Ctrl/Cmd+Enter too) saves, Shift+Enter
+   * inserts a newline, Escape cancels (keys typed into an IME
+   * composition are left alone); clicks inside the editor never reach
+   * a row click, so they do not inject the promptlet.  The caller
+   * attaches the row and then calls `focusTrickEditor`.
+   */
+  function makeTrickEditor(index, text) {
+    const div = document.createElement('div');
+    div.className = 'sidebar-item tricks-item editing';
+    const textarea = document.createElement('textarea');
+    textarea.className = 'tricks-edit-input';
+    textarea.setAttribute('aria-label', 'Edit promptlet');
+    textarea.rows = 1;
+    textarea.value = text;
+    const actions = document.createElement('span');
+    actions.className = 'tricks-edit-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'config-update-btn tricks-edit-save';
+    saveBtn.textContent = 'Save';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'config-update-btn tricks-edit-cancel';
+    cancelBtn.textContent = 'Cancel';
+    actions.appendChild(saveBtn);
+    actions.appendChild(cancelBtn);
+    div.appendChild(textarea);
+    div.appendChild(actions);
+    saveBtn.addEventListener('click', () =>
+      saveTrickEdit(index, textarea.value),
+    );
+    cancelBtn.addEventListener('click', cancelTrickEdit);
+    textarea.addEventListener('input', () => growTrickEditor(textarea));
+    textarea.addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cancelTrickEdit();
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        saveTrickEdit(index, textarea.value);
+      }
+    });
+    div.addEventListener('click', e => e.stopPropagation());
+    return div;
+  }
+
+  /**
+   * Size the textarea of the freshly attached editor *row* and put the
+   * caret at the end of its text.
+   */
+  function focusTrickEditor(row) {
+    const textarea = row.querySelector('.tricks-edit-input');
+    growTrickEditor(textarea);
+    textarea.focus();
+    const end = textarea.value.length;
+    try {
+      textarea.setSelectionRange(end, end);
+    } catch (_e) {}
+  }
+
+  /** Size the promptlet editor's textarea to its content. */
+  function growTrickEditor(textarea) {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  }
+
+  /**
    * Repaint #tricks-list with the promptlets matching the search box
    * (case-insensitive substring; every promptlet when the box is
    * empty).  Clicking a row injects it at the composer's caret; every
    * row ends with a copy button, and the first
    * `window.__MY_TRICKS_COUNT__` rows (the user's own, from
-   * ~/.kiss/MY_INJECTION.md) also with a delete button.
+   * ~/.kiss/MY_INJECTION.md) also with an edit (pencil) and a delete
+   * button.  The row at `editingTrickIndex` is painted as the in-place
+   * editor instead.
    */
   function renderTricks(tricks) {
     if (!tricksList) return;
@@ -20595,6 +20730,15 @@
     tricksList.innerHTML = '';
     tricks.forEach((text, index) => {
       if (query && !text.toLowerCase().includes(query)) return;
+      if (index === editingTrickIndex && index < userCount) {
+        // The open editor is re-attached as is (draft and focus kept);
+        // a fresh one is attached first, then sized and focused.
+        const fresh = !editingTrickRow;
+        if (fresh) editingTrickRow = makeTrickEditor(index, text);
+        tricksList.appendChild(editingTrickRow);
+        if (fresh) focusTrickEditor(editingTrickRow);
+        return;
+      }
       const div = document.createElement('div');
       div.className = 'sidebar-item tricks-item';
       div.dataset.tooltip = text;
@@ -20609,6 +20753,17 @@
       copyBtn.dataset.tooltip = 'Copy promptlet';
       div.appendChild(copyBtn);
       if (index < userCount) {
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'sidebar-item-edit';
+        editBtn.dataset.tooltip = 'Edit promptlet';
+        editBtn.setAttribute('aria-label', 'Edit promptlet');
+        editBtn.innerHTML = SIDEBAR_EDIT_SVG;
+        editBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          openTrickEditor(index);
+        });
+        div.appendChild(editBtn);
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'sidebar-item-delete';
