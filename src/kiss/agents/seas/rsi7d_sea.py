@@ -16,8 +16,9 @@ days in ``~/.kiss/sorcar.db`` and improve each SEA by AI discovery: it
 mines the trajectories for agentic mistakes, speed and cost sinks and
 quality problems, proposes concrete instructions, judges them pairwise,
 applies the winners to the SEA's ``SYSTEM_PROMPT`` constant, evaluates
-the change (a real replay of a cheap past task when affordable) and
-keeps or reverts it.  It also refreshes the observed model evidence the
+the change (a real replay of the past task that best exercises the new
+instructions; any run that cost below $500 is eligible) and keeps or
+reverts it.  It also refreshes the observed model evidence the
 autoroute SEA routes on.
 
 The deterministic tools live in this file (a SEA runs under the
@@ -147,16 +148,23 @@ system prompt. You also refresh the observed model evidence the autoroute SEA ro
 4. Implement. Call `sea_prompt(name)`, then `patch_sea_prompt(name, old, new)` (empty `old`
    appends the section). Re-read the result and make sure the section is coherent with the
    rest of the prompt.
-5. Evaluate for real when it is affordable. Pick the cheapest successful past run of the SEA
-   whose task is reproducible inside this checkout (cost below about $1, no external side
-   effects such as messaging, payments or publishing) and replay it:
-   `run_agent(agent="src/kiss/agents/seas/<name>_sea.py", task=<the verbatim past task>)`,
-   then compare `run_findings(<new task id>)` with the original run (status, cost, steps,
-   signal counts). Keep the change when the replay is not worse on status and signals and
-   not clearly worse on cost/steps; otherwise revert with `git checkout --
+5. Evaluate for real. Pick the past run of the SEA that best exercises the instructions you
+   added (the failed or unsuccessful run whose mistake a new bullet targets, else the
+   costliest successful run) among the runs whose task is reproducible inside this checkout
+   and has no external side effects (messaging, payments, publishing). Do not restrict
+   yourself to cheap runs: any run whose original cost was below $500 is eligible, and a
+   cheaper run is preferred only when it carries the same signal. Replay it with
+   `run_agent(agent="src/kiss/agents/seas/<name>_sea.py", task=<the verbatim past task>,
+   max_budget=<twice the original run's cost, at most 500>)` so a regression cannot run
+   away (a SEA that defines its own `max_budget()` getter overrides that argument and caps
+   the replay itself; check the getter with `grep -n "def max_budget" <sea file>`), then
+   compare `run_findings(<new task id>)` with the original run (status, cost,
+   steps, signal counts). Keep the change when the replay is not worse on status and signals
+   and not clearly worse on cost/steps; otherwise revert with `git checkout --
    src/kiss/agents/seas/<name>_sea.py` and record why in `./tmp/rsi7d/explored-ideas.md` so
-   the idea is not retried. Spend at most 30% of your remaining budget on replays; when a
-   SEA is too expensive or has side effects to replay, keep the change only if it is small,
+   the idea is not retried. Spend at most 60% of your remaining budget on replays and check
+   `run_findings` of the sweep so far before each one; when no eligible run exists (every
+   run cost $500 or more, or all have side effects), keep the change only if it is small,
    evidence-backed and passes `uv run pytest -q
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it "not
    replay-verified" in the report.
@@ -723,8 +731,13 @@ def system_prompt() -> str:
 
 
 def max_budget() -> float:
-    """Sweeping several SEAs, replays included, needs a larger budget than a chat task."""
-    return 60.0
+    """Sweeping several SEAs needs room for replays of past runs that cost up to $500 each.
+
+    A sub-agent's spend counts toward this task's total, so the cap must
+    hold the mining work plus a few $500-class replays (the procedure
+    limits replays to 60% of the remaining budget).
+    """
+    return 2000.0
 
 
 def use_memory() -> bool:

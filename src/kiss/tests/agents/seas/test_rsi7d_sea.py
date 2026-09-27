@@ -160,7 +160,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea.build_prompt("only review_paper").endswith(
         "Additional instructions: only review_paper"
     )
-    assert sea.max_budget() == 60.0
+    assert sea.max_budget() == 2000.0
     assert sea.use_memory() is True
     assert sea.use_web_tools() is False
     names = [t.__name__ for t in sea.tools()]
