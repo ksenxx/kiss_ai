@@ -16,6 +16,7 @@ No mocks — uses real functions from the server module.
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.file_index import FileIndexRegistry
 from kiss.server.helpers import model_vendor
 from kiss.server.server import VSCodeServer
 
@@ -116,23 +118,30 @@ class TestGetFiles(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {name}")
 
-        self.server._file_cache = {
-            self.tmpdir: [
-                "src/main.py",
-                "src/util.py",
-                "README.md",
-                "test/test_main.py",
-            ],
-        }
+        # A private registry whose home is an empty directory: the work
+        # dir is a root of its own and nothing outside it is scanned.
+        # Build the index up front so ``_get_files`` answers synchronously.
+        self.server._file_index.stop()
+        home = Path(self.tmpdir) / ".home"
+        home.mkdir()
+        self.server._file_index = FileIndexRegistry(
+            home=str(home), cache_dir=home / "cache",
+        )
+        indexed = threading.Event()
+        self.server._file_index.ensure(self.tmpdir, indexed.set)
+        assert indexed.wait(10.0), "file index was never built"
 
     def tearDown(self) -> None:
+        self.server._file_index.stop()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_files_filtered_by_prefix(self) -> None:
         self.server._get_files("main")
-        files = self.events[0]["files"]
+        assert len(self.events) == 1 and "loading" not in self.events[0]
+        files = [f["text"] for f in self.events[0]["files"]]
+        assert sorted(files) == ["src/main.py", "test/test_main.py"]
         for f in files:
-            assert "main" in f["text"].lower()
+            assert "main" in f.lower()
 
 
 class TestNewChatBroadcastsShowWelcome(unittest.TestCase):

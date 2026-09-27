@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests: softly spoken "Sorcar" must wake the listener.
+"""End-to-end tests: softly spoken "Hey Sorcar" must wake the listener.
 
 Reproduces a real bug: users had to speak the wake word LOUDLY to
 trigger it.  Quiet, breathy speech carries a soft onset that the
@@ -10,15 +10,20 @@ grammar-constrained recognizer decodes as a brief leading ``[unk]``
 before the alias — the macOS "Whisper" voice deterministically decodes
 as ``[unk] sore car`` with a ~60ms ``[unk]`` span — and the strict
 whole-utterance matcher rejected it, so only a loud, clean ``sore car``
-decode ever woke the listener.
+decode ever woke the listener.  (Measured with the old one-word wake
+word "Sorcar"; the gate now applies to the ``hey sore car`` phrase.)
 
 Real audio and the real Vosk model, no mocks:
 
-- ``test_soft_breathy_sorcar_wakes_every_time`` synthesizes "Sorcar"
-  three times with the macOS *Whisper* voice (soft breathy speech) and
+- ``test_soft_breathy_sorcar_wakes_every_time`` synthesizes "Hey
+  Sorcar" three times with the macOS *Whisper* voice (soft breathy
+  speech), after the lead-in silence a live microphone always has, and
   streams the audio through the real :class:`WakeDetector` at the
-  default sensitivity: every utterance must wake.  Before the fix the
-  first utterance (the ``[unk] sore car`` decode) was rejected.
+  default sensitivity: every utterance must wake (measured decodes:
+  ``hey sore car`` with "hey" confidences 0.62-0.76).  Without the
+  lead-in the synthesized whisper's first "hey" is inaudible to the
+  model (decoded as a bare ``sore car``, which correctly does not
+  wake).
 
 - ``test_sentences_with_word_prefixes_still_never_wake`` streams
   ordinary sentences whose spoken-word prefixes decode to long
@@ -86,6 +91,16 @@ class TestLeadingNoiseGate(unittest.TestCase):
         self.assertTrue(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.06, "conf": 0.51},
+                {"word": "hey", "start": 0.07, "end": 0.3, "conf": 1.0},
+                {"word": "sore", "start": 0.3, "end": 0.56, "conf": 1.0},
+                {"word": "car", "start": 0.62, "end": 0.95, "conf": 1.0},
+            ])
+        )
+
+    def test_soft_name_without_hey_rejects(self) -> None:
+        self.assertFalse(
+            wake_with_leading_noise([
+                {"word": "[unk]", "start": 0.0, "end": 0.06, "conf": 0.51},
                 {"word": "sore", "start": 0.07, "end": 0.33, "conf": 1.0},
                 {"word": "car", "start": 0.39, "end": 0.72, "conf": 1.0},
             ])
@@ -95,8 +110,9 @@ class TestLeadingNoiseGate(unittest.TestCase):
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.61},
-                {"word": "sore", "start": 0.65, "end": 0.95},
-                {"word": "car", "start": 0.98, "end": 1.3},
+                {"word": "hey", "start": 0.62, "end": 0.84},
+                {"word": "sore", "start": 0.85, "end": 1.15},
+                {"word": "car", "start": 1.18, "end": 1.5},
             ])
         )
 
@@ -104,8 +120,9 @@ class TestLeadingNoiseGate(unittest.TestCase):
         words = [
             {"word": "[unk]", "start": 0.0, "end": 0.2},
             {"word": "[unk]", "start": 0.25, "end": 0.45},
-            {"word": "sir", "start": 0.5, "end": 0.8},
-            {"word": "car", "start": 0.85, "end": 1.2},
+            {"word": "hey", "start": 0.5, "end": 0.7},
+            {"word": "sir", "start": 0.7, "end": 1.0},
+            {"word": "car", "start": 1.05, "end": 1.4},
         ]
         self.assertGreater(0.4, MAX_LEADING_NOISE_SECONDS)
         self.assertFalse(wake_with_leading_noise(words))
@@ -116,7 +133,8 @@ class TestLeadingNoiseGate(unittest.TestCase):
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.21},
-                {"word": "sir", "start": 0.24, "end": 0.51},
+                {"word": "hey", "start": 0.22, "end": 0.4},
+                {"word": "sir", "start": 0.4, "end": 0.51},
                 {"word": "car", "start": 0.66, "end": 0.93},
                 {"word": "[unk]", "start": 0.93, "end": 1.35},
             ])
@@ -126,15 +144,17 @@ class TestLeadingNoiseGate(unittest.TestCase):
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.06},
-                {"word": "car", "start": 0.1, "end": 0.45},
+                {"word": "hey", "start": 0.07, "end": 0.3},
+                {"word": "car", "start": 0.35, "end": 0.7},
             ])
         )
 
     def test_alias_without_noise_prefix_is_not_this_gates_job(self) -> None:
         self.assertFalse(
             wake_with_leading_noise([
-                {"word": "sore", "start": 0.0, "end": 0.3},
-                {"word": "car", "start": 0.35, "end": 0.7},
+                {"word": "hey", "start": 0.0, "end": 0.2},
+                {"word": "sore", "start": 0.2, "end": 0.5},
+                {"word": "car", "start": 0.55, "end": 0.9},
             ])
         )
 
@@ -142,6 +162,7 @@ class TestLeadingNoiseGate(unittest.TestCase):
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]"},
+                {"word": "hey", "start": 0.0, "end": 0.07},
                 {"word": "sore", "start": 0.07, "end": 0.33},
                 {"word": "car", "start": 0.39, "end": 0.72},
             ])
@@ -160,15 +181,15 @@ class TestLeadingNoiseGate(unittest.TestCase):
     "requires macOS `say` (with the Whisper voice) and `afconvert`",
 )
 class TestQuietSpeechWake(unittest.TestCase):
-    """Soft breathy 'Sorcar' wakes; word-prefixed sentences never do."""
+    """Soft breathy 'Hey Sorcar' wakes; word-prefixed sentences never do."""
 
     def test_soft_breathy_sorcar_wakes_every_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pcm = _tts_pcm(
                 Path(tmp),
                 "soft_sorcar",
-                "Sorcar [[slnc 1500]] Sorcar [[slnc 1500]] "
-                "Sorcar [[slnc 1500]]",
+                "[[slnc 1000]] Hey Sorcar [[slnc 1500]] "
+                "Hey Sorcar [[slnc 1500]] Hey Sorcar [[slnc 1500]]",
                 "Whisper",
             )
         self.assertEqual(_count_wakes(pcm), 3)

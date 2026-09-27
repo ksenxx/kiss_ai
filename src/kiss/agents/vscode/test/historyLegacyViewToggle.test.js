@@ -11,8 +11,7 @@
 //   of the chat's first task,
 // * the button right of the search box switches to the legacy flat
 //   list: every task newest first, no chat panels, no day separators,
-//   each row stamped with its chat's --task-color (rows of one chat
-//   share a color, rows of different chats differ),
+//   and no per-chat colour on any row,
 // * the switch is remembered in localStorage and honoured on load,
 // * switching rebuilds the loaded rows without a refetch — through the
 //   identical-refresh fast path, which must not keep the old view — and
@@ -192,10 +191,6 @@ const FLAT = [
   'row:task b1',
 ];
 
-function taskColor(row) {
-  return row.style.getPropertyValue('--task-color');
-}
-
 test('chat headers carry no tooltip and show the first line of the first task', () => {
   const {win, posted} = makeWebview();
   sendHistory(win, posted, 0, [
@@ -264,27 +259,10 @@ test('the view toggle sits right of the search box and swaps grouped <-> flat wi
   assert.strictEqual(all(win, '#history-list .history-chat-group').length, 0);
   assert.strictEqual(all(win, '#history-list .history-day-sep').length, 0);
 
-  // Per-chat colors: one hue per chat, distinct across chats.
-  const rows = all(win, '#history-list > .sidebar-item');
-  const colorOf = task =>
-    taskColor(
-      rows.find(
-        r => r.querySelector('.sidebar-item-text').textContent === task,
-      ),
-    );
-  assert.ok(/^hsl\(/.test(colorOf('task a2')), 'rows carry --task-color');
-  assert.strictEqual(
-    colorOf('task a2'),
-    colorOf('task a1'),
-    'same chat, same color',
-  );
-  assert.strictEqual(colorOf('task b2'), colorOf('task b1'));
-  assert.notStrictEqual(
-    colorOf('task a2'),
-    colorOf('task b2'),
-    'different chats differ',
-  );
-  assert.notStrictEqual(colorOf('task a2'), colorOf('task c1'));
+  // No per-chat colour: the flat rows carry no inline style at all.
+  all(win, '#history-list > .sidebar-item').forEach(r => {
+    assert.strictEqual(r.getAttribute('style'), null, 'flat rows carry no colour');
+  });
 
   // An identical refresh keeps the flat rows (fast path, same view).
   const rowsBefore = all(win, '#history-list > .sidebar-item');
@@ -296,15 +274,12 @@ test('the view toggle sits right of the search box and swaps grouped <-> flat wi
     'an identical refresh keeps the DOM rows',
   );
 
-  // Back to chat panels: the same data, regrouped, colors gone.
+  // Back to chat panels: the same data, regrouped.
   toggle.click();
   assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
   assert.strictEqual(win.localStorage.getItem(VIEW_KEY), '0');
   assert.ok(!byId(win, 'history-list').classList.contains('legacy-view'));
   assert.deepStrictEqual(listShape(win), GROUPED);
-  all(win, '#history-list .sidebar-item').forEach(r => {
-    assert.strictEqual(taskColor(r), '', 'grouped rows carry no color');
-  });
   win.close();
 });
 
@@ -320,10 +295,9 @@ test('the flat list is remembered across loads and used for the first page', () 
   // Later pages extend the flat list in order.
   sendHistory(win, posted, 5, [session('D', 'd1', todayNoon - 3 * DAY)]);
   assert.deepStrictEqual(listShape(win), FLAT.concat(['row:task d1']));
-  // A row without a chat id still gets the neutral fallback color.
+  // A row without a chat id is listed like any other.
   sendHistory(win, posted, 6, [session('', 'e1', todayNoon - 4 * DAY)]);
-  const last = all(win, '#history-list > .sidebar-item').pop();
-  assert.strictEqual(taskColor(last), 'hsl(0, 0%, 75%)');
+  assert.deepStrictEqual(listShape(win), FLAT.concat(['row:task d1', 'row:task e1']));
   win.close();
 });
 

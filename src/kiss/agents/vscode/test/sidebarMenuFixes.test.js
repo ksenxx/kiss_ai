@@ -95,9 +95,14 @@ function makeWebview() {
     },
     configurable: true,
   });
-  const prompts = [];
-  win.prompt = () => prompts.shift();
-  win.confirm = () => true;
+  // Native dialogs are gone from main.js (the VS Code webview sandbox
+  // never showed them); any call is a regression.
+  win.prompt = () => {
+    throw new Error('window.prompt must not be called');
+  };
+  win.confirm = () => {
+    throw new Error('window.confirm must not be called');
+  };
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
@@ -107,7 +112,23 @@ function makeWebview() {
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=sidebar-fixes-main.js',
   );
-  return {win, posted, copied, prompts};
+  return {win, posted, copied};
+}
+
+/** The in-webview prompt toast *id* and its text input. */
+function promptToast(win, id) {
+  const toast = win.document.querySelector(
+    '[data-notification-id="' + id + '"]',
+  );
+  assert.ok(toast, 'the prompt ' + id + ' is on screen');
+  return {toast, input: toast.querySelector('.kiss-notification-input')};
+}
+
+/** Type *value* into the prompt toast *id* and press Enter. */
+function answerPrompt(win, id, value) {
+  const {input} = promptToast(win, id);
+  input.value = value;
+  key(win, input, 'Enter');
 }
 
 function send(win, data) {
@@ -595,16 +616,19 @@ async function main() {
   });
 
   await test('Commit menu: Create Tag... without a message makes a lightweight tag; names survive', async () => {
-    const {win, posted, prompts} = makeWebview();
+    const {win, posted} = makeWebview();
     const row = openScm(win, posted);
-    prompts.push('v9', null); // name, then the message box dismissed
     rightClick(win, row);
     click(win, menuItem(win, 'Create Tag...'));
+    // The name, then the message box submitted empty (in-webview
+    // prompts replaced window.prompt, which the webview never showed).
+    answerPrompt(win, 'git-create-tag', 'v9');
+    answerPrompt(win, 'git-create-tag-message', '');
     let actions = ofType(posted, 'gitAction');
     assert.strictEqual(
       actions.length,
       1,
-      'BUG: dismissing the message aborted the tag',
+      'BUG: an empty message aborted the tag',
     );
     assert.strictEqual(actions[0].action, 'createTag');
     assert.strictEqual(actions[0].name, 'v9');
@@ -622,14 +646,14 @@ async function main() {
       'the notification names the tag',
     );
     // Cancelling the NAME box creates nothing.
-    prompts.push(null);
     rightClick(win, row);
     click(win, menuItem(win, 'Create Tag...'));
+    key(win, promptToast(win, 'git-create-tag').input, 'Escape');
     assert.strictEqual(ofType(posted, 'gitAction').length, 1);
     // Create Branch... names the branch in its notification.
-    prompts.push('topic');
     rightClick(win, row);
     click(win, menuItem(win, 'Create Branch...'));
+    answerPrompt(win, 'git-create-branch', 'topic');
     actions = ofType(posted, 'gitAction');
     assert.strictEqual(actions.length, 2);
     assert.strictEqual(actions[1].action, 'createBranch');

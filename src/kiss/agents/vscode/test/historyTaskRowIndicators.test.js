@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 const FROZEN_NOW_MS = 1_700_500_000_000;
@@ -53,7 +54,7 @@ function makeWebview() {
     };
   };
 
-  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   const styleEl = win.document.createElement('style');
   styleEl.textContent = cssText;
   win.document.head.appendChild(styleEl);
@@ -303,8 +304,8 @@ function testFinishedTaskShowsSolidGreenCircle() {
   const cs = win.getComputedStyle(completedDot);
   assert.strictEqual(
     cs.color,
-    'rgb(46, 125, 50)',
-    `tick colour must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.color}`,
+    'var(--green)',
+    `tick colour must be the theme green (--status-ok -> var(--green)); got: ${cs.color}`,
   );
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
@@ -409,10 +410,11 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
     // The action buttons occupy a line of their own below the task
     // text, so the panel is taller than its title: the indicator is
     // centered on the first line of the text (the panel's padding-top
-    // plus half a line box) instead of on the whole panel.
+    // plus half a line box, --space-1-5 = 6px) instead of on the whole
+    // panel.
     assert.strictEqual(
       style.top,
-      'calc(0.5lh + 7px)',
+      'calc(0.5lh + 6px)',
       `row ${title} indicator must sit on the first line of the task ` +
         `text, not at the panel middle; got top=${style.top}`,
     );
@@ -440,7 +442,7 @@ function testIndicatorsAreVerticallyCenteredInTaskPanels() {
 }
 
 function testCompletedDotKeyframesNotShared() {
-  const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const cssText = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   assert.ok(
     /\.sidebar-item-completed\s*\{/.test(cssText),
     'main.css must define .sidebar-item-completed for the green ' +
@@ -455,8 +457,8 @@ function testCompletedDotKeyframesNotShared() {
     '.sidebar-item-completed MUST NOT animate; the tick is static',
   );
   assert.ok(
-    /color\s*:\s*#2e7d32/i.test(body),
-    '.sidebar-item-completed MUST colour the tick #2e7d32 green',
+    /color\s*:\s*var\(--green\)/i.test(body),
+    '.sidebar-item-completed MUST colour the tick the theme green (--status-ok)',
   );
   const tick = cssText.match(/\.status-tick\s*\{([^}]*)\}/);
   assert.ok(

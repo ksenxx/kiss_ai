@@ -20,8 +20,8 @@ Implements the outer loop of SkillOpt (arXiv 2605.23904) for two kinds of
   string constant (``--constant SYSTEM_PROMPT``).  The constant's value is the
   trainable text; it may be a ``str.format`` template, and a candidate must
   keep exactly the original's replacement fields.  This is how a SEA whose
-  prompt is built inside a class or a function (for example the HarnessTax
-  container SEA, ``benchmarkings/harnesstax/sea_core.py``) is optimized.
+  prompt is built inside a class or a function (for example the coding
+  SEA, ``src/kiss/agents/seas/coding_sea.py``) is optimized.
 
 One optimization round: roll the current best out on the training batch,
 let a failure analyst and a success analyst propose patches over

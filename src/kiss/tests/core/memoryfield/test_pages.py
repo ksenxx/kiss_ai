@@ -6,6 +6,7 @@ if the directory tree is swapped underneath a live ``MemoryDir``; it stays as
 defence in depth.
 """
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,16 @@ def test_memory_dir_write_read_update_delete(tmp_path: Path) -> None:
         memory.read("woks")
     with pytest.raises(FileNotFoundError):
         memory.delete("woks")
+    # The deletion is recorded (for syncing with another machine) and undone by a new write.
+    tombstone = tmp_path / "mem" / ".tombstones" / "woks"
+    assert tombstone == memory.tombstone_path("woks.md")
+    deleted_at = tombstone.read_text().strip()
+    assert datetime.strptime(deleted_at, "%Y-%m-%dT%H:%M:%SZ")
+    assert memory.write("woks", "back again").frontmatter["updated"] >= deleted_at
+    assert not tombstone.exists()
+    assert memory.page_names() == ["finnish-bureaucracy", "imported", "woks"]
+    with pytest.raises(ValueError, match="Invalid page name"):
+        memory.tombstone_path("Bad Name")
 
 
 def test_memory_dir_rejects_bad_names_and_empty_bodies(tmp_path: Path) -> None:
@@ -191,6 +202,24 @@ def test_memory_dir_rejects_symlinked_pages(tmp_path: Path) -> None:
     assert outside.read_text() == "secret"
     assert memory.read("target").body == "real page\n"
     assert (root / "alias.md").is_symlink()
+
+
+def test_memory_dir_refuses_a_symlinked_tombstone_directory(tmp_path: Path) -> None:
+    """Neither a write nor a delete touches anything through a ``.tombstones`` symlink."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "lesson").write_text("unrelated file\n")
+    root = tmp_path / "mem"
+    memory = MemoryDir(root)
+    memory.write("lesson", "a page")
+    (root / ".tombstones").symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="symlink"):
+        memory.write("lesson", "rewritten")
+    with pytest.raises(ValueError, match="symlink"):
+        memory.delete("lesson")
+    assert memory.read("lesson").body == "a page\n"
+    assert (elsewhere / "lesson").read_text() == "unrelated file\n"
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["lesson"]
 
 
 def test_memory_dir_escape_guard_for_resolved_paths(tmp_path: Path) -> None:

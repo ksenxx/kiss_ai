@@ -1657,6 +1657,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     message = str(getattr(err, "message", "") or "")
                     if not message and isinstance(err, dict):
                         message = str(err.get("message", "") or "")
+                # Any usage the failed response carries was billed.
+                self._rejected_response = resp
                 raise KISSError(
                     f"Responses API stream ended with {etype}"
                     + (f": {message}" if message else "")
@@ -1676,6 +1678,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     reason = str(getattr(details, "reason", "") or "")
                     if not reason and isinstance(details, dict):
                         reason = str(details.get("reason", "") or "")
+                # The truncated response was billed: keep its usage.
+                self._rejected_response = resp
                 raise KISSError(
                     "Responses API stream ended incomplete"
                     + (f": {reason}" if reason else "")
@@ -1799,8 +1803,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         return cls._get_attr_or_key(response, "output", []) or []
 
-    @classmethod
-    def _raise_for_failed_response(cls, response: Any) -> None:
+    def _raise_for_failed_response(self, response: Any) -> None:
         """Raise :class:`KISSError` for terminal ``failed`` / ``incomplete`` statuses.
 
         Args:
@@ -1814,23 +1817,27 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 response in either state; both must be surfaced to the
                 caller so partial / truncated ``output`` (e.g. a
                 half-formed ``function_call.arguments`` string) is never
-                silently treated as a successful generation.
+                silently treated as a successful generation.  Whatever
+                usage the response carries was billed, so it is kept for
+                :meth:`take_partial_usage_response`.
         """
-        status = cls._get_attr_or_key(response, "status")
+        status = self._get_attr_or_key(response, "status")
+        if status in ("failed", "incomplete"):
+            self._rejected_response = response
         if status == "failed":
-            err = cls._get_attr_or_key(response, "error")
+            err = self._get_attr_or_key(response, "error")
             message = ""
             if err is not None:
-                message = str(cls._get_attr_or_key(err, "message", "") or "")
+                message = str(self._get_attr_or_key(err, "message", "") or "")
             raise KISSError(
                 "Responses API returned failed response"
                 + (f": {message}" if message else "")
             )
         if status == "incomplete":
-            details = cls._get_attr_or_key(response, "incomplete_details")
+            details = self._get_attr_or_key(response, "incomplete_details")
             reason = ""
             if details is not None:
-                reason = str(cls._get_attr_or_key(details, "reason", "") or "")
+                reason = str(self._get_attr_or_key(details, "reason", "") or "")
             raise KISSError(
                 "Responses API returned incomplete response"
                 + (f": {reason}" if reason else "")

@@ -335,7 +335,16 @@ function testDeletePostsAndAbandonsEdit() {
   send(win, {type: 'myModelsData', models: MODELS});
 
   click(win, win.document.querySelectorAll('.custom-model-edit-btn')[1]);
+  // The trash icon only reveals an inline Delete / Cancel pair
+  // (ui_antipattern_destructive_confirm.test.js); Delete posts.
   click(win, win.document.querySelectorAll('.custom-model-delete-btn')[1]);
+  assert.ok(!lastMsg(posted, 'deleteMyModel'), 'the icon alone posts nothing');
+  click(
+    win,
+    win.document.querySelectorAll('.custom-model-row')[1].querySelector(
+      '.sidebar-confirm-yes',
+    ),
+  );
   const msg = lastMsg(posted, 'deleteMyModel');
   assert.ok(msg, 'Delete posts deleteMyModel');
   assert.strictEqual(msg.name, 'model-b');

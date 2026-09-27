@@ -271,35 +271,12 @@ function testReopeningClearsTheEditedMarks() {
   console.log('  ok - reopening the panel clears the edited marks');
 }
 
-// The welcome screen mirrors its password box into the settings field
-// programmatically (no input event), so that path must be marked edited
-// too or the very first password a user sets is dropped.
-function testWelcomePasswordMirrorIsSaved() {
-  const {win, posted} = makeWebview();
-  const welcomePw = win.document.getElementById('welcome-cfg-remote-password');
-  assert.ok(welcomePw, 'the welcome screen must have a password box');
-  welcomePw.value = 'welcome-secret';
-  welcomePw.dispatchEvent(new win.Event('input', {bubbles: true}));
-  welcomePw.dispatchEvent(new win.Event('change', {bubbles: true}));
-
-  const save = lastMsg(posted, 'saveConfig');
-  assert.ok(save, 'the welcome password box must save what it mirrors');
-  assert.strictEqual(
-    save.config.remote_password,
-    'welcome-secret',
-    'the mirrored password must be the one saved',
-  );
-  win.close();
-  console.log('  ok - the welcome password mirror is saved');
-}
-
 function main() {
   testLateConfigDataDoesNotClobberTypedKey();
   testClosingBeforeTheReplyStillSavesTheEdit();
   testUntouchedPanelStillSavesNothing();
   testClosedPanelIsStillRepainted();
   testReopeningClearsTheEditedMarks();
-  testWelcomePasswordMirrorIsSaved();
   console.log('settingsPanelStaleConfig.test.js: all tests passed');
 }
 

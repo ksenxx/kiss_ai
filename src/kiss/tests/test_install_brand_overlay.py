@@ -34,7 +34,10 @@ _REPO = Path(__file__).resolve().parents[3]
 _INSTALL_SH = (_REPO / "install.sh").read_text(encoding="utf-8")
 MEDIA_REL = Path("src/kiss/agents/vscode/media")
 MANIFEST_REL = Path("src/kiss/agents/vscode/package.json")
-BRAND_FILES = ("brand.json", "brand.css", "kiss-icon.svg", "kiss-icon.png", "thumbnail.jpeg")
+BRAND_FILES = (
+    "brand.json", "brand.css", "kiss-icon.svg", "kiss-icon.png", "thumbnail.jpeg",
+    "welcome-logo.png", "welcome-logo-dark.png",
+)
 STOCK_MANIFEST = '{"displayName": "KISS Sorcar", "version": "0.0.0"}\n'
 
 pytestmark = posix_only("runs the brand-overlay block of install.sh under bash")

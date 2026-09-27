@@ -10,9 +10,10 @@
 one CLI invocation instead of driving a turn-by-turn KISS tool loop:
 
 - exactly one CLI subprocess is spawned for the whole run;
-- the system prompt is appended to the task after
+- the system prompt reaches ``claude`` as ``--append-system-prompt`` and
+  ``codex`` (whose CLI has no such flag) appended to the task after
   ``CLI_SYSTEM_PROMPT_HEADER`` (``"\\n\\n# You new system prompt
-  follows:\\n"``) — no ``--system-prompt`` flag, no ``[System]:`` prefix;
+  follows:\\n"``) — never a ``--system-prompt`` flag or ``[System]:`` prefix;
 - KISS tool descriptions are never injected into the prompt;
 - the CLI's final message is returned wrapped in the registered ``finish``
   tool's output contract (YAML for the structured ``kiss.core.utils.finish``,
@@ -155,7 +156,8 @@ def test_agentic_run_is_single_shot_with_appended_system_prompt(
     cli_name: str,
     events: list[dict],
 ) -> None:
-    """One CLI call runs the whole task; system prompt rides in the prompt."""
+    """One CLI call runs the whole task; the system prompt reaches the CLI
+    as ``--append-system-prompt`` (claude) or inside the prompt (codex)."""
     record_dir = _install_fake_cli(tmp_path, monkeypatch, cli_name, events)
     agent = KISSAgent("run-to-completion e2e")
     result = agent.run(
@@ -170,14 +172,20 @@ def test_agentic_run_is_single_shot_with_appended_system_prompt(
     calls = _read_calls(record_dir)
     assert len(calls) == 1, "the whole task must run in exactly one CLI invocation"
     prompt = calls[0]["prompt"]
-    assert prompt == TASK + CLI_SYSTEM_PROMPT_HEADER + SYSTEM_PROMPT
+    argv = calls[0]["argv"]
     assert CLI_SYSTEM_PROMPT_HEADER == "\n\n# You new system prompt follows:\n"
+    if cli_name == "claude":
+        assert prompt == TASK
+        assert argv[argv.index("--append-system-prompt") + 1] == SYSTEM_PROMPT
+    else:
+        assert prompt == TASK + CLI_SYSTEM_PROMPT_HEADER + SYSTEM_PROMPT
+        assert "--append-system-prompt" not in argv
     # KISS tools are never described to the CLI.
-    assert "_dummy_tool" not in prompt
-    assert "tool_calls" not in prompt
-    # The system prompt is not passed out-of-band.
-    assert "--system-prompt" not in calls[0]["argv"]
-    assert not any("[System]" in a for a in calls[0]["argv"])
+    assert "_dummy_tool" not in prompt and not any("_dummy_tool" in a for a in argv)
+    assert "tool_calls" not in prompt and not any("tool_calls" in a for a in argv)
+    # The CLI's own system prompt is never replaced.
+    assert "--system-prompt" not in argv
+    assert not any("[System]" in a for a in argv)
 
     payload = yaml.safe_load(result)
     assert payload["success"] is True
@@ -347,7 +355,9 @@ def test_non_agentic_run_unchanged(
     )
     assert result == FINAL_TEXT
     calls = _read_calls(record_dir)
-    assert calls[0]["prompt"] == TASK + CLI_SYSTEM_PROMPT_HEADER + SYSTEM_PROMPT
+    assert calls[0]["prompt"] == TASK
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--append-system-prompt") + 1] == SYSTEM_PROMPT
 
 
 def _serve_one_switch_turn() -> "HTTPServer":

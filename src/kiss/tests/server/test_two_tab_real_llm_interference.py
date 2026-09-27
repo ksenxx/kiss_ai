@@ -56,7 +56,7 @@ import kiss.agents.sorcar.persistence as ps
 import kiss.core.vscode_config as vc
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.web_server import WebPrinter
+from kiss.server.web_server import Payload, WebPrinter
 
 _CONTENT_EVENT_TYPES = frozenset({
     "result", "text_delta", "text_end", "thinking_start", "thinking_delta",
@@ -247,8 +247,11 @@ class _CapturingWebPrinter(WebPrinter):
         self.sent: list[dict[str, Any]] = []
         self._sent_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
         """Record every JSON payload that would be sent to clients."""
+        # A replay slot (``replay_snapshot``) is never sent here: these
+        # tests do not replay a running task.
+        assert isinstance(data, str)
         with self._sent_lock:
             self.sent.append(json.loads(data))
 

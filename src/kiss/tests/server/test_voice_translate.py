@@ -2,14 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for translating speech after the "Sorcar" wake word.
+"""End-to-end tests for translating speech after the "Hey Sorcar" wake word.
 
 Real audio, real speech models, real GPT translation — no mocks.  The
 translation is a single ``gpt-audio`` chat-completions call (audio
 content part first, dictation instruction text after, in one user
 message), so the tests also pin down the dictation semantics:
 
-- ``test_translate_speech_after_wake`` speaks "Sorcar" followed by a
+- ``test_translate_speech_after_wake`` speaks "Hey Sorcar" followed by a
   sentence with the macOS TTS engine, streams the audio through the
   actual wake-word listener (``kiss.server.voice_wake``), and
   asserts that the listener emits a ``SPEECH`` line whose payload is
@@ -150,12 +150,12 @@ def _silent_block() -> bytes:
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
 @unittest.skipUnless(HAVE_OPENAI_KEY, "requires OPENAI_API_KEY")
 class TestVoiceTranslateFromWav(unittest.TestCase):
-    """Speech following 'Sorcar' is GPT-translated into English."""
+    """Speech following 'Hey Sorcar' is GPT-translated into English."""
 
     def test_translate_speech_after_wake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(
                 tmpdir, "speech", "hello world, please fix the parser bug",
             )
@@ -187,7 +187,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
             self.skipTest("no French macOS TTS voice installed")
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             aiff = tmpdir / "fr.aiff"
             subprocess.run(
                 ["say", "-v", french, "Bonjour tout le monde",
@@ -213,7 +213,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
     def test_question_is_transcribed_not_answered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(
                 tmpdir, "speech", "What is the capital of France?",
             )
@@ -231,7 +231,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
     def test_speech_cut_off_at_end_of_file_is_still_translated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(tmpdir, "speech", "hello world")
             wav = _concat_wavs(
                 tmpdir / "combined.wav",
@@ -251,7 +251,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
     def test_no_speech_after_wake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             wav = _concat_wavs(
                 tmpdir / "combined.wav", [wake], gap_seconds=8.0,
             )
@@ -266,7 +266,7 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
     def test_translate_error_is_not_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(tmpdir, "speech", "hello world")
             wav = _concat_wavs(
                 tmpdir / "combined.wav", [wake, speech], gap_seconds=1.5,
@@ -290,7 +290,7 @@ class TestSpeechCapture(unittest.TestCase):
 
     - Leading silence after the wake word is ignored.
     - Speech immediately after the wake word is captured; users do not
-      need to pause after saying "Sorcar".
+      need to pause after saying "Hey Sorcar".
     - Capture ends after trailing silence, no-speech timeout, or a
       hard maximum duration.
     """
@@ -376,6 +376,13 @@ class TestSpeechCapture(unittest.TestCase):
         self.assertEqual(
             strip_leading_wake_word("Sorger, fix the failing test"),
             "fix the failing test",
+        )
+        self.assertEqual(strip_leading_wake_word("Hey Sorcar, fix it"), "fix it")
+        self.assertEqual(
+            strip_leading_wake_word("hey, sir car - fix it"), "fix it"
+        )
+        self.assertEqual(
+            strip_leading_wake_word("Hey there, fix it"), "Hey there, fix it"
         )
 
     def test_clean_transcript_strips_preamble_and_quotes(self) -> None:

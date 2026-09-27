@@ -85,7 +85,8 @@ function testWarningEscapesHtml() {
   const output = win.document.getElementById('output');
   assert.ok(output, 'output container must exist');
   assert.strictEqual(
-    output.querySelector('img'),
+    // The welcome page's own logos are the only legitimate images here.
+    output.querySelector('img:not(.welcome-logo)'),
     null,
     'BUG: warning message HTML was not escaped (XSS)',
   );

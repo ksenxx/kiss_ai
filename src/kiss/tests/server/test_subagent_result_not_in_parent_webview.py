@@ -48,7 +48,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.server.web_server import WebPrinter
+from kiss.server.web_server import Payload, WebPrinter
 from kiss.tests.agents.sorcar.test_subagent_result_not_in_parent_webview import (  # noqa: F401
     _finish_response,
     _Handler,
@@ -77,7 +77,7 @@ class _FakeWebPrinter(WebPrinter):
         self._sub_tabs: dict[str, str] = {}
         self._wire_lock = threading.Lock()
 
-    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
         """Capture every payload that would have been sent over the WS.
 
         Also performs the synchronous frontend round-trip for
@@ -89,6 +89,9 @@ class _FakeWebPrinter(WebPrinter):
         subscription is in place before any further sub-agent event
         is fanned out.
         """
+        # A replay slot (``replay_snapshot``) is never sent here: these
+        # tests do not replay a running task.
+        assert isinstance(data, str)
         try:
             payload = json.loads(data)
         except json.JSONDecodeError:

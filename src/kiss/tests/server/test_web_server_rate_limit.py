@@ -368,7 +368,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
     async def test_successful_start_does_not_mark_server(self) -> None:
         self._install_fake_cloudflared(
             'echo "INF |  https://ok-1234.trycloudflare.com  |" >&2\n'
-            "sleep 60\n",
+            "exec sleep 60\n",
         )
         url = await asyncio.get_event_loop().run_in_executor(
             None, self.server._start_quick_tunnel,

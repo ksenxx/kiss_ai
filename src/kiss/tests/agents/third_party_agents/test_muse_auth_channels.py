@@ -33,9 +33,6 @@ instead of mocked):
   bytes before building the urllib request; its ``_upload_file``
   MuseAuthError branch needs credentials cleared between upload steps
   1 and 2 (a cross-process race).
-* ``authenticate_slack``'s ``client is None`` guard needs the vault
-  cleared between its ``store_credentials`` and the surrogate mint (a
-  cross-process race).
 * ``ensure_daemon``'s wait-loop sleeps and 15s startup-failure raise
   depend on daemon spawn/shutdown timing.
 """
@@ -72,7 +69,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     clear_credentials,
     grant,
     mint_surrogate,
-    stop_daemon,
     vault_has_credentials,
 )
 from kiss.agents.third_party_agents.slack_sea import (
@@ -86,8 +82,13 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
+from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
+    CLIENT_ID,
+    SlackOAuthState,
+    sign_in,
+)
+from kiss.tests.conftest import hold_loopback_port
 
 _REAL_SLACK_TOKEN = "xoxb-real-secret-slack"
 _REAL_FIRECRAWL_KEY = "fc-real-secret-key"
@@ -113,6 +114,14 @@ class _ApiHandler(BaseHTTPRequestHandler):
             }
         )
         auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
+        if self.path == "/api/oauth.v2.access":
+            payload = json.dumps(self.server.oauth.answer(body.decode())).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if self.path == "/upload/file" and self.server.upload_redirect_to:
             self.send_response(307)
             self.send_header("Location", self.server.upload_redirect_to)
@@ -181,6 +190,8 @@ class _ApiServer(ThreadedHTTPServer):
         # When set, POSTs to /upload/file answer 307 -> this URL
         # (redirect content-egress tests).
         self.upload_redirect_to: str = ""
+        # Slack's oauth.v2.access token endpoint (sign-in and refresh).
+        self.oauth = SlackOAuthState()
 
     def header(self, name: str, index: int = -1) -> str:
         """Return a recorded request header (case-insensitive).
@@ -224,6 +235,23 @@ def muse_env(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     setup_muse_env(monkeypatch, policy)
     yield isolated_kiss_home
     teardown_muse_env()
+
+
+@pytest.fixture()
+def slack_sign_in(api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Point the Slack sign-in at the emulator's token endpoint.
+
+    Reserves the fixed redirect port across pytest processes for the
+    test's duration.
+    """
+    from kiss.agents.third_party_agents._device_auth import ConsentSession
+    from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT
+
+    monkeypatch.setenv("KISS_SLACK_BASE_URL", f"http://127.0.0.1:{api_server.server_address[1]}")
+    monkeypatch.setenv("KISS_SLACK_CLIENT_ID", CLIENT_ID)
+    with hold_loopback_port(LOOPBACK_PORT):
+        yield api_server
+        ConsentSession.cancel_active("slack")
 
 
 def _slack_backend(api_server: _ApiServer) -> SlackChannelBackend:
@@ -344,55 +372,76 @@ def test_slack_vault_first_and_workspace_names(muse_env: Path, api_server: _ApiS
     assert api_server.header("Authorization") == f"Bearer {_REAL_SLACK_TOKEN}"
 
 
-def test_slack_token_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServer) -> None:
-    """authenticate_slack re-enrolls rotated tokens; clear wipes the vault."""
+def test_slack_sign_in_rotation_and_clear_via_tools(
+    muse_env: Path, slack_sign_in: _ApiServer
+) -> None:
+    """Signed-in user tokens land in the vault; the daemon refreshes them."""
     from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
+    api_server = slack_sign_in
     agent = SlackAgent()
     assert agent._backend._client is None
-    agent._backend._api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
     tools = auth_tools(agent)
 
-    assert json.loads(tools["authenticate_slack"]("xoxb-first"))["ok"] is True
+    assert sign_in(tools, api_server.oauth)["ok"] is True
     client = agent._backend._client
     assert client is not None
     assert str(client.token).startswith("muse-sgt.slack.")
-    # Muse-mode authentication never writes a plaintext token file, and
-    # its auth.test validation ran through the boundary: it is audited
-    # and the emulated API saw the real token exactly once so far.
+    # Muse-mode sign-in never writes a plaintext token file.
     assert not _token_path("default").exists()
-    audit = (muse_auth_dir() / "audit.jsonl").read_text()
-    records = [json.loads(line) for line in audit.splitlines()]
-    assert any(r["service"] == "slack" and r["path"].endswith("/auth.test") for r in records)
-    assert len(api_server.requests) == 1
     client.auth_test()
-    assert api_server.header("Authorization") == "Bearer xoxb-first"
+    assert api_server.header("Authorization") == "Bearer xoxp-access-1"
 
-    # Rotate: the second token must actually be used.
-    assert json.loads(tools["authenticate_slack"]("xoxb-second"))["ok"] is True
+    # Signing in again replaces the credential.
+    assert sign_in(tools, api_server.oauth)["ok"] is True
     client = agent._backend._client
     assert client is not None
     client.auth_test()
-    assert api_server.header("Authorization") == "Bearer xoxb-second"
-
-    # check_slack_auth works through the boundary client.
+    assert api_server.header("Authorization") == "Bearer xoxp-access-2"
     checked = json.loads(tools["check_slack_auth"]())
     assert checked["ok"] is True
     assert checked["team"] == "KISS"
 
-    # An invalid token is rolled back: nothing stays enrolled.
-    failed = json.loads(tools["authenticate_slack"]("xoxb-invalid"))
+    # A token auth.test rejects is not stored; the working one stays.
+    api_server.oauth.invalid_next = True
+    failed = sign_in(tools, api_server.oauth)
     assert failed["ok"] is False
     assert "invalid_auth" in failed["error"]
-    assert not vault_has_credentials("slack")
-    assert agent._backend._client is None
-    # Re-authenticate so the clear below exercises a populated vault.
-    assert json.loads(tools["authenticate_slack"]("xoxb-second"))["ok"] is True
+    client.auth_test()
+    assert api_server.header("Authorization") == "Bearer xoxp-access-2"
 
-    # Clearing wipes both the token file and the vault enrollment.
+    # An expiring token is refreshed by the daemon with the public
+    # client ID and no secret; the rotated pair is used afterwards.
+    api_server.oauth.expires_in = 30
+    assert sign_in(tools, api_server.oauth)["ok"] is True  # xoxp-access-4
+    client = agent._backend._client
+    assert client is not None
+    client.auth_test()
+    assert api_server.oauth.forms[-1] == {
+        "grant_type": "refresh_token",
+        "refresh_token": "xoxe-1-refresh-4",
+        "client_id": CLIENT_ID,
+    }
+    assert api_server.header("Authorization") == "Bearer xoxp-access-5"
+
+    # Clearing wipes the vault enrollment.
     assert "cleared" in tools["clear_slack_auth"]()
     assert not vault_has_credentials("slack")
     assert mint_surrogate("slack") is None
+
+
+def test_slack_rotating_token_file_migrates_to_refreshing_vault_entry(
+    muse_env: Path, slack_sign_in: _ApiServer
+) -> None:
+    """A legacy-mode rotating token keeps refreshing after moving to the vault."""
+    api_server = slack_sign_in
+    api_server.oauth.refresh_token = "xoxe-1-legacy"
+    _save_token("xoxp-access-legacy", "default", "xoxe-1-legacy", 0.0, CLIENT_ID)
+    backend = _slack_backend(api_server)  # migrates, then auth.test
+    assert not _token_path("default").exists()
+    assert api_server.oauth.forms[-1]["refresh_token"] == "xoxe-1-legacy"
+    assert api_server.header("Authorization") == "Bearer xoxp-access-1"
+    assert backend._client is not None
 
 
 def test_firecrawl_selfhosted_enrollment_hosts(muse_env: Path, api_server: _ApiServer) -> None:
@@ -651,8 +700,7 @@ def test_stale_pre_upgrade_daemon_is_replaced(muse_env: Path) -> None:
     # A relic that REPLACES the verified daemon (new socket inode) is
     # caught without any cache reset: the socket identity changed, so
     # the handshake reruns and replaces the relic again.
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     relic2, stopped2 = _start_relic_daemon()
     muse_client.ensure_daemon()
     relic2.join(timeout=10.0)
@@ -728,21 +776,14 @@ def test_slack_workspace_list_and_delete_are_vault_aware(
 
 
 def test_slack_direct_muse_auth_workspace_is_listed(
-    muse_env: Path, api_server: _ApiServer, capsys: pytest.CaptureFixture
+    muse_env: Path, slack_sign_in: _ApiServer, capsys: pytest.CaptureFixture
 ) -> None:
-    """A workspace authenticated straight into the vault shows up in listings."""
+    """A workspace signed in straight into the vault shows up in listings."""
     from kiss.agents.third_party_agents.slack_sea import SlackAgent, _list_workspaces
 
-    agent = SlackAgent(workspace="team3")
-    agent._backend._api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
-    tools = auth_tools(agent)
-    # Allow the boundary to reach the emulator for this workspace.
-    policy_path = muse_auth_dir() / "policy.json"
-    policy = json.loads(policy_path.read_text())
-    policy["services"][_muse_service("team3")] = {"extra_hosts": ["127.0.0.1"]}
-    policy_path.write_text(json.dumps(policy))
-
-    assert json.loads(tools["authenticate_slack"]("xoxb-direct"))["ok"] is True
+    tools = auth_tools(SlackAgent(workspace="team3"))
+    assert sign_in(tools, slack_sign_in.oauth)["ok"] is True
+    assert vault_has_credentials(_muse_service("team3"))
     assert not _token_path("team3").exists()  # vault-only, no plaintext
     _list_workspaces()
     listing = capsys.readouterr().out
@@ -750,19 +791,17 @@ def test_slack_direct_muse_auth_workspace_is_listed(
     assert "vault" in listing
 
 
-def test_slack_transport_failure_rolls_back_enrollment(
-    muse_env: Path, refusing_port: int
+def test_slack_unreachable_api_stores_nothing(
+    muse_env: Path, slack_sign_in: _ApiServer, refusing_port: int
 ) -> None:
-    """A Muse boundary failure during validation clears the enrollment."""
+    """A sign-in whose auth.test cannot reach Slack enrolls nothing."""
     from kiss.agents.third_party_agents.slack_sea import SlackAgent
 
     agent = SlackAgent()
     agent._backend._api_base_url = f"http://127.0.0.1:{refusing_port}/api/"
-    tools = auth_tools(agent)
-    result = json.loads(tools["authenticate_slack"]("xoxb-unvalidated-secret"))
+    result = sign_in(auth_tools(agent), slack_sign_in.oauth)
     assert result["ok"] is False
     assert "Token validation failed" in result["error"]
-    # The unvalidated token did not stay enrolled or mintable.
     assert not vault_has_credentials("slack")
     assert mint_surrogate("slack") is None
     assert agent._backend._client is None
@@ -918,12 +957,10 @@ def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer,
     api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"
     empty = SlackChannelBackend()
     assert not empty.connect()
-    assert "No Slack token found" in empty._connection_info
+    assert "No Slack credential" in empty._connection_info
 
+    _save_token(_REAL_SLACK_TOKEN, "default")
     agent = SlackAgent()
-    agent._backend._api_base_url = api_base_url
-    tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_slack"](_REAL_SLACK_TOKEN))["ok"] is True
     assert agent._backend._client is not None
     assert agent._backend._client.token == _REAL_SLACK_TOKEN
 

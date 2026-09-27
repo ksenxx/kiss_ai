@@ -1,6 +1,6 @@
 # Sample Tasks for KISS Sorcar
 
-> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. In the VS Code extension these appear as welcome-screen chips. The bundled tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md); you can add your own at `~/.kiss/MY_TASK_TEMPLATES.md`.
+> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. The tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md).
 
 ## Code Understanding & Editing
 

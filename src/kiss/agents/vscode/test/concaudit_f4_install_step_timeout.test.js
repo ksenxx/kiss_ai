@@ -230,9 +230,12 @@ async function main() {
     verdict && verdict.startsWith('REJECTED:'),
     `setup must fail with a retryable error, got: ${out}`,
   );
+  // The retry advice moved out of the message: the failure toast's
+  // 'Retry' action (extension.ts runSetup) re-runs the setup, so the
+  // text no longer tells the user to reload the window.
   assert.match(
     verdict,
-    /uv sync did not finish within [\d.]+ minutes and was killed; reload the window to retry/,
+    /uv sync did not finish within [\d.]+ minutes and was killed\.$/,
     `unexpected error text: ${verdict}`,
   );
   console.log(

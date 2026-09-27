@@ -36,7 +36,9 @@
     'gap:24px;padding:5px 14px;cursor:pointer;white-space:nowrap}' +
     '#' +
     MENU_ID +
-    ' .sorcar-ctx-item:hover{background:#04395e;color:#fff}' +
+    ' .sorcar-ctx-item:hover,#' +
+    MENU_ID +
+    ' .sorcar-ctx-item:focus{background:#04395e;color:#fff;outline:none}' +
     '#' +
     MENU_ID +
     ' .sorcar-ctx-item.disabled{opacity:.4;cursor:default;' +
@@ -395,6 +397,9 @@
     const options = opts || {};
     const win = doc.defaultView;
     let menu = null;
+    // The element focused before the menu opened; close() hands focus back
+    // to it so a keyboard user does not lose their place.
+    let opener = null;
     // Chromium keeps a single Range per Selection, so a multi-range Select
     // All cannot be re-read from the DOM and its text has to be remembered.
     // The Range the menu itself installed is remembered alongside it: the
@@ -418,9 +423,41 @@
       return same ? selectAllText : '';
     }
 
+    // True while focus is still on the menu (or nowhere in particular):
+    // Escape, Enter / Space and the menu's own clicks leave it there.  A
+    // pointer click on another control has already moved focus to that
+    // control by the time the document click handler closes the menu,
+    // and that choice is the user's to keep.
+    function focusStillOnMenu() {
+      const active = doc.activeElement;
+      return (
+        !active ||
+        active === doc.body ||
+        (menu !== null && menu.contains(active))
+      );
+    }
+
     function close() {
+      const restore = focusStillOnMenu();
       if (menu && menu.parentNode) menu.parentNode.removeChild(menu);
       menu = null;
+      const prev = opener;
+      opener = null;
+      if (
+        restore &&
+        prev &&
+        prev !== doc.body &&
+        typeof prev.focus === 'function' &&
+        doc.contains(prev)
+      ) {
+        prev.focus({preventScroll: true});
+      }
+    }
+
+    function focusableItems() {
+      return menu
+        ? Array.from(menu.querySelectorAll('.sorcar-ctx-item:not(.disabled)'))
+        : [];
     }
 
     function activate(item) {
@@ -478,6 +515,8 @@
         const el = doc.createElement('div');
         el.className = 'sorcar-ctx-item' + (item.enabled ? '' : ' disabled');
         el.setAttribute('role', 'menuitem');
+        el.tabIndex = item.enabled ? 0 : -1;
+        if (!item.enabled) el.setAttribute('aria-disabled', 'true');
         el.dataset.action = item.id;
         const label = doc.createElement('span');
         label.className = 'sorcar-ctx-label';
@@ -509,6 +548,9 @@
       const py = vh ? Math.min(y, vh - mh - 4) : y;
       menu.style.left = Math.max(0, px) + 'px';
       menu.style.top = Math.max(0, py) + 'px';
+      opener = doc.activeElement;
+      const first = focusableItems()[0];
+      if (first) first.focus({preventScroll: true});
       return menu;
     }
 
@@ -527,8 +569,39 @@
       close();
     }
 
+    // Same keyboard model as treeContextMenu.js: Escape closes, Up / Down
+    // move between enabled items (wrapping), Home / End jump, Enter /
+    // Space run the focused item.
     function onKeyDown(e) {
-      if (e.key === 'Escape') close();
+      if (!menu) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        close();
+        return;
+      }
+      const items = focusableItems();
+      if (!items.length) return;
+      const idx = items.indexOf(doc.activeElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        let next;
+        if (e.key === 'ArrowDown')
+          next = idx < 0 ? 0 : (idx + 1) % items.length;
+        else next = idx <= 0 ? items.length - 1 : idx - 1;
+        items[next].focus({preventScroll: true});
+        return;
+      }
+      if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        items[e.key === 'Home' ? 0 : items.length - 1].focus({
+          preventScroll: true,
+        });
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === ' ') && idx >= 0) {
+        e.preventDefault();
+        items[idx].click();
+      }
     }
 
     function onScrollOrBlur() {

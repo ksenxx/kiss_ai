@@ -24,16 +24,28 @@ LLM/coding-assistant indexing") and verified live:
   `sea-commands.md`, `sample-tasks.md`, `prompt-tricks.md`, `tips.md`
   (content sourced from `README.md`, `API.md`, `src/kiss/SAMPLE_TASKS.md`,
   `src/kiss/INJECTIONS.md`, and `src/kiss/TIPS.md`; `sea-commands.md`
-  documents `src/kiss/agents/sorcar/sea_commands.py`).
+  documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
+  bundled `/merge`, `/sh`, `/task_update`, `/write_paper`, `/review_paper`,
+  `/git_extract_knowledge`, `/remember`, and `/forget` commands).
 - `index.html.md` — plain-Markdown twin of the homepage.
+- `privacy.html` — standalone privacy policy written for Google OAuth
+  verification of the Gmail and Google Workspace connectors. It names the
+  `gmail.modify` scope but still describes the pre-Composio flow: entirely
+  local operation, Google tokens stored and deleted under `~/.kiss/`, and
+  data shared only with the model provider and Google. The connectors now
+  go through Composio (`src/kiss/agents/third_party_agents/_composio_google.py`),
+  which holds the Google token and proxies every Google API call, so the
+  operation, storage, deletion and sharing sections need a revision.
+  Linked from the `index.html` footer and listed in `sitemap.xml`; not in
+  `llms.txt` or `llms-full.txt`.
 - `robots.txt` — allows all crawlers, references llms.txt and the sitemap.
 - `sitemap.xml` — lists the HTML homepage, `index.html.md`, `llms.txt`,
-  `llms-full.txt`, the 11 `docs/*.md` pages, and the five `blog/*.html`
-  posts (not `robots.txt` or `.well-known/llms.txt`).
+  `llms-full.txt`, the 11 `docs/*.md` pages, the five `blog/*.html`
+  posts, and `privacy.html` (not `robots.txt` or `.well-known/llms.txt`).
 - `.nojekyll` — ensures GitHub Pages serves all files verbatim.
 - `index.html` — gained `<link rel="alternate" type="text/markdown">` and
-  `<link rel="llms-txt">` tags in `<head>` plus footer links to `Docs` and
-  `llms.txt`.
+  `<link rel="llms-txt">` tags in `<head>` plus footer links to `Docs`,
+  `llms.txt`, and `Privacy`.
 
 To regenerate `llms-full.txt` after editing any `docs/*.md`: keep the two
 header lines (H1 + blockquote), then append, for `docs/index.md` followed by
@@ -75,13 +87,25 @@ All subsequent section numbers (§ 02 → § 03, …, § 09 → § 10) were shif
 by one, and a `Prompts` link was added to the top nav. No other content
 was changed.
 
-The section shows a 20-panel carousel, one panel per entry from:
+The section's intro paragraph links `src/kiss/SAMPLE_TASKS.md` and
+`src/kiss/INJECTIONS.md` and points to `~/.kiss/MY_INJECTION.md` for personal
+tricks; its earlier pointer to `~/.kiss/MY_TASK_TEMPLATES.md` was dropped
+when the welcome-screen task chips were replaced by the logo (the code no
+longer reads that file). The section shows a 20-panel carousel, one panel
+per entry from:
 
 - `./src/kiss/SAMPLE_TASKS.md` — **12 sample tasks** (rendered with a
   `Task` badge), and
 - `./src/kiss/INJECTIONS.md` — **8 promptlet tricks** (rendered with a
-  `Trick` badge; the file has since grown to 10 tricks, and the deck still
-  shows the original 8).
+  `Trick` badge). The deck is static, written from an earlier revision of
+  the file, and is not regenerated when the file changes. Four panels
+  still match a current trick verbatim (invariant reproduction, Claude
+  Fable 5 + GPT-5.6 Sol review, Kimi K3 + GPT-5.6 Sol review,
+  self-improving routing); "Run a task from an instructions file" and
+  "Resolve a merge conflict" come from tricks since removed, and the
+  authentication and GPT-6 Astra panels carry older wording than the
+  file. The file's `git pull`/merge/push trick and its `claude-fable-5-1`
+  + `gpt-6-sol` pair-programming variant have no panel.
 
 Each panel has:
 
@@ -101,7 +125,8 @@ remain in the markup but are hidden (`display: none`).
   replacement for the file in the website repo).
 - Under `kisssorcar.github.io/`: `docs/`, `llms.txt`, `.well-known/llms.txt`,
   `llms-full.txt`, `index.html.md`, `robots.txt`, `sitemap.xml`, and
-  `.nojekyll` — the LLM-indexing files described above.
+  `.nojekyll` (the LLM-indexing files described above), plus
+  `privacy.html`.
 - `kisssorcar.github.io/assets/` — images and paper PDFs linked from the
   homepage and `llms.txt`; `kisssorcar.github.io/blog/` — the five blog
   posts listed in `llms.txt` and `sitemap.xml`.

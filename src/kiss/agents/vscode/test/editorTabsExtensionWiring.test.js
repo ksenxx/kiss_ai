@@ -500,6 +500,24 @@ async function runTest() {
     'function',
     'the Task Info view received an onMetaRefresh hook',
   );
+  // The Apps subpanel's connect launch (openChat with autoSubmit)
+  // opens a fresh chat editor panel; other events are ignored.
+  const opensBefore = calls.manager.openChat.length;
+  metaViewInstance.panelHooks.onEvent({kind: 'reveal'});
+  assert.strictEqual(calls.manager.openChat.length, opensBefore);
+  const connect = {
+    kind: 'openChat',
+    pendingText: 'Connect my Slack app',
+    autoSubmit: true,
+  };
+  metaViewInstance.panelHooks.onEvent(connect);
+  assert.deepStrictEqual(
+    calls.manager.openChat.slice(opensBefore),
+    [connect],
+    "the Task Info view's openChat reaches the panel manager",
+  );
+  // Later checks count the history view's opens from zero.
+  calls.manager.openChat.length = opensBefore;
   const refreshBefore = calls.manager.refreshActiveTaskUpdate;
   metaViewInstance.onMetaRefresh();
   assert.strictEqual(

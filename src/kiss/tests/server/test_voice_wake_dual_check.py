@@ -169,6 +169,32 @@ class TestSplitWakePrefix(unittest.TestCase):
         confirmed, _rest = split_wake_prefix("it is so nice outside")
         self.assertFalse(confirmed)
 
+    def test_clipped_onset_may_follow_a_leading_hey(self) -> None:
+        # "Hey Sorcar, what is the weather" with the name merged into
+        # the sentence keeps the spoken "Hey" in front of the onset.
+        self.assertEqual(
+            split_wake_prefix("Hey, so what is the weather like today?"),
+            (True, "what is the weather like today?"),
+        )
+        self.assertEqual(
+            split_wake_prefix("hay sir run the build"),
+            (True, "run the build"),
+        )
+        confirmed, _rest = split_wake_prefix("Hey it is so nice outside")
+        self.assertFalse(confirmed)
+        confirmed, _rest = split_wake_prefix("Hey, what is the weather?")
+        self.assertFalse(confirmed)
+
+    def test_hey_sorcar_prefix_is_cut_whole(self) -> None:
+        self.assertEqual(
+            split_wake_prefix("Hey Sorcar, run the tests."),
+            (True, "run the tests."),
+        )
+        self.assertEqual(
+            split_wake_prefix("Hey, soccer. Open the file."),
+            (True, "Open the file."),
+        )
+
     def test_full_alias_is_preferred_over_a_clipped_onset(self) -> None:
         # "So car" is the whole wake word; cutting only its "So" would
         # leak "car" into the command.
@@ -359,7 +385,7 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         # the end exceeds END_SILENCE_SECONDS so the capture closes.
         cls.wav = _tts_wav(
             tmpdir, "utterance",
-            "[[slnc 1000]] Sorcar [[slnc 1500]] "
+            "[[slnc 1000]] Hey Sorcar [[slnc 1500]] "
             "please open the editor [[slnc 2500]]",
         )
         cls.speech_frames = _wav_frames(
@@ -369,9 +395,9 @@ class TestDualCheckEndToEnd(unittest.TestCase):
         # capture endpoint (2s) and the wake cooldown (2s) expire.
         cls.two_round_wav = _tts_wav(
             tmpdir, "two-rounds",
-            "[[slnc 1000]] Sorcar [[slnc 1500]] "
+            "[[slnc 1000]] Hey Sorcar [[slnc 1500]] "
             "please open the editor [[slnc 4000]] "
-            "Sorcar [[slnc 1500]] "
+            "Hey Sorcar [[slnc 1500]] "
             "please open the editor [[slnc 2500]]",
         )
 

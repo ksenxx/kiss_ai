@@ -11,8 +11,8 @@ F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the tab
     race the checkout.  The discard itself is never skipped: an empty
     worktree changes no files and the checkout is a no-op onto the
     branch the tree is already on.
-F13 ``diff_merge._scan_files`` must enforce its ``_SCAN_FILES_CAP`` entry
-    cap for directory entries too, not only in the files loop.
+F13 ``file_index.FileIndex.scan`` must enforce its ``_SCAN_FILES_CAP``
+    entry cap for directory entries too, not only for files.
 F20 the ``vscode_config`` key migration must not import a forged API
     key from a multi-line environment-variable value (line-based
     ``env`` parsing); it must use NUL-separated ``env -0`` records.
@@ -30,10 +30,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server import agent_state
+from kiss.server import agent_state, file_index
 from kiss.server.agent_state import AgentState
-from kiss.server.diff_merge import _SCAN_FILES_CAP, _scan_files
+from kiss.server.file_index import _SCAN_FILES_CAP, FileIndex
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
 
@@ -142,20 +144,29 @@ class _MergingFlagRecordingAgent(WorktreeSorcarAgent):
 
 
 class TestScanFilesCapCoversDirectories:
-    def test_directory_heavy_tree_respects_cap(self, tmp_path: Path) -> None:
-        """A tree dominated by directories is listed in full under the cap."""
+    def test_directory_heavy_tree_respects_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A tree dominated by directories is listed in full under the cap,
+        and truncated to the cap (directory entries included) above it."""
         wd = tmp_path / "ws"
         wd.mkdir()
-        (wd / "only.txt").write_text("x")
+        (wd / "only.py").write_text("x")
         for i in range(5500):
             (wd / f"d{i:04d}").mkdir()
 
-        paths = _scan_files(str(wd))
+        paths = FileIndex.scan(str(wd)).paths
 
         # 5500 directories + 1 file exceed the old 5000 cap; with the cap at
         # _SCAN_FILES_CAP (1,000,000) every entry is returned.
         assert len(paths) == 5501
         assert len(paths) <= _SCAN_FILES_CAP
+
+        monkeypatch.setattr(file_index, "_SCAN_FILES_CAP", 100)
+        capped = FileIndex.scan(str(wd)).paths
+        assert len(capped) == 100
+        assert capped[0] == "only.py"
+        assert all(p.endswith("/") for p in capped[1:]), "directory entries count towards the cap"
 
     def test_small_tree_lists_files_and_dirs(self, tmp_path: Path) -> None:
         wd = tmp_path / "ws"
@@ -163,7 +174,7 @@ class TestScanFilesCapCoversDirectories:
         (wd / "f.txt").write_text("x")
         (wd / "sub" / "g.txt").write_text("x")
 
-        paths = _scan_files(str(wd))
+        paths = FileIndex.scan(str(wd)).paths
 
         assert "f.txt" in paths
         assert "sub/" in paths

@@ -215,10 +215,13 @@ def _have_vosk() -> bool:
 
 
 def _say_sorcar_pcm(directory: Path) -> bytes:
-    """Synthesize one spoken "Sorcar" as raw 16kHz mono s16le PCM."""
+    """Synthesize one spoken "Hey Sorcar" as raw 16kHz mono s16le PCM.
+
+    The wake phrase is "Hey Sorcar"; a bare "Sorcar" never wakes.
+    """
     aiff = directory / "sorcar.aiff"
     wav = directory / "sorcar.wav"
-    subprocess.run(["say", "Sorcar", "-o", str(aiff)], check=True)
+    subprocess.run(["say", "Hey Sorcar", "-o", str(aiff)], check=True)
     subprocess.run(
         ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
          str(aiff), str(wav)],
@@ -235,11 +238,11 @@ def _say_sorcar_pcm(directory: Path) -> bytes:
 def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
     """The suppressed-match path (now calling ``Reset()``) end to end.
 
-    A second "Sorcar" spoken inside the cooldown must (a) be
+    A second "Hey Sorcar" spoken inside the cooldown must (a) be
     suppressed, (b) leave no stale recognizer state that fires a
     phantom WAKE out of the following silence once the cooldown
-    expires, and (c) not deafen the detector — a third "Sorcar" spoken
-    well after the cooldown must still fire.
+    expires, and (c) not deafen the detector — a third "Hey Sorcar"
+    spoken well after the cooldown must still fire.
 
     Note: with the alias grammar in this environment Vosk emits empty
     *partial* results (matches arrive only as endpointed FINAL

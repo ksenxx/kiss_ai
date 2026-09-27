@@ -192,7 +192,7 @@ import {
   provisionalDefaultModel,
   resolveDefaultModel,
 } from './DependencyInstaller';
-import {buildChatHtml, readSampleTasks} from './SorcarTab';
+import {buildChatHtml, clearTipsOptOut, recordTipsOptOut} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
@@ -251,6 +251,8 @@ export type PanelEvent =
       title?: string;
       // Fresh chats: composer draft to seed the new panel's textarea.
       pendingText?: string;
+      // Fresh chats: submit pendingText as the first task once ready.
+      autoSubmit?: boolean;
     }
   // Close this panel. retire=true means the USER closed the root chat
   // inside the panel, so the host must also retire the tab from the
@@ -348,10 +350,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getMyModels: [],
   saveMyModel: ['name', 'endpoint', 'apiKey', 'headers', 'originalName'],
   deleteMyModel: ['name'],
-  // The Inject promptlet panel's Add button: the daemon owns
-  // ~/.kiss/MY_INJECTION.md and answers with an unstamped `tricksData`
-  // list that every window's panel repaints from.
+  // The Inject promptlet panel's Add button and per-row delete and edit
+  // buttons: the daemon owns ~/.kiss/MY_INJECTION.md and answers with an
+  // unstamped `tricksData` list that every window's panel repaints from.
   addTrick: ['text'],
+  deleteTrick: ['text'],
+  editTrick: ['text', 'newText'],
   // The daemon builds and writes the shared chat page for both the
   // extension and the remote webapp, so the webview's serialized
   // transcript travels through whole; the daemon answers with a
@@ -378,6 +382,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // agent when due (or when `refresh` is set) and answers with a
   // direct `taskUpdate` that the client-listener relay passes back.
   getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
+  // The right sidebar's Schedule / Apps / Spend subpanels; the direct
+  // `cronJobs` / `appsStatus` / `spendReport` replies come back through
+  // the client relay.
+  getCronJobs: [],
+  getAppsStatus: ['refresh'],
+  getSpendReport: [],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings
@@ -472,6 +482,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
   private _webviewReady: boolean = false;
+  // A prompt to submit as soon as the webview is ready (see
+  // submitWhenReady); '' when none is waiting.
+  private _pendingSubmit = '';
 
   private _voiceWake: VoiceWakeService | undefined;
   private _voiceSensitivity: number | undefined;
@@ -1268,13 +1281,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendWelcomeSuggestions(): void {
-    this._sendToWebview({
-      type: 'welcome_suggestions',
-      suggestions: readSampleTasks(this._extensionUri.fsPath),
-    } as ToWebviewMessage);
-  }
-
   private _sendRemoteUrl(): void {
     const urlFile = path.join(kissHomeDir(), 'remote-url.json');
     this._tryReadAndSendUrl(urlFile);
@@ -1473,7 +1479,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'daemonStatus',
           connected: this._daemonConnected,
         });
-        this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
         this._watchConfigFile();
         // The Task Info view (meta-panel-mode): a metaState relayed
@@ -1486,12 +1491,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // replies (models / input history / config), merges any legacy
         // restoredTabs into an empty registry, answers with the
         // canonical `tabs_state` snapshot, and replays every
-        // chat-bound tab's transcript.
+        // chat-bound tab's transcript to this connection (only the
+        // `singleTabId` one for an editor-tab panel).
         this._getApi().forward({
           type: 'ready',
           tabId: message.tabId,
           restoredTabs: message.restoredTabs,
+          singleTabId: message.singleTabId,
         } as AgentCommand);
+        if (this._pendingSubmit) {
+          this._sendToWebview({
+            type: 'insertAndSubmit',
+            text: this._pendingSubmit,
+          });
+          this._pendingSubmit = '';
+        }
         break;
       }
 
@@ -1635,8 +1649,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'getWelcomeSuggestions':
-        this._sendWelcomeSuggestions();
+      case 'getWelcomeInfo':
         this._sendRemoteUrl();
         break;
 
@@ -1858,6 +1871,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getApi().serverReset();
         break;
 
+      case 'tipsOptOut':
+        if (message.optOut === false) {
+          clearTipsOptOut();
+        } else {
+          recordTipsOptOut();
+        }
+        break;
+
       case 'notificationAction':
         resolveWebviewNotificationAction(message.id, message.action);
         break;
@@ -1906,6 +1927,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           taskId: message.taskId,
           title: message.title,
           pendingText: message.pendingText,
+          autoSubmit: message.autoSubmit,
         });
         break;
 
@@ -2194,6 +2216,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       `KISS_HOME='${escKissHome}' bash '${escScript}' --non-interactive`,
     ].join('; ');
     this._openUpdateTerminal(path.dirname(scriptPath), preflight);
+  }
+
+  /**
+   * Submit *prompt* as a task in this webview's chat once the webview
+   * is ready, however long its first load takes: posted now when it is
+   * ready, otherwise held and posted once on its `ready`.  Unlike
+   * submitTask there is no timeout fallback, which would start a run
+   * without this panel's tab id (a run the daemon drops).
+   *
+   * @param prompt The task text; blank text is ignored.
+   */
+  public submitWhenReady(prompt: string): void {
+    const text = prompt.trim();
+    if (!text) return;
+    if (this._webviewReady) {
+      this._sendToWebview({type: 'insertAndSubmit', text});
+    } else {
+      this._pendingSubmit = text;
+    }
   }
 
   public async submitTask(prompt: string): Promise<void> {

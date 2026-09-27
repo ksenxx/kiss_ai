@@ -59,13 +59,13 @@ from kiss.agents.sorcar.task_classifier import (
     _structured_output_config,
     cached_classification,
     classification_enabled,
-    classification_will_call_model,
     classify_task,
     clear_classification_cache,
     remember_classification,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE
+from kiss.server.json_printer import JsonPrinter
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -404,43 +404,6 @@ def test_cache_persists_across_process_state_reset(
     )
     assert again.steps == 0
     assert len(endpoint.requests) == 1
-
-
-def test_classification_will_call_model_mirrors_the_gates(
-    env: IsolatedKissHome, endpoint: _CountingClassifierEndpoint,
-) -> None:
-    """The overlap hint is true exactly when a round trip is imminent."""
-    config = endpoint.model_config
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is True
-    # Disabled by override, env kill switch, or config.
-    assert classification_will_call_model(
-        "fresh", STANDIN_MODEL, config, enabled_override=False,
-    ) is False
-    os.environ[_DISABLE_ENV] = "1"
-    try:
-        assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    finally:
-        os.environ[_DISABLE_ENV] = "0"
-    env.write_config(classify_tasks=False)
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    assert classification_will_call_model(
-        "fresh", STANDIN_MODEL, config, enabled_override=True,
-    ) is True
-    env.write_config(classify_tasks=True)
-    # Run-to-completion CLI models are never classified.
-    assert classification_will_call_model("fresh", "cc/opus", config) is False
-    assert classification_will_call_model("fresh", "codex/default", config) is False
-    # A memoised verdict needs no call; truncation is applied before
-    # the lookup, so an over-long prompt keys the same as its prefix.
-    classify_task(task="fresh", model_name=STANDIN_MODEL, model_config=config)
-    assert classification_will_call_model("fresh", STANDIN_MODEL, config) is False
-    huge = "x" * 30_000
-    classify_task(task=huge, model_name=STANDIN_MODEL, model_config=config)
-    assert classification_will_call_model(huge, STANDIN_MODEL, config) is False
-    assert classification_will_call_model(
-        huge[:20_000] + "y" * 10_000, STANDIN_MODEL, config,
-    ) is False
-    assert len(endpoint.requests) == 2
 
 
 def test_unparseable_verdict_is_not_cached_and_falls_back(
@@ -979,6 +942,87 @@ def test_fold_classifier_usage_banks_and_resets(
     # Folding again is a no-op: the counters were reset.
     agent._fold_classifier_usage()
     assert agent.budget_used == pytest.approx(0.25)
+
+
+class _CapturePrinter(JsonPrinter):
+    """A real ``JsonPrinter`` whose broadcast events are collected."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+
+    def broadcast(self, event: dict) -> None:  # type: ignore[override]
+        self.events.append(dict(event))
+
+
+def _run_with_preloaded_classifier_spend(
+    env: IsolatedKissHome, printer: _CapturePrinter,
+) -> tuple[SorcarAgent, BaseException | None]:
+    """Run a zero-session ``SorcarAgent`` whose classifier already spent $0.25.
+
+    Returns:
+        The agent and the exception its run raised, if any.
+    """
+    agent = SorcarAgent("clf-fold-event")
+    agent._classification_attempted = True
+    agent._task_classification = TaskClassification(True, False)
+    agent._classifier_spend = _ClassifierSpend("classifier:e", 0.25, 123, 2)
+    raised: BaseException | None = None
+    try:
+        agent.run(
+            model_name=MODEL,
+            prompt_template="noop",
+            max_sub_sessions=0,
+            max_budget=5.0,
+            append_basic_tools=False,
+            use_memory=False,
+            web_tools=False,
+            work_dir=str(env.repo),
+            printer=printer,
+            verbose=False,
+        )
+    except BaseException as e:  # noqa: BLE001 – the outcome is under test
+        raised = e
+    return agent, raised
+
+
+def test_fold_emits_the_cumulative_cost_for_the_ui(
+    env: IsolatedKissHome,
+) -> None:
+    """The fold runs after the run's last event, so the run must publish
+    the new total: the UI's "Cost:" otherwise omits the classifier's
+    spend while the persisted task cost includes it."""
+    printer = _CapturePrinter()
+    agent, _raised = _run_with_preloaded_classifier_spend(env, printer)
+    event = printer.events[-1]
+    assert event["type"] == "usage_info"
+    assert event["cost"] == "$0.2500"
+    assert event["total_tokens"] == 123
+    assert event["total_steps"] == 2
+    assert "Budget: $0.2500/$5.00" in event["text"]
+    assert agent.usage_snapshot() == (0.25, 123, 2)
+
+
+def test_stopped_run_still_cleans_up_before_the_fold_event(
+    env: IsolatedKissHome,
+) -> None:
+    """Printing raises the task's stop when it is set; the run's cleanup
+    must already be done by then and the spend must stay banked."""
+    printer = _CapturePrinter()
+    printer._thread_local.stop_event = threading.Event()
+    printer._thread_local.stop_event.set()
+    agent, raised = _run_with_preloaded_classifier_spend(env, printer)
+    assert isinstance(raised, KeyboardInterrupt)
+    assert agent.usage_snapshot() == (0.25, 123, 2)
+    assert agent._classification_attempted is False
+    assert agent.pre_step_hook is None
+    assert agent._ask_user_question_callback is None
+
+
+def test_zero_classifier_spend_emits_no_extra_event(env: IsolatedKissHome) -> None:
+    agent = SorcarAgent("clf-fold-zero")
+    agent._classifier_spend = _ClassifierSpend("classifier:z", 0.0, 0, 0)
+    assert agent._fold_classifier_usage() is False
 
 
 # ---------------------------------------------------------------------------

@@ -2113,7 +2113,7 @@
             </tr>
             <tr>
               <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 43 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace</td>
+              <td class="kiss"><span class="yes">✓</span> 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace</td>
               <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
               <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
             </tr>
@@ -2141,7 +2141,7 @@
   <section id="prompts" class="section-card">
     <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your own tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -2733,7 +2733,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <section id="agents" class="section-card">
     <span class="num">§ 09 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar includes <strong>43 third-party agents</strong> that act on messaging services, mailboxes, devices, and web services on your behalf &mdash; <strong>32 messaging-channel agents</strong> and <strong>9 service agents</strong> &mdash; plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) that serves Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. Channels also work inbound: a recurring gateway tick turns a messaging channel into a prompt surface of its own, with thread continuity, sender allow-lists, and an optional pairing handshake. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
+    <p class="sub">KISS Sorcar includes <strong>44 third-party agents</strong> that act on messaging services, mailboxes, devices, and web services on your behalf &mdash; <strong>32 messaging-channel agents</strong> and <strong>10 service agents</strong> &mdash; plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) that serves Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. Channels also work inbound: a recurring gateway tick turns a messaging channel into a prompt surface of its own, with thread continuity, sender allow-lists, and an optional pairing handshake. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
     <div class="section-body">
       <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
         <h3>32 messaging-channel agents</h3>
@@ -2773,7 +2773,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
         </div>
       </div>
       <div class="inner-card" style="--i:1;margin-bottom:1.1rem;">
-        <h3>9 service agents</h3>
+        <h3>10 service agents</h3>
         <p>Authenticated API tools for productivity and data services, each with its own CLI entry point:</p>
         <div class="chip-cloud" style="margin-top:0.7rem;">
           <span class="chip">Brave Search (<code>kiss-brave</code>)</span>
@@ -2784,6 +2784,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
           <span class="chip">Google Drive (<code>kiss-gdrive</code>)</span>
           <span class="chip">Google Sheets (<code>kiss-gsheets</code>)</span>
           <span class="chip">Notion (<code>kiss-notion</code>)</span>
+          <span class="chip">Overleaf (<code>kiss-overleaf</code>)</span>
           <span class="chip">PostgreSQL (<code>kiss-postgres</code>)</span>
         </div>
       </div>
@@ -2925,7 +2926,8 @@ At each step, keep track of the best prompt, which has the maximum number of suc
       <a href="assets/writing_paper.pdf">Writing paper</a> &middot;
       <a href="https://arxiv.org/abs/2604.23822">arXiv</a> &middot;
       <a href="docs/index.md">Docs</a> &middot;
-      <a href="llms.txt">llms.txt</a>
+      <a href="llms.txt">llms.txt</a> &middot;
+      <a href="privacy.html">Privacy</a>
     </p>
     <p style="margin-top:0.4rem;">Named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>, the legendary Bengali magician.</p>
   </footer>

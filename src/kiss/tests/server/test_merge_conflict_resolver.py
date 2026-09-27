@@ -60,9 +60,13 @@ RESOLVED = "a\nB-both\nc\n"
 def _usage_rows() -> list[dict[str, Any]]:
     """Return every ``task_history`` row of the isolated DB with its usage."""
     cursor = persistence._get_db().execute(
-        "SELECT id, parent_task_id, task, tokens, cost, steps FROM task_history"
+        "SELECT id, parent_task_id, task, tokens, cost, steps, is_side_channel "
+        "FROM task_history"
     )
-    keys = ("id", "parent_task_id", "task", "tokens", "cost", "steps")
+    keys = (
+        "id", "parent_task_id", "task", "tokens", "cost", "steps",
+        "is_side_channel",
+    )
     return [dict(zip(keys, row, strict=True)) for row in cursor.fetchall()]
 
 
@@ -531,7 +535,14 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
         ]
         assert usage_events, self.printer.events_of_type("usage_info")
         assert usage_events[-1]["total_steps"] == task_row["steps"]
-        assert any(
-            e.get("type") == "new_tab" and e.get("task_id") == merge_row["id"]
-            for e in self.printer.captured
-        )
+        (merge_new_tab,) = [
+            e for e in self.printer.captured
+            if e.get("type") == "new_tab" and e.get("task_id") == merge_row["id"]
+        ]
+        # The resolver hangs off the tab the webviews show its parent
+        # under, and is a side channel: the daemon replays the finished
+        # child as ``subagentDone`` instead of re-opening its tab on
+        # every reconnect (no fan-out panel of the parent owns it).
+        assert merge_new_tab["parent_tab_id"] == "e2e-tab"
+        assert merge_row["is_side_channel"] == 1
+        assert task_row["is_side_channel"] == 0

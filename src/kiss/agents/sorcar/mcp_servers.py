@@ -35,10 +35,10 @@ Implements MCP server management with Claude Code compatibility:
 
 * **OAuth** — remote (``http``/``sse``) servers authenticate through
   the MCP SDK's OAuth 2.1 provider using tokens persisted per server
-  under ``~/.kiss/mcp_auth/`` by :class:`FileTokenStorage`.  Agent runs
-  reuse and refresh those tokens; there is deliberately no interactive
-  browser login (it would block a run on a human), so a server that
-  needs one fails with a hint to provision its tokens by hand.
+  under ``~/.kiss/mcp_auth/`` by :class:`FileTokenStorage`.  The user
+  signs in once through :mod:`kiss.agents.sorcar.mcp_oauth` (the
+  ``connect_mcp_server`` tool); agent runs then reuse and refresh those
+  tokens without ever blocking on a browser.
 
 Connections are kept alive for the life of the process by a single
 :class:`MCPManager` running an asyncio loop on a daemon thread; each
@@ -68,7 +68,6 @@ from typing import Any
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 from kiss.agents.sorcar.useful_tools import _file_lock
-from kiss.core.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -429,32 +428,77 @@ class FileTokenStorage:
             raise
 
     async def get_tokens(self) -> Any:
-        """Return the stored :class:`~mcp.shared.auth.OAuthToken`, if any."""
+        """Return the stored :class:`~mcp.shared.auth.OAuthToken`, if any.
+
+        The SDK treats a loaded token as valid until a request fails, so
+        an access token past its stored ``expires_at`` is handed back
+        with an empty ``access_token``: the provider then refreshes it
+        (when a refresh token exists) instead of sending a dead token
+        and falling into a full browser sign-in.
+        """
         from mcp.shared.auth import OAuthToken
 
-        raw = self._read().get("tokens")
+        data = self._read()
+        raw = data.get("tokens")
         if not raw:
             return None
         try:
-            return OAuthToken.model_validate(raw)
+            token = OAuthToken.model_validate(raw)
         except Exception:
             logger.debug("invalid stored tokens in %s", self.path, exc_info=True)
             return None
+        expires_at = data.get("expires_at")
+        if isinstance(expires_at, (int, float)) and time.time() >= expires_at - 60:
+            token.access_token = ""
+        return token
+
+    def get_oauth_metadata(self) -> Any:
+        """Return the authorization server metadata saved at sign-in, if any."""
+        from mcp.shared.auth import OAuthMetadata
+
+        raw = self._read().get("oauth_metadata")
+        if not raw:
+            return None
+        try:
+            return OAuthMetadata.model_validate(raw)
+        except Exception:
+            logger.debug("invalid oauth metadata in %s", self.path, exc_info=True)
+            return None
+
+    def set_oauth_metadata(self, metadata: Any) -> None:
+        """Persist the authorization server metadata discovered at sign-in.
+
+        The runtime provider seeds itself with it so a refresh goes to
+        the real token endpoint even when the authorization server is
+        not the MCP server itself.
+
+        Args:
+            metadata: An :class:`~mcp.shared.auth.OAuthMetadata`.
+        """
+        self._locked_update("oauth_metadata", metadata.model_dump(mode="json", exclude_none=True))
 
     def _locked_update(self, key: str, value: Any) -> None:
         """Replace *key* in the stored JSON under the inter-process lock.
 
         Args:
             key: Top-level key to set (``"tokens"``/``"client_info"``).
-            value: Its already-serialized JSON value.
+            value: Its already-serialized JSON value, or ``None`` to forget it.
         """
         with _file_lock(self._lock_path):
             data = self._read()
             data[key] = value
+            if key == "tokens":
+                expires_in = (value or {}).get("expires_in")
+                data["expires_at"] = (
+                    time.time() + expires_in if isinstance(expires_in, (int, float)) else None
+                )
             self._write(data)
 
     async def set_tokens(self, tokens: Any) -> None:
         """Persist *tokens* (an :class:`~mcp.shared.auth.OAuthToken`).
+
+        ``expires_at`` (absolute, seconds) is recorded next to them so
+        :meth:`get_tokens` can tell an expired access token apart.
 
         The read-modify-write runs on a worker thread: it blocks on an
         inter-process lock that another kiss process can hold for
@@ -508,31 +552,32 @@ class FileTokenStorage:
             return False
 
 
+_LOGIN_HINT = (
+    "MCP server requires an OAuth sign-in; ask the agent to call "
+    "connect_mcp_server(<name>) (or run `python -m "
+    "kiss.agents.sorcar.mcp_oauth <name>`) first."
+)
+
+
 async def _noninteractive_redirect(url: str) -> None:
     """Refuse to start a browser OAuth flow during an agent run."""
-    raise RuntimeError(
-        "MCP server requires interactive OAuth login; provision its "
-        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
-        "authenticates via --header) first."
-    )
+    raise RuntimeError(_LOGIN_HINT)
 
 
 async def _noninteractive_callback() -> tuple[str, str | None]:
     """Refuse to wait for an OAuth callback during an agent run."""
-    raise RuntimeError(
-        "MCP server requires interactive OAuth login; provision its "
-        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
-        "authenticates via --header) first."
-    )
+    raise RuntimeError(_LOGIN_HINT)
 
 
 def build_oauth_provider(cfg: MCPServerConfig) -> Any:
     """Build the OAuth provider used to authenticate to a remote server.
 
-    The provider refreshes and reuses the tokens stored by
-    :class:`FileTokenStorage`.  It never starts an interactive login:
+    The provider reuses the tokens stored by :class:`FileTokenStorage`
+    and refreshes them at the token endpoint recorded at sign-in.  It
+    never starts an interactive login:
     an agent run must not block waiting for a human at a browser, so
-    both handlers refuse and point at manual token provisioning.
+    both handlers refuse and point at the sign-in tool
+    (:mod:`kiss.agents.sorcar.mcp_oauth`).
 
     Args:
         cfg: The remote server configuration.
@@ -541,22 +586,19 @@ def build_oauth_provider(cfg: MCPServerConfig) -> Any:
         An ``httpx.Auth`` instance (``OAuthClientProvider``).
     """
     from mcp.client.auth import OAuthClientProvider
-    from mcp.shared.auth import OAuthClientMetadata
 
-    metadata = OAuthClientMetadata.model_validate({
-        "client_name": PRODUCT_NAME,
-        "redirect_uris": ["http://localhost:0/callback"],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "client_secret_post",
-    })
-    return OAuthClientProvider(
+    from kiss.agents.sorcar.mcp_oauth import client_metadata
+
+    storage = FileTokenStorage(cfg.name)
+    provider = OAuthClientProvider(
         server_url=cfg.url,
-        client_metadata=metadata,
-        storage=FileTokenStorage(cfg.name),
+        client_metadata=client_metadata(),
+        storage=storage,
         redirect_handler=_noninteractive_redirect,
         callback_handler=_noninteractive_callback,
     )
+    provider.context.oauth_metadata = storage.get_oauth_metadata()
+    return provider
 
 
 @dataclass
@@ -675,6 +717,25 @@ async def _park_until_stopped(
             await asyncio.wait_for(session.send_ping(), timeout=health_interval)
 
 
+def describe_exception(exc: BaseException) -> str:
+    """Flatten an exception (or nested exception group) into one line.
+
+    anyio task groups wrap transport failures in ``ExceptionGroup``s, whose
+    own message ("unhandled errors in a TaskGroup") hides the real cause,
+    such as the OAuth sign-in hint.
+
+    Args:
+        exc: The exception to describe.
+
+    Returns:
+        ``"Type: message"`` for each leaf exception, joined by ``"; "``.
+    """
+    inner = getattr(exc, "exceptions", None)
+    if inner:
+        return "; ".join(describe_exception(e) for e in inner)
+    return f"{type(exc).__name__}: {exc}"
+
+
 async def _maintain_connection(
     conn: _Connection, auth: Any, health_interval: float = HEALTH_INTERVAL,
 ) -> None:
@@ -704,7 +765,7 @@ async def _maintain_connection(
             conn.ready.set()
             await _park_until_stopped(conn, session, health_interval)
     except BaseException as exc:
-        conn.error = f"{type(exc).__name__}: {exc}"
+        conn.error = describe_exception(exc)
         logger.debug("MCP connection %s failed", conn.config.name, exc_info=True)
     finally:
         conn.session = None
@@ -1266,6 +1327,7 @@ _RESERVED_TOOL_NAMES = frozenset({
     "skill", "ask_user_question", "talk", "set_model", "decide",
     "run_parallel", "number_of_cores", "summary",
     "cron_job", "run_agent",
+    "connect_mcp_server", "finish_mcp_server_connect",
 })
 
 

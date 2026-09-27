@@ -181,9 +181,27 @@ class TestAgentBillsReportedCost:
         """Under BYOK the upstream bills the user directly; both parts are spend."""
         agent = _run_agent(
             _OPENROUTER_MODEL,
-            {"cost": 0.0001, "cost_details": {"upstream_inference_cost": 0.002}},
+            {
+                "cost": 0.0001,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": 0.002},
+            },
         )
         assert agent.budget_used == pytest.approx(0.0021)
+
+    def test_non_byok_upstream_cost_is_not_added_again(self) -> None:
+        """Without BYOK the upstream charge is inside ``cost``: live
+        OpenRouter responses report ``upstream_inference_cost == cost``
+        with ``is_byok`` false, so adding them would bill the call twice."""
+        agent = _run_agent(
+            _OPENROUTER_MODEL,
+            {
+                "cost": 0.00042,
+                "is_byok": False,
+                "cost_details": {"upstream_inference_cost": 0.00042},
+            },
+        )
+        assert agent.budget_used == pytest.approx(0.00042)
 
     def test_missing_cost_field_falls_back_to_the_catalog(self) -> None:
         agent = _run_agent(_OPENROUTER_MODEL, {})
@@ -290,8 +308,11 @@ class TestCostFieldShapes:
         return OpenAICompatibleModel(_OPENROUTER_MODEL, base_url="http://127.0.0.1:9", api_key="k")
 
     def test_dict_response_is_read(self) -> None:
-        response = {"usage": {"cost": 0.5, "cost_details": {"upstream_inference_cost": 0.25}}}
-        assert self._model().extract_cost_from_response(response) == pytest.approx(0.75)
+        usage = {"cost": 0.5, "cost_details": {"upstream_inference_cost": 0.25}}
+        model = self._model()
+        assert model.extract_cost_from_response({"usage": usage}) == pytest.approx(0.5)
+        byok = {"usage": {**usage, "is_byok": True}}
+        assert model.extract_cost_from_response(byok) == pytest.approx(0.75)
 
     def test_non_numeric_cost_is_ignored(self) -> None:
         model = self._model()
@@ -301,7 +322,13 @@ class TestCostFieldShapes:
         assert model.extract_cost_from_response({}) is None
 
     def test_non_numeric_upstream_cost_counts_as_zero(self) -> None:
-        response = {"usage": {"cost": 0.5, "cost_details": {"upstream_inference_cost": "n/a"}}}
+        response = {
+            "usage": {
+                "cost": 0.5,
+                "is_byok": True,
+                "cost_details": {"upstream_inference_cost": "n/a"},
+            }
+        }
         model = self._model()
         assert model.extract_cost_from_response(response) == pytest.approx(0.5)
         assert model.extract_cost_from_response({"usage": {"cost": 0.5}}) == pytest.approx(0.5)

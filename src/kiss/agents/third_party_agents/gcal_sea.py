@@ -4,12 +4,11 @@
 # add your name here
 """Google Calendar Agent — channel agent for the Google Calendar REST API.
 
-Provides authenticated access to Google Calendar via OAuth2 using plain
-REST calls against ``https://www.googleapis.com/calendar/v3`` (endpoint
-paths per https://developers.google.com/calendar/api/v3/reference).
-Credentials are handled by the shared Google Workspace OAuth helpers
-and persisted under
-``~/.kiss/third_party_agents/google_calendar/token.json``.
+Provides access to Google Calendar using plain REST calls against
+``https://www.googleapis.com/calendar/v3`` (endpoint paths per
+https://developers.google.com/calendar/api/v3/reference).  Sign-in and
+every API call go through Composio (see :mod:`._composio_google`), which
+holds the user's Google token.
 
 The Calendar REST API has no inbound message stream, so this adapter is
 outbound-only: ``main`` passes ``make_backend=None`` to ``channel_main``
@@ -33,11 +32,12 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.third_party_agents._composio_google import (
+    ComposioSession,
+    connected_account_id,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    fresh_access_token,
-    google_api_session,
-    google_consent_steps,
-    load_google_credentials,
+    google_auth_prompt,
     make_google_auth_tools,
 )
 
@@ -45,7 +45,6 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
 _SERVICE = "google_calendar"
-_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 _EVENT_FIELDS = (
     "id",
@@ -115,38 +114,27 @@ def _condense_event(event: dict[str, Any]) -> dict[str, Any]:
 class GoogleCalendarChannelBackend(ToolMethodBackend):
     """Channel backend for the Google Calendar REST API.
 
-    Talks to the Calendar v3 API over HTTP with an OAuth2 bearer token.
-    Outbound-only: there is no inbound message stream over plain REST.
+    Talks to the Calendar v3 API through Composio's proxy, which signs
+    each request with the user's Google token.  Outbound-only: there is
+    no inbound message stream over plain REST.
     """
 
     def __init__(self) -> None:
-        self._creds: Any = None
-        self._http: Any = google_api_session(_SERVICE)
-        self._token: str = ""
+        self._http: Any = ComposioSession(_SERVICE)
         self._base_url: str = "https://www.googleapis.com/calendar/v3"
         self._connection_info: str = ""
 
     def connect(self) -> bool:
-        """Load stored Google Calendar OAuth2 credentials from disk.
+        """Check that Google Calendar is connected through Composio.
 
         Returns:
-            True if valid credentials were loaded.
+            True if a Composio connection exists.
         """
-        self._creds = load_google_credentials(_SERVICE, _SCOPES)
-        if self._creds is None:
-            self._connection_info = "No Google Calendar credentials found."
+        if not connected_account_id(_SERVICE):
+            self._connection_info = "Google Calendar is not connected."
             return False
-        self._connection_info = "Google Calendar credentials loaded."
+        self._connection_info = "Google Calendar connected through Composio."
         return True
-
-    def _headers(self) -> dict[str, str]:
-        """Return the Authorization header for an API request.
-
-        Returns:
-            Header dict with the bearer token (the direct test override
-            ``_token`` wins over the stored credentials).
-        """
-        return {"Authorization": f"Bearer {self._token or fresh_access_token(self._creds)}"}
 
     def _request(
         self,
@@ -172,7 +160,6 @@ class GoogleCalendarChannelBackend(ToolMethodBackend):
         resp = self._http.request(
             method,
             url,
-            headers=self._headers(),
             params=params,
             json=payload,
             timeout=_TIMEOUT,
@@ -451,42 +438,19 @@ class GoogleCalendarChannelBackend(ToolMethodBackend):
 class GoogleCalendarAgent(BaseChannelAgent):
     """Channel agent with Google Calendar REST API tools."""
 
-    channel_system_prompt = (
-        "\n\n## Google Calendar Authentication\n"
-        "Always call check_google_calendar_auth() first; if it returns ok, report "
-        "that Google Calendar credentials are configured and stop — never start "
-        "an OAuth flow over valid credentials. If credentials.json is missing, call "
-        "start_google_calendar_browser_setup(), which opens Google Cloud Console for "
-        "the user to create an OAuth Desktop-app client; if credentials.json exists, call "
-        "authenticate_google_calendar() directly.\n"
-        + google_consent_steps("google_calendar")
-        + " Finish by verifying with check_google_calendar_auth()."
-    )
+    channel_system_prompt = google_auth_prompt(_SERVICE, "Google Calendar")
 
     def __init__(self) -> None:
         super().__init__("Google Calendar Agent")
         self._backend = GoogleCalendarChannelBackend()
-        self._backend._creds = load_google_credentials(_SERVICE, _SCOPES)
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend has credentials or a direct token."""
-        return bool(self._backend._creds is not None or self._backend._token)
+        """Return True if Google Calendar is connected through Composio."""
+        return bool(connected_account_id(_SERVICE))
 
     def _get_auth_tools(self) -> list:
-        """Return the standard Google OAuth tool set for Calendar."""
-        backend = self._backend
-
-        def on_credentials(creds: Any) -> None:
-            """Wire new (or cleared) OAuth credentials into the backend.
-
-            Args:
-                creds: New credentials, or None after clearing.
-            """
-            backend._creds = creds
-
-        return make_google_auth_tools(
-            self, _SERVICE, "Google Calendar", _SCOPES, on_credentials=on_credentials
-        )
+        """Return the Composio sign-in tool set for Calendar."""
+        return make_google_auth_tools(self, _SERVICE, "Google Calendar", self._backend.connect)
 
 
 def main() -> None:
@@ -508,7 +472,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    Composio connection recorded under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return GoogleCalendarAgent()._get_tools()

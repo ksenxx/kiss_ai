@@ -24,18 +24,21 @@ frontend tab id (set by the VS Code server), so the child's
 But a NESTED parent (a sub-agent that calls ``run_parallel``) carries
 the BACKEND synthetic tab id ``task-{grandparent_task_id}__sub_{idx}``
 — while its frontend viewer tab was created by
-``createBackgroundSubagentTab`` with a RANDOM frontend id.  The
-nested children's ``new_tab`` broadcasts would therefore carry a
+``createBackgroundSubagentTab`` under a different id.  The nested
+children's ``new_tab`` broadcasts would therefore carry a
 ``parent_tab_id`` that no frontend tab has, every webview would drop
 them, and no tabs would open.
 
 Fix
 ---
 When the parent is itself a sub-agent (``self._subagent_info is not
-None``), resolve the FRONTEND viewer tab id from the printer's
-subscriber map (``_fanout_targets(self._last_task_id)``) — populated
-when the frontend posted ``resumeSession`` for this sub-agent's tab —
-and use it as ``parent_tab_id``, falling back to the synthetic tab id.
+None``), ``_subagent_parent_tab_id`` derives the FRONTEND tab id every
+webview gave this sub-agent — ``{parent_tab_id}__sub_{task_id}``,
+the ``subagentTabIdFor`` formula of ``media/main.js`` — and uses it as
+``parent_tab_id``.  (An earlier fix looked the viewer up in the
+printer's subscriber map instead, which is empty until a client's
+``resumeSession`` arrives: a sub-agent fanning out right away still
+lost its children's tabs.)
 
 Test harness
 ------------
@@ -43,7 +46,7 @@ The test drives the REAL ``ChatSorcarAgent.run`` (task persistence,
 registry mirroring, ``new_tab`` broadcast, subscriber routing) against
 a printer that faithfully simulates the ``main.js`` webview: it keeps
 a ``tabs[]`` list, applies the exact ``new_tab`` guard, materialises
-background sub-agent tabs with random frontend ids, and posts
+background sub-agent tabs under their deterministic ids, and posts
 ``resumeSession`` (``subscribe_tab``) back to the backend.  Only the
 LLM-driven body (``SorcarAgent.run``) is replaced by a scripted body
 that invokes ``_run_tasks_parallel`` exactly as the ``run_parallel``
@@ -55,7 +58,6 @@ from __future__ import annotations
 import shutil
 import tempfile
 import threading
-import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -76,9 +78,11 @@ class _FrontendSimPrinter(JsonPrinter):
 
     1. Guard: drop the event when ``parent_tab_id`` is set and no local
        tab carries that id.
-    2. ``createBackgroundSubagentTab``: allocate a RANDOM frontend tab
-       id (never the backend's synthetic ``task-...__sub_N`` key) with
-       ``parentTabId`` linking to the parent tab.
+    2. ``createBackgroundSubagentTab`` under ``subagentTabIdFor``: the
+       deterministic frontend tab id ``{parent_tab_id}__sub_{task_id}``
+       (``task`` for a parentless spawn; never the backend's synthetic
+       ``task-...__sub_N`` key) with ``parentTabId`` linking to the
+       parent tab.
     3. ``resumeSession``: the server's ``_cmd_resume_session`` handler
        subscribes the new frontend tab to the task's event stream via
        ``subscribe_tab``.
@@ -113,7 +117,7 @@ class _FrontendSimPrinter(JsonPrinter):
             return
         if ev.get("task_id") is None:
             return
-        frontend_tab_id = "fe-" + uuid.uuid4().hex[:12]
+        frontend_tab_id = f"{parent_tab_id or 'task'}__sub_{ev['task_id']}"
         self.tabs.append(
             {"id": frontend_tab_id, "parentTabId": parent_tab_id},
         )
@@ -266,3 +270,38 @@ class TestNestedRunParallelOpensTabs:
                 f"id (frontend tabs: {frontend_tab_ids!r}); the webview "
                 f"guard drops this event and no tab opens: {ev!r}"
             )
+
+    def test_parent_tab_id_is_derived_until_viewers_say_otherwise(self) -> None:
+        """``_subagent_parent_tab_id`` of a sub-agent: the derived
+        ``{parent_tab_id}__sub_{task_id}`` id before any client has
+        subscribed and while the subscribed viewers agree with it; a
+        viewer under another id (the parent chat was reopened in a new
+        tab, so every webview shows this sub-agent as
+        ``{new_tab}__sub_{task_id}``) wins over the derived id; the
+        sub-agent's own synthetic id is never a candidate."""
+        printer = JsonPrinter()
+        sub = ChatSorcarAgent("nested-tabs-child")
+        sub.printer = printer  # type: ignore[assignment]
+        sub._tab_id = "task-grandparent__sub_0"  # type: ignore[attr-defined]
+        sub._subagent_info = {  # type: ignore[attr-defined]
+            "parent_task_id": "grandparent",
+            "parent_tab_id": ROOT_TAB_ID,
+            "reviewer": False,
+        }
+        task_id, _chat_id = th._add_task("child prompt", chat_id="")
+        with sub._task_id_lock:
+            sub._last_task_id = task_id
+        derived = f"{ROOT_TAB_ID}__sub_{task_id}"
+
+        # No viewer yet (the child fans out immediately).
+        assert sub._subagent_parent_tab_id() == derived
+        # Its own synthetic id is registered too (run_agent dispatches
+        # do that) and a webview subscribed under the derived id.
+        printer.subscribe_tab(task_id, sub._tab_id)
+        printer.subscribe_tab(task_id, derived)
+        assert sub._subagent_parent_tab_id() == derived
+        # The parent chat was reopened under another tab: the webviews
+        # now show this sub-agent as ``reopened-tab__sub_…``.
+        printer.cleanup_tab(derived)
+        printer.subscribe_tab(task_id, f"reopened-tab__sub_{task_id}")
+        assert sub._subagent_parent_tab_id() == f"reopened-tab__sub_{task_id}"

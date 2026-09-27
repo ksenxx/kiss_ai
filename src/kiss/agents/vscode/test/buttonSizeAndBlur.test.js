@@ -9,6 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -42,7 +43,9 @@ function makeWebview() {
   };
 
   const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  style.textContent = inlineDesignTokens(
+    fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'),
+  );
   win.document.head.appendChild(style);
 
   win.__TIPS__ = {tips: [], show: false};
@@ -66,8 +69,14 @@ function cssRule(win, selector) {
   return null;
 }
 
+// VS Code's default --vscode-font-size, the webview's root font size, so
+// a --fs-* token (rem) converts to the px size the user actually sees.
+const ROOT_FONT_PX = 13;
+
 function px(value) {
-  return parseFloat(String(value));
+  const text = String(value);
+  const n = parseFloat(text);
+  return text.endsWith('rem') ? n * ROOT_FONT_PX : n;
 }
 
 function assertAtLeast(actual, min, what) {
@@ -187,8 +196,11 @@ function clickAndAssertBlurred(win, el, what) {
     el,
     what + ' must be focusable in this harness (test setup)',
   );
+  // A pointer click (detail 1).  A keyboard-originated click carries
+  // detail 0 and deliberately keeps focus (see
+  // ui_antipattern_keyboard.test.js), so this contract is mouse-only.
   el.dispatchEvent(
-    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+    new win.MouseEvent('click', {bubbles: true, cancelable: true, detail: 1}),
   );
   assert.notStrictEqual(
     win.document.activeElement,

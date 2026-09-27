@@ -19,8 +19,10 @@ viewer's spinner (and its treatment of follow-up input as
 The window is made deterministic with a real
 :class:`~kiss.tests.server._memory_printer.MemoryPrinter` subclass
 whose ``subscribe_tab`` parks the replay thread on its way INTO the
-subscription — exactly the interleaving in which the task's terminal
-fan-out cannot see the viewer yet.  Everything else is real: a real
+subscription — the interleaving in which the task's terminal fan-out
+could not see the viewer yet.  The attach now resolves the live task
+and subscribes the viewer in one ``_state_lock`` section, so the run's
+end is serialized after the subscription (audit 2026-09-26).  Everything else is real: a real
 ``VSCodeServer``, a run submitted through the real ``_cmd_run``, a
 real worker thread parked in a real agent-script getter, the real
 end-of-run broadcasts.  Releasing the getter makes it raise, so the
@@ -30,11 +32,13 @@ task ends in setup and no LLM is ever invoked.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import textwrap
 import threading
 import time
 from pathlib import Path
+from types import FrameType
 from typing import Any
 from unittest import TestCase
 
@@ -66,11 +70,8 @@ _BLOCKING_SCRIPT = textwrap.dedent(
 class _ParkingPrinter(MemoryPrinter):
     """Real test printer that parks one tab's ``subscribe_tab`` call.
 
-    A second, independent park point holds the replaying thread right
-    AFTER it broadcast a ``task_events`` for a designated tab — i.e.
-    between the transcript replay and ``_finalize_viewer_attach`` —
-    so a task can end (and record its terminal result) inside that
-    window.
+    ``events_parked`` / ``release_events`` drive a second, independent
+    park point (see :func:`_replay_parked_before_finalize`).
     """
 
     def __init__(self) -> None:
@@ -78,11 +79,12 @@ class _ParkingPrinter(MemoryPrinter):
         self.park_tab = ""
         self.parked = threading.Event()
         self.release = threading.Event()
-        self.park_after_events_tab = ""
         self.events_parked = threading.Event()
         self.release_events = threading.Event()
 
-    def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
+    def subscribe_tab(
+        self, task_id: Any, tab_id: str,
+    ) -> list[dict[str, Any]] | None:
         """Park the designated tab's FIRST subscription, then delegate.
 
         Parking BEFORE the delegation keeps the viewer out of the
@@ -93,20 +95,36 @@ class _ParkingPrinter(MemoryPrinter):
             self.parked.set()
             if not self.release.wait(timeout=30):
                 raise TimeoutError("parked too long in subscribe_tab")
-        super().subscribe_tab(task_id, tab_id)
+        return super().subscribe_tab(task_id, tab_id)
 
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Delegate, then park after the designated ``task_events``."""
-        super().broadcast(event)
+
+def _replay_parked_before_finalize(
+    server: VSCodeServer, chat_id: str, tab_id: str,
+) -> None:
+    """Replay *chat_id* into *tab_id*, parking before the finalize step.
+
+    The park point holds the replaying thread AFTER it broadcast the
+    tab's ``task_events`` (and released the printer's
+    ``delivery_lock``) but before ``_finalize_viewer_attach`` — so a
+    task can end (and record its terminal result) inside that window.
+    """
+    printer = server.printer
+    assert isinstance(printer, _ParkingPrinter)
+
+    def hook(frame: FrameType, event: str, arg: Any) -> None:
         if (
-            self.park_after_events_tab
-            and event.get("type") == "task_events"
-            and event.get("tabId") == self.park_after_events_tab
-            and not self.events_parked.is_set()
+            frame.f_code.co_name == "_finalize_viewer_attach"
+            and not printer.events_parked.is_set()
         ):
-            self.events_parked.set()
-            if not self.release_events.wait(timeout=30):
+            printer.events_parked.set()
+            if not printer.release_events.wait(timeout=30):
                 raise TimeoutError("parked too long after task_events")
+
+    sys.settrace(hook)
+    try:
+        server._replay_session(chat_id, tab_id)
+    finally:
+        sys.settrace(None)
 
 
 class TestReattachStatusEndRace(TestCase):
@@ -191,24 +209,30 @@ class TestReattachStatusEndRace(TestCase):
             "the replay never reached subscribe_tab",
         )
 
-        # The task ends INSIDE the window: its terminal fan-out cannot
-        # see the not-yet-registered viewer.
+        # The task tries to end INSIDE the window.  The attach resolves
+        # the source and subscribes the viewer in one ``_state_lock``
+        # section, so the run's end (which deactivates the state under
+        # that lock before its terminal fan-out) is serialized after
+        # the subscription and its fan-out cannot miss the viewer.
         (self.tmp / "release").write_text("1", encoding="utf-8")
-        self.assertTrue(
-            self._wait(
-                lambda: False in self._statuses(launcher), 30.0,
-            ),
-            "the run never broadcast its terminal status",
+        self.assertFalse(
+            self._wait(lambda: False in self._statuses(launcher), 1.0),
+            "the run ended while the viewer's attach was mid-subscription",
         )
 
         self.printer.release.set()
         replayer.join(timeout=30)
         self.assertFalse(replayer.is_alive())
-
         self.assertIn(
             True,
             self._statuses(viewer),
             "the replay never told the viewer the task was running",
+        )
+        self.assertTrue(
+            self._wait(
+                lambda: False in self._statuses(launcher), 30.0,
+            ),
+            "the run never broadcast its terminal status",
         )
         self.assertTrue(
             self._wait(lambda: self._statuses(viewer)[-1] is False, 5.0),
@@ -220,44 +244,41 @@ class TestReattachStatusEndRace(TestCase):
 
         # The correction must NOT be a bare status boolean: the task's
         # terminal ``result`` (here: the setup failure) must reach the
-        # viewer through the replayed/re-snapshot ``task_events``
-        # BEFORE the corrective ``running=false`` — the early failure
-        # result used to be addressed only to the launcher tab, never
-        # recorded, so the viewer got ``[true, false]`` and an empty
-        # transcript (review Finding 4).
+        # viewer BEFORE the final ``running=false`` (review Finding 4).
+        # The viewer is subscribed before the run can end, so the
+        # result arrives either inside the replayed ``task_events``
+        # (when the snapshot already had it) or as the live copy
+        # fanned out to the viewer after the replay.
         viewer_events = [
             ev
             for ev in list(self.printer.emitted)
             if ev.get("tabId") == viewer
         ]
-        replayed_results = [
-            res
-            for ev in viewer_events
-            if ev.get("type") == "task_events"
-            for res in ev.get("events", [])
-            if res.get("type") == "result"
-        ]
+
+        def results_in(ev: dict[str, Any]) -> list[dict[str, Any]]:
+            if ev.get("type") == "result":
+                return [ev]
+            if ev.get("type") == "task_events":
+                return [r for r in ev.get("events", []) if r.get("type") == "result"]
+            return []
+
+        result_idx = [i for i, ev in enumerate(viewer_events) if results_in(ev)]
         self.assertTrue(
-            replayed_results,
+            result_idx,
             "BUG: the attached viewer never received the task's "
             "terminal result — its transcript ended with only status "
             f"booleans: {[e.get('type') for e in viewer_events]}",
         )
-        self.assertFalse(replayed_results[-1].get("success"))
-        self.assertIn("Task failed", str(replayed_results[-1].get("text", "")))
-        last_result_idx = max(
-            i
-            for i, ev in enumerate(viewer_events)
-            if ev.get("type") == "task_events"
-            and any(r.get("type") == "result" for r in ev.get("events", []))
-        )
+        last_result = results_in(viewer_events[result_idx[-1]])[-1]
+        self.assertFalse(last_result.get("success"))
+        self.assertIn("Task failed", str(last_result.get("text", "")))
         final_false_idx = max(
             i
             for i, ev in enumerate(viewer_events)
             if ev.get("type") == "status" and ev.get("running") is False
         )
         self.assertLess(
-            last_result_idx,
+            result_idx[-1],
             final_false_idx,
             "the terminal result must be delivered BEFORE the "
             "corrective running=false",
@@ -277,10 +298,9 @@ class TestReattachStatusEndRace(TestCase):
         launcher, viewer, chat_id = "snap-launcher", "snap-viewer", "chat-snap"
         self._start_parked_run(launcher, chat_id)
 
-        self.printer.park_after_events_tab = viewer
         replayer = threading.Thread(
-            target=self.server._replay_session,
-            args=(chat_id, viewer),
+            target=_replay_parked_before_finalize,
+            args=(self.server, chat_id, viewer),
             daemon=True,
         )
         replayer.start()

@@ -59,6 +59,13 @@ from kiss.tests.agents.sorcar.local_model_server import (
     tool_call_body,
 )
 from kiss.tests.conftest import posix_only, requires_unix_sockets
+from kiss.tests.server.parallel_agent_harness import (
+    STANDIN_MODEL,
+    CapturePrinter,
+    StandInModelServer,
+    finish_response,
+    tool_call_response,
+)
 
 
 class _ScriptedSea:
@@ -270,6 +277,71 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert f"Task id: {task_id}" in digest
     assert "Task prompt: Parent task prompt" in digest
     assert "(no transcript entries yet)" in digest
+
+
+def test_update_of_a_subagent_hangs_off_the_subagents_webview_tab(
+    tmp_path: Path,
+) -> None:
+    """A task update requested on a running SUB-agent announces itself
+    under the tab every webview shows that sub-agent in.
+
+    The sub-agent's own ``_tab_id`` is the fan-out's synthetic
+    ``task-…__sub_N`` id, which no webview has: a ``new_tab`` carrying
+    it is dropped by every surface (``main.js`` ``case 'new_tab'``) and
+    the update's tab never opens anywhere.  The webviews show the
+    sub-agent as ``{parent_tab_id}__sub_{task_id}``, and that is what
+    the update's ``new_tab`` must carry — before any client has
+    subscribed to the sub-agent's stream.
+    """
+    printer = CapturePrinter()
+    grandparent_id, chat_id = _add_task(
+        "Grandparent prompt", chat_id="",
+        extra={"model": MODEL, "work_dir": str(tmp_path)},
+    )
+    subagent = ChatSorcarAgent("Parallel-child")
+    subagent.work_dir = str(tmp_path)
+    subagent.printer = printer
+    subagent._tab_id = f"task-{grandparent_id}__sub_0"
+    subagent._subagent_info = {
+        "parent_task_id": grandparent_id,
+        "parent_tab_id": "root-tab",
+        "reviewer": False,
+    }
+    sub_task_id, _ = _add_task(
+        "Sub-agent prompt", chat_id=chat_id,
+        extra={
+            "model": MODEL, "work_dir": str(tmp_path),
+            "subagent": subagent._subagent_info,
+        },
+    )
+    subagent.resume_chat_by_id(chat_id)
+    with subagent._task_id_lock:
+        subagent._last_task_id = sub_task_id
+
+    # The child streams (its parent has a printer), so it needs the
+    # streaming-capable stand-in endpoint rather than the scripted one.
+    def respond(request: dict[str, Any]) -> dict[str, Any]:
+        if any(m.get("role") == "tool" for m in request.get("messages", [])):
+            return finish_response("<h4>Working</h4>")
+        return tool_call_response("task_transcript", {"task_id": sub_task_id})
+
+    standin = StandInModelServer(respond)
+    try:
+        subagent.model_name = STANDIN_MODEL
+        subagent.model_config = standin.model_config
+        text, _cost = run_task_update_sea(subagent, sub_task_id)
+    finally:
+        standin.stop()
+
+    assert text == "<h4>Working</h4>"
+    (new_tab,) = printer.events_of_type("new_tab")
+    assert new_tab["parent_tab_id"] == f"root-tab__sub_{sub_task_id}"
+    update_row = next(
+        r for r in _chat_rows(chat_id) if r["parent_task_id"] == sub_task_id
+    )
+    assert update_row["is_side_channel"] == 1
+    (done,) = printer.events_of_type("subagentDone")
+    assert done["tab_id"].startswith(f"task-{sub_task_id}__update-")
 
 
 def test_mark_legacy_updates_as_side_channels_stamps_only_update_children() -> None:

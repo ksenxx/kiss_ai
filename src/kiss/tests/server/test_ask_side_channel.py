@@ -410,12 +410,13 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
         sea_commands.get_command("ask")
     )
     assert kwargs["append_to_prompt"] == (
-        "Read the events of the task task-abc from ~/.kiss/sorcar.db "
-        "and answer the user question above."
+        "The question above is about the task with id task-abc. "
+        "Call task_overview with that task id first, then answer the question."
     )
     assert kwargs["append_to_system_prompt"] == ask_sea.append_to_system_prompt()
-    assert kwargs["append_to_system_prompt"].endswith(
-        "You must answer quickly because the user is waiting."
+    assert kwargs["append_to_system_prompt"].startswith(
+        "**MUST FOLLOW: You MUST NOT USE internet or internet search at any point. "
+        "You must answer quickly because the user is waiting.**"
     )
     assert kwargs["parent_task_id"] == "task-abc"
     assert kwargs["parent_tab_id"] == "tab-1"
