@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
@@ -43,6 +46,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     serve,
     tool_call_body,
 )
+from kiss.tests.server.parallel_agent_harness import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
 _SEAS_DIR = _SEA_PATH.parents[1]
@@ -178,6 +182,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "sea_prompt",
         "patch_sea_prompt",
         "write_autorouter_evidence",
+        "replay_in_clone",
     ]
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
@@ -196,6 +201,27 @@ def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
     assert sea.sea_name_of("cron") == "cron"
     assert sea.sea_name_of("") == ""
     assert sea.sea_name_of(None) == ""
+
+
+def test_editable_dirs_include_the_bundled_channel_seas(checkout: Path) -> None:
+    """A ``third_party_agents`` SEA next to ``seas`` is editable; ``seas`` wins a name clash."""
+    assert sea._editable_dirs() == [checkout]
+    third_party = checkout.parent / "third_party_agents"
+    (third_party / "ask").mkdir(parents=True)
+    (third_party / "ask" / "ask_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
+    (third_party / "demo").mkdir()
+    (third_party / "demo" / "demo_sea.py").write_text(_NOPROMPT_SEA, encoding="utf-8")
+    assert sea._editable_dirs() == [checkout, third_party]
+    assert sea._editable_path("ask") == third_party / "ask" / "ask_sea.py"
+    assert sea._editable_seas()["demo"] == checkout / "demo" / "demo_sea.py"
+    rows = {row["name"]: row for row in json.loads(sea.indexed_seas())}
+    assert rows["ask"]["editable_path"] == str(third_party / "ask" / "ask_sea.py")
+    assert rows["ask"]["prompt_constant"] == "SYSTEM_PROMPT"
+    assert rows["demo"]["editable_path"] == str(checkout / "demo" / "demo_sea.py")
+    assert "ask" in sea._signatures()
+    section = "## Lessons from recent runs (rsi7d)\n- Cite."
+    assert sea.patch_sea_prompt("ask", "", section).startswith("Patched SYSTEM_PROMPT of")
+    assert "- Cite." in (third_party / "ask" / "ask_sea.py").read_text(encoding="utf-8")
 
 
 def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -> None:
@@ -730,6 +756,20 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     assert sea._seas_dir() == _SEAS_DIR
     assert sea._editable_path("sh") == _SEAS_DIR / "sh" / "sh_sea.py"
     assert sea._editable_path("no-such") is None
+    # An old-layout checkout (flat ``seas/rsi7d_sea.py``) is still the editable directory:
+    # a replayed sweep must never fall through to the checkout the SEA was loaded from.
+    old_layout = tmp_path / "src" / "kiss" / "agents" / "seas"
+    old_layout.mkdir(parents=True)
+    (old_layout / "rsi7d_sea.py").write_text("SYSTEM_PROMPT = 'x'\n", encoding="utf-8")
+    assert sea._seas_dir() == old_layout.resolve()
+    assert sea._editable_path("sh") is None
+    init_repo(tmp_path)  # from a sub-directory of a checkout, the checkout's seas dir wins
+    (tmp_path / "docs").mkdir()
+    monkeypatch.chdir(tmp_path / "docs")
+    assert sea._seas_dir() == old_layout.resolve()
+    monkeypatch.chdir(tmp_path)
+    shutil.rmtree(tmp_path / "src")
+    shutil.rmtree(tmp_path / ".git")
     signatures = sea._signatures()
     assert signatures["sh"] == ast.literal_eval(repr(signatures["sh"]))  # plain text
     assert len(signatures["sh"]) == sea.SIGNATURE_CHARS and "review_paper" in signatures
@@ -784,3 +824,184 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert str(patched["content"]).startswith("Patched SYSTEM_PROMPT of")
     demo_prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
     assert demo_prompt.endswith(section + "\n")
+
+
+def _commit(
+    repo: Path, message: str, files: dict[str, str] | None = None, when: int = 0
+) -> str:
+    """Write *files* into *repo*, commit them with *message* (committed at *when*, a unix
+    time, when given) and return the commit sha."""
+    for name, text in (files or {}).items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text, encoding="utf-8")
+    run_git(repo, "add", "-A")
+    env = dict(os.environ, GIT_COMMITTER_DATE=f"@{when} +0000") if when else None
+    subprocess.run(
+        ["git", "commit", "-q", "--allow-empty", "-m", message],
+        cwd=repo, env=env, capture_output=True, check=True,
+    )
+    return run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_prepare_replay_clone_checks_out_the_state_before_the_tasks_auto_commit(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """A file-modifying task is replayed from the first parent of its auto-commit.
+
+    The run's work dir is a sub-directory of a removed worktree of the
+    repository; the commit is found through the ``User prompt:`` block
+    of the commit message (whitespace-insensitively, the whole prompt,
+    made after the task started), repository and worktree paths in the
+    task are rewritten to the clone in one pass although the clone lives
+    inside the repository, and the replay runs in the same sub-directory
+    of the clone.  A second preparation replaces the clone.
+    """
+    repo = tmp_path  # the clone under tmp/rsi7d/replays is inside the repository
+    init_repo(repo)
+    worktree = repo / ".kiss-worktrees" / "kiss_wt-gone"
+    _commit(repo, "seed paper", {"docs/paper.tex": "v1\n"})
+    task = f"Update the paper at {worktree}/docs/paper.tex  with the results\nin {repo}/results.md"
+    start_s = int(time.time()) - 60
+    _commit(repo, f"same task, earlier{USER_PROMPT_HEADING}{task}", when=start_s - 30)
+    _commit(repo, f"other task{USER_PROMPT_HEADING}{task} and publish it")
+    broader = _commit(repo, f"other task{USER_PROMPT_HEADING}{task} Result: provide a table")
+    auto = _commit(
+        repo,
+        f"docs: update the paper{USER_PROMPT_HEADING}{task}\n\nResult:\nUpdated.",
+        {"docs/paper.tex": "v2\n"},
+    )
+    task_id = _persist(task, [], work_dir=str(worktree / "docs"), sea="demo_sea")
+
+    prepared = sea.prepare_replay_clone(task_id)
+    assert isinstance(prepared, dict), prepared
+    clone = Path(prepared["clone"])
+    assert clone == tmp_path / sea.REPLAY_DIR / f"demo-{task_id[:8]}"
+    assert prepared["commit"] == broader  # the earlier and the two broader commits do not match
+    assert prepared["commit_source"] == f"first parent of the task's auto-commit {auto[:12]}"
+    assert run_git(clone, "rev-parse", "HEAD").stdout.strip() == broader
+    assert (clone / "docs" / "paper.tex").read_text(encoding="utf-8") == "v1\n"
+    assert prepared["task"] == (
+        f"Update the paper at {clone}/docs/paper.tex  with the results\nin {clone}/results.md"
+    )
+    assert prepared["work_dir"] == str(clone / "docs")
+    assert prepared["repo"] == str(repo.resolve())
+    assert prepared["sea"] == "demo" and prepared["model"] == "model-a"
+    assert prepared["sea_file"] == str(checkout / "demo" / "demo_sea.py")
+    assert (repo / "docs" / "paper.tex").read_text(encoding="utf-8") == "v2\n"  # untouched
+
+    (clone / "stray.txt").write_text("x", encoding="utf-8")
+    again = sea.prepare_replay_clone(task_id, name="demo")
+    assert isinstance(again, dict) and again["clone"] == str(clone)
+    assert not (clone / "stray.txt").exists()
+
+
+def test_task_tree_resolves_live_dirs_through_git_and_removed_worktrees_by_name(
+    tmp_path: Path,
+) -> None:
+    """An existing directory is its own checkout (nested repos, live worktrees, sub-dirs)."""
+    outer = tmp_path / "outer"
+    init_repo(outer)
+    (outer / "docs").mkdir()
+    inner = outer / "tmp" / "inner"
+    init_repo(inner)
+    run_git(outer, "worktree", "add", "-q", "-b", "wt", ".kiss-worktrees/kiss_wt-live")
+    live = outer / ".kiss-worktrees" / "kiss_wt-live"
+    (live / "docs").mkdir()
+    resolved = outer.resolve()
+    assert sea._task_tree(str(outer)) == (resolved, resolved, Path("."))
+    assert sea._task_tree(str(outer / "docs")) == (resolved, resolved, Path("docs"))
+    assert sea._task_tree(str(inner)) == (inner.resolve(), inner.resolve(), Path("."))
+    assert sea._task_tree(str(live)) == (resolved, live.resolve(), Path("."))
+    assert sea._task_tree(str(live / "docs")) == (resolved, live.resolve(), Path("docs"))
+    nested = live / "tmp" / "nested"
+    init_repo(nested)  # an independent repository under a live worktree is its own tree
+    assert sea._task_tree(str(nested)) == (nested.resolve(), nested.resolve(), Path("."))
+    gone = outer / ".kiss-worktrees" / "kiss_wt-gone"
+    assert sea._task_tree(str(gone / "a" / "b")) == (resolved, gone, Path("a") / "b")
+    assert sea._task_tree(str(tmp_path / "none" / ".kiss-worktrees" / "kiss_wt-x")) is None
+    assert sea._task_tree(str(tmp_path / "missing")) is None
+    assert sea._task_tree("") is None
+
+
+def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """Without an auto-commit the repository HEAD at the task's start is used; bad runs error."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    head = _commit(repo, "second", {"notes.md": "n\n"})
+    future = int(time.time() * 1000) + 10_000
+    task_id = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=future)
+    prepared = sea.prepare_replay_clone(task_id)
+    assert isinstance(prepared, dict), prepared
+    assert prepared["commit"] == head
+    assert prepared["commit_source"] == "HEAD of the repository when the task started"
+    assert prepared["task"] == "Summarize the repo" and prepared["work_dir"] == prepared["clone"]
+
+    legacy = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=0)
+    prepared = sea.prepare_replay_clone(legacy)  # start falls back to the insertion time
+    assert isinstance(prepared, dict) and prepared["commit"] == head
+
+    # The history records a worktree run's work dir as the repository; the task text
+    # still names the worktree, which is rewritten to the clone as well.
+    stripped = _persist(
+        f"Edit {repo}/.kiss-worktrees/kiss_wt-old/docs/paper.tex and {repo}/notes.md",
+        [], work_dir=str(repo), sea="demo_sea", startTs=future,
+    )
+    prepared = sea.prepare_replay_clone(stripped)
+    assert isinstance(prepared, dict), prepared
+    assert prepared["task"] == (
+        f"Edit {prepared['clone']}/docs/paper.tex and {prepared['clone']}/notes.md"
+    )
+
+    rooted = tmp_path / "rooted"
+    rooted.mkdir()
+    run_git(rooted, "init", "-q")
+    run_git(rooted, "config", "user.email", "kiss-test@example.com")
+    run_git(rooted, "config", "user.name", "Kiss Test")
+    root = _commit(rooted, f"first{USER_PROMPT_HEADING}Start the notes", {"notes.md": "n\n"})
+    first = _persist("Start the notes", [], work_dir=str(rooted), sea="demo_sea")
+    prepared = sea.prepare_replay_clone(first)  # a root auto-commit has no parent to go back to
+    assert isinstance(prepared, dict) and prepared["commit"] == root, prepared
+
+    early = _persist("Summarize the repo", [], work_dir=str(repo), sea="demo_sea", startTs=1_000)
+    assert sea.prepare_replay_clone(early) == (
+        f"Error: {repo.resolve()} has no commit from before the task started"
+    )
+    assert sea.prepare_replay_clone("nope") == "Error: unknown task id 'nope'"
+    no_sea = _persist("Plain sub-agent task", [], work_dir=str(repo))
+    assert sea.prepare_replay_clone(no_sea) == (
+        f"Error: run {no_sea} does not record its SEA; pass name=<sea>"
+    )
+    assert sea.prepare_replay_clone(no_sea, name="slack") == (
+        "Error: 'slack' is not an editable SEA of this checkout"
+    )
+    (tmp_path / "plain").mkdir()
+    for work_dir in (str(tmp_path / "plain"), str(tmp_path / "missing"), ""):
+        no_git = _persist("Plain task", [], work_dir=work_dir, sea="demo_sea")
+        assert sea.prepare_replay_clone(no_git) == (
+            f"Error: the run's work dir {work_dir!r} is not inside a git repository, so there "
+            "is nothing to clone; mark the run not replay-verified"
+        )
+    assert sea.replay_in_clone("nope", max_budget=1.0) == "Error: unknown task id 'nope'"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_prepare_replay_clone_reports_a_failed_git_command(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """A git failure while making the clone is reported, not raised."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    task_id = _persist(
+        "Describe the seed", [], work_dir=str(repo), sea="demo_sea",
+        startTs=int(time.time() * 1000) + 10_000,
+    )
+    replays = tmp_path / sea.REPLAY_DIR
+    replays.mkdir(parents=True)
+    replays.chmod(0o555)  # git cannot create the clone directory
+    try:
+        result = sea.prepare_replay_clone(task_id)
+    finally:
+        replays.chmod(0o755)
+    assert isinstance(result, str) and result.startswith("Error: git clone failed:"), result

@@ -85,6 +85,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.useful_tools import rewrite_parent_repo_paths
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
@@ -498,12 +499,49 @@ def _dispatch(
     classify: bool = True,
     options: RunOptions = RunOptions(),
 ) -> str:
+    """Submit an agent-script task to the kiss-web daemon and wait for its YAML result.
+
+    :func:`dispatch_result` with the same arguments, formatted for the
+    calling model: the sub-task's YAML result ("success" and "summary"
+    keys), or the error message.
+    """
+    result = dispatch_result(
+        name, prompt, agent_path, work_dir, model_name, budget, timeout,
+        parent_agent=parent_agent, scope_work_dir=scope_work_dir,
+        git_lifecycle=git_lifecycle, classify=classify, options=options,
+    )
+    if isinstance(result, str):
+        return result
+    summary = result.text or ("" if result.success else "Task failed")
+    return str(yaml.safe_dump(
+        {"success": result.success, "summary": summary}, sort_keys=False,
+    ))
+
+
+def dispatch_result(
+    name: str,
+    prompt: str,
+    agent_path: str,
+    work_dir: str,
+    model_name: str,
+    budget: float | None,
+    timeout: float,
+    parent_agent: Any = None,
+    scope_work_dir: str = "",
+    git_lifecycle: bool = True,
+    classify: bool = True,
+    options: RunOptions = RunOptions(),
+) -> TaskResult | str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
     The shared tail of :func:`_run_agent`'s channel and path modes:
     calls :func:`kiss.server.sorcar.run` with *agent_path* as its
-    *extension_agent_path* and returns
-    the result — or a clean error string — never raising.
+    *extension_agent_path* and returns the daemon's
+    :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
+    carries the sub-task's persisted ``task_id``) — or a clean error
+    string — never raising.  Callers that need the sub-task's id
+    (rsi7d's clone replays) use this; :func:`_dispatch` formats the
+    result for a model.
 
     Args:
         name: Display name of the agent for error messages (the
@@ -564,8 +602,7 @@ def _dispatch(
             *git_lifecycle*), so asking for one is an error.
 
     Returns:
-        The sub-task's YAML result ("success" and "summary" keys), or
-        an error message.
+        The sub-task's :class:`TaskResult`, or an error message.
     """
     if not git_lifecycle and (options.use_worktree or options.auto_commit):
         return (
@@ -694,10 +731,7 @@ def _dispatch(
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
     _attribute_dispatch_usage(parent_agent, result)
-    summary = result.text or ("" if result.success else "Task failed")
-    return str(yaml.safe_dump(
-        {"success": result.success, "summary": summary}, sort_keys=False,
-    ))
+    return result
 
 
 def _run_agent(

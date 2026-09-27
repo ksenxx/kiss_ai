@@ -19,7 +19,8 @@ applies the winners to the SEA's ``SYSTEM_PROMPT`` constant, evaluates
 the change (a real replay of the past task that best exercises the new
 instructions; any run that cost below $500 is eligible) and keeps or
 reverts it.  It also refreshes the observed model evidence the
-autorouter SEA routes on.
+autorouter SEA routes on.  rsi7d is itself one of the indexed SEAs: its
+own finished sweeps are mined and its prompt patched the same way.
 
 The deterministic tools live in this file (a SEA runs under the
 installed kiss package, so it imports no sibling module of the
@@ -55,12 +56,26 @@ Prompt editing
 --------------
 Edits are confined to ``SYSTEM_PROMPT``-style string constants (plain
 literals or f-strings) of SEA files inside the ``src/kiss/agents/seas``
-directory of the task's work dir (the SEA's own directory when the task
-does not run inside a KISS checkout): the gate rejects any candidate
+and ``src/kiss/agents/third_party_agents`` directories of the task's
+work dir (the SEA's own directory when the task does not run inside a
+KISS checkout): the gate rejects any candidate
 whose AST differs outside the constant's text, so code and f-string
 placeholders are never changed.  SEAs registered from other folders
 (channel agents, user folders) are analysed and reported on, never
 edited.
+
+Replays in clones
+-----------------
+A past task that modified files cannot be replayed in the checkout the
+sweep edits.  :func:`replay_in_clone` clones the task's repository
+(resolved from the run's ``work_dir``; a removed worktree path resolves
+to its parent repository) at the commit the task started from — the
+first parent of the task's auto-commit, found through the ``User
+prompt:`` block auto-commits carry, else the repository ``HEAD`` at the
+task's start time — into ``tmp/rsi7d/replays/<sea>-<id>``, rewrites
+repository paths in the task text to the clone and dispatches this
+checkout's SEA file (patched prompt included) there without a worktree
+or auto-commit.  The replay's task id comes back for ``run_findings``.
 """
 
 from __future__ import annotations
@@ -68,15 +83,22 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shutil
 import statistics
 import string
+import subprocess
 import textwrap
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from kiss.agents.sorcar import persistence, sea_commands, task_digest
+from kiss.agents.sorcar import agent_dispatch, persistence, sea_commands, task_digest
+from kiss.agents.sorcar.git_worktree import (
+    TASK_RESULT_HEADING,
+    USER_PROMPT_HEADING,
+    strip_worktree_suffix,
+)
 from kiss.server.agent_state import current_agent
 from kiss.server.tools_file import execute_python_file
 
@@ -92,6 +114,8 @@ EVIDENCE_END = "<!-- /rsi7d:model-evidence -->"
 """Markers delimiting the observed-model-evidence block in the autorouter SEA's prompt."""
 STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
+REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
+"""Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
 
 SYSTEM_PROMPT = """\
 You are rsi7d, the KISS Sorcar agent that improves the other agents. Every indexed SEA
@@ -102,12 +126,22 @@ important), fewer agentic mistakes, lower cost and higher speed, mostly by addin
 instructions to its system prompt. You also refresh the observed model evidence the autorouter
 SEA routes on.
 
+rsi7d itself is one of those SEAs: its `src/kiss/agents/seas/rsi7d/rsi7d_sea.py` prompt is
+editable through the same tools and its own finished sweeps (every run except the current
+one) are trajectories to mine like any other's. Typical rsi7d failure modes worth checking:
+verification claimed without a replay id, costs quoted from the running estimate instead of
+`run_findings`, replays skipped for eligible runs, a report that does not list the changed
+files. Patch its prompt with `patch_sea_prompt("rsi7d", ...)` exactly as for the others.
+
 ## Hard rules
 - Change SEA files only through `patch_sea_prompt` and `write_autorouter_evidence`. They edit
   one string constant and reject anything that changes code. Never edit a SEA with
-  Edit/Write, never touch files outside `src/kiss/agents/seas/`, never edit a SEA whose
-  `editable_path` is empty in `indexed_seas()` (third-party and user SEAs): analyse those
-  and put recommendations in the report instead.
+  Edit/Write, never touch files outside `src/kiss/agents/seas/` and
+  `src/kiss/agents/third_party_agents/`, never edit a SEA whose `editable_path` or
+  `prompt_constant` is empty in `indexed_seas()` (user SEAs, and the channel SEAs such as
+  `slack` or `gmail`, whose prompts are assembled at run time): analyse those and put
+  recommendations in the report instead. `/ask` (`third_party_agents/ask/ask_sea.py`) does
+  have a prompt constant and is optimized like the SEAs in `seas/`.
 - Every instruction you add must be grounded in evidence from the trajectories: cite the
   task id and digest entry index (from `run_findings` / `run_transcript`) in your notes. No
   instruction for a failure mode that did not occur.
@@ -151,22 +185,33 @@ SEA routes on.
    rest of the prompt.
 5. Evaluate for real. Pick the past run of the SEA that best exercises the instructions you
    added (the failed or unsuccessful run whose mistake a new bullet targets, else the
-   costliest successful run) among the runs whose task is reproducible inside this checkout
-   and has no external side effects (messaging, payments, publishing). Do not restrict
-   yourself to cheap runs: any run whose original cost was below $500 is eligible, and a
-   cheaper run is preferred only when it carries the same signal. Replay it with
-   `run_agent(agent="src/kiss/agents/seas/<name>/<name>_sea.py", task=<the verbatim past task>,
-   max_budget=<twice the original run's cost, at most 500>)` so a regression cannot run
-   away (a SEA that defines its own `max_budget()` getter overrides that argument and caps
-   the replay itself; check the getter with `grep -n "def max_budget" <sea file>`), then
-   compare `run_findings(<new task id>)` with the original run (status, cost,
-   steps, signal counts). Keep the change when the replay is not worse on status and signals
-   and not clearly worse on cost/steps; otherwise revert with `git checkout --
+   costliest successful run) among the runs that have no external side effects (messaging,
+   payments, publishing). Do not restrict yourself to cheap runs: any run whose original
+   cost was below $500 is eligible, and a cheaper run is preferred only when it carries the
+   same signal. Cap every replay at twice the original run's cost, at most 500, so a
+   regression cannot run away (a SEA that defines its own `max_budget()` getter overrides
+   that cap and limits the replay itself; check with `grep -n "def max_budget" <sea file>`).
+   Two ways to replay:
+   - A task that modifies files (a paper, code, a report, a past rsi7d sweep) is replayed
+     with `replay_in_clone(task_id, max_budget=<cap>)`. It clones the task's repository at
+     the commit the task started from into `tmp/rsi7d/replays/<name>-<id>`, rewrites
+     repository paths in the task text to the clone, and runs this checkout's patched SEA
+     file there, so this checkout is never touched. Use the `replay_task_id` it returns and
+     judge quality from `git -C <clone> status --short` / `diff` against the original run's
+     result. Delete `tmp/rsi7d/replays` before you finish. Never replay such a task with
+     `run_agent` in this checkout.
+   - A task that changes nothing on disk is replayed with
+     `run_agent(agent="src/kiss/agents/seas/<name>/<name>_sea.py", task=<the verbatim past
+     task>, max_budget=<cap>)`.
+   Then compare `run_findings(<new task id>)` with the original run (status, cost, steps,
+   signal counts). Keep the change when the replay is not worse on status and signals and
+   not clearly worse on cost/steps; otherwise revert with `git checkout --
    src/kiss/agents/seas/<name>/<name>_sea.py` and record why in `./tmp/rsi7d/explored-ideas.md` so
    the idea is not retried. Spend at most 60% of your remaining budget on replays and check
    `run_findings` of the sweep so far before each one; when no eligible run exists (every
-   run cost $500 or more, or all have side effects), keep the change only if it is small,
-   evidence-backed and passes `uv run pytest -q
+   run cost $500 or more, or all have side effects) or the budget rule forbids the replay
+   (a past rsi7d sweep is a full sweep and rarely fits), keep the change only if it is
+   small, evidence-backed and passes `uv run pytest -q
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it "not
    replay-verified" in the report.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
@@ -232,7 +277,8 @@ def description() -> str:
     return (
         "Mines the last 7 days of every indexed SEA's runs in ~/.kiss/sorcar.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
-        "SEA's SYSTEM_PROMPT and refreshes the autorouter SEA's model evidence; run it with "
+        "SEA's SYSTEM_PROMPT (its own included; file-modifying tasks are replayed in a clone "
+        "at the task's commit) and refreshes the autorouter SEA's model evidence; run it with "
         '`/rsi7d all` in the chat or `run_agent(agent="rsi7d", task="all")`.'
     )
 
@@ -762,27 +808,58 @@ def use_web_tools() -> bool:
 
 
 def _seas_dir() -> Path:
-    """Return the editable ``seas`` directory: the task work dir's checkout, else this file's."""
+    """Return the editable ``seas`` directory: the task work dir's checkout, else this file's.
+
+    Any ``src/kiss/agents/seas`` directory of the work dir counts, even
+    one from an older layout without ``rsi7d/rsi7d_sea.py``: a replay of
+    a past sweep in a clone (``replay_in_clone``) must edit the clone,
+    never fall through to the checkout this file was loaded from.
+    """
     agent = current_agent()
     bases = [Path(agent.work_dir)] if agent is not None and agent.work_dir else []
     bases.append(Path.cwd())
+    for base in list(bases):  # a task in a sub-directory of a checkout edits that checkout
+        top = _toplevel(base)
+        if top is not None:
+            bases.append(top)
     for base in bases:
         candidate = base / "src" / "kiss" / "agents" / "seas"
-        if (candidate / "rsi7d" / "rsi7d_sea.py").is_file():
+        if candidate.is_dir():
             return candidate.resolve()
     return Path(__file__).resolve().parents[1]
+
+
+def _editable_dirs() -> list[Path]:
+    """Return the checkout folders whose SEAs may be edited: ``seas`` and, next to it, the
+    bundled channel SEAs in ``third_party_agents`` (their prompts are assembled at run time
+    by ``_channel_agent_utils``, so only the few with a prompt constant, e.g. ``ask``, end up
+    patchable; the rest are analysed and reported on)."""
+    seas = _seas_dir()
+    third_party = seas.parent / "third_party_agents"
+    return [seas, third_party] if third_party.is_dir() else [seas]
+
+
+def _editable_seas() -> dict[str, Path]:
+    """Return ``{name: file}`` of every SEA in the editable folders."""
+    found: dict[str, Path] = {}
+    for folder in reversed(_editable_dirs()):  # ``seas`` wins a name clash
+        found.update(sea_commands._scan_folder(folder))
+    return found
 
 
 def _editable_path(name: str) -> Path | None:
     """Return the editable file of SEA *name*, or ``None`` when it is not a bundled SEA.
 
     *name* must be a bare module stem (``review_paper``); a path or ``..``
-    can never escape the seas directory.
+    can never escape the editable folders.
     """
     if not name.isidentifier():
         return None
-    path = sea_commands.sea_script_in(_seas_dir() / name)
-    return path if path.is_file() else None
+    for folder in _editable_dirs():
+        path = sea_commands.sea_script_in(folder / name)
+        if path.is_file():
+            return path
+    return None
 
 
 def _prompt_constant(source: str) -> tuple[str, str]:
@@ -889,12 +966,13 @@ def indexed_seas() -> str:
     Returns a JSON list of ``{"name", "registered_path", "editable_path",
     "prompt_getter", "prompt_constant", "prompt_chars"}``.  ``editable_path``
     is the file ``patch_sea_prompt`` edits (empty when the SEA is not a
-    bundled one under ``src/kiss/agents/seas``); ``prompt_constant`` is the
+    bundled one under ``src/kiss/agents/seas`` or
+    ``src/kiss/agents/third_party_agents``); ``prompt_constant`` is the
     module constant the prompt getter returns (empty when the SEA has no
     editable prompt).  Bundled SEAs that are not registered are listed too.
     """
     names = set(sea_commands.list_commands())
-    names.update(sea_commands._scan_folder(_seas_dir()))
+    names.update(_editable_seas())
     rows = [_sea_info(name, sea_commands.get_command(name)) for name in sorted(names)]
     return json.dumps(rows, indent=1)
 
@@ -907,7 +985,7 @@ def _signatures() -> dict[str, str]:
     tool call links it to the SEA.
     """
     signatures: dict[str, str] = {}
-    for name, path in sorted(sea_commands._scan_folder(_seas_dir()).items()):
+    for name, path in sorted(_editable_seas().items()):
         try:
             namespace = _execute_sea(path)
         except Exception:  # noqa: BLE001 - a SEA that does not load has no runs to mine
@@ -1264,8 +1342,236 @@ def write_autorouter_evidence(text: str) -> str:
     return patch_sea_prompt("autorouter", old, new)
 
 
+def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``git *args`` in *cwd* and return the completed process (no exception on failure)."""
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+    )
+
+
+def _task_row(task_id: str) -> dict[str, Any] | None:
+    """Return the task_history row of *task_id* as a dict, or ``None``."""
+    with persistence._rw_lock.read_lock():
+        row = (
+            persistence._get_db()
+            .execute(persistence._HISTORY_SELECT + "WHERE id = ?", (task_id,))
+            .fetchone()
+        )
+    return persistence._history_row_to_dict(row) if row is not None else None
+
+
+def _toplevel(path: Path) -> Path | None:
+    """Return the root of the git checkout containing *path*, or ``None``."""
+    proc = _git("rev-parse", "--show-toplevel", cwd=path) if path.is_dir() else None
+    return Path(proc.stdout.strip()) if proc is not None and proc.returncode == 0 else None
+
+
+def _repo_of(tree: Path) -> Path:
+    """Return the repository owning checkout *tree* (*tree* itself unless a linked worktree)."""
+    proc = _git("rev-parse", "--git-common-dir", cwd=tree)
+    common = (tree / proc.stdout.strip()).resolve() if proc.returncode == 0 else None
+    if common is not None and common.name == ".git" and common.parent != tree.resolve():
+        return common.parent
+    return tree.resolve()
+
+
+def _task_tree(work_dir: str) -> tuple[Path, Path, Path] | None:
+    """Return ``(repo, tree, sub)`` for the directory a task ran in, or ``None``.
+
+    ``repo`` is the repository root, ``tree`` the checkout the task ran
+    in — ``repo`` itself or a worktree of it, even one removed since —
+    and ``sub`` the task's directory relative to ``tree`` (``.`` for the
+    root).  An existing directory is resolved through git (a repository
+    nested inside another checkout is its own tree; a linked worktree's
+    repository is the owner of its common git dir); a missing
+    ``<repo>/.kiss-worktrees/kiss_wt-*/<sub>`` path is resolved by name.
+    """
+    path = Path(work_dir)
+    tree = _toplevel(path) if work_dir else None
+    if tree is not None:
+        return _repo_of(tree), tree.resolve(), path.resolve().relative_to(tree.resolve())
+    repo_text = strip_worktree_suffix(work_dir) if work_dir else work_dir
+    repo = _toplevel(Path(repo_text)) if repo_text != work_dir else None
+    if repo is None:
+        return None
+    depth = len(Path(repo_text).parts) + 2  # <repo>/.kiss-worktrees/kiss_wt-*
+    return repo.resolve(), Path(*path.parts[:depth]), Path(*path.parts[depth:])
+
+
+def _prompt_block(body: str) -> str | None:
+    """Return the prompt an auto-commit message *body* quotes under ``User prompt:``, or ``None``.
+
+    The canonical blocks end the message: the last ``User prompt:``
+    heading opens the prompt, which runs to the ``Result:`` heading or
+    the end of the message.
+    """
+    at = body.rfind(USER_PROMPT_HEADING)
+    if at < 0:
+        return None
+    block = body[at + len(USER_PROMPT_HEADING) :]
+    end = block.find(TASK_RESULT_HEADING)
+    return block if end < 0 else block[:end]
+
+
+def _base_commit(repo: Path, task: str, start_ms: int) -> tuple[str, str]:
+    """Return ``(commit, source)``: the commit of *repo* the task started from.
+
+    A task that changed files was auto-committed with its prompt under a
+    ``User prompt:`` heading; the earliest commit made after the task
+    started that quotes exactly *task* there (compared with whitespace
+    runs collapsed, as git normalises messages) marks its end, and its
+    first parent the state it started from.  Without such a commit the
+    newest first-parent commit of ``HEAD`` from before *start_ms* is
+    used.  ``("", "")`` when the repository has no commit from before
+    the task.
+    """
+    start_s = start_ms // 1000
+    wanted = _normalized(task)
+    proc = _git(
+        "log", "--all", f"--since=@{start_s}", "--format=%H%x1f%ct%x1f%P%x1f%B%x1e", cwd=repo
+    )
+    matches: list[tuple[int, str, str]] = []
+    for record in proc.stdout.split("\x1e"):
+        fields = record.strip("\n").split("\x1f", 3)
+        if len(fields) < 4 or int(fields[1]) < start_s:
+            continue
+        block = _prompt_block(fields[3])
+        if block is not None and _normalized(block) == wanted:
+            parents = fields[2].split()
+            matches.append((int(fields[1]), fields[0], parents[0] if parents else fields[0]))
+    if matches:
+        _committed, sha, parent = min(matches)
+        return parent, f"first parent of the task's auto-commit {sha[:12]}"
+    proc = _git("rev-list", "-1", "--first-parent", f"--before=@{start_s}", "HEAD", cwd=repo)
+    sha = proc.stdout.strip()
+    return sha, "HEAD of the repository when the task started" if sha else ""
+
+
+def _normalized(text: str) -> str:
+    """Return *text* with every whitespace run collapsed to one space and the ends stripped."""
+    return " ".join(text.split())
+
+
+def _work_root() -> Path:
+    """Return this task's work directory (the cwd outside a task)."""
+    agent = current_agent()
+    return Path(agent.work_dir) if agent is not None and agent.work_dir else Path.cwd()
+
+
+def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
+    """Clone the repository of past run *task_id* at the commit it started from.
+
+    Returns the replay parameters (``sea``, ``sea_file`` of this checkout,
+    ``repo``, ``commit``, ``commit_source``, ``clone``, ``work_dir`` — the
+    task's directory inside the clone — ``model`` and the ``task`` with
+    repository paths rewritten to the clone) or an ``Error: ...`` string.
+    *name* overrides the SEA recorded on the run.  An existing clone of
+    the same run is replaced.
+    """
+    row = _task_row(task_id)
+    if row is None:
+        return f"Error: unknown task id {task_id!r}"
+    sea = name or sea_name_of(row.get("sea") or "")
+    if not sea:
+        return f"Error: run {task_id} does not record its SEA; pass name=<sea>"
+    sea_file = _editable_path(sea)
+    if sea_file is None:
+        return f"Error: {sea!r} is not an editable SEA of this checkout"
+    work_dir = str(row.get("work_dir") or "")
+    located = _task_tree(work_dir)
+    if located is None:
+        return (
+            f"Error: the run's work dir {work_dir!r} is not inside a git repository, so there "
+            "is nothing to clone; mark the run not replay-verified"
+        )
+    repo, tree, sub = located
+    start_ms = int(row.get("start_ts") or 0) or int(float(row.get("timestamp") or 0) * 1000)
+    commit, source = _base_commit(repo, str(row.get("task") or ""), start_ms)
+    if not commit:
+        return f"Error: {repo} has no commit from before the task started"
+    clone = _work_root() / REPLAY_DIR / f"{sea}-{task_id[:8]}"
+    shutil.rmtree(clone, ignore_errors=True)
+    clone.parent.mkdir(parents=True, exist_ok=True)
+    for label, args in (
+        ("clone", ("clone", "--quiet", "--no-checkout", str(repo), str(clone))),
+        ("checkout", ("-C", str(clone), "checkout", "--quiet", "--detach", commit)),
+    ):
+        proc = _git(*args)
+        if proc.returncode:
+            return f"Error: git {label} failed: {proc.stderr.strip()}"
+    # One pass, longest alternative first: any worktree of the repository the task text
+    # may name (the history strips worktree suffixes from work_dir, so the tree may be
+    # the repository while the text names its worktree), the tree, the repository.
+    worktrees = re.escape(str(repo)) + r"[/\\]\.kiss-worktrees[/\\]kiss_wt-[^/\\\s'\"]+"
+    roots = sorted({str(tree), str(repo)}, key=len, reverse=True)
+    task = re.sub(
+        "|".join([worktrees, *map(re.escape, roots)]),
+        str(clone).replace("\\", "\\\\"),
+        str(row.get("task") or ""),
+    )
+    return {
+        "sea": sea,
+        "sea_file": str(sea_file),
+        "repo": str(repo),
+        "commit": commit,
+        "commit_source": source,
+        "clone": str(clone),
+        "work_dir": str(clone / sub),
+        "model": str(row.get("model") or ""),
+        "task": task,
+    }
+
+
+def replay_in_clone(
+    task_id: str, max_budget: float, timeout: float = 3600.0, name: str = "", model: str = ""
+) -> str:
+    """Replay past run *task_id* in a fresh clone of its repository at the commit it started from.
+
+    Use it for tasks that modify files (papers, code, reports): the replay
+    runs the SEA file of this checkout (with its patched prompt) inside
+    ``tmp/rsi7d/replays/<sea>-<task id prefix>``, so it never touches this
+    checkout.  The commit is the first parent of the task's own auto-commit
+    (found through the ``User prompt:`` block of the commit message) or,
+    without one, the repository HEAD at the task's start; repository paths
+    in the task text are rewritten to the clone and the replay runs in the
+    same directory of the clone the task ran in.  The replay runs without
+    a worktree and without auto-commit, with the original run's model
+    unless *model* is given, capped by *max_budget* (USD) and *timeout*
+    (seconds); *name* overrides the SEA recorded on the run.  Returns JSON
+    with ``replay_task_id`` (pass it to ``run_findings``), ``clone``,
+    ``commit``, ``commit_source`` and the replay's ``result``.  Inspect
+    what the replay changed with ``git -C <clone> status --short`` and
+    delete the clone when done.
+    """
+    prepared = prepare_replay_clone(task_id, name)
+    if isinstance(prepared, str):
+        return prepared
+    result = agent_dispatch.dispatch_result(
+        prepared["sea"],
+        prepared["task"],
+        prepared["sea_file"],
+        prepared["work_dir"],
+        model or prepared["model"],
+        max_budget,
+        timeout,
+        parent_agent=current_agent(),
+        scope_work_dir=str(_work_root()),
+        options=agent_dispatch.RunOptions(use_worktree=False, auto_commit=False),
+    )
+    if isinstance(result, str):
+        prepared["replay_task_id"] = ""
+        prepared["result"] = result
+    else:
+        prepared["replay_task_id"] = result.task_id
+        prepared["result"] = {
+            "success": result.success, "summary": result.text, "cost": result.cost,
+            "steps": result.steps,
+        }
+    return json.dumps(prepared, indent=1)
+
+
 def tools() -> list[Any]:
-    """Trajectory mining, prompt inspection and the gated prompt editors."""
+    """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
     return [
         indexed_seas,
         sea_runs,
@@ -1278,4 +1584,5 @@ def tools() -> list[Any]:
         sea_prompt,
         patch_sea_prompt,
         write_autorouter_evidence,
+        replay_in_clone,
     ]
