@@ -13844,10 +13844,13 @@
         renderCustomModels();
         break;
       case 'tricksData':
-        // The daemon's full promptlet list after an Add (from this or
-        // any other window): it replaces the list frozen into the page
-        // at load time so the panel shows the new entry right away.
+        // The daemon's full promptlet list after an Add or Delete (from
+        // this or any other window): it replaces the list frozen into
+        // the page at load time so the panel repaints right away.  The
+        // first `userCount` entries are the user's own (deletable) rows.
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
+        window.__MY_TRICKS_COUNT__ =
+          typeof ev.userCount === 'number' ? ev.userCount : 0;
         renderTricks(window.__TRICKS__);
         break;
       case 'taskUpdate':
@@ -18711,13 +18714,15 @@
     if (idx >= 0) items[idx].scrollIntoView({block: 'nearest'});
   }
 
+  const SIDEBAR_DELETE_SVG =
+    '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
   function makeSidebarDeleteConfirm(opts) {
     const delBtn = document.createElement('button');
     delBtn.className = 'sidebar-item-delete';
     delBtn.dataset.tooltip = 'Delete';
     delBtn.setAttribute('aria-label', opts.ariaLabel);
-    delBtn.innerHTML =
-      '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+    delBtn.innerHTML = SIDEBAR_DELETE_SVG;
     const confirmWrap = document.createElement('span');
     confirmWrap.className = 'sidebar-item-confirm';
     confirmWrap.style.display = 'none';
@@ -18878,11 +18883,18 @@
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
   }
 
-  function makeSidebarCopyButton(text) {
+  /**
+   * A sidebar row's copy-to-clipboard button for *text*.
+   *
+   * @param {string} text What the click copies.
+   * @param {string} [ariaLabel] Screen-reader label; defaults to the
+   *   task-row wording.
+   */
+  function makeSidebarCopyButton(text, ariaLabel) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
-    btn.setAttribute('aria-label', 'Copy task to clipboard');
+    btn.setAttribute('aria-label', ariaLabel || 'Copy task to clipboard');
     wireCopyButton(btn, text, false);
     return btn;
   }
@@ -20552,9 +20564,29 @@
   }
 
   /**
+   * Post `deleteTrick` for the user-owned promptlet at *index* and drop
+   * it from the page's list right away: the daemon removes its section
+   * from ~/.kiss/MY_INJECTION.md and answers every window with a fresh
+   * `tricksData` (or the sender alone with an `error`).
+   */
+  function deleteTrick(index) {
+    const tricks = window.__TRICKS__ || [];
+    api.deleteTrick({text: tricks[index]});
+    tricks.splice(index, 1);
+    window.__MY_TRICKS_COUNT__ = Math.max(
+      0,
+      (window.__MY_TRICKS_COUNT__ || 0) - 1,
+    );
+    renderTricks(tricks);
+  }
+
+  /**
    * Repaint #tricks-list with the promptlets matching the search box
    * (case-insensitive substring; every promptlet when the box is
-   * empty).  Clicking a row injects it at the composer's caret.
+   * empty).  Clicking a row injects it at the composer's caret; every
+   * row ends with a copy button, and the first
+   * `window.__MY_TRICKS_COUNT__` rows (the user's own, from
+   * ~/.kiss/MY_INJECTION.md) also with a delete button.
    */
   function renderTricks(tricks) {
     if (!tricksList) return;
@@ -20564,16 +20596,10 @@
       return;
     }
     const query = tricksSearch ? tricksSearch.value.trim().toLowerCase() : '';
-    const shown = query
-      ? tricks.filter(text => text.toLowerCase().includes(query))
-      : tricks;
-    if (shown.length === 0) {
-      tricksList.innerHTML =
-        '<div class="sidebar-empty">No matching promptlets</div>';
-      return;
-    }
+    const userCount = window.__MY_TRICKS_COUNT__ || 0;
     tricksList.innerHTML = '';
-    shown.forEach(text => {
+    tricks.forEach((text, index) => {
+      if (query && !text.toLowerCase().includes(query)) return;
       const div = document.createElement('div');
       div.className = 'sidebar-item tricks-item';
       div.dataset.tooltip = text;
@@ -20581,6 +20607,25 @@
       textSpan.className = 'sidebar-item-text';
       textSpan.textContent = text;
       div.appendChild(textSpan);
+      const copyBtn = makeSidebarCopyButton(
+        text,
+        'Copy promptlet to clipboard',
+      );
+      copyBtn.dataset.tooltip = 'Copy promptlet';
+      div.appendChild(copyBtn);
+      if (index < userCount) {
+        const delBtn = document.createElement('button');
+        delBtn.type = 'button';
+        delBtn.className = 'sidebar-item-delete';
+        delBtn.dataset.tooltip = 'Delete promptlet';
+        delBtn.setAttribute('aria-label', 'Delete promptlet');
+        delBtn.innerHTML = SIDEBAR_DELETE_SVG;
+        delBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          deleteTrick(index);
+        });
+        div.appendChild(delBtn);
+      }
       div.addEventListener('click', () => {
         const current = inp.value;
         const start =
@@ -20609,6 +20654,10 @@
       });
       tricksList.appendChild(div);
     });
+    if (tricksList.childElementCount === 0) {
+      tricksList.innerHTML =
+        '<div class="sidebar-empty">No matching promptlets</div>';
+    }
   }
 
   function renderFrequentTasks(tasks) {

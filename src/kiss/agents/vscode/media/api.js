@@ -35,6 +35,7 @@
     'saveMyModel',
     'deleteMyModel',
     'addTrick',
+    'deleteTrick',
     'setWorkDir',
     'getFiles',
     'recordFileUsage',

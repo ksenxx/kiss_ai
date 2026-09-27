@@ -2530,10 +2530,19 @@ body.sidebar-chat-mode #meta-info-content {
   border-radius: var(--radius-sm);
   white-space: normal;
   word-break: break-word;
+  gap: var(--space-1-5);
 }
 
 .tricks-item:hover {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+/* The copy and (user-owned rows only) delete buttons sit at the right
+   edge of a promptlet row; they take the row's own gap, not the task
+   panels' margin. */
+.tricks-item > .sidebar-item-copy,
+.tricks-item > .sidebar-item-delete {
+  margin-left: 0;
 }
 
 .sidebar-tab-panel {

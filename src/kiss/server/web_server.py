@@ -118,7 +118,7 @@ from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import read_tips
-from kiss.server.tricks import read_tricks
+from kiss.server.tricks import read_tricks_data
 from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
@@ -3775,7 +3775,8 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
-    tricks_json = json.dumps(read_tricks()).replace("</", "<\\/")
+    tricks_data = read_tricks_data()
+    tricks_json = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
     tips_json = json.dumps(
         {"tips": read_tips(), "show": False},
     ).replace("</", "<\\/")
@@ -3843,6 +3844,7 @@ def _build_html() -> str:
             + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
         ),
         "TRICKS_JSON": tricks_json,
+        "MY_TRICKS_COUNT": str(tricks_data["userCount"]),
         "TIPS_JSON": tips_json,
         "TIPS_SRC": _media_url("tips.js"),
         "VOICE_SRC": _media_url("voice.js"),

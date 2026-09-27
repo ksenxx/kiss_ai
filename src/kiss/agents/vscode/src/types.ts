@@ -316,6 +316,8 @@ export type FromWebviewMessage =
   | {type: 'deleteMyModel'; name: string}
   /** Inject promptlet panel: append `text` to ~/.kiss/MY_INJECTION.md. */
   | {type: 'addTrick'; text: string}
+  /** Inject promptlet panel: drop `text` from ~/.kiss/MY_INJECTION.md. */
+  | {type: 'deleteTrick'; text: string}
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
@@ -772,8 +774,12 @@ type ToWebviewMessageBody =
         headers: string;
       }>;
     }
-  /** The full Inject promptlet list after an `addTrick` succeeded. */
-  | {type: 'tricksData'; tricks: string[]}
+  /**
+   * The full Inject promptlet list after an `addTrick` / `deleteTrick`
+   * succeeded; the first `userCount` entries come from the user's own
+   * ~/.kiss/MY_INJECTION.md and are the ones the panel can delete.
+   */
+  | {type: 'tricksData'; tricks: string[]; userCount: number}
   | {
       type: 'history';
       sessions: SessionInfo[];
@@ -1096,6 +1102,7 @@ export interface AgentCommand {
     | 'saveMyModel'
     | 'deleteMyModel'
     | 'addTrick'
+    | 'deleteTrick'
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
@@ -1145,7 +1152,7 @@ export interface AgentCommand {
   headers?: string;
   /** saveMyModel: the entry's name before an edit-and-rename. */
   originalName?: string;
-  /** addTrick: the promptlet body to append. */
+  /** addTrick / deleteTrick: the promptlet body to append or remove. */
   text?: string;
   /** getTaskUpdate: fingerprint of the report state the client holds. */
   knownSig?: string;

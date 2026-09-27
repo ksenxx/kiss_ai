@@ -174,6 +174,7 @@ def _build_extension_html() -> str:
         "MAIN_SRC": "main.js",
         "SHIM_SCRIPT": shim,
         "TRICKS_JSON": "[]",
+        "MY_TRICKS_COUNT": "0",
         "TIPS_JSON": json.dumps({"tips": [], "show": False}),
         "TIPS_SRC": "tips.js",
         "VOICE_SRC": "voice.js",

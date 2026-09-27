@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -2247,20 +2248,55 @@ class _CommandsMixin:
         — the file is shared by every window, so every open panel
         repaints, not only the one that clicked.
         """
-        from kiss.server.tricks import append_my_injection_trick, read_tricks
+        from kiss.server.tricks import append_my_injection_trick
+
+        self._edit_my_injection(cmd, append_my_injection_trick, "addTrick")
+
+    def _cmd_delete_trick(self, cmd: dict[str, Any]) -> None:
+        """Remove a promptlet from ``~/.kiss/MY_INJECTION.md``.
+
+        Services the delete button that the Inject promptlet panel shows
+        on user-added rows.  ``text`` is the promptlet body as listed;
+        a body that is not in the file (a bundled promptlet, or one
+        another window already deleted) or a failed write answers the
+        sender with an ``error`` event.  Success rebroadcasts the full
+        list as an UNstamped ``tricksData`` event, like ``addTrick``.
+        """
+        from kiss.server.tricks import delete_my_injection_trick
+
+        self._edit_my_injection(cmd, delete_my_injection_trick, "deleteTrick")
+
+    def _edit_my_injection(
+        self,
+        cmd: dict[str, Any],
+        edit: Callable[[str], str | None],
+        name: str,
+    ) -> None:
+        """Run *edit* on ``cmd["text"]`` and answer the panel.
+
+        Shared tail of ``addTrick`` / ``deleteTrick``.  Success broadcasts
+        the fresh ``tricksData`` list (``tricks`` plus ``userCount``, the
+        number of leading user-owned rows) to every window, since the
+        file is shared by all of them.  A rejection or ``OSError`` goes
+        to the sender as an ``error`` event followed by a ``tricksData``
+        stamped for the sender alone: the panel drops a deleted row
+        before the answer arrives, so the list on disk is re-sent to put
+        the row back.
+        """
+        from kiss.server.tricks import read_tricks_data
 
         text = cmd.get("text", "")
         try:
-            error = append_my_injection_trick(
-                text if isinstance(text, str) else ""
-            )
+            error = edit(text if isinstance(text, str) else "")
         except OSError as e:
-            logger.warning("addTrick failed", exc_info=True)
+            logger.warning("%s failed", name, exc_info=True)
             error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+        event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd)
-            return
-        self.printer.broadcast({"type": "tricksData", "tricks": read_tricks()})
+            if cmd.get("connId"):
+                event["connId"] = cmd["connId"]
+        self.printer.broadcast(event)
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
@@ -2356,4 +2392,5 @@ class _CommandsMixin:
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,
         "addTrick": _cmd_add_trick,
+        "deleteTrick": _cmd_delete_trick,
     }

@@ -53,7 +53,15 @@ function readMarkdownSections(markdownFile: string, heading: string): string[] {
   return items;
 }
 
-export function getTricks(): string[] {
+/**
+ * The Inject promptlet list plus how many leading entries the user owns.
+ *
+ * `tricks` is ~/.kiss/MY_INJECTION.md's `## Trick` sections followed by
+ * the bundled INJECTIONS.md ones; `userCount` is the length of the first
+ * part, the rows the panel shows a delete button on.  Same shape as the
+ * daemon's `tricksData` event.
+ */
+export function getTricksData(): {tricks: string[]; userCount: number} {
   const items: string[] = [];
 
   const myInjectionPath = ensureUserAssetFromDefault(
@@ -63,6 +71,7 @@ export function getTricks(): string[] {
   if (myInjectionPath !== null) {
     items.push(...readMarkdownSections(myInjectionPath, 'Trick'));
   }
+  const userCount = items.length;
 
   const bundledOverride = process.env.KISS_INJECTIONS_PATH;
   let bundledPath: string | null = bundledOverride || null;
@@ -76,7 +85,12 @@ export function getTricks(): string[] {
     items.push(...readMarkdownSections(bundledPath, 'Trick'));
   }
 
-  return items;
+  return {tricks: items, userCount};
+}
+
+/** The Inject promptlet list alone (see `getTricksData`). */
+export function getTricks(): string[] {
+  return getTricksData().tricks;
 }
 
 function parseTipSections(text: string): string[] {
@@ -340,7 +354,8 @@ export function buildChatHtml(
 ): string {
   const nonce = getNonce();
   const version = getVersion();
-  const tricksJson = JSON.stringify(getTricks()).replace(/<\//g, '<\\/');
+  const tricksData = getTricksData();
+  const tricksJson = JSON.stringify(tricksData.tricks).replace(/<\//g, '<\\/');
   const tips = getTips();
   const tipsJson = JSON.stringify({
     tips,
@@ -413,6 +428,7 @@ export function buildChatHtml(
     MAIN_SRC: u('main.js'),
     SHIM_SCRIPT: '',
     TRICKS_JSON: tricksJson,
+    MY_TRICKS_COUNT: String(tricksData.userCount),
     TIPS_JSON: tipsJson,
     TIPS_SRC: u('tips.js'),
     VOICE_SRC: u('voice.js'),
