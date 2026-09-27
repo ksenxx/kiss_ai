@@ -195,6 +195,16 @@
             <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
             <button type="button" id="hf-date-clear" class="hf-date-clear" title="Clear date range" aria-label="Clear date range" style="display:none;">&times;</button>
           </div>
+          <!-- Agent-script (SEA) filter: the options are rebuilt from the
+               loaded rows on every history render (see
+               refreshHistorySeaOptions in main.js). -->
+          <div class="history-filter-sea" role="group" aria-label="Filter tasks by agent script">
+            <label for="hf-sea" class="history-filter-date-lbl">SEA</label>
+            <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this agent script (SEA)" aria-label="Agent script">
+              <option value="">All</option>
+              <option value="__none__">None</option>
+            </select>
+          </div>
         </div>
           </div>
         </div>

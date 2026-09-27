@@ -3822,6 +3822,31 @@ body.sidebar-chat-mode #meta-info-content {
   color: var(--fg);
 }
 
+/* The agent-script (SEA) filter: a pill like the date range holding
+   one <select> whose options are the SEAs of the loaded rows. */
+.history-filter-sea {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  flex-wrap: nowrap; white-space: nowrap;
+  max-width: 100%; box-sizing: border-box;
+  padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.history-filter-sea-select {
+  flex: 1 1 auto; min-width: 0; max-width: 14em;
+  background: transparent;
+  border: none; border-bottom: 1px solid transparent;
+  color: var(--fg); font-size: var(--fs-sm);
+  padding: var(--space-0-5) 0; outline: none; box-sizing: border-box;
+  font-family: inherit; cursor: pointer;
+}
+.history-filter-sea-select:focus { border-bottom-color: var(--accent); }
+
+.history-filter-sea-select option {
+  background: var(--bg); color: var(--fg);
+}
+
 .history-filter-date-group {
   display: inline-flex; align-items: center; gap: var(--space-1);
   flex-wrap: nowrap; white-space: nowrap;
@@ -4253,7 +4278,8 @@ body.remote-chat .running-item.history-active-task:hover {
 /* The task's tags ("work · coding"), right before its "launched ..."
    label and in the same muted style, so the two read as one line of
    metadata. */
-.sidebar-item-tags {
+.sidebar-item-tags,
+.sidebar-item-sea {
   flex-shrink: 1;
   min-width: 0;
   margin-left: var(--space-0-5);
@@ -4265,7 +4291,9 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-.sidebar-item-tags + .sidebar-item-launched::before {
+.sidebar-item-tags + .sidebar-item-sea::before,
+.sidebar-item-tags + .sidebar-item-launched::before,
+.sidebar-item-sea + .sidebar-item-launched::before {
   content: '•';
   margin-right: var(--space-0-5);
 }

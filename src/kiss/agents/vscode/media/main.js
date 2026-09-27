@@ -19041,6 +19041,7 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
     } = getHistoryFilterEls();
     [
       hfRunning,
@@ -19050,6 +19051,7 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
@@ -20281,6 +20283,53 @@
     return span;
   }
 
+  /**
+   * The agent script (SEA) that ran the task, e.g. "write_paper_sea",
+   * shown with the tags; null for a plain run.
+   */
+  function makeTaskSeaLabel(session) {
+    const sea = typeof session.sea === 'string' ? session.sea.trim() : '';
+    if (!sea) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-sea';
+    span.textContent = sea;
+    span.title = 'Agent script: ' + sea;
+    return span;
+  }
+
+  // The SEA <select>'s value for rows with no agent script.
+  const HF_SEA_NONE = '__none__';
+
+  /**
+   * Rebuild the SEA filter's options from the loaded history rows: All,
+   * None (plain runs) and every distinct agent script seen, sorted.
+   * The current selection survives even when no loaded row carries it
+   * any more (a later page or a refresh may bring it back).
+   */
+  function refreshHistorySeaOptions() {
+    const hfSea = document.getElementById('hf-sea');
+    if (!hfSea) return;
+    const selected = hfSea.value;
+    const names = new Set();
+    allHistSessions.forEach(s => {
+      if (typeof s.sea === 'string' && s.sea.trim()) names.add(s.sea.trim());
+    });
+    if (selected && selected !== HF_SEA_NONE) names.add(selected);
+    hfSea.innerHTML = '';
+    const addOption = (value, label) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      hfSea.appendChild(opt);
+    };
+    addOption('', 'All');
+    addOption(HF_SEA_NONE, 'None');
+    Array.from(names)
+      .sort()
+      .forEach(name => addOption(name, name));
+    hfSea.value = selected;
+  }
+
   // Keep every on-screen "launched ... ago" label current: history
   // re-renders only happen on daemon broadcasts, so without this sweep
   // a quiet panel would keep saying "just now" forever. The sweep is a
@@ -21254,6 +21303,7 @@
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
         historyHasMore = false;
+        refreshHistorySeaOptions();
         return;
       }
       historyList.innerHTML = '';
@@ -21290,6 +21340,7 @@
       div.dataset.timestamp = String(Number(s.timestamp || 0));
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
+      div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
@@ -21376,6 +21427,8 @@
       actions.appendChild(makeSidebarCollapseToggle(div, s));
       const tagsLabel = makeTaskTagsLabel(s);
       if (tagsLabel) actions.appendChild(tagsLabel);
+      const seaLabel = makeTaskSeaLabel(s);
+      if (seaLabel) actions.appendChild(seaLabel);
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
@@ -21528,6 +21581,7 @@
     if (sessions.length < 50) {
       historyHasMore = false;
     }
+    refreshHistorySeaOptions();
     applyHistoryFilterVisibility();
     syncHistoryActiveTask();
     if (focusKey) {
@@ -21803,6 +21857,7 @@
       hfFavorite: document.getElementById('hf-favorite'),
       hfFrom: document.getElementById('hf-from'),
       hfTo: document.getElementById('hf-to'),
+      hfSea: document.getElementById('hf-sea'),
     };
   }
 
@@ -21815,6 +21870,7 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
     } = getHistoryFilterEls();
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
@@ -21822,6 +21878,9 @@
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
+    // '' = every agent script, HF_SEA_NONE = plain runs only, otherwise
+    // the exact SEA name.
+    const seaFilter = hfSea ? hfSea.value : '';
     const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // "/Users/me/proj" -> "/Users/me/proj/", but "/" stays "/", so that
     // subdirectory matching below never looks for a doubled separator.
@@ -21859,7 +21918,11 @@
         normClientWorkDir === '' ||
         rowWorkDir === normClientWorkDir ||
         rowWorkDir.startsWith(clientWorkDirPrefix);
-      if (catOk && dateOk && favOk && wsOk) {
+      const rowSea = row.dataset.sea || '';
+      const seaOk =
+        seaFilter === '' ||
+        (seaFilter === HF_SEA_NONE ? rowSea === '' : rowSea === seaFilter);
+      if (catOk && dateOk && favOk && wsOk && seaOk) {
         row.style.display = '';
         visible++;
       } else {
