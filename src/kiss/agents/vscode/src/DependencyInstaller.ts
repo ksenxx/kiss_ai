@@ -61,7 +61,11 @@ const INSTALL_STEP_TIMEOUT_MS = 30 * 60_000;
 
 const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
-const UV_VERSION = '0.11.2';
+// Keep at the newest release (https://github.com/astral-sh/uv/releases):
+// releases before 0.11.15 carry GHSA-4gg8-gxpx-9rph (arbitrary file write
+// through entry-point names) and GHSA-pjjw-68hj-v9mw (file deletion through
+// RECORD entries).  Dockerfile pins the same version.
+const UV_VERSION = '0.12.19';
 
 function xmlEscape(s: string): string {
   return s
@@ -218,6 +222,11 @@ function spawnCollect(
      * -- is killed, not just the direct child.
      */
     killGroup?: boolean;
+    /**
+     * The setup's cancellation token: cancelling kills the child (and
+     * its group, see killGroup) and rejects with code 'ECANCELLED'.
+     */
+    token?: vscode.CancellationToken;
   },
 ): Promise<{code: number | null; stdout: string; stderr: string}> {
   return new Promise((resolve, reject) => {
@@ -230,14 +239,17 @@ function spawnCollect(
     });
     let stdout = '';
     let stderr = '';
+    const killTree = () => {
+      if (ownGroup && proc.pid) {
+        try {
+          process.kill(-proc.pid, 'SIGKILL');
+        } catch {}
+      }
+      proc.kill('SIGKILL');
+    };
     const timer = opts.timeoutMs
       ? setTimeout(() => {
-          if (ownGroup && proc.pid) {
-            try {
-              process.kill(-proc.pid, 'SIGKILL');
-            } catch {}
-          }
-          proc.kill('SIGKILL');
+          killTree();
           const err: NodeJS.ErrnoException = new Error(
             `${cmd} ${args.join(' ')} timed out after ${opts.timeoutMs}ms`,
           );
@@ -245,6 +257,15 @@ function spawnCollect(
           reject(err);
         }, opts.timeoutMs)
       : undefined;
+    // Guarded like the other optional host APIs (test stubs may pass a
+    // bare token without the event).
+    const cancelSub =
+      typeof opts.token?.onCancellationRequested === 'function'
+        ? opts.token.onCancellationRequested(() => {
+            killTree();
+            reject(new SetupCancelledError());
+          })
+        : undefined;
     proc.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
     });
@@ -253,13 +274,54 @@ function spawnCollect(
     });
     proc.on('close', code => {
       if (timer) clearTimeout(timer);
+      cancelSub?.dispose();
       resolve({code, stdout, stderr});
     });
     proc.on('error', err => {
       if (timer) clearTimeout(timer);
+      cancelSub?.dispose();
       reject(err);
     });
   });
+}
+
+/**
+ * Thrown when the user cancels the first-run setup from its progress
+ * notification: every step checks the token between commands, and a
+ * running command is killed (spawnCollect).
+ */
+export class SetupCancelledError extends Error {
+  code = 'ECANCELLED';
+  constructor() {
+    super('Setup was cancelled.');
+  }
+}
+
+/** Throw SetupCancelledError when *token* has been cancelled. */
+function throwIfCancelled(token: vscode.CancellationToken | undefined): void {
+  if (token?.isCancellationRequested) throw new SetupCancelledError();
+}
+
+const CAUSE_MAX_CHARS = 200;
+
+/**
+ * The one line of a failed command's output that explains the failure,
+ * for the error toast: the first line mentioning an error, a missing
+ * file or a denied permission, else the first non-empty line — capped
+ * at CAUSE_MAX_CHARS.  The full output goes to the log, never the toast.
+ */
+export function summarizeFailure(output: string): string {
+  const lines = output
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l !== '');
+  const cause =
+    lines.find(l => /error|failed|not found|no such|denied|cannot/i.test(l)) ||
+    lines[0] ||
+    'no output';
+  return cause.length > CAUSE_MAX_CHARS
+    ? cause.slice(0, CAUSE_MAX_CHARS - 1) + '…'
+    : cause;
 }
 
 async function spawnPromise(
@@ -270,8 +332,10 @@ async function spawnPromise(
 ): Promise<string> {
   const r = await spawnCollect(cmd, args, {cwd, timeoutMs});
   if (r.code === 0) return r.stdout.trim();
+  log(`${cmd} ${args.join(' ')} exited ${r.code}\n${r.stderr}`);
   throw new Error(
-    `${cmd} ${args.join(' ')} exited ${r.code}: ${r.stderr.trim()}`,
+    `${cmd} ${args.join(' ')} exited ${r.code}: ` +
+      summarizeFailure(r.stderr || r.stdout),
   );
 }
 
@@ -407,11 +471,25 @@ async function resolveDefaultModelImpl(): Promise<string> {
   return getFallbackDefaultModel();
 }
 
+/**
+ * The last setup steps shared by the fast and the slow path: CLI
+ * wrapper, model catalog, cloudflared, kiss-web restart, shell PATH,
+ * API-key and remote-password prompts.
+ *
+ * @param token The slow path's cancellation token: checked right before
+ *     every side effect and before reporting success, so a Cancel
+ *     pressed while a step's message is showing stops the setup at that
+ *     step (SetupCancelledError) instead of restarting the daemon or
+ *     prompting for credentials.  The fast path passes none.
+ * @returns whether an API key (or the Claude CLI) is available.
+ */
 async function runFinalization(
   progress: vscode.Progress<{message?: string; increment?: number}> | null,
   kissProjectPath: string,
   uvPath: string | null,
+  token?: vscode.CancellationToken,
 ): Promise<boolean> {
+  throwIfCancelled(token);
   if (uvPath) {
     if (progress) progress.report({message: 'Installing CLI wrapper...'});
     installCliScript(kissProjectPath, uvPath);
@@ -444,14 +522,17 @@ async function runFinalization(
   }
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
+  throwIfCancelled(token);
   await installCloudflaredIfNeeded();
 
   if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
+  throwIfCancelled(token);
   const webWorkDir =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || kissProjectPath;
   await restartKissWebDaemon(kissProjectPath, webWorkDir);
 
   if (progress) progress.report({message: 'Updating shell PATH...'});
+  throwIfCancelled(token);
   try {
     const rcPath = getShellRcPath();
     const localBin = path.join(HOME_DIR, '.local', 'bin');
@@ -469,11 +550,16 @@ async function runFinalization(
   }
 
   if (progress) progress.report({message: 'Checking API keys...'});
+  throwIfCancelled(token);
   const apiKeysReady = await ensureApiKeys();
 
   if (progress) progress.report({message: 'Checking remote password...'});
+  throwIfCancelled(token);
   await ensureRemotePassword(uvPath, kissProjectPath);
 
+  // A Cancel pressed during the last prompt must not end in
+  // "Installation complete".
+  throwIfCancelled(token);
   return apiKeysReady;
 }
 
@@ -502,7 +588,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   log(`KISS project: ${kissProjectPath}`);
 
   const updateMarker = path.join(LOG_DIR, '.extension-updated');
-  let uvPath = findUvPath();
+  const uvPath = findUvPath();
   let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
   if (
     uvPath &&
@@ -586,107 +672,41 @@ async function ensureDependenciesImpl(): Promise<void> {
     }
     apiKeysReady = await runFinalization(null, kissProjectPath, uvPath);
   } else {
-    const result = await withWebviewNotificationProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `${PRODUCT_NAME}: Setting up`,
-        cancellable: false,
-      },
-      async progress => {
-        if (!uvPath) {
-          if (process.platform !== 'win32') {
-            for (const bin of ['curl', 'tar']) {
-              if (!commandExists(bin)) {
-                showErrorNotification(
-                  `${PRODUCT_NAME}: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
-                );
-                return {success: false, apiKeysReady: false};
-              }
-            }
-          }
-          progress.report({
-            message: 'Installing uv package manager...',
-            increment: 0,
-          });
-          uvPath = await installUv();
-          if (!uvPath) {
-            // uv's official one-liners: PowerShell on Windows, curl | sh
-            // elsewhere.
-            const manual =
-              process.platform === 'win32'
-                ? 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
-                : 'curl -LsSf https://astral.sh/uv/install.sh | sh';
-            showErrorNotification(
-              `${PRODUCT_NAME}: Failed to install uv. Install manually: ${manual}`,
-            );
-            return {success: false, apiKeysReady: false};
-          }
-          progress.report({increment: 20});
-        }
-
-        if (!(await gitWorks())) {
-          progress.report({message: 'Installing git...'});
-          const gitInstalled = await installGit();
-          if (!gitInstalled) {
-            showWarningNotification(
-              `${PRODUCT_NAME}: git could not be installed automatically. ${gitInstallHint()}`,
-            );
-          }
-        }
-
-        if (!commandExists('code')) {
-          progress.report({message: 'Setting up VS Code CLI...'});
-          const codeInstalled = await installCodeCli();
-          if (!codeInstalled) {
-            log('VS Code CLI could not be set up on PATH');
-          }
-        }
-
-        if (!venvExists) {
-          progress.report({
-            message:
-              'Setting up Python environment (first time, may take a minute)...',
-          });
-          await runAsync(uvPath, ['sync'], kissProjectPath);
-          progress.report({increment: 50});
-        }
-
-        if ((await checkPythonVersion(uvPath, kissProjectPath)) !== 'ok') {
-          showErrorNotification(
-            `${PRODUCT_NAME} requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
-              `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
-          );
-          return {success: false, apiKeysReady: false};
-        }
-
-        progress.report({message: 'Installing dependencies...'});
-        await runAsync(
-          uvPath,
-          ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
-          kissProjectPath,
-        );
-        if (process.platform === 'linux') {
-          await runAsync(
-            uvPath,
-            ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'],
+    // The first-run install can take minutes (uv sync, Chromium).  It
+    // is cancellable from the progress toast: the token is checked
+    // between steps and handed to the long-running commands, which are
+    // killed on cancel.  A cancelled setup says how to start it again.
+    let result: {success: boolean; apiKeysReady: boolean};
+    try {
+      result = await withWebviewNotificationProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `${PRODUCT_NAME}: Setting up`,
+          cancellable: true,
+        },
+        (progress, token) =>
+          runSlowPathSetup(
+            progress,
+            token,
             kissProjectPath,
-          ).catch(err =>
-            log(
-              `Playwright deps install failed (may need sudo): ${err instanceof Error ? err.message : err}`,
-            ),
-          );
+            uvPath,
+            venvExists,
+          ),
+      );
+    } catch (err) {
+      if (!(err instanceof SetupCancelledError)) throw err;
+      log('Setup cancelled by the user');
+      void showInformationNotification(
+        `${PRODUCT_NAME}: setup was cancelled. Run "KISS: Retry Setup" ` +
+          'from the Command Palette to start it again.',
+        'Retry setup',
+      ).then(action => {
+        if (action === 'Retry setup') {
+          void vscode.commands.executeCommand('kissSorcar.retrySetup');
         }
-        progress.report({increment: 30});
-
-        progress.report({message: 'Finalizing setup...'});
-        const finalizedKeys = await runFinalization(
-          progress,
-          kissProjectPath,
-          uvPath,
-        );
-        return {success: true, apiKeysReady: finalizedKeys};
-      },
-    );
+      });
+      return;
+    }
 
     showRestartNotification = !!result.success;
     apiKeysReady = result.apiKeysReady;
@@ -698,12 +718,136 @@ async function ensureDependenciesImpl(): Promise<void> {
     if (apiKeysReady) {
       showInformationNotification(`${PRODUCT_NAME}: Installation complete!`);
     } else {
+      void showWarningNotification(
+        `${PRODUCT_NAME}: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required.`,
+        'Enter API key',
+      ).then(action => {
+        if (action === 'Enter API key') {
+          void vscode.commands.executeCommand('kissSorcar.enterApiKey');
+        }
+      });
+    }
+  }
+}
+
+/**
+ * The slow-path install steps (no uv and/or no .venv yet), run inside
+ * the cancellable "Setting up" progress notification.
+ *
+ * @returns success=false when a prerequisite is missing (the user was
+ *     told what to install); apiKeysReady from runFinalization.
+ * @throws SetupCancelledError when the user cancels; any other error
+ *     from a failing command, its message already summarised for the
+ *     failure toast (the full output is in install.log).
+ */
+async function runSlowPathSetup(
+  progress: vscode.Progress<{message?: string; increment?: number}>,
+  token: vscode.CancellationToken,
+  kissProjectPath: string,
+  uvPath: string | null,
+  venvExists: boolean,
+): Promise<{success: boolean; apiKeysReady: boolean}> {
+  if (!uvPath) {
+    if (process.platform !== 'win32') {
+      for (const bin of ['curl', 'tar']) {
+        if (!commandExists(bin)) {
+          showErrorNotification(
+            `${PRODUCT_NAME}: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
+          );
+          return {success: false, apiKeysReady: false};
+        }
+      }
+    }
+    progress.report({
+      message: 'Installing uv package manager...',
+      increment: 0,
+    });
+    uvPath = await installUv(token);
+    if (!uvPath) {
+      // uv's official one-liners: PowerShell on Windows, curl | sh
+      // elsewhere.
+      const manual =
+        process.platform === 'win32'
+          ? 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
+          : 'curl -LsSf https://astral.sh/uv/install.sh | sh';
+      showErrorNotification(
+        `${PRODUCT_NAME}: Failed to install uv. Install manually: ${manual}`,
+      );
+      return {success: false, apiKeysReady: false};
+    }
+    progress.report({increment: 20});
+  }
+
+  throwIfCancelled(token);
+  if (!(await gitWorks())) {
+    progress.report({message: 'Installing git...'});
+    const gitInstalled = await installGit(token);
+    if (!gitInstalled) {
       showWarningNotification(
-        `${PRODUCT_NAME}: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ` +
-          'Set an API key in your environment, then reload the window (Developer: Reload Window) to be prompted again.',
+        `${PRODUCT_NAME}: git could not be installed automatically. ${gitInstallHint()}`,
       );
     }
   }
+
+  throwIfCancelled(token);
+  if (!commandExists('code')) {
+    progress.report({message: 'Setting up VS Code CLI...'});
+    const codeInstalled = await installCodeCli(token);
+    if (!codeInstalled) {
+      log('VS Code CLI could not be set up on PATH');
+    }
+  }
+
+  throwIfCancelled(token);
+  if (!venvExists) {
+    progress.report({
+      message:
+        'Setting up Python environment (first time, may take a minute)...',
+    });
+    await runAsync(uvPath, ['sync'], kissProjectPath, token);
+    progress.report({increment: 50});
+  }
+
+  throwIfCancelled(token);
+  if ((await checkPythonVersion(uvPath, kissProjectPath)) !== 'ok') {
+    showErrorNotification(
+      `${PRODUCT_NAME} requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
+        `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
+    );
+    return {success: false, apiKeysReady: false};
+  }
+
+  progress.report({message: 'Installing dependencies...'});
+  await runAsync(
+    uvPath,
+    ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
+    kissProjectPath,
+    token,
+  );
+  if (process.platform === 'linux') {
+    await runAsync(
+      uvPath,
+      ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'],
+      kissProjectPath,
+      token,
+    ).catch(err => {
+      if (err instanceof SetupCancelledError) throw err;
+      log(
+        `Playwright deps install failed (may need sudo): ${err instanceof Error ? err.message : err}`,
+      );
+    });
+  }
+  progress.report({increment: 30});
+
+  throwIfCancelled(token);
+  progress.report({message: 'Finalizing setup...'});
+  const finalizedKeys = await runFinalization(
+    progress,
+    kissProjectPath,
+    uvPath,
+    token,
+  );
+  return {success: true, apiKeysReady: finalizedKeys};
 }
 
 /**
@@ -1696,7 +1840,17 @@ function uvAssetInfo(): {
   return null;
 }
 
-async function installUv(): Promise<string | null> {
+/**
+ * Download and install uv into ~/.local/bin.
+ *
+ * @param token Setup cancellation token, checked between the download,
+ *     the hash check and the extraction; a cancel is rethrown as
+ *     SetupCancelledError instead of being reported as a failed install.
+ * @returns the installed uv path, or null when the install failed.
+ */
+async function installUv(
+  token?: vscode.CancellationToken,
+): Promise<string | null> {
   const asset = uvAssetInfo();
   if (!asset) {
     log(
@@ -1726,9 +1880,12 @@ async function installUv(): Promise<string | null> {
     } else {
       const tarPath = path.join(installDir, `${assetName}.${asset.ext}`);
       await downloadFile(url, tarPath);
+      throwIfCancelled(token);
       const expectedHash = await fetchUvStyleSha256(url);
+      throwIfCancelled(token);
       verifyDownloadHash(tarPath, expectedHash);
       await spawnPromise('tar', ['xzf', tarPath, '-C', installDir]);
+      throwIfCancelled(token);
       const extractedDir = path.join(installDir, assetName);
       for (const bin of ['uv', 'uvx']) {
         const src = path.join(extractedDir, bin);
@@ -1750,6 +1907,7 @@ async function installUv(): Promise<string | null> {
     log('uv installed successfully');
     return findUvPath();
   } catch (err) {
+    if (err instanceof SetupCancelledError) throw err;
     log(`Failed to install uv: ${err instanceof Error ? err.message : err}`);
     return null;
   }
@@ -1851,7 +2009,15 @@ function gitInstallHint(): string {
   return 'Download Git from https://git-scm.com';
 }
 
-async function installGit(): Promise<boolean> {
+/**
+ * Install git with the platform's package manager (or Xcode CLT).
+ *
+ * @param token Setup cancellation token, checked between install
+ *     attempts and on every poll of the Xcode CLT installer (up to ten
+ *     minutes); a cancel throws SetupCancelledError.
+ * @returns whether a working git is available afterwards.
+ */
+async function installGit(token?: vscode.CancellationToken): Promise<boolean> {
   log('Git not found, attempting to install...');
 
   if (process.platform === 'darwin') {
@@ -1869,6 +2035,9 @@ async function installGit(): Promise<boolean> {
         );
       }
     }
+    // A Cancel pressed while Homebrew ran must not open the Xcode
+    // Command Line Tools installer as a fallback.
+    throwIfCancelled(token);
 
     try {
       execSync('xcode-select -p', {
@@ -1886,6 +2055,7 @@ async function installGit(): Promise<boolean> {
 
     for (let i = 0; i < 120; i++) {
       await new Promise(resolve => setTimeout(resolve, 5_000));
+      throwIfCancelled(token);
       if (await gitWorks()) {
         log('Git installed via Xcode Command Line Tools');
         return true;
@@ -1904,6 +2074,7 @@ async function installGit(): Promise<boolean> {
       ['apk', 'sudo -n apk add git'],
     ];
     for (const [bin, cmd] of attempts) {
+      throwIfCancelled(token);
       if (commandExists(bin)) {
         log(`Installing git via ${bin}...`);
         try {
@@ -1926,10 +2097,15 @@ async function installGit(): Promise<boolean> {
 }
 
 async function installMinGitWindows(): Promise<boolean> {
-  const GIT_VERSION = '2.49.0';
-  const archSuffix = process.arch === 'arm64' ? 'arm64' : '64';
-  const assetName = `MinGit-${GIT_VERSION}-${archSuffix}-bit`;
-  const url = `https://github.com/git-for-windows/git/releases/download/v${GIT_VERSION}.windows.1/${assetName}.zip`;
+  // git-for-windows tags a release `v<git>.windows.<n>` and names its
+  // assets `MinGit-<git>[.<n>]-64-bit.zip` / `MinGit-<git>[.<n>]-arm64.zip`
+  // (the `.<n>` suffix is dropped when n == 1).  Newest release:
+  // https://github.com/git-for-windows/git/releases/latest
+  const GIT_RELEASE_TAG = 'v2.55.0.windows.5';
+  const GIT_VERSION = '2.55.0.5';
+  const archSuffix = process.arch === 'arm64' ? 'arm64' : '64-bit';
+  const assetName = `MinGit-${GIT_VERSION}-${archSuffix}`;
+  const url = `https://github.com/git-for-windows/git/releases/download/${GIT_RELEASE_TAG}/${assetName}.zip`;
   const gitDir = path.join(HOME_DIR, '.local', 'git');
 
   log(`Downloading MinGit from ${url}`);
@@ -2011,7 +2187,16 @@ async function installCloudflaredIfNeeded(): Promise<boolean> {
   }
 }
 
-async function installCodeCli(): Promise<boolean> {
+/**
+ * Put the `code` CLI on PATH (symlink on macOS, snap/apt on Linux).
+ *
+ * @param token Setup cancellation token, checked between the snap and
+ *     the apt attempt; a cancel throws SetupCancelledError.
+ * @returns whether `code` is on PATH afterwards.
+ */
+async function installCodeCli(
+  token?: vscode.CancellationToken,
+): Promise<boolean> {
   if (commandExists('code')) return true;
 
   if (process.platform === 'darwin') {
@@ -2046,6 +2231,7 @@ async function installCodeCli(): Promise<boolean> {
         log(`snap install failed: ${err instanceof Error ? err.message : err}`);
       }
     }
+    throwIfCancelled(token);
     if (commandExists('apt-get')) {
       try {
         await execPromise(
@@ -2070,6 +2256,7 @@ async function runAsync(
   cmd: string,
   args: string[],
   cwd: string,
+  token?: vscode.CancellationToken,
 ): Promise<void> {
   const cmdLine = `${cmd} ${args.join(' ')}`;
   log(`Running: ${cmdLine}`);
@@ -2080,14 +2267,14 @@ async function runAsync(
       env: {...process.env, PYTHONUNBUFFERED: '1'},
       timeoutMs: INSTALL_STEP_TIMEOUT_MS,
       killGroup: true,
+      token,
     });
   } catch (err) {
     log(`Spawn error [${cmdLine}]: ${(err as Error).message}`);
     if ((err as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
       throw new Error(
         `${cmdLine} did not finish within ` +
-          `${INSTALL_STEP_TIMEOUT_MS / 60_000} minutes and was killed; ` +
-          'reload the window to retry',
+          `${INSTALL_STEP_TIMEOUT_MS / 60_000} minutes and was killed.`,
       );
     }
     throw err;
@@ -2098,7 +2285,11 @@ async function runAsync(
     log(`Completed: ${cmdLine}`);
     return;
   }
-  throw new Error(`${cmdLine} failed (exit code ${r.code}): ${output}`);
+  // The toast gets the one-line cause; the full output is in the log
+  // (written above) behind the toast's 'Open log' action.
+  throw new Error(
+    `${cmdLine} failed (exit code ${r.code}): ${summarizeFailure(output)}`,
+  );
 }
 
 function execPromise(cmd: string): Promise<string> {
@@ -2128,7 +2319,14 @@ function getShellRcPath(): string {
   }
 }
 
-function validateAnthropicKey(key: string): Promise<boolean> {
+/**
+ * Outcome of probing a provider with a key: 'ok', 'rejected' (the
+ * provider answered and refused the key) or 'unreachable' (no answer —
+ * offline, DNS, firewall — so nothing is known about the key).
+ */
+export type KeyValidation = 'ok' | 'rejected' | 'unreachable';
+
+function validateAnthropicKey(key: string): Promise<KeyValidation> {
   return new Promise(resolve => {
     const headers: Record<string, string> = {
       'x-api-key': key,
@@ -2150,14 +2348,14 @@ function validateAnthropicKey(key: string): Promise<boolean> {
         timeout: 15000,
       },
       res => {
-        resolve(res.statusCode === 200);
+        resolve(res.statusCode === 200 ? 'ok' : 'rejected');
         res.resume();
       },
     );
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve('unreachable'));
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      resolve('unreachable');
     });
     req.end();
   });
@@ -2262,12 +2460,29 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   log(`Added ${dirRef} to PATH in ${rcPath}`);
 }
 
-async function promptForApiKey(
+/**
+ * Ask for one API key in a password input box and, when a validator is
+ * given, probe the provider with it before accepting.  Exported so the
+ * e2e tests can drive the prompt with a fake validator.
+ *
+ * @param displayName Human name of the key ("Anthropic API Key").
+ * @param placeholder Input-box placeholder ("sk-ant-...").
+ * @param validate Optional provider probe; see {@link KeyValidation}.
+ * @param optional Esc skips silently instead of asking "Enter Key / Skip".
+ * @param providerHost Host named in the validation messages.
+ * @returns The trimmed key, or undefined when the user skipped/cancelled.
+ */
+export async function promptForApiKey(
   displayName: string,
   placeholder: string,
-  validate?: (key: string) => Promise<boolean>,
+  validate?: (key: string) => Promise<KeyValidation>,
   optional?: boolean,
+  providerHost = '',
 ): Promise<string | undefined> {
+  // The value typed last time: a 'Try again' after a failed validation
+  // reopens the box with it so a one-character typo is fixed, not
+  // retyped from scratch.
+  let lastValue = '';
   while (true) {
     const prompt = optional
       ? `${displayName} (optional — press Esc to skip):`
@@ -2277,6 +2492,8 @@ async function promptForApiKey(
       prompt,
       placeHolder: placeholder,
       ignoreFocusOut: true,
+      password: true,
+      value: lastValue,
     });
 
     if (key === undefined) {
@@ -2297,9 +2514,10 @@ async function promptForApiKey(
     if (!trimmed) {
       continue;
     }
+    lastValue = trimmed;
 
     if (validate) {
-      const valid = await withWebviewNotificationProgress(
+      const outcome = await withWebviewNotificationProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: `Validating ${displayName}...`,
@@ -2307,13 +2525,28 @@ async function promptForApiKey(
         () => validate(trimmed),
       );
 
-      if (!valid) {
+      if (outcome === 'unreachable') {
+        // Nothing is known about the key: offer to keep it unvalidated
+        // rather than calling a possibly fine key "not valid".
         const choice = await showWarningNotification(
-          `The ${displayName} is not valid. Please try again.`,
-          'Try Again',
+          `Could not reach ${providerHost || 'the provider'} to validate ` +
+            'the key; check your connection.',
+          'Try again',
+          'Save without validating',
           'Cancel',
         );
-        if (choice !== 'Try Again') {
+        if (choice === 'Save without validating') return trimmed;
+        if (choice !== 'Try again') return undefined;
+        continue;
+      }
+      if (outcome === 'rejected') {
+        const choice = await showWarningNotification(
+          `${providerHost || 'The provider'} rejected this ${displayName}. ` +
+            'Check the key and try again.',
+          'Try again',
+          'Cancel',
+        );
+        if (choice !== 'Try again') {
           return undefined;
         }
         continue;
@@ -2375,8 +2608,33 @@ const API_KEYS_LOCK_FILE = path.join(LOG_DIR, '.api-keys.lock');
 // finish before giving up and reporting whatever keys exist by then.
 const API_KEYS_LOCK_WAIT_MS = 600_000;
 
+// Written when the user skips the API-key prompt.  While it exists no
+// activation prompts again (the skip was an answer, not a request to be
+// asked at every window); "KISS: Enter API Key" clears it.
+const API_KEYS_DECLINED_FILE = path.join(LOG_DIR, '.api-keys-declined');
+
+/** Persist a one-shot user decision as a marker file under $KISS_HOME. */
+function writeDeclinedMarker(markerPath: string): void {
+  try {
+    fs.mkdirSync(path.dirname(markerPath), {recursive: true});
+    fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
+  } catch {}
+}
+
+/**
+ * "KISS: Enter API Key": forget an earlier skip and run the API-key
+ * prompt now.
+ *
+ * @returns true when a key (or the Claude CLI) is available afterwards.
+ */
+export function promptApiKeysNow(): Promise<boolean> {
+  fs.rmSync(API_KEYS_DECLINED_FILE, {force: true});
+  return ensureApiKeys();
+}
+
 export async function ensureApiKeys(
   lockFile: string = API_KEYS_LOCK_FILE,
+  declinedFile: string = API_KEYS_DECLINED_FILE,
 ): Promise<boolean> {
   loadApiKeysFromShellRc();
 
@@ -2386,11 +2644,14 @@ export async function ensureApiKeys(
       displayName: 'Anthropic API Key',
       placeholder: 'sk-ant-...',
       validate: validateAnthropicKey,
+      providerHost: 'api.anthropic.com',
     },
     {
       envName: 'OPENAI_API_KEY',
       displayName: 'OpenAI API Key',
       placeholder: 'sk-...',
+      validate: undefined,
+      providerHost: 'api.openai.com',
     },
   ];
 
@@ -2399,6 +2660,10 @@ export async function ensureApiKeys(
     hasClaudeCli || keys.some(k => !!process.env[k.envName]);
 
   if (hasAnyKey()) return true;
+  if (fs.existsSync(declinedFile)) {
+    log('API key prompt skipped earlier — not asking again');
+    return false;
+  }
 
   const releaseLock = acquireDaemonRestartLock(lockFile);
   if (!releaseLock) {
@@ -2425,7 +2690,13 @@ export async function ensureApiKeys(
     const rcPath = getShellRcPath();
 
     while (true) {
-      for (const {envName, displayName, placeholder, validate} of keys) {
+      for (const {
+        envName,
+        displayName,
+        placeholder,
+        validate,
+        providerHost,
+      } of keys) {
         // A prompt can sit open for minutes; keys saved elsewhere in
         // the meantime (e.g. by `sorcar` in a terminal) make the
         // remaining prompts unnecessary, so re-read before each one.
@@ -2438,6 +2709,7 @@ export async function ensureApiKeys(
           placeholder,
           validate,
           true,
+          providerHost,
         );
         if (key) {
           process.env[envName] = key;
@@ -2453,7 +2725,16 @@ export async function ensureApiKeys(
         'Enter Key',
         'Skip',
       );
-      if (choice !== 'Enter Key') break;
+      if (choice !== 'Enter Key') {
+        // Skip (or closing the toast) is remembered: no window asks
+        // again until the user runs the command offered here.
+        writeDeclinedMarker(declinedFile);
+        void showInformationNotification(
+          `${PRODUCT_NAME} will not ask for an API key again. ` +
+            'Add one any time with "KISS: Enter API Key" from the Command Palette.',
+        );
+        break;
+      }
     }
 
     if (!alreadyPrompted) {
@@ -2647,6 +2928,13 @@ const REMOTE_PASSWORD_LOCK_FILE = path.join(LOG_DIR, '.remote-password.lock');
 const REMOTE_PASSWORD_LOCK_WAIT_MS = 600_000;
 // How often a waiter re-checks the holder (liveness and outcome).
 const REMOTE_PASSWORD_POLL_MS = 1000;
+// Written when the user skips the remote-password prompt (Esc / empty).
+// While it exists no later session prompts again; the settings panel's
+// Remote password field is the way to set one afterwards.
+const REMOTE_PASSWORD_DECLINED_FILE = path.join(
+  LOG_DIR,
+  '.remote-password-declined',
+);
 // An unreadable lock younger than this is assumed to be one caught
 // mid-write and is honoured as live.
 const PROMPT_LOCK_UNREADABLE_STALE_MS = 120_000;
@@ -2834,6 +3122,9 @@ function acquireRemotePasswordPromptLock(
  *   before giving up (overridable for tests).
  * @param pollMs Interval between holder liveness checks (overridable
  *   for tests).
+ * @param declinedFile Marker written when the user skipped the prompt
+ *   in an earlier session; while it exists the prompt is not repeated
+ *   (overridable for tests).
  */
 export async function ensureRemotePassword(
   uvPath: string | null,
@@ -2841,10 +3132,15 @@ export async function ensureRemotePassword(
   lockFile: string = REMOTE_PASSWORD_LOCK_FILE,
   waitMs: number = REMOTE_PASSWORD_LOCK_WAIT_MS,
   pollMs: number = REMOTE_PASSWORD_POLL_MS,
+  declinedFile: string = REMOTE_PASSWORD_DECLINED_FILE,
 ): Promise<void> {
   // audit0903-coverage:start
   if (await getStoredRemotePassword()) {
     log('ensureRemotePassword: password already set — skipping prompt');
+    return;
+  }
+  if (fs.existsSync(declinedFile)) {
+    log('ensureRemotePassword: prompt skipped earlier — not asking again');
     return;
   }
 
@@ -2878,7 +3174,11 @@ export async function ensureRemotePassword(
       if (hold) {
         let outcome: RemotePasswordOutcome = 'failed';
         try {
-          outcome = await ensureRemotePasswordLocked(uvPath, kissProjectPath);
+          outcome = await ensureRemotePasswordLocked(
+            uvPath,
+            kissProjectPath,
+            declinedFile,
+          );
         } finally {
           hold.finish(outcome);
         }
@@ -2908,11 +3208,13 @@ export async function ensureRemotePassword(
  *
  * @param uvPath Path of the uv binary, or null when uv was not found.
  * @param kissProjectPath Root of the kiss checkout whose venv runs Python.
+ * @param declinedFile Marker to write when the user skips the prompt.
  * @returns The terminal outcome the holder records beside the lock.
  */
 async function ensureRemotePasswordLocked(
   uvPath: string | null,
   kissProjectPath: string,
+  declinedFile: string,
 ): Promise<RemotePasswordOutcome> {
   // audit0903-coverage:start
   // Re-check under the lock: a previous holder (or a takeover) may have
@@ -2935,10 +3237,19 @@ async function ensureRemotePasswordLocked(
   });
 
   if (password === undefined || password.trim() === '') {
-    showInformationNotification(
-      `${PRODUCT_NAME}: You can set the remote access password later in the ` +
-        `${PRODUCT_NAME} settings panel (Remote password field).`,
-    );
+    // The skip is remembered across sessions; the one-time follow-up
+    // says where the password can be set later and opens it.
+    writeDeclinedMarker(declinedFile);
+    void showInformationNotification(
+      `${PRODUCT_NAME} will not ask for a remote access password again. ` +
+        `Set one any time in the ${PRODUCT_NAME} settings panel ` +
+        '(Remote password field).',
+      'Open settings',
+    ).then(action => {
+      if (action === 'Open settings') {
+        void vscode.commands.executeCommand('kissSorcar.openSettings');
+      }
+    });
     return 'skipped';
   }
 

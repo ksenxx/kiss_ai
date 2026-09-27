@@ -31,6 +31,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from kiss.tests.agents.vscode.design_tokens import inline_design_tokens
+
 MEDIA_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 )
@@ -64,7 +66,7 @@ def test_remote_codex_defines_more_menu_surface() -> None:
 def test_remote_codex_styles_more_menu_items() -> None:
     """remote-codex.css must give the menu items comfortable touch
     padding and a hover treatment."""
-    css = CODEX_CSS.read_text(encoding="utf-8")
+    css = inline_design_tokens(CODEX_CSS.read_text(encoding="utf-8"))
     rule = _find_rule(css, ".more-menu-item")
     m_pad = re.search(r"padding:\s*(\d+)px", rule)
     assert m_pad and int(m_pad.group(1)) >= 6, (

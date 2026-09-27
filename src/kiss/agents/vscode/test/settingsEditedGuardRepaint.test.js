@@ -15,11 +15,7 @@
 // close.
 //
 // The marks are dropped in two places (``openSettingsPanel`` and
-// ``closeSettingsPanel``), and one mark is set with the panel CLOSED:
-// the welcome screen mirrors its password box into ``#cfg-remote-
-// password`` by assignment, which fires no ``input`` event, so it calls
-// ``markSettingsFieldEdited`` by hand.  That mark belongs to no editing
-// session and is the one most likely to get stuck.
+// ``closeSettingsPanel``).
 //
 // These tests pin the release valve rather than the guard.
 
@@ -185,56 +181,6 @@ function testReopenedPanelShowsTheServerValueNotTheOldEdit() {
   console.log('  ok - a reopened panel shows and re-saves the server value');
 }
 
-// The welcome-screen mirror is the only place that marks a field edited
-// with the settings panel closed. If that mark could outlive the
-// welcome screen, the password box would be frozen for the rest of the
-// session.
-function testWelcomeMirrorMarkDoesNotFreezeThePasswordField() {
-  const {win} = makeWebview();
-  const welcomePw = win.document.getElementById('welcome-cfg-remote-password');
-  assert.ok(welcomePw, 'the welcome screen must have a password box');
-
-  welcomePw.value = 'welcome-secret';
-  welcomePw.dispatchEvent(new win.Event('input', {bubbles: true}));
-  assert.strictEqual(
-    valueOf(win, 'cfg-remote-password'),
-    'welcome-secret',
-    'the welcome box must mirror into the settings field',
-  );
-
-  // The daemon confirms a DIFFERENT password (another window set one).
-  // While the mirror mark is live the settings field must hold what was
-  // just typed -- that is the guard working.
-  send(win, {
-    type: 'configData',
-    config: {...STORED, remote_password: 'pw-from-other-window'},
-    apiKeys: {},
-  });
-  assert.strictEqual(
-    valueOf(win, 'cfg-remote-password'),
-    'welcome-secret',
-    'the just-typed password must not be painted over',
-  );
-
-  // Opening the settings panel starts a fresh session and re-requests
-  // the config: now the server value must win, or the field is stuck
-  // for good.
-  openSettings(win);
-  send(win, {
-    type: 'configData',
-    config: {...STORED, remote_password: 'pw-from-other-window'},
-    apiKeys: {},
-  });
-  assert.strictEqual(
-    valueOf(win, 'cfg-remote-password'),
-    'pw-from-other-window',
-    'openSettingsPanel() must clear the welcome mirror mark too, or the ' +
-      'password field can never be repainted again in this session',
-  );
-  win.close();
-  console.log('  ok - the welcome mirror mark is released, not sticky');
-}
-
 // The run toggles are seeded by configData for every session, so a mark
 // stuck on one of them would silently run tasks with the wrong flags.
 function testToggleMarksAreReleasedBetweenSessions() {
@@ -267,7 +213,6 @@ function testToggleMarksAreReleasedBetweenSessions() {
 function main() {
   testServerChangeWhilePanelClosedRepaints();
   testReopenedPanelShowsTheServerValueNotTheOldEdit();
-  testWelcomeMirrorMarkDoesNotFreezeThePasswordField();
   testToggleMarksAreReleasedBetweenSessions();
   console.log('settingsEditedGuardRepaint.test.js: all tests passed');
 }

@@ -15,7 +15,7 @@ that process (``model("my-org/my-custom-model")`` then raises
 accounting).
 
 ``src/kiss/server/user_assets.py`` already solved exactly this for
-``MY_TASK_TEMPLATES.md`` / ``MY_INJECTION.md`` by staging the default in
+``MY_INJECTION.md`` by staging the default in
 a sibling temp file and hard-linking it into place; ``_seed_my_models_file``
 was a second, weaker implementation of the same behaviour.
 

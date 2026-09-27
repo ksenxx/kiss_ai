@@ -93,6 +93,7 @@ from datetime import datetime, timedelta
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -139,6 +140,26 @@ _DURATION_RE = re.compile(r"^(\d+)\s*(s|m|h|d)$")
 _INTERVAL_RE = re.compile(r"^every\s+(\d+)\s*(s|m|h|d)$")
 
 _CRON_BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+
+SCHEDULE_TZ = ZoneInfo("America/Los_Angeles")
+"""Time zone of every schedule time: Pacific time (PDT, or PST in winter).
+
+Cron expressions and offset-less ISO timestamps are evaluated in it, and
+job listings and run logs show their times in it, whatever the time
+zone of the machine running the scheduler.
+"""
+
+
+def format_schedule_time(timestamp: float) -> str:
+    """Return *timestamp* (epoch seconds) as schedule time, e.g. ``2026-09-27 05:00:00 PDT``.
+
+    Args:
+        timestamp: The time in epoch seconds.
+
+    Returns:
+        The date and time in :data:`SCHEDULE_TZ` with the zone abbreviation.
+    """
+    return datetime.fromtimestamp(timestamp, SCHEDULE_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _cron_dir() -> Path:
@@ -331,7 +352,7 @@ def _cron_date_matches(
         fields: Fields from :func:`_parse_cron_expr`.
         dom_star: Whether the day-of-month field was written as ``*``.
         dow_star: Whether the day-of-week field was written as ``*``.
-        dt: The local datetime whose date to test.
+        dt: The schedule-time datetime whose date to test.
 
     Returns:
         ``True`` when the month and day rules all match.
@@ -367,9 +388,9 @@ def compute_next_run(schedule: str, now: float) -> float | None:
 
     - Interval: ``"every 30m"``, ``"every 2h"`` (units ``s m h d``).
     - Cron: standard 5-field expression, e.g. ``"0 9 * * 1-5"``,
-      evaluated in local time.
+      evaluated in Pacific time (:data:`SCHEDULE_TZ`).
     - One-shot duration: ``"30m"``, ``"1d"`` (relative to *now*).
-    - One-shot ISO 8601 timestamp: ``"2026-01-15T14:00:00"`` (local
+    - One-shot ISO 8601 timestamp: ``"2026-01-15T14:00:00"`` (Pacific
       time unless an offset is given).
 
     Args:
@@ -386,7 +407,7 @@ def compute_next_run(schedule: str, now: float) -> float | None:
         ValueError: When *schedule* matches none of the supported forms.
 
     Note:
-        Cron times use naive local time: around a DST transition a run
+        Cron times use Pacific wall-clock time: around a DST transition a run
         can shift by up to an hour (a time skipped by spring-forward
         fires an hour late; the repeated fall-back hour fires once).
     """
@@ -401,17 +422,19 @@ def compute_next_run(schedule: str, now: float) -> float | None:
     if parsed is not None:
         fields, dom_star, dow_star = parsed
         minute_set, hour_set = fields[0], fields[1]
-        dt = datetime.fromtimestamp(now).replace(second=0, microsecond=0)
+        dt = datetime.fromtimestamp(now, SCHEDULE_TZ).replace(second=0, microsecond=0)
         dt += timedelta(minutes=1)
         for _ in range(CRON_SCAN_DAYS):
             if _cron_date_matches(fields, dom_star, dow_star, dt):
                 day = dt.date()
                 while dt.date() == day:
-                    if dt.minute in minute_set and dt.hour in hour_set:
+                    # Wall-clock arithmetic drops the fall-back fold, so a
+                    # minute of the repeated hour can map to the past.
+                    if dt.minute in minute_set and dt.hour in hour_set and dt.timestamp() > now:
                         return dt.timestamp()
                     dt += timedelta(minutes=1)
             else:
-                dt = datetime(dt.year, dt.month, dt.day) + timedelta(days=1)
+                dt = datetime(dt.year, dt.month, dt.day, tzinfo=SCHEDULE_TZ) + timedelta(days=1)
         return None
     try:
         when = datetime.fromisoformat(text)
@@ -421,6 +444,8 @@ def compute_next_run(schedule: str, now: float) -> float | None:
             "5-field cron expression, a one-shot duration like '30m', or an "
             "ISO timestamp like '2026-01-15T14:00'"
         ) from None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=SCHEDULE_TZ)
     ts = when.timestamp()
     return ts if ts > now else None
 
@@ -490,7 +515,7 @@ def _deliver(job: dict[str, Any], text: str) -> list[str]:
     """
     _output_dir().mkdir(parents=True, exist_ok=True)
     log_path = _output_dir() / f"{job['id']}.md"
-    stamp = datetime.now().isoformat(timespec="seconds")
+    stamp = format_schedule_time(time.time())
     with log_path.open("a", encoding="utf-8") as fp:
         fp.write(f"## {stamp} — {job.get('name', '')}\n\n{text}\n\n")
     notes: list[str] = []
@@ -716,7 +741,7 @@ def _run_prompt_job(
 
     The run has no parent task (the tool is built without a parent
     agent), so the daemon treats it as a top-level task: no reviewer
-    sub-tree marking, no shared budget or task-tree quota.
+    sub-tree marking, no shared budget.
 
     Args:
         job: The job dict (uses ``id``, ``name``, ``prompt``,
@@ -1190,7 +1215,7 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
         job: The stored job dict.
 
     Returns:
-        A dict with the job's key fields and ISO-formatted times.
+        A dict with the job's key fields and its times in Pacific time.
     """
     view = {
         key: job.get(key)
@@ -1206,9 +1231,7 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
             view[key] = job[key]
     for key in ("next_run_at", "last_run_at"):
         if job.get(key):
-            view[key] = datetime.fromtimestamp(float(job[key])).isoformat(
-                timespec="seconds"
-            )
+            view[key] = format_schedule_time(float(job[key]))
     return view
 
 
@@ -1311,14 +1334,16 @@ def cron_job(
     stopped once it exceeds it (default 3600 s for a prompt job,
     600 s for a command).
 
-    Schedule forms (local time):
+    Schedule forms (all times are Pacific time, PDT/PST, never UTC or the
+    machine's time zone):
 
     - Repeating interval: ``"every 30m"``, ``"every 2h"``
       (units ``s``, ``m``, ``h``, ``d``).
     - Repeating cron: standard 5-field expression, e.g. ``"0 9 * * 1-5"``
-      for 9:00 on weekdays.
+      for 9:00 PDT on weekdays.
     - One-shot delay: ``"30m"``, ``"1d"`` (runs once, that far from now).
-    - One-shot timestamp: ISO 8601, e.g. ``"2026-01-15T14:00"``.
+    - One-shot timestamp: ISO 8601, e.g. ``"2026-01-15T14:00"`` (Pacific
+      time unless it carries an offset).
 
     Delivery (``deliver``): comma-separated targets.  ``local`` (default)
     only appends to ``~/.kiss/cron/output/<job_id>.md``; any other
@@ -1559,7 +1584,9 @@ CRON_DISPATCH_PREAMBLE = (
     "cron_job tool for managing scheduled automations — use it directly "
     "and immediately, without exploring any source code.  Translate the "
     "user's natural-language schedule into one of the tool's four "
-    "supported schedule forms yourself.  For polls and checks (\"is X "
+    "supported schedule forms yourself.  All schedule times are Pacific "
+    "time (PDT): write \"9am\" as hour 9 and convert times the user gives "
+    "in another zone to Pacific, never to UTC.  For polls and checks (\"is X "
     "released?\", \"is the site up?\") create a no-LLM command job (curl/"
     "grep pipeline that prints only when there is news) rather than a "
     "prompt job, and pass until_delivered=True when the user wants to be "

@@ -9,14 +9,19 @@ per-module policy documents which services get loopback ``extra_hosts``
 entries) but delegates the common setup and teardown here:
 ``setup_muse_env`` enables Muse-auth and writes the policy file inside
 the isolated ``KISS_HOME``, and ``teardown_muse_env`` stops the daemon
-subprocess and waits for its socket to vanish so the next test (or the
-next daemon in the same test) starts from a clean slate.
+subprocess and waits for its socket to vanish and its process to exit so
+the next test (or the next daemon in the same test) starts from a clean
+slate and the subprocess reaper finds nothing left running.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
+import struct
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -67,25 +72,60 @@ def setup_muse_env(monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any]) -> N
 
 
 def teardown_muse_env() -> None:
-    """Stop the Muse-auth daemon and wait until its socket disappears."""
+    """Stop the Muse-auth daemon and wait until its process has exited.
+
+    ``stop_daemon`` only asks the daemon to exit.  The daemon unlinks its
+    socket as its serve loop ends and then still needs tens of
+    milliseconds (more under coverage) to shut its interpreter down, so
+    waiting for the socket alone let the subprocess reaper find the
+    daemon alive at test teardown and ``SIGTERM`` it.  The daemon's pid
+    is therefore read before the stop and awaited afterwards; waiting
+    for the socket to vanish also keeps a follow-up ``ensure_daemon``
+    from handshaking with the dying daemon.
+    """
+    pid = _daemon_pid()
     stop_daemon()
-    wait_daemon_stopped()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and (
+        socket_path().exists() or (pid is not None and _process_running(pid))
+    ):
+        time.sleep(0.02)
 
 
-def wait_daemon_stopped(timeout: float = 10.0) -> None:
-    """Poll until the Muse-auth daemon socket vanishes (or ``timeout``).
+def _daemon_pid() -> int | None:
+    """Return the pid of the daemon listening on the Muse-auth socket.
 
-    ``stop_daemon`` only asks the daemon to exit; the subprocess removes
-    its socket as it shuts down.  Waiting for the socket to vanish keeps
-    a follow-up ``ensure_daemon`` (or the next test) from handshaking
-    with the dying daemon.
+    Returns:
+        The listener's pid from the kernel's ``SO_PEERCRED`` record, or
+        None when no daemon accepts connections.
+    """
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        # Bounded: a listener with a full backlog must not stall teardown.
+        sock.settimeout(5.0)
+        try:
+            sock.connect(str(socket_path()))
+        except OSError:
+            return None
+        peercred = getattr(socket, "SO_PEERCRED")  # Linux-only constant
+        creds = sock.getsockopt(socket.SOL_SOCKET, peercred, struct.calcsize("3i"))
+    pid: int = struct.unpack("3i", creds)[0]
+    return pid
+
+
+def _process_running(pid: int) -> bool:
+    """Return whether ``pid`` exists and has not exited (a zombie has exited).
 
     Args:
-        timeout: Maximum seconds to wait for the socket to disappear.
+        pid: Process id to check.
+
+    Returns:
+        True while the process is running.
     """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and socket_path().exists():
-        time.sleep(0.05)
+    with contextlib.suppress(OSError):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        # The state letter follows the parenthesised command name.
+        return stat[stat.rindex(")") + 2] != "Z"
+    return False
 
 
 def auth_tools(agent: Any) -> dict[str, Any]:

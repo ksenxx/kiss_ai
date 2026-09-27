@@ -4,9 +4,8 @@
 # add your name here
 """Google Docs Agent — channel agent for the Google Docs REST API.
 
-Provides authenticated access to Google Docs via OAuth2 (see
-``_google_workspace_utils`` for the shared credential flow; the token
-is persisted under ``$KISS_HOME/third_party_agents/google_docs/``).
+Provides access to Google Docs; sign-in and every API call go through
+Composio (see :mod:`._composio_google`), which holds the Google token.
 Documents are read and edited through plain ``requests`` calls against
 ``https://docs.googleapis.com/v1`` and listed through the Drive v3
 ``files`` endpoint.
@@ -33,19 +32,16 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.third_party_agents._composio_google import (
+    ComposioSession,
+    connected_account_id,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    fresh_access_token,
-    google_api_session,
-    google_consent_steps,
-    load_google_credentials,
+    google_auth_prompt,
     make_google_auth_tools,
 )
 
 _SERVICE = "google_docs"
-_SCOPES = [
-    "https://www.googleapis.com/auth/documents",
-    "https://www.googleapis.com/auth/drive",
-]
 _TIMEOUT = 30
 
 
@@ -148,44 +144,30 @@ def _extract_tabs_text(tabs: list[Any]) -> list[str]:
 class GoogleDocsChannelBackend(ToolMethodBackend):
     """Channel backend for the Google Docs REST API.
 
-    Talks to ``docs.googleapis.com`` (and Drive v3 for listing) over
-    HTTP with an OAuth2 bearer token.  Outbound-only: there is no
-    inbound message stream, so :meth:`poll_messages` always returns no
-    messages.
+    Talks to ``docs.googleapis.com`` (and Drive v3 for listing) through
+    Composio's proxy, which signs each request with the user's Google
+    token.  Outbound-only: there is no inbound message stream, so
+    :meth:`poll_messages` always returns no messages.
     """
 
     def __init__(self) -> None:
-        self._creds: Any = None
-        self._http: Any = google_api_session(_SERVICE)
-        self._token: str = ""
+        self._http: Any = ComposioSession(_SERVICE)
         self._base_url: str = "https://docs.googleapis.com/v1"
         self._drive_base_url: str = "https://www.googleapis.com/drive/v3"
         self._request_lock = threading.Lock()
         self._connection_info: str = ""
 
     def connect(self) -> bool:
-        """Load stored Google Docs OAuth2 credentials from disk.
+        """Check that Google Docs is connected through Composio.
 
         Returns:
-            True if valid credentials were loaded (or a token was
-            already injected), False otherwise.
+            True if a Composio connection exists.
         """
-        creds = load_google_credentials(_SERVICE, _SCOPES)
-        if creds is not None:
-            self._creds = creds
-        if self._creds is None and not self._token:
-            self._connection_info = "No Google Docs credentials found. Please authenticate first."
+        if not connected_account_id(_SERVICE):
+            self._connection_info = "Google Docs is not connected. Please authenticate first."
             return False
-        self._connection_info = "Google Docs credentials loaded."
+        self._connection_info = "Google Docs connected through Composio."
         return True
-
-    def _headers(self) -> dict[str, str]:
-        """Build the Authorization header from the injected token or credentials.
-
-        Returns:
-            Headers dict with a Bearer access token.
-        """
-        return {"Authorization": f"Bearer {self._token or fresh_access_token(self._creds)}"}
 
     def _request(
         self,
@@ -208,7 +190,7 @@ class GoogleDocsChannelBackend(ToolMethodBackend):
         """
         with self._request_lock:
             resp = self._http.request(
-                method, url, headers=self._headers(), params=params, json=payload,
+                method, url, params=params, json=payload,
                 timeout=_TIMEOUT,
             )
         if resp.status_code >= 400:
@@ -470,40 +452,19 @@ class GoogleDocsChannelBackend(ToolMethodBackend):
 class GoogleDocsAgent(BaseChannelAgent):
     """Channel agent with Google Docs REST API tools."""
 
-    channel_system_prompt = (
-        "\n\n## Google Docs Authentication\n"
-        "Always call check_google_docs_auth() first; if it returns ok, report "
-        "that Google Docs credentials are configured and stop — never start "
-        "an OAuth flow over valid credentials. If credentials.json is missing, call "
-        "start_google_docs_browser_setup(), which opens Google Cloud Console for "
-        "the user to create an OAuth Desktop-app client; if credentials.json exists, call "
-        "authenticate_google_docs() directly.\n"
-        + google_consent_steps("google_docs")
-        + " Finish by verifying with check_google_docs_auth()."
-    )
+    channel_system_prompt = google_auth_prompt(_SERVICE, "Google Docs")
 
     def __init__(self) -> None:
         super().__init__("Google Docs Agent")
         self._backend = GoogleDocsChannelBackend()
-        self._backend._creds = load_google_credentials(_SERVICE, _SCOPES)
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend has credentials or an injected token."""
-        return bool(self._backend._creds is not None or self._backend._token)
+        """Return True if Google Docs is connected through Composio."""
+        return bool(connected_account_id(_SERVICE))
 
     def _get_auth_tools(self) -> list:
-        """Return the Google Docs authentication tool functions."""
-        backend = self._backend
-
-        def on_credentials(creds: Any) -> None:
-            """Wire new (or cleared) OAuth credentials into the backend.
-
-            Args:
-                creds: New credentials, or None after clearing.
-            """
-            backend._creds = creds
-
-        return make_google_auth_tools(self, _SERVICE, "Google Docs", _SCOPES, on_credentials)
+        """Return the Composio sign-in tool set for Google Docs."""
+        return make_google_auth_tools(self, _SERVICE, "Google Docs", self._backend.connect)
 
 
 def main() -> None:
@@ -525,7 +486,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    Composio connection recorded under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return GoogleDocsAgent()._get_tools()

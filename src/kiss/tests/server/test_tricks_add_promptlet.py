@@ -240,12 +240,16 @@ class TestAddTrickCommand(_TricksHome):
 
     def test_rejected_body_answers_sender_with_error(self) -> None:
         self.server._cmd_add_trick({"text": "   ", "connId": "c9"})
-        self.assertIsNone(self.server.last("tricksData"))
         err = self.server.last("error")
         assert err is not None
         self.assertEqual(err["connId"], "c9")
         self.assertEqual(err["text"], "Promptlet must not be empty")
-        self.assertFalse(self.user_file.exists())
+        # The error is followed by the list on disk, for the sender only.
+        resync = self.server.printer.messages[-1]
+        self.assertEqual(resync["type"], "tricksData")
+        self.assertEqual(resync["connId"], "c9")
+        self.assertEqual(resync["userCount"], 1)
+        self.assertEqual(self.user_text(), tricks.DEFAULT_MY_INJECTION)
 
     def test_non_string_text_is_treated_as_empty(self) -> None:
         self.server._cmd_add_trick({"text": 42})
@@ -271,7 +275,10 @@ class TestAddTrickCommand(_TricksHome):
         self.assertTrue(
             err["text"].startswith("Could not write ~/.kiss/MY_INJECTION.md: ")
         )
-        self.assertIsNone(self.server.last("tricksData"))
+        resync = self.server.last("tricksData")
+        assert resync is not None
+        self.assertEqual(resync["connId"], "c2")
+        self.assertNotIn("Blocked.", resync["tricks"])
 
 
 @requires_unix_sockets

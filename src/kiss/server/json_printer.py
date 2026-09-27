@@ -26,6 +26,9 @@ import os
 import re
 import threading
 import time
+from collections.abc import Iterator
+from concurrent.futures import Future
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
@@ -242,18 +245,21 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return events
     result: list[dict[str, Any]] = []
     merge_types = ("thinking_delta", "text_delta", "system_output")
+    # Texts of the run being merged into ``result[-1]`` (empty when
+    # ``result[-1]`` cannot absorb a successor), joined once per run so
+    # coalescing stays linear in the total text length.
+    texts: list[str] = []
     for ev in events:
         t = ev.get("type", "")
-        if (
-            result
-            and t == result[-1].get("type")
-            and t in merge_types
-            and "text" in ev
-            and "text" in result[-1]
-        ):
-            result[-1] = {**result[-1], "text": result[-1]["text"] + ev["text"]}
-        else:
-            result.append(ev)
+        if texts and t == result[-1].get("type") and "text" in ev:
+            texts.append(ev["text"])
+            continue
+        if len(texts) > 1:
+            result[-1] = {**result[-1], "text": "".join(texts)}
+        result.append(ev)
+        texts = [ev["text"]] if t in merge_types and "text" in ev else []
+    if len(texts) > 1:
+        result[-1] = {**result[-1], "text": "".join(texts)}
     return result
 
 
@@ -524,6 +530,16 @@ class JsonPrinter(Printer):
         # ever expiring (gpt-5.6-sol conc review, finding 5).
         self._closed_tasks_evicted = False
         self._recordings: dict[str, list[dict[str, Any]]] = {}
+        # Recordings ``stop_recording`` retired but ``cleanup_task`` has
+        # not freed yet.  A server-owned run records its final events
+        # and stops recording while its state is still registered and
+        # counts as running, so a viewer that attaches meanwhile must
+        # still find them for its replay (the events table lags
+        # behind).  Only runs whose state is still registered are kept
+        # (see stop_recording), and the task runner cleans each of
+        # those up; bridge-created runs (sub-agents) are unregistered
+        # before they stop recording and are never kept.
+        self._retired_recordings: dict[str, list[dict[str, Any]]] = {}
         # task id → (tab_id, conn_id) of the UI tab the task was
         # launched from; set via register_task_ui when a task runs in
         # a UI tab.  Deliberately TASK-SCOPED: cleanup_task drops the
@@ -554,6 +570,30 @@ class JsonPrinter(Printer):
         # list append), and no caller of the three methods holds any
         # printer lock.  Order: ``_model_pick_lock`` → ``_lock``.
         self._model_pick_lock = threading.Lock()
+        # Makes "record a task event + choose its live recipients +
+        # schedule their sends" atomic with respect to "snapshot a
+        # running task's recording + schedule the replay that carries
+        # it".  The webview REPLACES a tab's transcript on a replay, so
+        # with the two interleaved an event could render twice (in the
+        # snapshot and again live, after the replay) or vanish (sent
+        # live, then wiped by a replay whose snapshot predates it).
+        # Under this lock every event is either in the snapshot (and
+        # any live copy precedes the replay in the endpoint's FIFO
+        # send queue, so the replay supersedes it) or recorded after it
+        # (and its live copy follows the replay).  Persistence of a
+        # task event is queued under it too, so the events table keeps
+        # the live order.  Holders do O(1) work per event (plus one
+        # shallow recording copy for a replay, whose payload is built
+        # after release; see :meth:`replay_snapshot`): they only record,
+        # queue and schedule sends, never block on I/O or the event
+        # loop, and never take ``STATE_LOCK`` or an agent's lock.
+        # Re-entrant: the setup-failure path broadcasts while holding
+        # it.  Order: ``STATE_LOCK`` → ``_model_pick_lock`` →
+        # ``delivery_lock`` → ``_lock``.
+        self.delivery_lock = threading.RLock()
+        # Replay send slot reserved by :meth:`replay_snapshot` on this
+        # thread; the next ``task_events`` broadcast fills it.
+        self._replay_slot = threading.local()
         # Absolute paths of files each task changed through the
         # file-mutating tools (Write / Edit), keyed by task id.
         # Consumed by the task-runner's end-of-task auto-commit so
@@ -587,7 +627,9 @@ class JsonPrinter(Printer):
             getattr(self._thread_local, "task_id", None),
         )
 
-    def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
+    def subscribe_tab(
+        self, task_id: Any, tab_id: str,
+    ) -> list[dict[str, Any]] | None:
         """Subscribe *tab_id* to receive every event broadcast for *task_id*.
 
         Used by the server when the user opens a chat tab that is
@@ -598,10 +640,21 @@ class JsonPrinter(Printer):
             task_id: The task identifier (``task_history.id`` int or
                 its string form).
             tab_id: The frontend tab id to subscribe.
+
+        Returns:
+            The task's recording list (live, or retired and not yet
+            cleaned up) as of the subscription, or ``None`` when the
+            task has none.  Taken in the same lock hold as the
+            subscription, so every event the tab missed is in it.
+            Recordings are append-only and ``stop_recording`` /
+            ``cleanup_task`` only drop the printer's reference, so a
+            replay passing this list to :meth:`replay_snapshot` sees
+            every event recorded up to its snapshot, however the run
+            ends meanwhile.
         """
         key = self._coerce_task_id(task_id)
         if not key or not tab_id:
-            return
+            return None
         # _model_pick_lock keeps the catch-up's state write and its
         # broadcast atomic w.r.t. restore_model_pick: a restore racing
         # this subscribe used to discard the tab's membership and
@@ -617,6 +670,7 @@ class JsonPrinter(Printer):
                     viewers = set()
                     self._subscribers[key] = viewers
                 viewers.add(tab_id)
+                recording = self._recording_ref(key)
                 # A tab joining a task whose agent already switched
                 # models missed that one-shot event, and would
                 # otherwise sit on the wrong label until the task
@@ -626,6 +680,7 @@ class JsonPrinter(Printer):
                     self._model_override_tabs.add(tab_id)
             if catch_up:
                 self.broadcast_model_pick(catch_up, "agent", tab_id)
+        return recording
 
     def register_task_ui(
         self,
@@ -1055,13 +1110,45 @@ class JsonPrinter(Printer):
             return {**event, "taskId": key}
         return event
 
-    def _keep_tab_stamped_task_event(self, event: dict[str, Any]) -> bool:
-        """Record and persist a ``tabId``-stamped event under its own task.
+    @staticmethod
+    def _tab_stamped_task_record(
+        event: dict[str, Any],
+    ) -> tuple[dict[str, Any], str] | None:
+        """Return the copy of a ``tabId``-stamped event kept under its task.
 
         Only the :data:`TAB_STAMPED_TASK_EVENT_TYPES` that also carry a
         ``taskId`` are kept; every other tabId-stamped event is a
-        transient targeted broadcast.  A tabId-stripped copy is appended
-        to that task's in-memory recording and queued for persistence
+        transient targeted broadcast.  Encodes the persisted JSON here
+        so callers can do it before taking :attr:`delivery_lock`.
+
+        Args:
+            event: The tabId-stamped event (not mutated).
+
+        Returns:
+            ``(record, encoded)``: the tabId-stripped copy and its JSON
+            (``""`` when it is not a persisted display event), or
+            ``None`` for a transient targeted broadcast.
+        """
+        if (
+            event.get("type") not in TAB_STAMPED_TASK_EVENT_TYPES
+            or not event.get("taskId")
+        ):
+            return None
+        record = {k: v for k, v in event.items() if k != "tabId"}
+        encoded = (
+            json.dumps(record)
+            if record.get("type") in _DISPLAY_EVENT_TYPES else ""
+        )
+        return record, encoded
+
+    def _keep_tab_stamped_task_event(
+        self, record: dict[str, Any], encoded: str,
+    ) -> None:
+        """Record and persist a ``tabId``-stamped event under its own task.
+
+        *record* and *encoded* come from :meth:`_tab_stamped_task_record`.
+        The record is appended to that task's in-memory recording and
+        (when *encoded* is set) queued for persistence
         under the event's OWN ``taskId`` — the emitters of these events
         (``commands._echo_injected_prompt``,
         ``commands._broadcast_ask_answer``,
@@ -1073,49 +1160,52 @@ class JsonPrinter(Printer):
         it must still survive a history reopen.
 
         Args:
-            event: The tabId-stamped event (not mutated).
-
-        Returns:
-            ``True`` when the event was recorded and persisted, ``False``
-            when it was a transient targeted broadcast.
+            record: The tabId-stripped event.
+            encoded: Its JSON, or ``""`` when it is not persisted.
         """
-        if (
-            event.get("type") not in TAB_STAMPED_TASK_EVENT_TYPES
-            or not event.get("taskId")
-        ):
-            return False
-        record = {k: v for k, v in event.items() if k != "tabId"}
         with self._lock:
             self._record_event(record)
-        if record.get("type") in _DISPLAY_EVENT_TYPES:
-            _queue_chat_event(record, task_id=str(record["taskId"]))
-        return True
+        if encoded:
+            _queue_chat_event(encoded, task_id=str(record["taskId"]))
 
-    def _persist_event(self, event: dict[str, Any]) -> None:
-        """Persist a display event to the database if applicable.
+    def _persistence_task_id(self, event: dict[str, Any]) -> str:
+        """Return the ``task_history`` id a display event is filed under.
 
         Looks up the agent state registered for ``event["taskId"]``
-        and, when its agent has already published a ``last_task_id``,
-        enqueues the event for asynchronous persistence via
-        ``_queue_chat_event``.  The id is read through the agent's
-        property, which takes the same lock the publishing assignment
-        takes; it answers ``""`` for an agent that has not run yet,
-        and an event can never be filed under an empty id.
+        (under ``STATE_LOCK``) and reads its agent's published
+        ``last_task_id`` through the property, which takes the same
+        lock the publishing assignment takes; it answers ``""`` for an
+        agent that has not run yet, so an event is never filed under an
+        empty id.  Must not be called under :attr:`delivery_lock`.
+
+        Args:
+            event: The event dictionary (must already have ``taskId``
+                injected when applicable).
+
+        Returns:
+            The persisted task id, or ``""`` when the event is not
+            persisted (not a display event, or no published id).
+        """
+        if event.get("type") not in _DISPLAY_EVENT_TYPES:
+            return ""
+        key = self._coerce_task_id(event.get("taskId"))
+        if not key:
+            return ""
+        state = agent_state.get(key)
+        agent = state.agent if state is not None else None
+        task_id = getattr(agent, "last_task_id", "")
+        return str(task_id) if task_id else ""
+
+    def _persist_event(self, event: dict[str, Any]) -> None:
+        """Queue a display event for persistence if applicable.
 
         Args:
             event: The event dictionary (must already have ``taskId``
                 injected when applicable).
         """
-        if event.get("type") not in _DISPLAY_EVENT_TYPES:
-            return
-        key = self._coerce_task_id(event.get("taskId"))
-        if not key:
-            return
-        state = agent_state.get(key)
-        agent = state.agent if state is not None else None
-        task_id = getattr(agent, "last_task_id", "")
+        task_id = self._persistence_task_id(event)
         if task_id:
-            _queue_chat_event(event, task_id=str(task_id))
+            _queue_chat_event(event, task_id=task_id)
 
     def _read_offset(
         self, offsets: dict[str, _OffsetT], default: _OffsetT,
@@ -1217,7 +1307,7 @@ class JsonPrinter(Printer):
     def steps_offset(self, value: int) -> None:
         self._write_offset(self._steps_offsets, value)
 
-    def cleanup_tab(self, tab_id: str) -> None:
+    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
         """Remove *tab_id* from every subscriber and override set.
 
         Should be called when a frontend tab is closed.  The
@@ -1230,12 +1320,19 @@ class JsonPrinter(Printer):
 
         This also runs when a tab merely re-subscribes (session
         replay, new chat), so it must stay safe to call on a live tab.
+        A session replay that re-subscribes the tab to the running
+        task passes that task as *keep_task_id*: the tab is shared by
+        every window, so dropping and re-adding that subscription
+        would fan a task event emitted in between out to no window.
 
         Args:
             tab_id: The frontend tab identifier to drop.
+            keep_task_id: A task whose subscription of *tab_id* is
+                left in place (``None`` drops every subscription).
         """
         if not tab_id:
             return
+        keep_key = self._coerce_task_id(keep_task_id)
         # _model_pick_lock: this is a WRITER of the model-override
         # lifecycle state, so it must be serialized with the
         # subscribe/pick/restore trio.  Without it a
@@ -1249,6 +1346,8 @@ class JsonPrinter(Printer):
             self._model_override_tabs.discard(tab_id)
             self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
+                if task_key == keep_key:
+                    continue
                 viewers = self._subscribers[task_key]
                 viewers.discard(tab_id)
                 if not viewers:
@@ -1318,6 +1417,7 @@ class JsonPrinter(Printer):
         # review, finding 4).  Order: _model_pick_lock → _lock.
         with self._model_pick_lock, self._lock:
             self._recordings.pop(key, None)
+            self._retired_recordings.pop(key, None)
             self._changed_paths.pop(key, None)
             self._task_model_override.pop(key, None)
             self._tokens_offsets.pop(key, None)
@@ -1507,6 +1607,17 @@ class JsonPrinter(Printer):
     def stop_recording(self) -> list[dict[str, Any]]:
         """Stop recording for the current task and return its display events.
 
+        While the task's agent state is still registered (a server-owned
+        run: the task runner still counts it as running and frees it
+        with :meth:`cleanup_task`), the recording stays readable by
+        :meth:`subscribe_tab`, :meth:`peek_recording_for_task` and
+        :meth:`replay_snapshot`, so a viewer attaching now replays the
+        run's final events.  A run whose state is already gone (the
+        printer bridge unregisters sub-agent and standalone runs just
+        before they stop recording) can no longer be attached to, so
+        its recording is dropped.  ``STATE_LOCK`` makes the check and
+        the retirement atomic with respect to a viewer's attach.
+
         Returns:
             List of display-relevant events with consecutive deltas
             merged.  Empty when no recording is active.
@@ -1514,9 +1625,31 @@ class JsonPrinter(Printer):
         key = self._task_key()
         if not key:
             return []
-        with self._lock:
-            raw = self._recordings.pop(key, [])
+        with agent_state.STATE_LOCK, self._lock:
+            raw = self._recordings.pop(key, None)
+            if raw is None:
+                return []
+            if key in agent_state.agent_states:
+                self._retired_recordings[key] = raw
         return self._filter_and_coalesce(raw)
+
+    def _recording_ref(self, task_id: Any) -> list[dict[str, Any]] | None:
+        """Return *task_id*'s live or retired raw recording list itself.
+
+        Must be called with ``self._lock`` held.
+
+        Args:
+            task_id: The task identifier.
+
+        Returns:
+            The recording list (not a copy), or ``None`` when the task
+            has none.
+        """
+        key = self._coerce_task_id(task_id)
+        rec = self._recordings.get(key)
+        if rec is None:
+            rec = self._retired_recordings.get(key)
+        return rec
 
     def peek_recording(self) -> list[dict[str, Any]]:
         """Return a snapshot of the current task's recording.
@@ -1548,15 +1681,88 @@ class JsonPrinter(Printer):
 
         Returns:
             List of display-relevant events with consecutive deltas
-            merged.  Empty when the task has no active recording.
+            merged.  Empty when the task has no recording (a recording
+            retired by ``stop_recording`` still counts until
+            ``cleanup_task``).
         """
-        key = self._coerce_task_id(task_id)
-        if not key:
-            return []
         with self._lock:
-            rec = self._recordings.get(key)
-            raw = list(rec) if rec is not None else []
+            raw = list(self._recording_ref(task_id) or ())
         return self._filter_and_coalesce(raw)
+
+    @contextmanager
+    def replay_snapshot(
+        self,
+        task_id: Any,
+        conn_id: str = "",
+        recording: list[dict[str, Any]] | None = None,
+    ) -> Iterator[list[dict[str, Any]]]:
+        """Snapshot a running task's recording and reserve its replay slot.
+
+        Under :attr:`delivery_lock` this copies *recording* — the list
+        :meth:`subscribe_tab` returned when the viewer subscribed, so a
+        run that stops recording or is cleaned up meanwhile cannot take
+        it away — or, when the task had none then, the task's current
+        recording, and reserves the replay's place in its
+        recipients' FIFO send queues (see :meth:`_reserve_replay_send`).
+        Every task event is thus either in the snapshot or delivered
+        after the replay.  The lock is released before the block runs,
+        so filtering, coalescing and serializing a long transcript
+        stall no other delivery.  The block's next ``task_events``
+        :meth:`broadcast` on this thread fills the reserved slot.  The
+        slot is created before any send is scheduled and cancelled on
+        exit, whatever interrupts the reservation or the block (task
+        threads receive an asynchronous ``KeyboardInterrupt`` on
+        stop), so no send waits for it forever.
+
+        Args:
+            task_id: The running task (``""`` when none is running).
+            conn_id: The requesting connection for a connection-scoped
+                replay, ``""`` for one sent to every client.
+            recording: The recording list the viewer's
+                :meth:`subscribe_tab` returned, or ``None``.
+
+        Yields:
+            The snapshot's display events, consecutive deltas merged.
+        """
+        slot: Future[str] = Future()
+        try:
+            with self.delivery_lock:
+                with self._lock:
+                    if recording is None:
+                        recording = self._recording_ref(task_id)
+                    raw = list(recording or ())
+                self._reserve_replay_send(slot, conn_id)
+            self._replay_slot.future = slot
+            yield self._filter_and_coalesce(raw)
+        finally:
+            self._replay_slot.future = None
+            slot.cancel()
+
+    def _reserve_replay_send(self, slot: Future[str], conn_id: str) -> None:
+        """Schedule replay sends whose payload *slot* supplies later.
+
+        The base printer has no transport and schedules nothing.
+
+        Args:
+            slot: The future the serialised replay is set on.
+            conn_id: Connection the replay is scoped to, or ``""``.
+        """
+
+    def _take_replay_slot(self, event: dict[str, Any]) -> Future[str] | None:
+        """Pop this thread's reserved replay slot for a replay *event*.
+
+        Args:
+            event: The event being broadcast.
+
+        Returns:
+            The reserved slot when *event* is a ``task_events`` replay
+            and :meth:`replay_snapshot` reserved one, else ``None``.
+        """
+        slot: Future[str] | None = getattr(self._replay_slot, "future", None)
+        if slot is None or event.get("type") != "task_events":
+            return None
+        self._replay_slot.future = None
+        return slot
 
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append *event* to the active recording for its task.
@@ -1637,7 +1843,9 @@ class JsonPrinter(Printer):
         stamp_event_ts(event)
         event.pop("recordOnly", None)
         if "tabId" in event:
-            self._keep_tab_stamped_task_event(event)
+            kept = self._tab_stamped_task_record(event)
+            if kept is not None:
+                self._keep_tab_stamped_task_event(*kept)
             return
         event = self._inject_task_id(event)
         with self._lock:

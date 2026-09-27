@@ -39,6 +39,7 @@ import os
 import re
 import threading
 from pathlib import Path
+from typing import TypedDict
 
 from kiss.server.user_assets import ensure_user_asset_from_default
 
@@ -65,6 +66,13 @@ MY_INJECTION_DEFAULT_BODY = (
 )
 
 DEFAULT_MY_INJECTION = "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
+
+
+class TricksData(TypedDict):
+    """The Inject promptlet list and how many leading entries the user owns."""
+
+    tricks: list[str]
+    userCount: int
 
 
 def _parse_trick_sections(text: str) -> list[str]:
@@ -137,8 +145,8 @@ def _read_bundled_tricks() -> list[str]:
     return _parse_trick_sections(text)
 
 
-def read_tricks() -> list[str]:
-    """Return the ordered "Inject instruction" trick list.
+def read_tricks_data() -> TricksData:
+    """Return the Inject promptlet list plus how many entries the user owns.
 
     The list is built by concatenating, in order:
 
@@ -147,15 +155,178 @@ def read_tricks() -> list[str]:
     2. The bundled ``src/kiss/INJECTIONS.md`` (read directly from the
        package; never copied into ``~/.kiss/``).
 
-    Empty list if both files are unavailable so a deployment without
-    either still degrades gracefully (no tricks rendered, no ghost
-    suggestions).
+    ``userCount`` is the length of the first part: the panel shows a
+    delete button only on those leading rows, since only the user
+    file can be edited.  Empty list if both files are unavailable so a
+    deployment without either still degrades gracefully (no tricks
+    rendered, no ghost suggestions).
+
+    Returns:
+        ``{"tricks": [...], "userCount": n}`` — the ordered trick
+        strings (MY_INJECTION first then bundled) and the number of
+        leading MY_INJECTION entries.  The shape of the ``tricksData``
+        event and of the page's ``window.__TRICKS__`` /
+        ``window.__MY_TRICKS_COUNT__`` globals.
+    """
+    user = _read_my_injection_tricks()
+    return {"tricks": user + _read_bundled_tricks(), "userCount": len(user)}
+
+
+def read_tricks() -> list[str]:
+    """Return the ordered "Inject instruction" trick list.
+
+    See :func:`read_tricks_data` for the sources and their order.
 
     Returns:
         Ordered list of trick text strings, MY_INJECTION first then
         bundled.
     """
-    return _read_my_injection_tricks() + _read_bundled_tricks()
+    return read_tricks_data()["tricks"]
+
+
+def delete_my_injection_trick(text: str) -> str | None:
+    """Remove the ``## Trick`` section(s) whose body is *text* from ``~/.kiss/MY_INJECTION.md``.
+
+    Services the delete button of the Inject promptlet panel.  Every
+    section whose parsed body (trimmed, backslash-unescaped — what the
+    panel shows) equals *text* is dropped; everything else in the file
+    (text before the first ``##`` heading, other ``##`` sections in
+    their original order and spelling) is kept, ending in a single
+    newline (an empty file when nothing is left, so the starter
+    promptlet is not re-seeded behind the user's back); the rewrite
+    goes through text mode, so CRLF line endings come out as LF.  The
+    file is rewritten in place under the same process-wide lock as
+    :func:`append_my_injection_trick`, so a concurrent add from another
+    window is never lost.
+
+    Args:
+        text: The promptlet body as shown in the panel.  Surrounding
+            whitespace is trimmed and CRLF line breaks are read as LF
+            (the VS Code page lists a CRLF file's bodies verbatim, this
+            module's parser normalises them).
+
+    Returns:
+        ``None`` on success, else a user-facing error message: an
+        unreadable or missing file, a file that is not UTF-8 text, or
+        a body that is not in the file (already deleted from another
+        window, or a bundled promptlet).  ``OSError`` from the write
+        propagates to the caller.
+    """
+    body = text.replace("\r\n", "\n").strip()
+    with _APPEND_LOCK:
+        user_path = ensure_user_asset_from_default(
+            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
+        )
+        if user_path is None:
+            return "Could not read ~/.kiss/MY_INJECTION.md"
+        try:
+            existing = user_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+        preamble, sections = _split_sections(existing)
+        kept = [preamble]
+        removed = 0
+        for section in sections:
+            if _parse_trick_sections(section) == [body]:
+                removed += 1
+            else:
+                kept.append(section)
+        if removed == 0:
+            return "That promptlet is not in ~/.kiss/MY_INJECTION.md"
+        # Trailing blank lines belonged to the dropped section's spacing;
+        # one newline keeps add/delete cycles from growing the file.
+        rest = "".join(kept)
+        rest = rest.rstrip("\n") + "\n" if rest.strip() else ""
+        user_path.write_text(rest, encoding="utf-8")
+    return None
+
+
+def _split_sections(text: str) -> tuple[str, list[str]]:
+    """Split *text* into what precedes the first ``##`` heading and its ``##`` sections.
+
+    Each section runs from its heading line to the start of the next
+    heading (or the end of the file), so ``preamble + "".join(sections)``
+    is *text* itself.
+
+    Returns:
+        ``(preamble, sections)``; ``(text, [])`` when there is no heading.
+    """
+    starts = [m.start() for m in re.finditer(r"^##\s+", text, re.MULTILINE)]
+    if not starts:
+        return text, []
+    ends = starts[1:] + [len(text)]
+    return text[: starts[0]], [text[s:e] for s, e in zip(starts, ends, strict=True)]
+
+
+def _reject_new_body(body: str) -> str | None:
+    """Return why *body* cannot be stored as a ``## Trick`` section, or ``None``."""
+    if not body:
+        return "Promptlet must not be empty"
+    if re.search(r"^##\s", body, flags=re.MULTILINE):
+        return "Promptlet must not contain a line starting with '## '"
+    return None
+
+
+def edit_my_injection_trick(text: str, new_text: str) -> str | None:
+    """Rewrite the ``## Trick`` section *text* of ``~/.kiss/MY_INJECTION.md`` as *new_text*.
+
+    Services the edit (pencil) button of the Inject promptlet panel.
+    The first section whose parsed body (trimmed, backslash-unescaped —
+    what the panel shows) equals *text* has its body rewritten in
+    place, so the promptlet keeps its position in the list; the rest of
+    the file (preamble, other sections, the section's own trailing
+    blank lines) is kept byte for byte, except that the rewrite goes
+    through text mode, so CRLF line endings come out as LF.  The new
+    body is stored Markdown-escaped like :func:`append_my_injection_trick`
+    stores an added one.  The read-check-write runs under the same
+    process-wide lock as the add and delete helpers.
+
+    Args:
+        text: The promptlet body as shown in the panel (trimmed, CRLF
+            read as LF, like :func:`delete_my_injection_trick`).
+        new_text: The replacement body.  Surrounding whitespace is
+            trimmed.
+
+    Returns:
+        ``None`` on success (also when *new_text* equals *text*, which
+        leaves the file untouched), else a user-facing error message: an
+        empty new body, a new body that would itself start a ``##``
+        section, a new body already stored as another promptlet of the
+        file, an unreadable or missing file, a file that is not UTF-8
+        text, or a body that is not in the file.  ``OSError`` from the
+        write propagates to the caller.
+    """
+    body = text.replace("\r\n", "\n").strip()
+    new_body = new_text.replace("\r\n", "\n").strip()
+    if (error := _reject_new_body(new_body)) is not None:
+        return error
+    with _APPEND_LOCK:
+        user_path = ensure_user_asset_from_default(
+            "MY_INJECTION.md", DEFAULT_MY_INJECTION,
+        )
+        if user_path is None:
+            return "Could not read ~/.kiss/MY_INJECTION.md"
+        try:
+            existing = user_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return "~/.kiss/MY_INJECTION.md is not UTF-8 text"
+        preamble, sections = _split_sections(existing)
+        bodies = [_parse_trick_sections(s) for s in sections]
+        if [body] not in bodies:
+            return "That promptlet is not in ~/.kiss/MY_INJECTION.md"
+        if new_body == body:
+            return None
+        if [new_body] in bodies:
+            return "That promptlet is already in ~/.kiss/MY_INJECTION.md"
+        index = bodies.index([body])
+        old = sections[index]
+        # Keep the section's own spacing (usually one blank line) so the
+        # file's layout survives the edit.
+        trailing = "\n" * max(1, old[len(old.rstrip("\r\n")) :].count("\n"))
+        escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", new_body)
+        sections[index] = "## Trick\n\n" + escaped + trailing
+        user_path.write_text(preamble + "".join(sections), encoding="utf-8")
+    return None
 
 
 def append_my_injection_trick(text: str) -> str | None:
@@ -184,10 +355,8 @@ def append_my_injection_trick(text: str) -> str | None:
         write propagates to the caller.
     """
     body = text.strip()
-    if not body:
-        return "Promptlet must not be empty"
-    if re.search(r"^##\s", body, flags=re.MULTILINE):
-        return "Promptlet must not contain a line starting with '## '"
+    if (error := _reject_new_body(body)) is not None:
+        return error
     with _APPEND_LOCK:
         user_path = ensure_user_asset_from_default(
             "MY_INJECTION.md", DEFAULT_MY_INJECTION,

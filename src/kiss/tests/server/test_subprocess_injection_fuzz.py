@@ -134,6 +134,7 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
 
     def test_fuzz_prefix_metachars(self) -> None:
         from kiss.server import autocomplete as ac
+        from kiss.server.file_index import FileIndexRegistry
 
         broadcasts: list[dict] = []
 
@@ -141,17 +142,29 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
             def broadcast(self, msg: dict) -> None:
                 broadcasts.append(msg)
 
+        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-ac-fuzz-"))
+        work_dir = tmpdir / "work"
+        for rel in ("a.py", "b.py", "x/y.txt"):
+            (work_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (work_dir / rel).write_text("")
+        registry = FileIndexRegistry(home=str(tmpdir / "home"), cache_dir=tmpdir / "cache")
+
         class FakeServer(ac._AutocompleteMixin):
             def __init__(self) -> None:
                 self.printer = StubPrinter()  # type: ignore[assignment]
-                self.work_dir = "/"
+                self.work_dir = str(work_dir)
                 self._state_lock = threading.RLock()
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = {}
-                self._file_cache = {"/": ["a.py", "b.py", "x/y.txt"]}
+                self._file_index = registry
 
         srv = FakeServer()
+        # Build the index up front so every fuzzed query is answered
+        # synchronously with exactly one populated ``files`` event.
+        indexed = threading.Event()
+        registry.ensure(str(work_dir), indexed.set)
+        self.assertTrue(indexed.wait(10.0), "file index was never built")
         marker = Path(tempfile.gettempdir()) / f"ac-pwned-{os.getpid()}"
         if marker.exists():
             marker.unlink()
@@ -165,9 +178,12 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
                                  f"autocomplete fired shell for {prefix!r}")
                 self.assertEqual(len(broadcasts), 1)
                 self.assertEqual(broadcasts[0]["type"], "files")
+                self.assertNotIn("loading", broadcasts[0])
         finally:
+            registry.stop()
             if marker.exists():
                 marker.unlink()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

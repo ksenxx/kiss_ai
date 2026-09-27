@@ -148,7 +148,7 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
             f.write(
                 "#!/bin/bash\n"
                 'echo "INF https://h1-ok.trycloudflare.com" >&2\n'
-                "sleep 60\n"
+                "exec sleep 60\n"
             )
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
@@ -201,7 +201,7 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
                 "#!/bin/bash\n"
                 "yes 'STDOUT_FLOOD_LINE_FOR_H2_TEST' | head -c 262144\n"
                 'echo "INF https://h2-ok.trycloudflare.com" >&2\n'
-                "sleep 30\n"
+                "exec sleep 30\n"
             )
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")

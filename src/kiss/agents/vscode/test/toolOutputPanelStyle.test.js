@@ -7,9 +7,10 @@
 //
 // 1. Panels showing tool call output (.bash-panel) use the same
 //    background as the thinking panel (.think): the identical
-//    translucent cyan tint standalone, and the same tint mixed over
-//    --bg when nested inside a .tc card (whose opaque --surface would
-//    otherwise make the translucent tint render lighter).
+//    translucent neutral tint (--panel-tint) standalone, and the same
+//    tint pre-mixed over --bg (--panel-tint-solid) when nested inside a
+//    .tc card (whose opaque --surface would otherwise make the
+//    translucent tint render lighter).
 // 2. The model picker pill (#model-btn) width caps:
 //    min(300px, 50vw) in the extension webview and
 //    clamp(72px, 21vw, 220px) in the remote web app.
@@ -22,6 +23,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
+const CSS = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
 function makeWebview(opts) {
   const remote = !!(opts && opts.remote);
@@ -42,7 +44,7 @@ function makeWebview(opts) {
   win.HTMLElement.prototype.scrollTo = function () {};
 
   const style = win.document.createElement('style');
-  style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  style.textContent = CSS;
   win.document.head.appendChild(style);
   if (remote) {
     const remoteStyle = win.document.createElement('style');
@@ -128,12 +130,23 @@ function testToolOutputMatchesThinkingBackground() {
   const nested = d.querySelector('.tc > .bash-panel');
   assert.ok(nested, 'the Bash tool call must nest an output panel in its .tc');
   // The .tc card paints the opaque --surface behind its children, so the
-  // nested panel mixes the same tint over --bg (what the thinking panel
-  // sits on) instead of relying on transparency.
+  // nested panel paints the same tint pre-mixed over --bg (what the
+  // thinking panel sits on) instead of relying on transparency.  jsdom
+  // leaves var() unresolved, so compare the token definitions in the
+  // :root palette of main.css.
+  assert.strictEqual(thinkBg, 'var(--panel-tint)');
   assert.strictEqual(
     win.getComputedStyle(nested).background,
-    thinkBg.replace('transparent', 'var(--bg)'),
-    'a nested tool output panel must mix the thinking tint over --bg',
+    'var(--panel-tint-solid)',
+    'a nested tool output panel must paint the pre-mixed thinking tint',
+  );
+  const root = CSS.match(/:root\s*\{([^}]*)\}/)[1];
+  const tint = /--panel-tint:\s*([^;]+);/.exec(root)[1].trim();
+  const solid = /--panel-tint-solid:\s*([^;]+);/.exec(root)[1].trim();
+  assert.strictEqual(
+    solid,
+    tint.replace('transparent', 'var(--bg)'),
+    '--panel-tint-solid must be --panel-tint mixed over --bg',
   );
   win.close();
 }

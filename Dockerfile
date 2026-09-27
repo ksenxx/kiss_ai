@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y \
     python3 python3-venv python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv (Python package manager)
-ENV UV_VERSION=0.11.2
+# Install uv (Python package manager).  Same pin as UV_VERSION in
+# src/kiss/agents/vscode/src/DependencyInstaller.ts; releases before 0.11.15
+# carry two file-write/deletion advisories.
+ENV UV_VERSION=0.12.19
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
         x86_64)  TARGET="x86_64-unknown-linux-gnu" ;; \

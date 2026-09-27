@@ -54,7 +54,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.web_server import WebPrinter
+from kiss.server.web_server import Payload, WebPrinter
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -131,9 +131,10 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         printer = self.printer
         original_send = printer._send_to_ws_clients
 
-        def _capture(data: str, tab_id: str = "") -> None:
-            with self.captured_lock:
-                self.captured_frames.append(data)
+        def _capture(data: Payload, tab_id: str = "") -> None:
+            if isinstance(data, str):  # not a replay slot
+                with self.captured_lock:
+                    self.captured_frames.append(data)
             original_send(data, tab_id)
 
         printer._send_to_ws_clients = _capture  # type: ignore[method-assign]

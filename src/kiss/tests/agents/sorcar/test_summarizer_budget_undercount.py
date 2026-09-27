@@ -22,6 +22,7 @@ and ``agent.total_tokens_used``. No mocks, patches, fakes, or doubles.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import tempfile
 import threading
@@ -33,6 +34,13 @@ import pytest
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost
+from kiss.server.json_printer import JsonPrinter
+from kiss.tests.core.models.openai_sse_harness import (
+    Reply,
+    Request,
+    ScriptedOpenAIServer,
+    chat_chunk,
+)
 
 _PROMPT_TOKENS = 1000
 _COMPLETION_TOKENS = 100
@@ -221,3 +229,110 @@ class TestRelentlessAgentSummarizerBudgetIncluded:
             f"token undercount: agent.total_tokens_used={agent.total_tokens_used} "
             f"but expected {expected_tokens}"
         )
+
+
+
+class _CapturePrinter(JsonPrinter):
+    """A real ``JsonPrinter`` whose broadcast events are collected."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+
+    def broadcast(self, event: dict) -> None:  # type: ignore[override]
+        self.events.append(dict(event))
+
+
+def _streamed_tool_call(name: str, arguments: str) -> Reply:
+    """A streamed Chat Completions turn making one tool call, with usage.
+
+    A printer installs a token callback, so the agent streams; the
+    plain-JSON handler above only serves non-streamed calls.
+    """
+    base = {"id": "chatcmpl-s", "object": "chat.completion.chunk", "created": 0, "model": _MODEL}
+    call = {
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    return Reply(
+        sse_chunks=[
+            chat_chunk(
+                {
+                    **base,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "tool_calls": [call]},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            ),
+            chat_chunk(
+                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+            ),
+            chat_chunk(
+                {
+                    **base,
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": _PROMPT_TOKENS,
+                        "completion_tokens": _COMPLETION_TOKENS,
+                        "total_tokens": _PROMPT_TOKENS + _COMPLETION_TOKENS,
+                    },
+                }
+            ),
+            b"data: [DONE]\n\n",
+        ]
+    )
+
+
+def _streaming_responder(request: Request) -> Reply:
+    """Summarizer prompts get ``finish``; executor prompts loop on ``noop``."""
+    if "Summarizer" in json.dumps(request.body):
+        args = json.dumps({"success": True, "summary": "summary-from-test"})
+        return _streamed_tool_call("finish", args)
+    return _streamed_tool_call("noop", "{}")
+
+
+class TestSummarizerUsageEventsStayCumulative:
+    """The summarizer's ``usage_info`` events must include the failed session.
+
+    Bug: the failed session's spend was banked before the summarizer ran,
+    but the printer offsets were only re-based at the next session start,
+    so the summarizer's events showed the task cost dropping by the whole
+    failed session (production task ``f8816a13``: $30.68 -> $9.35).
+    """
+
+    def test_displayed_cost_never_decreases(self) -> None:
+        printer = _CapturePrinter()
+        agent = RelentlessAgent("summarizer-offsets")
+        with ScriptedOpenAIServer(_streaming_responder) as server:
+            with tempfile.TemporaryDirectory() as td:
+                # With a printer the exhausted run reports its failure as
+                # a result instead of raising; either way is fine here.
+                with contextlib.suppress(KISSError):
+                    agent.run(
+                        model_name=_MODEL,
+                        prompt_template="Do nothing forever.",
+                        max_steps=3,
+                        max_budget=1.00,
+                        max_sub_sessions=1,
+                        work_dir=td,
+                        verbose=False,
+                        printer=printer,
+                        model_config={"base_url": server.base_url, "api_key": "test-key"},
+                    )
+        costs = [
+            float(e["cost"].lstrip("$"))
+            for e in printer.events
+            if e.get("type") == "usage_info"
+        ]
+        per_call = calculate_cost(_MODEL, _PROMPT_TOKENS, _COMPLETION_TOKENS)
+        # Three executor steps, then at least one summarizer step.
+        assert len(costs) >= 4
+        assert costs == sorted(costs)
+        assert costs[-1] == pytest.approx(agent.budget_used, abs=1e-4)
+        assert agent.budget_used == pytest.approx(len(costs) * per_call)

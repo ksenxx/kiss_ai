@@ -13,71 +13,101 @@ These tests use deterministic synchronisation harnesses (not mocks or
 fakes of production behaviour) to force the exact interleaving that
 exposes each race.  They avoid DB I/O and heavy agent machinery so
 they can surface races reliably.
+
+The former ``TestFileCacheOverwriteRace`` (a main-thread ``_scan_files``
+overwriting a fresher background scan of ``_file_cache``) is gone with
+its subject: ``FileIndexRegistry`` builds every index on one worker
+thread, so two scans of a root can no longer run concurrently.
+:class:`TestOverlappingIndexRequests` covers what remains of that
+intent — overlapping requests for one root must leave exactly one
+index that matches the disk.
 """
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
+import time
 import unittest
+from pathlib import Path
 
-from kiss.server.server import VSCodeServer
+from kiss.server.file_index import FileIndexRegistry
 
 
-class TestFileCacheOverwriteRace(unittest.TestCase):
-    """``VSCodeServer._get_files`` must not overwrite a newer cache.
+class TestOverlappingIndexRequests(unittest.TestCase):
+    """Overlapping ``ensure``/``refresh`` calls for one root converge on
+    a single index reflecting the files on disk.
 
-    ``_refresh_file_cache`` spawns a background thread that scans
-    files and writes ``self._file_cache``.  If ``_get_files`` sees
-    ``cache is None`` concurrently, it scans again and blindly writes
-    its own (older) result under ``_state_lock`` without re-checking
-    — a slower main-thread scan therefore replaces a fresher
-    background result.
-
-    The test forces this interleaving with two events: the main-thread
-    scan starts and blocks until the background refresh publishes its
-    fresher value, after which the stale scan returns.  A correct
-    ``_get_files`` must NOT overwrite the already-published cache.
+    The worker is held after the first build by a gate callback so a
+    second ``ensure`` (from another thread) and a ``refresh`` (from the
+    main thread) are queued while the first result is already
+    published and the tree has changed underneath it.  Once the gate
+    opens the queued jobs must rebuild — not drop the request or keep
+    the stale result — and the registry must hold exactly one index
+    for the root, listing the current files.
     """
 
-    def test_background_refresh_is_not_overwritten(self) -> None:
-        server = VSCodeServer()
-        server._file_cache = {}
-        server.printer.broadcast = lambda *_a, **_k: None  # type: ignore[method-assign]  # silence output
-
-        wd = server.work_dir
-        fresh = ["fresh/file.py"]
-        scan_started = threading.Event()
-        bg_done = threading.Event()
-
-        def bg_refresh() -> None:
-            scan_started.wait(timeout=5)
-            with server._state_lock:
-                server._file_cache[wd] = fresh
-            bg_done.set()
-
-        t = threading.Thread(target=bg_refresh, daemon=True)
-        t.start()
-
-        from kiss.server import diff_merge
-
-        original_scan = diff_merge._scan_files
-
-        def sync_scan(_work_dir: str) -> list[str]:
-            scan_started.set()
-            bg_done.wait(timeout=5)
-            return ["stale/file.py"]
-
-        diff_merge._scan_files = sync_scan  # type: ignore[assignment]
-        try:
-            server._get_files("")
-        finally:
-            diff_merge._scan_files = original_scan  # type: ignore[assignment]
-            t.join(timeout=2)
-
-        self.assertEqual(
-            server._file_cache.get(wd), fresh,
-            "background refresh result must not be overwritten by a slower scan",
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-index-race-"))
+        self.root = self.tmpdir / "root"
+        for rel in ("a.py", "sub/b.py"):
+            (self.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / rel).write_text("")
+        self.registry = FileIndexRegistry(
+            home=str(self.tmpdir / "home"), cache_dir=self.tmpdir / "cache",
         )
+
+    def tearDown(self) -> None:
+        self.registry.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_overlapping_requests_leave_one_consistent_index(self) -> None:
+        reg = self.registry
+        root = str(self.root)
+        first_built = threading.Event()
+        gate = threading.Event()
+
+        def hold_worker() -> None:
+            first_built.set()
+            gate.wait(timeout=10)
+
+        reg.ensure(root, hold_worker)
+        self.assertTrue(first_built.wait(10), "first build never finished")
+        first = reg.view_for(root)
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual(first.paths, ["a.py", "sub/", "sub/b.py"])
+
+        # The worker is parked inside ``hold_worker``.  Change the tree
+        # and queue two overlapping requests for the same root from two
+        # threads while the first index is still the published one.
+        time.sleep(0.02)  # coarse mtime clocks: the directory must look changed
+        (self.root / "c.py").write_text("")
+        (self.root / "sub" / "b.py").unlink()
+        second_done = threading.Event()
+        t = threading.Thread(target=reg.ensure, args=(root, second_done.set), daemon=True)
+        t.start()
+        reg.refresh(root)
+        t.join(timeout=5)
+        self.assertFalse(second_done.is_set(), "second build ran while the worker was gated")
+
+        gate.set()
+        self.assertTrue(second_done.wait(10), "queued ensure never completed")
+        # Drain the refresh job too (FIFO: this callback runs after it).
+        drained = threading.Event()
+        reg.ensure(root, drained.set)
+        self.assertTrue(drained.wait(10))
+
+        self.assertEqual(list(reg._indexes), [root], "exactly one index per root")
+        view = reg.view_for(root)
+        assert view is not None
+        self.assertEqual(view.paths, ["a.py", "c.py", "sub/"])
+        on_disk = sorted(
+            str(p.relative_to(self.root)) + ("/" if p.is_dir() else "")
+            for p in self.root.rglob("*")
+        )
+        self.assertEqual(sorted(view.paths), on_disk)
 
 
 if __name__ == "__main__":

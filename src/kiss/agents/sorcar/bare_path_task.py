@@ -13,7 +13,11 @@ a prompt: open the path with the platform opener and stop.  The
 task-history row, the tab title and the frequent-tasks table still
 show the raw path the user typed, because
 :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent` records
-those before the directive is added.
+those before the directive is added.  A run under a custom base system
+prompt (an agent script with its own ``system_prompt()``, such as the
+``/git_extract_knowledge <repo>`` or ``/review_paper <pdf>`` SEAs,
+whose whole task is legitimately a path) gets no directive: that
+prompt defines what a bare path means for it.
 """
 
 from __future__ import annotations

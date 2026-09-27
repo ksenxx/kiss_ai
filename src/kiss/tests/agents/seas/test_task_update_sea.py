@@ -22,7 +22,7 @@ from typing import Any
 import yaml
 
 from kiss.agents.seas import task_update_sea as sea
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import sea_commands, task_digest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -199,7 +199,7 @@ def test_transcript_pages_and_clips_the_page_size() -> None:
     # A negative start and an oversized count are clamped.
     clamped = sea.task_transcript(task_id, -5, 10_000)
     assert "Entries 0..9 of 10:" in clamped
-    assert sea._MAX_PAGE == 400
+    assert task_digest.MAX_PAGE == 400
 
 
 def test_transcript_of_a_finished_subagent_without_events() -> None:

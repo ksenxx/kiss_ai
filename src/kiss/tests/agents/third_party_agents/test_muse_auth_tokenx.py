@@ -11,10 +11,13 @@ Microsoft Graph API, and the Telegram Bot API — no mocks, patches, or
 fakes.  The emulated APIs record every request arriving at the
 "network" so tests can prove the two NEW mechanisms:
 
-* ``oauth2_client_credentials`` vault entries (MS Teams): the DAEMON
-  runs the client-credentials exchange at the boundary and caches the
-  acquired Graph token; the agent process holds only a surrogate and
-  never sees the client_secret or the Graph token.
+* ``oauth2_client_credentials`` vault entries (enrolled directly under
+  ``msteams``, whose Graph host and pinned token endpoint they use): the
+  DAEMON runs the client-credentials exchange at the boundary and
+  caches the acquired Graph token; the agent process holds only a
+  surrogate and never sees the client_secret or the Graph token.  The
+  MS Teams agent itself only signs in through the device code flow
+  (``test_muse_connect_flows.py``); its backend wires any vault kind.
 * path-kind credentials (Telegram): the agent's request URL embeds the
   surrogate in the token path segment (``/bot<surrogate>/<Method>``)
   and the daemon splices in the real bot token just before each send,
@@ -37,11 +40,10 @@ instead of mocked):
   adapter, and the legacy direction is covered flag-off against the
   same emulator (``test_telegram_legacy_tools_without_sdk``; the
   transport itself is exercised in ``test_telegram_legacy_transport.py``).
-* ``_get_access_token`` and the legacy MS Teams ``_token`` refresh
-  contact the real ``login.microsoftonline.com`` (hardcoded legacy
-  URL), so the legacy directions of the ``_token``/``connect``/
-  ``authenticate_msteams`` mode branches — which would perform a real
-  Azure exchange — are exercised only up to their offline guards here.
+* ``MSTeamsAgent.__init__``'s ``except MuseAuthError`` branch needs
+  ``mint_surrogate`` to fail although the daemon is reachable (a daemon
+  dying mid-request), a cross-process race documented rather than
+  simulated.
 * Non-path/query/client-credentials directions of the shared daemon,
   vault, and CLI branches (header/bearer kinds, query CLI imports) are
   exercised by the sibling ``test_muse_auth*.py`` suites.
@@ -108,7 +110,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     ensure_daemon,
     grant,
     mint_surrogate,
-    stop_daemon,
     store_credentials,
     vault_has_credentials,
 )
@@ -119,7 +120,6 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
     teardown_muse_env,
-    wait_daemon_stopped,
 )
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
@@ -425,28 +425,25 @@ def _ms_env(monkeypatch: pytest.MonkeyPatch, api_server: _TokenXApiServer) -> No
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", api_server.base())
 
 
-def _ms_config(secret: str = _REAL_MS_SECRET) -> None:
-    """Save a legacy MS Teams config."""
-    ms_config.save(
-        {
-            "tenant_id": _MS_TENANT,
-            "client_id": _MS_CLIENT_ID,
-            "client_secret": secret,
-            "bot_id": "B1",
-        }
-    )
-
-
 def _ms_backend(api_server: _TokenXApiServer) -> MSTeamsChannelBackend:
     """Create an MS Teams backend whose Graph base is the emulator."""
     return MSTeamsChannelBackend(graph_base=api_server.base("/v1.0"))
 
 
-def _client_credential_info_from_env(api_server: _TokenXApiServer) -> dict[str, str]:
-    """Build the client-credentials vault payload pointed at the emulator."""
-    from kiss.agents.third_party_agents.msteams_sea import _client_credential_info
+def _client_credential_info(base: str, secret: str = _REAL_MS_SECRET) -> dict[str, str]:
+    """Build a client-credentials vault payload whose token URL is under *base*."""
+    return {
+        "kind": "oauth2_client_credentials",
+        "token_url": f"{base}/{_MS_TENANT}/oauth2/v2.0/token",
+        "client_id": _MS_CLIENT_ID,
+        "client_secret": secret,
+        "token_scope": "https://graph.microsoft.com/.default",
+    }
 
-    return _client_credential_info(_MS_TENANT, _MS_CLIENT_ID, _REAL_MS_SECRET)
+
+def _ms_enroll(api_server: _TokenXApiServer, secret: str = _REAL_MS_SECRET) -> None:
+    """Enroll a client-credentials entry for ``msteams`` against the emulator."""
+    store_credentials("msteams", _client_credential_info(api_server.base(), secret), [])
 
 
 def _tg_backend(api_server: _TokenXApiServer) -> TelegramChannelBackend:
@@ -464,15 +461,14 @@ def _audit_text() -> str:
 # ---------------------------------------------------------------- MS Teams
 
 
-def test_msteams_daemon_side_token_exchange_and_scrub(
+def test_msteams_daemon_side_token_exchange(
     muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The daemon exchanges the vaulted secret; the agent holds a surrogate."""
     _ms_env(monkeypatch, api_server)
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
-    assert backend._muse is True
     assert backend._access_token.startswith("muse-sgt.msteams.")
     assert "Muse-auth" in backend._connection_info
     # The exchange happened daemon-side, once, with the real secret.
@@ -486,10 +482,6 @@ def test_msteams_daemon_side_token_exchange_and_scrub(
     graph = [r for r in api_server.requests if "/v1.0/" in r["path"]]
     auth = next(v for k, v in graph[-1]["headers"].items() if k.lower() == "authorization")
     assert auth == "Bearer graph-tok-1"
-    # The secret is scrubbed; non-secret metadata survives.
-    stored = json.loads(ms_config.path.read_text())
-    assert "client_secret" not in stored
-    assert stored == {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "bot_id": "B1"}
     assert vault_has_credentials("msteams")
     # Reads flow without grants and reuse the cached token: no second
     # exchange happens for the next Graph call.
@@ -503,7 +495,7 @@ def test_msteams_token_cache_expiry_forces_reexchange(
     """An expired cached token is re-acquired (60s skew honored)."""
     _ms_env(monkeypatch, api_server)
     api_server.token_expires_in = 61  # 1s of effective validity after skew
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
     assert len(api_server.token_requests) == 1
@@ -521,7 +513,7 @@ def test_msteams_bad_secret_fails_without_leaking_it(
     """A refused exchange surfaces a secret-free resolution error."""
     _ms_env(monkeypatch, api_server)
     bad_secret = "msteams-wrong-secret-value"
-    _ms_config(secret=bad_secret)
+    _ms_enroll(api_server, bad_secret)
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     assert "credential resolution failed" in backend._connection_info
@@ -542,8 +534,9 @@ def test_msteams_token_endpoint_down_is_a_safe_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dead token endpoint reports class + URL, never form contents."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", f"http://127.0.0.1:{refusing_port}")
-    _ms_config()
+    store_credentials(
+        "msteams", _client_credential_info(f"http://127.0.0.1:{refusing_port}"), []
+    )
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     assert "ConnectionError" in backend._connection_info
@@ -587,77 +580,12 @@ def test_msteams_store_validation_pins_the_token_endpoint(muse_env: Path) -> Non
     assert valid_token_endpoint("msteams", "http://127.0.0.1:9/t") is True
 
 
-def test_msteams_wire_rejects_malformed_tenant_before_any_state_change(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A traversal-shaped tenant_id neither enrolls nor scrubs anything."""
-    _ms_env(monkeypatch, api_server)
-    ms_config.save(
-        {
-            "tenant_id": "evil/../../tenant",
-            "client_id": _MS_CLIENT_ID,
-            "client_secret": _REAL_MS_SECRET,
-        }
-    )
-    backend = _ms_backend(api_server)
-    assert backend.connect() is False
-    assert "invalid tenant_id" in backend._connection_info
-    assert not vault_has_credentials("msteams")
-    assert json.loads(ms_config.path.read_text())["client_secret"] == _REAL_MS_SECRET
-
-
-def test_msteams_authenticate_tool_success_and_rollback(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """authenticate_msteams stores secrets vault-only; failures roll back."""
-    _ms_env(monkeypatch, api_server)
-    agent = MSTeamsAgent.__new__(MSTeamsAgent)
-    agent._backend = _ms_backend(api_server)
-    tools = auth_tools(agent)
-    # Tenant/value validation happens before any state change.
-    bad_tenant = tools["authenticate_msteams"]("bad/tenant", "c", "s")
-    assert "tenant_id must be" in bad_tenant
-    assert not ms_config.path.exists()
-    bad_value = json.loads(tools["authenticate_msteams"](_MS_TENANT, "c\nid", "s"))
-    assert bad_value["ok"] is False
-    # A refused exchange rolls back the vault and restores the config.
-    ms_config.save({"tenant_id": "old-tenant", "client_id": "old-client"})
-    prev_raw = ms_config.path.read_text()
-    refused = json.loads(
-        tools["authenticate_msteams"](_MS_TENANT, _MS_CLIENT_ID, "msteams-wrong-secret")
-    )
-    assert refused["ok"] is False
-    assert "msteams-wrong-secret" not in refused["error"]
-    assert not vault_has_credentials("msteams")
-    assert ms_config.path.read_text() == prev_raw
-    assert agent._is_authenticated() is False
-    # A good secret enrolls, probes through the boundary, and never
-    # writes the secret to config.json.
-    saved = json.loads(
-        tools["authenticate_msteams"](_MS_TENANT, _MS_CLIENT_ID, _REAL_MS_SECRET, "B1")
-    )
-    assert saved["ok"] is True
-    assert vault_has_credentials("msteams")
-    stored = json.loads(ms_config.path.read_text())
-    assert "client_secret" not in stored
-    assert stored["tenant_id"] == _MS_TENANT
-    assert agent._is_authenticated() is True
-    checked = json.loads(tools["check_msteams_auth"]())
-    assert checked["ok"] is True
-    # Clearing removes the vault entry and the wired session.
-    assert "cleared" in tools["clear_msteams_auth"]()
-    assert not vault_has_credentials("msteams")
-    assert agent._backend._muse is False
-    assert agent._is_authenticated() is False
-    assert "Not authenticated" in tools["check_msteams_auth"]()
-
-
 def test_msteams_write_needs_grant_and_agent_wires_from_vault(
     muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Graph POSTs classify as writes; a fresh agent wires vault-first."""
     _ms_env(monkeypatch, api_server)
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
     denied = json.loads(backend.post_channel_message("T1", "C1", "hi"))
@@ -666,7 +594,7 @@ def test_msteams_write_needs_grant_and_agent_wires_from_vault(
     grant("msteams", "write", "once")
     posted = json.loads(backend.post_channel_message("T1", "C1", "hi"))
     assert posted == {"ok": True, "id": "M1"}
-    # A fresh agent (config already scrubbed) wires from the vault.
+    # A fresh agent wires from the vault.
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
     agent._backend = _ms_backend(api_server)
     assert agent._backend._wire_muse() is True
@@ -674,7 +602,6 @@ def test_msteams_write_needs_grant_and_agent_wires_from_vault(
     # Poll mode wires the same way; the default-base backend still
     # mints (its Graph base is the real cloud host).
     wired = ms_make_backend()
-    assert wired._muse is True
     assert wired._access_token.startswith("muse-sgt.msteams.")
 
 
@@ -682,28 +609,6 @@ def test_msteams_make_backend_exits_when_unenrolled(muse_env: Path) -> None:
     """Poll mode refuses to start with no vault entry and no config."""
     with pytest.raises(SystemExit):
         ms_make_backend()
-
-
-def test_msteams_cli_import(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`muse_auth import msteams` migrates and scrubs the client_secret."""
-    _ms_env(monkeypatch, api_server)
-    assert muse_cli.main(["import", "msteams"]) == 1  # no config yet
-    ms_config.save({"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID})
-    assert muse_cli.main(["import", "msteams"]) == 1  # no secret
-    ms_config.save(
-        {"tenant_id": "bad/tenant", "client_id": _MS_CLIENT_ID, "client_secret": "s1"}
-    )
-    assert muse_cli.main(["import", "msteams"]) == 1  # malformed tenant
-    _ms_config()
-    assert muse_cli.main(["import", "msteams"]) == 0
-    assert vault_has_credentials("msteams")
-    stored = json.loads(ms_config.path.read_text())
-    assert "client_secret" not in stored
-    backend = _ms_backend(api_server)
-    assert backend.connect() is True
-    assert api_server.token_requests[0]["client_secret"] == _REAL_MS_SECRET
 
 
 # ---------------------------------------------------------------- Telegram
@@ -1030,7 +935,7 @@ def test_msteams_probe_policy_denial_and_nonjson_graph(
 ) -> None:
     """The probe distinguishes policy denials from proof of exchange."""
     _ms_env(monkeypatch, api_server)
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
     agent = MSTeamsAgent.__new__(MSTeamsAgent)
@@ -1059,7 +964,7 @@ def test_msteams_graph_http_errors_surface_in_tools(
 ) -> None:
     """Graph 4xx envelopes surface as ok=False from the posting tools."""
     _ms_env(monkeypatch, api_server)
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
     grant("msteams", "write", "session")
@@ -1080,56 +985,25 @@ def test_msteams_graph_http_errors_surface_in_tools(
     assert backend._get("/teams/badT")["ok"] is False
 
 
-def test_msteams_scrub_edge_cases_and_legacy_paths(
+def test_msteams_flag_off_refuses_to_connect(
     isolated_kiss_home: Path, api_server: _TokenXApiServer
 ) -> None:
-    """The secret scrub tolerates odd configs; legacy paths stay direct."""
-    from kiss.agents.third_party_agents.msteams_sea import _scrub_config_secret
-
-    _scrub_config_secret()  # no config file: a no-op
-    ms_config.save({"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID})
-    before = ms_config.path.read_text()
-    _scrub_config_secret()  # no client_secret key: untouched
-    assert ms_config.path.read_text() == before
-    ms_config.path.write_text(json.dumps({"client_secret": "only-secret"}))
-    _scrub_config_secret()  # nothing but the secret: file removed
-    assert not ms_config.path.exists()
-    # Legacy poll mode builds the direct backend without any daemon.
-    _ms_config()
-    backend = ms_make_backend()
-    assert backend._muse is False
-    assert backend._http is requests
-    assert backend._client_secret == _REAL_MS_SECRET
-    # Legacy agent construction and a config-less connect stay offline.
-    legacy_agent = MSTeamsAgent()
-    assert legacy_agent._backend._client_secret == _REAL_MS_SECRET
-    ms_config.clear()
-    fresh = MSTeamsChannelBackend()
-    assert fresh.connect() is False
-    assert "No MS Teams config found" in fresh._connection_info
-    # The legacy clear tool needs no daemon either.
-    agent = MSTeamsAgent.__new__(MSTeamsAgent)
-    agent._backend = backend
-    assert "cleared" in auth_tools(agent)["clear_msteams_auth"]()
+    """With Muse-auth off MS Teams has nowhere to keep its token pair."""
+    backend = _ms_backend(api_server)
+    assert backend.connect() is False
+    assert "KISS_MUSE_AUTH=0" in backend._connection_info
+    agent = MSTeamsAgent()
+    assert agent._is_authenticated() is False
+    tools = auth_tools(agent)
+    assert "Not authenticated" in tools["check_msteams_auth"]()
+    refused = json.loads(tools["authenticate_msteams"]())
+    assert refused["ok"] is False and "KISS_MUSE_AUTH=0" in refused["error"]
+    with pytest.raises(SystemExit):
+        ms_make_backend()
+    ms_config.save({"tenant_id": _MS_TENANT})
+    assert "cleared" in tools["clear_msteams_auth"]()
     assert not ms_config.path.exists()
     assert not socket_path().exists()
-
-
-def test_msteams_authenticate_unpinned_login_base_rolls_back(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A store-time rejection (unpinned endpoint) restores a clean state."""
-    monkeypatch.setenv("MSTEAMS_LOGIN_BASE", "https://attacker.example")
-    agent = MSTeamsAgent.__new__(MSTeamsAgent)
-    agent._backend = _ms_backend(api_server)
-    result = json.loads(
-        auth_tools(agent)["authenticate_msteams"](_MS_TENANT, _MS_CLIENT_ID, _REAL_MS_SECRET)
-    )
-    assert result["ok"] is False
-    assert "unpinned OAuth token endpoint" in result["error"]
-    assert not vault_has_credentials("msteams")
-    # There was no pre-call config, so none survives the rollback.
-    assert not ms_config.path.exists()
 
 
 def test_agents_construct_and_fail_closed(
@@ -1142,9 +1016,8 @@ def test_agents_construct_and_fail_closed(
     tg_agent = TelegramAgent()
     assert tg_agent._backend._muse is True
     assert tg_agent._is_authenticated() is True
-    _ms_config()
+    _ms_enroll(api_server)
     ms_agent = MSTeamsAgent()
-    assert ms_agent._backend._muse is True
     assert ms_agent._is_authenticated() is True
     # A credential the daemon rejects at enrollment (embedded newline)
     # fails closed but keeps the agents constructible.
@@ -1155,13 +1028,10 @@ def test_agents_construct_and_fail_closed(
     assert tg_agent._backend._bot is None
     assert "Muse-auth wiring failed" in tg_agent._backend._connection_info
     assert not vault_has_credentials("telegram")
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "bad\nsecret"}
-    )
+    # With no MS Teams enrollment the agent is constructible and tokenless.
     ms_agent = MSTeamsAgent()
     assert ms_agent._backend._access_token == ""
-    assert "Muse-auth wiring failed" in ms_agent._backend._connection_info
-    assert not vault_has_credentials("msteams")
+    assert "No MS Teams credential" in ms_agent._backend._connection_info
 
 
 def test_telegram_adapter_and_scrub_edges(
@@ -1405,7 +1275,7 @@ def test_token_exchange_refuses_redirecting_endpoint(
     """A 307 from the token endpoint never forwards the secret-bearing POST."""
     _ms_env(monkeypatch, api_server)
     api_server.token_redirect_to = rogue_server.base("/stolen/oauth2/v2.0/token")
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     assert "answered with a redirect" in backend._connection_info
@@ -1421,7 +1291,7 @@ def test_token_exchange_error_never_relays_endpoint_text(
     """Reflected (encoded) secret text in an error field is suppressed."""
     _ms_env(monkeypatch, api_server)
     api_server.token_error_echo = True
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     message = backend._connection_info
@@ -1436,7 +1306,7 @@ def test_token_exchange_rejects_nonfinite_expiry(
     """A non-finite expires_in must not create an immortal cache entry."""
     _ms_env(monkeypatch, api_server)
     api_server.token_expires_in = "Infinity"
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
     cached = json.loads((muse_auth_dir() / "vault" / "msteams.json").read_text())[
@@ -1452,7 +1322,7 @@ def test_msteams_probe_rejects_graph_401(
     """A Graph 401 (unusable token) is not reported as authenticated."""
     _ms_env(monkeypatch, api_server)
     api_server.graph_always_401 = True
-    _ms_config()
+    _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     assert "HTTP 401" in backend._connection_info
@@ -1478,21 +1348,6 @@ def test_failed_rotations_keep_the_prior_credential(
     # The previously wired backend still works end to end.
     assert json.loads(auth_tools(tg_agent)["check_telegram_auth"]())["ok"] is True
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
-    # MS Teams: same contract.
-    _ms_config()
-    ms_backend = _ms_backend(api_server)
-    assert ms_backend.connect() is True
-    ms_agent = MSTeamsAgent.__new__(MSTeamsAgent)
-    ms_agent._backend = ms_backend
-    refused = json.loads(
-        auth_tools(ms_agent)["authenticate_msteams"](
-            _MS_TENANT, _MS_CLIENT_ID, "msteams-rotated-wrong"
-        )
-    )
-    assert refused["ok"] is False
-    assert vault_has_credentials("msteams")
-    assert not vault_has_credentials("msteams-pending")
-    assert json.loads(ms_backend.list_teams())["ok"] is True
 
 
 def test_lowercase_percent_escapes_cannot_smuggle_the_token(
@@ -1593,41 +1448,12 @@ def test_telegram_authenticate_handles_nonjson_probe(
     assert not vault_has_credentials("telegram-pending")
 
 
-def test_cli_import_msteams_rejects_non_string_values(muse_env: Path) -> None:
+def test_cli_import_rejects_non_string_values(muse_env: Path) -> None:
     """JSON booleans are a malformed config, not importable credentials."""
-    ms_config.path.parent.mkdir(parents=True, exist_ok=True)
-    ms_config.path.write_text(
-        json.dumps({"tenant_id": True, "client_id": True, "client_secret": True})
-    )
-    before = ms_config.path.read_text()
-    assert muse_cli.main(["import", "msteams"]) == 1
-    assert ms_config.path.read_text() == before  # nothing scrubbed
-    assert not vault_has_credentials("msteams")
-    # The generic token importers are type-strict too.
     tg_config.path.parent.mkdir(parents=True, exist_ok=True)
     tg_config.path.write_text(json.dumps({"bot_token": True}))
     assert muse_cli.main(["import", "telegram"]) == 1
     assert not vault_has_credentials("telegram")
-
-
-def test_flag_off_msteams_matches_head_semantics(
-    isolated_kiss_home: Path, api_server: _TokenXApiServer
-) -> None:
-    """Legacy responses carry no injected ok-marking and auth is client_id-only."""
-    backend = _ms_backend(api_server)
-    # Prime a token client-side so no real Azure exchange happens.
-    backend._access_token = "graph-tok-legacy"
-    backend._token_expiry = time.time() + 3600
-    result = backend._get("/teams/badT")  # emulator answers HTTP 400
-    assert result == {"error": {"code": "BadRequest"}}  # no ok=False injected
-    posted = backend._post("/teams/badT/channels/C1/messages", {"body": {}})
-    assert posted == {"error": {"code": "BadRequest"}}
-    agent = MSTeamsAgent.__new__(MSTeamsAgent)
-    agent._backend = backend
-    assert agent._is_authenticated() is False  # token alone is not auth
-    backend._client_id = _MS_CLIENT_ID
-    assert agent._is_authenticated() is True
-    assert not socket_path().exists()
 
 
 # --------------------------------------------- review round-2 regressions
@@ -1646,19 +1472,6 @@ def test_auto_migration_never_clobbers_a_working_credential(
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
     stored = json.loads((muse_auth_dir() / "vault" / "telegram.json").read_text())
     assert stored["authorized_user_info"]["token"] == _REAL_TG_TOKEN
-    # MS Teams: same contract with a stale config secret.
-    _ms_env(monkeypatch, api_server)
-    store_credentials(
-        "msteams",
-        _client_credential_info_from_env(api_server),
-        [],
-    )
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "stale-bad"}
-    )
-    ms_backend = _ms_backend(api_server)
-    assert ms_backend.connect() is True
-    assert api_server.token_requests[-1]["client_secret"] == _REAL_MS_SECRET
 
 
 def test_first_migration_still_seeds_the_vault(
@@ -1676,17 +1489,6 @@ def test_auto_migration_rejects_non_string_config_values(
     muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A JSON boolean in config is refused, not coerced, and never scrubbed."""
-    _ms_env(monkeypatch, api_server)
-    ms_config.path.parent.mkdir(parents=True, exist_ok=True)
-    ms_config.path.write_text(
-        json.dumps({"tenant_id": True, "client_id": _MS_CLIENT_ID, "client_secret": "s"})
-    )
-    before = ms_config.path.read_text()
-    backend = _ms_backend(api_server)
-    assert backend.connect() is False
-    assert "non-string credentials" in backend._connection_info
-    assert not vault_has_credentials("msteams")
-    assert ms_config.path.read_text() == before  # nothing scrubbed
     # Telegram: a boolean bot_token is likewise refused (mint returns
     # None because nothing was enrolled).
     tg_config.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1853,7 +1655,7 @@ def test_prefix_infinity_cache_is_not_trusted(
 ) -> None:
     """A persisted expires_at=inf (from an older build) forces re-exchange."""
     _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info_from_env(api_server), [])
+    store_credentials("msteams", _client_credential_info(api_server.base()), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
     payload["cached_token"] = {"access_token": "stale-immortal", "expires_at": float("inf")}
@@ -1923,15 +1725,6 @@ def test_malformed_first_migration_connect_returns_false(
     # Poll mode exits cleanly rather than crashing with MuseAuthError.
     with pytest.raises(SystemExit):
         tg_make_backend()
-    _ms_env(monkeypatch, api_server)
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "bad\nsecret"}
-    )
-    ms_backend = _ms_backend(api_server)
-    assert ms_backend.connect() is False
-    assert "auth failed" in ms_backend._connection_info
-    with pytest.raises(SystemExit):
-        ms_make_backend()
 
 
 # --------------------------------------------- review round-4 regressions
@@ -1966,15 +1759,6 @@ def test_malformed_stale_config_does_not_block_the_vault(
     tg_backend = _tg_backend(api_server)
     assert tg_backend.connect() is True
     assert api_server.requests[-1]["path"] == f"/bot{_REAL_TG_TOKEN}/getMe"
-    # MS Teams: authoritative vault credential + a malformed stale secret.
-    _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info_from_env(api_server), [])
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "bad\nsecret"}
-    )
-    ms_backend = _ms_backend(api_server)
-    assert ms_backend.connect() is True
-    assert api_server.token_requests[-1]["client_secret"] == _REAL_MS_SECRET
 
 
 def test_compare_and_scrub_keeps_a_newer_config_value(
@@ -1994,14 +1778,6 @@ def test_compare_and_scrub_keeps_a_newer_config_value(
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     _scrub_config_token(expected=_REAL_TG_TOKEN)
     assert not tg_config.path.exists()
-    # MS Teams compare-and-scrub behaves the same.
-    from kiss.agents.third_party_agents.msteams_sea import _scrub_config_secret
-
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "newer-secret"}
-    )
-    _scrub_config_secret(expected=_REAL_MS_SECRET)
-    assert json.loads(ms_config.path.read_text())["client_secret"] == "newer-secret"
 
 
 def test_huge_finite_cache_expiry_is_not_trusted(
@@ -2009,7 +1785,7 @@ def test_huge_finite_cache_expiry_is_not_trusted(
 ) -> None:
     """A persisted expires_at=1e308 forces a fresh exchange."""
     _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info_from_env(api_server), [])
+    store_credentials("msteams", _client_credential_info(api_server.base()), [])
     vault_file = muse_auth_dir() / "vault" / "msteams.json"
     payload = json.loads(vault_file.read_text())
     payload["cached_token"] = {"access_token": "stale-huge", "expires_at": 1e308}
@@ -2033,8 +1809,7 @@ def test_scratch_files_are_swept_at_daemon_startup(muse_env: Path) -> None:
     old = time.time() - 3600
     os.utime(stale, (old, old))
     # Restart the daemon (protocol handshake tears down and respawns).
-    stop_daemon()
-    wait_daemon_stopped()
+    teardown_muse_env()
     ensure_daemon()
     # Give the startup sweep a moment.
     deadline = time.monotonic() + 5.0
@@ -2058,52 +1833,6 @@ def test_stale_boundary_surrogate_reports_reconnect(
             f"{api_server.base()}/bot{handle.token}/getMe",
             headers={"Authorization": f"Bearer {handle.token}"},
         )
-
-
-def test_local_msteams_validation_never_blocks_the_vault(
-    muse_env: Path, api_server: _TokenXApiServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Locally-rejected stale config never disables the vault credential.
-
-    Round-5 regression: ``_wire_muse`` used to run the type/tenant
-    validation of the legacy config BEFORE minting, so a stale
-    non-string or malformed-tenant config failed the connect even
-    though the authoritative vault credential was present and mintable.
-    """
-    _ms_env(monkeypatch, api_server)
-    store_credentials("msteams", _client_credential_info_from_env(api_server), [])
-    # Non-string credentials (JSON booleans/numbers) in the stale
-    # config, all truthy so the migration guard is entered and the
-    # type check (not the falsy short-circuit) is what rejects them.
-    ms_config.path.parent.mkdir(parents=True, exist_ok=True)
-    ms_config.path.write_text(
-        json.dumps({"tenant_id": True, "client_id": 7, "client_secret": 3})
-    )
-    backend = _ms_backend(api_server)
-    assert backend.connect() is True
-    assert api_server.token_requests[-1]["client_secret"] == _REAL_MS_SECRET
-    # The stale config was neither applied nor scrubbed (it never
-    # migrated; rotation goes through authenticate_msteams).
-    assert json.loads(ms_config.path.read_text())["tenant_id"] is True
-    # A malformed tenant string in the stale config.
-    ms_config.save(
-        {"tenant_id": "bad/tenant", "client_id": _MS_CLIENT_ID, "client_secret": "s3"}
-    )
-    backend2 = _ms_backend(api_server)
-    assert backend2.connect() is True
-    assert json.loads(backend2.list_teams())["ok"] is True
-    # With an EMPTY vault the same stale configs are genuinely needed,
-    # so their local rejection now surfaces (fail closed).
-    clear_credentials("msteams")
-    backend3 = _ms_backend(api_server)
-    assert backend3.connect() is False
-    assert "invalid tenant_id" in backend3._connection_info
-    ms_config.path.write_text(
-        json.dumps({"tenant_id": True, "client_id": 7, "client_secret": 3})
-    )
-    backend4 = _ms_backend(api_server)
-    assert backend4.connect() is False
-    assert "non-string credentials" in backend4._connection_info
 
 
 def test_store_if_absent_presence_and_validation_are_atomic(muse_env: Path) -> None:
@@ -2169,7 +1898,6 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
         config_file_lock,
         write_private_file,
     )
-    from kiss.agents.third_party_agents.msteams_sea import _scrub_config_secret
     from kiss.agents.third_party_agents.telegram_sea import _scrub_config_token
 
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
@@ -2193,34 +1921,6 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
     assert scrubbed.is_set()
     # The scrub read the newer value under the lock and backed off.
     assert json.loads(tg_config.path.read_text())["bot_token"] == "9:newer-token"
-    # MS Teams: same mechanism, newer secret written while the scrub is
-    # pending survives.
-    ms_config.save(
-        {"tenant_id": _MS_TENANT, "client_id": _MS_CLIENT_ID, "client_secret": "old-sec"}
-    )
-    ms_scrubbed = threading.Event()
-
-    def ms_scrub() -> None:
-        _scrub_config_secret(expected="old-sec")
-        ms_scrubbed.set()
-
-    with config_file_lock(ms_config.path):
-        ms_thread = threading.Thread(target=ms_scrub)
-        ms_thread.start()
-        assert not ms_scrubbed.wait(0.4)
-        write_private_file(
-            ms_config.path,
-            json.dumps(
-                {
-                    "tenant_id": _MS_TENANT,
-                    "client_id": _MS_CLIENT_ID,
-                    "client_secret": "newer-sec",
-                },
-                indent=2,
-            ),
-        )
-    ms_thread.join(10.0)
-    assert json.loads(ms_config.path.read_text())["client_secret"] == "newer-sec"
 
 
 def _wait_for_blocked_connect(port: int, timeout: float = 10.0) -> bool:

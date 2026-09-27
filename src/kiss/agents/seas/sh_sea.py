@@ -29,7 +29,14 @@ SYSTEM_PROMPT = (
     "verbatim, preserving line order and quoting, and include stderr and any error "
     "messages. If the command produced no output, state that it produced no output and "
     "exited successfully (exit code 0). If the command exits non-zero or errors, still "
-    "report all output it produced and note the exit code.\n"
+    "report all output it produced and note the exit code.\n" """\
+
+
+## Lessons from recent runs (rsi7d)
+- Every reply is a tool call. If you will not run the command, call `finish` at once with
+  `success=false` and a one-line reason as the result; never answer in prose without a
+  tool call, since a prose-only reply gets recorded as the command's output.
+"""
 )
 """The whole base system prompt of the shell agent (replaces ``SYSTEM.md``)."""
 

@@ -9,8 +9,9 @@ Covers two behavior changes:
 1. ``_MAX_PROMPT_BYTES`` is now enforced in UTF-8 **bytes** (matching
    its name), not characters.  A 400k-character ``€`` prompt is
    1.2 MB on the wire — under the old character-based check it passed
-   untruncated; now it must be truncated to <= 1 MB without ever
-   splitting inside a multibyte character.
+   through; now it must be refused (``error`` with ``code:
+   "prompt_refused"`` naming the size and the limit) so the composer
+   keeps the draft instead of the agent running on a cut prompt.
 
 2. ``_version_tuple`` is now strict digits-only per component
    (``/^\\d+$/`` like the extension's ``UpdateChecker.js`` twin), so
@@ -171,10 +172,10 @@ class _UdsHarness(unittest.TestCase):
 
 class TestPromptTruncationIsByteBased(_UdsHarness):
     """``submit`` prompts are capped at ``_MAX_PROMPT_BYTES`` UTF-8
-    bytes, never splitting inside a character."""
+    bytes; an over-cap prompt is refused, not started."""
 
     def test_multibyte_prompt_truncated_to_byte_cap(self) -> None:
-        """A 400k-char (1.2 MB) '€' prompt is truncated to <= 1 MB."""
+        """A 400k-char (1.2 MB) '€' prompt is refused by the byte cap."""
         n_chars = 400_000
         prompt = "\u20ac" * n_chars
         self.assertGreater(
@@ -184,37 +185,44 @@ class TestPromptTruncationIsByteBased(_UdsHarness):
         self.assertLess(
             len(prompt), _MAX_PROMPT_BYTES,
             "test prompt must be under the cap in CHARACTERS so the "
-            "old char-based check would not have truncated it",
+            "old char-based check would not have refused it",
         )
 
         writer, received, got = self._open_conn()
         self._send_line(writer, {
             "type": "submit",
             "prompt": prompt,
-            "tabId": "",
+            "tabId": "tab-big",
             "model": "",
             "attachments": [],
         })
 
-        def _task_text() -> dict[str, Any] | None:
+        def _refusal() -> dict[str, Any] | None:
             for d in self._decoded(received):
-                if d.get("type") == "setTaskText":
+                if d.get("type") == "error" and d.get("tabId") == "tab-big":
                     return d
             return None
 
         self._wait_for(
-            lambda: _task_text() is not None,
-            "never received the setTaskText echo",
+            lambda: _refusal() is not None,
+            "never received the prompt_refused error",
             timeout=10.0,
         )
-        text = _task_text()["text"]  # type: ignore[index]
-        encoded = text.encode("utf-8")
-        self.assertLessEqual(
-            len(encoded), _MAX_PROMPT_BYTES,
-            f"setTaskText echo is {len(encoded)} bytes — the prompt cap "
-            "must be enforced in BYTES, not characters",
-        )
-        self.assertEqual(text, "\u20ac" * (_MAX_PROMPT_BYTES // 3))
+        refusal = _refusal()
+        assert refusal is not None
+        self.assertEqual(refusal["code"], "prompt_refused")
+        self.assertIn("too long to send", refusal["text"])
+        self.assertIn("1.2 MB", refusal["text"])
+        self.assertIn("limit is 1 MB", refusal["text"])
+        # The refusal lowers the tab's optimistic running state first,
+        # and nothing was started: no setTaskText echo, no run.
+        types = [
+            d["type"] for d in self._decoded(received)
+            if d.get("tabId") == "tab-big"
+        ]
+        self.assertEqual(types[-2:], ["status", "error"], types)
+        self.assertNotIn("setTaskText", types)
+        self.assertNotIn("clear", types)
 
     def test_lone_surrogate_prompt_does_not_kill_transport(self) -> None:
         """JSON permits escaped lone surrogates; prompt sizing must too.

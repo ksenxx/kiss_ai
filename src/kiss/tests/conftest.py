@@ -59,6 +59,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence as _th
 from kiss.core import stop_signal, vscode_config
+from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 
 # Generous: a sweep only walks the sentinel rows of one temporary
@@ -118,6 +119,28 @@ requires_unix_sockets = pytest.mark.skipif(
 def is_root() -> bool:
     """Return whether the test process runs as root (never on Windows)."""
     return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+@contextlib.contextmanager
+def hold_loopback_port(port: int) -> Iterator[None]:
+    """Reserve the fixed loopback *port* for this test across pytest processes.
+
+    OAuth redirect listeners bind a fixed port (53682 for the PKCE apps,
+    53683 for MCP servers) because a registered redirect URI cannot
+    vary.  The parallel test runner spreads one file's tests over many
+    processes, so a test that binds such a port holds this inter-process
+    lock for its whole duration (including the fixture teardown that
+    frees the port); concurrent tests take turns instead of failing
+    with ``[Errno 98] Address already in use``.
+
+    Args:
+        port: The fixed loopback port the test binds.
+
+    Yields:
+        None while the port is reserved.
+    """
+    with exclusive_file_lock(Path(tempfile.gettempdir()) / f"kiss-test-loopback-{port}.lock"):
+        yield
 
 
 @contextlib.contextmanager

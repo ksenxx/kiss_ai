@@ -14,8 +14,8 @@ F5-02 — request-sequence freshness was checked only BEFORE the
 (potentially slow) completion computation, so a request that was
 superseded mid-computation still broadcast its stale result.
 
-F5-03 — a slow ``@``-mention directory scan for one work_dir could
-finish after a newer ``getFiles`` on the same connection (different
+F5-03 — a pending ``@``-mention index build for one work_dir could
+complete after a newer ``getFiles`` on the same connection (different
 tab / work_dir) and overwrite the newer picker contents with files
 from the wrong workspace.
 """
@@ -30,6 +30,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from kiss.server import agent_state
+from kiss.server.file_index import FileIndexRegistry
 from kiss.server.server import VSCodeServer
 
 
@@ -149,7 +150,24 @@ class TestStaleCompleteDropped(_AutocompleteHarness):
 
 
 class TestStaleFilePickerReplyDropped(_AutocompleteHarness):
-    """F5-03: a superseded ``getFiles`` scan must not emit its reply."""
+    """F5-03: a superseded cold ``getFiles`` must not emit its reply.
+
+    Cold requests are answered by ``_emit_indexed_files`` once the
+    registry's single worker has built the work_dir's index; the reply
+    is dropped when the connection's request token has moved on.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.server._file_index.stop()
+        self.registry = FileIndexRegistry(
+            home=str(self.root / "home"), cache_dir=self.root / "cache",
+        )
+        self.server._file_index = self.registry
+
+    def tearDown(self) -> None:
+        self.registry.stop()
+        super().tearDown()
 
     def _wait(self, predicate: Any, timeout: float = 15.0) -> None:
         deadline = time.monotonic() + timeout
@@ -159,33 +177,39 @@ class TestStaleFilePickerReplyDropped(_AutocompleteHarness):
             time.sleep(0.02)
         raise AssertionError(f"timed out; events: {self.events[-5:]!r}")
 
-    def test_slow_scan_does_not_overwrite_newer_workdir(self) -> None:
-        """Same prefix, same connection, two work_dirs: old reply dropped."""
+    def test_superseded_cold_request_does_not_overwrite_newer_workdir(self) -> None:
+        """Same prefix, same connection, two work_dirs: old reply dropped.
+
+        A gate job parks the worker before either request's index is
+        built, so the second request deterministically supersedes the
+        first while the first is still pending.
+        """
         slow_dir = self.root / "slow"
         slow_dir.mkdir()
-        for i in range(4000):
-            (slow_dir / f"filler_{i:05d}.py").write_text("x = 1\n")
         (slow_dir / "marker_slow.py").write_text("x = 1\n")
         fast_dir = self.root / "fast"
         fast_dir.mkdir()
         (fast_dir / "marker_fast.py").write_text("y = 2\n")
 
         conn_id = "conn-C"
-        # No pause between the two requests: the second must supersede
-        # the first while the first's directory scan is still running.
+        gate = threading.Event()
+        self.registry.ensure(str(self.root / "gate"), gate.wait)
         self.server._get_files("marker", work_dir=str(slow_dir), conn_id=conn_id)
         self.server._get_files("marker", work_dir=str(fast_dir), conn_id=conn_id)
+        gate.set()
 
-        def _both_scans_done() -> bool:
-            with self.server._state_lock:
-                return (
-                    str(slow_dir) in self.server._file_cache
-                    and str(fast_dir) in self.server._file_cache
+        def _both_replies_decided() -> bool:
+            with self.registry._lock:
+                built = (
+                    str(slow_dir) in self.registry._indexes
+                    and str(fast_dir) in self.registry._indexes
                 )
+            with self.server._state_lock:
+                return built and conn_id not in self.server._files_request_map()
 
-        self._wait(_both_scans_done)
-        # Allow any (buggy) post-scan emission to land.
-        time.sleep(0.3)
+        # The worker is FIFO: once the newer reply has released the
+        # token, the older reply has already run (and stood down).
+        self._wait(_both_replies_decided)
         populated = [
             e for e in self.events
             if e.get("type") == "files" and e.get("files")

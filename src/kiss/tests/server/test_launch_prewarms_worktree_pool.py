@@ -2,20 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The task runner starts preparing a spare worktree before classifying.
+"""Spare worktrees are prepared at daemon start and at every submit.
 
-Submit-path latency: the pre-run classifier costs one LLM round trip
-(~2 s on the large models), and a development verdict then paid a
-full-checkout ``git worktree add`` (~1.5 s on a real repository) on
-top of it whenever the spare pool was empty — always for the first
-worktree task of a daemon session, since the pool used to refill only
-AFTER a worktree task had consumed a spare.
+Submit-path latency: a full-checkout ``git worktree add`` takes seconds
+on a large repository, and a worktree run used to pay for it inline
+whenever the spare pool was empty — always for the first worktree task
+after a daemon start, and for any run whose classifier verdict came
+from the cache (no LLM wait to overlap the checkout with).
 
-``_run_task_inner`` now schedules ``worktree_pool.prewarm_async``
-right before ``classify_task_for_run`` (maintenance-free, so it never
-squash-merges anything into the main tree), so the checkout overlaps
-the classifier's wait and the run's own worktree acquisition finds a
-ready spare.
+* ``VSCodeServer.prewarm_worktree_pool`` (called by ``kiss-web`` at
+  start) creates a spare for the daemon's work dir.
+* ``_run_task_inner`` schedules ``worktree_pool.prewarm_async`` right
+  before classification (maintenance-free, so it never squash-merges
+  anything into the main tree), whether or not a classifier call
+  follows.
+* A run that reaches ``_acquire_task_worktree`` while that refill is
+  still checking out waits on ``repo_lock`` (held by the refill) and
+  then consumes the spare, never running a second checkout.
 
 Everything here is real: a real :class:`VSCodeServer`, a real
 :class:`WorktreeSorcarAgent`, a real temporary git repository and a
@@ -272,8 +275,8 @@ class TestDevelopmentRunConsumesThePrewarmedSpare(_PrewarmHarness):
 
 
 class TestPrewarmGating(_PrewarmHarness):
-    """No spare is prepared unless a classifier wait can be overlapped
-    for a user who has worktrees on."""
+    """A spare is prepared at submit only for a user who has worktrees
+    on, in a repo that is not itself a kiss worktree."""
 
     def test_no_prewarm_when_worktree_off_and_classifier_off(self) -> None:
         self._run("say hello", use_worktree=False, classify=False)
@@ -325,17 +328,17 @@ class TestPrewarmGating(_PrewarmHarness):
         self.assertEqual(worktree_pool.spare_branches(), set())
         self.assertFalse((nested_dir / ".kiss-worktrees").exists())
 
-    def test_classifier_off_keeps_the_acquire_then_refill_path(self) -> None:
-        """With no classifier wait to overlap, a worktree run acquires
-        its worktree as before and the refill still pools a spare."""
+    def test_classifier_off_still_pools_a_spare(self) -> None:
+        """With no classifier wait to overlap, a worktree run still
+        leaves a spare pooled for the next task."""
         self._run("say hello", use_worktree=True, classify=False)
         self.assertEqual(self.classifier_seen, [])
         self._join_refill()
         self.assertIsNotNone(worktree_pool.take_spare(self.repo))
 
-    def test_cached_verdict_schedules_no_prewarm(self) -> None:
-        """A memoised verdict means no LLM wait, hence no submit-time
-        prewarm: the pool stays empty for a direct run."""
+    def test_cached_verdict_still_prewarms(self) -> None:
+        """A memoised verdict means no LLM wait, but the submit-time
+        prewarm still runs: a direct run leaves a spare pooled."""
         self._run("say hello", use_worktree=True)
         self.assertEqual(len(self.classifier_seen), 1)
         self._join_refill()
@@ -347,8 +350,7 @@ class TestPrewarmGating(_PrewarmHarness):
             len(self.classifier_seen), 1, "the second run must hit the verdict cache",
         )
         self._join_refill()
-        self.assertIsNone(worktree_pool.take_spare(self.repo))
-        self.assertEqual(worktree_pool.spare_branches(), set())
+        self.assertIsNotNone(worktree_pool.take_spare(self.repo))
 
     def test_non_git_work_dir_is_harmless(self) -> None:
         plain_dir = Path(self.home.tmpdir) / "not-a-repo"
@@ -395,3 +397,99 @@ class TestDevelopmentVerdictRespectsWorktreePin(_PrewarmHarness):
         self.assertTrue((self.repo / "prewarm-written.txt").is_file())
         results = self.printer.events_of_type("result")
         self.assertTrue(results and results[-1].get("success") is not False)
+
+
+def _record_checkouts(repo: Path) -> Path:
+    """Install a ``post-checkout`` hook that logs each new worktree.
+
+    ``git worktree add`` runs the hook inside the new checkout, so the
+    log lists worktree branches in creation order.  The hook also
+    sleeps, standing in for a large repository's slow checkout, so a
+    run really starts while the submit-time spare is still being
+    created.  Returns the log.
+    """
+    log = repo.parent / "checkouts.log"
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\nsleep 1\ngit symbolic-ref --short HEAD >> '{log}'\n")
+    hook.chmod(0o755)
+    return log
+
+
+class TestRunWaitsForTheInFlightSpare(_PrewarmHarness):
+    """A worktree run with no classifier wait consumes the spare the
+    submit-time prewarm is still creating instead of running a second
+    checkout inline."""
+
+    development_verdict = True
+    agent_writes_file = True
+
+    def _assert_run_used_first_checkout(self, log: Path) -> None:
+        """The run's worktree is the first one created after submit:
+        the prewarm's spare, not a second inline checkout."""
+        wt = getattr(self._agent(), "_wt", None)
+        assert wt is not None, "the run should leave a pending worktree"
+        self.assertTrue((wt.wt_dir / "prewarm-written.txt").is_file())
+        self._join_refill()
+        created = log.read_text(encoding="utf-8").split()
+        self.assertEqual(created[0], wt.branch, created)
+
+    def test_cached_development_verdict_uses_the_submit_time_spare(self) -> None:
+        self._run("PREWARM-WRITE: create a file", use_worktree=True)
+        self.assertEqual(len(self.classifier_seen), 1)
+        self._agent().discard()
+        self._join_refill()
+        worktree_pool.discard_all()
+        self.printer.captured.clear()
+        log = _record_checkouts(self.repo)
+
+        self._run("PREWARM-WRITE: create a file", use_worktree=True)
+        self.assertEqual(
+            len(self.classifier_seen), 1, "the second run must hit the verdict cache",
+        )
+        self._assert_run_used_first_checkout(log)
+
+    def test_classifier_off_run_uses_the_submit_time_spare(self) -> None:
+        log = _record_checkouts(self.repo)
+        self._run("PREWARM-WRITE: create a file", use_worktree=True, classify=False)
+        self.assertEqual(self.classifier_seen, [])
+        self._assert_run_used_first_checkout(log)
+
+
+class TestDaemonStartPrewarm(_PrewarmHarness):
+    """``VSCodeServer.prewarm_worktree_pool`` (run by ``kiss-web`` at
+    start) leaves a spare ready for the daemon's work dir."""
+
+    def test_start_creates_a_spare_for_the_work_dir(self) -> None:
+        thread = self.server.prewarm_worktree_pool()
+        assert thread is not None
+        thread.join(timeout=120)
+        spare = worktree_pool.take_spare(self.repo)
+        assert spare is not None, "no spare after the daemon-start prewarm"
+        self.assertTrue(spare[1].is_dir())
+        # Maintenance-free: the main checkout is untouched.
+        self.assertEqual((self.repo / "seed.txt").read_text(encoding="utf-8"), "seed\n")
+
+    def test_nothing_when_worktrees_are_off(self) -> None:
+        self.home.write_config(is_worktree=False)
+        self.assertIsNone(self.server.prewarm_worktree_pool())
+        self.assertEqual(worktree_pool.spare_branches(), set())
+
+    def test_nothing_when_the_pool_is_disabled(self) -> None:
+        os.environ[worktree_pool._DISABLE_ENV] = "1"
+        self.assertIsNone(self.server.prewarm_worktree_pool())
+        self.assertEqual(worktree_pool.spare_branches(), set())
+
+    def test_nothing_for_a_non_git_work_dir(self) -> None:
+        plain_dir = Path(self.home.tmpdir) / "not-a-repo"
+        plain_dir.mkdir()
+        self.server.work_dir = str(plain_dir)
+        self.assertIsNone(self.server.prewarm_worktree_pool())
+
+    def test_nothing_for_a_work_dir_inside_a_kiss_worktree(self) -> None:
+        assert worktree_pool.prewarm(self.repo) is True
+        spare = worktree_pool.take_spare(self.repo)
+        assert spare is not None
+        self.server.work_dir = str(spare[1])
+        self.assertIsNone(self.server.prewarm_worktree_pool())
+        self.assertEqual(worktree_pool.spare_branches(), set())

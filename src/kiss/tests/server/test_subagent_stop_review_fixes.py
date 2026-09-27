@@ -75,9 +75,11 @@ class _RecordingPrinter(JsonPrinter):
         with self._ev_lock:
             self.events.append(event)
 
-    def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
+    def subscribe_tab(
+        self, task_id: Any, tab_id: str,
+    ) -> list[dict[str, Any]] | None:
         self.subscribe_calls.append((task_id, tab_id))
-        super().subscribe_tab(task_id, tab_id)
+        return super().subscribe_tab(task_id, tab_id)
 
 
 class _DbRedirectBase:

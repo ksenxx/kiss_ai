@@ -6,9 +6,9 @@
 
 This package ports the authentication architecture Meta published for
 its Muse personal agent (research.meta.ai, "How We Built Safety Into
-Muse", September 2026) to the KISS third-party connectors (Gmail,
-Google Drive, Calendar, Docs, Sheets, Google Chat, Notion, GitHub,
-Slack, Firecrawl, Brave Search):
+Muse", September 2026) to the KISS third-party connectors (Notion,
+GitHub, Slack, Firecrawl, Brave Search, ...; the Google agents go
+through Composio instead, see ``_composio_google``):
 
 * **authd / vault** (:mod:`.vault`) — a daemon-owned credential store.
   OAuth tokens live in ``$KISS_HOME/muse_auth/vault/`` (0700/0600) and
@@ -22,17 +22,15 @@ Slack, Firecrawl, Brave Search):
   checked against a per-service host allowlist and an
   allow/deny/ask policy, optionally satisfied by a user grant
   (once / session / time-bounded / perpetual), and audit-logged.
-* **Per-service ACLs** — a surrogate minted for ``google_drive``
-  cannot obtain the Gmail credential or reach Gmail API hosts.
+* **Per-service ACLs** — a surrogate minted for ``notion`` cannot
+  obtain the GitHub credential or reach GitHub API hosts.
 
 Muse-auth is enabled by default on platforms that can run the daemon
 (see ``platform_supports_muse_daemon``); opt out by setting
 ``KISS_MUSE_AUTH=0`` (or ``false`` / ``no`` / ``off``) to restore the
 legacy plaintext transport.  Credentials already migrated into the
 vault stay there — recover one for a legacy config with the ``export``
-CLI command.  The Google agents route all
-API traffic through the daemon (see
-``_google_workspace_utils.google_api_session``).  Manage enrollment
+CLI command.  Manage enrollment
 and grants with ``python -m kiss.agents.third_party_agents.muse_auth``.
 
 Honest scope note: unlike Muse's VM, both processes here run as the
@@ -51,13 +49,11 @@ approvals.  Response bodies are capped at ~48 MiB by the daemon's
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
     MuseBoundarySession,
-    MuseHttp,
     SurrogateCredentials,
     bearer_surrogate,
     clear_credentials,
     grant,
     mint_surrogate,
-    mint_surrogate_migrating,
     muse_auth_enabled,
     platform_supports_muse_daemon,
     store_credentials,
@@ -67,13 +63,11 @@ from kiss.agents.third_party_agents.muse_auth.client import (
 __all__ = [
     "MuseAuthError",
     "MuseBoundarySession",
-    "MuseHttp",
     "SurrogateCredentials",
     "bearer_surrogate",
     "clear_credentials",
     "grant",
     "mint_surrogate",
-    "mint_surrogate_migrating",
     "muse_auth_enabled",
     "platform_supports_muse_daemon",
     "store_credentials",

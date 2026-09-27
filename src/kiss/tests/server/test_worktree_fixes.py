@@ -112,6 +112,9 @@ class TestFix3MainTreeBusyGuard:
         wt_state.use_worktree = True
         agent_state.register(wt_state)
 
+        # The running non-wt task has edited a tracked file of the
+        # main tree: that is what makes it block the merge.
+        (repo / "README.md").write_text("# Test\nedited by the direct task\n")
         non_wt_state = agent_state.AgentState(
             "task-non-wt", tab_id="non_wt_tab", server_owned=True,
         )
@@ -125,10 +128,56 @@ class TestFix3MainTreeBusyGuard:
             result = server._handle_worktree_action("merge", "wt_tab")
             assert result["success"] is False
             assert "running" in result["message"].lower()
+            assert "tracked files" in result["message"], result
         finally:
             agent_state.unregister(non_wt_state.task_id, non_wt_state)
             agent_state.unregister(wt_state.task_id, wt_state)
             wt_agent.discard()
+
+    def test_worktree_merge_allowed_when_non_wt_left_tracked_files_alone(
+        self,
+    ) -> None:
+        """A running non-wt task that has not changed any tracked file
+        of the main tree does not block the user's Merge click."""
+        repo = _make_repo(Path(self._tmpdir) / "repo")
+        server = VSCodeServer()
+        server.work_dir = str(repo)
+
+        wt_agent = WorktreeSorcarAgent("wt")
+        wt_agent._chat_id = "wt_tab"
+        wt_work = wt_agent._try_setup_worktree(repo, str(repo))
+        assert wt_work is not None
+        (Path(wt_work) / "work.txt").write_text("agent work\n")
+        subprocess.run(
+            ["git", "-C", wt_work, "add", "work.txt"], check=True,
+        )
+        subprocess.run(
+            ["git", "-C", wt_work, "commit", "-q", "-m", "agent work"],
+            check=True,
+        )
+
+        wt_state = agent_state.AgentState(
+            "task-wt", agent=wt_agent, tab_id="wt_tab", server_owned=True,
+        )
+        wt_state.use_worktree = True
+        agent_state.register(wt_state)
+
+        non_wt_state = agent_state.AgentState(
+            "task-non-wt", tab_id="non_wt_tab", server_owned=True,
+        )
+        non_wt_state.is_running_non_wt = True
+        non_wt_state.non_wt_repo_root = repo.resolve()
+        agent_state.register(non_wt_state)
+
+        try:
+            result = server._handle_worktree_action("merge", "wt_tab")
+            assert result["success"] is True, result
+            assert (repo / "work.txt").read_text() == "agent work\n"
+        finally:
+            agent_state.unregister(non_wt_state.task_id, non_wt_state)
+            agent_state.unregister(wt_state.task_id, wt_state)
+            if wt_agent._wt_pending:
+                wt_agent.discard()
 
     def test_check_merge_conflict_suppressed_when_non_wt_running(self) -> None:
         """_check_merge_conflict returns False when non-wt agent is running."""

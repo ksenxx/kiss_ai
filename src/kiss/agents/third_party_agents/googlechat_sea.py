@@ -4,8 +4,12 @@
 # add your name here
 """Google Chat Agent — channel agent with Google Chat API tools.
 
-Provides authenticated access to Google Chat via Service Account or OAuth2.
-Stores credentials in ``~/.kiss/third_party_agents/googlechat/``.
+Provides access to Google Chat as the user, through Composio (see
+:mod:`._composio_google`), or as a Chat bot with a service account
+stored at ``~/.kiss/third_party_agents/googlechat/service_account.json``.
+Composio has no managed Google Chat app, so user sign-in needs a custom
+Composio auth config whose ID is set in
+``KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT``.
 
 Usage::
 
@@ -20,20 +24,20 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
     write_private_file,
 )
+from kiss.agents.third_party_agents._composio_google import ComposioHttp, connected_account_id
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    CLOUD_CONSOLE_URL,
-    RemoteOAuthSession,
-    google_consent_steps,
-    start_google_consent,
+    google_auth_prompt,
+    make_google_auth_tools,
 )
 from kiss.core.config import kiss_home
+
+_SERVICE = "googlechat"
 
 _SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
@@ -52,50 +56,20 @@ def _gchat_dir() -> Path:
     return kiss_home() / "third_party_agents" / "googlechat"
 
 
-def _token_path() -> Path:
-    """Return the path to the stored OAuth2 token file."""
-    return _gchat_dir() / "token.json"
-
-
-def _credentials_path() -> Path:
-    """Return the path to the OAuth2 client credentials file."""
-    return _gchat_dir() / "credentials.json"
-
-
 def _service_account_path() -> Path:
     """Return the path to the service account JSON file."""
     return _gchat_dir() / "service_account.json"
 
 
-def _save_token(creds: Any) -> None:
-    """Persist OAuth2 credentials atomically with owner-only permissions.
-
-    Mirrors gmail's ``_save_credentials``: the token JSON is written via
-    :func:`~kiss.agents.third_party_agents._channel_agent_utils.write_private_file`
-    (mkstemp ``0o600`` + ``os.replace``), so concurrent readers never
-    observe a torn file and the secret is never even briefly
-    world-readable.
-
-    Args:
-        creds: A ``google.oauth2.credentials.Credentials`` instance.
-    """
-    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
-    if muse_auth_enabled():
-        # Muse-auth mode: the credential goes straight into the daemon
-        # vault; no agent-readable token.json is written.
-        from kiss.agents.third_party_agents.muse_auth.client import store_credentials
-
-        store_credentials("googlechat", creds, list(getattr(creds, "scopes", None) or []))
-        return
-    write_private_file(_token_path(), creds.to_json())
-
-
 def _load_service(sa_path: str = "") -> Any:
-    """Load a Google Chat API service using service account or OAuth2.
+    """Load a Google Chat API service from a service account or Composio.
+
+    A service account (Chat bot) wins when its JSON file exists;
+    otherwise the recorded Composio connection is used.
 
     Args:
-        sa_path: Path to service account JSON. If empty, uses OAuth2.
+        sa_path: Path to a service account JSON file. If empty, the
+            default ``service_account.json`` is used when present.
 
     Returns:
         Google Chat API service resource, or None on failure.
@@ -103,7 +77,7 @@ def _load_service(sa_path: str = "") -> Any:
     from googleapiclient.discovery import build
 
     sa_file = Path(sa_path) if sa_path else _service_account_path()
-    if sa_file.exists():  # pragma: no branch
+    if sa_file.exists():
         try:
             from google.oauth2 import service_account
 
@@ -114,58 +88,9 @@ def _load_service(sa_path: str = "") -> Any:
         except Exception:
             pass
 
-    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
-    if muse_auth_enabled():
-        # Muse-auth mode: the user-OAuth token lives in the daemon
-        # vault; API calls carry a surrogate that the daemon swaps for
-        # the real token at the network boundary.  A leftover legacy
-        # ``token.json`` is migrated into the vault (and removed) so
-        # the user-OAuth path can never silently fall back to a
-        # real-credential service in this mode.  (Service-account auth
-        # signs JWTs locally and intentionally stays legacy, above.)
-        from kiss.agents.third_party_agents.muse_auth.client import (
-            MuseHttp,
-            mint_surrogate_migrating,
-        )
-
-        handle = mint_surrogate_migrating("googlechat", _token_path(), _SCOPES)
-        if handle is None:
-            return None
-        return build(
-            "chat", "v1", http=MuseHttp("googlechat", handle.token), static_discovery=True
-        )
-
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-
-    token_file = _token_path()
-    if not token_file.exists():  # pragma: no branch
+    if sa_path or not connected_account_id(_SERVICE):
         return None
-    try:
-        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
-        if creds.valid:  # pragma: no branch
-            return build("chat", "v1", credentials=creds)
-        if creds.expired and creds.refresh_token:  # pragma: no branch
-            creds.refresh(Request())
-            _save_token(creds)
-            return build("chat", "v1", credentials=creds)
-    except Exception:
-        pass
-    return None
-
-
-def _clear_config() -> None:
-    """Delete the stored Google Chat credentials (legacy file and Muse vault)."""
-    for path in [_token_path()]:
-        if path.exists():  # pragma: no branch
-            path.unlink()
-    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
-    if muse_auth_enabled():
-        from kiss.agents.third_party_agents.muse_auth.client import clear_credentials
-
-        clear_credentials("googlechat")
+    return build("chat", "v1", http=ComposioHttp(_SERVICE), static_discovery=True)
 
 
 class GoogleChatChannelBackend(ToolMethodBackend):
@@ -483,18 +408,13 @@ class GoogleChatAgent(BaseChannelAgent):
         result = agent.run(prompt_template="List all spaces")
     """
 
-    channel_system_prompt = (
-        "\n\n## Google Chat Authentication\n"
-        "Always call check_googlechat_auth() first; if it returns ok, report "
-        "that and stop — never start an OAuth flow over valid credentials. If "
-        "no credentials exist, follow the setup instructions it returns "
-        "(a service_account.json or an OAuth credentials.json), then call "
-        "authenticate_googlechat() — pass service_account_json_path to use a "
-        "specific service-account file; when it is empty, the default "
-        "service_account.json is used if present, otherwise the OAuth "
-        "credentials.json flow runs.\n"
-        + google_consent_steps("googlechat")
-        + " Finish by verifying with check_googlechat_auth()."
+    channel_system_prompt = google_auth_prompt(_SERVICE, "Google Chat") + (
+        " Composio has no managed Google Chat app: user sign-in needs a custom "
+        "Composio auth config (created with the user's own Google OAuth client "
+        "at https://dashboard.composio.dev) whose ID is set in the "
+        "KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT environment variable. To act as a "
+        "Chat bot instead, call authenticate_googlechat_service_account() with "
+        "the path of the bot's service account JSON key."
     )
 
     def __init__(self) -> None:
@@ -505,137 +425,50 @@ class GoogleChatAgent(BaseChannelAgent):
             self._backend._service = service
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend is authenticated."""
-        return self._backend._service is not None
+        """Return True if a service account is loaded or a Composio connection is set up."""
+        return self._backend._service is not None or bool(connected_account_id(_SERVICE))
+
+    def _forget_service_account(self) -> None:
+        """Drop the loaded Chat service and delete the stored service-account key."""
+        self._backend._service = None
+        _service_account_path().unlink(missing_ok=True)
 
     def _get_auth_tools(self) -> list:
-        """Return channel-specific authentication tool functions."""
+        """Return the Composio sign-in tools plus the service-account tool."""
         agent = self
 
-        def check_googlechat_auth() -> str:
-            """Check if Google Chat credentials are configured and valid.
+        def authenticate_googlechat_service_account(service_account_json_path: str = "") -> str:
+            """Authenticate Google Chat as a Chat bot with a service account key.
 
-            Returns:
-                Authentication status or instructions for how to authenticate.
-            """
-            if agent._backend._service is None:  # pragma: no branch
-                sa_exists = _service_account_path().exists()
-                creds_exists = _credentials_path().exists()
-                if sa_exists:  # pragma: no branch
-                    return (
-                        "Not authenticated. A service_account.json file exists. "
-                        "Call authenticate_googlechat() to load it."
-                    )
-                if creds_exists:  # pragma: no branch
-                    return (
-                        "Not authenticated. A credentials.json file exists. "
-                        "Call authenticate_googlechat() to start OAuth2 flow."
-                    )
-                return (
-                    "Not authenticated with Google Chat. The user creates the "
-                    f"credentials themselves. {portal_handoff(CLOUD_CONSOLE_URL)}\n"
-                    "Option 1 (Service Account): Create at "
-                    "https://console.cloud.google.com/iam-admin/serviceaccounts, "
-                    f"download JSON, save to {_service_account_path()}\n"
-                    "Option 2 (OAuth): Create OAuth credentials (Desktop app) at "
-                    f"{CLOUD_CONSOLE_URL}, download JSON, save to {_credentials_path()}\n"
-                    "The user may paste the JSON content back for you to write to "
-                    "that path. Enable the Google Chat API, then call "
-                    "authenticate_googlechat()."
-                )
-            try:
-                resp = agent._backend._service.spaces().list(pageSize=1).execute()
-                return json.dumps({"ok": True, "space_count": len(resp.get("spaces", []))})
-            except Exception as e:
-                return json.dumps({"ok": False, "error": str(e)})
-
-        def authenticate_googlechat(service_account_json_path: str = "") -> str:
-            """Authenticate with Google Chat using a service account or OAuth2.
-
-            The OAuth2 path starts the loopback consent server, opens the
-            Google consent page in the user's default browser when this
-            machine has one, and returns the auth_url for the user to
-            open by hand otherwise; finish_googlechat_auth() completes it.
+            A key outside the default location is copied there so later
+            runs find it.
 
             Args:
-                service_account_json_path: Path to service account JSON file.
-                    If empty, uses OAuth2 with credentials.json.
+                service_account_json_path: Path to the service account JSON
+                    key. If empty, the default service_account.json is used.
 
             Returns:
-                Authentication result, status 'consent_required' with
-                auth_url, browser_opened and instructions, or an error
-                message.
+                JSON with ok status, or an error message.
             """
-            service = _load_service(service_account_json_path)
-            if service is None and not service_account_json_path:  # pragma: no branch
-                # OAuth: start the loopback consent server, open the
-                # consent page in the user's default browser when
-                # possible, and hand back the auth_url; the redirect
-                # (direct, or replayed from a pasted URL) is collected
-                # by finish_googlechat_auth().
-                answer = start_google_consent("googlechat", "Google Chat", _SCOPES)
-                if answer is not None:
-                    return answer
-            if service is None:  # pragma: no branch
-                return (
-                    f"Authentication failed. Ensure credentials exist at "
-                    f"{_service_account_path()} or {_credentials_path()}"
-                )
+            source = Path(service_account_json_path) if service_account_json_path else (
+                _service_account_path()
+            )
+            service = _load_service(str(source))
+            if service is None:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"Could not load a service account key from {source}.",
+                })
+            if source.resolve() != _service_account_path().resolve():
+                write_private_file(_service_account_path(), source.read_text())
             agent._backend._service = service
-            try:
-                resp = agent._backend._service.spaces().list(pageSize=1).execute()
-                return json.dumps(
-                    {
-                        "ok": True,
-                        "message": "Google Chat authentication successful.",
-                        "space_count": len(resp.get("spaces", [])),
-                    }
-                )
-            except Exception as e:
-                return json.dumps({"ok": True, "message": "Authenticated.", "error": str(e)})
-
-        def clear_googlechat_auth() -> str:
-            """Clear the stored Google Chat credentials.
-
-            Returns:
-                Status message.
-            """
-            _clear_config()
-            agent._backend._service = None
-            return "Google Chat authentication cleared."
-
-        def finish_googlechat_auth() -> str:
-            """Complete the Google Chat OAuth consent started by authenticate_googlechat().
-
-            Call after the user has approved consent in their own browser
-            (and, when they did so on another machine, after the pasted
-            redirect URL has been delivered to the local consent server
-            with ``curl -s '<pasted redirect URL>'``).
-
-            Returns:
-                Authentication result, a pending status when consent is not
-                finished, or an error message.
-            """
-            creds, status = RemoteOAuthSession.finish("googlechat", _SCOPES)
-            if status == "pending":
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "status": "pending",
-                        "error": "Consent is not completed yet; finish the flow in "
-                                 "the browser, then call this tool again.",
-                    }
-                )
-            if creds is None:
-                return json.dumps({"ok": False, "error": f"OAuth flow failed: {status}"})
-            agent._backend._service = _load_service()
-            return json.dumps({"ok": True, "message": "Google Chat authentication successful."})
+            return json.dumps({"ok": True, "message": "Google Chat service account loaded."})
 
         return [
-            check_googlechat_auth,
-            authenticate_googlechat,
-            clear_googlechat_auth,
-            finish_googlechat_auth,
+            *make_google_auth_tools(
+                self, _SERVICE, "Google Chat", self._backend.connect, self._forget_service_account
+            ),
+            authenticate_googlechat_service_account,
         ]
 
 
@@ -665,7 +498,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    credentials recorded under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return GoogleChatAgent()._get_tools()

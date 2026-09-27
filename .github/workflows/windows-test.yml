@@ -45,7 +45,8 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Installing uv..."
-          irm https://astral.sh/uv/0.11.2/install.ps1 | iex
+          # Same uv release as UV_VERSION in DependencyInstaller.ts / Dockerfile.
+          irm https://astral.sh/uv/0.12.19/install.ps1 | iex
           $uvDir = "$env:USERPROFILE\.local\bin"
           echo "$uvDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           $env:PATH = "$uvDir;$env:PATH"

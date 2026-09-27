@@ -20,53 +20,53 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.server.diff_merge import _scan_files
+from kiss.server.file_index import MAX_DEPTH, FileIndex
 
 
-class TestScanFilesDepthOffByOne(unittest.TestCase):
-    """N3: ``_scan_files`` checks ``len(rel_root.parts) - 1 > 3``
-    which was written assuming ``PurePath('.').parts == ('.',)``.
-    Since ``PurePath('.').parts`` is actually ``()``, the ``- 1``
-    creates an off-by-one that allows one extra level of nesting.
+class TestScanFilesDepthBoundary(unittest.TestCase):
+    """N3: the ``@``-mention scan must stop at exactly ``MAX_DEPTH``.
+
+    The old ``_scan_files`` depth check had an off-by-one; the index
+    scan now descends into directories at depth ``< MAX_DEPTH`` only,
+    so a directory at depth ``MAX_DEPTH`` is listed (and its files are
+    listed) but its subdirectories are never entered.
     """
 
-    def test_depth_10_files_are_included(self) -> None:
-        """Behavioral: files at depth 10 are included when the
-        intended limit was depth 9.
+    def test_files_at_max_depth_are_included_and_deeper_ones_are_not(self) -> None:
+        """Behavioral: files at ``MAX_DEPTH - 1``, ``MAX_DEPTH`` and ``MAX_DEPTH + 1``.
 
-        Creates a directory tree:
-          root/a/b/c/d/e/f/g/h/i/shallow.txt  (depth 9)
-          root/a/b/c/d/e/f/g/h/i/j/deep.txt   (depth 10)
-          root/a/b/c/d/e/f/g/h/i/j/k/very_deep.txt  (depth 11)
-
-        With the off-by-one, depth 10 is included.  Without it, only
-        depth 9 should be included.
+        Creates a directory tree of nested ``dN`` directories:
+          root/d0/.../d{MAX_DEPTH-2}/shallow.txt     (depth MAX_DEPTH - 1)
+          root/d0/.../d{MAX_DEPTH-1}/boundary.txt    (depth MAX_DEPTH)
+          root/d0/.../d{MAX_DEPTH}/too_deep.txt      (depth MAX_DEPTH + 1)
         """
         td = tempfile.mkdtemp()
         try:
-            d9 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i")
-            os.makedirs(d9)
-            Path(d9, "shallow.txt").write_text("ok")
+            names = [f"d{i}" for i in range(MAX_DEPTH + 1)]
+            shallow = os.path.join(td, *names[: MAX_DEPTH - 1])
+            boundary = os.path.join(td, *names[:MAX_DEPTH])
+            too_deep = os.path.join(td, *names)
+            os.makedirs(too_deep)
+            Path(shallow, "shallow.txt").write_text("ok")
+            Path(boundary, "boundary.txt").write_text("at the limit")
+            Path(too_deep, "too_deep.txt").write_text("way too deep")
 
-            d10 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
-            os.makedirs(d10)
-            Path(d10, "deep.txt").write_text("too deep?")
+            index = FileIndex.scan(td)
+            file_results = [p for p in index.paths if not p.endswith("/")]
 
-            d11 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k")
-            os.makedirs(d11)
-            Path(d11, "very_deep.txt").write_text("way too deep")
-
-            result = _scan_files(td)
-            file_results = [p for p in result if not p.endswith("/")]
-
-            assert "a/b/c/d/e/f/g/h/i/shallow.txt" in file_results, (
-                "depth-9 files should always be included"
+            assert "/".join(names[: MAX_DEPTH - 1]) + "/shallow.txt" in file_results, (
+                f"depth-{MAX_DEPTH - 1} files should always be included"
             )
-            assert "a/b/c/d/e/f/g/h/i/j/deep.txt" in file_results, (
-                "N3: depth-10 files are included due to the off-by-one bug"
+            assert "/".join(names[:MAX_DEPTH]) + "/boundary.txt" in file_results, (
+                f"N3: depth-{MAX_DEPTH} files are included (the directory is listed)"
             )
-            assert "a/b/c/d/e/f/g/h/i/j/k/very_deep.txt" not in file_results, (
-                "depth-11 files should be excluded"
+            assert "/".join(names) + "/" in index.paths, (
+                f"the depth-{MAX_DEPTH + 1} directory itself is listed as an entry"
             )
+            assert "/".join(names) + "/too_deep.txt" not in file_results, (
+                f"depth-{MAX_DEPTH + 1} files should be excluded"
+            )
+            assert "/".join(names[:MAX_DEPTH]) in index.dirs
+            assert "/".join(names) not in index.dirs, "a listed-only directory is not descended"
         finally:
             shutil.rmtree(td)

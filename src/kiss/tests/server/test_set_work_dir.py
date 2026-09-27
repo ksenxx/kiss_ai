@@ -16,25 +16,32 @@ notices that the user switched folders, so file autocomplete and
 related commands keep using the stale init value.
 
 These tests reproduce that mismatch and verify the ``setWorkDir``
-handler keeps ``server.work_dir`` and the autocomplete file cache
-synchronised with the active VS Code folder.
+handler keeps ``server.work_dir`` synchronised with the active VS Code
+folder, pre-warms the ``@``-mention file index of a newly adopted
+folder (``_file_index.ensure``), and queues nothing for an empty or
+unchanged folder.  Every server gets a private
+:class:`~kiss.server.file_index.FileIndexRegistry` rooted in the test's
+temp dir so the real home directory is never scanned.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.server import VSCodeServer
 
 
-def _wait_for(predicate, timeout: float = 5.0) -> None:
+def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
     """Poll ``predicate`` until it returns truthy or ``timeout`` elapses."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -45,7 +52,7 @@ def _wait_for(predicate, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture()
-def two_workspaces() -> Any:
+def two_workspaces() -> Iterator[tuple[str, str]]:
     """Create two temp dirs simulating two VS Code workspace folders.
 
     Folder A contains ``alpha.txt`` only; folder B contains
@@ -60,16 +67,75 @@ def two_workspaces() -> Any:
     try:
         yield a, b
     finally:
-        import shutil
         shutil.rmtree(a, ignore_errors=True)
         shutil.rmtree(b, ignore_errors=True)
 
 
-def _make_server(work_dir: str) -> VSCodeServer:
-    """Build a ``VSCodeServer`` pinned to ``work_dir``."""
-    server = VSCodeServer()
-    server.work_dir = work_dir
-    return server
+class _Servers:
+    """Build ``VSCodeServer`` instances with private file-index registries.
+
+    Every registry is rooted in the test's temp dir (``home`` and cache
+    dir) and stopped at teardown so no worker outlives the test.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
+        self.registries: list[FileIndexRegistry] = []
+
+    def make(self, work_dir: str, printer: Any = None) -> VSCodeServer:
+        """Return a server pinned to *work_dir* with a private registry."""
+        server = VSCodeServer(printer=printer) if printer is not None else VSCodeServer()
+        server.work_dir = work_dir
+        server._file_index.stop()
+        registry = FileIndexRegistry(
+            home=str(self.tmp_path / "home"), cache_dir=self.tmp_path / "cache",
+        )
+        server._file_index = registry
+        self.registries.append(registry)
+        return server
+
+    def drain(self, server: VSCodeServer) -> None:
+        """Block until every build queued so far on the server's registry ran.
+
+        The registry's single worker serves jobs in FIFO order, so a
+        sentinel job on an unrelated directory completing proves the
+        earlier jobs (or their absence) have been decided.
+        """
+        done = threading.Event()
+        server._file_index.ensure(str(self.tmp_path / "sentinel"), done.set)
+        assert done.wait(10.0), "the file-index worker never ran the sentinel"
+
+    def stop_all(self) -> None:
+        for registry in self.registries:
+            registry.stop()
+
+
+@pytest.fixture()
+def servers(tmp_path: Path) -> Iterator[_Servers]:
+    """Yield a server factory whose registries are stopped at teardown."""
+    factory = _Servers(tmp_path)
+    try:
+        yield factory
+    finally:
+        factory.stop_all()
+
+
+def _index_of(server: VSCodeServer, work_dir: str) -> FileIndex | None:
+    """Return the index object currently serving *work_dir*, if any."""
+    registry = server._file_index
+    root, _ = registry.root_for(work_dir)
+    with registry._lock:
+        return registry._indexes.get(root)
+
+
+def _build(server: VSCodeServer, work_dir: str) -> FileIndex:
+    """Index *work_dir* on the server's registry and return the index."""
+    done = threading.Event()
+    server._file_index.ensure(work_dir, done.set)
+    assert done.wait(10.0), "the index build never finished"
+    index = _index_of(server, work_dir)
+    assert index is not None
+    return index
 
 
 def _capture_files_events(server: VSCodeServer) -> list[dict[str, Any]]:
@@ -87,80 +153,100 @@ def _capture_files_events(server: VSCodeServer) -> list[dict[str, Any]]:
     return captured
 
 
-def test_set_work_dir_updates_field_and_invalidates_caches(
-    two_workspaces: tuple[str, str],
+def _names(entries: list[Any]) -> list[str]:
+    return [e["text"] if isinstance(e, dict) else str(e) for e in entries]
+
+
+def test_set_work_dir_updates_field_and_prewarms_the_index(
+    two_workspaces: tuple[str, str], servers: _Servers,
 ) -> None:
-    """``setWorkDir`` must update ``work_dir`` and clear stale caches.
+    """``setWorkDir`` must update ``work_dir``, drop the connection's
+    active-file snapshot, and start indexing the new folder.
 
     The bug: ``VSCodeServer.work_dir`` is captured once at __init__
     from ``KISS_WORKDIR``/``getcwd()`` and never refreshed.  Once
-    ``_file_cache``, ``_last_active_file``, or
-    ``_last_active_content`` are populated against folder A, those
-    values must be discarded the moment the user switches to
-    folder B — otherwise stale entries leak across workspaces.
+    ``_last_active_file`` / ``_last_active_content`` are populated
+    against folder A, those values must be discarded the moment the
+    user switches to folder B — otherwise stale entries leak across
+    workspaces — and folder B's ``@``-mention index must be built so
+    the first ``getFiles`` there is answered from a warm index.
     """
     a, b = two_workspaces
-    server = _make_server(a)
+    server = servers.make(a)
     with server._state_lock:
-        server._file_cache = {a: ["alpha.txt"]}
         server._last_active_file[""] = os.path.join(a, "alpha.txt")
         server._last_active_content[""] = "alpha"
+    assert server._file_index.view_for(b) is None
 
     server._handle_command({"type": "setWorkDir", "workDir": b})
 
     assert server.work_dir == b, (
         "setWorkDir must update work_dir to the new workspace folder"
     )
-    assert server._file_cache == {}, (
-        "file_cache holds folder-A files; must be cleared on folder change"
-    )
     assert server._last_active_file.get("", "") == ""
     assert server._last_active_content.get("", "") == ""
+    _wait_for(lambda: server._file_index.view_for(b) is not None)
+    view = server._file_index.view_for(b)
+    assert view is not None and "beta.txt" in view.paths, (
+        "setWorkDir must pre-warm the new folder's file index"
+    )
 
 
-def test_set_work_dir_ignored_when_empty(two_workspaces: tuple[str, str]) -> None:
-    """An empty ``workDir`` must be a no-op (no destructive reset)."""
+def test_set_work_dir_ignored_when_empty(
+    two_workspaces: tuple[str, str], servers: _Servers,
+) -> None:
+    """An empty ``workDir`` must be a no-op (no adoption, no index build)."""
     a, _b = two_workspaces
-    server = _make_server(a)
-    with server._state_lock:
-        server._file_cache = {a: ["alpha.txt"]}
+    server = servers.make(a)
     server._handle_command({"type": "setWorkDir", "workDir": ""})
     assert server.work_dir == a
-    assert server._file_cache == {a: ["alpha.txt"]}, (
-        "empty workDir must not invalidate caches"
+    servers.drain(server)
+    assert _index_of(server, a) is None, (
+        "empty workDir must not queue an index build"
     )
+    # Nor may it disturb an index that already exists.
+    done = threading.Event()
+    server._file_index.ensure(a, done.set)
+    assert done.wait(10.0)
+    warm = _index_of(server, a)
+    assert warm is not None
+    server._handle_command({"type": "setWorkDir", "workDir": ""})
+    servers.drain(server)
+    assert _index_of(server, a) is warm, "empty workDir must leave the warm index alone"
 
 
 def test_set_work_dir_idempotent_when_unchanged(
-    two_workspaces: tuple[str, str],
+    two_workspaces: tuple[str, str], servers: _Servers,
 ) -> None:
-    """Repeating the same ``workDir`` must not wipe an active cache.
+    """Repeating the same ``workDir`` must not rebuild a warm index.
 
     Folder-change events can fire spuriously (e.g. on every
     workspace mutation); reapplying the same value must be a no-op
-    so a freshly-populated file cache survives.
+    so a freshly-built file index survives untouched.
     """
     a, _b = two_workspaces
-    server = _make_server(a)
-    with server._state_lock:
-        server._file_cache = {a: ["alpha.txt"]}
+    server = servers.make(a)
+    index = _build(server, a)
     server._handle_command({"type": "setWorkDir", "workDir": a})
-    assert server._file_cache == {a: ["alpha.txt"]}
+    servers.drain(server)
+    assert _index_of(server, a) is index, (
+        "re-announcing the same work dir must not rebuild its index"
+    )
 
 
 def test_get_files_returns_new_workspace_after_set_work_dir(
-    two_workspaces: tuple[str, str],
+    two_workspaces: tuple[str, str], servers: _Servers,
 ) -> None:
     """End-to-end reproduction: autocomplete must reflect folder B
     after ``setWorkDir`` even though the server started in folder A.
 
     Without the fix, ``_get_files`` reads ``self.work_dir`` (frozen
     at init time) and emits folder A's files forever; with the fix,
-    ``setWorkDir`` invalidates ``_file_cache`` so the next
-    ``getFiles`` scan picks up folder B's files.
+    ``setWorkDir`` adopts folder B so the next unstamped ``getFiles``
+    is served from folder B's index.
     """
     a, b = two_workspaces
-    server = _make_server(a)
+    server = servers.make(a)
     captured = _capture_files_events(server)
 
     server._handle_command({"type": "getFiles", "prefix": ""})
@@ -174,9 +260,6 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
         e["files"] for e in captured
         if e.get("type") == "files" and not e.get("loading")
     )
-    def _names(entries: list[Any]) -> list[str]:
-        return [e["text"] if isinstance(e, dict) else str(e) for e in entries]
-
     assert "alpha.txt" in _names(a_files), (
         f"folder A scan must include alpha.txt; got {a_files}"
     )
@@ -205,7 +288,7 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
 
 
 def test_set_work_dir_syncs_web_printer_work_dir(
-    two_workspaces: tuple[str, str],
+    two_workspaces: tuple[str, str], servers: _Servers,
 ) -> None:
     """``setWorkDir`` must propagate to the ``WebPrinter.work_dir``.
 
@@ -222,8 +305,7 @@ def test_set_work_dir_syncs_web_printer_work_dir(
     a, b = two_workspaces
     printer = WebPrinter()
     printer.work_dir = a
-    server = VSCodeServer(printer=printer)
-    server.work_dir = a
+    server = servers.make(a, printer=printer)
 
     server._handle_command({"type": "setWorkDir", "workDir": b})
 

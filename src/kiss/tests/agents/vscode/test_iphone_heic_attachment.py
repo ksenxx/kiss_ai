@@ -216,6 +216,8 @@ def test_webkit_attaches_iphone_heic_as_downscaled_jpeg(
     """Safari's engine converts a picked HEIC into a JPEG attachment."""
     heic = _make_heic(tmp_path)
     with sync_playwright() as p:
+        if not Path(p.webkit.executable_path).exists():
+            pytest.skip("Playwright WebKit is not installed (uv run playwright install webkit)")
         browser = p.webkit.launch()
         try:
             page = _open_mobile_page(browser, remote_port)

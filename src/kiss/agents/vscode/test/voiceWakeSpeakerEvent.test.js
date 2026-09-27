@@ -58,7 +58,7 @@ const aiff = path.join(tmpdir, 'task.aiff');
 const wav = path.join(tmpdir, 'task.wav');
 spawnSync(
   'say',
-  ['Sorcar [[slnc 1200]] fix the parser bug [[slnc 4000]]', '-o', aiff],
+  ['Hey Sorcar [[slnc 1200]] fix the parser bug [[slnc 4000]]', '-o', aiff],
   {stdio: 'inherit'},
 );
 spawnSync(

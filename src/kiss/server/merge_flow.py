@@ -1513,7 +1513,10 @@ class _MergeFlowMixin:
 
         Checks both the tab's own task and any non-worktree task running
         on the main tree of *repo_root* (BUG-35, BUG-72 fixes), or
-        inside the pending worktree *wt_dir* itself.
+        inside the pending worktree *wt_dir* itself.  For ``"merging"``
+        the main-tree occupant only blocks while a tracked file of that
+        tree is modified (:meth:`_main_tree_blocks_merge`); the other
+        verbs are refused by any occupant.
 
         Must be called with ``_state_lock`` already held (RACE-1 fix)
         so the caller can atomically set ``state.is_merging = True``
@@ -1576,15 +1579,72 @@ class _MergeFlowMixin:
                     f"task's worktree. Wait for it to finish before {verb}."
                 ),
             }
-        if self._any_non_wt_running(repo_root):
-            message = (
-                "Another tab is running a task on the main working "
-                f"tree. Wait for it to finish before {verb}."
-            )
-            if verb == "merging":
-                message += " " + self._defer_worktree_merge(state)
-            return {"success": False, "message": message}
+        if verb == "merging":
+            if self._main_tree_blocks_merge(repo_root):
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task on the main working "
+                        f"tree and has uncommitted changes to tracked files. "
+                        f"Wait for it to finish before {verb}. "
+                        + self._defer_worktree_merge(state)
+                    ),
+                }
+        elif self._any_non_wt_running(repo_root):
+            return {
+                "success": False,
+                "message": (
+                    "Another tab is running a task on the main working "
+                    f"tree. Wait for it to finish before {verb}."
+                ),
+            }
         return None
+
+    def _main_tree_blocks_merge(self, repo_root: Path | None) -> bool:
+        """True when a merge into *repo_root*'s main tree must wait.
+
+        A non-worktree task running on another tab occupies the main
+        working tree, but it only makes a merge unsafe once a tracked
+        file there is modified: the merge would then stash, checkout
+        and merge the very files that task may still be writing.
+        While no tracked file is modified (``git status --porcelain
+        -uno`` is empty) the merge proceeds — so a research or
+        question-answering task that only reads the repository, or
+        writes ignored/untracked scratch files, does not block a merge
+        on an otherwise clean tree.  The check looks at the tree, not
+        at who edited it: an uncommitted edit that predates the
+        occupant blocks just the same, because the merge cannot tell
+        the two apart and either would be stashed around a live task.
+        A status git cannot read counts as dirty (fail closed), as
+        does a ``None`` *repo_root* — the caller cannot name the tree
+        it would merge into, so any occupant blocks.
+
+        Must be called with ``_state_lock`` held (same atomicity
+        contract as :meth:`_check_worktree_busy`).  The status call
+        runs under that lock only in the rare occupied case; with
+        ``-uno`` it skips the untracked-file walk and takes ~40 ms on
+        a 127k-file checkout.
+
+        The check is a snapshot: the occupant may start editing a
+        tracked file after it passed, while the merge is still
+        running.  That is the residual risk the user accepts by
+        merging next to a live task — the same one any concurrent
+        editor of the main tree has always carried — and it is
+        bounded by the merge's duration.
+
+        Args:
+            repo_root: The main repository root the merge would write,
+                or ``None`` when unknown.
+
+        Returns:
+            True when the merge must be refused (and deferred).
+        """
+        if not self._any_non_wt_running(repo_root):
+            return False
+        if repo_root is None:
+            return True
+        status = _git(str(repo_root), "status", "--porcelain", "-uno")
+        return status.returncode != 0 or bool(status.stdout.strip())
 
     def _defer_worktree_merge(self, state: AgentState) -> str:
         """Schedule the tab's pending worktree for an automatic merge.
@@ -1622,10 +1682,13 @@ class _MergeFlowMixin:
         user-action path (so all its busy guards still apply) and the
         outcome is broadcast to that tab as a ``worktree_result``.
 
-        Nothing happens while the main tree is still dirty (or its
-        status cannot be read) — the changes have not been committed
-        yet, and the main-tree bar (or a later Git Commit) will trigger
-        the merge when they are.
+        Nothing happens while a tracked file of the main tree is still
+        modified (or the status cannot be read) — the changes have not
+        been committed yet, and the main-tree bar (or a later Git
+        Commit) will trigger the merge when they are.  Untracked files
+        alone do not hold the merge back: the deferral was recorded
+        because of tracked changes (:meth:`_main_tree_blocks_merge`),
+        so the same yardstick decides when it is lifted.
 
         Args:
             repo: Resolved main-repo root whose tree may have been
@@ -1634,7 +1697,7 @@ class _MergeFlowMixin:
         """
         if repo is None:
             return
-        status = _git(str(repo), "status", "--porcelain", "-uall")
+        status = _git(str(repo), "status", "--porcelain", "-uno")
         if status.returncode != 0 or status.stdout.strip():
             # Dirty — or unknown, when git itself failed: the changes
             # are not known to be committed, so the deferral stands
@@ -1808,14 +1871,17 @@ class _MergeFlowMixin:
                         f"before {verb}."
                     ),
                 }
-            elif action == "merge" and self._any_non_wt_running(repo_root):
+            elif action == "merge" and self._main_tree_blocks_merge(repo_root):
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
                 # auto-finalize runs on the task thread that owns
                 # them).  It must NOT bypass the main-tree guard
                 # (F4-19): merging stashes/checkouts/merges the
                 # main working tree while a direct task on another
-                # tab is still writing it.  A DISCARD is exempt from
+                # tab is still writing it.  The guard only bites once
+                # that task has changed a tracked file, though — an
+                # occupant that has left every tracked file untouched
+                # does not block the merge.  A DISCARD is exempt from
                 # THIS guard: it only removes .kiss-worktrees/<slug>
                 # and deletes the unmerged branch, touching neither
                 # the main working tree's files nor its HEAD, so
@@ -1827,7 +1893,8 @@ class _MergeFlowMixin:
                     "success": False,
                     "message": (
                         "Another tab is running a task on the main "
-                        "working tree. Wait for it to finish before "
+                        "working tree and has uncommitted changes to "
+                        f"tracked files. Wait for it to finish before "
                         f"{verb}. " + self._defer_worktree_merge(state)
                     ),
                 }

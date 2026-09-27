@@ -93,6 +93,7 @@ import json
 import logging
 import math
 import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -122,10 +123,39 @@ from kiss.agents.sorcar.daemon_client import (
 from kiss.agents.sorcar.daemon_client import (
     run as run,
 )
+from kiss.core.config import kiss_home
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
+from kiss.server import sidebar_panels
 
 logger = logging.getLogger(__name__)
+
+# In-flight ``appsStatus`` replies (see ServerApi.get_apps_status): the
+# event loop keeps only weak references to tasks.
+_APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
+
+TIPS_OPT_OUT_MARKER = "TIPS_DISABLED"
+"""Basename, under ``$KISS_HOME``, of the "don't show tips again" marker."""
+
+
+def _write_tips_opt_out_marker(opt_out: bool) -> None:
+    """Create (``opt_out``) or remove the tips opt-out marker file.
+
+    Best-effort: an unwritable ``$KISS_HOME`` only means the tips
+    window may show again, so no error surfaces to the user.
+
+    Args:
+        opt_out: True to record the opt-out, False to forget it.
+    """
+    marker = kiss_home() / TIPS_OPT_OUT_MARKER
+    try:
+        if opt_out:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not update %s: %s", marker, exc)
 
 
 def _job_dir_is_contained(
@@ -251,9 +281,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),
     ApiCommand("getSeaCommands"),
-    ApiCommand(
-        "getWelcomeSuggestions", handler="get_welcome_suggestions"
-    ),
+    ApiCommand("getWelcomeInfo", handler="get_welcome_info"),
     ApiCommand("activeTasksQuery", handler="active_tasks_query"),
     ApiCommand("getModels"),
     ApiCommand("selectModel", required=("model",)),
@@ -263,6 +291,8 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("saveMyModel", required=("name",)),
     ApiCommand("deleteMyModel", required=("name",)),
     ApiCommand("addTrick", required=("text",)),
+    ApiCommand("deleteTrick", required=("text",)),
+    ApiCommand("editTrick", required=("text", "newText")),
     ApiCommand("getDefaultModel", handler="get_default_model"),
     ApiCommand("readKissConfig", handler="read_kiss_config"),
     ApiCommand(
@@ -280,6 +310,9 @@ API: dict[str, ApiCommand] = _catalog(
     ),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("getTaskUpdate", handler="get_task_update"),
+    ApiCommand("getCronJobs", handler="get_cron_jobs"),
+    ApiCommand("getAppsStatus", handler="get_apps_status"),
+    ApiCommand("getSpendReport", handler="get_spend_report"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
@@ -307,6 +340,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
     ),
+    ApiCommand("tipsOptOut", handler="tips_opt_out"),
     ApiCommand("voiceToggle", required=("enabled",), handler="drop"),
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
@@ -466,6 +500,10 @@ class ServerBackend(Protocol):
     _vscode_server: Any
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
+
+    async def _reply_direct(
+        self, endpoint: Any, reply: dict[str, Any], what: str,
+    ) -> None: ...
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
@@ -760,8 +798,11 @@ class ServerApi:
         try:
             await websocket.send(json.dumps({
                 "type": "error",
-                "text": "No remote_password is configured; only "
-                        "localhost may connect.",
+                "code": "localhost_only",
+                "text": "Remote access is turned off: no remote "
+                        "password is set, so only this computer may "
+                        "connect. On it, open Settings and set a "
+                        "Remote password.",
             }))
             await websocket.close()
         except Exception:
@@ -911,9 +952,14 @@ class ServerApi:
                     return False
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
-            await websocket.send(
-                json.dumps({"type": "error", "text": "Authentication failed"})
-            )
+            # ``code`` lets the webapp shim tell this apart from other
+            # pre-auth errors (it shows the text inside the password
+            # dialog and keeps the dialog open across the close below).
+            await websocket.send(json.dumps({
+                "type": "error",
+                "code": "auth_failed",
+                "text": "That password is not correct. Try again.",
+            }))
             await websocket.close()
             return False
         except Exception:
@@ -1098,6 +1144,86 @@ class ServerApi:
         """
         await self._backend._handle_get_task_update(cmd, ctx.endpoint)
 
+    async def get_cron_jobs(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the scheduled cron jobs for its Schedule subpanel.
+
+        The right sidebar's "Schedule" subpanel (every surface: remote
+        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
+        this command.  The direct reply, to whichever endpoint (WSS or
+        UDS) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
+        rows of :func:`kiss.server.sidebar_panels.cron_jobs_report`.
+
+        Args:
+            cmd: The ``getCronJobs`` command (no fields).
+            ctx: The transport context of the current call.
+        """
+        jobs = await asyncio.to_thread(sidebar_panels.cron_jobs_report)
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "cronJobs", "jobs": jobs}, "getCronJobs"
+        )
+
+    async def get_apps_status(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client every third-party agent's authentication status.
+
+        Feeds the right sidebar's "Apps" subpanel.  The status comes
+        from :func:`kiss.server.sidebar_panels.apps_status` (a cached
+        probe subprocess; ``refresh: true`` — the subpanel's refresh
+        button, or an app waiting for its connect task — probes again).
+        The direct reply is ``{"type": "appsStatus", "apps": [...],
+        "checkedAt": <epoch ms>}``.
+
+        A probe takes seconds, and each connection's commands are
+        dispatched one at a time, so the reply is produced by a
+        background task: a ``submit`` or ``stop`` sent right after the
+        poll is not held up behind the probe.
+
+        Args:
+            cmd: The ``getAppsStatus`` command (optional ``refresh``).
+            ctx: The transport context of the current call.
+        """
+        task = asyncio.create_task(
+            self._reply_apps_status(ctx.endpoint, bool(cmd.get("refresh")))
+        )
+        _APPS_STATUS_REPLIES.add(task)
+        task.add_done_callback(_APPS_STATUS_REPLIES.discard)
+
+    async def _reply_apps_status(self, endpoint: Any, refresh: bool) -> None:
+        """Probe (or read the cache) and send the ``appsStatus`` reply.
+
+        Args:
+            endpoint: The requesting client's transport endpoint.
+            refresh: Probe again even when the cache is fresh.
+        """
+        try:
+            apps, checked_at = await asyncio.to_thread(sidebar_panels.apps_status, refresh)
+            await self._backend._reply_direct(
+                endpoint,
+                {"type": "appsStatus", "apps": apps, "checkedAt": checked_at},
+                "getAppsStatus",
+            )
+        except Exception:  # noqa: BLE001 - a background task must not die silently
+            logger.warning("getAppsStatus reply failed", exc_info=True)
+
+    async def get_spend_report(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the task history's spend for its Spend subpanel.
+
+        The right sidebar's "Spend" subpanel (every surface: remote
+        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
+        this command for its all-time totals, daily cost heatmap and
+        cost-by-model bars.  The direct reply is ``{"type":
+        "spendReport", ...}`` carrying the ``total``, ``days``,
+        ``totalByModel`` and ``daysByModel`` fields of
+        :func:`kiss.server.sidebar_panels.spend_report`.
+
+        Args:
+            cmd: The ``getSpendReport`` command (no fields).
+            ctx: The transport context of the current call.
+        """
+        report = await asyncio.to_thread(sidebar_panels.spend_report)
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "spendReport", **report}, "getSpendReport"
+        )
+
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """List a directory for the remote webapp's Explorer view.
 
@@ -1219,7 +1345,8 @@ class ServerApi:
         The chat webview serialized the highlighted tab's static task
         panel and event panels (its ``shareChat`` command carries the
         markup) and asks the daemon to save them as
-        ``reports/chat-<chatId>.html`` under the tab's work dir.  Both
+        ``reports/chat-<title-slug>-<chatId>.html`` under the tab's work
+        dir.  Both
         transports take this path — the VS Code extension host
         forwards the webview's ``shareChat`` over UDS, the remote
         webapp sends it over WSS — so the page is built in exactly one
@@ -1261,7 +1388,7 @@ class ServerApi:
     ) -> None:
         """Transcribe a remote-web client's post-wake utterance.
 
-        A remote-web (browser mode) client heard the "Sorcar" wake
+        A remote-web (browser mode) client heard the "Hey Sorcar" wake
         word and captured the utterance that followed in the page (VS
         Code webviews never send this: their speech is captured and
         translated by the extension host's local listener).  The audio
@@ -1401,13 +1528,13 @@ class ServerApi:
         """
         await self._backend._handle_active_tasks_query(ctx.endpoint)
 
-    async def get_welcome_suggestions(
+    async def get_welcome_info(
         self, cmd: dict[str, Any], ctx: ApiContext,
     ) -> None:
-        """Broadcast the welcome-screen suggestions.
+        """Broadcast the welcome-screen info (the active remote URL).
 
         Args:
-            cmd: The ``getWelcomeSuggestions`` command (unused).
+            cmd: The ``getWelcomeInfo`` command (unused).
             ctx: The transport context of the current call (unused).
         """
         await self._backend._send_welcome_info()
@@ -1456,6 +1583,25 @@ class ServerApi:
         await self._backend._handle_snooze_update(
             latest if isinstance(latest, str) else "",
         )
+
+    async def tips_opt_out(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Persist, or forget, the "Don't show tips again" choice.
+
+        Services the tips window's checkbox on the remote page.  The
+        choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` — the
+        same file the VS Code extension writes and reads
+        (``SorcarTab.recordTipsOptOut`` / ``tipsDisabled``), so a
+        choice made on one surface holds on every surface.  ``optOut``
+        ``false`` (checkbox unticked again) removes the marker; absent
+        or any other value opts out.
+
+        Args:
+            cmd: The ``tipsOptOut`` command with an optional boolean
+                ``optOut``.
+            ctx: The transport context of the current call (unused).
+        """
+        opt_out = cmd.get("optOut") is not False
+        await asyncio.to_thread(_write_tips_opt_out_marker, opt_out)
 
     async def update_when_idle(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Arm (or cancel) an update that runs once no task is running.

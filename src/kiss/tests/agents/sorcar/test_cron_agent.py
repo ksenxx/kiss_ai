@@ -24,7 +24,7 @@ import json
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -32,6 +32,7 @@ import yaml
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
+    SCHEDULE_TZ,
     compute_next_run,
     cron_job,
     is_one_shot,
@@ -56,8 +57,13 @@ def _isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 def _ts(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
-    """Return the epoch timestamp of a local datetime."""
-    return datetime(year, month, day, hour, minute).timestamp()
+    """Return the epoch timestamp of a Pacific-time (schedule-time) datetime."""
+    return datetime(year, month, day, hour, minute, tzinfo=SCHEDULE_TZ).timestamp()
+
+
+def _utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
+    """Return the epoch timestamp of a UTC datetime."""
+    return datetime(year, month, day, hour, minute, tzinfo=UTC).timestamp()
 
 
 def _create(yaml_text: str) -> dict:
@@ -116,6 +122,48 @@ def test_one_shot_duration_and_iso() -> None:
     assert future == _ts(2999, 1, 15, 14, 0)
     assert is_one_shot("2999-01-15T14:00")
     assert compute_next_run("2001-01-15T14:00", _ts(2020, 1, 1)) is None
+
+
+def test_schedule_times_are_pacific_whatever_the_machine_zone() -> None:
+    # "0 9 * * *" is 9:00 Pacific: 16:00 UTC under PDT, 17:00 UTC under PST.
+    summer = compute_next_run("0 9 * * *", _utc(2026, 9, 26, 12, 0))
+    assert summer == _utc(2026, 9, 26, 16, 0)
+    winter = compute_next_run("0 9 * * *", _utc(2026, 12, 1, 12, 0))
+    assert winter == _utc(2026, 12, 1, 17, 0)
+    # After 9:00 PDT the next run is tomorrow's 9:00 PDT.
+    assert compute_next_run("0 9 * * *", _utc(2026, 9, 26, 16, 1)) == _utc(2026, 9, 27, 16, 0)
+    # Offset-less ISO timestamps are Pacific; explicit offsets are honored.
+    assert compute_next_run("2999-07-01T09:00", 0.0) == datetime(
+        2999, 7, 1, 16, 0, tzinfo=UTC
+    ).timestamp()
+    assert compute_next_run("2999-07-01T09:00+00:00", 0.0) == datetime(
+        2999, 7, 1, 9, 0, tzinfo=UTC
+    ).timestamp()
+    assert cron_agent.format_schedule_time(_utc(2026, 9, 27, 12, 0)) == "2026-09-27 05:00:00 PDT"
+    assert cron_agent.format_schedule_time(_utc(2026, 12, 1, 17, 0)) == "2026-12-01 09:00:00 PST"
+
+
+def test_repeated_fall_back_hour_fires_once() -> None:
+    # 2026-11-01 01:00 PST is the second pass through 01:xx; the 01:30
+    # PDT run already happened, so the next one is tomorrow's 01:30 PST.
+    second_pass = datetime.fromisoformat("2026-11-01T01:00:00-08:00").timestamp()
+    assert compute_next_run("30 1 * * *", second_pass) == datetime.fromisoformat(
+        "2026-11-02T01:30:00-08:00"
+    ).timestamp()
+    # During the first pass (PDT) the 01:30 PDT occurrence is next.
+    first_pass = datetime.fromisoformat("2026-11-01T01:00:00-07:00").timestamp()
+    assert compute_next_run("30 1 * * *", first_pass) == first_pass + 1800
+
+
+def test_listing_and_run_log_show_pacific_times() -> None:
+    created = _create(cron_job("create", name="brief", schedule="0 5 * * *", command="echo hi"))
+    assert created["next_run_at"].endswith((" PDT", " PST"))
+    assert created["next_run_at"].split()[1] == "05:00:00"
+    listed = yaml.safe_load(cron_job("list"))
+    assert listed["jobs"] == [created]
+    cron_job("run_now", job_id=created["id"])
+    log = (cron_agent._output_dir() / f"{created['id']}.md").read_text()
+    assert log.startswith("## ") and log.split(" — ")[0].endswith((" PDT", " PST"))
 
 
 def test_cron_daily_and_step() -> None:

@@ -96,6 +96,9 @@ TOKEN_ENDPOINT_HOSTS: dict[str, tuple[str, ...]] = {
     # POSTed anywhere else.
     "github": ("github.com",),
     "twitch": ("id.twitch.tv",),
+    # PKCE sign-ins through the KISS-owned public apps.
+    "slack": ("slack.com",),
+    "discord": ("discord.com",),
 }
 
 

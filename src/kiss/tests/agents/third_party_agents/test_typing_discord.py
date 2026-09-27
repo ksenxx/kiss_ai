@@ -79,7 +79,7 @@ class TestDiscordSendTyping:
     def setup_method(self) -> None:
         self.server.requests.clear()
         self.backend = DiscordChannelBackend(api_base=self.api_base)
-        self.backend._bot_token = "test-token"
+        self.backend._token = "test-token"
 
     def test_send_typing_posts_typing_endpoint_with_auth(self) -> None:
         """send_typing must POST /channels/{id}/typing with the bot header."""
@@ -105,6 +105,6 @@ class TestDiscordSendTyping:
     def test_send_typing_swallows_unreachable_server(self, refusing_port: int) -> None:
         """An unreachable server (connection refused) must never raise."""
         backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
-        backend._bot_token = "test-token"
+        backend._token = "test-token"
         backend.send_typing("111")
         assert self.server.requests == []

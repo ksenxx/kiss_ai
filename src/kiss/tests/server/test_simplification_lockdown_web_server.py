@@ -155,20 +155,20 @@ class TestHttpEndpointMatrix(_ServerTestBase):
         """GET /media/../web_server.py must not escape the media dir."""
         status, headers, body = await self._http_get("/media/../web_server.py")
         self.assertEqual(status, 404)
-        self.assertEqual(body, b"Not Found")
+        self.assertIn(b"There is nothing at this address", body)
 
     async def test_media_percent_encoded_traversal_rejected(self) -> None:
         """A percent-encoded traversal (%2e%2e) is also rejected."""
         status, _, body = await self._http_get("/media/%2e%2e/web_server.py")
         self.assertEqual(status, 404)
-        self.assertEqual(body, b"Not Found")
+        self.assertIn(b"There is nothing at this address", body)
 
     async def test_unknown_path_returns_404(self) -> None:
-        """An unknown path returns 404 text/plain "Not Found"."""
+        """An unknown path returns a 404 plain-language HTML page."""
         status, headers, body = await self._http_get("/definitely/not/here")
         self.assertEqual(status, 404)
-        self.assertEqual(headers["content-type"], "text/plain")
-        self.assertEqual(body, b"Not Found")
+        self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+        self.assertIn(b"There is nothing at this address", body)
 
     async def test_head_request_returns_200_empty_body(self) -> None:
         """HEAD / gets the raw 200 empty-body health-check reply."""

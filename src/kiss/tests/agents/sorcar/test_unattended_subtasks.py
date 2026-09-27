@@ -18,7 +18,7 @@ local OpenAI-compatible HTTP server:
   unattended (its prompt carries ``UNATTENDED_MARKER``) instead of
   invoking the blocking callback.
 * ``run_parallel`` prepends ``UNATTENDED_CHILD_PREAMBLE`` to every child
-  task of an unattended run; ``run_agent`` (``_dispatch_reserved``) appends
+  task of an unattended run; ``run_agent`` (``_dispatch``) appends
   it through ``append_to_prompt`` so that an agent script's ``prompt()``
   override cannot drop it.  Either way the children inherit the rule.
 

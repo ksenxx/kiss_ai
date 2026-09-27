@@ -234,6 +234,11 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
             self.server._handle_run_update(),
         )
         await asyncio.sleep(0.5)
+        # The installer is detached by design; wait for it to exit so
+        # it does not outlive the test.
+        proc = self.server._update_proc
+        if proc is not None:
+            await asyncio.to_thread(proc.wait, 10)
         runs = (
             marker.read_text().strip().splitlines()
             if marker.exists() else []

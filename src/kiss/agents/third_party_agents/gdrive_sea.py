@@ -4,13 +4,12 @@
 # add your name here
 """Google Drive Agent — channel agent for the Google Drive REST API.
 
-Provides authenticated access to Google Drive via OAuth2 using plain
-REST calls against ``https://www.googleapis.com/drive/v3`` (endpoint
-paths per https://developers.google.com/drive/api/reference/rest/v3)
-and multipart uploads against
-``https://www.googleapis.com/upload/drive/v3``.  Credentials are
-handled by the shared Google Workspace OAuth helpers and persisted
-under ``~/.kiss/third_party_agents/google_drive/token.json``.
+Provides access to Google Drive using plain REST calls against
+``https://www.googleapis.com/drive/v3`` (endpoint paths per
+https://developers.google.com/drive/api/reference/rest/v3).  Sign-in and
+every API call go through Composio (see :mod:`._composio_google`), which
+holds the user's Google token; multipart uploads travel as the proxy's
+binary body.
 
 The Drive REST API has no inbound message stream, so this adapter is
 outbound-only: ``main`` passes ``make_backend=None`` to ``channel_main``
@@ -39,11 +38,12 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.third_party_agents._composio_google import (
+    ComposioSession,
+    connected_account_id,
+)
 from kiss.agents.third_party_agents._google_workspace_utils import (
-    fresh_access_token,
-    google_api_session,
-    google_consent_steps,
-    load_google_credentials,
+    google_auth_prompt,
     make_google_auth_tools,
 )
 
@@ -51,11 +51,8 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 60
 _SERVICE = "google_drive"
-_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 _FILE_FIELDS = "id,name,mimeType,size,modifiedTime,webViewLink,parents"
-# Google documents multipart uploads only for files up to 5 MB
-# (https://developers.google.com/drive/api/guides/manage-uploads).
 _MULTIPART_UPLOAD_LIMIT = 5 * 1024 * 1024
 _GOOGLE_APPS_PREFIX = "application/vnd.google-apps"
 _FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -99,39 +96,28 @@ def _http_error(resp: requests.Response) -> str:
 class GoogleDriveChannelBackend(ToolMethodBackend):
     """Channel backend for the Google Drive REST API.
 
-    Talks to the Drive v3 API over HTTP with an OAuth2 bearer token.
-    Outbound-only: there is no inbound message stream over plain REST.
+    Talks to the Drive v3 API through Composio's proxy, which signs
+    each request with the user's Google token.  Outbound-only: there is
+    no inbound message stream over plain REST.
     """
 
     def __init__(self) -> None:
-        self._creds: Any = None
-        self._http: Any = google_api_session(_SERVICE)
-        self._token: str = ""
+        self._http: Any = ComposioSession(_SERVICE)
         self._base_url: str = "https://www.googleapis.com/drive/v3"
         self._upload_base_url: str = "https://www.googleapis.com/upload/drive/v3"
         self._connection_info: str = ""
 
     def connect(self) -> bool:
-        """Load stored Google Drive OAuth2 credentials from disk.
+        """Check that Google Drive is connected through Composio.
 
         Returns:
-            True if valid credentials were loaded.
+            True if a Composio connection exists.
         """
-        self._creds = load_google_credentials(_SERVICE, _SCOPES)
-        if self._creds is None:
-            self._connection_info = "No Google Drive credentials found."
+        if not connected_account_id(_SERVICE):
+            self._connection_info = "Google Drive is not connected."
             return False
-        self._connection_info = "Google Drive credentials loaded."
+        self._connection_info = "Google Drive connected through Composio."
         return True
-
-    def _headers(self) -> dict[str, str]:
-        """Return the Authorization header for an API request.
-
-        Returns:
-            Header dict with the bearer token (the direct test override
-            ``_token`` wins over the stored credentials).
-        """
-        return {"Authorization": f"Bearer {self._token or fresh_access_token(self._creds)}"}
 
     def _request(
         self,
@@ -156,7 +142,6 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
         resp = self._http.request(
             method,
             url,
-            headers=self._headers(),
             params=params,
             json=payload,
             timeout=_TIMEOUT,
@@ -192,7 +177,6 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
         file_path = f"/files/{quote(file_id, safe='')}"
         meta_resp = self._http.get(
             self._base_url.rstrip("/") + file_path,
-            headers=self._headers(),
             params={"fields": "id,name,mimeType"},
             timeout=_TIMEOUT,
         )
@@ -206,15 +190,13 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             )
             content_resp = self._http.get(
                 self._base_url.rstrip("/") + file_path + "/export",
-                headers=self._headers(),
-                params={"mimeType": export_mime},
+                    params={"mimeType": export_mime},
                 timeout=_TIMEOUT,
             )
         else:
             content_resp = self._http.get(
                 self._base_url.rstrip("/") + file_path,
-                headers=self._headers(),
-                params={"alt": "media"},
+                    params={"alt": "media"},
                 timeout=_TIMEOUT,
             )
         if content_resp.status_code >= 400:
@@ -387,7 +369,6 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
                 return json.dumps(
                     {"ok": False, "error": "file exceeds the 5 MB multipart upload limit"}
                 )
-            data = source.read_bytes()
             file_name = name or source.name
             media_type = mime_type or (
                 mimetypes.guess_type(file_name)[0] or "application/octet-stream"
@@ -396,8 +377,8 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
             if folder_id:
                 metadata["parents"] = [folder_id]
             # Drive requires an RFC 2387 multipart/related body (JSON
-            # metadata part first, then the media part), which requests'
-            # files= (multipart/form-data) cannot produce — build it by hand.
+            # metadata part first, then the media part); the proxy carries
+            # it as a binary body.
             boundary = uuid.uuid4().hex
             body = (
                 (
@@ -407,14 +388,12 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
                     f"--{boundary}\r\n"
                     f"Content-Type: {media_type}\r\n\r\n"
                 ).encode()
-                + data
+                + source.read_bytes()
                 + f"\r\n--{boundary}--\r\n".encode()
             )
-            headers = self._headers()
-            headers["Content-Type"] = f"multipart/related; boundary={boundary}"
             resp = self._http.post(
-                self._upload_base_url.rstrip("/") + "/files",
-                headers=headers,
+                self._upload_base_url + "/files",
+                headers={"Content-Type": f"multipart/related; boundary={boundary}"},
                 params={"uploadType": "multipart", "fields": _FILE_FIELDS},
                 data=body,
                 timeout=_TIMEOUT,
@@ -535,42 +514,19 @@ class GoogleDriveChannelBackend(ToolMethodBackend):
 class GoogleDriveAgent(BaseChannelAgent):
     """Channel agent with Google Drive REST API tools."""
 
-    channel_system_prompt = (
-        "\n\n## Google Drive Authentication\n"
-        "Always call check_google_drive_auth() first; if it returns ok, report "
-        "that Google Drive credentials are configured and stop — never start "
-        "an OAuth flow over valid credentials. If credentials.json is missing, call "
-        "start_google_drive_browser_setup(), which opens Google Cloud Console for "
-        "the user to create an OAuth Desktop-app client; if credentials.json exists, call "
-        "authenticate_google_drive() directly.\n"
-        + google_consent_steps("google_drive")
-        + " Finish by verifying with check_google_drive_auth()."
-    )
+    channel_system_prompt = google_auth_prompt(_SERVICE, "Google Drive")
 
     def __init__(self) -> None:
         super().__init__("Google Drive Agent")
         self._backend = GoogleDriveChannelBackend()
-        self._backend._creds = load_google_credentials(_SERVICE, _SCOPES)
 
     def _is_authenticated(self) -> bool:
-        """Return True if the backend has credentials or a direct token."""
-        return bool(self._backend._creds is not None or self._backend._token)
+        """Return True if Google Drive is connected through Composio."""
+        return bool(connected_account_id(_SERVICE))
 
     def _get_auth_tools(self) -> list:
-        """Return the standard Google OAuth tool set for Drive."""
-        backend = self._backend
-
-        def on_credentials(creds: Any) -> None:
-            """Wire new (or cleared) OAuth credentials into the backend.
-
-            Args:
-                creds: New credentials, or None after clearing.
-            """
-            backend._creds = creds
-
-        return make_google_auth_tools(
-            self, _SERVICE, "Google Drive", _SCOPES, on_credentials=on_credentials
-        )
+        """Return the Composio sign-in tool set for Google Drive."""
+        return make_google_auth_tools(self, _SERVICE, "Google Drive", self._backend.connect)
 
 
 def main() -> None:
@@ -592,7 +548,7 @@ def tools() -> list:
 
     Called by the kiss-web daemon when this module's path is passed as
     the API's ``tools=`` argument: builds a fresh agent from the
-    credentials persisted under ``~/.kiss`` and returns its
+    Composio connection recorded under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
     return GoogleDriveAgent()._get_tools()

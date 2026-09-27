@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import httpx2  # the Anthropic SDK (>= 1.0) builds its errors on httpx2, not httpx
 import pytest
 from anthropic import AuthenticationError as AnthropicAuthError
 from openai import AuthenticationError as OpenAIAuthError
@@ -50,7 +51,7 @@ def _openai_auth_error(msg: str = "Incorrect API key provided") -> OpenAIAuthErr
 def _anthropic_auth_error(msg: str = "invalid x-api-key") -> AnthropicAuthError:
     return AnthropicAuthError(
         message=msg,
-        response=httpx.Response(401, request=_DUMMY_REQUEST),
+        response=httpx2.Response(401, request=httpx2.Request("GET", "https://api.example.com/")),
         body=None,
     )
 

@@ -4,9 +4,12 @@
 # add your name here
 """End-to-end regression tests for Fixer-8 findings (real repos, no mocks).
 
-F2  ``_AutocompleteMixin._refresh_files_after_task`` must not clobber a
-    fresher ``_file_cache`` entry published by a concurrent writer while
-    its background scan was running.
+F2  ``_AutocompleteMixin._refresh_files_after_task`` queues a rescan on
+    the ``FileIndexRegistry`` worker: a no-op for a root nobody has
+    indexed yet, and a pick-up of added/removed files for an indexed
+    one, without broadcasting any event.  (The original race between a
+    concurrent ``_file_cache`` writer and the post-task scan no longer
+    exists: a single worker thread owns every index.)
 F4  ``_MergeFlowMixin._main_dirty_files`` must not ``strip()`` porcelain
     paths: filenames with leading/trailing spaces are legal and unquoted.
 F5  The porcelain fallback of ``_get_worktree_changed_files`` (extracted
@@ -20,7 +23,7 @@ F9  ``autocomplete._ghost_suffix`` behaviour for the three completion
     the unreachable ``else`` arm).
 F12 ``vscode_config.sanitize_config`` must reject boolean values for
     numeric keys (``max_budget: true`` used to become ``1.0``).
-F17 ``diff_merge._load_gitignore_dirs`` must treat root-anchored
+F17 ``file_index.FileIndex.scan`` must treat root-anchored ``.gitignore``
     entries like ``/build`` as matching at the repo root only, not at
     every depth.
 
@@ -33,11 +36,13 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
-from kiss.server.diff_merge import _git, _scan_files
+from kiss.server.diff_merge import _git
+from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.tests.conftest import posix_only
@@ -88,12 +93,36 @@ class _RecordingPrinter(JsonPrinter):
 class _AC(_AutocompleteMixin):
     """Concrete autocomplete host with the state the mixin expects."""
 
-    def __init__(self, work_dir: str) -> None:
+    def __init__(self, work_dir: str, registry: FileIndexRegistry) -> None:
         self.work_dir = work_dir
         self._state_lock = threading.RLock()
-        self._file_cache: dict[str, list[str]] = {}
+        self._file_index = registry
         self.rec_printer = _RecordingPrinter()
         self.printer = self.rec_printer
+
+
+def _wait_for(pred: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Poll *pred* until it holds or fail after *timeout* seconds."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not met in time")
+
+
+def _index(registry: FileIndexRegistry, work_dir: str) -> None:
+    """Build the index covering *work_dir* and wait for it."""
+    done = threading.Event()
+    registry.ensure(work_dir, done.set)
+    assert done.wait(10.0)
+    assert registry.view_for(work_dir) is not None
+
+
+def _paths(registry: FileIndexRegistry, work_dir: str) -> list[str]:
+    """Return the current entries of *work_dir*'s view (``[]`` when unindexed)."""
+    view = registry.view_for(work_dir)
+    return [] if view is None else view.paths
 
 
 class _MF(_MergeFlowMixin):
@@ -105,60 +134,72 @@ class _MF(_MergeFlowMixin):
 
 
 class TestRefreshAfterTaskRace:
-    def test_fresher_concurrent_entry_survives_post_task_scan(
-        self, tmp_path: Path,
-    ) -> None:
-        """A cache entry published while the post-task scan runs wins.
+    """F2: ``_refresh_files_after_task`` against a real ``FileIndexRegistry``."""
 
-        The scan is slowed deterministically by a large tree (2000
-        files) so the main thread can publish a fresher entry before
-        the background thread reaches its cache write.
+    def _registry(self, tmp_path: Path) -> FileIndexRegistry:
+        return FileIndexRegistry(home=str(tmp_path / "home"), cache_dir=tmp_path / "cache")
+
+    def test_never_indexed_root_is_left_alone(self, tmp_path: Path) -> None:
+        """Refreshing a root nobody asked about queues no scan.
+
+        The worker serves jobs in order, so once a sentinel build of an
+        unrelated root has completed, any job the refresh might have
+        queued before it would have run too.
         """
-        wd = tmp_path / "big"
-        for d in range(40):
-            sub = wd / f"d{d:02d}"
-            sub.mkdir(parents=True)
-            for f in range(50):
-                (sub / f"f{f:02d}.txt").write_text("x")
-        wd_str = str(wd)
+        wd = tmp_path / "ws"
+        wd.mkdir()
+        (wd / "a.txt").write_text("x")
+        other = tmp_path / "other"
+        other.mkdir()
+        registry = self._registry(tmp_path)
+        try:
+            host = _AC(str(wd), registry)
+            host._refresh_files_after_task(str(wd))
+            _index(registry, str(other))
 
-        host = _AC(wd_str)
-        host._file_cache[wd_str] = ["stale.txt"]
+            assert registry.view_for(str(wd)) is None
+            assert set(registry._indexes) == {str(other)}
+            assert host.rec_printer.events == []
+        finally:
+            registry.stop()
 
-        host._refresh_files_after_task(wd_str)
-        fresh = ["fresh.txt"]
-        with host._state_lock:
-            host._file_cache[wd_str] = fresh
+    def test_indexed_root_picks_up_added_and_removed_files(self, tmp_path: Path) -> None:
+        wd = tmp_path / "ws"
+        wd.mkdir()
+        (wd / "gone.txt").write_text("x")
+        registry = self._registry(tmp_path)
+        try:
+            host = _AC(str(wd), registry)
+            _index(registry, str(wd))
+            assert _paths(registry, str(wd)) == ["gone.txt"]
 
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            with host._state_lock:
-                current = host._file_cache[wd_str]
-            assert current is fresh, (
-                "post-task scan clobbered the fresher concurrent entry"
-            )
-            time.sleep(0.05)
-
-    def test_no_cache_entry_is_noop(self, tmp_path: Path) -> None:
-        host = _AC(str(tmp_path))
-        host._refresh_files_after_task(str(tmp_path))
-        time.sleep(0.2)
-        assert host._file_cache == {}
-        assert host.rec_printer.events == []
-
-    def test_changed_set_updates_cache(self, tmp_path: Path) -> None:
-        (tmp_path / "new.txt").write_text("x")
-        wd_str = str(tmp_path)
-        host = _AC(wd_str)
-        host._file_cache[wd_str] = ["gone.txt"]
-        host._refresh_files_after_task(wd_str)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            with host._state_lock:
-                if host._file_cache[wd_str] == ["new.txt"]:
-                    break
+            # Directory mtimes have a coarse granularity: leave the build
+            # behind before changing the tree so the rescan sees a new mtime.
             time.sleep(0.02)
-        assert host._file_cache[wd_str] == ["new.txt"]
+            (wd / "gone.txt").unlink()
+            (wd / "new.txt").write_text("x")
+            host._refresh_files_after_task(str(wd))
+
+            _wait_for(lambda: _paths(registry, str(wd)) == ["new.txt"])
+            assert host.rec_printer.events == [], "no unsolicited files event"
+        finally:
+            registry.stop()
+
+    def test_empty_work_dir_falls_back_to_the_host_work_dir(self, tmp_path: Path) -> None:
+        wd = tmp_path / "ws"
+        wd.mkdir()
+        (wd / "a.txt").write_text("x")
+        registry = self._registry(tmp_path)
+        try:
+            host = _AC(str(wd), registry)
+            _index(registry, str(wd))
+            time.sleep(0.02)
+            (wd / "b.txt").write_text("x")
+            host._refresh_files_after_task()
+
+            _wait_for(lambda: _paths(registry, str(wd)) == ["a.txt", "b.txt"])
+        finally:
+            registry.stop()
 
 
 
@@ -266,12 +307,18 @@ class TestGhostSuffixKinds:
 
 
 class TestGitignoreAnchoring:
+    """F17: ``.gitignore`` anchoring rules applied by ``FileIndex.scan``.
+
+    The unanchored-name case uses ``out`` rather than ``node_modules``:
+    the latter is now skipped unconditionally (``JUNK_DIR_NAMES``), so it
+    would pass regardless of the ignore file.
+    """
+
     def _tree(self, tmp_path: Path, gitignore: str) -> Path:
         wd = tmp_path / "ws"
         wd.mkdir()
         (wd / ".gitignore").write_text(gitignore)
-        for d in ("build", "src/build", "node_modules",
-                  "a/node_modules", "src/generated"):
+        for d in ("build", "src/build", "out", "a/out", "src/generated"):
             p = wd / d
             p.mkdir(parents=True)
             (p / "f.txt").write_text("x")
@@ -280,26 +327,29 @@ class TestGitignoreAnchoring:
 
     def test_root_anchored_entry_skips_root_only(self, tmp_path: Path) -> None:
         wd = self._tree(tmp_path, "/build\n")
-        paths = _scan_files(str(wd))
+        paths = FileIndex.scan(str(wd)).paths
         assert "build/f.txt" not in paths
         assert "build/" not in paths
         assert "src/build/f.txt" in paths
 
     def test_unanchored_name_skips_any_depth(self, tmp_path: Path) -> None:
-        wd = self._tree(tmp_path, "node_modules\n")
-        paths = _scan_files(str(wd))
-        assert "node_modules/f.txt" not in paths
-        assert "a/node_modules/f.txt" not in paths
+        wd = self._tree(tmp_path, "out\n")
+        paths = FileIndex.scan(str(wd)).paths
+        assert "out/f.txt" not in paths
+        assert "out/" not in paths
+        assert "a/out/f.txt" not in paths
+        assert "a/out/" not in paths
         assert "keep.txt" in paths
 
     def test_path_entry_skips_exact_path_only(self, tmp_path: Path) -> None:
         wd = self._tree(tmp_path, "src/generated\n")
-        paths = _scan_files(str(wd))
+        paths = FileIndex.scan(str(wd)).paths
         assert "src/generated/f.txt" not in paths
+        assert "src/generated/" not in paths
         assert "src/build/f.txt" in paths
 
     def test_trailing_slash_dir_entry_unanchored(self, tmp_path: Path) -> None:
         wd = self._tree(tmp_path, "build/\n")
-        paths = _scan_files(str(wd))
+        paths = FileIndex.scan(str(wd)).paths
         assert "build/f.txt" not in paths
         assert "src/build/f.txt" not in paths

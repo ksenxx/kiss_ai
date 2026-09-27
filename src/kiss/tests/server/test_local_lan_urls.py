@@ -150,7 +150,7 @@ class TestLoopbackOnlyServer(_LiveServerCase):
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             ev = await self._recv_remote_url(ws)
             self.assertEqual(ev["url"], "https://lan-test.trycloudflare.com")
             self.assertEqual(
@@ -193,13 +193,13 @@ class TestLanCapableServer(_LiveServerCase):
         ]
 
     async def test_broadcast_includes_loopback_and_lan(self) -> None:
-        """getWelcomeSuggestions' remote_url has loopbackUrl and lanUrls."""
+        """getWelcomeInfo's remote_url has loopbackUrl and lanUrls."""
         self.server._active_url = "https://lan-test.trycloudflare.com"
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()
         ) as ws:
             await self._auth_ws(ws)
-            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            await ws.send(json.dumps({"type": "getWelcomeInfo"}))
             ev = await self._recv_remote_url(ws)
             self.assertEqual(ev["url"], "https://lan-test.trycloudflare.com")
             self.assertEqual(

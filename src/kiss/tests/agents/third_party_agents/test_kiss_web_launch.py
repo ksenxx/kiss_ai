@@ -312,7 +312,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
         prompt = str(self.stub_calls[0]["kwargs"].get("prompt_template", ""))
         assert "Slack Authentication" in prompt
-        assert "start_slack_browser_auth" in prompt
+        assert "finish_slack_auth()" in prompt
 
     def test_agent_module_is_the_tools_file(self) -> None:
         from kiss.agents.third_party_agents import slack_sea
@@ -328,8 +328,8 @@ class TestLaunchViaApi(_ApiLaunchBase):
             for expected in (
                 "check_slack_auth",
                 "authenticate_slack",
+                "finish_slack_auth",
                 "clear_slack_auth",
-                "start_slack_browser_auth",
             ):
                 assert expected in tools, f"missing channel tool {expected}"
             auth_out = tools["check_slack_auth"]()

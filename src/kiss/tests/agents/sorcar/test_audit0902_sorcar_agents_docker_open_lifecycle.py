@@ -75,12 +75,13 @@ def test_second_open_is_refused_and_keeps_first_container(
     first = manager.container
     first_dir = manager.host_shared_path
     assert first is not None and first_dir is not None
+    first_id = first.id
     with pytest.raises(KISSError):
         manager.open()
     assert manager.container is first, "the first container was orphaned"
     assert manager.host_shared_path == first_dir
     started = image_container_ids(client) - before
-    assert started == {first.id}, f"extra containers started: {started}"
+    assert started == {first_id}, f"extra containers started: {started}"
     assert manager.Bash("echo still-open", "probe").strip() == "still-open"
     manager.close()
     assert manager.container is None

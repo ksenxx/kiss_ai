@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for the sub-agent spawning guardrails.
+"""End-to-end tests for the sub-agent fan-out checks.
 
 Rules from :mod:`kiss.agents.sorcar.fanout_guard`, exercised through the
 real ``run_parallel`` tool closure, the real fan-out engine, and the
@@ -10,38 +10,28 @@ real ``run_agent`` dispatch helper:
 
 * ``tasks`` must be a JSON array of non-empty strings (a literal
   ``"$(cat tasks.json)"`` is refused with a hint).
-* One task tree launches at most ``MAX_REVIEW_ROUNDS`` review fan-outs;
-  the quota is one shared, atomic :class:`ReviewQuota` inherited by
-  every child, and a fan-out refused before any child exists (bad
-  ``max_workers``, budget preflight) does not burn a round.
-* A reviewer sub-agent — and anything under it — may not spawn further
-  reviewers, through ``run_parallel`` or ``run_agent``.
+* A review task puts its child on the read-only ``review`` tool
+  profile, and the reviewer marker is inherited down the sub-tree.
+* There is no cap on review fan-outs and no rule against a reviewer
+  spawning reviewers: those guardrails were removed, so the tests here
+  pin that every such fan-out is dispatched.
 
-No mocks: refusals happen before any sub-agent exists, the
-dispatch/round-consumption tests drive the real engine with an unknown
-model name so each child fails fast without a network call, and the
-LLM-driven test runs on a real cheap model (skipped without a key).
-The only patching is ``DEFAULT_CONFIG.tool_profiles = False`` in the
-tests that exercise the ``run_parallel`` refusal, because a reviewer
-running with tool profiles on has no ``run_parallel`` tool at all.
+No mocks: argument refusals happen before any sub-agent exists, and the
+dispatch tests drive the real engine with an unknown model name so each
+child fails fast without a network call.  The only patching is
+``DEFAULT_CONFIG.tool_profiles = False`` in the tests that give a
+reviewer the ``run_parallel`` tool, because a reviewer running with tool
+profiles on has no ``run_parallel`` tool at all.
 """
 
 from __future__ import annotations
 
-import os
-import threading
 from typing import Any
 
 import pytest
-import yaml
 
 from kiss.agents.sorcar.agent_dispatch import _dispatch
-from kiss.agents.sorcar.fanout_guard import (
-    MAX_REVIEW_ROUNDS,
-    ReviewQuota,
-    is_review_task,
-    parse_tasks_json,
-)
+from kiss.agents.sorcar.fanout_guard import is_review_task, parse_tasks_json
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _LiveUsageMonitor,
@@ -49,11 +39,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.core.config import DEFAULT_CONFIG
 
-FAST_MODEL = "claude-haiku-4-5"
 UNKNOWN_MODEL = "no-such-model-fanout-guard"
-skip_no_key = pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set"
-)
 
 
 def _run_parallel_tool(agent: SorcarAgent):
@@ -128,34 +114,9 @@ class TestParseTasksJson:
             parse_tasks_json('["a", "  "]')
 
 
-class TestReviewQuota:
-    def test_reserve_up_to_limit_then_refuse(self) -> None:
-        quota = ReviewQuota(limit=2)
-        assert quota.try_reserve() and quota.try_reserve()
-        assert not quota.try_reserve()
-        assert quota.used == 2
-
-    def test_concurrent_reservations_never_exceed_limit(self) -> None:
-        quota = ReviewQuota()
-        outcomes: list[bool] = []
-        lock = threading.Lock()
-
-        def reserve() -> None:
-            got = quota.try_reserve()
-            with lock:
-                outcomes.append(got)
-
-        threads = [threading.Thread(target=reserve) for _ in range(16)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert sum(outcomes) == MAX_REVIEW_ROUNDS
-        assert quota.used == MAX_REVIEW_ROUNDS
-
-
-class TestRunParallelToolRefusals:
-    """Refusals come back as ``Error:`` strings before any child exists."""
+class TestRunParallelToolArguments:
+    """Argument refusals come back as ``Error:`` strings before any
+    child exists; everything else is dispatched."""
 
     def test_shell_substitution_string_is_rejected(self) -> None:
         run_parallel = _run_parallel_tool(SorcarAgent("guard-json"))
@@ -186,72 +147,56 @@ class TestRunParallelToolRefusals:
         names = {getattr(t, "__name__", "") for t in agent._get_tools()}
         assert "run_parallel" not in names and "Edit" not in names
 
-    def test_reviewer_subagent_cannot_spawn_reviewers(
+    def test_reviewer_subagent_with_full_toolset_may_spawn_reviewers(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The refusal still guards a reviewer that runs with the full toolset."""
+        """A reviewer running with the full toolset is not refused when it
+        fans out another review task: the children are dispatched (and
+        fail fast on the unknown model)."""
         monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
         agent = SorcarAgent("guard-reviewer")
         _mark_reviewer(agent)
-        run_parallel = _run_parallel_tool(agent)
-        result = run_parallel('["Review src/x.py for regressions"]')
-        assert result.startswith("Error: You are a reviewer sub-agent")
-        assert agent._review_quota is None  # nothing reserved
-
-    def test_reviewer_subagent_may_still_run_non_review_fanouts(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Only reviewer-spawning is forbidden; helper fan-outs still
-        dispatch (children fail fast on the unknown model)."""
-        monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
-        agent = SorcarAgent("guard-reviewer-helper")
-        _mark_reviewer(agent)
         agent.model_name = UNKNOWN_MODEL
         run_parallel = _run_parallel_tool(agent)
-        result = run_parallel('["Run the test split 3 and report PASS/FAIL"]')
+        result = run_parallel('["Review src/x.py for regressions"]')
         assert "Unknown model name" in result
+        assert not result.startswith("Error:")
 
-    def test_fourth_review_round_is_refused(self) -> None:
+    def test_review_fanouts_are_not_capped(self) -> None:
+        """Five consecutive review fan-outs all reach the engine; there is
+        no per-task-tree round limit any more."""
         agent = SorcarAgent("guard-rounds")
         agent.model_name = UNKNOWN_MODEL
         run_parallel = _run_parallel_tool(agent)
-        for expected in range(1, MAX_REVIEW_ROUNDS + 1):
+        for _ in range(5):
             result = run_parallel('["Review the diff read-only"]')
-            assert "Unknown model name" in result  # dispatch happened
-            assert agent._review_quota is not None
-            assert agent._review_quota.used == expected
-        result = run_parallel('["Review the diff read-only"]')
-        assert result.startswith("Error: Review-round cap reached")
-        assert agent._review_quota is not None
-        assert agent._review_quota.used == MAX_REVIEW_ROUNDS
+            assert "Unknown model name" in result
+            assert not result.startswith("Error:")
 
-    def test_non_review_fanouts_do_not_consume_rounds(self) -> None:
-        agent = SorcarAgent("guard-no-round")
-        agent.model_name = UNKNOWN_MODEL
-        run_parallel = _run_parallel_tool(agent)
-        result = run_parallel('["Summarize README.md"]')
-        assert "Unknown model name" in result
-        assert agent._review_quota is None
-
-    def test_budget_refused_review_fanout_does_not_burn_quota(self) -> None:
-        """The zero-child budget preflight raises BEFORE a round is
-        reserved, so a later viable review fan-out still runs."""
-        from kiss.core.kiss_error import KISSError
-
-        agent = SorcarAgent("guard-preflight")
-        agent.max_budget = 1.0
-        agent.budget_used = 0.9  # remaining $0.10 -> share below minimum
-        run_parallel = _run_parallel_tool(agent)
-        with pytest.raises(KISSError, match="Refusing to spawn"):
-            run_parallel('["Review the diff"]')
-        assert agent._review_quota is None
+    def test_review_share_in_prompt_does_not_clip_children(
+        self, tmp_path,
+    ) -> None:
+        """A prompt naming a review share used to cap reviewer children's
+        budgets; now every child gets the plain remaining-budget share."""
+        parent = SorcarAgent("guard-share")
+        parent.max_budget = 10.0
+        parent.budget_used = 0.0
+        monitor = _LiveUsageMonitor(parent, None)
+        results = run_tasks_parallel(
+            ["Review the diff for regressions", "Run the tests"],
+            max_workers=1, model_name=UNKNOWN_MODEL, usage_monitor=monitor,
+            parent_agent=parent, max_budget=parent._subagent_budget_share(2),
+            work_dir=str(tmp_path),
+        )
+        assert all("Unknown model name" in r for r in results)
+        assert [a.max_budget for a in monitor._agents] == [10.0 / 3, 10.0 / 3]
 
 
-class TestQuotaSharedAcrossTree:
-    """``run_tasks_parallel`` hands the parent's quota to every child,
-    so helper children cannot each mint a fresh 3-round budget.  The
+class TestReviewerMarkerAcrossTree:
+    """``run_tasks_parallel`` stamps the reviewer marker on each child
+    so a reviewer's helpers get the read-only tool profile.  The
     unknown model makes each child fail fast (no network) after the
-    inheritance has been applied."""
+    marker has been applied."""
 
     @staticmethod
     def _spawn(parent: SorcarAgent, tasks: list[str]) -> list[Any]:
@@ -262,12 +207,6 @@ class TestQuotaSharedAcrossTree:
         )
         assert all("Unknown model name" in r for r in results)
         return list(monitor._agents)
-
-    def test_children_inherit_the_parent_quota_instance(self) -> None:
-        parent = SorcarAgent("quota-parent")
-        parent._review_quota = ReviewQuota()
-        children = self._spawn(parent, ["Run tests", "Summarize a file"])
-        assert all(c._review_quota is parent._review_quota for c in children)
 
     def test_review_task_child_is_marked_reviewer(self) -> None:
         children = self._spawn(
@@ -287,10 +226,10 @@ class TestQuotaSharedAcrossTree:
         assert children[0]._subagent_info["reviewer"] is False
 
 
-class TestRunAgentDispatchGuard:
-    """``run_agent`` dispatch honours the reviewer sub-tree rule."""
+class TestRunAgentDispatch:
+    """``run_agent`` dispatch no longer refuses reviews from a reviewer."""
 
-    def test_reviewer_may_not_dispatch_a_review_task(self) -> None:
+    def test_reviewer_may_dispatch_a_review_task(self) -> None:
         parent = SorcarAgent("dispatch-reviewer")
         _mark_reviewer(parent)
         result = _dispatch(
@@ -298,74 +237,7 @@ class TestRunAgentDispatchGuard:
             agent_path="/nonexistent/agent.py", work_dir="/tmp",
             model_name="", budget=None, timeout=1.0, parent_agent=parent,
         )
-        assert result.startswith("Error: You are a reviewer sub-agent")
-
-    def test_review_dispatch_draws_from_the_shared_quota(self) -> None:
-        """A ``run_agent`` review dispatch is not a free side door: it
-        reserves one round from the same task-tree quota, and an
-        exhausted quota refuses the dispatch outright."""
-        parent = SorcarAgent("dispatch-quota")
-        parent._review_quota = ReviewQuota()
-        result = _dispatch(
-            name="helper", prompt="Review the diff for regressions",
-            agent_path="/nonexistent/agent.py", work_dir="/tmp",
-            model_name="", budget=None, timeout=1.0, parent_agent=parent,
-        )
-        # The reservation happened before the (failing, daemonless)
-        # dispatch attempt; the result is a dispatch error, not a
-        # guardrail refusal.
-        assert parent._review_quota.used == 1
-        assert not result.startswith("Error: Review-round cap reached")
-
-        while parent._review_quota.try_reserve():
-            pass
-        refused = _dispatch(
-            name="helper", prompt="Review the diff for regressions",
-            agent_path="/nonexistent/agent.py", work_dir="/tmp",
-            model_name="", budget=None, timeout=1.0, parent_agent=parent,
-        )
-        assert refused.startswith("Error: Review-round cap reached")
-
-    def test_non_review_dispatch_ignores_the_quota(self) -> None:
-        parent = SorcarAgent("dispatch-plain")
-        parent._review_quota = ReviewQuota()
-        _dispatch(
-            name="helper", prompt="Run the tests and report PASS/FAIL",
-            agent_path="/nonexistent/agent.py", work_dir="/tmp",
-            model_name="", budget=None, timeout=1.0, parent_agent=parent,
-        )
-        assert parent._review_quota.used == 0
-
-
-@skip_no_key
-class TestReviewerSubtreeWithRealModel:
-    @pytest.mark.slow
-    def test_reviewer_child_is_refused_when_it_spawns_a_reviewer(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A real child of a reviewer asks ``run_parallel`` for another
-        reviewer and must receive the refusal as its tool result.
-
-        With tool profiles on, the child would get the ``review`` profile
-        and have no ``run_parallel`` tool at all (see
-        ``test_reviewer_subagent_has_no_run_parallel_tool``); the
-        refusal path exists for reviewers running with the full toolset,
-        so the profile lever is switched off here like in the fast tests.
-        """
-        monkeypatch.setattr(DEFAULT_CONFIG, "tool_profiles", False)
-        parent = SorcarAgent("real-reviewer-parent")
-        _mark_reviewer(parent)
-        task = (
-            "Call the run_parallel tool exactly once with "
-            'tasks=\'["Review README.md for typos"]\'. Then finish; your '
-            "summary must quote the tool result verbatim."
-        )
-        results = run_tasks_parallel(
-            [task], max_workers=1, model_name=FAST_MODEL,
-            work_dir=str(tmp_path), parent_agent=parent, max_budget=0.5,
-            web_tools=False,
-        )
-        # The child's result is a YAML document whose folded ``summary``
-        # scalar may wrap in the middle of the phrase; parse it first.
-        summary = str(yaml.safe_load(results[0])["summary"])
-        assert "may not spawn further reviewers" in summary
+        # Without a daemon the dispatch itself fails; what matters is
+        # that the failure is the dispatch error, not a spawn refusal.
+        assert "reviewer sub-agent" not in result
+        assert result.startswith("Error: the helper agent task could not run")

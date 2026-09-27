@@ -581,80 +581,15 @@ def _dispatch(
     # ``subagentDone`` when it ends) instead of a top-level tab.
     # Standalone use (no calling agent, or one that has not persisted
     # a task row) dispatches an ordinary top-level task, unchanged.
-    # Reviewer guardrail (see kiss.agents.sorcar.fanout_guard): a
-    # reviewer's sub-tree may not spawn further reviewers through a
-    # daemon dispatch either, and any child a reviewer dispatches
-    # carries the reviewer marker so its own run_parallel stays bound.
-    from kiss.agents.sorcar.fanout_guard import (
-        REVIEW_BUDGET_REFUSAL,
-        REVIEW_CAP_REFUSAL,
-        REVIEWER_SPAWN_REFUSAL,
-        is_review_task,
-    )
-    from kiss.agents.sorcar.sorcar_agent import MIN_SUBAGENT_BUDGET
-
-    _is_rev = getattr(parent_agent, "_is_reviewer_subagent", None)
-    parent_reviewer = bool(_is_rev()) if callable(_is_rev) else False
-    quota = None
-    reserved: float | None = None
-    if is_review_task(prompt):
-        if parent_reviewer:
-            return f"Error: {REVIEWER_SPAWN_REFUSAL}"
-        # A review dispatched through run_agent draws from the same
-        # task-tree round AND dollar budget as a run_parallel review
-        # round; otherwise run_agent would be a free side door around
-        # both caps.  The child's budget is clipped to what is left.
-        quota = getattr(parent_agent, "_review_quota", None)
-        if quota is not None:
-            requested = budget if budget is not None else quota.budget_left
-            if requested is not None:
-                granted = quota.reserve_budget(requested)
-                if granted < MIN_SUBAGENT_BUDGET - 1e-9:
-                    quota.release(granted)
-                    return f"Error: {REVIEW_BUDGET_REFUSAL}"
-                reserved = budget = granted
-            if not quota.try_reserve():
-                if reserved is not None:
-                    quota.release(reserved)
-                return f"Error: {REVIEW_CAP_REFUSAL}"
-    cost = 0.0
-    try:
-        text, cost = _dispatch_reserved(
-            name, prompt, agent_path, work_dir, model_name, budget, timeout,
-            parent_agent, scope_work_dir, git_lifecycle, classify, parent_reviewer,
-            options,
-        )
-        return text
-    finally:
-        if quota is not None and reserved is not None:
-            quota.release(reserved - cost)
-
-
-def _dispatch_reserved(
-    name: str,
-    prompt: str,
-    agent_path: str,
-    work_dir: str,
-    model_name: str,
-    budget: float | None,
-    timeout: float,
-    parent_agent: Any,
-    scope_work_dir: str,
-    git_lifecycle: bool,
-    classify: bool,
-    parent_reviewer: bool,
-    options: RunOptions,
-) -> tuple[str, float]:
-    """Run the daemon round trip of :func:`_dispatch` (quota already reserved).
-
-    Returns:
-        The tool result string and the sub-task's reported cost in USD
-        (``0.0`` when the dispatch failed before running).
-    """
+    # Any child a reviewer dispatches carries the reviewer marker (see
+    # kiss.agents.sorcar.fanout_guard) so it gets the same read-only
+    # tool profile.
     from kiss.agents.sorcar import daemon_client
     from kiss.agents.sorcar.fanout_guard import is_review_task
     from kiss.agents.sorcar.sorcar_agent import _persisted_task_id
 
+    _is_rev = getattr(parent_agent, "_is_reviewer_subagent", None)
+    parent_reviewer = bool(_is_rev()) if callable(_is_rev) else False
     parent_task_id = _persisted_task_id(parent_agent)
     # ``/ask <question>`` routes here with a fixed
     # ``append_to_prompt`` that carries a literal ``<task_id>``
@@ -679,10 +614,10 @@ def _dispatch_reserved(
         )
     parent_tab_id = ""
     if parent_task_id:
-        # The tab really watching the caller (its own tab id, or —
-        # when the caller is itself a sub-agent — the viewer tab the
-        # printer's fan-out registry knows), the same resolution
-        # nested ``run_parallel`` fan-outs use.  A persisted task id
+        # The tab the webviews show the caller under (its own tab id,
+        # or — when the caller is itself a sub-agent — its
+        # ``{parent}__sub_{task}`` tab), the same resolution nested
+        # ``run_parallel`` fan-outs use.  A persisted task id
         # proves the caller is a ``ChatSorcarAgent``, which always has
         # the resolver; the guard only covers duck-typed callers.
         resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
@@ -744,7 +679,7 @@ def _dispatch_reserved(
             sock_path=_daemon_sock_path(),
         )
     except daemon_client.StopUnconfirmedTimeoutError:
-        return stop_unconfirmed_error(name, timeout), 0.0
+        return stop_unconfirmed_error(name, timeout)
     except TimeoutError:
         return (
             f"Error: the {name} agent task did not finish within "
@@ -752,16 +687,15 @@ def _dispatch_reserved(
             f"the stop (side effects, spend) is not reported here. "
             f"Check what it already did before retrying with a larger "
             f"`timeout` argument."
-        ), 0.0
+        )
     except Exception as e:
         logger.warning("agent dispatch failed", exc_info=True)
-        return f"Error: the {name} agent task could not run: {e}", 0.0
+        return f"Error: the {name} agent task could not run: {e}"
     _attribute_dispatch_usage(parent_agent, result)
     summary = result.text or ("" if result.success else "Task failed")
-    text = str(yaml.safe_dump(
+    return str(yaml.safe_dump(
         {"success": result.success, "summary": summary}, sort_keys=False,
     ))
-    return text, float(getattr(result, "cost", 0.0) or 0.0)
 
 
 def _run_agent(

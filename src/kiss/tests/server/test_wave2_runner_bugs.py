@@ -22,8 +22,9 @@ Covers:
   can never block on a different queue than the one it drained (e.g.
   after the tab's queue is swapped by a close/reopen mid-question).
 - F13: ``_cmd_save_config`` wrote ``self.work_dir`` without
-  ``_state_lock`` and, unlike ``_cmd_set_work_dir``, neither cleared
-  the ``@``-mention file cache nor synced ``printer.work_dir``.
+  ``_state_lock`` and, unlike ``_cmd_set_work_dir``, neither pre-warmed
+  the ``@``-mention file index of the new directory nor synced
+  ``printer.work_dir``.
 - F12: ``_ensure_downloaded_model`` raced concurrent callers on a
   shared temp file and could publish a half-extracted model
   directory; now serialised by an ``fcntl`` lock with an atomic
@@ -55,6 +56,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
+from kiss.server.file_index import FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter, _BashState
 from kiss.server.server import VSCodeServer
 
@@ -377,18 +379,41 @@ class _WorkDirPrinter(_CapturePrinter):
         self.work_dir = ""
 
 
-def test_f13_save_config_work_dir_syncs_cache_and_printer(
+def _private_registry(server: VSCodeServer, tmp_path: Path) -> FileIndexRegistry:
+    """Give *server* a file-index registry rooted in *tmp_path*."""
+    server._file_index.stop()
+    registry = FileIndexRegistry(
+        home=str(tmp_path / "home"), cache_dir=tmp_path / "cache",
+    )
+    server._file_index = registry
+    return registry
+
+
+def test_f13_save_config_work_dir_syncs_index_and_printer(
     tmp_path: Path,
 ) -> None:
+    """``saveConfig`` with a new ``work_dir`` adopts it, mirrors it onto
+    the printer and pre-warms its ``@``-mention index exactly like
+    ``setWorkDir`` does."""
     printer = _WorkDirPrinter()
     server = VSCodeServer(printer=printer)
-    new_dir = str(tmp_path / "proj")
-    os.makedirs(new_dir)
-    server._file_cache["stale"] = ["old.py"]
-    server._cmd_save_config({"config": {"work_dir": new_dir}})
-    assert server.work_dir == new_dir
-    assert printer.work_dir == new_dir
-    assert server._file_cache == {}
+    registry = _private_registry(server, tmp_path)
+    try:
+        new_dir = str(tmp_path / "proj")
+        os.makedirs(new_dir)
+        Path(new_dir, "new.py").write_text("x = 1\n")
+        server._cmd_save_config({"config": {"work_dir": new_dir}})
+        assert server.work_dir == new_dir
+        assert printer.work_dir == new_dir
+        deadline = time.monotonic() + 10
+        while registry.view_for(new_dir) is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        view = registry.view_for(new_dir)
+        assert view is not None and "new.py" in view.paths, (
+            "saveConfig must pre-warm the new work dir's file index"
+        )
+    finally:
+        registry.stop()
 
 
 def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
@@ -398,6 +423,7 @@ def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
 
     printer = _WorkDirPrinter()
     server = VSCodeServer(printer=printer)
+    registry = _private_registry(server, tmp_path)
     dirs = []
     for i in range(2):
         d = str(tmp_path / f"proj{i}")
@@ -418,6 +444,7 @@ def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
         t.start()
     for t in threads:
         t.join(timeout=10)
+    registry.stop()
     assert all(not t.is_alive() for t in threads)
     cfg = load_config()
     assert server.work_dir in dirs

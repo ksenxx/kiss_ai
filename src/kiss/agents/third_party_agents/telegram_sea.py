@@ -24,7 +24,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -33,6 +32,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     config_file_lock,
     write_private_file,
 )
+from kiss.core.browser_handoff import portal_handoff
 
 _TELEGRAM_DIR = Path.home() / ".kiss" / "third_party_agents" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))

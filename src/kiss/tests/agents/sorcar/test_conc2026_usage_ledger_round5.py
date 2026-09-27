@@ -91,7 +91,7 @@ def _codes_with_nested(functions: list[Any]) -> frozenset[types.CodeType]:
 
 
 def _run_with_injection_at(
-    operation: Callable[[], None],
+    operation: Callable[[], object],
     codes: frozenset[types.CodeType],
     boundary: int,
 ) -> tuple[bool, bool]:

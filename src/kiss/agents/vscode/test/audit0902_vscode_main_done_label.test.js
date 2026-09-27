@@ -127,10 +127,12 @@ function testFallbackUsesTheFinishedTabsClock() {
   startTask(win, tabB, now - 5000);
   assert.strictEqual(win._testApi.getActiveTabId(), tabB);
 
-  // A finishes; the event carries no span.  Its task_done also brings
-  // the user to A (a finished task may switch tabs).
+  // A finishes; the event carries no span.  The user clicked B since
+  // submitting, so its task_done leaves them on B (focusFinishedTab
+  // only undoes an agent-made switch); they go to A themselves.
   send(win, {type: 'task_done', tabId: tabA});
-  assert.strictEqual(win._testApi.getActiveTabId(), tabA);
+  assert.strictEqual(win._testApi.getActiveTabId(), tabB);
+  clickTab(win, tabA);
   const label = statusText(win);
   assert.ok(
     /^Done \(1m 0s\)$/.test(label) || /^Done \(1m 1s\)$/.test(label),

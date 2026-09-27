@@ -3,11 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The frequent-tasks list's per-task pastel tint (a hue hashed from the
-// task text, with near-black text) is a VS Code webview cue only.  The
-// remote page paints with VS Code's Dark Modern / Light Modern theme
-// colours alone (remote-codex.css), so renderFrequentTasks must leave
-// the rows' inline colours empty there.
+// The frequent-tasks list paints with the theme's colours alone on
+// every surface: renderFrequentTasks stamps no inline background or
+// text colour on a row (the old per-task pastel tint, a hue hashed from
+// the task text with near-black text, is gone), so the rows are the
+// same neutral .sidebar-item panels the history list shows, in the VS
+// Code webview and on the remote page (remote-codex.css) alike.
 
 'use strict';
 
@@ -30,25 +31,28 @@ function loadFrequent(win) {
   });
 }
 
-function testWebviewRowsKeepThePastelTint() {
+function testWebviewRowsHaveNoInlineColours() {
   const {win} = makeWebview();
   loadFrequent(win);
   const rows = frequentRows(win);
   assert.strictEqual(rows.length, 2, 'two frequent rows rendered');
   for (const row of rows) {
-    // jsdom serialises the hashed hsl() tint as rgb().
-    assert.match(
+    assert.strictEqual(
       row.style.backgroundColor,
-      /^rgb\(/,
-      `webview row keeps its hashed tint; got ${row.style.backgroundColor}`,
+      '',
+      `webview row must not carry the old pastel tint; got ${row.style.backgroundColor}`,
     );
     assert.strictEqual(
       row.style.color,
-      'rgb(26, 26, 26)',
-      'webview row keeps the near-black text over the pastel',
+      '',
+      'webview row must not carry the old near-black inline text colour',
+    );
+    assert.ok(
+      row.classList.contains('sidebar-item'),
+      'the row is a plain themed .sidebar-item panel',
     );
   }
-  console.log('PASS webview frequent rows keep the pastel tint');
+  console.log('PASS webview frequent rows carry no inline colours');
 }
 
 function testRemoteRowsHaveNoInlineColours() {
@@ -78,7 +82,7 @@ function testRemoteRowsHaveNoInlineColours() {
 }
 
 function main() {
-  testWebviewRowsKeepThePastelTint();
+  testWebviewRowsHaveNoInlineColours();
   testRemoteRowsHaveNoInlineColours();
   console.log('All frequentTasksThemeColors tests passed');
 }

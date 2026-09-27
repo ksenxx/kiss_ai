@@ -204,28 +204,8 @@ function testBackgroundTabReplayFollowupClickCopies() {
   console.log('PASS background-tab replay followup bar click copies to input');
 }
 
-function testWelcomeSuggestionChipClickCopies() {
-  const {win} = makeWebview();
-  send(win, {
-    type: 'welcome_suggestions',
-    suggestions: [{text: 'try this prompt'}],
-  });
-  const chip = win.document.querySelector('#suggestions .suggestion-chip');
-  assert.ok(chip, 'the welcome suggestion chip must be rendered');
-  click(win, chip);
-  assert.strictEqual(
-    inputBox(win).value,
-    'try this prompt',
-    'clicking a welcome suggestion chip must copy the prompt into the ' +
-      'input box',
-  );
-  win.close();
-  console.log('PASS welcome suggestion chip click copies to input');
-}
-
 testLiveFollowupClickCopies();
 testActiveTabReplayFollowupClickCopies();
 testAdjacentTaskFollowupClickCopies();
 testBackgroundTabReplayFollowupClickCopies();
-testWelcomeSuggestionChipClickCopies();
 console.log('All tests passed');

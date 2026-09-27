@@ -4,20 +4,18 @@
 # add your name here
 """End-to-end tests for atomic private-file persistence (G-RC5).
 
-``save_json_config`` and gmail's ``_save_credentials`` used to
-truncate-write the destination and chmod afterwards, exposing torn
-reads to concurrent processes and a brief 0644 window on secrets.
-Both now delegate to ``write_private_file`` (mkstemp 0600 +
-``os.replace``), the same pattern ``save_channel_state`` already used.
+``save_json_config`` used to truncate-write the destination and chmod
+afterwards, exposing torn reads to concurrent processes and a brief
+0644 window on secrets.  It now delegates to ``write_private_file``
+(mkstemp 0600 + ``os.replace``), the same pattern
+``save_channel_state`` already used.
 
-No mocks or test doubles: real files, real threads, real
-``google.oauth2`` credentials objects.
+No mocks or test doubles: real files, real threads.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import stat
 import sys
 import threading
@@ -158,35 +156,3 @@ class TestSaveJsonConfig:
         assert config.load() == {"api_key": "k1"}
         if _IS_POSIX:  # pragma: no branch
             assert _mode(config.path) == 0o600
-
-
-class TestGmailSaveCredentials:
-    """gmail _save_credentials writes the OAuth token atomically at 0600."""
-
-    def test_token_saved_atomically_with_0600(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """A real google Credentials object persists to a private file."""
-        monkeypatch.setenv("KISS_HOME", str(tmp_path / "kiss_home"))
-        from google.oauth2.credentials import Credentials
-
-        from kiss.agents.third_party_agents.gmail_sea import (
-            _save_credentials,
-            _token_path,
-        )
-
-        creds = Credentials(
-            token="access-token",
-            refresh_token="refresh-token",
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id="cid",
-            client_secret="csecret",
-        )
-        _save_credentials(creds)
-        path = _token_path()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        assert data["refresh_token"] == "refresh-token"
-        if _IS_POSIX:  # pragma: no branch
-            assert _mode(path) == 0o600
-        assert [p.name for p in path.parent.iterdir()] == [path.name]
-        assert os.environ["KISS_HOME"].startswith(str(tmp_path))

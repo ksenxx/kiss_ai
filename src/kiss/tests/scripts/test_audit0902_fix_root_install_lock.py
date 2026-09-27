@@ -354,10 +354,41 @@ class RootInstallLockTest(unittest.TestCase):
         self.assertEqual(self._count("started"), 2)
         self.assertTrue(_lock_is_free(self.lock_file))
 
+    def _dead_pid(self) -> int:
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def test_refusal_names_the_live_holder_not_the_previous_runs_pid(self) -> None:
+        # A finished run leaves its pid in the lock file: the kernel released
+        # its flock on exit but nothing rewrites the file.  A contender that
+        # loses the lock before the new holder has written its own pid must
+        # keep polling instead of reporting that dead pid.  Here the holder is
+        # this test process, which writes its pid 0.2 s after the contender
+        # starts -- long after a bash re-exec reaches acquire_update_lock.
+        self.lock_file.parent.mkdir(parents=True)
+        self.lock_file.write_text(f"{self._dead_pid()}\n")
+        fd = os.open(self.lock_file, os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            loser = self._start()
+            time.sleep(0.2)
+            self.lock_file.write_text(f"{os.getpid()}\n")
+            lost, _ = loser.communicate(timeout=30)
+        finally:
+            os.close(fd)
+        self.assertEqual(loser.returncode, 1, lost)
+        self.assertIn(f"{REFUSED}{os.getpid()}); exiting.", lost)
+        self.assertEqual(self._count("started"), 0)
+
     def test_eight_simultaneous_contenders_admit_exactly_one_installer(self) -> None:
         # Legacy leftover of the mkdir protocol (a crash between mkdir and
         # writing the pid): it must be irrelevant, never "recovered".
         legacy = self.home / ".kiss" / ".update.lock.d"
+        # A previous run's pid in the lock file (every trial after the first
+        # leaves one behind too) must never be quoted by a refused contender.
+        self.lock_file.parent.mkdir(parents=True)
+        self.lock_file.write_text(f"{self._dead_pid()}\n")
         for trial in range(5):
             legacy.mkdir(parents=True, exist_ok=True)
             gate = self.tmp / f"gate{trial}"

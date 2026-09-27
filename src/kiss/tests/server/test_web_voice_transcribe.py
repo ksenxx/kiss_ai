@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for remote-webapp voice transcription.
 
-Bug being reproduced — the remote webapp recognized the "Sorcar" wake
+Bug being reproduced — the remote webapp recognized the "Hey Sorcar" wake
 word but never transcribed the speech that followed.  In webview mode
 the VS Code extension host runs a local listener that captures and
 translates post-wake speech; in browser mode nothing did: the page's
@@ -286,7 +286,7 @@ class WebVoiceTranscribeTest(IsolatedAsyncioTestCase):
         (empty text).
         """
         ws = await self._connect_ok()
-        wake_pcm = _tts_pcm(Path(self.tmpdir), "wake", "Sorcar")
+        wake_pcm = _tts_pcm(Path(self.tmpdir), "wake", "Hey Sorcar")
         gap = b"\x00" * (2 * 16000)
         command_pcm = _tts_pcm(
             Path(self.tmpdir), "command", "open the readme file",

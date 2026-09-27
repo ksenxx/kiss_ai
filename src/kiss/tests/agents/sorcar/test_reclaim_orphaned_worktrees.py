@@ -25,11 +25,14 @@ branches.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (
@@ -387,6 +390,112 @@ class TestReclaimSafetyGuards:
         # Main tree returned to its committed state (no conflict
         # markers dangling).
         assert not GitWorktreeOps.has_uncommitted_changes(self.repo)
+
+    def test_conflict_parks_worktree_so_later_passes_skip_it(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A conflicting orphan is merged once, then marked preserve-
+        for-review; the next pass skips it without re-running the
+        failing merge."""
+        branch = "kiss/wt-1000-conflict-once"
+        wt_dir = _plant_orphan_worktree(
+            self.repo, branch, with_baseline=True, dirty_kind="clean",
+        )
+        (wt_dir / "README.md").write_text("worktree change\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        (self.repo / "README.md").write_text("main change\n")
+        _git("add", "-A", cwd=self.repo)
+        _git("commit", "-m", "main edit", cwd=self.repo)
+
+        with caplog.at_level(logging.INFO, logger="kiss.agents.sorcar.git_worktree"):
+            assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+            assert "returned conflict" in caplog.text
+            assert GitWorktreeOps.load_preserve_marker(self.repo, branch)
+            caplog.clear()
+            head = GitWorktreeOps.head_sha(self.repo)
+            assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert "returned conflict" not in caplog.text
+        assert "marked preserve-for-review" in caplog.text
+        assert GitWorktreeOps.head_sha(self.repo) == head
+        assert wt_dir.exists()
+        assert GitWorktreeOps.branch_exists(self.repo, branch)
+
+    def test_conflict_without_baseline_is_parked(self) -> None:
+        """The plain ``git merge --squash`` path parks a real conflict."""
+        branch = "kiss/wt-1000-conflict-nobase"
+        wt_dir = _plant_orphan_worktree(self.repo, branch, dirty_kind="clean")
+        (wt_dir / "README.md").write_text("worktree change\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        (self.repo / "README.md").write_text("main change\n")
+        _git("add", "-A", cwd=self.repo)
+        _git("commit", "-m", "main edit", cwd=self.repo)
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert GitWorktreeOps.load_preserve_marker(self.repo, branch)
+
+    def test_held_index_lock_is_not_mistaken_for_a_conflict(self) -> None:
+        """A held ``index.lock`` fails ``git merge --squash`` (reported
+        as CONFLICT by the merge helper) although the content merges
+        cleanly: the worktree is not parked and the next pass, after
+        the lock is gone, merges it."""
+        branch = "kiss/wt-1000-index-lock"
+        wt_dir = _plant_orphan_worktree(self.repo, branch, dirty_kind="clean")
+        (wt_dir / "new.txt").write_text("new\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        lock = self.repo / ".git" / "index.lock"
+        lock.write_text("")
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert not GitWorktreeOps.load_preserve_marker(self.repo, branch)
+
+        lock.unlink()
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert (self.repo / "new.txt").read_text() == "new\n"
+
+    def test_held_index_lock_on_baseline_path_is_not_parked(self) -> None:
+        """Same on the baseline cherry-pick path, where HEAD is still the
+        baseline's parent (so the re-check uses ``-X theirs`` like the
+        cherry-pick does)."""
+        branch = "kiss/wt-1000-index-lock-base"
+        wt_dir = _plant_orphan_worktree(
+            self.repo, branch, with_baseline=True, dirty_kind="clean",
+        )
+        (wt_dir / "README.md").write_text("worktree change\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        lock = self.repo / ".git" / "index.lock"
+        lock.write_text("")
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert not GitWorktreeOps.load_preserve_marker(self.repo, branch)
+        lock.unlink()
+
+    def test_non_conflict_merge_failure_is_retried(self) -> None:
+        """A merge that fails for another reason (here the main tree's
+        pre-commit hook rejects the squash commit) may be transient, so
+        the worktree is not parked and a later pass retries it."""
+        branch = "kiss/wt-1000-merge-failed"
+        wt_dir = _plant_orphan_worktree(
+            self.repo, branch, with_baseline=True, dirty_kind="clean",
+        )
+        (wt_dir / "new.txt").write_text("new\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        assert GitWorktreeOps.commit_all(wt_dir, "wt edit")
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 0
+        assert not GitWorktreeOps.load_preserve_marker(self.repo, branch)
+
+        hook.unlink()
+        assert GitWorktreeOps.reclaim_orphaned_worktrees(self.repo) == 1
+        assert not wt_dir.exists()
+        assert (self.repo / "new.txt").read_text() == "new\n"
 
     def test_preserves_when_precommit_hook_rejects(self) -> None:
         wt_dir = _plant_orphan_worktree(

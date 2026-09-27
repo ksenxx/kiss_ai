@@ -17,7 +17,7 @@
 - [Client Interfaces](https://kisssorcar.github.io/docs/cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](https://kisssorcar.github.io/docs/api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
 - [Supported Models](https://kisssorcar.github.io/docs/models.md) — 661-model catalog across 9 provider categories
-- [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 9 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
+- [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md) — Every `xxx_sea.py` is a chat command `/xxx`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](https://kisssorcar.github.io/docs/prompt-tricks.md) — Reusable prompt snippets that boost result quality
@@ -89,7 +89,7 @@ print(result.text)
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | Run on top of Claude Code / Codex CLI | Yes — `cc/*` and `codex/*` namespaces | N/A | No |
-| Messaging and communication channels | 43 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| Messaging and communication channels | 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
 | Scheduled automations | Natural-language cron agent | — | — |
 | Wake word for voice interaction | Sorcar | N/A | N/A |
 
@@ -101,9 +101,9 @@ print(result.text)
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
 - **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
-- **43 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
+- **44 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
 - **Pre-run task classification.** Normally one fast non-agentic model call (structured output, with one plain-text retry if that fails) detects whether a task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
-- **Persistent agent memory.** On by default: standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks. Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index; toggle it in the Settings panel or set `KISS_USE_MEMORY=0`.
+- **Persistent agent memory.** On by default: standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks. Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index, and a run inside a git repository also gets that repository's own memory in `~/.kiss/memories/<repo>/`; toggle it in the Settings panel or set `KISS_USE_MEMORY=0`.
 - **Credential isolation (Muse auth).** On Linux, credentials for the 24 Muse-supported connectors are isolated by default behind a Meta-Muse-style security boundary: legacy tokens auto-migrate into a local auth daemon's vault on first use (a one-time hand-off of the real credential; plaintext copies are then scrubbed on a best-effort basis), after which the agent process holds only opaque surrogate tokens that the daemon swaps for the real ones at the network edge, and every boundary-routed API request is host-allowlisted (credential-free, bodyless `GET`/`HEAD` redirect hops are the one permitted off-list exception), classified read vs. write, and checked against an allow/deny/ask policy with an audit log. Where the provider supports a poll-based grant (GitHub, Twitch, Microsoft Teams, Nextcloud Talk, Matrix, Signal), connecting works like the Muse app's Connect button — the user signs in and approves in their own browser, nothing is pasted back; providers without such a grant (the six Google services on a headless host, Slack, Discord) get a safe paste-back hand-off instead of browser automation, and the agent never asks for a password or 2FA code. Opt out with `KISS_MUSE_AUTH=0`.
 
 ## What Is in the Name
@@ -231,7 +231,7 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - A pre-run **task classifier** that detects whether the task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Classify with Jev" (`classify_with_decisions`; unticked pins the LLM classifier).
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
 - **Image and PDF attachments**: attach files to a task via the picker, paste, or drag-and-drop — images (HEIC/HEIF converted, oversized ones re-encoded) and PDFs are sent to the model along with the prompt.
-- **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel or set `KISS_USE_MEMORY=0`; a custom directory goes in the `memory_dir` key of `~/.kiss/config.json`.
+- **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel or set `KISS_USE_MEMORY=0`; a custom directory goes in the `memory_dir` key of `~/.kiss/config.json`. A run whose working directory is inside a git repository also gets that repository's own memory, the sub-directory `~/.kiss/memories/<repo>/` named after the repository directory (shared by a main checkout and its linked worktrees; independent clones share it only when their directory names match): its pages are addressed as `<repo>/<page>`, `memory_search` covers every memory unless narrowed with `memory=`, and the protocol tells the agent to keep repository knowledge there and cross-project lessons in the general memory.
 - Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run. Wrapping the message in `<task>…</task>` tags instead queues it as a follow-up task that runs sequentially after the current task finishes.
 - Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory, and sub-agents dispatched with `run_agent` open their own tab in the calling workspace.
@@ -313,7 +313,6 @@ The full authoring guide is in [`src/kiss/server/README.md`](https://github.com/
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`; OAuth tokens are persisted under `~/.kiss/mcp_auth/`. A curated catalog of privacy-first MCP connectors (fetch, time, memory, GitHub, Slack, Google Workspace, WhatsApp, …) ships in [`connectors/`](https://github.com/ksenxx/kiss_ai/blob/main/connectors/README.md) with `enable.py`/`verify.py` CLIs.
 - "Tricks" (inject-instruction) entries are the concatenation of two `## Trick`-sectioned Markdown files: `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-created on first read and never overwritten thereafter) and the bundled `src/kiss/INJECTIONS.md`, read directly from the package so every upgrade delivers the latest bundled tricks. Edit `~/.kiss/MY_INJECTION.md` to customize; your tricks are listed first.
-- Welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.
 
 ---
 
@@ -501,7 +500,7 @@ The full per-model list (all 661 entries) is in the [project README](https://git
 
 # Messaging & Third-Party Agents
 
-> KISS Sorcar includes 43 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 9 service agents — plus infrastructure agents and a Govee smart-home CLI.
+> KISS Sorcar includes 44 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 10 service agents — plus infrastructure agents and a Govee smart-home CLI.
 
 ## The 32 Messaging-Channel Agents
 
@@ -538,9 +537,9 @@ The full per-model list (all 661 entries) is in the [project README](https://git
 - WhatsApp
 - Zalo
 
-## The 9 Service Agents
+## The 10 Service Agents
 
-Nine service agents give Sorcar authenticated API tools for productivity and data services:
+Ten service agents give Sorcar authenticated API tools for productivity and data services:
 
 - Brave Search (`kiss-brave`)
 - Firecrawl (`kiss-firecrawl`)
@@ -550,6 +549,7 @@ Nine service agents give Sorcar authenticated API tools for productivity and dat
 - Google Drive (`kiss-gdrive`)
 - Google Sheets (`kiss-gsheets`)
 - Notion (`kiss-notion`)
+- Overleaf (`kiss-overleaf`)
 - PostgreSQL (`kiss-postgres`)
 
 In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.
@@ -738,7 +738,7 @@ If the command does not appear, check that the file name ends in `_sea.py`, that
 
 # Sample Tasks for KISS Sorcar
 
-> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. In the VS Code extension these appear as welcome-screen chips. The bundled tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md); you can add your own at `~/.kiss/MY_TASK_TEMPLATES.md`.
+> Ready-to-use example prompts shipped with KISS Sorcar. Replace the `<<...>>` placeholders with your own values. The tasks live in [`src/kiss/SAMPLE_TASKS.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md).
 
 ## Code Understanding & Editing
 
