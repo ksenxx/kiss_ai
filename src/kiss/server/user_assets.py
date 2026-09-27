@@ -6,11 +6,9 @@
 
 :func:`ensure_user_asset_from_default` seeds a user copy from an
 **inline string default**, with no package file involved.  Used for
-``MY_TASK_TEMPLATES.md`` (welcome-screen chips) and
-``MY_INJECTION.md`` (Inject instruction panel), both purely
-user-curated files whose only "bundled" content is a tiny inline
-starter (``## Task\\n\\nHi!\\n`` and a ``## Trick`` test-first
-starter, respectively).  Returns ``None`` when ``~/.kiss/`` is not
+``MY_INJECTION.md`` (Inject instruction panel), a purely user-curated
+file whose only "bundled" content is a tiny ``## Trick`` test-first
+starter.  Returns ``None`` when ``~/.kiss/`` is not
 writable so the caller can skip silently.
 
 ``KISS_HOME`` overrides the default ``~/.kiss`` location, matching the
@@ -37,7 +35,7 @@ def ensure_user_asset_from_default(
 ) -> Path | None:
     """Return ``~/.kiss/<name>``, seeding it with ``default_content`` if absent.
 
-    Used for assets like ``MY_TASK_TEMPLATES.md`` whose source of
+    Used for assets like ``MY_INJECTION.md`` whose source of
     truth is the user's local copy — there is no bundled package
     file, only a tiny inline default written on first read.
 
@@ -51,7 +49,7 @@ def ensure_user_asset_from_default(
     user edit), the existing file wins.
 
     Args:
-        name: Asset file name (e.g. ``"MY_TASK_TEMPLATES.md"``).
+        name: Asset file name (e.g. ``"MY_INJECTION.md"``).
         default_content: UTF-8 string written to ``~/.kiss/<name>``
             on first read.  Never overwrites an existing file.
 

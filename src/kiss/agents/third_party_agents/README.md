@@ -1,6 +1,6 @@
 # Third-Party Agents
 
-This package contains KISS Sorcar's **channel agents**: 44 `*_sea.py` modules plus the
+This package contains KISS Sorcar's **channel agents**: 45 `*_sea.py` modules plus the
 `govee.py` smart-light helper. All but one wrap an external service — a messaging
 platform (Slack, Telegram, WhatsApp, ...), a service API (GitHub, Notion, PostgreSQL,
 ...), or a piece of agent infrastructure (A2A, OpenAI-compatible server) — and expose
@@ -22,7 +22,7 @@ which surfaces, and what each channel can do.
 - [Credential isolation (Muse auth)](#credential-isolation-muse-auth)
 - [Agent catalog](#agent-catalog)
   - [Messaging and device channels](#messaging-and-device-channels-32)
-  - [Service APIs](#service-apis-9)
+  - [Service APIs](#service-apis-10)
   - [Infrastructure: two extra surfaces](#infrastructure-two-extra-surfaces)
   - [Task Q&A: the `/ask` command](#task-qa-the-ask-command)
   - [Home lights (Govee)](#home-lights-govee)
@@ -41,7 +41,7 @@ plain-language prompts work everywhere**:
 2. **Web / mobile app.** The identical chat interface served over a cloudflared
    tunnel — copy the URL and password from the Settings panel and open it on any
    phone, tablet, or browser.
-3. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Sorcar,
+3. **Voice.** Press the mic button and speak, prefixed with the wake word: *"Hey Sorcar,
    tell the eng Slack channel that the deploy is done."* You can also steer a running
    task by voice; Sorcar replies aloud in the language you spoke.
 4. **Your existing messaging apps.** Once a channel gateway is running (see
@@ -108,17 +108,19 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Each service module defines a `tools()` function (`ask_sea.py`, which wraps no
-  service, defines only the agent-script getters `system_prompt()`,
-  `append_to_system_prompt()`, `is_parallel()`, and `use_web_tools()`). The daemon calls
+  service, returns its three trajectory tools `task_overview`, `task_transcript`, and
+  `task_step` from `tools()` and defines the agent-script getters `system_prompt()`,
+  `append_to_system_prompt()`, `tool_profile()`, `is_parallel()`, `use_web_tools()`,
+  and `use_memory()`; see "Task Q&A" below). The daemon calls
   `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
-  `~/.kiss`). On Linux, outbound API secrets for the 24 Muse-covered services (see
+  `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
   below) migrate out of those files into the `$KISS_HOME/muse_auth/vault` credential
-  vault on first use; non-secret settings, OAuth bootstrap files (Google's
-  `credentials.json`), and inbound-verification secrets (LINE's `channel_secret`) stay
-  in the service directory. Because auth tools are always available,
+  vault on first use; non-secret settings and inbound-verification secrets (LINE's
+  `channel_secret`) stay in the service directory. The Google Workspace agents keep no
+  Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
   a not-yet-configured agent can walk you through authentication *in chat* — you never
   have to hand-edit `config.json` first.
 - Backends whose platform has an inbound message stream also implement
@@ -133,7 +135,17 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 Auth tools are always present, so a fresh, unconfigured channel sets itself up in
 conversation:
 
-> Check my GitHub auth; if it's missing, walk me through creating a token and store it.
+> Check my GitHub auth; if it's missing, sign me in and store the credential.
+
+You do not have to type such a prompt yourself. The right sidebar's **Apps** panel
+(kiss-web and the VS Code extension) lists every channel agent with a connected /
+not-connected / unknown badge — the daemon probes them in a short-lived subprocess
+(`python -m kiss.agents.third_party_agents.auth_status`, 20-second deadline, result
+cached for 30 seconds; a probe that fails or times out shows as unknown; a service
+enrolled in the Muse vault counts as connected, except the six Google services, whose
+Composio connection is probed directly) — and clicking an app that is not connected
+opens a new chat that runs a "Connect my *X* app" task
+through `run_agent`, which drives the same auth tools described below.
 
 Each channel's `check_<service>_auth` returns setup instructions when unconfigured,
 and several channels go further with a guided sign-in. Three styles exist, and in
@@ -146,8 +158,8 @@ one) in the chat, so you can finish by hand when no window appeared — the agen
 on a remote or headless host, say. `$BROWSER` picks the browser; `KISS_HEADLESS=1`
 turns the automatic opening off.
 
-- **Connect-style browser sign-in** (GitHub, Twitch, Microsoft Teams, Nextcloud Talk,
-  Matrix, Signal). `authenticate_<service>` without a token starts the sign-in, opens
+- **Connect-style browser sign-in** (GitHub, Microsoft Teams, Slack, Discord, Twitch,
+  Nextcloud Talk, Matrix, Signal). `authenticate_<service>` starts the sign-in, opens
   the link in your default browser when it can, and returns it — for Signal, a QR code
   to scan like Signal Desktop, also opened as a black-on-white page — that you open
   and approve in your *own* browser or on your phone, while the agent polls in the
@@ -155,26 +167,50 @@ turns the automatic opening off.
   until your approval lands). WhatsApp has its own variant of this:
   `start_whatsapp_bridge` + `get_whatsapp_qr_code` open a pairing QR page that you
   scan from the phone, and `wait_for_whatsapp_pairing` waits for the scan.
-  Where the flow first needs an OAuth app of your own (GitHub, Twitch, Microsoft
-  Teams), calling `authenticate_<service>` without the client ID opens the provider's
-  app-registration page for you and says what to copy back.
-- **Consent hand-off** (Gmail and the five other Google agents).
-  `authenticate_<service>` starts a loopback consent server, opens Google's consent
-  page in your default browser when it can, and hands you the authorization URL
-  either way. Approving on the same machine completes by itself; approving from
-  another device ends on a `localhost` redirect URL that you paste back into the chat
-  for the agent to replay locally. `finish_<service>_auth` stores the token. (Creating
-  the OAuth client itself is separate: `start_gmail_browser_setup` /
-  `start_<service>_browser_setup` opens the Google Cloud Console credentials page for
-  you and lists the steps — Google Chat, whose check tool opens the console and gives
-  the setup instructions instead, has no such tool.)
-- **Portal hand-off with token paste-back** (Slack, Discord, and the API-key channels
-  such as Brave, Notion, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram).
-  `start_slack_browser_auth` / `start_discord_browser_auth` — or, for the API-key
-  channels, `check_<service>_auth` itself — open the provider's developer portal in
-  your default browser and tell the agent the steps to relay; you create the app in
-  your own browser and paste the token back. The agent never drives the portal with
-  its built-in browser.
+  GitHub, Microsoft Teams, Slack and Discord sign in through *public* OAuth apps
+  (device flow for GitHub and Teams, PKCE with the fixed loopback redirect
+  `http://localhost:53682/callback` for Slack and Discord): no client secret exists,
+  you sign in and click Allow. `_oauth_apps.py` is where the KISS-owned apps' client
+  IDs are embedded; in this checkout those entries are still empty, so
+  `authenticate_<service>` answers with the `KISS_<PROVIDER>_CLIENT_ID` variable to
+  set; that variable overrides an embedded ID as well, for example with an app you
+  registered yourself (the module docstring lists the settings such an app needs). Microsoft Teams additionally requires
+  Muse-auth: its delegated token pair must live in the vault for the daemon to
+  refresh it, so with `KISS_MUSE_AUTH=0` the Teams sign-in refuses. A
+  Slack or Discord sign-in yields a *user* token: Slack acts as you (its posts appear
+  under your name, and in channel mode it answers other people, not messages you
+  wrote yourself), and Discord can list your servers and post to the one channel you
+  pick at sign-in (its message reading and channel mode still need a bot token, which
+  Discord issues only to the app owner). Twitch still needs an OAuth app of your own; calling
+  `authenticate_twitch` without the client ID opens its app-registration page.
+- **MCP servers with OAuth** (Notion, Linear, Asana, Zoom and any remote MCP server).
+  Sorcar's `connect_mcp_server(name)` tool (or `python -m kiss.agents.sorcar.mcp_oauth
+  <name>`) runs the MCP authorization flow directly against the server: the client
+  registers itself (CIMD or dynamic registration), you sign in and click Allow, and
+  the tokens land in `~/.kiss/mcp_auth/<server>.json`, where later runs refresh them.
+  Zoom's authorization server accepts only pre-registered apps: set
+  `KISS_MCP_ZOOM_CLIENT_ID` / `KISS_MCP_ZOOM_CLIENT_SECRET` from an app that lists
+  `http://localhost:53683/callback` as redirect URI.
+- **Composio sign-in** (Gmail, Google Calendar, Docs, Drive, Sheets and Chat).
+  Google only lets verified OAuth apps request Workspace scopes, so KISS brokers
+  Google through Composio. `authenticate_<service>` (pass `api_key=` once if no
+  `COMPOSIO_API_KEY` is configured; create one at https://dashboard.composio.dev)
+  returns a Composio Connect Link and opens it in your default browser when it can;
+  you sign in to Google and click Allow there, and `finish_<service>_auth` records the
+  connection (answering `pending` until you approve). Every API call then goes through
+  Composio's proxy, which adds the Google token, so no Google token is stored locally.
+  One limit: Composio has no managed Google Chat app, so Chat user sign-in needs a custom
+  Composio auth config whose ID you set in `KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT`.
+  Google Chat can instead act as a Chat bot via
+  `authenticate_googlechat_service_account(path)`.
+- **Portal hand-off with token paste-back** (the API-key channels such as Brave,
+  Notion's REST agent, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
+  Overleaf, which has no OAuth or public API, is the same flow with the
+  `overleaf_session2` browser cookie pasted back instead of a token).
+  `check_<service>_auth` opens the provider's developer portal in your default
+  browser and tells the agent the steps to relay; you create the key in your own
+  browser and paste it back. The agent never drives the portal with its built-in
+  browser.
 
 Do interactive auth from a chat surface — the agent may need to ask you questions,
 and the chat panel is where you answer them.
@@ -187,7 +223,7 @@ your **next** prompt:
 
 ## Credential isolation (Muse auth)
 
-On Linux, credentials for the 24 Muse-supported services are isolated by default behind
+On Linux, credentials for the 18 Muse-supported services are isolated by default behind
 a Meta-Muse-style security boundary implemented in the `muse_auth/` package: legacy
 tokens auto-migrate into a vault owned by a local auth daemon on first use (a one-time
 hand-off of the real credential through the agent process), after which ordinary
@@ -199,15 +235,17 @@ write, and checked against an allow/deny/ask policy. Reads are allowed by defaul
 writes ask for a grant. The audit log records the Sentinel's allow/deny/ask decisions —
 not whether the network call afterwards succeeded.
 
-Covered services (`muse_auth/_common.py` `SERVICE_HOSTS`): the six Google services
-(`gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`,
-`googlechat` — Google Chat's service-account mode excepted) plus `slack`, `github`,
-`notion`, `discord`, `homeassistant`, `firecrawl`, `brave_search`, `ntfy`, `govee`,
+Covered services: `slack`, `github`, `notion`, `discord`, `homeassistant`, `firecrawl`, `brave_search`, `ntfy`, `govee`,
 `line`, `mattermost`, `msteams`, `nextcloud`, `synology`, `telegram`, `twitch`, `zalo`,
-and `bluebubbles`. Other channels keep their legacy direct-credential path.
+and `bluebubbles`. Other channels keep their legacy direct-credential path; the
+Google agents go through Composio instead. (The daemon's host table,
+`SERVICE_HOSTS` in `muse_auth/_common.py`, still lists the six Google service names
+— 24 entries in all — so a Google token imported into the vault before the Composio
+switch stays managed there, but no Google agent reads it any more, and the Apps panel
+ignores such stale enrollments.)
 
 The boundary is managed with `python -m kiss.agents.third_party_agents.muse_auth`
-(verbs: `status`, `enroll SERVICE`, `import SERVICE`, `grant SERVICE read|write`,
+(verbs: `status`, `import SERVICE`, `grant SERVICE read|write`,
 `revoke SERVICE`, `export SERVICE`, `clear SERVICE`, `audit`, `daemon`, `stop`) —
 you can run it yourself or simply ask Sorcar to do it:
 
@@ -215,12 +253,17 @@ you can run it yourself or simply ask Sorcar to do it:
 
 > Grant the github service a single-use write permission.
 
-`enroll` supports only the six Google OAuth services; every other covered service
-enrolls itself when its legacy credential auto-migrates on first use — and the
-Connect-style browser sign-ins for GitHub, Twitch, and Microsoft Teams store their
-grant straight into the vault: as a refresh-token credential the daemon renews itself
-when the grant includes a refresh token (Teams requires one; GitHub OAuth apps issue
-one only with expiring tokens enabled), otherwise as a plain bearer token.
+Every covered service enrolls itself when its legacy credential auto-migrates on first use — and the
+Connect-style browser sign-ins for GitHub, Twitch, Microsoft Teams, Slack and Discord
+store their grant straight into the vault while Muse-auth is enabled (with
+`KISS_MUSE_AUTH=0`, GitHub, Slack and Discord fall back to their legacy credential
+files and Teams refuses to sign in): as a refresh-token credential the daemon
+renews itself when the grant includes a refresh token (Teams rejects a grant without
+one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
+plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
+header). The daemon starts on demand: agents that find none
+serialize the start behind `$KISS_HOME/muse_auth/spawn.lock`, so concurrent agents
+never race to launch two.
 `grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
 `KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
@@ -245,18 +288,18 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | --- | --- | --- | --- | --- |
 | BlueBubbles (iMessage via a Mac server) | `bluebubbles` | yes | server URL + password, `bluebubbles/config.json` | `list_chats`, `get_chat`, `get_chat_messages`, `post_message`, `get_server_info`, `mark_chat_read` |
 | DingTalk group robots | `dingtalk` | yes | robot webhook (+ optional `secret`, `outgoing_token`), `dingtalk/config.json` | `post_message`, `post_markdown` |
-| Discord | `discord` | yes | bot token (also `start_discord_browser_auth`), `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
+| Discord | `discord` | yes | click-Allow sign-in through the KISS Discord app (`authenticate_discord`, `finish_discord_auth`; user token + one webhook channel), or `authenticate_discord(bot_token=...)` for bot-only features, `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
 | Email (any IMAP/SMTP mailbox) | `email` | yes | IMAP host + SMTP host + address + app-password, `email/config.json` | `send_email`, `list_unread_emails`, `read_email`, `mark_email_read` |
 | Feishu / Lark | `feishu` | yes | `app_id` + `app_secret`, `feishu/config.json` | `send_text_message`, `reply_message`, `delete_message`, `list_messages`, `list_chats`, `get_chat`, `get_user_info` |
-| Gmail | `gmail` | no | OAuth2 (`start_gmail_browser_setup`, `finish_gmail_auth`), token in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `delete_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
-| Google Chat | `googlechat` | yes | service account or OAuth2 (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
+| Gmail | `gmail` | no | Composio Connect Link (`authenticate_gmail`, `finish_gmail_auth`), connection record in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
+| Google Chat | `googlechat` | yes | service account (`authenticate_googlechat_service_account`) or Composio with a custom auth config (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
 | Home Assistant | `homeassistant` | no | `base_url` + long-lived token, `homeassistant/config.json` | `ha_get_states`, `ha_call_service`, `ha_list_services`, `ha_get_history`, `ha_render_template`, `ha_fire_event` |
 | iMessage (macOS AppleScript) | `imessage` | no | local Messages app, `imessage/config.json` | `send_imessage`, `send_attachment`, `list_conversations`, `get_messages` |
 | IRC | `irc` | yes | server/nick (+ NickServ), `irc/config.json` | `connect_irc`, `join_irc_channel`, `leave_channel`, `post_message`, `send_notice`, `get_topic`, `set_topic`, `kick_user`, `whois`, `identify_nickserv` |
 | LINE | `line` | yes | channel access token, `line/config.json` | `push_text_message`, `reply_message`, `get_profile`, `get_quota`, `leave_group`, `push_image_message` |
 | Matrix | `matrix` | yes | browser sign-in via the homeserver's OAuth 2.0 device grant (`authenticate_matrix(homeserver_url)`, `finish_matrix_auth`; matrix.org and other MAS-backed servers; the agent renews the short-lived token itself) or a hand-supplied access token (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile`, `refresh_if_needed` (renews an OAuth-issued token) |
 | Mattermost | `mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_third_party_agents` (channels), `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
-| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow (`authenticate_msteams(tenant_id, client_id)`, `finish_msteams_auth`; delegated token refreshed by the Muse daemon) or app-only client credentials, `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
+| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow through the KISS multi-tenant app (`authenticate_msteams()`, optional `tenant_id`; `finish_msteams_auth`; delegated token refreshed by the Muse daemon, so Muse-auth must be enabled), `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
 | Nextcloud Talk | `nextcloud` | yes | browser sign-in via Login Flow v2 (`authenticate_nextcloud(url)`, `finish_nextcloud_auth`; app password issued by the server) or username + app password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message`, `revoke_app_password` |
 | Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
@@ -264,7 +307,7 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | QQ bot platform | `qq` | yes | app id/secret (Ed25519 webhook), `qq/config.json` | `send_group_message`, `send_c2c_message` |
 | Signal (signal-cli) | `signal` | yes | link like Signal Desktop: `authenticate_signal()` runs `signal-cli link` and shows a QR code to scan from the phone, `finish_signal_auth` records the account; or an already registered signal-cli number, `signal/config.json` | `send_signal_message`, `receive_messages`, `send_attachment`, `list_contacts`, `list_groups` |
 | SimpleX Chat | `simplex` | yes | local `simplex-chat -p 5225` WebSocket, `simplex/config.json` | `send_simplex_message`, `list_simplex_contacts`, `get_simplex_address` |
-| Slack | `slack` | yes | bot token (also `start_slack_browser_auth`); one credential set per workspace in `slack/<workspace>/token.json` | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
+| Slack | `slack` | yes | click-Allow sign-in through the KISS Slack app with PKCE (`authenticate_slack`, `finish_slack_auth`; rotating user token refreshed by the Muse daemon); one credential set per workspace | `list_third_party_agents` (channels), `read_messages`, `read_thread`, `post_message`, `update_message`, `delete_message`, `list_users`, `get_user_info`, `create_channel`, `invite_to_channel`, `add_reaction`, `search_messages`, `set_channel_topic`, `upload_file`, `get_channel_info` |
 | SMS / voice (Twilio) | `sms` | yes | account SID + auth token + from number, `sms/config.json` | `send_sms`, `send_mms`, `list_messages`, `get_message`, `list_phone_numbers`, `get_account_info`, `send_whatsapp_message`, `create_call`, `list_calls`, `get_call`, `cancel_message` |
 | Synology Chat | `synology` | yes | incoming/outgoing webhooks, `synology/config.json` | `post_message`, `send_file_message` |
 | Telegram | `telegram` | yes | @BotFather bot token, `telegram/config.json` | `send_text`, `send_photo`, `send_document`, `edit_message_text`, `delete_message`, `pin_message`, `unpin_message`, `get_chat`, `get_chat_members_count`, `get_chat_member`, `ban_chat_member`, `unban_chat_member`, `get_updates`, `send_poll`, `forward_message` |
@@ -285,21 +328,22 @@ caps bodies at 1 MB, suppresses duplicate deliveries, rate-limits to 60 events p
 route per minute, and can either queue events as agent tasks or push them straight
 through another channel's backend (`deliver_module` routes).
 
-### Service APIs (9)
+### Service APIs (10)
 
 | Agent | Name in prompts | Auth / config | Backend tools |
 | --- | --- | --- | --- |
 | Brave Search | `brave` | subscription token, `brave_search/config.json` | `brave_web_search`, `brave_news_search`, `brave_image_search`, `brave_video_search` |
 | Firecrawl (scraping/crawling) | `firecrawl` | API key (+ optional self-hosted `base_url`), `firecrawl/config.json` | `firecrawl_scrape`, `firecrawl_map`, `firecrawl_search`, `firecrawl_start_crawl`, `firecrawl_get_crawl_status`, `firecrawl_cancel_crawl` |
-| GitHub | `github` | browser sign-in via the OAuth device flow (`authenticate_github(client_id=...)` with a device-flow-enabled OAuth app; the client ID may instead come from `oauth_client_id` in `github/config.json` or `$KISS_GITHUB_CLIENT_ID`; finish with `finish_github_auth`) or a personal access token (+ optional `read_only: "true"`), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
-| Google Calendar | `gcal` | OAuth2 quintet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `start_google_calendar_browser_setup`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
-| Google Docs | `gdocs` | OAuth2 quintet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
-| Google Drive | `gdrive` | OAuth2 quintet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
-| Google Sheets | `gsheets` | OAuth2 quintet (for `google_sheets`), `google_sheets/` | `gsheets_create_spreadsheet`, `gsheets_get_info`, `gsheets_get_values`, `gsheets_update_values`, `gsheets_append_values`, `gsheets_clear_values`, `gsheets_add_sheet`, `gsheets_batch_update`, `gsheets_list_spreadsheets` |
+| GitHub | `github` | browser sign-in via the OAuth device flow through the KISS GitHub app (`authenticate_github(read_only=...)`, finish with `finish_github_auth`; `$KISS_GITHUB_CLIENT_ID` substitutes another app), `github/config.json` | `gh_get_me`, `gh_search_repositories`, `gh_get_repository`, `gh_list_issues`, `gh_get_issue`, `gh_list_issue_comments`, `gh_search_issues`, `gh_search_code`, `gh_list_pull_requests`, `gh_get_pull_request`, `gh_get_pull_request_diff`, `gh_get_file_contents`, `gh_list_commits`, `gh_list_branches`, `gh_create_issue`, `gh_comment_on_issue`, `gh_update_issue`, `gh_create_pull_request`, `gh_merge_pull_request` |
+| Google Calendar | `gcal` | Composio quartet (`check_google_calendar_auth`, `authenticate_google_calendar`, `clear_google_calendar_auth`, `finish_google_calendar_auth`), `google_calendar/` | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_quick_add` |
+| Google Docs | `gdocs` | Composio quartet (as above, for `google_docs`), `google_docs/` | `gdocs_create_document`, `gdocs_read_document`, `gdocs_append_text`, `gdocs_replace_text`, `gdocs_insert_text`, `gdocs_batch_update`, `gdocs_list_documents` |
+| Google Drive | `gdrive` | Composio quartet (for `google_drive`), `google_drive/` | `gdrive_search_files`, `gdrive_get_file`, `gdrive_read_file`, `gdrive_download_file`, `gdrive_upload_file`, `gdrive_create_folder`, `gdrive_share_file`, `gdrive_move_file`, `gdrive_trash_file` |
+| Google Sheets | `gsheets` | Composio quartet (for `google_sheets`), `google_sheets/` | `gsheets_create_spreadsheet`, `gsheets_get_info`, `gsheets_get_values`, `gsheets_update_values`, `gsheets_append_values`, `gsheets_clear_values`, `gsheets_add_sheet`, `gsheets_batch_update`, `gsheets_list_spreadsheets` |
 | Notion | `notion` | internal-integration token, `notion/config.json` | `notion_search`, `notion_get_page`, `notion_get_block_children`, `notion_append_paragraph`, `notion_append_blocks`, `notion_create_page`, `notion_update_page`, `notion_get_database`, `notion_query_database`, `notion_list_users`, `notion_create_comment`, `notion_get_comments` |
+| Overleaf | `overleaf` | `overleaf_session2` browser session cookie (no OAuth or public API; sign in in your own browser and paste the cookie) + optional Git bridge token and Server Pro `host`, `overleaf/config.json` | `overleaf_whoami`, `overleaf_list_projects`, `overleaf_create_project`, `overleaf_upload_project_zip`, `overleaf_rename_project`, `overleaf_clone_project`, `overleaf_set_project_state`, `overleaf_update_project_settings`, `overleaf_download_project_zip`, `overleaf_list_files`, `overleaf_read_file`, `overleaf_download_file`, `overleaf_write_file`, `overleaf_upload_file`, `overleaf_create_folder`, `overleaf_rename_entity`, `overleaf_move_entity`, `overleaf_delete_entity`, `overleaf_compile`, `overleaf_download_pdf`, `overleaf_word_count`, `overleaf_clear_compile_cache`, `overleaf_list_members`, `overleaf_invite_collaborator`, `overleaf_set_collaborator_privileges`, `overleaf_remove_collaborator`, `overleaf_revoke_invite`, `overleaf_get_sharing_links`, `overleaf_leave_project`, `overleaf_transfer_ownership`, `overleaf_get_chat_messages`, `overleaf_send_chat_message`, `overleaf_list_tags`, `overleaf_create_tag`, `overleaf_edit_tag`, `overleaf_delete_tag`, `overleaf_tag_project`, `overleaf_get_history`, `overleaf_list_labels`, `overleaf_create_label`, `overleaf_delete_label`, `overleaf_get_diff`, `overleaf_download_version_zip`, `overleaf_restore_file`, `overleaf_revert_project`, `overleaf_list_notifications`, `overleaf_git_clone`, `overleaf_git_sync` |
 | PostgreSQL | `postgres` | `postgresql://` URI, `postgres/config.json` | `pg_query`, `pg_execute`, `pg_list_schemas`, `pg_list_tables`, `pg_describe_table`, `pg_list_indexes`, `pg_explain` |
 
-All nine are outbound-only (no gateway mode). PostgreSQL defaults to **read-only
+All ten are outbound-only (no gateway mode). PostgreSQL defaults to **read-only
 enforced server-side**: connections open with `default_transaction_read_only=on` and
 `pg_query` uses the extended query protocol so multi-statement strings are rejected;
 read paths run under a 60 s server-side `statement_timeout` while `pg_execute` (write
@@ -334,13 +378,25 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 
 `ask_sea.py` is the one module that wraps no external service. On an idle tab,
 `/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
-plus an instruction to read the events of the task you are asking about from
-`~/.kiss/sorcar.db`; the script swaps the system prompt for the compact SYSTEM_LITE
-prompt with a no-internet, answer-quickly suffix, and returns `False` from
-`is_parallel()` and `use_web_tools()`, so the answering session has no browser tools and
-no parallel sub-agents and is instructed to answer only from the local event log. Typed
-into a tab whose task is still running, the question is instead dispatched directly to
-the daemon through a background side channel that does not interrupt the running agent:
+plus an instruction naming the task you are asking about and telling the agent to call
+`task_overview` on it first. The script gives the answering session three read-only
+trajectory tools over a pre-digested copy of that task's persisted events
+(`kiss.agents.sorcar.task_digest`): `task_overview(task_id)` (status, model, spend, the
+sub-agents it dispatched, later user messages, progress summaries, and its last 30
+transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
+page of the digested transcript, optionally filtered), and `task_step(task_id, index,
+max_chars)` (one entry in full). It swaps the system prompt
+for the compact SYSTEM_LITE prompt (the bundled `_ask_system_lite.md`, a copy of the
+ablation prompt with the brand identity as a `{{IDENTITY}}` placeholder) with a
+no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
+`review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and
+`use_memory()`, so the answering session has no browser tools, no memory tools, and no
+parallel sub-agents. It answers from the trajectory tools, may run one short read-only
+Bash command for live state the transcript cannot show (result files, background jobs,
+`git diff` in the task's work dir), and is told never to read `~/.kiss/sorcar.db` by
+hand. Typed into a tab whose task is still running, the question
+is instead dispatched directly to the daemon through a background side channel that does
+not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only
 while it works (the tab closes when it finishes and does not reappear on reload), and the
 reply lands in that task's transcript. No configuration or credentials are involved.
@@ -400,7 +456,11 @@ directly:
    reminder help center uses "Remind me to call the dentist tomorrow at 10am" and
    "Every Monday at 9am, remind me to submit my timesheet", then cancels by name
    ("Cancel my dentist reminder"). Phrase scheduled prompts to Sorcar the same way: a
-   name, an exact schedule, a bounded prompt, a delivery target.
+   name, an exact schedule, a bounded prompt, a delivery target. Cron expressions and
+   timestamps without a UTC offset are read as Pacific time (`America/Los_Angeles`,
+   PDT or PST), not UTC; a timestamp with an offset keeps its instant, and intervals
+   are zone-free. Say "9am Eastern" and the cron agent converts it to Pacific before
+   storing the job.
 7. **Meet people in the channel they already use.** Muse's biggest distribution bet is
    living inside WhatsApp rather than a new app. The KISS equivalent: have scheduled
    results delivered where the audience already is (a Telegram chat, `#eng` on Slack,
@@ -413,7 +473,7 @@ directly:
 
 ## Example prompts
 
-Everything below is a prompt you can type — or speak, with the wake word "sorcar, …" —
+Everything below is a prompt you can type — or speak, with the wake word "Hey Sorcar, …" —
 into any Sorcar chat surface (VS Code sidebar, web/mobile app, a channel gateway, an
 OpenAI-compatible client).
 
@@ -424,9 +484,10 @@ explicit target:
 
 > Post "deploy of v2.3 finished, all green" to the Slack channel #eng.
 
-**2. Authenticate in chat, not in config files:**
+**2. Authenticate in chat, not in config files** (or click the app in the sidebar's
+Apps panel, which submits an equivalent prompt for you):
 
-> Check my GitHub auth; if it's missing, walk me through creating a token and store it.
+> Check my GitHub auth; if it's missing, sign me in and store the credential.
 
 Then, as a second prompt (the session that stores a fresh token cannot use the new
 backend tools itself — they are snapshotted at session start):
@@ -511,10 +572,10 @@ workspace whose `SORCAR.md` points at `govee.py`, as this repository's does.)
 (`get_stream_info` returns title and viewer data but no URL — the prompt builds the
 link from the channel login.)
 
-**13. Google Drive backup, link shared to Mattermost:**
+**13. Google Drive file shared to Mattermost:**
 
-> Upload ./reports/q3-summary.pdf to the "Team Reports" folder on Google Drive, share
-> it read-only with team-lead@acme.dev, then post the file link to the town-square
+> Find "q3-summary.pdf" in the "Team Reports" folder on Google Drive, share it
+> read-only with team-lead@acme.dev, then post the file link to the town-square
 > Mattermost channel.
 
 **14. Slack thread → Google Docs minutes:**
@@ -531,8 +592,10 @@ link from the channel login.)
 
 ### Schedules and always-on gateways
 
-The built-in cron agent understands plain-language schedules; the kiss-web daemon
-ticks the scheduler automatically, and a job's result can be delivered to any
+The built-in cron agent understands plain-language schedules (wall-clock times are
+Pacific, `America/Los_Angeles`, unless a timestamp carries its own offset; the job
+listing shows next-run times in Pacific too); the
+kiss-web daemon ticks the scheduler automatically, and a job's result can be delivered to any
 gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_REPLY`
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run

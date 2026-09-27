@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
@@ -51,6 +53,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _task_accepts_input
+from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.server import VSCodeServer
 from kiss.server.tab_registry import _MAX_TABS, OpenTabOutcome, TabRegistry
 from kiss.server.task_runner import _wt_merge_on_repo
@@ -384,42 +387,107 @@ class TestDRC3AtomicOccupancyCheckAndClaim:
                 wt_agent.discard(rescue_ignored=False)
 
 
+def _wait_for(predicate: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Poll *predicate* until it holds or *timeout* seconds elapse."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not met in time")
+
+
+def _private_registry(server: VSCodeServer, tmp_path: Path) -> FileIndexRegistry:
+    """Replace the server's file-index registry with one rooted in *tmp_path*."""
+    server._file_index.stop()
+    registry = FileIndexRegistry(
+        home=str(tmp_path / "home"), cache_dir=tmp_path / "cache",
+    )
+    server._file_index = registry
+    return registry
+
+
+def _drain(registry: FileIndexRegistry, tmp_path: Path) -> None:
+    """Block until every build queued so far on *registry* has run.
+
+    The registry's single worker serves jobs in FIFO order, so a
+    sentinel job on an unrelated directory completing proves the
+    earlier jobs (or their absence) have been decided.
+    """
+    done = threading.Event()
+    registry.ensure(str(tmp_path / "sentinel"), done.set)
+    assert done.wait(10.0), "the file-index worker never ran the sentinel"
+
+
+def _index_of(registry: FileIndexRegistry, work_dir: str) -> FileIndex | None:
+    root, _ = registry.root_for(work_dir)
+    with registry._lock:
+        return registry._indexes.get(root)
+
+
 class TestDR1SharedWorkDirUpdate:
-    """Both work-dir update paths share ``_apply_new_work_dir``."""
+    """Both work-dir update paths share ``_apply_new_work_dir``.
+
+    Adopting a different directory pre-warms its ``@``-mention index
+    (``_file_index.ensure(new_dir)``); re-announcing the current one or
+    naming a filesystem root queues nothing.
+    """
 
     def test_set_work_dir_updates_state(self, tmp_path: Path) -> None:
         server = VSCodeServer(printer=MemoryPrinter())
-        # ``work_dir`` is an optional printer attribute the update
-        # mirrors onto when present (hasattr-guarded in production).
-        setattr(server.printer, "work_dir", "")
-        server._file_cache = {"stale": ["a.py"]}
-        new_dir = str(tmp_path / "workspace-a")
-        server._cmd_set_work_dir({"workDir": new_dir, "connId": "c1"})
-        assert server.work_dir == new_dir
-        assert server._file_cache == {}, (
-            "changing the work dir must invalidate the file cache"
-        )
-        assert getattr(server.printer, "work_dir") == new_dir
+        registry = _private_registry(server, tmp_path)
+        try:
+            # ``work_dir`` is an optional printer attribute the update
+            # mirrors onto when present (hasattr-guarded in production).
+            setattr(server.printer, "work_dir", "")
+            new_dir = tmp_path / "workspace-a"
+            new_dir.mkdir()
+            (new_dir / "a.py").write_text("a = 1\n")
+            server._cmd_set_work_dir({"workDir": str(new_dir), "connId": "c1"})
+            assert server.work_dir == str(new_dir)
+            assert getattr(server.printer, "work_dir") == str(new_dir)
+            _wait_for(lambda: registry.view_for(str(new_dir)) is not None)
+            index = _index_of(registry, str(new_dir))
+            assert index is not None and "a.py" in index.paths, (
+                "changing the work dir must pre-warm the new directory's index"
+            )
 
-        # Unchanged dir: the cache survives.
-        server._file_cache = {"warm": ["b.py"]}
-        server._cmd_set_work_dir({"workDir": new_dir, "connId": "c1"})
-        assert server._file_cache == {"warm": ["b.py"]}, (
-            "re-announcing the same work dir must not blow the cache"
-        )
+            # Unchanged dir: no build is queued, the index stays as is.
+            server._cmd_set_work_dir({"workDir": str(new_dir), "connId": "c1"})
+            _drain(registry, tmp_path)
+            assert _index_of(registry, str(new_dir)) is index, (
+                "re-announcing the same work dir must not rebuild its index"
+            )
+
+            # A filesystem root is refused: nothing adopted, nothing queued.
+            server._cmd_set_work_dir({"workDir": "/", "connId": "c1"})
+            assert server.work_dir == str(new_dir)
+            _drain(registry, tmp_path)
+            assert registry.home not in registry._indexes, (
+                "a refused root must not queue an index build of the home dir"
+            )
+        finally:
+            registry.stop()
 
     def test_save_config_updates_state_identically(
         self, tmp_path: Path,
     ) -> None:
         server = VSCodeServer(printer=MemoryPrinter())
-        setattr(server.printer, "work_dir", "")
-        server._file_cache = {"stale": ["a.py"]}
-        new_dir = str(tmp_path / "workspace-b")
-        server._cmd_save_config({
-            "config": {"work_dir": new_dir},
-            "apiKeys": {},
-            "connId": "c1",
-        })
-        assert server.work_dir == new_dir
-        assert server._file_cache == {}
-        assert getattr(server.printer, "work_dir") == new_dir
+        registry = _private_registry(server, tmp_path)
+        try:
+            setattr(server.printer, "work_dir", "")
+            new_dir = tmp_path / "workspace-b"
+            new_dir.mkdir()
+            (new_dir / "b.py").write_text("b = 1\n")
+            server._cmd_save_config({
+                "config": {"work_dir": str(new_dir)},
+                "apiKeys": {},
+                "connId": "c1",
+            })
+            assert server.work_dir == str(new_dir)
+            assert getattr(server.printer, "work_dir") == str(new_dir)
+            _wait_for(lambda: registry.view_for(str(new_dir)) is not None)
+            index = _index_of(registry, str(new_dir))
+            assert index is not None and "b.py" in index.paths
+        finally:
+            registry.stop()

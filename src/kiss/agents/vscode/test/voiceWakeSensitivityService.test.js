@@ -54,8 +54,8 @@ const aiff = path.join(tmpdir, 'hey.aiff');
 const wav = path.join(tmpdir, 'hey.wav');
 spawnSync(
   'say',
-  ['hey there [[slnc 300]] Sorcar [[slnc 1500]] ' +
-   'hey there [[slnc 300]] Sorcar [[slnc 1500]]',
+  ['hey there [[slnc 300]] Hey Sorcar [[slnc 1500]] ' +
+   'hey there [[slnc 300]] Hey Sorcar [[slnc 1500]]',
    '-o', aiff],
   {stdio: 'inherit'},
 );
@@ -124,7 +124,7 @@ async function main() {
   try {
     assert.ok(
       eager.wakes.length >= 1,
-      'the default sensitivity (80) must accept "hey there Sorcar"; ' +
+      'the default sensitivity (80) must accept "hey there, Hey Sorcar"; ' +
         `states=${JSON.stringify(eager.states)}`,
     );
     console.log(

@@ -29,10 +29,11 @@ _has_codex = shutil.which("codex") is not None
 requires_codex_cli = pytest.mark.skipif(not _has_codex, reason="codex CLI not installed")
 
 
+# Catalog entries the Codex backend must expose.  ``codex/gpt-5.4`` was
+# retired upstream and dropped by the 2026-09-26 ``update_models.py`` refresh.
 _CODEX_MODEL_NAMES = (
     "codex/codex-auto-review",
     "codex/default",
-    "codex/gpt-5.4",
     "codex/gpt-5.5",
     "codex/gpt-5.6-luna",
     "codex/gpt-5.6-sol",

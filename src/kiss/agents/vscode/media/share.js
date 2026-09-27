@@ -90,10 +90,37 @@
     const p = el.parentElement;
     if (!p) return;
     const cnt = p.querySelector('.cnt');
-    if (cnt) cnt.classList.toggle('hidden');
+    if (cnt) {
+      cnt.classList.toggle('hidden');
+      el.setAttribute(
+        'aria-expanded',
+        cnt.classList.contains('hidden') ? 'false' : 'true',
+      );
+    }
     const arrow = el.querySelector('.arrow');
     if (arrow) arrow.classList.toggle('collapsed');
   };
+
+  /**
+   * Keyboard parity for the thinking header: the header is a focusable
+   * role="button", so Enter and Space toggle it like a click does.
+   *
+   * @param {KeyboardEvent} e The keydown event.
+   */
+  function onThinkHeaderKeydown(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target;
+    if (
+      !target ||
+      typeof target.matches !== 'function' ||
+      !target.matches('.think > .lbl')
+    ) {
+      return;
+    }
+    e.preventDefault();
+    window.toggleThink(target);
+  }
+  document.addEventListener('keydown', onThinkHeaderKeydown);
 
   /**
    * Collapse every run_parallel panel inside *root*, mirroring

@@ -279,7 +279,7 @@ class TestSlackAgent:
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = check()
         assert "Not authenticated" in result
-        assert "xoxb-" in result
+        assert "authenticate_slack()" in result
 
     def test_check_auth_with_invalid_token(self) -> None:
         _save_token("xoxb-invalid-token")
@@ -288,15 +288,6 @@ class TestSlackAgent:
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = json.loads(check())
         assert result["ok"] is False
-
-    def test_authenticate_invalid_token(self) -> None:
-        agent = SlackAgent()
-        tools = agent._get_tools()
-        auth = next(t for t in tools if t.__name__ == "authenticate_slack")
-        result = json.loads(auth(token="xoxb-invalid-test"))
-        assert result["ok"] is False
-        assert "error" in result
-        assert _load_token() is None
 
 
 

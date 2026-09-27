@@ -15,6 +15,7 @@ inspect the actual system prompt the run installed on the live model
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,9 +26,12 @@ from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _memory_root_for_run,
     _memory_settings,
+    _repo_memory_domains,
     run_tasks_parallel,
 )
-from kiss.core.memoryfield.tools import MEMORY_PROTOCOL
+from kiss.core import config as config_module
+from kiss.core.memoryfield.index import hashed_embedding
+from kiss.core.memoryfield.tools import MEMORY_PROTOCOL, MemoryTools
 
 live_api = pytest.mark.live_api
 requires_keys = pytest.mark.skipif(
@@ -347,6 +351,148 @@ class TestFanOutForwardsUseMemory:
         run_parallel('["record via tool"]', max_workers="1")
         assert [entry["override"] for entry in recorded] == [False]
         assert recorded[0]["memory_tools"] is None
+
+
+def _git_repo(path: Path) -> None:
+    """Turn *path* into a git repository with one commit (worktrees need a HEAD)."""
+    path.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q", "."], cwd=path, check=True, env=env)
+    (path / "README.md").write_text("hello\n")
+    subprocess.run(["git", "add", "README.md"], cwd=path, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=path, check=True, env=env)
+
+
+class TestRepoMemoryDomains:
+    """``_repo_memory_domains`` names the repository memory after the main checkout."""
+
+    def test_main_checkout_sub_directory_and_worktree_share_one_memory(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "My_Project.v2"
+        _git_repo(repo)
+        (repo / "src").mkdir()
+        worktree = tmp_path / "wt"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", str(worktree), "-b", "feature"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        expected = {"my-project-v2": f"memory of the repository {repo.resolve()}"}
+        assert _repo_memory_domains(str(repo)) == expected
+        assert _repo_memory_domains(str(repo / "src")) == expected
+        assert _repo_memory_domains(str(worktree)) == expected
+        # A work dir the run has yet to create inside the repo counts as inside it.
+        assert _repo_memory_domains(str(repo / "new" / "deeper")) == expected
+
+    def test_no_repository_means_no_domain_memory(self, tmp_path: Path) -> None:
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert _repo_memory_domains(str(plain)) == {}
+        assert _repo_memory_domains(str(tmp_path / "missing" / "too")) == {}
+        bare = tmp_path / "bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        assert _repo_memory_domains(str(bare)) == {}
+
+    def test_submodules_and_separate_git_dirs_are_named_after_their_checkout(
+        self, tmp_path: Path
+    ) -> None:
+        """When the common dir is not ``<checkout>/.git``, ``--show-toplevel`` decides."""
+        env = {**os.environ, "GIT_ALLOW_PROTOCOL": "file"}
+        upstream = tmp_path / "upstream"
+        _git_repo(upstream)
+        superproject = tmp_path / "superproject"
+        _git_repo(superproject)
+        for sub in ("sub-one", "sub-two"):
+            subprocess.run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                 str(upstream), sub],
+                cwd=superproject, check=True, capture_output=True, env=env,
+            )
+        assert _repo_memory_domains(str(superproject / "sub-one")) == {
+            "sub-one": f"memory of the repository {(superproject / 'sub-one').resolve()}"
+        }
+        assert _repo_memory_domains(str(superproject / "sub-two")) == {
+            "sub-two": f"memory of the repository {(superproject / 'sub-two').resolve()}"
+        }
+        checkout = tmp_path / "project-one"
+        (tmp_path / "meta").mkdir()
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(tmp_path / "meta" / "one.git"),
+             str(checkout)],
+            check=True, capture_output=True,
+        )
+        assert _repo_memory_domains(str(checkout)) == {
+            "project-one": f"memory of the repository {checkout.resolve()}"
+        }
+
+    def test_a_repository_named_general_gets_a_non_reserved_memory_name(
+        self, tmp_path: Path
+    ) -> None:
+        repo = tmp_path / "General"
+        _git_repo(repo)
+        domains = _repo_memory_domains(str(repo))
+        assert domains == {"general-repo": f"memory of the repository {repo.resolve()}"}
+        MemoryTools(tmp_path / "memory", embed=hashed_embedding, domains=domains)
+
+    def test_run_attaches_the_repository_memory_of_the_work_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A run whose work_dir is a repo gets `MemoryTools` with that repo's domain
+        and a system prompt that names it; a run outside any repo gets neither."""
+        home = _home(monkeypatch, tmp_path)
+        _write_config(home, {"use_memory": True, "classify_tasks": False})
+        repo = tmp_path / "kissy"
+        _git_repo(repo)
+        seen: dict[str, Any] = {}
+
+        def recorder_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["tools"] = self_agent._memory_tools
+            seen["system"] = kwargs.get("system_prompt", "")
+            return "done"
+
+        # As in TestFanOutForwardsUseMemory, only the LLM boundary (the parent
+        # class's run) is replaced; SorcarAgent.run's memory wiring is real.
+        monkeypatch.setattr(cast(Any, SorcarAgent.__mro__[1]), "run", recorder_run)
+        agent = SorcarAgent("repo-memory")
+        agent.run(
+            model_name="claude-haiku-4-5", prompt_template="x", work_dir=str(repo),
+            web_tools=False, is_parallel=False, verbose=False,
+        )
+        tools = seen["tools"]
+        assert tools is not None
+        assert tools.memory.root == home / "memories"
+        assert tools.domains == {"kissy": f"memory of the repository {repo.resolve()}"}
+        assert tools.indexes["kissy"].memory.root == home / "memories" / "kissy"
+        assert MEMORY_PROTOCOL in seen["system"]
+        assert f"- `kissy/`: memory of the repository {repo.resolve()}" in seen["system"]
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        SorcarAgent("no-repo-memory").run(
+            model_name="claude-haiku-4-5", prompt_template="x", work_dir=str(plain),
+            web_tools=False, is_parallel=False, verbose=False,
+        )
+        assert seen["tools"].domains == {}
+        assert MEMORY_PROTOCOL in seen["system"]
+        assert "Domain memories:" not in seen["system"]
+
+        # A work dir the run will create inside the repo, and the default work
+        # dir (artifact_dir/kiss_workdir) when it lies inside a repo, both attach it.
+        SorcarAgent("new-dir-memory").run(
+            model_name="claude-haiku-4-5", prompt_template="x",
+            work_dir=str(repo / "not" / "yet"), web_tools=False, is_parallel=False,
+            verbose=False,
+        )
+        assert list(seen["tools"].domains) == ["kissy"]
+        monkeypatch.setattr(config_module, "artifact_dir", str(repo / "artifacts"))
+        SorcarAgent("default-dir-memory").run(
+            model_name="claude-haiku-4-5", prompt_template="x", web_tools=False,
+            is_parallel=False, verbose=False,
+        )
+        assert list(seen["tools"].domains) == ["kissy"]
 
 
 def _run_capturing_system_prompt(

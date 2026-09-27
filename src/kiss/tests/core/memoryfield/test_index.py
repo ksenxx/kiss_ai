@@ -220,8 +220,11 @@ def test_pre_column_index_schema_is_migrated_and_reembedded(tmp_path: Path) -> N
     index = VectorIndex(memory, embed=hashed_embedding)
     assert index.sync().added == 2
     with closing(sqlite3.connect(index.path)) as conn, conn:
+        conn.execute("DROP INDEX pages_sync")  # old files predate the covering index too
         conn.execute("ALTER TABLE pages DROP COLUMN input_format")  # simulate the old schema
         conn.execute("ALTER TABLE pages DROP COLUMN revision")
+        # Files from before these columns also predate the schema_version key.
+        conn.execute("DELETE FROM meta WHERE key IN ('schema_version', 'generation')")
 
     report = index.sync()
     assert (report.added, report.updated, report.removed, report.unchanged) == (0, 2, 0, 0)

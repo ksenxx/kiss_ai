@@ -26,53 +26,93 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
+from typing import Any
 
 from kiss.tests.conftest import posix_only
 
 
 class TestH9AutocompleteNonBlocking(unittest.TestCase):
-    """``_get_files`` must return promptly without running a synchronous scan."""
+    """``getFiles`` must return promptly even while the index worker is busy.
 
-    def test_get_files_does_not_block_on_empty_cache(self) -> None:
-        from kiss.server import autocomplete as ac
+    The ``@``-mention index is built on ``FileIndexRegistry``'s single
+    worker thread.  A ``getFiles`` for a root that is not indexed yet
+    must therefore answer at once with a ``loading`` placeholder and
+    deliver the populated list later — never run the scan on the
+    message-handling thread or wait for the worker to become free.
+    """
+
+    def test_get_files_does_not_block_while_worker_is_busy(self) -> None:
+        from kiss.server.file_index import FileIndexRegistry
+        from kiss.server.server import VSCodeServer
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-h9-"))
+        work_dir = tmpdir / "work"
+        other_root = tmpdir / "other"
+        for rel in ("work/a.py", "work/b/c.py", "other/z.py"):
+            (tmpdir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmpdir / rel).write_text("")
 
         broadcasts: list[dict] = []
+        lock = threading.Lock()
 
-        class StubPrinter:
-            def broadcast(self, msg: dict) -> None:
-                broadcasts.append(msg)
+        def capture(msg: dict[str, Any]) -> None:
+            with lock:
+                broadcasts.append(dict(msg))
 
-        class FakeServer(ac._AutocompleteMixin):
-            def __init__(self) -> None:
-                self.printer = StubPrinter()  # type: ignore[assignment]
-                self.work_dir = "/"
-                self._state_lock = threading.RLock()
-                self._complete_queue = None
-                self._complete_worker = None
-                self._complete_seq_latest = {}
-                self._file_cache = {}
+        server = VSCodeServer()
+        server.printer.broadcast = capture  # type: ignore[method-assign, assignment]
+        server.work_dir = str(work_dir)
+        server._file_index.stop()
+        registry = FileIndexRegistry(home=str(tmpdir / "home"), cache_dir=tmpdir / "cache")
+        server._file_index = registry
+        try:
+            # Park the worker: it builds ``other_root`` and then blocks in
+            # the callback until the gate opens, so a build of ``work_dir``
+            # cannot start before that.
+            worker_parked = threading.Event()
+            gate = threading.Event()
 
-        srv = FakeServer()
-        from kiss.server import diff_merge as dm
+            def park_worker() -> None:
+                worker_parked.set()
+                gate.wait(timeout=10)
 
-        slow_scan_started = threading.Event()
-        slow_scan_done = threading.Event()
+            registry.ensure(str(other_root), park_worker)
+            self.assertTrue(worker_parked.wait(5.0), "worker never reached the gate")
 
-        def slow_scan(work_dir: str) -> list[str]:
-            slow_scan_started.set()
-            time.sleep(2.0)
-            slow_scan_done.set()
-            return ["a.py", "b/c.py"]
+            t0 = time.monotonic()
+            server._handle_command(
+                {"type": "getFiles", "prefix": "a", "workDir": str(work_dir)},
+            )
+            dt = time.monotonic() - t0
+            self.assertLess(dt, 0.5,
+                            f"getFiles blocked for {dt:.2f}s while the index worker was busy")
+            with lock:
+                seen = list(broadcasts)
+            self.assertEqual(len(seen), 1, f"expected only the loading placeholder; got {seen}")
+            self.assertEqual(seen[0]["type"], "files")
+            self.assertTrue(seen[0].get("loading"))
+            self.assertEqual(seen[0]["files"], [])
+            self.assertEqual(seen[0]["prefix"], "a")
 
-        with mock.patch.object(dm, "_scan_files", slow_scan):
-            t0 = time.time()
-            srv._get_files("a")
-            dt = time.time() - t0
-        self.assertLess(dt, 0.5,
-                        f"_get_files blocked for {dt:.2f}s — scan ran on caller thread")
-        self.assertTrue(slow_scan_started.wait(2.0),
-                        "Background scan was never started")
+            gate.set()
+            deadline = time.monotonic() + 5.0
+            populated: list[dict] = []
+            while time.monotonic() < deadline and not populated:
+                with lock:
+                    populated = [
+                        m for m in broadcasts
+                        if m["type"] == "files" and not m.get("loading")
+                    ]
+                time.sleep(0.01)
+            self.assertEqual(
+                len(populated), 1,
+                f"no populated reply after the gate opened: {broadcasts}",
+            )
+            self.assertEqual(populated[0]["prefix"], "a")
+            self.assertEqual([f["text"] for f in populated[0]["files"]], ["a.py"])
+        finally:
+            registry.stop()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 

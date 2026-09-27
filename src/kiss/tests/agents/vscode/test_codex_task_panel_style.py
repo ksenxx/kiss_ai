@@ -7,21 +7,21 @@
 Features on the remote webapp (served by ``RemoteAccessServer``):
 
 1. The pinned task panel (``#task-panel``) inherits main.css's
-   thinking-panel look verbatim (same background and foreground as
-   ``.think``, plus a thick cyan border; the remote page merely swaps
-   the palette variables), sized by the page's injected 14px
+   look verbatim (the thinking panel's foreground over the accent tint,
+   plus a 1px accent hairline; the remote page merely swaps the
+   palette variables), sized by the page's injected 14px
    ``--vscode-editor-font-size``.  The event panels likewise inherit
    the extension's main.css typography — that extension-parity
    contract is pinned end to end by
    ``test_remote_panels_match_extension.py``.
-2. History rows (``.running-item``) are neutral in the grouped view
-   (no pastel background, no colored left border, no ``--task-color``
-   custom property, no inline colors) on every surface.  Only the
+2. History rows (``.running-item``) are neutral on every surface and
+   in both views: no pastel background, no coloured border, no
+   per-chat ``--task-color`` custom property, no inline colours.  The
    legacy flat list (``#history-list.legacy-view``, toggled by the
-   button right of the search box) stamps ``--task-color`` per row and
-   paints it as a narrow bar on the row's RIGHT edge.  The chat-panel
-   headers of the grouped view sit on a sky-blue tint, show one line
-   of text and carry no tooltip.
+   button right of the search box) is the same flat rows, newest
+   first.  The chat-panel headers of the grouped view are plain rows
+   on the list background (a tint only under the pointer), show one
+   line of text and carry no tooltip.
 3. ALL task metadata (steps, tok, cost, duration, time, work dir,
    model, wt, parallel, auto-commit, chat id, task id) renders as ONE
    wrapping line instead of three separately-clipped lines.  Field
@@ -82,8 +82,7 @@ def _resolve_palette_vars(decls: str, palette: dict[str, str]) -> str:
     custom properties so the light theme can re-theme the page, so the
     static assertions below have to compare resolved values instead of
     literal declarations. ``var()`` references to properties outside
-    the palette (e.g. the per-chat ``--task-color`` written by main.js)
-    are left untouched.
+    the palette are left untouched.
 
     Args:
         decls: CSS declarations to expand.
@@ -108,10 +107,9 @@ def _find_rule(css: str, selector: str) -> str:
     return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
 
 
-def test_main_js_history_rows_color_only_in_legacy_view() -> None:
-    """renderHistory writes no inline colors on history rows; the
-    per-chat --task-color property is stamped only on the legacy flat
-    list's rows (the ``historyLegacyView`` branch)."""
+def test_main_js_history_rows_carry_no_colour() -> None:
+    """renderHistory writes no inline colours on history rows in either
+    view: no background, no text colour, no per-chat ``--task-color``."""
     js = MAIN_JS.read_text(encoding="utf-8")
     start = js.index("function renderHistory(")
     end = js.index("function applyHistoryViewToggle(")
@@ -120,63 +118,48 @@ def test_main_js_history_rows_color_only_in_legacy_view() -> None:
         "renderHistory must not set an inline background color on "
         "history rows (inline styles beat every stylesheet)"
     )
-    assert "style.color = '#1a1a1a'" not in body, (
+    assert "style.color" not in body, (
         "renderHistory must not set an inline text color on history rows"
     )
-    assert body.count("--task-color") == 1, (
-        "renderHistory stamps --task-color in exactly one place"
-    )
-    stamp = body.index("--task-color")
-    branch = body.rindex("if (historyLegacyView) {", 0, stamp)
-    assert "historyGroupFor(" not in body[branch:stamp], (
-        "the --task-color stamp belongs to the flat-list branch, before "
-        "the grouped branch"
-    )
+    assert "--task-color" not in js, "no per-chat colour is stamped anywhere"
+    assert "chatIdBgColor" not in js, "the per-chat hue hash is gone"
 
 
 def test_main_css_webview_rows_are_neutral() -> None:
-    """The VS Code webview's task panels are neutral: no pastel
-    background, theme foreground text; --task-color is read by main.css
-    in exactly one rule — the legacy flat list's right-edge bar."""
+    """The VS Code webview's task panels are flat: transparent until
+    hovered, theme foreground text, no per-chat colour bar in either view."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     m = re.search(r"\n\.running-item\s*\{([^}]*)\}", css)
     assert m, ".running-item rule missing from main.css"
     rule = m.group(1)
-    assert "--task-color" not in rule, (
-        f".running-item must not read var(--task-color) any more; got: {rule!r}"
-    )
-    assert "background-color: color-mix(in srgb, var(--fg) 3%, transparent)" in rule, (
-        f".running-item must paint a neutral background; got: {rule!r}"
+    assert "background-color: transparent" in rule, (
+        f".running-item must paint no background of its own; got: {rule!r}"
     )
     assert "color: var(--fg)" in rule, (
         f".running-item must use the theme foreground; got: {rule!r}"
     )
-    legacy = re.search(
-        r"#history-list\.legacy-view > \.running-item\s*\{([^}]*)\}", css
-    )
-    assert legacy, "the legacy flat list's color-bar rule is missing"
-    assert "border-right: 4px solid var(--task-color" in legacy.group(1), (
-        f"the legacy bar is a 4px right border in the chat color; got: {legacy.group(1)!r}"
-    )
-    assert "background" not in legacy.group(1), "no pastel background in the legacy view"
-    assert css.count("var(--task-color") == 1, (
-        "main.css reads --task-color only for the legacy right-edge bar"
-    )
+    assert "--task-color" not in css, "main.css reads no per-chat colour"
+    assert "legacy-view" not in css, "the legacy flat list has no styling of its own"
 
 
-def test_main_css_chat_header_cyan_single_line() -> None:
-    """The grouped view's chat-panel header sits on a clearly visible
-    cyan tint (the Bash tool-call header's hue, at least 25% strong)
-    and shows its title on one ellipsized line."""
+def test_main_css_chat_header_neutral_single_line() -> None:
+    """The grouped view's chat-panel header is a plain row on the list
+    background (a faint --fg tint only under the pointer, never an accent
+    band competing with the active row) and shows its title on one
+    ellipsized line."""
     css = MAIN_CSS.read_text(encoding="utf-8")
     header = re.search(r"\n\.history-chat-header\s*\{([^}]*)\}", css)
     assert header, ".history-chat-header rule missing"
+    assert "background: transparent" in header.group(1), header.group(1)
+    assert "var(--accent)" not in header.group(1), header.group(1)
+    hover = re.search(r"\n\.history-chat-header:hover\s*\{([^}]*)\}", css)
+    assert hover, ".history-chat-header:hover rule missing"
     tint = re.search(
-        r"background:\s*color-mix\(in srgb, var\(--cyan\) (\d+)%, transparent\)",
-        header.group(1),
+        r"background:\s*color-mix\(in srgb, var\(--fg\) (\d+)%, transparent\)",
+        hover.group(1),
     )
-    assert tint, f"the header background must be a --cyan tint; got: {header.group(1)!r}"
-    assert int(tint.group(1)) >= 25, f"the header tint is barely visible: {tint.group(0)}"
+    assert tint, f"the hover background must be a --fg tint; got: {hover.group(1)!r}"
+    assert 3 <= int(tint.group(1)) <= 10, f"the hover tint is not faint: {tint.group(0)}"
     title = re.search(r"\n\.history-chat-title\s*\{([^}]*)\}", css)
     assert title, ".history-chat-title rule missing"
     assert "white-space: nowrap" in title.group(1)
@@ -202,6 +185,16 @@ def _hue_of(rgba: str) -> float:
     return h * 60
 
 
+def _chroma_of(color: str) -> float:
+    """The spread between the largest and smallest RGB channel (0..255)
+    of a computed ``rgb(...)`` / ``rgba(...)`` / ``color(srgb ...)``
+    color string; 0 for a pure grey."""
+    nums = [float(n) for n in re.findall(r"[\d.]+", color.replace("srgb", ""))[:3]]
+    if "srgb" in color:
+        nums = [n * 255 for n in nums]
+    return max(nums) - min(nums)
+
+
 def _alpha_of(rgba: str) -> float:
     """The alpha (0..1) of a computed ``rgb(...)`` / ``rgba(...)`` /
     ``color(srgb ...)`` color string; 1 when the color is opaque."""
@@ -219,19 +212,15 @@ SELECTED = "var(--vscode-list-inactiveSelectionBackground, #37373d)"
 
 
 def test_remote_history_row_is_neutral() -> None:
-    """On the remote page the row is neutral too: no per-chat left
-    border, VS Code's inactive-selection background, the editor
-    foreground."""
+    """The remote page adds no row fill of its own: the rows are the
+    flat main.css rows (transparent, editor foreground), lit only by the
+    remote hover colour under the pointer."""
     codex_css = CODEX_CSS.read_text(encoding="utf-8")
-    rule = _find_rule(codex_css, ".running-item")
-    assert "border-left" not in rule, (
-        f"the per-chat left border is gone; got: {rule!r}"
+    assert re.search(r"body\.remote-chat \.running-item\s*\{", codex_css) is None, (
+        "remote-codex.css must not restyle .running-item (no selection fill)"
     )
-    assert f"background-color: {SELECTED}" in rule, (
-        f"the row background must be list.inactiveSelectionBackground; got: {rule!r}"
-    )
-    assert f"color: {FG}" in rule, (
-        f"the row text must be the editor foreground; got: {rule!r}"
+    assert f"background-color: {SELECTED}" not in codex_css, (
+        "no history row is painted with list.inactiveSelectionBackground"
     )
     assert "--task-color" not in codex_css, (
         "remote-codex.css must not reference --task-color anywhere"
@@ -482,12 +471,13 @@ _PROBE_STYLES_JS = r"""(() => {
   const thinkCnt = think ? think.querySelector('.cnt') : null;
   const thinkCntCs = thinkCnt ? getComputedStyle(thinkCnt) : null;
 
-  // Resolve var(--cyan) (the task panel's border color) to rgb().
-  const cyanProbe = document.createElement('div');
-  cyanProbe.style.color = 'var(--cyan)';
-  document.body.appendChild(cyanProbe);
-  const cyanColor = getComputedStyle(cyanProbe).color;
-  cyanProbe.remove();
+  // Resolve var(--accent) (the hue of the task panel's tint and
+  // hairline) to rgb().
+  const accentProbe = document.createElement('div');
+  accentProbe.style.color = 'var(--accent)';
+  document.body.appendChild(accentProbe);
+  const accentColor = getComputedStyle(accentProbe).color;
+  accentProbe.remove();
 
   // The old per-chat accent (djb2 hash of the chat id), resolved to an
   // rgb() string: nothing on the row may carry it any more.
@@ -533,7 +523,7 @@ _PROBE_STYLES_JS = r"""(() => {
     taskPanelBorderColor: tp.borderTopColor,
     thinkBg: thinkCs ? thinkCs.backgroundColor : 'MISSING',
     thinkColor: thinkCntCs ? thinkCntCs.color : 'MISSING',
-    cyanColor,
+    accentColor,
     infoLineRects,
     infoClipped,
     oldAccent,
@@ -566,13 +556,6 @@ _LEGACY_VIEW_PROBE_JS = r"""(() => {
   const list = document.getElementById('history-list');
   const row = list.querySelector(':scope > .running-item');
   const cs = getComputedStyle(row);
-  // Resolve the row's --task-color the way the browser does for the
-  // border: paint it on a probe element and read the computed color.
-  const probe = document.createElement('div');
-  probe.style.color = row.style.getPropertyValue('--task-color');
-  document.body.appendChild(probe);
-  const taskColorComputed = getComputedStyle(probe).color;
-  probe.remove();
   const out = {
     toggleVisible: tBox.width > 0 && tBox.height > 0,
     toggleLeft: tBox.left,
@@ -582,7 +565,8 @@ _LEGACY_VIEW_PROBE_JS = r"""(() => {
     borderRightWidth: cs.borderRightWidth,
     borderLeftWidth: cs.borderLeftWidth,
     borderRightColor: cs.borderRightColor,
-    taskColorComputed,
+    borderLeftColor: cs.borderLeftColor,
+    inlineStyle: row.getAttribute('style'),
   };
   toggle.click();
   out.restoredGroups = list.querySelectorAll('.history-chat-group').length;
@@ -644,10 +628,11 @@ def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: the pinned task panel keeps the
-    extension's thinking-panel look (same background/foreground as
-    .think, thick cyan border) under the remote palette; history rows
-    paint the per-chat color on the left border over a neutral
-    background; all metadata flows as one wrapping line."""
+    extension's look (the thinking panel's foreground over the accent
+    tint, 1px accent hairline) under the remote palette; chat headers
+    are a faint neutral tint; history rows paint the per-chat color on
+    the left border over a neutral background; all metadata flows as
+    one wrapping line."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -720,9 +705,9 @@ def test_live_task_panel_typography_and_history_rows(
                             headerBg: getComputedStyle(
                                 g.querySelector('.history-chat-header')
                             ).backgroundColor,
-                            cyan: (() => {
+                            accent: (() => {
                                 const probe = document.createElement('i');
-                                probe.style.color = 'var(--cyan)';
+                                probe.style.color = 'var(--accent)';
                                 document.body.appendChild(probe);
                                 const c = getComputedStyle(probe).color;
                                 probe.remove();
@@ -750,11 +735,9 @@ def test_live_task_panel_typography_and_history_rows(
                 assert group_probe["whiteSpace"] == "nowrap", (
                     "the chat header shows one line of text: " + repr(group_probe)
                 )
-                assert _hue_of(group_probe["headerBg"]) == pytest.approx(
-                    _hue_of(group_probe["cyan"]), abs=2
-                ), "the chat header background has the page's cyan hue: " + repr(group_probe)
-                assert _alpha_of(group_probe["headerBg"]) >= 0.25, (
-                    "the chat header tint must be clearly visible: " + repr(group_probe)
+                assert _alpha_of(group_probe["headerBg"]) == 0, (
+                    "the chat header is a plain row with no fill of its own: "
+                    + repr(group_probe)
                 )
                 assert group_probe["headerTooltip"] is False, (
                     "the chat header carries no tooltip: " + repr(group_probe)
@@ -923,16 +906,15 @@ def test_live_task_panel_typography_and_history_rows(
                 page.click("#history-list .running-item .sidebar-item-collapse")
                 # Park the mouse away from the row so the style probe
                 # below does not read the :hover background, and wait
-                # out the 0.15s background transition
-                # (body.remote-chat .sidebar-item in remote-codex.css)
-                # back to list.inactiveSelectionBackground (#37373d).
+                # out the 0.15s background transition back to the
+                # row's own transparent fill.
                 page.mouse.move(0, 0)
                 page.wait_for_function(
                     """() => getComputedStyle(
                         document.querySelector(
                             '#history-list .running-item'
                         )
-                    ).backgroundColor === 'rgb(55, 55, 61)'
+                    ).backgroundColor === 'rgba(0, 0, 0, 0)'
                     """,
                     timeout=10000,
                 )
@@ -968,14 +950,14 @@ def test_live_task_panel_typography_and_history_rows(
     assert legacy["legacyClass"] is True and legacy["groups"] == 0, (
         "the legacy view is a flat list: " + repr(legacy)
     )
-    assert legacy["borderRightWidth"] == "4px", (
-        "the legacy row paints a 4px right bar: " + repr(legacy)
+    assert legacy["borderRightWidth"] == legacy["borderLeftWidth"] == "1px", (
+        "the legacy row carries no per-chat colour bar: " + repr(legacy)
     )
-    assert legacy["borderLeftWidth"] == "1px", (
-        "the bar is on the right only: " + repr(legacy)
+    assert _alpha_of(legacy["borderRightColor"]) == 0, (
+        "the legacy row's outline is transparent: " + repr(legacy)
     )
-    assert legacy["borderRightColor"] == legacy["taskColorComputed"], (
-        "the bar is the row's --task-color: " + repr(legacy)
+    assert legacy["inlineStyle"] is None, (
+        "the legacy row carries no inline colour: " + repr(legacy)
     )
     assert legacy["restoredGroups"] >= 1, (
         "toggling back restores the chat panels: " + repr(legacy)
@@ -995,18 +977,25 @@ def test_live_task_panel_typography_and_history_rows(
         "the task panel text must use the SAME foreground as the "
         "thinking panel (main.css --panel-fg: var(--dim)): " + repr(probes)
     )
-    assert probes["taskPanelBg"] == probes["thinkBg"], (
-        "the task panel background must be the SAME as the thinking "
-        "panel (main.css --panel-bg: the .think cyan tint): " + repr(probes)
+    # The thinking panel is neutral (main.css --panel-tint, 4% of --fg);
+    # the task panel alone sits on the accent tint (--accent-tint, 8%)
+    # behind a 1px accent hairline (--accent-line).
+    assert 0.03 <= _alpha_of(probes["thinkBg"]) <= 0.05, (
+        "the thinking panel is a faint neutral tint: " + repr(probes)
+    )
+    assert _hue_of(probes["taskPanelBg"]) == pytest.approx(
+        _hue_of(probes["accentColor"]), abs=2
+    ), "the task panel background must be the accent tint: " + repr(probes)
+    assert 0.07 <= _alpha_of(probes["taskPanelBg"]) <= 0.09, (
+        "the task panel tint is 8% of the accent: " + repr(probes)
     )
     assert probes["taskPanelBorderStyle"] == "solid", probes
-    assert probes["taskPanelBorderWidth"] == "4px", (
-        "the task panel must carry a thick 4px border: " + repr(probes)
+    assert probes["taskPanelBorderWidth"] == "1px", (
+        "the task panel carries a 1px hairline: " + repr(probes)
     )
-    assert probes["taskPanelBorderColor"] == probes["cyanColor"], (
-        "the task panel border must be the cyan theme color "
-        "(var(--cyan)): " + repr(probes)
-    )
+    assert _hue_of(probes["taskPanelBorderColor"]) == pytest.approx(
+        _hue_of(probes["accentColor"]), abs=4
+    ), "the task panel hairline must be the accent hue (--accent-line): " + repr(probes)
 
     row = probes["row"]
     assert row != "MISSING", "history row was not rendered"
@@ -1020,9 +1009,8 @@ def test_live_task_panel_typography_and_history_rows(
     assert row["backgroundColor"] != accent, (
         f"row background must not be the per-chat pastel; row: {row}"
     )
-    # Dark Modern: list.inactiveSelectionBackground #37373d and
-    # editor.foreground #cccccc.
-    assert row["backgroundColor"] == "rgb(55, 55, 61)", row
+    # A flat row: no fill of its own; Dark Modern editor.foreground #cccccc.
+    assert row["backgroundColor"] == "rgba(0, 0, 0, 0)", row
     assert row["color"] == "rgb(204, 204, 204)", (
         f"row text must be light (not the old #1a1a1a); row: {row}"
     )

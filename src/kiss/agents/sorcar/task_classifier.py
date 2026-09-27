@@ -914,51 +914,6 @@ def _truncate_task(task: str) -> str:
     return task[:CLASSIFIER_TASK_MAX_CHARS] + "\n... [task truncated for classification]"
 
 
-def classification_will_call_model(
-    task: str,
-    model_name: str,
-    model_config: dict[str, Any] | None = None,
-    enabled_override: bool | None = None,
-) -> bool:
-    """Whether :func:`classify_task` would make a model round trip now.
-
-    Lets callers overlap other launch work (e.g. preparing a spare git
-    worktree) with the classifier's wait — and skip that overlap when
-    there is nothing to wait for.  Applies exactly the gates
-    :func:`classify_task` applies before calling a model: the classifier
-    must be enabled (see :func:`classification_enabled`), the verdict
-    must not be memoised already, and — on the LLM route only — the
-    model must not be a run-to-completion CLI model.  Best-effort by
-    nature: the answer is a snapshot, and a concurrent memo write or
-    settings change between this call
-    and :func:`classify_task` can make the two disagree.  Callers must
-    only use it to schedule work that is harmless either way.
-
-    Args:
-        task: The task prompt as it will be passed to
-            :func:`classify_task` (before truncation).
-        model_name: The classifying model.
-        model_config: The run's model configuration (endpoint), or
-            ``None``.
-        enabled_override: Per-run ``classify_tasks`` override, see
-            :func:`classification_enabled`.
-
-    Returns:
-        ``True`` when a classification model call is imminent — the
-        decisions classifier's, or the LLM classifier's when the
-        decisions classifier is off (see
-        :func:`decisions_classification_enabled`).
-    """
-    if not classification_enabled(enabled_override):
-        return False
-    task = _truncate_task(task)
-    if decisions_classification_enabled():
-        return _cached_decision(task) is None
-    if _model_runs_task_to_completion(model_name):
-        return False
-    return cached_classification(task, model_name, model_config) is None
-
-
 def _cached_decision(task: str) -> TaskClassification | None:
     """Return the memoised decisions-classifier verdict for *task*, if any.
 

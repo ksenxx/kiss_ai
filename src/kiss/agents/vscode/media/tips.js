@@ -122,7 +122,59 @@
     '.tips-prev:disabled, .tips-next:disabled {' +
     '  opacity: 0.4;' +
     '  cursor: default;' +
+    '}' +
+    '.tips-optout {' +
+    '  display: flex;' +
+    '  align-items: center;' +
+    '  gap: 6px;' +
+    '  flex: 1;' +
+    '  color: #908caa;' +
+    '  font-size: 0.85em;' +
+    '  cursor: pointer;' +
+    '}' +
+    '.tips-close:focus-visible, .tips-prev:focus-visible,' +
+    '.tips-next:focus-visible, .tips-optout input:focus-visible {' +
+    '  outline: 2px solid #9ccfd8;' +
+    '  outline-offset: 1px;' +
     '}';
+
+  // The webview remembers the user's "don't show tips automatically"
+  // choice under this localStorage key so the auto-open on cfg.show is
+  // skipped even before the host has persisted the choice.
+  const OPT_OUT_KEY = 'kissTipsOptOut';
+
+  function readOptOut() {
+    try {
+      return window.localStorage.getItem(OPT_OUT_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Persist the "don't show tips automatically" choice.
+   *
+   * Stores it in localStorage for the webview itself and dispatches the
+   * `kiss-tips-opt-out` CustomEvent on `window` with
+   * `detail = {type: 'tipsOptOut', optOut: <boolean>}`.  main.js relays
+   * that detail to the extension host / remote server as a
+   * `tipsOptOut` message so the choice survives extension updates
+   * (the host must then stop clearing the TIPS_SHOWN marker).
+   */
+  function writeOptOut(optOut) {
+    try {
+      if (optOut) window.localStorage.setItem(OPT_OUT_KEY, '1');
+      else window.localStorage.removeItem(OPT_OUT_KEY);
+    } catch {
+      // Storage may be unavailable (private mode); the host copy is
+      // the durable one.
+    }
+    window.dispatchEvent(
+      new CustomEvent('kiss-tips-opt-out', {
+        detail: {type: 'tipsOptOut', optOut: !!optOut},
+      }),
+    );
+  }
 
   function copyViaExecCommand(text) {
     // Looked up at call time: panelCopy.js loads after tips.js.
@@ -229,7 +281,18 @@
       this._next.className = 'tips-next';
       this._next.type = 'button';
       this._next.textContent = 'Next';
+      const optOutLabel = document.createElement('label');
+      optOutLabel.className = 'tips-optout';
+      this._optOut = document.createElement('input');
+      this._optOut.type = 'checkbox';
+      this._optOut.className = 'tips-optout-input';
+      this._optOut.checked = readOptOut();
+      optOutLabel.appendChild(this._optOut);
+      optOutLabel.appendChild(
+        document.createTextNode("Don't show tips automatically"),
+      );
       footer.appendChild(this._prev);
+      footer.appendChild(optOutLabel);
       footer.appendChild(this._next);
 
       panel.appendChild(header);
@@ -237,6 +300,9 @@
       panel.appendChild(footer);
       overlay.appendChild(panel);
       root.appendChild(overlay);
+      this._overlay = overlay;
+      this._panel = panel;
+      this._opener = null;
 
       const self = this;
       this._prev.addEventListener('click', () => {
@@ -252,9 +318,45 @@
         }
       });
       this._close.addEventListener('click', () => {
-        self._close.blur();
         self.remove();
       });
+      this._optOut.addEventListener('change', () => {
+        writeOptOut(self._optOut.checked);
+      });
+      // A click on the dimmed backdrop (not inside the panel) closes.
+      overlay.addEventListener('click', event => {
+        if (event.target === overlay) self.remove();
+      });
+      this._onKeyDown = function (event) {
+        self._handleKeyDown(event);
+      };
+    }
+
+    /**
+     * Escape closes the dialog; Tab and Shift+Tab cycle inside it so
+     * focus never lands on the page behind the modal overlay.
+     */
+    _handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.remove();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = Array.from(
+        this._panel.querySelectorAll('button, input'),
+      ).filter(el => !el.disabled);
+      if (items.length === 0) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      const current = this.shadowRoot.activeElement;
+      if (event.shiftKey && (current === first || current === null)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && current === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
 
     get tips() {
@@ -269,7 +371,29 @@
     }
 
     connectedCallback() {
-      if (!this._tipsAssigned) this.remove();
+      if (!this._tipsAssigned) {
+        this.remove();
+        return;
+      }
+      // Remember who opened the dialog so closing can hand focus back,
+      // then move focus into the dialog (the close button).
+      this._opener = document.activeElement;
+      document.addEventListener('keydown', this._onKeyDown, true);
+      this._close.focus();
+    }
+
+    disconnectedCallback() {
+      document.removeEventListener('keydown', this._onKeyDown, true);
+      const opener = this._opener;
+      this._opener = null;
+      if (
+        opener &&
+        opener !== document.body &&
+        typeof opener.focus === 'function' &&
+        document.contains(opener)
+      ) {
+        opener.focus();
+      }
     }
 
     _update() {
@@ -339,6 +463,7 @@
   if (
     cfg &&
     cfg.show &&
+    !readOptOut() &&
     configuredTips().length > 0 &&
     !document.body.querySelector('kiss-tips-panel')
   ) {

@@ -34,7 +34,6 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -44,6 +43,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.browser_handoff import open_in_default_browser
 from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)

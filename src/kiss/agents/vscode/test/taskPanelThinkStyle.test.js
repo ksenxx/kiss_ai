@@ -3,11 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The fixed task panel at the top of a chat webview must use the SAME
-// background and foreground colors as the thinking panel (.think) on
-// every surface (sidebar webview, editor-tab webview, remote webapp
-// and shared chat pages all inline media/main.css), plus a thick cyan
-// border. Fresh installs must default to editor-tabs mode
+// The fixed task panel at the top of a chat webview is the one panel
+// the eye should find first: it paints the accent tint behind the
+// thinking panel's foreground colours and carries a 1px accent
+// hairline, on every surface (sidebar webview, editor-tab webview,
+// remote webapp and shared chat pages all inline media/main.css).
+// Fresh installs must default to editor-tabs mode
 // (kissSorcar.editorTabsMode default true in package.json).
 
 'use strict';
@@ -44,32 +45,30 @@ function decl(body, prop) {
   return m ? m[1].trim() : null;
 }
 
-function testTaskPanelBackgroundMatchesThinkingPanel() {
+function testTaskPanelBackgroundIsTheAccentTint() {
   const think = ruleBody('.think');
   const panel = ruleBody('#task-panel');
   assert.ok(think, 'main.css must style .think');
   assert.ok(panel, 'main.css must style #task-panel');
 
-  const thinkBg = decl(think, 'background');
-  assert.ok(thinkBg, '.think must declare a background');
-
-  // #task-panel paints var(--panel-bg); that variable must hold the
-  // exact background value the thinking panel uses.
-  const panelBgVar = decl(panel, '--panel-bg');
-  const panelBg = decl(panel, 'background');
+  // The transcript panels share the neutral --panel-tint; the task
+  // panel alone paints the accent tint, through --panel-bg.
   assert.strictEqual(
-    panelBg,
+    decl(think, 'background'),
+    'var(--panel-tint)',
+    '.think must paint the neutral --panel-tint',
+  );
+  assert.strictEqual(
+    decl(panel, 'background'),
     'var(--panel-bg)',
     '#task-panel must paint its background from --panel-bg',
   );
   assert.strictEqual(
-    panelBgVar,
-    thinkBg,
-    'BUG: #task-panel --panel-bg must equal the .think background ' +
-      `("${thinkBg}") so the task panel matches the thinking panel, ` +
-      `got "${panelBgVar}"`,
+    decl(panel, '--panel-bg'),
+    'var(--accent-tint)',
+    'BUG: #task-panel --panel-bg must be the accent tint (--accent-tint)',
   );
-  console.log('  ok - #task-panel background equals .think background');
+  console.log('  ok - #task-panel background is the accent tint');
 }
 
 function testTaskPanelForegroundMatchesThinkingPanel() {
@@ -98,21 +97,17 @@ function testTaskPanelForegroundMatchesThinkingPanel() {
   console.log('  ok - #task-panel foreground equals .think text color');
 }
 
-function testTaskPanelHasThickCyanBorder() {
+function testTaskPanelHasAccentHairline() {
   const panel = ruleBody('#task-panel');
   const border = decl(panel, 'border');
   assert.ok(border, '#task-panel must declare a border');
-  const m = /^(\d+(?:\.\d+)?)px\s+solid\s+var\(\s*--cyan\s*\)$/.exec(border);
-  assert.ok(
-    m,
-    'BUG: #task-panel border must be "<N>px solid var(--cyan)", got ' +
-      `"${border}"`,
+  assert.strictEqual(
+    border,
+    '1px solid var(--accent-line)',
+    'BUG: #task-panel border must be the 1px accent hairline ' +
+      `"1px solid var(--accent-line)", got "${border}"`,
   );
-  assert.ok(
-    parseFloat(m[1]) >= 3,
-    `BUG: the cyan border must be thick (>= 3px), got ${m[1]}px`,
-  );
-  console.log('  ok - #task-panel has a thick cyan border');
+  console.log('  ok - #task-panel has a 1px accent hairline');
 }
 
 function testInvertedPaletteIsGone() {
@@ -160,9 +155,9 @@ function testEditorTabsModeDefaultsOn() {
 
 function main() {
   console.log('taskPanelThinkStyle.test.js');
-  testTaskPanelBackgroundMatchesThinkingPanel();
+  testTaskPanelBackgroundIsTheAccentTint();
   testTaskPanelForegroundMatchesThinkingPanel();
-  testTaskPanelHasThickCyanBorder();
+  testTaskPanelHasAccentHairline();
   testInvertedPaletteIsGone();
   testEditorTabsModeDefaultsOn();
   console.log('all task-panel style tests passed');

@@ -108,10 +108,10 @@ def _build_test_page() -> str:
       --vscode-panel-border: #80808059;
       --vscode-descriptionForeground: #8b8b8b;
       --vscode-textLink-foreground: #3794ff;
-      --vscode-terminal-ansiRed: #f44747;
-      --vscode-terminal-ansiGreen: #6a9955;
-      --vscode-terminal-ansiYellow: #d7ba7d;
-      --vscode-terminal-ansiMagenta: #c586c0;
+      --vscode-charts-red: #f44747;
+      --vscode-charts-green: #6a9955;
+      --vscode-charts-yellow: #d7ba7d;
+      --vscode-charts-purple: #c586c0;
       --vscode-terminal-ansiCyan: #4ec9b0;
     }}
     html, body {{ height: 100%; margin: 0; padding: 0; }}

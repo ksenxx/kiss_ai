@@ -87,7 +87,7 @@ class TestDiscordSendMessageFailures:
     def setup_method(self) -> None:
         self.server.requests.clear()
         self.backend = DiscordChannelBackend(api_base=self.api_base)
-        self.backend._bot_token = "test-token"
+        self.backend._token = "test-token"
 
     def test_send_message_raises_on_http_500(self) -> None:
         """A 500 API response must raise so the ledger can retry the send."""
@@ -101,7 +101,7 @@ class TestDiscordSendMessageFailures:
     def test_send_message_raises_on_unreachable_server(self, refusing_port: int) -> None:
         """An unreachable server (connection refused) must raise."""
         backend = DiscordChannelBackend(api_base=f"http://127.0.0.1:{refusing_port}")
-        backend._bot_token = "test-token"
+        backend._token = "test-token"
         with pytest.raises(requests.RequestException):
             backend.send_message("111", "hello")
         assert self.server.requests == []

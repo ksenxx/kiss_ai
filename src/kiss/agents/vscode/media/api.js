@@ -25,7 +25,7 @@
     'setFavorite',
     'getInputHistory',
     'getSeaCommands',
-    'getWelcomeSuggestions',
+    'getWelcomeInfo',
     'activeTasksQuery',
     'getModels',
     'selectModel',
@@ -35,6 +35,8 @@
     'saveMyModel',
     'deleteMyModel',
     'addTrick',
+    'deleteTrick',
+    'editTrick',
     'setWorkDir',
     'getFiles',
     'recordFileUsage',
@@ -42,6 +44,9 @@
     'saveFile',
     'checkPaths',
     'getTaskUpdate',
+    'getCronJobs',
+    'getAppsStatus',
+    'getSpendReport',
     'listDir',
     'gitStatus',
     'gitLog',
@@ -72,6 +77,7 @@
     'notificationAction',
     'sizeReport',
     'resolveDroppedPaths',
+    'tipsOptOut',
   ];
 
   function createSorcarApi(post) {

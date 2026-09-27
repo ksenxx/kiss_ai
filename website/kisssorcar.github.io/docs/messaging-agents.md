@@ -1,6 +1,6 @@
 # Messaging & Third-Party Agents
 
-> KISS Sorcar includes 43 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 9 service agents — plus infrastructure agents and a Govee smart-home CLI.
+> KISS Sorcar includes 44 third-party agents that act on messaging services, mailboxes, devices, and web services on your behalf — 32 messaging-channel agents and 10 service agents — plus infrastructure agents and a Govee smart-home CLI.
 
 ## The 32 Messaging-Channel Agents
 
@@ -37,9 +37,9 @@
 - WhatsApp
 - Zalo
 
-## The 9 Service Agents
+## The 10 Service Agents
 
-Nine service agents give Sorcar authenticated API tools for productivity and data services:
+Ten service agents give Sorcar authenticated API tools for productivity and data services:
 
 - Brave Search (`kiss-brave`)
 - Firecrawl (`kiss-firecrawl`)
@@ -49,6 +49,7 @@ Nine service agents give Sorcar authenticated API tools for productivity and dat
 - Google Drive (`kiss-gdrive`)
 - Google Sheets (`kiss-gsheets`)
 - Notion (`kiss-notion`)
+- Overleaf (`kiss-overleaf`)
 - PostgreSQL (`kiss-postgres`)
 
 In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") — Sorcar dispatches the matching agent through its `run_agent` tool. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...) for running tasks directly from the shell.

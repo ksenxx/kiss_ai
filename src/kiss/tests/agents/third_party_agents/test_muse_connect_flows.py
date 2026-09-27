@@ -38,6 +38,7 @@ from kiss.agents.third_party_agents._device_auth import (
     TokenGrant,
     consent_instructions,
 )
+from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
 from kiss.agents.third_party_agents.github_sea import GitHubAgent
 from kiss.agents.third_party_agents.github_sea import _config as gh_config
 from kiss.agents.third_party_agents.matrix_sea import MatrixAgent, MatrixChannelBackend
@@ -224,13 +225,17 @@ class _AuthHandler(BaseHTTPRequestHandler):
             self.server.access_tokens.pop(token, None)
             self.server.revoked.append(token)
             self._json(200, {})
-        elif path == f"/{_MS_TENANT}/oauth2/v2.0/devicecode":
+        elif path in (
+            f"/{_MS_TENANT}/oauth2/v2.0/devicecode",
+            "/organizations/oauth2/v2.0/devicecode",
+        ):
             self._device("ms", form, "https://microsoft.com/devicelogin", scope_key="scope")
         elif path in (
             "/login/oauth/access_token",
             "/oauth2/token",
             "/mas/oauth2/token",
             f"/{_MS_TENANT}/oauth2/v2.0/token",
+            "/organizations/oauth2/v2.0/token",
         ):
             self._token(form)
         else:
@@ -636,17 +641,19 @@ def test_github_device_flow_enrolls_bearer_and_connects(
 ) -> None:
     """GitHub: consent_required → user approves → token validated and vaulted."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
 
-    # No client ID anywhere: the agent is told how to get one, no network call.
+    # No client ID anywhere: the setup error, and no network call.
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "")
     missing = json.loads(tools["authenticate_github"]())
-    assert missing["ok"] is False
-    assert "settings/applications/new" in missing["error"]
+    assert missing == {"ok": False, "error": missing_client_id_error("github", "GitHub")}
     assert not auth_server.requests
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
 
-    started = json.loads(tools["authenticate_github"](client_id="kiss-app", read_only=True))
+    started = json.loads(tools["authenticate_github"](read_only=True))
     assert started["status"] == "consent_required"
     assert started["verification_uri"] == "https://github.com/login/device"
     assert started["user_code"].startswith("CODE-")
@@ -656,10 +663,8 @@ def test_github_device_flow_enrolls_bearer_and_connects(
     device_request = auth_server.requests[0]
     assert device_request["form"] == {"client_id": "kiss-app", "scope": "repo read:org read:user"}
     assert device_request["headers"]["Accept"] == "application/json"
-    # Only the (public) client ID is remembered at this point: nothing
-    # else changes until the sign-in lands.
-    saved = json.loads(gh_config.path.read_text())
-    assert saved == {"oauth_client_id": "kiss-app"}
+    # Nothing is written until the sign-in lands.
+    assert not gh_config.path.exists()
 
     pending = json.loads(tools["finish_github_auth"]())
     assert pending == {
@@ -690,7 +695,7 @@ def test_github_device_flow_enrolls_bearer_and_connects(
     assert _vault_entry("github")["scopes"] == ["repo", "read:org", "read:user"]
     assert "token" not in json.loads(gh_config.path.read_text())
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": True}
-    # The client ID is remembered for the next sign-in.
+    # The next sign-in uses the same KISS app.
     again = json.loads(tools["authenticate_github"]())
     assert again["status"] == "consent_required"
     assert auth_server.requests[-1]["form"]["client_id"] == "kiss-app"
@@ -754,16 +759,19 @@ def test_github_denied_and_rejected_client(
 ) -> None:
     """Denied consent and a refused client ID report errors and enroll nothing."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     tools = auth_tools(agent)
-    rejected = json.loads(tools["authenticate_github"](client_id="rejected-client"))
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "rejected-client")
+    rejected = json.loads(tools["authenticate_github"]())
     assert rejected == {
         "ok": False,
         "error": "device authorization refused (invalid_client: unknown app)",
     }
     assert "github" not in ConsentSession._active
 
-    assert json.loads(tools["authenticate_github"](client_id="kiss-app"))["status"] == (
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
+    assert json.loads(tools["authenticate_github"]())["status"] == (
         "consent_required"
     )
     auth_server.deny()
@@ -786,10 +794,11 @@ def test_github_api_rejecting_new_token_rolls_back(
 ) -> None:
     """A token the API refuses is cleared again instead of staying enrolled."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
-    tools["authenticate_github"](client_id="kiss-app")
+    tools["authenticate_github"]()
     session = ConsentSession._active["github"]
     auth_server.approve()
     session._thread.join(timeout=10.0)
@@ -803,19 +812,6 @@ def test_github_api_rejecting_new_token_rolls_back(
     assert agent._is_authenticated() is False
 
 
-def test_github_token_path_unchanged(muse_env: Path, auth_server: _AuthServer) -> None:
-    """A personal access token still configures GitHub directly (Muse vault)."""
-    agent = GitHubAgent()
-    tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_github"]("ghp_direct"))["ok"] is True
-    assert _vault_entry("github")["authorized_user_info"] == {
-        "kind": "bearer",
-        "token": "ghp_direct",
-    }
-    assert json.loads(gh_config.path.read_text()) == {"read_only": "false"}
-    assert agent._is_authenticated() is True
-
-
 # ---------------------------------------------------------- GitHub (legacy)
 
 
@@ -825,12 +821,13 @@ def test_github_device_flow_legacy_mode(
     """With Muse-auth off the device-flow token lands in config.json."""
     assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
     unauth = tools["check_github_auth"]()
-    assert "finish_github_auth" in unauth and "KISS_GITHUB_CLIENT_ID" in unauth
-    started = json.loads(tools["authenticate_github"](client_id="kiss-app"))
+    assert "finish_github_auth" in unauth and "github.com/login/device" in unauth
+    started = json.loads(tools["authenticate_github"]())
     assert started["status"] == "consent_required"
     auth_server.approve()
     done = _finish(tools["finish_github_auth"])
@@ -838,7 +835,6 @@ def test_github_device_flow_legacy_mode(
     assert json.loads(gh_config.path.read_text()) == {
         "token": "access-1",
         "read_only": "false",
-        "oauth_client_id": "kiss-app",
     }
     assert agent._backend._token == "access-1"
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": False}
@@ -963,19 +959,24 @@ def test_msteams_device_code_delegated_token(
 ) -> None:
     """MS Teams: device code → refresh-token entry with scope, probed via Graph."""
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     auth_server.expiring = True
     agent = MSTeamsAgent()
     agent._backend._graph_base = f"{auth_server.base()}/v1.0"
     tools = auth_tools(agent)
     unauth = tools["check_msteams_auth"]()
     assert "microsoft.com/devicelogin" in unauth and "finish_msteams_auth" in unauth
-    empty = tools["authenticate_msteams"]("", "c")
-    assert empty.startswith("tenant_id cannot be empty.")
-    assert "portal.azure.com" in empty and "ask_user_question" in empty
-    assert "GUID or verified domain" in tools["authenticate_msteams"]("bad/tenant", "c")
-    assert "control characters" in tools["authenticate_msteams"](_MS_TENANT, "c\nid")
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "")
+    missing = json.loads(tools["authenticate_msteams"]())
+    assert missing == {
+        "ok": False,
+        "error": missing_client_id_error("msteams", "Microsoft Teams"),
+    }
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
+    assert "GUID or verified domain" in tools["authenticate_msteams"]("bad/tenant")
+    assert not auth_server.requests
 
-    started = json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1", bot_id="B1"))
+    started = json.loads(tools["authenticate_msteams"](_MS_TENANT, bot_id="B1"))
     assert started["status"] == "consent_required"
     assert started["verification_uri"] == "https://microsoft.com/devicelogin"
     assert started["user_code"]
@@ -987,17 +988,14 @@ def test_msteams_device_code_delegated_token(
     auth_server.approve()
     done = _finish(tools["finish_msteams_auth"])
     assert done == {"ok": True, "message": "MS Teams credentials saved (Muse-auth)."}
-    assert json.loads(ms_config.path.read_text()) == {
-        "tenant_id": _MS_TENANT,
-        "client_id": "app-1",
-        "bot_id": "B1",
-    }
+    assert json.loads(ms_config.path.read_text()) == {"tenant_id": _MS_TENANT, "bot_id": "B1"}
     entry = _vault_entry("msteams")["authorized_user_info"]
     assert entry["kind"] == "oauth2_refresh_token"
     assert entry["token_url"] == f"{auth_server.base()}/{_MS_TENANT}/oauth2/v2.0/token"
     assert entry["client_id"] == "app-1"
     assert entry["token_scope"] == device["form"]["scope"]
-    assert agent._backend._muse is True and agent._backend._bot_id == "B1"
+    assert agent._backend._access_token.startswith("muse-sgt.msteams.")
+    assert agent._backend._bot_id == "B1"
     # The scratch validation entry is gone; only the live one remains.
     vault_files = sorted(p.name for p in (muse_auth_dir() / "vault").glob("*.json"))
     assert vault_files == ["msteams.json"]
@@ -1022,23 +1020,25 @@ def test_msteams_device_code_requires_refresh_token_and_muse(
 ) -> None:
     """Without offline_access (no refresh token) the sign-in is rejected."""
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     agent = MSTeamsAgent()
     agent._backend._graph_base = f"{auth_server.base()}/v1.0"
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))["status"] == (
-        "consent_required"
-    )
+    # With no tenant the multi-tenant "organizations" authority is used.
+    assert json.loads(tools["authenticate_msteams"]())["status"] == "consent_required"
+    assert auth_server.requests[0]["path"] == "/organizations/oauth2/v2.0/devicecode"
+    assert auth_server.requests[0]["form"]["client_id"] == "app-1"
     auth_server.approve()
     result = _finish(tools["finish_msteams_auth"])
     assert result["ok"] is False and "offline_access" in result["error"]
     assert not vault_has_credentials("msteams")
     # The tenant rides on the session, so a config.json edited while the
     # sign-in is pending cannot redirect the finish step.
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))["status"] == (
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
         "consent_required"
     )
     ms_config.path.parent.mkdir(parents=True, exist_ok=True)
-    ms_config.path.write_text(json.dumps({"tenant_id": "bad/tenant", "client_id": "app-1"}))
+    ms_config.path.write_text(json.dumps({"tenant_id": "bad/tenant"}))
     auth_server.approve()
     result = _finish(tools["finish_msteams_auth"])
     assert result["ok"] is False and "offline_access" in result["error"]
@@ -1050,9 +1050,10 @@ def test_msteams_legacy_mode_rejects_device_code(
 ) -> None:
     """Legacy mode has no vault to refresh in; the tool says so and does nothing."""
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     agent = MSTeamsAgent()
     tools = auth_tools(agent)
-    result = json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))
+    result = json.loads(tools["authenticate_msteams"](_MS_TENANT))
     assert result["ok"] is False and "KISS_MUSE_AUTH=0" in result["error"]
     assert not auth_server.requests
     assert "msteams" not in ConsentSession._active
@@ -1342,13 +1343,14 @@ def test_daemon_refresh_edge_cases(
 ) -> None:
     """Tampered expiry strings, odd expires_in and non-rotating providers."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     auth_server.expiring = True
     auth_server.rotate = False
     auth_server.bad_expires_in = True
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
-    tools["authenticate_github"](client_id="kiss-app")
+    tools["authenticate_github"]()
     auth_server.approve()
     assert _finish(tools["finish_github_auth"])["ok"] is True
     entry_file = muse_auth_dir() / "vault" / "github.json"
@@ -1410,7 +1412,9 @@ def test_failure_paths_after_approval(
     """Refused clients, missing sessions, vault refusals and API rejections."""
     monkeypatch.setenv("TWITCH_OAUTH_BASE", auth_server.base())
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     twitch = TwitchAgent()
     twitch._backend._helix_base = f"{auth_server.base()}/helix"
     tw_tools = auth_tools(twitch)
@@ -1419,7 +1423,8 @@ def test_failure_paths_after_approval(
         "ok": False,
         "error": "device authorization refused (invalid_client: unknown app)",
     }
-    assert json.loads(ms_tools["authenticate_msteams"](_MS_TENANT, "rejected-client")) == {
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "rejected-client")
+    assert json.loads(ms_tools["authenticate_msteams"](_MS_TENANT)) == {
         "ok": False,
         "error": "device authorization refused (invalid_client: unknown app)",
     }
@@ -1442,7 +1447,7 @@ def test_failure_paths_after_approval(
     github = GitHubAgent()
     github._backend._base_url = auth_server.base()
     gh_tools = auth_tools(github)
-    gh_tools["authenticate_github"](client_id="kiss-app")
+    gh_tools["authenticate_github"]()
     auth_server.approve()
     result = _finish(gh_tools["finish_github_auth"])
     assert result == {
@@ -1561,73 +1566,46 @@ def test_github_sign_in_never_disturbs_the_working_credential(
 ) -> None:
     """Starting, failing or superseding a sign-in leaves the current token intact."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
-    auth_server.access_tokens["ghp_old"] = "repo"
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_github"]("ghp_old", read_only=True))["ok"] is True
+    tools["authenticate_github"](read_only=True)
+    auth_server.approve()
+    assert _finish(tools["finish_github_auth"])["ok"] is True
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": True}
+    working = {"kind": "bearer", "token": "access-1"}
 
-    # Starting a sign-in changes nothing but the remembered client ID.
-    started = json.loads(tools["authenticate_github"](client_id="kiss-app"))
+    # Starting a sign-in changes nothing.
+    started = json.loads(tools["authenticate_github"]())
     assert started["status"] == "consent_required"
-    assert json.loads(gh_config.path.read_text()) == {
-        "read_only": "true",
-        "oauth_client_id": "kiss-app",
-    }
-    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_old"}
+    assert json.loads(gh_config.path.read_text()) == {"read_only": "true"}
+    assert _vault_entry("github")["authorized_user_info"] == working
     data, error = agent._backend._api("GET", "/user")
     assert error == "" and data["login"] == "octocat"
 
     # The API rejects the new token → the old one stays enrolled and usable.
     auth_server.approve()
     ConsentSession._active["github"]._thread.join(timeout=10.0)
-    auth_server.access_tokens.pop("access-1")
+    auth_server.access_tokens.pop("access-2")
     rejected = _finish(tools["finish_github_auth"])
     assert rejected == {"ok": False, "error": "GitHub rejected the new token: HTTP 401"}
-    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_old"}
+    assert _vault_entry("github")["authorized_user_info"] == working
     assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": True}
 
-    # A hand-supplied token supersedes a pending sign-in: the late approval
-    # has nowhere to land.
-    assert json.loads(tools["authenticate_github"](client_id="kiss-app"))["status"] == (
-        "consent_required"
-    )
+    # A newer sign-in supersedes a pending one, and a successful sign-in
+    # applies the options chosen when it was started.
+    assert json.loads(tools["authenticate_github"]())["status"] == "consent_required"
     pending = ConsentSession._active["github"]
-    auth_server.access_tokens["ghp_new"] = "repo"
-    assert json.loads(tools["authenticate_github"]("ghp_new"))["ok"] is True
-    assert pending._cancelled is True and "github" not in ConsentSession._active
-    auth_server.approve()
-    assert "no sign-in in progress" in json.loads(tools["finish_github_auth"]())["error"]
-    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_new"}
-    assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": False}
-    # The direct path never writes the plaintext token into the config:
-    # it goes straight into the vault (atomic replace).
-    assert "token" not in json.loads(gh_config.path.read_text())
-
-    # A direct token the daemon refuses (embedded control character) must
-    # not disturb the enrolled credential or the config: store() replaces
-    # atomically, so there is no clear-then-store window.  (Regression:
-    # the old path cleared the vault before migrating the candidate, so a
-    # refused candidate lost the working credential.)
-    bad = json.loads(tools["authenticate_github"]("bad\ttoken"))
-    assert bad["ok"] is False and "failed to save GitHub config" in bad["error"]
-    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "ghp_new"}
-    assert json.loads(tools["check_github_auth"]()) == {"ok": True, "read_only": False}
-    assert "token" not in json.loads(gh_config.path.read_text())
-
-    # A successful sign-in applies the options chosen when it was started.
-    assert json.loads(tools["authenticate_github"](read_only=True))["status"] == (
-        "consent_required"
-    )
-    auth_server.approve()
+    started = json.loads(tools["authenticate_github"](read_only=False))
+    assert started["status"] == "consent_required"
+    assert pending._cancelled is True and ConsentSession._active["github"] is not pending
+    auth_server.approve(auth_server.pending_codes()[-1])
     done = _finish(tools["finish_github_auth"])
-    assert done["ok"] is True and done["read_only"] is True
-    assert json.loads(gh_config.path.read_text()) == {
-        "read_only": "true",
-        "oauth_client_id": "kiss-app",
-    }
-    assert _vault_entry("github")["authorized_user_info"] == {"kind": "bearer", "token": "access-2"}
+    assert done["ok"] is True and done["read_only"] is False
+    assert json.loads(gh_config.path.read_text()) == {"read_only": "false"}
+    assert _vault_entry("github")["authorized_user_info"]["kind"] == "bearer"
+    assert _vault_entry("github")["authorized_user_info"] != working
 
 
 def test_device_polling_ignores_ambient_proxy_settings(
@@ -1635,6 +1613,7 @@ def test_device_polling_ignores_ambient_proxy_settings(
 ) -> None:
     """A proxy in the environment never sees the device code or the token."""
     monkeypatch.setenv("GITHUB_OAUTH_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
     monkeypatch.delenv("NO_PROXY", raising=False)
@@ -1642,7 +1621,7 @@ def test_device_polling_ignores_ambient_proxy_settings(
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_github"](client_id="kiss-app"))["status"] == (
+    assert json.loads(tools["authenticate_github"]())["status"] == (
         "consent_required"
     )
     auth_server.approve()
@@ -1653,14 +1632,15 @@ def test_device_polling_ignores_ambient_proxy_settings(
 def test_msteams_graph_permission_verdicts_and_superseding(
     muse_env: Path, auth_server: _AuthServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 401 from Graph rejects the token; 403 proves the exchange; secrets supersede."""
+    """A 401 from Graph rejects the token; 403 proves it; a new sign-in supersedes."""
     monkeypatch.setenv("MSTEAMS_LOGIN_BASE", auth_server.base())
+    monkeypatch.setenv("KISS_MSTEAMS_CLIENT_ID", "app-1")
     auth_server.expiring = True
     auth_server.graph_status = 401
     agent = MSTeamsAgent()
     agent._backend._graph_base = f"{auth_server.base()}/v1.0"
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))["status"] == (
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
         "consent_required"
     )
     auth_server.approve()
@@ -1673,19 +1653,19 @@ def test_msteams_graph_permission_verdicts_and_superseding(
     assert agent._is_authenticated() is False
     # A 403 (token fine, permission missing) counts as proof of the exchange.
     auth_server.graph_status = 403
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))["status"] == (
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
         "consent_required"
     )
     auth_server.approve()
     assert _finish(tools["finish_msteams_auth"])["ok"] is True
     assert vault_has_credentials("msteams")
-    # App credentials supersede a pending sign-in.
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT, "app-1"))["status"] == (
+    # A newer sign-in supersedes a pending one.
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
         "consent_required"
     )
     pending = ConsentSession._active["msteams"]
-    tools["authenticate_msteams"](_MS_TENANT, "app-1", client_secret="s3cret")
-    assert pending._cancelled is True and "msteams" not in ConsentSession._active
+    tools["authenticate_msteams"](_MS_TENANT)
+    assert pending._cancelled is True and ConsentSession._active["msteams"] is not pending
 
 
 def test_twitch_token_supersedes_pending_sign_in(

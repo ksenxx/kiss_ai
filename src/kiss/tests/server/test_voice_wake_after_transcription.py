@@ -5,7 +5,7 @@
 """End-to-end regression tests: the wake word keeps working after a
 transcription.
 
-Reproduces (and proves fixed) the bug where saying "Sorcar" after a
+Reproduces (and proves fixed) the bug where saying "Hey Sorcar" after a
 transcription did nothing until the mic was toggled off and on: the
 gpt-audio translation call used to run on the audio loop, so a slow or
 stalled HTTPS request blocked wake detection for its whole duration
@@ -59,9 +59,9 @@ def _make_wake_speech_wake_wav(directory: Path) -> Path:
     aiff = directory / "wake-speech-wake.aiff"
     wav = directory / "wake-speech-wake.wav"
     text = (
-        "Sorcar [[slnc 1500]] "
+        "Hey Sorcar [[slnc 1500]] "
         "please fix the parser bug in the compiler [[slnc 2500]] "
-        "Sorcar [[slnc 1500]]"
+        "Hey Sorcar [[slnc 1500]]"
     )
     subprocess.run(["say", text, "-o", str(aiff)], check=True)
     subprocess.run(
@@ -266,7 +266,7 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            sorcar = _tts_pcm(Path(tmp), "sorcar", "Sorcar")
+            sorcar = _tts_pcm(Path(tmp), "sorcar", "Hey Sorcar")
             speech = _tts_pcm(
                 Path(tmp), "speech",
                 "please fix the parser bug in the compiler now",
@@ -319,7 +319,7 @@ class TestWatchdogSilenceAdvancesSession(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            sorcar = _tts_pcm(Path(tmp), "sorcar-dead-gap", "Sorcar")
+            sorcar = _tts_pcm(Path(tmp), "sorcar-dead-gap", "Hey Sorcar")
 
         session = WakeSession(WakeDetector(ensure_model(DEFAULT_MODELS_DIR)))
         block = 2 * 800

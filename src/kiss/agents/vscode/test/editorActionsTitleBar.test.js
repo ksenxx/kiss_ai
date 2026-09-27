@@ -12,8 +12,11 @@
 // `workbench.editor.editorActionsLocation` (src/editorActionsLocation
 // .ts, wired in extension.ts). Covered behavior, activation + config
 // flips through the real compiled extension host wiring:
-//  - activation with editor-tabs mode ON sets the global value to
-//    "titleBar" and remembers the user's prior global value;
+//  - activation with editor-tabs mode ON asks the user ONCE ('Move
+//    actions to title bar' / 'Keep my setting' —
+//    ui_antipattern_editor_focus.test.js covers the answers); after
+//    'Move' the global value becomes "titleBar" and the user's prior
+//    global value is remembered;
 //  - activation with the mode OFF leaves the setting alone even when
 //    a restore record exists (another window may have the mode ON;
 //    restores happen only on explicit mode flips);
@@ -273,8 +276,17 @@ stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
 stubModule(path.join(OUT_DIR, 'kissPaths.js'), {
   findKissProject: () => '/fake/kiss_project',
 });
+// The one-time consent question: this test answers 'Move actions to
+// title bar' and counts how often it was asked.
+const consentQuestions = [];
 stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
-  showInformationNotification: () => Promise.resolve(undefined),
+  showInformationNotification: (message, ...actions) => {
+    if (actions.includes('Move actions to title bar')) {
+      consentQuestions.push(message);
+      return Promise.resolve('Move actions to title bar');
+    }
+    return Promise.resolve(undefined);
+  },
   showWarningNotification: () => Promise.resolve(undefined),
   showErrorNotification: () => Promise.resolve(undefined),
 });
@@ -344,8 +356,9 @@ async function runTest() {
   assert.deepStrictEqual(
     actionUpdates(),
     [{key: EDITOR_ACTIONS, value: 'titleBar', target: 1}],
-    'activation in editor-tabs mode must set editorActionsLocation to titleBar globally',
+    'activation in editor-tabs mode must set editorActionsLocation to titleBar globally once the user agreed',
   );
+  assert.strictEqual(consentQuestions.length, 1, 'the user was asked once');
   assert.deepStrictEqual(
     ctx.globalState.get(PRIOR_LOCATION_KEY),
     {prior: null},

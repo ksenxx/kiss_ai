@@ -279,13 +279,9 @@ class TestF03InterruptUsageAccounting(_TempDbTestBase):
 
         # Before the fix, the interrupt skipped the aggregation entirely
         # and totals_out stayed empty — the parent lost all accounting.
-        # ``budget_used_per_task`` (one entry per task) lets the parent
-        # release each child's unspent review budget.
         assert set(totals) == {
             "budget_used", "total_tokens_used", "total_steps",
-            "budget_used_per_task",
         }
-        assert len(totals["budget_used_per_task"]) == 1
         # No sub-agent registry entry may leak either.
         assert all(
             not state.is_subagent for state in agent_state.snapshot()

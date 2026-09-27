@@ -5,19 +5,21 @@
 """GitHub Agent — channel agent for the GitHub REST API.
 
 Provides access to GitHub via its REST API (https://api.github.com)
-using an OAuth or personal access token sent as ``Authorization:
+using an OAuth token sent as ``Authorization:
 Bearer`` with ``Accept: application/vnd.github+json`` and
 ``X-GitHub-Api-Version: 2022-11-28`` on every call.
 
 Connecting works like the Muse app: ``authenticate_github()`` starts
-GitHub's device flow (RFC 8628) with the OAuth app's public client ID
-and hands back ``https://github.com/login/device`` plus a short code;
-the user signs in and approves in their own browser and
+GitHub's device flow (RFC 8628) with the KISS-owned public OAuth app
+(``oauth_client_id("github")``, overridable with
+``$KISS_GITHUB_CLIENT_ID``) and hands back
+``https://github.com/login/device`` plus a short code; the user signs
+in and clicks Authorize in their own browser and
 ``finish_github_auth()`` collects the token — nothing is pasted back.
-A personal access token can still be supplied directly.  Stores config
-in ``~/.kiss/third_party_agents/github/config.json`` (keys: ``token``,
-optional ``read_only`` — ``"true"`` blocks every mutating tool — and
-``oauth_client_id``, the device-flow client ID).
+Stores config in ``~/.kiss/third_party_agents/github/config.json``
+(keys: ``token`` — only when Muse auth is off, otherwise the token
+lives in the Muse vault — and optional ``read_only``: ``"true"``
+blocks every mutating tool).
 
 GitHub's REST API has no inbound message stream, so this adapter is
 outbound-only and the ``--channel`` poll mode is disabled (``main``
@@ -42,7 +44,6 @@ from urllib.parse import quote
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -57,6 +58,10 @@ from kiss.agents.third_party_agents._device_auth import (
     TokenGrant,
     connect_prompt,
     consent_required,
+)
+from kiss.agents.third_party_agents._oauth_apps import (
+    missing_client_id_error,
+    oauth_client_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,8 +105,8 @@ def _relaxed_config() -> dict[str, str]:
     """Read ``config.json`` without required-key validation.
 
     After the token is migrated into the Muse vault the config may
-    legitimately lack the ``token`` key while still carrying settings
-    like ``read_only`` and ``oauth_client_id``.
+    legitimately lack the ``token`` key while still carrying the
+    ``read_only`` setting.
 
     Returns:
         The raw config dict (values stringified), or ``{}`` when
@@ -112,23 +117,6 @@ def _relaxed_config() -> dict[str, str]:
     except Exception:
         return {}
     return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-
-
-def _device_client_id(explicit: str) -> str:
-    """Resolve the OAuth app client ID used for the device flow.
-
-    Args:
-        explicit: The ``client_id`` argument of ``authenticate_github``.
-
-    Returns:
-        *explicit* when given, else the ``oauth_client_id`` remembered
-        in ``config.json``, else ``$KISS_GITHUB_CLIENT_ID``, else ``""``.
-    """
-    return (
-        explicit.strip()
-        or _relaxed_config().get("oauth_client_id", "")
-        or os.environ.get("KISS_GITHUB_CLIENT_ID", "").strip()
-    )
 
 
 def _split_granted_scopes(scope: str) -> list[str]:
@@ -313,7 +301,7 @@ def _condense_commit(commit: dict[str, Any]) -> dict[str, Any]:
 class GitHubChannelBackend(ToolMethodBackend):
     """Channel backend for the GitHub REST API.
 
-    Talks to GitHub over HTTPS with a personal access token.
+    Talks to GitHub over HTTPS with an OAuth access token.
     Outbound-only: there is no inbound message stream, so poll mode is
     disabled.  When read-only mode is enabled, every mutating tool
     refuses to run before making any HTTP call.
@@ -330,9 +318,9 @@ class GitHubChannelBackend(ToolMethodBackend):
     def connect(self) -> bool:
         """Load the GitHub config from disk.
 
-        In Muse-auth mode (the default) the real personal
-        access token lives in the Muse vault (auto-enrolled from the
-        legacy config on first connect); this process only holds a
+        In Muse-auth mode (the default) the real access token lives in
+        the Muse vault (auto-enrolled from the legacy config on first
+        connect); this process only holds a
         surrogate and every API call is executed at the daemon boundary.
 
         Returns:
@@ -1199,11 +1187,9 @@ class GitHubAgent(BaseChannelAgent):
     ) + connect_prompt(
         "github",
         "GitHub",
-        "authenticate_github() with no token (client_id=... if none is remembered)",
-        "It needs the public Client ID of a GitHub OAuth app with 'Enable Device "
-        "Flow' ticked (https://github.com/settings/applications/new); if the user "
-        "prefers, they may instead hand you a personal access token for "
-        "authenticate_github(token=...).",
+        "authenticate_github()",
+        "It uses the KISS GitHub OAuth app, so the user only signs in and clicks "
+        "Authorize; pass read_only=True to block every write tool.",
     )
 
     def __init__(self) -> None:
@@ -1238,120 +1224,48 @@ class GitHubAgent(BaseChannelAgent):
             """
             if not agent._is_authenticated():
                 return (
-                    "Not configured for GitHub. Call authenticate_github() with no "
-                    "token to sign in the way the Muse app connects: it returns "
+                    "Not configured for GitHub. Call authenticate_github() to sign "
+                    "in the way the Muse app connects: it returns "
                     "https://github.com/login/device plus a short code for the user "
-                    "to enter in their OWN browser after signing in; then call "
-                    "finish_github_auth(). This needs the Client ID of a GitHub OAuth "
-                    "app with 'Enable Device Flow' ticked (pass client_id=..., or set "
-                    "KISS_GITHUB_CLIENT_ID). Never ask for the user's GitHub password "
-                    "or 2FA code. Alternatively the user may hand you a personal "
-                    "access token (https://github.com/settings/tokens, or `gh auth "
-                    "token` when the GitHub CLI is logged in) for "
-                    "authenticate_github(token=...)."
+                    "to enter in their OWN browser after signing in and clicking "
+                    "Authorize; then call finish_github_auth(). Never ask for the "
+                    "user's GitHub password or 2FA code."
                 )
             return json.dumps({"ok": True, "read_only": agent._backend._read_only})
 
-        def authenticate_github(
-            token: str = "", read_only: bool = False, client_id: str = "", scope: str = ""
-        ) -> str:
-            """Connect GitHub by browser sign-in (device flow) or with a token.
+        def authenticate_github(read_only: bool = False, scope: str = "") -> str:
+            """Connect GitHub by browser sign-in (device flow).
 
-            Without ``token`` this starts GitHub's device flow with the
-            OAuth app ``client_id`` (argument, remembered config value,
-            or $KISS_GITHUB_CLIENT_ID) and returns a ``consent_required``
-            answer: give the user the verification URL and code
-            (ask_user_question) to complete in their OWN browser, then
-            call finish_github_auth().  With ``token`` the personal
-            access token is stored directly.
+            Starts GitHub's device flow with the KISS-owned OAuth app
+            (``$KISS_GITHUB_CLIENT_ID`` overrides its client ID) and
+            returns a ``consent_required`` answer: give the user the
+            verification URL and code (ask_user_question) to complete in
+            their OWN browser, then call finish_github_auth().  The
+            credential in use stays in force until the sign-in finishes.
 
             Args:
-                token: Optional personal access token (from
-                    https://github.com/settings/tokens or `gh auth token`).
                 read_only: When True, every mutating tool (create/update/
                     comment/merge) is refused (default False).
-                client_id: Client ID of a GitHub OAuth app with the device
-                    flow enabled (a public identifier, not a secret).
                 scope: Space-separated OAuth scopes for the device flow
                     (default "repo read:org read:user").
 
             Returns:
-                A consent_required JSON answer, a configuration result, or
-                an error message.
+                A consent_required JSON answer or an error message.
             """
-            from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
-
-            if token and not token.strip():
-                # An explicit blank token is a mistake, not a request for
-                # the browser sign-in.
-                return "token cannot be empty."
-            if token.strip():
-                # A hand-supplied token supersedes any browser sign-in
-                # still pending; drop it so a late approval cannot
-                # overwrite this credential.
-                ConsentSession.cancel_active("github")
-                try:
-                    # Keep the remembered OAuth client ID (public) so the
-                    # next browser sign-in does not ask for it again.
-                    meta = dict(_relaxed_config())
-                    meta["read_only"] = "true" if read_only else "false"
-                    if muse_auth_enabled():
-                        # Enroll straight into the Muse vault: store()
-                        # replaces any previous entry atomically and
-                        # invalidates its old surrogates, so there is no
-                        # clear-then-store window in which a failure
-                        # could lose the working credential, and no
-                        # plaintext copy ever lands in the config file.
-                        from kiss.agents.third_party_agents.muse_auth.client import (
-                            store_credentials,
-                        )
-
-                        store_credentials(
-                            "github", {"kind": "bearer", "token": token.strip()}, []
-                        )
-                        meta.pop("token", None)
-                        _config.save(meta)
-                        if not agent._backend.connect():
-                            raise RuntimeError(agent._backend._connection_info)
-                    else:
-                        meta["token"] = token.strip()
-                        _config.save(meta)
-                        agent._backend._token = token.strip()
-                        agent._backend._read_only = read_only
-                except Exception as e:
-                    return json.dumps({"ok": False, "error": f"failed to save GitHub config: {e}"})
-                return json.dumps({"ok": True, "message": "GitHub configured."})
-            resolved_client_id = _device_client_id(client_id)
-            if not resolved_client_id:
+            client_id = oauth_client_id("github")
+            if not client_id:
                 return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "No OAuth app client ID for the GitHub device flow. Ask "
-                        "the user to create one once at "
-                        "https://github.com/settings/applications/new (any homepage "
-                        "and callback URL; tick 'Enable Device Flow') and pass its "
-                        "Client ID as client_id=..., or set KISS_GITHUB_CLIENT_ID. "
-                        "Or pass a personal access token as token=... "
-                        + portal_handoff("https://github.com/settings/applications/new"),
-                    }
+                    {"ok": False, "error": missing_client_id_error("github", "GitHub")}
                 )
             try:
                 session = DeviceFlowSession(
                     "github",
                     _device_provider(),
-                    resolved_client_id,
+                    client_id,
                     scope.strip() or _DEFAULT_SCOPE,
                 )
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
-            # Remember the (public) client ID for next time without
-            # touching anything else in the config: an existing token
-            # and read_only flag stay in force until the new sign-in is
-            # actually finished.
-            meta = dict(_relaxed_config())
-            if meta.get("oauth_client_id") != resolved_client_id:
-                meta["oauth_client_id"] = resolved_client_id
-                save_json_config(_config.path, meta)
             session.options["read_only"] = read_only
             session.register()
             return json.dumps(consent_required("github", "GitHub", session))
@@ -1397,8 +1311,8 @@ class GitHubAgent(BaseChannelAgent):
 
                     meta = dict(_relaxed_config())
                     meta.pop("token", None)
+                    meta.pop("oauth_client_id", None)
                     meta["read_only"] = "true" if read_only else "false"
-                    meta["oauth_client_id"] = session.client_id
                     save_json_config(_config.path, meta)
                     # The store atomically replaces any previous vault
                     # entry; no clear-then-store window.
@@ -1414,7 +1328,6 @@ class GitHubAgent(BaseChannelAgent):
                         {
                             "token": grant.access_token,
                             "read_only": "true" if read_only else "false",
-                            "oauth_client_id": session.client_id,
                         }
                     )
                     agent._backend._token = grant.access_token

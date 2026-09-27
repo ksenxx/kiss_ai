@@ -188,7 +188,9 @@ class _RecordingModel:
         return finish_response("opened")
 
 
-def _run(env: IsolatedKissHome, prompt: str) -> tuple[str, _RecordingModel]:
+def _run(
+    env: IsolatedKissHome, prompt: str, base_system_prompt: str = "",
+) -> tuple[str, _RecordingModel]:
     """Run a ``ChatSorcarAgent`` on *prompt* against the stand-in model."""
     model = _RecordingModel()
     server = StandInModelServer(model)
@@ -201,6 +203,7 @@ def _run(env: IsolatedKissHome, prompt: str) -> tuple[str, _RecordingModel]:
             web_tools=False,
             is_parallel=False,
             verbose=False,
+            base_system_prompt=base_system_prompt,
         )
     finally:
         server.stop()
@@ -236,3 +239,23 @@ class TestChatSorcarAgentRun:
         sent = model.prompts[0]
         assert "# Task\nsay done" in sent
         assert DIRECTIVE not in sent
+
+    def test_custom_base_system_prompt_gets_no_directive(
+        self, env: IsolatedKissHome,
+    ) -> None:
+        """An agent script with its own system prompt owns the meaning of a bare path.
+
+        ``/git_extract_knowledge /path/to/repo`` dispatches the SEA with
+        the repository path as its whole task; the open directive would
+        make it ``xdg-open`` the repository instead of indexing it.
+        """
+        raw = str(env.repo)
+        _, model = _run(
+            env, raw,
+            base_system_prompt="You index the git repository named by the task.",
+        )
+        sent = model.prompts[0]
+        assert f"# Task\n{raw}" in sent
+        assert DIRECTIVE not in sent
+        assert "xdg-open" not in sent
+        assert [row["task"] for row in history_rows()] == [raw]

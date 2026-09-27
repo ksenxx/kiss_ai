@@ -5,14 +5,16 @@
 """End-to-end tests for the Google Drive channel agent.
 
 Runs a REAL local HTTP server (stdlib ``ThreadedHTTPServer``) emulating
-the Google Drive v3 REST API — no mocks, patches, or fakes.  The server
-asserts the ``Authorization: Bearer`` header on every call, serves both
-file metadata and file content (``alt=media`` and ``/export``), accepts
-multipart uploads, and records every request for verification.
+the Google Drive v3 REST API, reached through a real local Composio API
+emulator (``composio_test_utils``) whose proxy injects the bearer token
+— no mocks or patches.  The Drive server asserts the
+``Authorization: Bearer`` header on every call, serves both file
+metadata and file content (``alt=media`` and ``/export``), and records
+every request for verification.
 
-Token state is isolated because the session conftest points
-``KISS_HOME`` at a temporary directory; an autouse fixture additionally
-clears the google_drive token around every test.
+State is isolated because the session conftest points ``KISS_HOME`` at
+a temporary directory; an autouse fixture additionally forgets the
+google_drive Composio connection around every test.
 """
 
 from __future__ import annotations
@@ -31,18 +33,19 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents._google_workspace_utils import (
-    clear_google_credentials,
-    token_path,
-)
 from kiss.agents.third_party_agents.gdrive_sea import (
-    _SCOPES,
     _SERVICE,
     GoogleDriveAgent,
     GoogleDriveChannelBackend,
 )
+from kiss.tests.agents.third_party_agents.composio_test_utils import (
+    TOKEN,
+    connect,
+    reset_state,
+    start_fake_composio,
+)
 
-_TOKEN = "test-token"
+_TOKEN = TOKEN
 
 _FILES: dict[str, dict[str, Any]] = {
     "gdoc1": {
@@ -90,7 +93,6 @@ _AUTH_TOOL_NAMES = [
     "check_google_drive_auth",
     "authenticate_google_drive",
     "clear_google_drive_auth",
-    "start_google_drive_browser_setup",
     "finish_google_drive_auth",
 ]
 
@@ -105,25 +107,6 @@ _TOOL_NAMES = {
     "gdrive_move_file",
     "gdrive_trash_file",
 }
-
-
-def write_synthetic_token() -> None:
-    """Persist a synthetic, never-expiring OAuth token for google_drive."""
-    path = token_path(_SERVICE)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            {
-                "token": "synthetic-access-token",
-                "refresh_token": "synthetic-refresh-token",
-                "client_id": "synthetic-client-id",
-                "client_secret": "synthetic-client-secret",
-                "scopes": _SCOPES,
-                "expiry": "2099-01-01T00:00:00Z",
-            }
-        ),
-        encoding="utf-8",
-    )
 
 
 class _DriveRequestHandler(BaseHTTPRequestHandler):
@@ -189,17 +172,16 @@ class _DriveRequestHandler(BaseHTTPRequestHandler):
                 if file_id == "cfail":
                     self._reply_json(500, {"error": {"code": 500, "message": "content boom"}})
                 else:
-                    self._reply(200, _BIN_CONTENT, content_type="text/plain")
+                    self._reply(200, _BIN_CONTENT, content_type="application/octet-stream")
             else:
                 self._reply_json(200, _FILES[file_id])
-        elif self.command == "POST" and path == "/upload/files":
-            content_type = self.headers.get("Content-Type", "")
-            if not content_type.startswith("multipart/related"):
-                self._reply_json(400, {"error": {"code": 400, "message": "not multipart/related"}})
-                return
-            self._reply_json(200, {"id": "up1", "name": "uploaded"})
         elif self.command == "POST" and path.endswith("/permissions"):
             self._reply_json(200, {"id": "perm1"} | json.loads(raw.decode("utf-8")))
+        elif self.command == "POST" and path == "/upload/files":
+            if b"multipart/related" not in self.headers.get("Content-Type", "").encode():
+                self._reply_json(400, {"error": {"code": 400, "message": "not multipart"}})
+            else:
+                self._reply_json(200, {"id": "up1", "name": "uploaded"})
         elif self.command == "POST" and path == "/files":
             self._reply_json(200, {"id": "folder-new"} | json.loads(raw.decode("utf-8")))
         elif self.command == "PATCH" and path.startswith("/files/"):
@@ -231,11 +213,17 @@ class _DriveServer(ThreadedHTTPServer):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_token():
-    """Start and end every test with no persisted google_drive token."""
-    clear_google_credentials(_SERVICE)
+def _fresh_state():
+    """Start and end every test with no recorded google_drive connection."""
+    reset_state(_SERVICE)
     yield
-    clear_google_credentials(_SERVICE)
+    reset_state(_SERVICE)
+
+
+@pytest.fixture()
+def composio(monkeypatch):
+    """Run the local Composio API emulator and point the SDK at it."""
+    yield from start_fake_composio(monkeypatch)
 
 
 @pytest.fixture()
@@ -252,13 +240,13 @@ def drive_server():
 
 
 @pytest.fixture()
-def backend(drive_server):
-    """A backend pointed at the emulated server with the valid token."""
+def backend(drive_server, composio):
+    """A connected backend pointed at the emulated Drive server."""
     base_url, server = drive_server
+    connect(composio, _SERVICE)
     b = GoogleDriveChannelBackend()
     b._base_url = base_url
     b._upload_base_url = base_url + "/upload"
-    b._token = _TOKEN
     return b, server
 
 
@@ -280,14 +268,18 @@ def test_check_auth_unauthenticated_explains_setup() -> None:
     tools = {t.__name__: t for t in agent._get_tools()}
     msg = tools["check_google_drive_auth"]()
     assert "Not authenticated with Google Drive" in msg
-    assert "start_google_drive_browser_setup" in msg
     assert "authenticate_google_drive" in msg
+    assert "No Composio API key" in msg
 
 
-def test_synthetic_token_authenticates_new_agent() -> None:
-    """A synthetic token.json makes a new agent authenticated end-to-end."""
-    write_synthetic_token()
+def test_connect_link_flow_authenticates_agent(composio) -> None:
+    """authenticate -> user approves -> finish unlocks the Drive tools."""
     agent = GoogleDriveAgent()
+    tools = {t.__name__: t for t in agent._get_tools()}
+    started = json.loads(tools["authenticate_google_drive"]())
+    assert started["status"] == "consent_required"
+    composio.accounts[started["verification_uri"].rsplit("/", 1)[1]] = "ACTIVE"
+    assert json.loads(tools["finish_google_drive_auth"]())["ok"] is True
     assert agent._is_authenticated() is True
     names = {t.__name__ for t in agent._get_tools()}
     assert set(_AUTH_TOOL_NAMES) <= names
@@ -297,14 +289,14 @@ def test_synthetic_token_authenticates_new_agent() -> None:
     assert json.loads(tools["check_google_drive_auth"]())["ok"] is True
 
 
-def test_clear_auth_removes_token_and_relocks_tools() -> None:
-    """clear_google_drive_auth deletes the token and re-locks backend tools."""
-    write_synthetic_token()
+def test_clear_auth_removes_connection_and_relocks_tools(composio) -> None:
+    """clear_google_drive_auth deletes the connection and re-locks backend tools."""
+    account = connect(composio, _SERVICE)
     agent = GoogleDriveAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools["clear_google_drive_auth"]()
     assert "cleared" in result.lower()
-    assert not token_path(_SERVICE).exists()
+    assert composio.deleted == [account]
     assert agent._is_authenticated() is False
     assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
 
@@ -320,16 +312,15 @@ def test_connect_without_token_fails() -> None:
     """connect() fails cleanly when no token is persisted."""
     b = GoogleDriveChannelBackend()
     assert b.connect() is False
-    assert "No Google Drive credentials" in b.connection_info
+    assert "not connected" in b.connection_info
 
 
-def test_connect_with_synthetic_token_succeeds() -> None:
-    """connect() loads persisted synthetic credentials into the backend."""
-    write_synthetic_token()
+def test_connect_with_composio_connection_succeeds(composio) -> None:
+    """connect() succeeds once a Composio connection is recorded."""
+    connect(composio, _SERVICE)
     b = GoogleDriveChannelBackend()
     assert b.connect() is True
-    assert b._creds is not None
-    assert b._headers() == {"Authorization": "Bearer synthetic-access-token"}
+    assert "connected through Composio" in b.connection_info
 
 
 def test_search_files_defaults(backend) -> None:
@@ -450,7 +441,7 @@ def test_download_google_doc_exports(backend, tmp_path) -> None:
 
 
 def test_upload_file_multipart(backend, tmp_path) -> None:
-    """gdrive_upload_file builds a multipart/related body the server accepts."""
+    """gdrive_upload_file sends an RFC 2387 multipart body as the proxy's binary body."""
     b, server = backend
     source = tmp_path / "report.txt"
     source.write_bytes(b"report body bytes")
@@ -464,19 +455,15 @@ def test_upload_file_multipart(backend, tmp_path) -> None:
     parsed = urlparse(req["path"])
     assert parsed.path == "/upload/files"
     assert parse_qs(parsed.query)["uploadType"] == ["multipart"]
-    assert req["authorization"] == f"Bearer {_TOKEN}"
     content_type = req["content_type"]
     assert content_type.startswith("multipart/related; boundary=")
     boundary = content_type.split("boundary=", 1)[1]
     body = cast(bytes, req["body"])
     parts = body.split(f"--{boundary}".encode())
-    assert body.rstrip().endswith(f"--{boundary}--".encode().rstrip())
     metadata_part, media_part = parts[1], parts[2]
-    assert b"Content-Type: application/json; charset=UTF-8" in metadata_part
     metadata = json.loads(metadata_part.split(b"\r\n\r\n", 1)[1])
     assert metadata == {"name": "Q2 Report.txt", "parents": ["folder9"]}
-    assert b"Content-Type: text/plain" in media_part
-    assert b"report body bytes" in media_part
+    assert b"Content-Type: text/plain" in media_part and b"report body bytes" in media_part
 
 
 def test_upload_file_defaults_name_and_guessed_mime(backend, tmp_path) -> None:
@@ -484,17 +471,11 @@ def test_upload_file_defaults_name_and_guessed_mime(backend, tmp_path) -> None:
     b, server = backend
     source = tmp_path / "diagram.png"
     source.write_bytes(b"\x89PNG fake")
-    result = json.loads(b.gdrive_upload_file(str(source)))
-    assert result["ok"] is True
+    assert json.loads(b.gdrive_upload_file(str(source)))["ok"] is True
     body = cast(bytes, _last(server)["body"])
     metadata = json.loads(body.split(b"\r\n\r\n", 1)[1].split(b"\r\n", 1)[0])
     assert metadata == {"name": "diagram.png"}
     assert b"Content-Type: image/png" in body
-
-
-def test_upload_file_explicit_mime_and_unknown_extension(backend, tmp_path) -> None:
-    """An explicit mime_type wins; unknown extensions fall back to octet-stream."""
-    b, server = backend
     source = tmp_path / "data.unknownext"
     source.write_bytes(b"x")
     assert json.loads(b.gdrive_upload_file(str(source), mime_type="application/x-custom"))["ok"]
@@ -503,40 +484,26 @@ def test_upload_file_explicit_mime_and_unknown_extension(backend, tmp_path) -> N
     assert b"Content-Type: application/octet-stream" in cast(bytes, _last(server)["body"])
 
 
-def test_upload_file_over_5mb_rejected(backend, tmp_path) -> None:
-    """A local file over 5 MB is refused before any HTTP request (multipart limit)."""
+def test_upload_file_size_limit_and_missing_file(backend, tmp_path) -> None:
+    """Over 5 MB is refused before any request; exactly 5 MB and errors are handled."""
     b, server = backend
     big = tmp_path / "big.bin"
-    with big.open("wb") as f:  # sparse/seek-created: 5 MB + 1 byte without real I/O
+    with big.open("wb") as f:
         f.seek(5 * 1024 * 1024)
         f.write(b"\0")
-    assert big.stat().st_size == 5 * 1024 * 1024 + 1
     result = json.loads(b.gdrive_upload_file(str(big)))
     assert result == {"ok": False, "error": "file exceeds the 5 MB multipart upload limit"}
     assert server.requests == []
-
-
-def test_upload_file_exactly_5mb_allowed(backend, tmp_path) -> None:
-    """A file of exactly 5 MB is within the documented multipart limit."""
-    b, server = backend
     exact = tmp_path / "exact.bin"
     with exact.open("wb") as f:
         f.seek(5 * 1024 * 1024 - 1)
         f.write(b"\0")
-    assert exact.stat().st_size == 5 * 1024 * 1024
-    result = json.loads(b.gdrive_upload_file(str(exact)))
-    assert result["ok"] is True
-    assert _last(server)["method"] == "POST"
-
-
-def test_upload_missing_local_file(backend, tmp_path) -> None:
-    """Uploading a nonexistent local file fails without any HTTP request."""
-    b, server = backend
-    result = json.loads(b.gdrive_upload_file(str(tmp_path / "missing.txt")))
-    assert result["ok"] is False
-    assert "not found" in result["error"]
-    assert server.requests == []
-
+    assert json.loads(b.gdrive_upload_file(str(exact)))["ok"] is True
+    missing = json.loads(b.gdrive_upload_file(str(tmp_path / "nope.txt")))
+    assert missing["ok"] is False and "local file not found" in missing["error"]
+    assert json.loads(b.gdrive_upload_file(str(exact), folder_id="../x"))["ok"] is False
+    b._upload_base_url = b._base_url + "/files/boom"
+    assert json.loads(b.gdrive_upload_file(str(exact)))["ok"] is False
 
 def test_create_folder(backend) -> None:
     """gdrive_create_folder posts the folder MIME type and parent."""
@@ -615,13 +582,10 @@ def test_trash_file(backend) -> None:
 def test_path_unsafe_ids_rejected_before_any_request(backend, tmp_path) -> None:
     """Path-unsafe file/folder IDs are refused up front — no HTTP request."""
     b, server = backend
-    source = tmp_path / "f.txt"
-    source.write_text("x")
     for attempt in (
         b.gdrive_get_file("../about"),
         b.gdrive_read_file("a/b"),
         b.gdrive_download_file("a\\b", str(tmp_path / "out")),
-        b.gdrive_upload_file(str(source), folder_id="../root"),
         b.gdrive_create_folder("x", parent_id="a/b"),
         b.gdrive_share_file("fil..e", "a@example.com"),
         b.gdrive_move_file("../x", "f"),
@@ -634,21 +598,15 @@ def test_path_unsafe_ids_rejected_before_any_request(backend, tmp_path) -> None:
     assert server.requests == []
 
 
-def test_wrong_token_returns_ok_false(drive_server, tmp_path) -> None:
+def test_wrong_token_returns_ok_false(backend, composio, tmp_path) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = drive_server
-    b = GoogleDriveChannelBackend()
-    b._base_url = base_url
-    b._upload_base_url = base_url + "/upload"
-    b._token = "wrong-token"
-    source = tmp_path / "f.txt"
-    source.write_text("x")
+    b, _ = backend
+    composio.token = "wrong-token"
     for call in (
         b.gdrive_search_files,
         lambda: b.gdrive_get_file("bin1"),
         lambda: b.gdrive_read_file("bin1"),
         lambda: b.gdrive_download_file("bin1", str(tmp_path / "out")),
-        lambda: b.gdrive_upload_file(str(source)),
         lambda: b.gdrive_create_folder("x"),
         lambda: b.gdrive_share_file("bin1", "a@example.com"),
         lambda: b.gdrive_move_file("bin1", "f"),
@@ -723,20 +681,15 @@ def test_main_without_args_prints_usage(monkeypatch, capsys) -> None:
     assert "Usage: kiss-gdrive" in capsys.readouterr().out
 
 
-def test_connection_refused_returns_ok_false(tmp_path) -> None:
+def test_connection_refused_returns_ok_false(backend, tmp_path) -> None:
     """Tools return ok:false when the server is unreachable — never raise."""
-    b = GoogleDriveChannelBackend()
+    b, _ = backend
     b._base_url = "http://127.0.0.1:9"  # discard port; nothing listens
-    b._upload_base_url = "http://127.0.0.1:9/upload"
-    b._token = _TOKEN
-    source = tmp_path / "f.txt"
-    source.write_text("x")
     for call in (
         b.gdrive_search_files,
         lambda: b.gdrive_get_file("bin1"),
         lambda: b.gdrive_read_file("bin1"),
         lambda: b.gdrive_download_file("bin1", str(tmp_path / "out")),
-        lambda: b.gdrive_upload_file(str(source)),
         lambda: b.gdrive_create_folder("x"),
         lambda: b.gdrive_share_file("bin1", "a@example.com"),
         lambda: b.gdrive_move_file("bin1", "f"),

@@ -515,22 +515,18 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     abs_path = str(sea_path)
     if command == "ask":
         # ``/ask <question>`` is a fixed side-channel Q&A over the
-        # calling task's persisted events: the two ``append_to_*``
-        # arguments must reach ``run_agent`` unchanged.  ``<task_id>``
-        # is left as a literal placeholder here — the calling task's
-        # id is not known until the daemon dispatch allocates one, so
-        # ``_dispatch_reserved`` substitutes it into
-        # ``append_to_prompt`` right before the daemon round trip.
-        # The system-prompt suffix is owned by ``ask_sea.py`` (its
-        # ``append_to_system_prompt()`` getter also overrides the
-        # wire value daemon-side), so it is read from the resolved SEA
-        # file itself.
-        append_to_prompt = (
-            "Read the events of the task <task_id> from "
-            "~/.kiss/sorcar.db and answer the user question above."
-        )
+        # calling task's persisted events: ``append_to_prompt`` must
+        # reach ``run_agent`` unchanged.  ``<task_id>`` is left as a
+        # literal placeholder here — the calling task's id is not
+        # known until the daemon dispatch allocates one, so
+        # ``_dispatch`` substitutes it into ``append_to_prompt`` right
+        # before the daemon round trip.  Both texts are owned by
+        # ``ask_sea.py`` and read from the resolved SEA file itself;
+        # the system-prompt suffix is not repeated in the directive
+        # because the SEA's ``append_to_system_prompt()`` getter
+        # overrides the wire value daemon-side anyway.
         with _load_sea_module(sea_path) as module:
-            append_to_system_prompt = module.append_to_system_prompt()
+            append_to_prompt = module.APPEND_TO_PROMPT
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "
@@ -538,7 +534,6 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
             f'  agent = "{abs_path}"\n'
             f"  task  = the text below, verbatim\n"
             f'  append_to_prompt = "{append_to_prompt}"\n'
-            f'  append_to_system_prompt = "{append_to_system_prompt}"\n'
             f"Do not modify these arguments, do not explore any source "
             f"code, do not paraphrase the task, and do not call any "
             f"other tool first.  When run_agent returns, relay its "

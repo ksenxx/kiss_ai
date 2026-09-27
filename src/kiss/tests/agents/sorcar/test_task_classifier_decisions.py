@@ -50,9 +50,9 @@ from kiss.agents.sorcar.task_classifier import (
     CLASSIFIER_TASK_MAX_CHARS,
     ClassifierRun,
     TaskClassification,
+    _cached_decision,
     _decisions_model_config,
     cached_classification,
-    classification_will_call_model,
     classify_task,
     clear_classification_cache,
     decisions_classification_enabled,
@@ -226,10 +226,10 @@ def test_each_kind_maps_to_its_verdict(env: IsolatedKissHome, kind: str) -> None
 def test_verdict_is_memoised_separately_from_the_llm_memo(env: IsolatedKissHome) -> None:
     """A repeat is served from the memo at zero cost; the LLM memo stays empty."""
     task = "kind:development add a flag"
-    assert classification_will_call_model(task, "claude-haiku-4-5") is True
+    assert _cached_decision(task) is None
     first = classify_task(task=task, model_name="claude-haiku-4-5")
     assert first.classification == TaskClassification(is_simple=False, is_development=True)
-    assert classification_will_call_model(task, "claude-haiku-4-5") is False
+    assert _cached_decision(task) is not None
     second = classify_task(task=task, model_name="gpt-5.6-sol")  # any run model shares it
     assert second.classification == first.classification
     assert (second.budget_used, second.tokens_used, second.steps) == (0.0, 0, 0)
@@ -247,15 +247,14 @@ def test_memo_is_bound_to_the_decisions_endpoint(
     """A verdict memoised from one endpoint is not served for another."""
     task = "kind:simple what time is it"
     classify_task(task=task, model_name="claude-haiku-4-5")
-    assert classification_will_call_model(task, "claude-haiku-4-5") is False
+    assert _cached_decision(task) is not None
     monkeypatch.setenv(_BASE_URL_ENV, os.environ[_BASE_URL_ENV] + "/other")
-    assert classification_will_call_model(task, "claude-haiku-4-5") is True
+    assert _cached_decision(task) is None
 
 
 def test_run_to_completion_models_are_classified_by_decisions(env: IsolatedKissHome) -> None:
     """``cc/*`` and ``codex/*`` runs, skipped by the LLM classifier, get a Jev verdict."""
     task = "kind:git_only push the branch"
-    assert classification_will_call_model(task, "codex/default") is True
     outcome = classify_task(task=task, model_name="cc/claude-fable-5")
     assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
     assert len(_JevHandler.requests) == 1
@@ -418,8 +417,6 @@ def test_without_openrouter_key_the_llm_classifies(
     assert decisions_classification_enabled() is False
     llm = StandInModelServer(_llm_responder('{"is_simple": true, "is_development": false}'))
     try:
-        assert classification_will_call_model("kind:development t", STANDIN_MODEL, llm.model_config)
-        assert classification_will_call_model("kind:development t", "codex/default") is False
         outcome = classify_task(
             task="kind:development t", model_name=STANDIN_MODEL, model_config=llm.model_config
         )

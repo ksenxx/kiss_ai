@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server.json_printer import JsonPrinter
 
 
 def _redirect(tmpdir: Path) -> tuple:
@@ -461,6 +462,62 @@ class OrphanProgressBackfillTest(_BackfillTestCase):
         self.assertEqual(row["result"], "Agent Failed Abruptly")
         self.assertEqual(row["steps"], 0)
         self.assertEqual(row["end_ts"], 0)
+
+
+class _CapturePrinter(JsonPrinter):
+    """A real ``JsonPrinter`` whose broadcasts are collected, not sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+
+    def broadcast(self, event: dict) -> None:  # type: ignore[override]
+        self.events.append(dict(event))
+
+
+class ContinuationTotalsBackfillTest(_BackfillTestCase):
+    """A killed continuation session recovers the task total, not its own."""
+
+    def test_structured_task_totals_beat_the_session_text(self) -> None:
+        """Session 0 banked $10 / 1M tokens / 50 steps; the killed session 1
+        printed its own "Budget: $2.0000" text.  The printer rewrote the
+        event's structured fields to the task totals, which must win."""
+        task_id = self._insert_orphan_row()
+        printer = _CapturePrinter()
+        printer._thread_local.task_id = task_id
+        printer.set_usage_offsets(task_id, 10.0, 1_000_000, 50)
+        printer.print(
+            "Steps: 7/10000, Context: 50,000/1,000,000 tokens, "
+            "Total tokens: 200,000, Budget: $2.0000/$990.00, ",
+            type="usage_info", total_tokens=200_000, cost="$2.0000",
+            total_steps=7,
+        )
+        self._insert_event(task_id, 1, printer.events[-1], 300.0)
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        row = self._row(task_id)
+        self.assertEqual(row["steps"], 57)
+        self.assertEqual(row["tokens"], 1_200_000)
+        self.assertAlmostEqual(row["cost"], 12.0)
+
+    def test_malformed_structured_fields_fall_back_to_the_text(self) -> None:
+        """Non-numeric or boolean structured fields are ignored."""
+        task_id = self._insert_orphan_row()
+        self._insert_event(
+            task_id, 1,
+            {"type": "usage_info",
+             "text": "Steps: 4/100, Total tokens: 4,000, Budget: $0.40/$5.00, ",
+             "total_steps": True, "total_tokens": "many", "cost": "N/A"},
+            100.0,
+        )
+
+        th._recover_orphaned_tasks(set(), time.time())
+
+        row = self._row(task_id)
+        self.assertEqual(row["steps"], 4)
+        self.assertEqual(row["tokens"], 4000)
+        self.assertAlmostEqual(row["cost"], 0.4)
 
 
 if __name__ == "__main__":

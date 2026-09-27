@@ -5,7 +5,7 @@
 """End-to-end tests for speaker identification of post-wake speech.
 
 Real audio, real speech models, real GPT translation — no mocks.
-After the "Sorcar" wake word, the listener captures the utterance,
+After the "Hey Sorcar" wake word, the listener captures the utterance,
 translates it to English AND identifies the speaker with the Vosk
 speaker-identification model (x-vector embeddings compared by cosine
 distance).  Each distinct voice gets a unique number starting from 1;
@@ -210,7 +210,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
                 (voice_b, "run all the tests"),
                 (voice_a, "update the documentation"),
             ]):
-                wake = _tts_wav(tmpdir, f"wake{i}", "Sorcar", voice)
+                wake = _tts_wav(tmpdir, f"wake{i}", "Hey Sorcar", voice)
                 speech = _tts_wav(tmpdir, f"speech{i}", text, voice)
                 utterance = _concat_wavs(
                     tmpdir / f"utterance{i}.wav", [wake, speech],
@@ -252,7 +252,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
     def test_single_utterance_payload_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(tmpdir, "speech", "hello world")
             wav = _concat_wavs(
                 tmpdir / "combined.wav", [wake, speech], gap_seconds=1.5,
@@ -284,7 +284,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
                 DEFAULT_MODELS_DIR / MODEL_NAME
             )
             (models_dir / SPK_MODEL_NAME).mkdir()
-            wake = _tts_wav(tmpdir, "wake", "Sorcar")
+            wake = _tts_wav(tmpdir, "wake", "Hey Sorcar")
             speech = _tts_wav(tmpdir, "speech", "hello world")
             wav = _concat_wavs(
                 tmpdir / "combined.wav", [wake, speech], gap_seconds=1.5,
