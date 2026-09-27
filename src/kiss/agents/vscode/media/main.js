@@ -13532,6 +13532,27 @@
       // again if nothing is ever said into it.
       streamOpenThoughts(ctx, ev.ts, true);
     }
+    if (t === 'llm_call' && ctx.llmPanel) {
+      // The call's own price lands under the thoughts panel that holds
+      // its words: the event follows the response's deltas and precedes
+      // the tool_call that seals the panel.  A response with no words
+      // (tool calls only) has a provisional panel that tool_call
+      // discards, cost and all.  A text-only reply is followed by a
+      // retry call whose words land in the SAME panel (no tool_call
+      // sealed it), so the panel's figure is the sum of its calls.
+      const panel = ctx.llmPanel;
+      const cost = Number(ev.cost);
+      if (isFinite(cost) && cost >= 0) {
+        panel._kissCallCost = (panel._kissCallCost || 0) + cost;
+        panel._kissCallCount = (panel._kissCallCount || 0) + 1;
+        window.PanelCopy.setPanelCost(
+          panel,
+          panel._kissCallCost,
+          ev.model,
+          panel._kissCallCount,
+        );
+      }
+    }
     if (t === 'usage_info' && ctx.stepCount > 0) {
       // The daemon's own count outranks the panel counting, which only
       // estimates the steps between two of its reports -- a run_parallel
@@ -14463,6 +14484,8 @@
     'prompt',
     'result',
     'usage_info',
+    // Per-call cost, stamped under the open thoughts panel (streamEnd).
+    'llm_call',
     'task_settings',
   ]);
 
@@ -20213,15 +20236,48 @@
     return ms;
   }
 
-  function makeLaunchedAgoLabel(session) {
-    const ms = taskLaunchMs(session);
+  /**
+   * A "launched 3 hours ago" label for the instant *ms*, refreshed by
+   * the 30 s sweep below; *prefix* replaces the leading word ("last
+   * launched" for a chat panel).  Null for an unusable instant.
+   */
+  function makeLaunchedAgoLabelFor(ms, prefix) {
     if (!isFinite(ms)) return null;
+    const lead = prefix || 'launched';
     const span = document.createElement('span');
     span.className = 'sidebar-item-launched';
     span.dataset.launchTs = String(ms);
-    span.textContent = 'launched ' + taskLaunchedAgoText(ms);
-    span.title = 'Launched ' + new Date(ms).toLocaleString();
+    span.dataset.launchPrefix = lead;
+    span.textContent = lead + ' ' + taskLaunchedAgoText(ms);
+    span.title =
+      lead.charAt(0).toUpperCase() +
+      lead.slice(1) +
+      ' ' +
+      new Date(ms).toLocaleString();
     scheduleLaunchedAgoRefresh();
+    return span;
+  }
+
+  function makeLaunchedAgoLabel(session) {
+    return makeLaunchedAgoLabelFor(taskLaunchMs(session), 'launched');
+  }
+
+  /**
+   * The task's classification tags ("work · coding"), shown right
+   * before its "launched ..." label; null when the row has none (a
+   * task still running, or a daemon predating the `tags` column).
+   */
+  function makeTaskTagsLabel(session) {
+    const raw = typeof session.tags === 'string' ? session.tags : '';
+    const tags = raw
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean);
+    if (tags.length === 0) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-tags';
+    span.textContent = tags.join(' · ');
+    span.title = 'Tags: ' + tags.join(', ');
     return span;
   }
 
@@ -20246,7 +20302,8 @@
     labels.forEach(el => {
       const ms = Number(el.dataset.launchTs);
       if (!isFinite(ms) || ms < 0) return;
-      const text = 'launched ' + taskLaunchedAgoText(ms);
+      const lead = el.dataset.launchPrefix || 'launched';
+      const text = lead + ' ' + taskLaunchedAgoText(ms);
       if (el.textContent !== text) el.textContent = text;
     });
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
@@ -20549,6 +20606,7 @@
    * one before.
    */
   function updateHistoryGroupHeader(group, session) {
+    updateHistoryGroupLaunched(group, session);
     const titleEl = group.querySelector(
       ':scope > .history-chat-header .history-chat-title',
     );
@@ -20571,6 +20629,28 @@
         .map(l => l.trim())
         .filter(Boolean)[0] || 'Untitled';
     if (titleEl.textContent !== text) titleEl.textContent = text;
+  }
+
+  /**
+   * Keep *group*'s "last launched ... ago" line current. The daemon
+   * stamps every row with the chat's `chat_last_launched` (epoch ms,
+   * from `chat_summaries`); without it (an older daemon, or a chat not
+   * yet summarised) the line follows the newest row loaded so far.
+   */
+  function updateHistoryGroupLaunched(group, session) {
+    const line = group.querySelector(':scope > .history-chat-launched');
+    if (!line) return;
+    const stamped = Number(session.chat_last_launched || 0);
+    const rowMs = taskLaunchMs(session);
+    let ms = stamped > 0 && stamped <= MAX_LAUNCH_EPOCH_MS ? stamped : rowMs;
+    // Epoch zero is a real launch instant (taskLaunchMs), so "no label
+    // yet" is the absence of the attribute, not a zero.
+    const known =
+      line.dataset.launchTs === undefined ? NaN : Number(line.dataset.launchTs);
+    if (isFinite(known) && (!isFinite(ms) || known > ms)) ms = known;
+    if (!isFinite(ms) || ms === known) return;
+    line.dataset.launchTs = String(ms);
+    line.replaceChildren(makeLaunchedAgoLabelFor(ms, 'last launched'));
   }
 
   /** Build the collapsible chat panel's clickable header. */
@@ -20625,6 +20705,11 @@
     // The chat's latest task time decides its day bucket.
     group.dataset.ts = String(ts);
     group.appendChild(historyGroupHeader(group, chatId));
+    // The line under the header: when the chat's latest task was
+    // launched (filled by updateHistoryGroupLaunched).
+    const launched = document.createElement('div');
+    launched.className = 'history-chat-launched';
+    group.appendChild(launched);
     const body = document.createElement('div');
     body.className = 'history-chat-body';
     group.appendChild(body);
@@ -21284,6 +21369,8 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      const tagsLabel = makeTaskTagsLabel(s);
+      if (tagsLabel) actions.appendChild(tagsLabel);
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);

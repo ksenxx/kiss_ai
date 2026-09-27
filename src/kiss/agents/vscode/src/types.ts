@@ -720,6 +720,19 @@ type ToWebviewMessageBody =
       cache_read?: number;
       model?: string;
     }
+  // One per model call: its own tokens, USD cost and duration
+  // (``KissAgent._print_llm_call``).
+  | {
+      type: 'llm_call';
+      model?: string;
+      step?: number;
+      duration_ms?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read?: number;
+      cache_write?: number;
+      cost?: number;
+    }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
   // The finished ``/ask`` side-channel answer, delivered into the

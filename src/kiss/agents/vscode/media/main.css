@@ -4026,6 +4026,20 @@ body.sidebar-chat-mode #meta-info-content {
   white-space: nowrap;
 }
 
+/* The line under the chat header: when the chat's latest task was
+   launched, in the task panels' "launched ... ago" style. Indented to
+   the header's title column; empty until the daemon's stamp arrives. */
+.history-chat-launched {
+  display: flex;
+  min-width: 0;
+  padding: 0 var(--space-2-5) var(--space-1) calc(var(--space-2) + 12px + var(--space-1-5));
+  line-height: 1.35;
+}
+
+.history-chat-launched:empty { display: none; }
+
+.history-chat-launched > .sidebar-item-launched { margin-left: 0; }
+
 /* The chat's task rows, indented under the header behind a hairline
    guide so the nesting reads without a tinted band. */
 .history-chat-body {
@@ -4234,6 +4248,26 @@ body.remote-chat .running-item.history-active-task:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The task's tags ("work · coding"), right before its "launched ..."
+   label and in the same muted style, so the two read as one line of
+   metadata. */
+.sidebar-item-tags {
+  flex-shrink: 1;
+  min-width: 0;
+  margin-left: var(--space-0-5);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-item-tags + .sidebar-item-launched::before {
+  content: '•';
+  margin-right: var(--space-0-5);
 }
 
 .sidebar-item-copy.copied { opacity: 0.9; color: var(--status-ok); }
@@ -4669,6 +4703,12 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .panel-ts {
+  white-space: nowrap;
+}
+
+/* The USD cost of the model call a thoughts panel holds, next to its
+   time label (from the llm_call event). */
+.panel-cost {
   white-space: nowrap;
 }
 

@@ -184,6 +184,11 @@ class ChatSorcarAgent(SorcarAgent):
         self._chat_id: str = ""
         self._context_task_id: str = ""
         self._subagent_info: dict[str, object] | None = None
+        # File stem of the SEA (agent script, wire field ``agentPath``)
+        # this run executes on behalf of, e.g. ``write_paper_sea`` or
+        # ``cron_agent``; set by the task runner and persisted in the
+        # ``task_history.sea`` column.  Empty for a plain run.
+        self.sea_name: str = ""
         # Frontend tab this agent's events belong to.  The fan-out
         # engine assigns each sub-agent its own synthetic tab id, so
         # the attribute lives here rather than on the worktree
@@ -333,6 +338,8 @@ class ChatSorcarAgent(SorcarAgent):
             payload["max_budget"] = max_budget
         if self._subagent_info is not None:
             payload["subagent"] = self._subagent_info
+        if self.sea_name:
+            payload["sea"] = self.sea_name
         return payload
 
     def _system_prompt_task_settings(self) -> dict[str, str]:

@@ -1536,6 +1536,10 @@ class _TaskRunnerMixin:
         _agent_script_run = bool(
             _raw_agent_path.strip() if isinstance(_raw_agent_path, str) else "",
         )
+        # Recorded in the row's ``sea`` column (see ChatSorcarAgent.sea_name).
+        agent.sea_name = (
+            Path(str(_raw_agent_path).strip()).stem if _agent_script_run else ""
+        )
         _open_bare_path = not _agent_script_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = (

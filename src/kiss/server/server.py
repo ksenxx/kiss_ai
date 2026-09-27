@@ -37,6 +37,7 @@ from kiss.agents.sorcar import sea_commands, worktree_pool
 from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
+    _chat_summaries,
     _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
@@ -1313,6 +1314,9 @@ class VSCodeServer(
                     session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
                     session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
                     session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
+                    for key in ("tags", "sea"):
+                        raw = extra_obj.get(key, "")
+                        session[key] = raw if isinstance(raw, str) else ""
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
@@ -1323,10 +1327,17 @@ class VSCodeServer(
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
         # The chat-panel headers in the History sidebar show each chat's
-        # FIRST task, which may be older than any row on this page.
-        first_tasks = _chat_first_tasks([str(s["id"]) for s in sessions])
+        # FIRST task, which may be older than any row on this page, and
+        # the launch time of its LATEST task (``chat_summaries``).
+        chat_ids = [str(s["id"]) for s in sessions]
+        first_tasks = _chat_first_tasks(chat_ids)
+        summaries = _chat_summaries(chat_ids)
         for session in sessions:
-            session["chat_first_task"] = first_tasks.get(str(session["id"]), "")
+            chat_id = str(session["id"])
+            session["chat_first_task"] = first_tasks.get(chat_id, "")
+            summary = summaries.get(chat_id, {})
+            session["chat_summary"] = summary.get("summary", "")
+            session["chat_last_launched"] = summary.get("last_launched", 0)
         min_ts, max_ts = _history_date_range()
         event: dict[str, Any] = {
             "type": "history",

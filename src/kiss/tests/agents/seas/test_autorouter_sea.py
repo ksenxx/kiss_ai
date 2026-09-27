@@ -38,7 +38,9 @@ from kiss.tests.agents.sorcar.local_model_server import (
 )
 
 _SEA_PATH = Path(autorouter_sea.__file__).resolve()
-_TOOL_NAMES = {"model_menu", "pick_model", "estimate_cost", "log_decision"}
+_TOOL_NAMES = {
+    "model_menu", "pick_model", "estimate_cost", "observed_call_costs", "log_decision",
+}
 
 
 def _runnable_candidates(tier: str) -> list[str]:
@@ -48,7 +50,7 @@ def _runnable_candidates(tier: str) -> list[str]:
 
 
 def test_sea_getters_follow_the_contract() -> None:
-    """The getters pin the run: added protocol, picker entry, four tools, run_parallel off."""
+    """The getters pin the run: added protocol, picker entry, five tools, run_parallel off."""
     prompt = autorouter_sea.add_to_system_prompt()
     assert prompt == autorouter_sea.SYSTEM_PROMPT
     assert prompt.startswith("## Model routing protocol (autorouter)")
@@ -62,6 +64,7 @@ def test_sea_getters_follow_the_contract() -> None:
         "`run_agent(task=..., model_name=<picked>)`, one call per unit",
         "`set_model` only at a phase boundary",
         "`log_decision(unit, tier, model, reason, outcome)`",
+        "`observed_call_costs(days, model)`",
         "Never downgrade a model the user named explicitly.",
     ):
         assert phrase in flat, phrase

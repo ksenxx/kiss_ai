@@ -50,6 +50,9 @@ Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
 from __future__ import annotations
 
 import json
+import sqlite3
+import statistics
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -167,7 +170,13 @@ name or a price.
 
 3. Pick a concrete model with `pick_model(tier, tokens_in, tokens_out, exclude)`. Pass
    realistic token counts: a sub-agent that reads a medium codebase and runs tests uses
-   about 200k prompt and 20k completion tokens. Then dispatch on the sub-agent boundary,
+   about 200k prompt and 20k completion tokens. `estimate_cost` prices from the catalog;
+   `observed_call_costs(days, model)` reports what each model's calls actually cost on
+   this installation (every call is recorded as an `llm_call` event with its own tokens,
+   cost and duration). Call it once per task: when a candidate's observed mean cost per
+   call is more than twice the catalog estimate for the same token counts, or its
+   observed `mean_seconds` is far above its tier peers, treat the observed figure as the
+   price and move on to the next candidate. Then dispatch on the sub-agent boundary,
    never mid-context: `run_agent(task=..., model_name=<picked>)`, one call per unit. The
    sub-agent starts a fresh session with the default Sorcar prompt and toolset, so its
    task text must name the files it may touch and the check that ends it; a small-tier
@@ -390,6 +399,97 @@ def estimate_cost(
     )
 
 
+def observed_call_costs(days: int = 7, model: str = "") -> str:
+    """Aggregate the per-call ``llm_call`` events of recent tasks by model.
+
+    Every model call an agent makes is recorded in ``sorcar.db`` as an
+    ``llm_call`` event with the call's own tokens, USD cost and duration
+    (``KissAgent._print_llm_call``).  This reads the events of the tasks
+    launched in the last *days* days and reports, per model, what a call
+    actually cost on this installation — the observed price to check
+    ``estimate_cost``'s catalog estimate against before dispatching.
+
+    Args:
+        days: Look-back window in days over task launch times (default 7).
+        model: Restrict the report to one model name; empty for every model.
+
+    Returns:
+        JSON list ordered by total cost, one record per model:
+        ``{model, calls, tasks, total_usd, mean_usd_per_call,
+        median_usd_per_call, mean_input_tokens, mean_output_tokens,
+        cache_read_share, mean_seconds}``; an empty list when no calls
+        were recorded in the window.
+    """
+    db_path = kiss_home() / "sorcar.db"
+    if not db_path.exists():
+        return "[]"
+    cutoff = time.time() - max(1, int(days)) * 86400
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30.0)
+    try:
+        task_ids = [
+            r[0]
+            for r in conn.execute(
+                "SELECT id FROM task_history WHERE timestamp >= ? "
+                "ORDER BY timestamp DESC LIMIT 5000",
+                (cutoff,),
+            )
+        ]
+        per_model: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(task_ids), 500):
+            chunk = task_ids[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                "SELECT task_id, event_json FROM events "
+                f"WHERE task_id IN ({placeholders}) "
+                "AND event_json LIKE '%\"type\": \"llm_call\"%'",
+                chunk,
+            )
+            for task_id, event_json in rows:
+                event = json.loads(event_json)
+                name = str(event.get("model") or "")
+                if event.get("type") != "llm_call" or not name or (model and name != model):
+                    continue
+                agg = per_model.setdefault(
+                    name,
+                    {"costs": [], "tasks": set(), "input": 0, "output": 0,
+                     "cache_read": 0, "ms": 0},
+                )
+                agg["costs"].append(float(event.get("cost") or 0.0))
+                agg["tasks"].add(task_id)
+                # Prompt tokens = uncached input + cache writes (Anthropic
+                # reports cache-creation tokens apart from input) + reads.
+                agg["input"] += int(event.get("input_tokens") or 0) + int(
+                    event.get("cache_write") or 0
+                )
+                agg["output"] += int(event.get("output_tokens") or 0)
+                agg["cache_read"] += int(event.get("cache_read") or 0)
+                agg["ms"] += int(event.get("duration_ms") or 0)
+    finally:
+        conn.close()
+    report = []
+    for name, agg in per_model.items():
+        calls = len(agg["costs"])
+        prompt_tokens = agg["input"] + agg["cache_read"]
+        report.append(
+            {
+                "model": name,
+                "calls": calls,
+                "tasks": len(agg["tasks"]),
+                "total_usd": round(sum(agg["costs"]), 4),
+                "mean_usd_per_call": round(sum(agg["costs"]) / calls, 6),
+                "median_usd_per_call": round(statistics.median(agg["costs"]), 6),
+                "mean_input_tokens": round(prompt_tokens / calls),
+                "mean_output_tokens": round(agg["output"] / calls),
+                "cache_read_share": round(agg["cache_read"] / prompt_tokens, 3)
+                if prompt_tokens
+                else 0.0,
+                "mean_seconds": round(agg["ms"] / calls / 1000, 1),
+            }
+        )
+    report.sort(key=lambda r: r["total_usd"], reverse=True)
+    return json.dumps(report, indent=2)
+
+
 def ledger_path() -> Path:
     """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
 
@@ -491,8 +591,8 @@ def model() -> str:
 
 
 def tools() -> list[Any]:
-    """Expose the priced menu, the pick, the cost estimate and the ledger to the model."""
-    return [model_menu, pick_model, estimate_cost, log_decision]
+    """Expose the priced menu, the pick, the cost estimate, the observed costs and the ledger."""
+    return [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 
 
 def is_parallel() -> bool:
