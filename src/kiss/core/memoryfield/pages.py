@@ -11,6 +11,13 @@ frontmatter block carrying ``title``, ``uuid``, ``summary``, ``created`` and
 ``updated``. The pages are the canonical data; the vector index built by
 :mod:`kiss.core.memoryfield.index` is a regenerable cache.
 
+Deleting a page leaves a *tombstone*, ``<memory>/.tombstones/<name>``,
+holding the time of the deletion.  Tombstones are not pages -- no listing
+shows them -- but they travel with the memory when two machines are synced
+(``scripts/sync-memory.sh``), so that a page deleted here is deleted there
+too instead of coming back from the other copy.  Writing the page again
+removes its tombstone.
+
 Only the standard library plus PyYAML (already a project dependency) is used.
 """
 
@@ -36,6 +43,11 @@ DEBRIS_NAMES = frozenset({".DS_Store", "desktop.ini", "Thumbs.db"})
 
 # Pages SHOULD NOT exceed this many bytes; indexers only embed this prefix.
 MAX_PAGE_BYTES = 8192
+
+# Sub-directory of a memory holding one file per deleted page (see the
+# module docstring); its name is not a valid page name, so no listing --
+# and no sync -- takes it for a page or a domain memory.
+TOMBSTONES_DIR = ".tombstones"
 
 FRONTMATTER_KEYS = ("title", "uuid", "summary", "created", "updated")
 
@@ -300,6 +312,7 @@ class MemoryDir:
             ValueError: If the name is invalid or the body is empty.
         """
         path = self.page_path(name)
+        tombstone = self.tombstone_path(path.stem)
         incoming, body = split_frontmatter(body)
         if not body.strip():
             raise ValueError("Refusing to write an empty page.")
@@ -334,16 +347,43 @@ class MemoryDir:
         # page gets Path.write_text's umask-derived bits (helper default
         # 0o600 is for secret-bearing files); an existing page keeps its mode.
         atomic_write_text(path, raw, create_mode=0o666)
+        # The page is back: a tombstone left by an earlier deletion would
+        # otherwise delete it again on the next sync with another machine.
+        tombstone.unlink(missing_ok=True)
         return Page(name=path.stem, frontmatter=frontmatter, body=body, raw=raw)
 
+    def tombstone_path(self, name: str) -> Path:
+        """Return where the tombstone of page *name* lives once the page is deleted.
+
+        Args:
+            name: Page name, with or without ``.md``.
+
+        Raises:
+            ValueError: If the name is invalid (see :meth:`page_path`), or
+                the tombstone directory is a symlink -- a write through it
+                would land outside the memory.
+        """
+        directory = self.root / TOMBSTONES_DIR
+        if directory.is_symlink():
+            raise ValueError(f"{directory} is a symlink; the tombstone directory must not be.")
+        return directory / self.page_path(name).stem
+
     def delete(self, name: str) -> None:
-        """Delete page *name*.
+        """Delete page *name*, leaving a tombstone that records when.
+
+        The tombstone, ``.tombstones/<name>`` holding the deletion time as
+        ``updated`` is written, lets a sync with another machine delete the
+        page there too rather than bring it back (see the module docstring).
 
         Args:
             name: Page name (``.md`` optional).
 
         Raises:
             FileNotFoundError: If the page does not exist.
-            ValueError: If the name is invalid.
+            ValueError: If the name is invalid, or the tombstone cannot be
+                placed (see :meth:`tombstone_path`); the page is then kept.
         """
+        tombstone = self.tombstone_path(name)
         self.page_path(name).unlink()
+        tombstone.parent.mkdir(exist_ok=True)
+        atomic_write_text(tombstone, now_iso() + "\n", create_mode=0o666)

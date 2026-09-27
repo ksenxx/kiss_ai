@@ -91,10 +91,13 @@ def test_tools_full_lifecycle(tmp_path: Path) -> None:
     # An empty query embeds to the zero vector, so every page is orthogonal and dropped.
     assert tools.memory_search("", k=5) == "No matches."
     assert tools.memory_pull("") == "No matches."
+    # The deletion left a tombstone, so a sync with another machine deletes the page there too.
     assert sorted(p.name for p in (tmp_path / "memory").iterdir()) == [
+        ".tombstones",
         "carbon-fibre-woks.md",
         "hashed-bow-v1.sqlite3",
     ]
+    assert [p.name for p in (tmp_path / "memory" / ".tombstones").iterdir()] == ["finnish-id"]
 
 
 def test_write_warns_when_page_exceeds_embedding_limit(tmp_path: Path) -> None:
