@@ -690,6 +690,9 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # A complete, billed response the adapter refused to use
+        # (truncated, incomplete, refused); see take_partial_usage_response.
+        self._rejected_response: Any = None
         # Seconds of event-level silence tolerated before a streamed
         # request is aborted with a retryable TimeoutError.  Read here
         # once for every streaming transport (the key is in
@@ -1143,19 +1146,23 @@ class Model(ABC):
     def take_partial_usage_response(self) -> Any:
         """Return (and consume) usage for a generation that raised, if known.
 
-        A ``generate()`` call that fails mid-stream (stall timeout, parse
-        error) may still have observed billable usage before the failure.
-        Adapters that can track it (e.g. Claude Code's per-message
-        ``message_delta`` events) override this to hand the caller a
-        response object suitable for
-        :meth:`extract_input_output_token_counts_from_response`; the base
-        implementation knows of none.  Consuming clears the stored value so
-        the same usage is never counted twice.
+        A generation call can raise after the provider already billed it:
+        adapters reject a complete response they cannot use (output
+        truncated at the token limit, an ``incomplete`` Responses status,
+        a safety refusal) and record it in ``self._rejected_response``
+        just before raising.  Adapters that observe usage mid-stream (e.g.
+        Claude Code's per-message ``message_delta`` events) override this.
+        The returned object suits
+        :meth:`extract_input_output_token_counts_from_response`.
+        Consuming clears the stored value so the same usage is never
+        counted twice.
 
         Returns:
-            A response object carrying the partial usage, or ``None``.
+            A response object carrying the billed usage, or ``None``.
         """
-        return None
+        response = self._rejected_response
+        self._rejected_response = None
+        return response
 
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
@@ -1169,6 +1176,23 @@ class Model(ABC):
             list[float]: The embedding vector as a list of floats.
         """
         pass  # pragma: no cover
+
+    def get_embeddings(
+        self, texts: list[str], embedding_model: str | None = None
+    ) -> list[list[float]]:
+        """Generates one embedding vector per text.
+
+        The base implementation calls :meth:`get_embedding` once per text;
+        providers with a batch endpoint override it with a single request.
+
+        Args:
+            texts: The texts to embed.
+            embedding_model: Optional model name to use for embedding generation.
+
+        Returns:
+            The embedding vectors, in the order of *texts*.
+        """
+        return [self.get_embedding(text, embedding_model) for text in texts]
 
     def set_usage_info_for_messages(self, usage_info: str) -> None:
         """Sets token information to append to messages sent to the LLM.
@@ -1355,10 +1379,11 @@ class CLITextModel(Model):
 
     Both transports are full coding agents in their own right, so
     ``runs_task_to_completion`` is True: :class:`~kiss.core.kiss_agent.KISSAgent`
-    hands them the whole task in one ``generate()`` call — with the system
-    prompt appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` —
-    and returns their final output, instead of driving a turn-by-turn
-    KISS tool loop.
+    hands them the whole task in one ``generate()`` call and returns their
+    final output, instead of driving a turn-by-turn KISS tool loop.  The
+    system prompt reaches Claude Code as ``--append-system-prompt``;
+    Codex's CLI has no such flag, so it gets the prompt appended to the
+    task after :data:`CLI_SYSTEM_PROMPT_HEADER`.
 
     Both transports flatten the conversation into a single text prompt,
     support tool calling only via the text-based ``tool_calls`` JSON
@@ -1377,24 +1402,34 @@ class CLITextModel(Model):
     # early at the first complete ``tool_calls`` block consult it.
     _tool_bearing_turn = False
 
-    def _build_prompt(self) -> str:
-        """Build the single prompt string sent to the CLI.
+    def _task_text(self) -> str:
+        """Return the conversation as the task text sent to the CLI.
 
         A one-message conversation (the normal run-to-completion case) is
         the task text itself; a multi-turn conversation is flattened into
-        a ``[User]/[Assistant]/[Tool Result]`` transcript.  When
-        ``system_instruction`` is set in ``model_config`` it is appended
-        to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the CLIs are
-        agents with their own system prompts, so KISS's system prompt
-        rides inside the task instead of replacing theirs.
+        a ``[User]/[Assistant]/[Tool Result]`` transcript.
+
+        Returns:
+            The task text, without any system instruction.
+        """
+        if len(self.conversation) == 1:
+            return flatten_content_to_text(self.conversation[0]["content"])
+        return self._conversation_as_dialogue()
+
+    def _build_prompt(self) -> str:
+        """Build the single prompt string sent to the CLI.
+
+        When ``system_instruction`` is set in ``model_config`` it is
+        appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the
+        CLIs are agents with their own system prompts, so KISS's system
+        prompt rides inside the task instead of replacing theirs.  A CLI
+        with a real channel for an appended system prompt overrides this
+        (see :class:`~kiss.core.models.claude_code_model.ClaudeCodeModel`).
 
         Returns:
             The assembled prompt string.
         """
-        if len(self.conversation) == 1:
-            task = flatten_content_to_text(self.conversation[0]["content"])
-        else:
-            task = self._conversation_as_dialogue()
+        task = self._task_text()
         system_instruction = self.model_config.get("system_instruction")
         if system_instruction:
             return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"

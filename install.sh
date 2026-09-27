@@ -275,9 +275,11 @@ acquire_update_lock() {
     exec 9>>"$_kiss_lock_file"
     if ! perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", 9) or exit 2; exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)'; then
         # The winner writes its pid right after locking; give it a moment.
+        # Until then the file still names the previous run's (dead) holder:
+        # the kernel released that lock on exit but nothing clears the pid.
         for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             holder=$(cat "$_kiss_lock_file" 2>/dev/null || true)
-            [ -n "$holder" ] && break
+            [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null && break
             sleep 0.05
         done
         echo "another KISS update is already running (pid ${holder:-unknown}); exiting." >&2
@@ -311,7 +313,11 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
-NODE_VERSION="v22.16.0"
+# Node.js release installed when the machine has none.  Keep this at the
+# newest release of the 22.x line (https://nodejs.org/dist/latest-v22.x/):
+# releases before v22.23.2 carry the HIGH-severity CVEs fixed in the
+# July 2026 security release.
+NODE_VERSION="v22.23.3"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR"
 export PATH="$BIN_DIR:$PATH"
@@ -1047,7 +1053,7 @@ guard_vsix_tracking() {
 # ---------------------------------------------------------------------------
 # A white-label distribution re-brands KISS Sorcar by replacing the data
 # files under src/kiss/agents/vscode/media/ (brand.json, brand.css,
-# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg; see kiss.core.brand and
+# kiss-icon.svg, kiss-icon.png, thumbnail.jpeg, welcome-logo.png; see kiss.core.brand and
 # scripts/apply-brand.js).  Editing those tracked files in place would
 # make the Update button's pre-flight (``git stash`` / ``git reset --hard
 # @{upstream}`` / ``git stash pop``) conflict on every release, because
@@ -1072,7 +1078,7 @@ guard_vsix_tracking() {
 # the brand, and every later update rebuilds with the same overlay.
 # Without a ``.brand/`` directory both functions do nothing (stock KISS
 # Sorcar), so a development checkout is never re-branded by accident.
-BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg)
+BRAND_OVERLAY_FILES=(brand.json brand.css kiss-icon.svg kiss-icon.png thumbnail.jpeg welcome-logo.png welcome-logo-dark.png)
 BRAND_MEDIA_REL="src/kiss/agents/vscode/media"
 BRAND_MANIFEST_REL="src/kiss/agents/vscode/package.json"
 # Snapshot directory while the overlay is applied; empty otherwise.
@@ -1388,7 +1394,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # User-curated model overrides / extensions live in
     # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
     # short documentation block and one commented-out example entry —
-    # matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
+    # matching the ``MY_INJECTION.md`` pattern.
     MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
     MODEL_INFO_DST="${KISS_HOME:-$HOME/.kiss}/MODEL_INFO.json"
     if [ -f "$MODEL_INFO_SRC" ]; then
@@ -1408,8 +1414,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # edits.  User-curated tricks live in ``~/.kiss/MY_INJECTION.md``
     # — auto-seeded on first read with a single ``## Trick`` starter
     # ("Write end-to-end 100% coverage tests for the feature first.
-    # Then implement the feature.") — matching the
-    # ``MY_TASK_TEMPLATES.md`` / ``SAMPLE_TASKS.md`` pattern.
+    # Then implement the feature.").
     #
     # Re-introducing the copy here would mean a stale user-side
     # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed

@@ -95,7 +95,19 @@ function run() {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(added)), [
     {type: 'addTrick', text: 'Delta promptlet'},
   ]);
-  assert.strictEqual(addInput.value, '', 'box cleared after Add');
+  // The box keeps its text until the daemon's tricksData lists the new
+  // promptlet (ui_antipattern_drafts.test.js): a rejection must not
+  // lose what was typed.
+  assert.strictEqual(addInput.value, '  Delta promptlet  ', 'box kept until confirmed');
+  const beforeAdd = [...win.__TRICKS__];
+  send(win, {
+    type: 'tricksData',
+    tricks: ['Delta promptlet', ...beforeAdd],
+    userCount: 1,
+  });
+  assert.strictEqual(addInput.value, '', 'box cleared once confirmed');
+  // Back to the pre-add list for the reload checks below.
+  send(win, {type: 'tricksData', tricks: beforeAdd, userCount: 0});
   assert.ok(addBtn.disabled, 'Add disabled again after clearing');
   assert.strictEqual(doc.activeElement, addInput, 'focus stays in the box');
 

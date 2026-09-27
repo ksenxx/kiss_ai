@@ -4,8 +4,7 @@
 # add your name here
 """Audit 2026-09-03 (server, fix round): stale old-workspace file replies.
 
-The ``@``-mention picker's background refresh
-(:meth:`_refresh_file_cache`) used to verify AND REMOVE its
+The ``@``-mention picker's cold path used to verify AND REMOVE its
 per-connection request token under ``_state_lock``, release the lock,
 and only then load usage, rank, and emit the ``files`` event.  A newer
 ``getFiles`` from the SAME connection — same typed prefix, different
@@ -15,10 +14,11 @@ check.  The frontend validates replies only by active tab and prefix
 (not by work dir), so the picker ended up showing — and letting the
 user insert — paths from the wrong repository (review Finding 5).
 
-The fix computes the scan and ranking outside the lock, then
-reacquires ``_state_lock``, re-verifies that the captured token is
-still the connection's current request, emits while it is, and removes
-the token only after the emission.
+Today a cold request has the :class:`~kiss.server.file_index.FileIndexRegistry`
+worker build the work_dir's index and then run ``_emit_indexed_files``,
+which ranks outside the lock, reacquires ``_state_lock``, re-verifies
+that the captured token is still the connection's current request,
+emits while it is, and removes the token only after the emission.
 
 The superseded interleaving is made deterministic with a real
 :class:`VSCodeServer` subclass whose ``_emit_files`` parks the OLD
@@ -31,6 +31,9 @@ newer reply has been observed (old code — the stale reply then lands
 last and the test fails) or after a grace period during which the
 newer request is provably lock-blocked (fixed code — the old reply
 lands first, while still current, and the newer reply wins).
+
+Every server gets a private registry rooted in the test's temp dir so
+the real home directory is never scanned.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.server import agent_state
+from kiss.server.file_index import FileIndexRegistry
 from kiss.server.server import VSCodeServer
 from kiss.tests.server._memory_printer import MemoryPrinter
 
@@ -99,10 +103,20 @@ class TestAutocompleteStaleReply(TestCase):
         self.printer = MemoryPrinter()
         self.server = _ParkingEmitServer(self.printer)
         self.server.work_dir = str(self.tmp)
+        self.server._file_index.stop()
+        self.registry = FileIndexRegistry(
+            home=str(self.tmp / "home"), cache_dir=self.tmp / "cache",
+        )
+        self.server._file_index = self.registry
 
     def tearDown(self) -> None:
         self.server.release.set()
+        self.registry.stop()
         agent_state.agent_states.clear()
+
+    def _indexed(self, work_dir: Path) -> bool:
+        """Whether the registry has published an index covering *work_dir*."""
+        return self.registry.view_for(str(work_dir)) is not None
 
     def _files_events(self, conn_id: str) -> list[dict[str, Any]]:
         return [
@@ -125,8 +139,8 @@ class TestAutocompleteStaleReply(TestCase):
     def _names(self, ev: dict[str, Any]) -> str:
         return " ".join(str(f) for f in ev.get("files", []))
 
-    def _warm_cache(self, work_dir: Path) -> None:
-        """Populate the file cache for *work_dir* through production code."""
+    def _warm_index(self, work_dir: Path) -> None:
+        """Build the index for *work_dir* through a production cold request."""
         self.server._get_files(_PREFIX, str(work_dir), "warm-conn", "warm-tab")
         self.assertTrue(
             self._wait(
@@ -136,15 +150,15 @@ class TestAutocompleteStaleReply(TestCase):
                 ),
                 30.0,
             ),
-            "warming the new workspace's file cache never completed",
+            "warming the new workspace's file index never completed",
         )
 
     def test_superseded_old_workspace_reply_never_lands_last(self) -> None:
-        self._warm_cache(self.wd_new)
+        self._warm_index(self.wd_new)
 
-        # Request 1: same prefix, OLD workspace — cache miss, so the
-        # populated reply comes from the background refresh, which is
-        # parked on its way out.
+        # Request 1: same prefix, OLD workspace — no index yet, so the
+        # populated reply comes from the worker's
+        # ``_emit_indexed_files``, which is parked on its way out.
         self.server.park_marker = "marker-old"
         self.server._get_files(_PREFIX, str(self.wd_old), _CONN, "tab-1")
         self.assertTrue(
@@ -152,8 +166,8 @@ class TestAutocompleteStaleReply(TestCase):
             "the old workspace's populated reply never reached emission",
         )
 
-        # Request 2: SAME connection and prefix, NEW workspace (cache
-        # hit) — the exact supersession the frontend cannot detect.
+        # Request 2: SAME connection and prefix, NEW workspace (warm
+        # index) — the exact supersession the frontend cannot detect.
         req2 = threading.Thread(
             target=self.server._get_files,
             args=(_PREFIX, str(self.wd_new), _CONN, "tab-2"),
@@ -202,16 +216,20 @@ class TestAutocompleteStaleReply(TestCase):
     def test_reply_superseded_during_ranking_is_dropped(self) -> None:
         """A token replaced while the old reply ranks is never emitted.
 
-        Covers the fixed re-verification branch: the old refresh has
-        already published its scan when the newer request lands, so
-        its reply is superseded between the scan and the emission
+        Covers the fixed re-verification branch: the old request's
+        index is already published when the newer request lands, so
+        its reply is superseded between the build and the emission
         (inside the usage-ranking step).  The interleaving is made
         deterministic with the REAL persistence read/write lock the
         ranking step's ``_load_file_usage`` takes: the test holds the
-        write side, parking BOTH refreshes inside ranking, installs
-        the newer token, and releases — the old reply must then be
-        dropped by the emit-time token check, and only the newer
-        workspace's reply reaches the connection.
+        write side, parking the old reply inside ranking on the
+        registry's worker, installs the newer token (the newer build
+        queues behind the parked reply), and releases — the old reply
+        must then be dropped by the emit-time token check, and only
+        the newer workspace's reply reaches the connection.  Because
+        the single worker runs the two replies in order, the newer
+        reply releasing the token proves the old reply has already
+        run: no grace sleep is needed for the verdict.
         """
         from kiss.agents.sorcar import persistence as _persistence
 
@@ -219,26 +237,20 @@ class TestAutocompleteStaleReply(TestCase):
         write_lock.__enter__()
         released = False
         try:
-            # Request 1 (OLD workspace): the miss path emits only the
-            # loading placeholder on this thread; its refresh thread
-            # scans, publishes the cache, and blocks in ranking.
+            # Request 1 (OLD workspace): the cold path emits only the
+            # loading placeholder on this thread; the worker builds
+            # the index, publishes it, and blocks in ranking.
             self.server._get_files(_PREFIX, str(self.wd_old), _CONN, "tab-1")
             self.assertTrue(
-                self._wait(
-                    lambda: str(self.wd_old) in self.server._file_cache,
-                    30.0,
-                ),
-                "the old workspace's scan never published its cache",
+                self._wait(lambda: self._indexed(self.wd_old), 30.0),
+                "the old workspace's index was never published",
             )
             # Request 2 (NEW workspace, same connection): replaces the
             # token BEFORE the old reply can reach its emit-time check.
             self.server._get_files(_PREFIX, str(self.wd_new), _CONN, "tab-2")
-            self.assertTrue(
-                self._wait(
-                    lambda: str(self.wd_new) in self.server._file_cache,
-                    30.0,
-                ),
-                "the new workspace's scan never published its cache",
+            self.assertFalse(
+                self._indexed(self.wd_new),
+                "the newer build must queue behind the parked old reply",
             )
             write_lock.__exit__(None, None, None)
             released = True
@@ -253,15 +265,14 @@ class TestAutocompleteStaleReply(TestCase):
                 ),
                 "the newer workspace's reply never arrived",
             )
-            # The answered request's token is gone; give the old
-            # refresh time to (wrongly) emit before the verdict.
+            # The answered request's token is gone, and with it the
+            # old reply has provably already run (FIFO worker).
             self.assertTrue(
                 self._wait(
                     lambda: _CONN not in self.server._files_request_map(),
                     30.0,
                 ),
             )
-            time.sleep(0.3)
             self.assertFalse(
                 any(
                     self._populated(ev) and "marker-old" in self._names(ev)
@@ -275,7 +286,7 @@ class TestAutocompleteStaleReply(TestCase):
                 write_lock.__exit__(None, None, None)
 
     def test_unsuperseded_refresh_still_answers(self) -> None:
-        """A cache-miss refresh with no competing request must reply."""
+        """A cold request with no competing request must reply."""
         self.server._get_files(_PREFIX, str(self.wd_old), "conn-solo", "tab")
         self.assertTrue(
             self._wait(

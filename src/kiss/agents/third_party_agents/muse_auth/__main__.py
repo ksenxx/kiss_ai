@@ -7,10 +7,8 @@
 Usage (via ``python -m kiss.agents.third_party_agents.muse_auth``):
 
 * ``status`` — enrolled services and pending state locations.
-* ``enroll <service>`` — run the Google OAuth consent flow and store
-  the token straight into the daemon vault (no agent-readable copy).
-* ``import <service>`` — migrate an existing legacy ``token.json``
-  into the vault and delete the plaintext original.
+* ``import <service>`` — migrate an existing legacy plaintext token
+  into the vault and delete or scrub the plaintext original.
 * ``grant <service> <read|write> [--scope once|session|perpetual|ttl] [--ttl SECONDS]``
   — approve asked actions (Muse's human-in-the-loop grant).
 * ``revoke <service> [action]`` — remove grants.
@@ -40,16 +38,6 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     stop_daemon,
     store_credentials,
 )
-
-# Google-OAuth connector service name -> module holding its _SCOPES.
-_SERVICE_MODULES = {
-    "gmail": "kiss.agents.third_party_agents.gmail_sea",
-    "google_drive": "kiss.agents.third_party_agents.gdrive_sea",
-    "google_calendar": "kiss.agents.third_party_agents.gcal_sea",
-    "google_docs": "kiss.agents.third_party_agents.gdocs_sea",
-    "google_sheets": "kiss.agents.third_party_agents.gsheets_sea",
-    "googlechat": "kiss.agents.third_party_agents.googlechat_sea",
-}
 
 # Plain token connectors: the legacy config.json key holding the token,
 # plus the credential header when it is not ``Authorization: Bearer``,
@@ -190,27 +178,6 @@ def _scrub_imported_config(service: str, expected: str | None = None) -> None:
             path.unlink()
 
 
-def _service_scopes(service: str) -> list[str]:
-    """Return the OAuth scopes a connector service requests.
-
-    Args:
-        service: Connector service name.
-
-    Returns:
-        The service module's ``_SCOPES`` list.
-
-    Raises:
-        SystemExit: On an unknown service name.
-    """
-    module_name = _SERVICE_MODULES.get(service)
-    if module_name is None:
-        raise SystemExit(
-            f"unknown service '{service}'; choose from {sorted(_SERVICE_MODULES)}"
-        )
-    module = __import__(module_name, fromlist=["_SCOPES"])
-    return list(module._SCOPES)
-
-
 def _cmd_status() -> int:
     """Print enrolled services and state file locations.
 
@@ -229,56 +196,20 @@ def _cmd_status() -> int:
     return 0
 
 
-def _cmd_enroll(service: str) -> int:
-    """Run the OAuth consent flow and store the token into the vault.
-
-    Args:
-        service: Connector service name.
-
-    Returns:
-        Process exit code.
-    """
-    from google_auth_oauthlib.flow import InstalledAppFlow
-
-    from kiss.agents.third_party_agents._backend_utils import is_headless_environment
-    from kiss.agents.third_party_agents._google_workspace_utils import credentials_path
-
-    scopes = _service_scopes(service)
-    creds_path = credentials_path(service)
-    if not creds_path.exists():
-        print(
-            f"credentials.json not found for '{service}'. Download an OAuth Desktop-app "
-            f"client JSON from Google Cloud Console and save it to {creds_path}.",
-            file=sys.stderr,
-        )
-        return 1
-    flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), scopes)
-    if is_headless_environment():
-        creds = flow.run_local_server(port=0, open_browser=False)
-    else:
-        creds = flow.run_local_server(port=0)
-    store_credentials(service, creds, scopes)
-    print(f"'{service}' enrolled into the Muse-auth vault.")
-    return 0
-
-
 def _cmd_import(service: str) -> int:
     """Migrate a legacy plaintext credential into the vault.
 
-    Google-OAuth services move their ``token.json`` (the plaintext file
-    is deleted).  Token services (notion, github, firecrawl,
+    Token services (notion, github, firecrawl,
     brave_search, discord, homeassistant, ntfy, twitch, zalo, line,
     mattermost, bluebubbles, telegram) move the token out of their
     ``config.json``: the secret keys are scrubbed after a successful
     store while non-secret settings survive.  ``nextcloud`` folds its
     username/password into one Basic credential; ``synology`` extracts
-    the ``token=`` parameter embedded in its webhook URL; ``msteams``
-    folds its tenant/client IDs and client secret into one
-    ``oauth2_client_credentials`` entry the daemon exchanges for Graph
-    tokens at the boundary.  ``slack``
-    migrates the default workspace's bot token and deletes its
-    plaintext file; other Slack workspaces migrate automatically on
-    their first Muse-mode connect.  ``govee`` enrolls
+    the ``token=`` parameter embedded in its webhook URL.  ``slack``
+    migrates the default workspace's token file (a rotating user token
+    keeps refreshing through the vault) and deletes the plaintext file;
+    other Slack workspaces migrate automatically on their first
+    Muse-mode connect.  ``govee`` enrolls
     ``$GOVEE_API_KEY`` from the environment (there is no config file);
     unset the shell export afterwards.
 
@@ -289,13 +220,17 @@ def _cmd_import(service: str) -> int:
         Process exit code.
     """
     if service == "slack":
-        from kiss.agents.third_party_agents.slack_sea import _load_token, _token_path
+        from kiss.agents.third_party_agents.slack_sea import (
+            _legacy_vault_credential,
+            _load_config,
+            _token_path,
+        )
 
-        token = _load_token("default")
-        if not token:
+        cfg = _load_config("default")
+        if not cfg or not cfg.get("access_token"):
             print(f"no legacy token at {_token_path('default')}", file=sys.stderr)
             return 1
-        store_credentials("slack", {"kind": "bearer", "token": token}, [])
+        store_credentials("slack", _legacy_vault_credential(cfg), [])
         _token_path("default").unlink()
         print("migrated the default Slack workspace token into the Muse-auth vault "
               "and removed the plaintext token.")
@@ -314,8 +249,6 @@ def _cmd_import(service: str) -> int:
         return _cmd_import_nextcloud()
     if service == "synology":
         return _cmd_import_synology()
-    if service == "msteams":
-        return _cmd_import_msteams()
     if service in _TOKEN_SERVICES:
         spec = _TOKEN_SERVICES[service]
         path = muse_auth_dir().parent / "third_party_agents" / service / "config.json"
@@ -395,17 +328,8 @@ def _cmd_import(service: str) -> int:
             f"the plaintext copy from {path}."
         )
         return 0
-    from kiss.agents.third_party_agents._google_workspace_utils import token_path
-
-    path = token_path(service)
-    if not path.exists():
-        print(f"no legacy token at {path}", file=sys.stderr)
-        return 1
-    info = json.loads(path.read_text())
-    store_credentials(service, info, _service_scopes(service))
-    path.unlink()
-    print(f"migrated {path} into the Muse-auth vault and removed the plaintext token.")
-    return 0
+    print(f"unknown service '{service}' for import", file=sys.stderr)
+    return 1
 
 
 def _cmd_import_nextcloud() -> int:
@@ -458,59 +382,6 @@ def _cmd_import_nextcloud() -> int:
     print(
         f"imported the nextcloud credentials into the Muse-auth vault and scrubbed "
         f"the plaintext password from {path}."
-    )
-    return 0
-
-
-def _cmd_import_msteams() -> int:
-    """Migrate legacy MS Teams client credentials into the vault.
-
-    The tenant/client IDs and client secret become one
-    ``oauth2_client_credentials`` vault entry — the Muse daemon runs
-    the token exchange itself at the network boundary — and the
-    ``client_secret`` is scrubbed from ``config.json`` while the
-    non-secret ``tenant_id``/``client_id``/``bot_id`` survive.
-
-    Returns:
-        Process exit code.
-    """
-    from kiss.agents.third_party_agents import msteams_sea as ms
-
-    path = muse_auth_dir().parent / "third_party_agents" / "msteams" / "config.json"
-    if not path.exists():
-        print(f"no legacy config at {path}", file=sys.stderr)
-        return 1
-    cfg = json.loads(path.read_text())
-    # Type-strict pre-coercion: JSON booleans/numbers must not become
-    # apparently valid credential strings ("True") that then get
-    # enrolled while the malformed source config is scrubbed.
-    for key in ("tenant_id", "client_id", "client_secret", "bot_id"):
-        value = cfg.get(key)
-        if value is not None and not isinstance(value, str):
-            print(f"'{key}' in {path} must be a string", file=sys.stderr)
-            return 1
-    tenant_id = str(cfg.get("tenant_id") or "")
-    client_id = str(cfg.get("client_id") or "")
-    client_secret = str(cfg.get("client_secret") or "")
-    if not (tenant_id and client_id and client_secret):
-        print(f"{path} must hold tenant_id, client_id, and client_secret", file=sys.stderr)
-        return 1
-    if not ms._TENANT_ID_RE.fullmatch(tenant_id):
-        print(
-            f"'tenant_id' in {path} is not a valid Azure tenant "
-            "(GUID or verified domain, one URL path segment)",
-            file=sys.stderr,
-        )
-        return 1
-    store_credentials(
-        "msteams", ms._client_credential_info(tenant_id, client_id, client_secret), []
-    )
-    # Compare-and-scrub: only the secret that was just migrated may be
-    # removed, so a newer secret a concurrent writer lands survives.
-    ms._scrub_config_secret(expected=client_secret)
-    print(
-        f"imported the msteams client credentials into the Muse-auth vault and "
-        f"scrubbed the client_secret from {path}."
     )
     return 0
 
@@ -571,7 +442,7 @@ def _cmd_export(service: str) -> int:
     The Muse-auth default migrates plaintext credentials into the vault
     and scrubs the legacy copies, so a user opting out afterwards
     (``KISS_MUSE_AUTH=0``) needs the real credential back to rebuild a
-    legacy config or ``token.json``.  The vault file already belongs to
+    legacy config.  The vault file already belongs to
     (and is readable by) the invoking user, so printing it discloses
     nothing the user cannot read; the daemon itself still never returns
     credentials over the socket.
@@ -626,7 +497,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="muse_auth", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
-    sub.add_parser("enroll").add_argument("service")
     sub.add_parser("import").add_argument("service")
     p_grant = sub.add_parser("grant")
     p_grant.add_argument("service")
@@ -647,8 +517,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "status":
         return _cmd_status()
-    if args.cmd == "enroll":
-        return _cmd_enroll(args.service)
     if args.cmd == "import":
         return _cmd_import(args.service)
     if args.cmd == "grant":

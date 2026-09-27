@@ -18,6 +18,7 @@ import logging
 from kiss.agents.sorcar.git_worktree import (
     TASK_RESULT_HEADING,
     USER_PROMPT_HEADING,
+    result_to_commit_text,
 )
 from kiss.core.models.model_info import get_fast_model
 
@@ -200,9 +201,11 @@ def _append_user_prompt(message: str, user_prompt: str) -> str:
 def _append_task_result(message: str, task_result: str) -> str:
     """Append the task's result summary to a commit message body.
 
-    Trims whitespace from *task_result* and appends it under a
-    ``Result:`` heading separated by a blank line.  If the result
-    is empty after trimming, *message* is returned unchanged.
+    Converts an HTML *task_result* to Markdown
+    (:func:`~kiss.agents.sorcar.git_worktree.result_to_commit_text`),
+    trims whitespace and appends it under a ``Result:`` heading
+    separated by a blank line.  If the result is empty after
+    trimming, *message* is returned unchanged.
 
     Args:
         message: The base commit message (subject + optional body).
@@ -211,7 +214,7 @@ def _append_task_result(message: str, task_result: str) -> str:
     Returns:
         The combined commit message with the task result appended.
     """
-    trimmed = task_result.strip()
+    trimmed = result_to_commit_text(task_result)
     if not trimmed:
         return message
     return f"{message.rstrip()}{TASK_RESULT_HEADING}{trimmed}"

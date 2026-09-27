@@ -12,6 +12,7 @@ class-level ``_HANDLERS`` dispatch table consumed by
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import platform
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,6 +45,7 @@ from kiss.server.task_runner import (
 )
 
 if TYPE_CHECKING:
+    from kiss.server.file_index import FileIndexRegistry
     from kiss.server.json_printer import JsonPrinter
     from kiss.server.tab_registry import TabRegistry
 
@@ -332,7 +335,7 @@ class _CommandsMixin:
         )
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
-        _file_cache: dict[str, list[str]]
+        _file_index: FileIndexRegistry
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
         _commit_msg_tabs: set[str]
@@ -369,15 +372,12 @@ class _CommandsMixin:
             conn_id: str = "",
             tab_id: str = "",
         ) -> None: ...
-        def _refresh_file_cache(
-            self,
-            then_emit_for_prefix: str | None = None,
-            work_dir: str = "",
-            conn_id: str = "",
-            tab_id: str = "",
-        ) -> None: ...
         def _replay_session(
-            self, chat_id: str, tab_id: str = "", task_id: str | None = None,
+            self,
+            chat_id: str,
+            tab_id: str = "",
+            task_id: str | None = None,
+            conn_id: str = "",
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
@@ -448,9 +448,9 @@ class _CommandsMixin:
         Single shared implementation of the work-dir update used by
         both :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`
         (D-R1: the latter used to copy-paste the former's block).
-        Invalidates the autocomplete file cache only when the
-        directory actually changes, and mirrors the value onto the
-        printer either way.  Takes ``_state_lock`` itself; the lock is
+        Starts indexing the new directory for the ``@``-mention picker
+        when the directory actually changes, and mirrors the value onto
+        the printer either way.  Takes ``_state_lock`` itself; the lock is
         re-entrant, so callers already holding it may call this
         directly.
 
@@ -474,7 +474,7 @@ class _CommandsMixin:
         with self._state_lock:
             if self.work_dir != new_dir:
                 self.work_dir = new_dir
-                self._file_cache = {}
+                self._file_index.ensure(new_dir)
             if hasattr(self.printer, "work_dir"):
                 setattr(self.printer, "work_dir", new_dir)
         # Every surface's "Working directory" panel lists the directories
@@ -491,7 +491,9 @@ class _CommandsMixin:
         the moment the user hits Enter and only a ``status
         running:false`` ever lowers it again, so the refusal MUST
         clear it first or the tab's composer stays disabled forever
-        (F08-1).
+        (F08-1).  The ``error`` carries ``code: "prompt_refused"`` so
+        the webview can put the refused draft (text and attachments)
+        back into the composer instead of losing what the user typed.
 
         Args:
             tab_id: The tab whose submit is refused.
@@ -500,9 +502,32 @@ class _CommandsMixin:
         self.printer.broadcast(
             {"type": "status", "running": False, "tabId": tab_id},
         )
-        self.printer.broadcast(
-            {"type": "error", "text": text, "tabId": tab_id},
-        )
+        self.printer.broadcast({
+            "type": "error",
+            "code": "prompt_refused",
+            "text": text,
+            "tabId": tab_id,
+        })
+
+    def _broadcast_run_notice(self, cmd: dict[str, Any], tab_id: str) -> None:
+        """Deliver the submit-time notice a ``run`` carries in ``_notice``.
+
+        The remote webapp's ``submit`` handler attaches a notice (e.g.
+        "only the first 32 attachments were sent") to the run it
+        builds instead of broadcasting it itself: a notice sent before
+        the run's ``clear`` is wiped from the transcript by that very
+        reset, so it goes out here, after the new task has cleared the
+        tab (or, for a prompt steered into a running task, at once).
+
+        Args:
+            cmd: The ``run`` command, possibly carrying ``_notice``.
+            tab_id: The tab the notice is addressed to.
+        """
+        text = cmd.get("_notice", "")
+        if isinstance(text, str) and text:
+            self.printer.broadcast(
+                {"type": "notice", "text": text, "tabId": tab_id},
+            )
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread.
@@ -652,6 +677,7 @@ class _CommandsMixin:
                 self._echo_injected_prompt(
                     tab_id, inject_prompt, inject_task, remember,
                 )
+                self._broadcast_run_notice(cmd, tab_id)
             return
         # ``thread`` and ``state`` are created together above, so a
         # non-None thread guarantees the state.
@@ -749,6 +775,7 @@ class _CommandsMixin:
                 "chat_id": chat_id,
                 "tabId": tab_id,
             })
+            self._broadcast_run_notice(cmd, tab_id)
             # Start/cancel handshake (audit0903 F1/F2): a ``stop`` or
             # the graceful-shutdown sweep can land while the registry
             # write and the ``clear`` broadcast above hold the
@@ -1350,10 +1377,7 @@ class _CommandsMixin:
                 tab_id,
             )
             return
-        append_to_prompt = (
-            f"Read the events of the task {owner_task_id} from "
-            f"~/.kiss/sorcar.db and answer the user question above."
-        )
+        append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
 
@@ -1564,13 +1588,22 @@ class _CommandsMixin:
 
         When ``taskId`` is present, load that specific task instead of
         the latest task in the chat session.
+
+        ``replayConnId`` is set only on the resumes a client's ``ready``
+        fans out (``_handle_ready``): the transcript then goes to that
+        connection alone.  A user's history click carries no
+        ``replayConnId`` and its transcript is broadcast, since every
+        window mirroring the tab must show the newly bound chat.
         """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
         task_id = _opt_str(cmd.get("taskId"))
         if chat_id or task_id is not None:
             self._replay_session(
-                chat_id, cmd.get("tabId", ""), task_id=task_id,
+                chat_id,
+                cmd.get("tabId", ""),
+                task_id=task_id,
+                conn_id=str(cmd.get("replayConnId") or ""),
             )
 
     def _cmd_get_tabs_state(self, cmd: dict[str, Any]) -> None:
@@ -2237,20 +2270,79 @@ class _CommandsMixin:
         — the file is shared by every window, so every open panel
         repaints, not only the one that clicked.
         """
-        from kiss.server.tricks import append_my_injection_trick, read_tricks
+        from kiss.server.tricks import append_my_injection_trick
+
+        self._edit_my_injection(cmd, append_my_injection_trick, "addTrick")
+
+    def _cmd_delete_trick(self, cmd: dict[str, Any]) -> None:
+        """Remove a promptlet from ``~/.kiss/MY_INJECTION.md``.
+
+        Services the delete button that the Inject promptlet panel shows
+        on user-added rows.  ``text`` is the promptlet body as listed;
+        a body that is not in the file (a bundled promptlet, or one
+        another window already deleted) or a failed write answers the
+        sender with an ``error`` event.  Success rebroadcasts the full
+        list as an UNstamped ``tricksData`` event, like ``addTrick``.
+        """
+        from kiss.server.tricks import delete_my_injection_trick
+
+        self._edit_my_injection(cmd, delete_my_injection_trick, "deleteTrick")
+
+    def _cmd_edit_trick(self, cmd: dict[str, Any]) -> None:
+        """Rewrite a promptlet of ``~/.kiss/MY_INJECTION.md`` in place.
+
+        Services the edit (pencil) button that the Inject promptlet panel
+        shows on user-added rows.  ``text`` is the promptlet body as
+        listed and ``newText`` its replacement; the section keeps its
+        position in the file.  A body that is not in the file, an
+        empty or ``##``-starting replacement, a replacement that
+        duplicates another promptlet, or a failed write answers the
+        sender with an ``error`` event.  Success rebroadcasts the full
+        list as an UNstamped ``tricksData`` event, like ``addTrick``.
+        """
+        from kiss.server.tricks import edit_my_injection_trick
+
+        new_text = cmd.get("newText", "")
+        self._edit_my_injection(
+            cmd,
+            functools.partial(
+                edit_my_injection_trick,
+                new_text=new_text if isinstance(new_text, str) else "",
+            ),
+            "editTrick",
+        )
+
+    def _edit_my_injection(
+        self,
+        cmd: dict[str, Any],
+        edit: Callable[[str], str | None],
+        name: str,
+    ) -> None:
+        """Run *edit* on ``cmd["text"]`` and answer the panel.
+
+        Shared tail of ``addTrick`` / ``deleteTrick`` / ``editTrick``.
+        Success broadcasts the fresh ``tricksData`` list (``tricks`` plus
+        ``userCount``, the number of leading user-owned rows) to every
+        window, since the file is shared by all of them.  A rejection or
+        ``OSError`` goes to the sender as an ``error`` event followed by
+        a ``tricksData`` stamped for the sender alone: the panel drops a
+        deleted row (or shows an edited one) before the answer arrives,
+        so the list on disk is re-sent to put the row back.
+        """
+        from kiss.server.tricks import read_tricks_data
 
         text = cmd.get("text", "")
         try:
-            error = append_my_injection_trick(
-                text if isinstance(text, str) else ""
-            )
+            error = edit(text if isinstance(text, str) else "")
         except OSError as e:
-            logger.warning("addTrick failed", exc_info=True)
+            logger.warning("%s failed", name, exc_info=True)
             error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+        event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd)
-            return
-        self.printer.broadcast({"type": "tricksData", "tricks": read_tricks()})
+            if cmd.get("connId"):
+                event["connId"] = cmd["connId"]
+        self.printer.broadcast(event)
 
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
@@ -2346,4 +2438,6 @@ class _CommandsMixin:
         "saveMyModel": _cmd_save_my_model,
         "deleteMyModel": _cmd_delete_my_model,
         "addTrick": _cmd_add_trick,
+        "deleteTrick": _cmd_delete_trick,
+        "editTrick": _cmd_edit_trick,
     }

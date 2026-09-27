@@ -30,10 +30,10 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_slack_auth",
         "auth": "authenticate_slack",
         "clear": "clear_slack_auth",
-        "browser_auth": "start_slack_browser_auth",
-        "required_params": ["token"],
+        # authenticate_slack() with no arguments starts the PKCE sign-in.
+        "required_params": [],
         "prompt_urls": [],
-        "prompt_keywords": ["xoxb-", "Slack"],
+        "prompt_keywords": ["authenticate_slack()", "finish_slack_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.telegram_sea",
@@ -51,8 +51,8 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_discord_auth",
         "auth": "authenticate_discord",
         "clear": "clear_discord_auth",
-        "browser_auth": "start_discord_browser_auth",
-        "required_params": ["bot_token"],
+        # authenticate_discord() with no arguments starts OAuth sign-in.
+        "required_params": [],
         "prompt_urls": [],
         "prompt_keywords": ["Discord"],
     },
@@ -63,11 +63,8 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "auth": "authenticate_googlechat",
         "clear": "clear_googlechat_auth",
         "required_params": [],
-        "prompt_urls": [
-            "console.cloud.google.com/iam-admin/serviceaccounts",
-            "console.cloud.google.com/apis/credentials",
-        ],
-        "prompt_keywords": ["Google Chat"],
+        "prompt_urls": ["https://dashboard.composio.dev"],
+        "prompt_keywords": ["Google Chat", "KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT"],
     },
     {
         "module": "kiss.agents.third_party_agents.signal_sea",
@@ -87,11 +84,10 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_msteams_auth",
         "auth": "authenticate_msteams",
         "clear": "clear_msteams_auth",
-        # client_secret is optional: without it the device code sign-in
-        # (browser consent) is used instead of the app-only flow.
-        "required_params": ["tenant_id", "client_id"],
-        "prompt_urls": ["https://portal.azure.com", "https://microsoft.com/devicelogin"],
-        "prompt_keywords": ["App registrations", "finish_msteams_auth"],
+        # Device code sign-in with the KISS app; tenant_id is optional.
+        "required_params": [],
+        "prompt_urls": ["https://microsoft.com/devicelogin"],
+        "prompt_keywords": ["authenticate_msteams()", "finish_msteams_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.matrix_sea",
@@ -272,10 +268,9 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "check": "check_gmail_auth",
         "auth": "authenticate_gmail",
         "clear": "clear_gmail_auth",
-        "browser_auth": "start_gmail_browser_setup",
         "required_params": [],
-        "prompt_urls": [],
-        "prompt_keywords": ["Gmail", "credentials.json"],
+        "prompt_urls": ["https://dashboard.composio.dev"],
+        "prompt_keywords": ["Gmail", "Composio"],
     },
 ]
 

@@ -174,15 +174,19 @@ The parameters without getters:
   already runs on that daemon.
 - **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
   CALLING task's identity (how `run_agent` nests a dispatched run under
-  its caller) and whether that caller sits in a reviewer sub-tree
-  (so the child's `run_parallel` spawns no further reviewers), which a
-  dispatched script must not be able to forge.
+  its caller) and whether that caller sits in a reviewer sub-tree (a
+  marker the child and its own sub-agents inherit; with tool profiles
+  enabled, a marked run whose task is not an implementation task and
+  that names no explicit profile gets the read-only `review` profile),
+  which a dispatched script must not be able to forge.
 - **`side_channel`** — marks the run as a side channel of its parent
   (a sub-agent whose result is shown outside its own tab: the `/ask`
-  answerer delivers its answer into the PARENT's transcript, and the
+  answerer delivers its answer into the PARENT's transcript, the
   periodic `/task_update` child fills the parent task's task-info
-  panel; so its own tab closes when the run ends and is not re-opened
-  when the chat is reloaded); only
+  panel, and the in-process `/merge` run that resolves a conflicting
+  auto-merge works in the parent's repository; so its own tab closes
+  when the run ends and is not re-opened when the chat is reloaded);
+  only
   meaningful with `parent_task_id`, and not forgeable for the same
   reason.
 - **`extension_agent_path`** — the script cannot override its own path.
@@ -202,7 +206,14 @@ The parameters without getters:
   in (`kiss.core.brand.render_brand`); a
   string returned by `system_prompt()` or
   `append_to_system_prompt()` is used verbatim, with no placeholder
-  rendering.  A non-empty string replaces that base prompt.  A
+  rendering.  A non-empty string replaces that base prompt.  Either
+  way the agent still appends its per-run operational instructions
+  after the prompt (`RelentlessAgent.perform_task`): the work
+  directory (omitted when the tools run in an attached container that
+  does not mount it), the process id, the task settings, and the
+  user's standing instructions from `~/.kiss/SORCAR.md`
+  (`$KISS_HOME/SORCAR.md`, the file the bundled `/remember` and
+  `/forget` SEAs maintain) when that file exists.  A
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
   `setdefault`s it).
@@ -216,9 +227,14 @@ The parameters without getters:
   `system_prompt()` replacement) when the agent is executed.
   Unlike `system_prompt()`, it does not replace anything.
 - **`append_to_prompt()`** — extra text **appended** to the
-  executed task prompt.  A multi-`<task>` prompt runs the agent once
-  per subtask and the text is appended to each subtask's prompt.  The
-  appended text becomes part of the recorded prompt in chat history.
+  executed task prompt.  A run with an agent script executes its
+  prompt as one task: the task runner does not split `<task>` blocks
+  into subtasks for an `agentPath` run (they are the SEA's to
+  interpret), so the text is appended once.  A prompt that is nothing
+  but a filesystem path is likewise handed to the SEA as-is rather
+  than turned into an "open this file" request, as it is for a path
+  typed into a chat box.  The appended text becomes part of the
+  recorded prompt in chat history.
 - **`scope_work_dir()`** — the workspace directory the run's tab is
   scoped to in clients' tab bars, when different from the execution
   `work_dir`.  An empty string scopes the tab to the run's work
@@ -242,7 +258,36 @@ The parameters without getters:
   toolset, a Docker run, a run-to-completion CLI model (`cc/*`,
   `codex/*`), or a caller-supplied
   `model_config["system_instruction"]` stays memory-free even with
-  `True`.
+  `True`.  Pages live in the directory named by the `memory_dir`
+  setting, or `~/.kiss/memories` (`$KISS_HOME/memories`) when unset;
+  a run whose work directory is inside a git repository also attaches
+  that repository's domain memory, a sub-directory named after the
+  repository's main checkout directory (linked worktrees resolve to it
+  through `git rev-parse --git-common-dir`, so they share one domain;
+  `sorcar_agent._memory_settings`, `_repo_memory_domains`).
+- **`use_worktree()`** — whether the run executes in a fresh git
+  worktree on its own branch (when `work_dir` is inside a git
+  repository; the daemon may hand it a spare worktree it prepared in
+  advance) instead of the main working tree.  With task classification
+  enabled, a task not classified as development work also runs
+  without a worktree; the verdict only ever demotes a `True`, so
+  `False` stays `False`.
+- **`auto_commit()`** — whether the run's changes are committed when
+  it finishes successfully.  A worktree run's branch is committed and
+  squash-merged into the original branch (a conflicting merge is
+  handed to the bundled `/merge` SEA, which resolves and stages the
+  conflicted files, and the resolver then commits); a main-tree run's
+  changes are committed in place.  A run that failed, was stopped, or
+  reported `success: False` is not auto-committed, and `False` leaves
+  a worktree run pending for the user to review, merge or discard.
+  The commit message is generated from the diff and stamped with the
+  user's prompt and the task's result (HTML converted to Markdown,
+  `kiss.agents.sorcar.commit_message`).  A merge into the main tree
+  waits while another non-worktree task is active there and
+  `git status --porcelain -uno` reports uncommitted changes to tracked
+  files, whoever made them (an unreadable status blocks too); untracked
+  scratch files alone do not block it
+  (`merge_flow._main_tree_blocks_merge`).
 - **`is_parallel()`** — whether the agent may spawn parallel
   sub-agents (`run_parallel`).
 - **`tool_profile()`** — the name of the tool profile the run's
@@ -258,11 +303,21 @@ The parameters without getters:
 - **`docker_image()`** — the Docker image the run's shell and file
   tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
   execute in: an image name starts a fresh container that is removed
-  when the task ends, `container:<name-or-id>` attaches to a container
-  the caller already runs (commands run in its working directory, it
-  is left running afterwards), `""` runs the tools on the host.
+  when the task ends (the task's `work_dir` is bind-mounted at the
+  same path and is the container's working directory),
+  `container:<name-or-id>` attaches to a container the caller already
+  runs (commands run in its own working directory, nothing extra is
+  mounted, it is left running afterwards), `""` runs the tools on the
+  host.
   `run_parallel` sub-agents share the task's container; `bash_job`
-  and persistent memory are unavailable in a Docker run.
+  and persistent memory are unavailable in a Docker run.  A
+  run-to-completion CLI model (`cc/*`, `codex/*`) executes its own
+  tools on the host, so a non-empty `docker_image()` with such a
+  model fails the task with a `KISSError` instead of silently
+  bypassing the container.  The bundled `coding_sea.py`'s
+  `ContainerHarness` is the reference user of the attach form: its
+  `docker_image()` returns `container:<id>` for the trial container
+  it is given.
 
 ### Hook getters (no `run()` parameter)
 
@@ -776,7 +831,11 @@ class TaskResult:
 - The SEA and its tools run **in the daemon process**
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
-  environment.
+  environment.  A tool that runs on the task's worker thread can call
+  `kiss.server.agent_state.current_agent()` to get the running agent
+  (its `work_dir`, model and usage counters); it returns `None` on any
+  other thread.  The bundled `autoroute_sea.py` and `skillopt_sea.py`
+  use it.
 - Name the file `xxx_sea.py` and put its folder in `~/.kiss/SEAS.md`
   (one folder per line; blank lines and `#` comments are ignored) to
   expose it as the chat command `/xxx`; `/xxx some text` runs the SEA
@@ -784,10 +843,30 @@ class TaskResult:
   `src/kiss/agents/third_party_agents/*_sea.py` scripts take
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
-  `src/kiss/agents/seas/` (`/merge`, `/sh`, `/skillopt`,
-  `/task_update`, `/write_paper`, `/review_paper`; `dummy_sea.py`, an SEA with no getters, is what
-  `run_agent` runs when its `agent` argument is empty) have the
-  lowest precedence, so a `SEAS.md` folder can shadow them.  Syntax,
+  `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
+  folder can shadow them.  The 13 bundled `*_sea.py` files register
+  these commands: `/autoroute` (runs a task on the cheapest model tier
+  that will finish it), `/coding` (unattended coding in a Docker
+  container; the module defines no top-level getters, its
+  `ContainerHarness` getters are exposed by generated per-trial SEAs,
+  so the bare command runs Sorcar with its defaults), `/forget`
+  (removes a standing instruction from `~/.kiss/SORCAR.md`),
+  `/git_extract_knowledge` (builds and refreshes a repository's
+  knowledge memory and can schedule its daily refresh), `/merge`
+  (resolves git merge conflicts and stages the resolved files; commits
+  only when asked), `/remember` (appends a standing instruction to
+  `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
+  a venue), `/rsi7d` (7-day self-improvement of the indexed SEAs from
+  their recorded runs; needs task text, e.g. `/rsi7d all`), `/sh`
+  (runs the command with the `bash` tool profile), `/skillopt`
+  (optimizes the prompt text of a skill or SEA against an eval set),
+  `/task_update` (reports what a running task has done so far),
+  `/write_paper` (writes or revises a research paper), and `/dummy`
+  (`dummy_sea.py`, an SEA with no getters, is what `run_agent` runs
+  when its `agent` argument is empty).  The other modules in that
+  folder (`coding_test_context.py`, `git_knowledge_index.py`,
+  `git_knowledge_store.py`, `sorcar_md.py`) are helpers, not
+  commands: only `*_sea.py` files are registered.  Syntax,
   precedence and the dispatch flow are
   documented in
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)

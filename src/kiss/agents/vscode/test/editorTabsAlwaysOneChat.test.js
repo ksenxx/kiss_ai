@@ -10,10 +10,13 @@
 // chat tabs (main.js closeTab -> createNewTab, reconcileTabs'
 // placeholder):
 //  - the user closing the LAST chat panel (editor tab X) opens a fresh
-//    chat that takes the focus; closing one of several opens nothing;
+//    chat in the BACKGROUND (closing is not a request for a new chat,
+//    so the replacement never steals the focus —
+//    ui_antipattern_editor_focus.test.js); closing one of several opens
+//    nothing;
 //  - the webview's closePanel (root chat closed inside the panel, or
 //    the registry dropping the tab) on the last panel opens a fresh
-//    chat — focused for a user close, in the background otherwise;
+//    chat, in the background either way;
 //  - a restored placeholder tab (tabGroups) counts as an open chat, so
 //    closing the last LIVE panel next to one opens nothing, while the
 //    placeholder itself closing (tabGroups.onDidChangeTabs — it never
@@ -225,14 +228,15 @@ function lastPanel() {
 }
 
 /** The fresh chat took the focus: revealed with focus AND told to focus
- * its composer (SorcarSidebarView.focusChatInput). */
+ * its composer (SorcarSidebarView.focusChatInput) — only when the USER
+ * asked for a chat (enterMode). */
 async function assertFocusedReplacement(panel) {
   assert.strictEqual(panel.showOptions.preserveFocus, false);
   await waitFor(
     () => panel._posted.some(m => m.type === 'focusInput'),
-    'a user-close replacement must focus its composer',
+    'a requested chat must focus its composer',
   );
-  assert.ok(panel.reveals >= 1, 'a user-close replacement is revealed');
+  assert.ok(panel.reveals >= 1, 'a requested chat is revealed');
 }
 
 async function assertBackgroundReplacement(panel) {
@@ -271,7 +275,8 @@ async function runTest() {
   );
   assert.strictEqual(createdPanels.length, 1);
 
-  // --- user closes the LAST panel (editor tab X): a fresh, focused chat
+  // --- user closes the LAST panel (editor tab X): a fresh chat in the
+  // background
   const panelA = createdPanels[0];
   const tabA = tabIdOf(panelA);
   panelA.dispose();
@@ -281,7 +286,7 @@ async function runTest() {
   assert.notStrictEqual(tabIdOf(panelB), tabA, 'the replacement is fresh');
   assert.deepStrictEqual(retired, [tabA], 'the closed chat is retired');
   assert.strictEqual(manager.panelCount, 1);
-  await assertFocusedReplacement(panelB);
+  await assertBackgroundReplacement(panelB);
   assert.strictEqual(
     manager.activeController(),
     manager.revealActiveOrCreate(),
@@ -310,13 +315,13 @@ async function runTest() {
   assert.deepStrictEqual(retired, [tabA, tabC], 'a remote close retires nothing');
 
   // --- closePanel WITH retire (user closed the root chat inside the
-  // webview): focused replacement, chat retired -----------------------
+  // webview): background replacement, chat retired --------------------
   const tabD = tabIdOf(panelD);
   panelD._recv.fire({type: 'closePanel', retire: true});
   await waitFor(() => panelD.disposed, 'closePanel(retire) disposes');
   assert.strictEqual(createdPanels.length, 5);
   const panelE = lastPanel();
-  await assertFocusedReplacement(panelE);
+  await assertBackgroundReplacement(panelE);
   assert.deepStrictEqual(retired, [tabA, tabC, tabD]);
 
   // --- a restored placeholder counts as an open chat ------------------
@@ -363,7 +368,7 @@ async function runTest() {
   panelF.dispose();
   assert.strictEqual(createdPanels.length, 7, 'dispose opens the one chat');
   const panelF2 = lastPanel();
-  await assertFocusedReplacement(panelF2);
+  await assertBackgroundReplacement(panelF2);
   // (b) dispose first while the tabs model still lists the closed tab:
   // the dispose path sees a chat tab standing and defers to the
   // backstop, which opens exactly one chat once the model catches up.

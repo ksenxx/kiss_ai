@@ -12,9 +12,10 @@ contract against the genuine article:
 1. The whole task is completed in one CLI invocation — the CLI uses its own
    native tools to create a file on disk (something a single turn-by-turn
    text completion could not do without KISS-executed tools).
-2. The system prompt, appended to the task after
-   ``CLI_SYSTEM_PROMPT_HEADER``, actually reaches the model: the final
-   answer contains a marker only the system prompt asks for.
+2. The system prompt (``--append-system-prompt`` for claude, appended to
+   the task after ``CLI_SYSTEM_PROMPT_HEADER`` for codex) actually reaches
+   the model: the final answer contains a marker only the system prompt
+   asks for.
 3. The result comes back wrapped in the structured ``finish`` YAML contract.
 
 Requires the ``claude`` / ``codex`` CLIs to be installed and authenticated.
@@ -97,8 +98,7 @@ def test_claude_code_runs_task_to_completion_live(tmp_path: Path) -> None:
     assert probe.exists(), "the CLI's native tools must have written the file"
     assert probe.read_text().strip() == "live-ok"
     assert MARKER in payload["summary"], (
-        "the system prompt appended after CLI_SYSTEM_PROMPT_HEADER "
-        "must reach the model"
+        "the system prompt passed as --append-system-prompt must reach the model"
     )
 
 

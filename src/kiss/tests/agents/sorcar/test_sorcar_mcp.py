@@ -403,8 +403,8 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
 
 
 def test_noninteractive_oauth_refuses_browser_flow() -> None:
-    """Agent runs never block on OAuth; they direct to token provisioning."""
-    with pytest.raises(RuntimeError, match="interactive OAuth login"):
+    """Agent runs never block on OAuth; they direct to the sign-in tool."""
+    with pytest.raises(RuntimeError, match="requires an OAuth sign-in.*connect_mcp_server"):
         asyncio.run(_noninteractive_redirect("https://auth.example/authorize"))
 
 

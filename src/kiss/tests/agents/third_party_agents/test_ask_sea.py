@@ -9,16 +9,19 @@ mocks, just the real registry, the real rewriter and the real
 dispatch code:
 
 1. The ``ask_sea`` module itself: ``system_prompt`` MUST return the
-   bytes of ``papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md``,
-   ``append_to_system_prompt`` MUST return the no-internet directive
-   followed by the answer-quickly sentence, and ``is_parallel`` and
-   ``use_web_tools`` MUST return ``False``.
+   bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
+   ``append_to_system_prompt`` MUST start with the no-internet and
+   answer-quickly directives and carry the answering playbook,
+   ``tools`` MUST expose the three trajectory tools, ``tool_profile``
+   MUST be ``review``, and ``is_parallel``, ``use_web_tools`` and
+   ``use_memory`` MUST return ``False``.
 2. The command rewriter ``rewrite_prompt_if_command`` MUST recognise
    ``/ask <question>`` and emit a directive that instructs the outer
    LLM to call ``run_agent`` with the fixed ``append_to_prompt`` (with
-   the ``<task_id>`` placeholder still intact) and
-   ``append_to_system_prompt`` this command carries.
-3. The dispatch layer ``_dispatch_reserved`` MUST substitute the
+   the ``<task_id>`` placeholder still intact); the system-prompt
+   suffix is supplied daemon-side by the SEA getter, not repeated in
+   the directive.
+3. The dispatch layer ``_dispatch`` MUST substitute the
    literal ``<task_id>`` in ``options.append_to_prompt`` with the
    calling task's ``last_task_id`` before the daemon round trip,
    and MUST leave the substitution untouched for any other agent
@@ -43,14 +46,15 @@ from kiss.core.brand import BRAND, render_brand
 # The literal placeholder the /ask flow substitutes at dispatch time.
 _PLACEHOLDER = "<task_id>"
 
-# The exact strings the task description dictates.
+# The exact prompt suffix both dispatch paths use.
 _EXPECTED_APPEND_TO_PROMPT = (
-    "Read the events of the task <task_id> from ~/.kiss/sorcar.db "
-    "and answer the user question above."
+    "The question above is about the task with id <task_id>. "
+    "Call task_overview with that task id first, then answer the question."
 )
-_EXPECTED_APPEND_TO_SYSTEM_PROMPT = (
+_EXPECTED_APPEND_TO_SYSTEM_PROMPT = ask_sea.append_to_system_prompt()
+_EXPECTED_SUFFIX_START = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
-    "at any point. You must answer quickly because the user is waiting."
+    "at any point. You must answer quickly because the user is waiting.**"
 )
 
 
@@ -87,16 +91,29 @@ def test_system_prompt_returns_system_lite_md() -> None:
 
 
 def test_append_to_system_prompt_returns_fixed_suffix() -> None:
-    """append_to_system_prompt MUST return the two fixed directives.
+    """append_to_system_prompt MUST open with the two fixed directives
+    and carry the answering playbook.
 
-    The exact text is pinned: the no-internet directive first, then
-    the answer-quickly sentence (the user typed ``/ask`` into a live
-    task and is waiting on the reply).
+    The no-internet directive comes first, then the answer-quickly
+    sentence (the user typed ``/ask`` into a live task and is waiting
+    on the reply); the playbook names the three trajectory tools in
+    the order they should be used and the pitfalls seen in earlier
+    runs (raw DB reads, memory tools, editing files).
     """
-    assert ask_sea.append_to_system_prompt() == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
-    assert ask_sea.append_to_system_prompt().endswith(
-        "You must answer quickly because the user is waiting."
-    )
+    text = ask_sea.append_to_system_prompt()
+    assert text.startswith(_EXPECTED_SUFFIX_START)
+    assert text.index("task_overview") < text.index("task_transcript") < text.index("task_step")
+    assert "sqlite3" in text and "memory tools" in text and "read-only" in text
+    assert ask_sea.APPEND_TO_PROMPT == _EXPECTED_APPEND_TO_PROMPT
+
+
+def test_tools_profile_and_memory_getters() -> None:
+    """tools MUST be the three trajectory tools, the profile ``review``, memory off."""
+    assert [t.__name__ for t in ask_sea.tools()] == [
+        "task_overview", "task_transcript", "task_step",
+    ]
+    assert ask_sea.tool_profile() == "review"
+    assert ask_sea.use_memory() is False
 
 
 def test_is_parallel_returns_false() -> None:
@@ -109,37 +126,20 @@ def test_use_web_tools_returns_false() -> None:
     assert ask_sea.use_web_tools() is False
 
 
-def test_bundled_system_lite_is_byte_identical() -> None:
-    """The wheel-fallback copy MUST match the repo copy byte for byte.
+def test_system_lite_is_bundled_next_to_the_module() -> None:
+    """The prompt MUST ship inside the package, not under ``papers/``.
 
-    The bundled ``_ask_system_lite.md`` next to ``ask_sea.py`` is
-    what ``system_prompt()`` returns from a wheel install (``papers/``
-    is excluded from sdist/wheel per ``pyproject.toml``).  If it
-    drifts from the repo file, wheel users get a stale ablation
-    prompt while source users get the updated one — a silent split
-    the ablation study cannot tolerate.
+    ``papers/`` is excluded from sdist/wheel per ``pyproject.toml``,
+    and its ``ablation/prompts/SYSTEM_LITE.md`` is a frozen record of
+    the ablation run (literal identity sentence, no brand
+    placeholder), so ``system_prompt()`` must read a copy that lives
+    next to ``ask_sea.py`` and carries ``{{IDENTITY}}`` for
+    ``render_brand``.
     """
-    repo_bytes = ask_sea._SYSTEM_LITE_PATH.read_bytes()
-    bundled_bytes = ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_bytes()
-    assert bundled_bytes == repo_bytes
-
-
-def test_system_prompt_falls_back_to_bundled_copy(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A missing ``papers/`` MUST NOT break ``system_prompt()``.
-
-    Simulates a wheel install by pointing ``_SYSTEM_LITE_PATH`` at a
-    non-existent file: the function MUST fall back to
-    ``_BUNDLED_SYSTEM_LITE_PATH`` (identical content, verified
-    above) and return the same text a repo install would.
-    """
-    missing = tmp_path / "does-not-exist.md"
-    monkeypatch.setattr(ask_sea, "_SYSTEM_LITE_PATH", missing)
-    text = ask_sea.system_prompt()
-    assert text == render_brand(
-        ask_sea._BUNDLED_SYSTEM_LITE_PATH.read_text(encoding="utf-8"),
-    )
+    path = ask_sea._SYSTEM_LITE_PATH
+    assert path.parent == Path(ask_sea.__file__).resolve().parent
+    assert path.is_file()
+    assert "{{IDENTITY}}" in path.read_text(encoding="utf-8")
 
 
 def test_ask_sea_lives_in_third_party_agents_package() -> None:
@@ -172,10 +172,10 @@ def test_rewriter_emits_ask_directive_with_fixed_arguments() -> None:
     """``/ask <question>`` MUST rewrite to a run_agent directive.
 
     The directive MUST reference the resolved ``ask_sea.py`` path,
-    carry the exact ``append_to_prompt`` and ``append_to_system_prompt``
-    strings the task description dictates (with ``<task_id>`` still a
-    literal placeholder — dispatch substitutes it later), and end
-    with the user's question verbatim.
+    carry the exact ``append_to_prompt`` string (with ``<task_id>``
+    still a literal placeholder — dispatch substitutes it later), not
+    repeat the multi-line system-prompt suffix (the SEA getter supplies
+    it daemon-side), and end with the user's question verbatim.
     """
     sea_commands.refresh_registry()
     hit = sea_commands.rewrite_prompt_if_command(
@@ -186,10 +186,7 @@ def test_rewriter_emits_ask_directive_with_fixed_arguments() -> None:
     assert sea_path.name == "ask_sea.py"
     assert f'agent = "{sea_path}"' in rewritten
     assert f'append_to_prompt = "{_EXPECTED_APPEND_TO_PROMPT}"' in rewritten
-    assert (
-        f'append_to_system_prompt = "{_EXPECTED_APPEND_TO_SYSTEM_PROMPT}"'
-        in rewritten
-    )
+    assert "append_to_system_prompt" not in rewritten
     assert rewritten.endswith("why did the last step fail?")
     # The placeholder MUST reach dispatch intact — the rewriter has no
     # access to the calling task's id yet.
@@ -255,7 +252,7 @@ class _DispatchCaptured(BaseException):
 
     Inherits :class:`BaseException` (not :class:`Exception`) so it is
     NOT caught by the generic ``except Exception`` in
-    :func:`_dispatch_reserved` that turns any daemon failure into an
+    :func:`_dispatch` that turns any daemon failure into an
     "Error:" string — the test needs the exception to propagate up so
     it can read the captured kwargs.
     """
@@ -280,11 +277,11 @@ def _run_dispatch(
     agent_path: str, options: RunOptions, parent_task_id: str,
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> dict[str, Any]:
-    """Drive :func:`_dispatch_reserved` and return the captured kwargs."""
+    """Drive :func:`_dispatch` and return the captured kwargs."""
     _install_daemon_capture(monkeypatch)
     parent = _StubAgent(parent_task_id)
     try:
-        agent_dispatch._dispatch_reserved(
+        agent_dispatch._dispatch(
             name="ask",
             prompt="why did the last step fail?",
             agent_path=agent_path,
@@ -296,7 +293,6 @@ def _run_dispatch(
             scope_work_dir="",
             git_lifecycle=False,
             classify=True,
-            parent_reviewer=False,
             options=options,
         )
     except _DispatchCaptured as captured:
@@ -356,7 +352,7 @@ def test_dispatch_substitutes_even_when_parent_task_id_is_empty(
     assert _PLACEHOLDER not in captured["append_to_prompt"]
     # Every other character of the sentence is preserved.
     assert captured["append_to_prompt"].startswith(
-        "Read the events of the task  from"
+        "The question above is about the task with id . Call"
     )
 
 
@@ -479,3 +475,8 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
     assert cmd["appendToSystemPrompt"] == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
     assert cmd["useParallel"] is False
     assert cmd["webTools"] is False
+    assert cmd["useMemory"] is False
+    assert cmd["toolProfile"] == "review"
+    # ``tools()`` returns callables, so the SEA file doubles as its
+    # own tools file.
+    assert cmd["toolsFile"] == ask_path

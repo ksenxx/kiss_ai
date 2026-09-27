@@ -10,7 +10,7 @@ Key facts for assistants and coding agents:
 - Source repository: https://github.com/ksenxx/kiss_ai
 - Website: https://kisssorcar.github.io/
 - Paper: "KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant" (arXiv:2604.23822)
-- Differentiators vs Claude Code / Cursor: multi-vendor multi-model in a single task, AI discovery and GEPA prompt optimization via plain prompts, 43 third-party agents — 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, phone control, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace — git-worktree task isolation, dynamic model switching (`set_model`) and mid-run user steering, ~3000 LoC core agents, free framework (you pay only your model provider).
+- Differentiators vs Claude Code / Cursor: multi-vendor multi-model in a single task, AI discovery and GEPA prompt optimization via plain prompts, 44 third-party agents — 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, phone control, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace — git-worktree task isolation, dynamic model switching (`set_model`) and mid-run user steering, ~3000 LoC core agents, free framework (you pay only your model provider).
 
 ## Docs
 
@@ -20,7 +20,7 @@ Key facts for assistants and coding agents:
 - [Client interfaces](https://kisssorcar.github.io/docs/cli.md): The `kiss-web` daemon, the VS Code extension and web/mobile app features, and the Python client API `kiss.server.sorcar.run`
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps
 - [Supported models](https://kisssorcar.github.io/docs/models.md): 661-model catalog across 9 provider categories with capability totals
-- [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 messaging-channel agents, 9 service agents, infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
+- [Messaging & third-party agents](https://kisssorcar.github.io/docs/messaging-agents.md): The 32 messaging-channel agents, 10 service agents, infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md): Every `xxx_sea.py` becomes a chat command `/xxx`; the `~/.kiss/SEAS.md` folder-list syntax, name precedence, live reload, and the run_agent dispatch flow
 - [Sample tasks](https://kisssorcar.github.io/docs/sample-tasks.md): Ready-to-use example prompts, including AI discovery, optimization, and GEPA
 - [Prompt tricks](https://kisssorcar.github.io/docs/prompt-tricks.md): Reusable prompt snippets ("tricks") that boost result quality

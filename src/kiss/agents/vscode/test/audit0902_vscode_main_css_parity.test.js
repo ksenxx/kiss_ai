@@ -21,6 +21,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const {JSDOM} = require('jsdom');
+const {inlineDesignTokens} = require('./designTokens');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -28,7 +29,7 @@ function makeDom() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
-  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const css = inlineDesignTokens(fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8'));
   html = html.replace('</head>', '<style>' + css + '</style></head>');
   return new JSDOM(html, {pretendToBeVisual: true, url: 'https://localhost/'});
 }

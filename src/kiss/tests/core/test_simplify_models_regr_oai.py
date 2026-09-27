@@ -151,15 +151,18 @@ def test_response_has_message_text_and_failed() -> None:
     ))
     assert not has(_dict_response([{"type": "reasoning"}]))
 
-    OpenAICompatibleModel2._raise_for_failed_response(_dict_response([]))
+    m = make_v2()
+    m._raise_for_failed_response(_dict_response([]))
+    assert m.take_partial_usage_response() is None
+    failed = {"status": "failed", "error": {"message": "boom"}}
     with pytest.raises(KISSError, match="boom"):
-        OpenAICompatibleModel2._raise_for_failed_response(
-            {"status": "failed", "error": {"message": "boom"}}
-        )
+        m._raise_for_failed_response(failed)
+    assert m.take_partial_usage_response() is failed
+    incomplete = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
     with pytest.raises(KISSError, match="max_output_tokens"):
-        OpenAICompatibleModel2._raise_for_failed_response(
-            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
-        )
+        m._raise_for_failed_response(incomplete)
+    assert m.take_partial_usage_response() is incomplete
+    assert m.take_partial_usage_response() is None
 
 
 def test_consume_stream_missing_completed_raises() -> None:

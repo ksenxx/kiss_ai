@@ -4,17 +4,38 @@
 # add your name here
 """Discord Agent — channel agent with Discord REST API tools.
 
-Provides authenticated access to Discord via a bot token. Uses the Discord
-REST API v10 directly via requests (no discord.py needed). Stores the token
-in ``~/.kiss/third_party_agents/discord/config.json``.
+Uses the Discord REST API v10 directly via requests (no discord.py).
 
-In Muse-auth mode (the default) the bot token lives in the
-Muse vault as a header-kind credential occupying the ``Authorization``
-header itself (Discord's scheme is ``Bot <token>``, not ``Bearer``):
-this process holds only a surrogate bearer, and the daemon swaps it
-for the real ``Authorization: Bot ...`` header at the network
-boundary.  The plaintext token is scrubbed from ``config.json`` after
-enrollment (the non-secret ``application_id``/``guild_ids`` survive).
+Primary sign-in is click-Allow: ``authenticate_discord()`` runs the
+OAuth authorization-code grant with PKCE against the KISS-owned public
+Discord app (no client secret) with scopes ``identify guilds
+webhook.incoming``.  The user signs in, picks a server and a channel,
+and clicks Authorize; ``finish_discord_auth()`` stores the resulting
+user token and the incoming webhook Discord created for that channel.
+A user token can read the user's profile and server list but, by
+Discord's rules, cannot read or send channel messages, so messages go
+to the authorized channel through the webhook.  Bot-only features
+(reading messages, channel poll mode, managing messages) still need a
+bot token passed to ``authenticate_discord(bot_token=...)``, because
+Discord offers no OAuth equivalent for them.
+
+Storage.  Exactly one Discord credential is active at a time:
+
+* Muse-auth mode (the default): the credential lives in the Muse vault
+  under service ``discord`` (the only name the daemon lets reach
+  ``discord.com`` and refresh against ``discord.com/api/oauth2/token``).
+  A user sign-in is an ``oauth2_refresh_token`` entry the daemon
+  refreshes itself; a bot token is a header-kind entry occupying the
+  ``Authorization`` header (``Bot <token>``).  Either way this process
+  holds only a surrogate bearer.  ``config.json`` keeps non-secret
+  metadata only; ``auth_mode: user`` marks a user sign-in.
+* Legacy mode: ``~/.kiss/third_party_agents/discord/config.json`` holds
+  ``bot_token``, or ``access_token`` plus ``auth_mode: user``.
+
+The webhook URL embeds its own secret token, so it is kept like a
+credential in ``~/.kiss/third_party_agents/discord/webhook/config.json``
+(mode 0600) together with its channel and server IDs, and is never
+printed.
 
 Usage::
 
@@ -34,7 +55,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -42,26 +62,124 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.agents.third_party_agents._device_auth import (
+    ConsentSession,
+    LoopbackPkceSession,
+    PkceProvider,
+    TokenGrant,
+    connect_prompt,
+    consent_required,
+)
+from kiss.agents.third_party_agents._oauth_apps import (
+    LOOPBACK_REDIRECT_URI,
+    missing_client_id_error,
+    oauth_client_id,
+)
 
 _DISCORD_DIR = Path.home() / ".kiss" / "third_party_agents" / "discord"
 _API_BASE = "https://discord.com/api/v10"
+_OAUTH_SCOPES = "identify guilds webhook.incoming"
 _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
+_webhook_config = ChannelConfig(_DISCORD_DIR / "webhook", ("url",))
+# Config keys holding real secrets (scrubbed once the vault has them).
+_SECRET_KEYS = ("bot_token", "access_token", "refresh_token")
+
+_BOT_ONLY_ERROR = json.dumps(
+    {
+        "ok": False,
+        "error": "This needs a Discord bot token: the signed-in user token cannot "
+        "read channels or manage messages (Discord bans self-bots). Ask the user "
+        "for a bot token and call authenticate_discord(bot_token=...).",
+    }
+)
+
+
+def _pkce_provider() -> PkceProvider:
+    """Return Discord's OAuth endpoints (``$DISCORD_OAUTH_BASE`` overrides the host)."""
+    base = os.environ.get("DISCORD_OAUTH_BASE", "https://discord.com").rstrip("/")
+    return PkceProvider(f"{base}/oauth2/authorize", f"{base}/api/oauth2/token")
+
+
+_REFRESH_MARGIN = 300.0
+
+
+def _legacy_vault_credential(cfg: dict[str, str]) -> dict[str, Any]:
+    """Map a legacy user sign-in config onto its Muse vault credential.
+
+    Args:
+        cfg: The stored config dict (``access_token`` and, for a
+            refreshable sign-in, ``refresh_token``/``expires_at``/``client_id``).
+
+    Returns:
+        An ``oauth2_refresh_token`` credential when a refresh token is
+        stored (the daemon keeps refreshing it), else a plain ``bearer``.
+    """
+    if not cfg.get("refresh_token"):
+        return {"kind": "bearer", "token": cfg["access_token"]}
+    return {
+        "kind": "oauth2_refresh_token",
+        "token_url": _pkce_provider().token_url,
+        "client_id": cfg.get("client_id", ""),
+        "access_token": cfg["access_token"],
+        "refresh_token": cfg["refresh_token"],
+        "expires_at": float(cfg.get("expires_at") or 0),
+    }
+
+
+def _refresh_legacy_user_token(cfg: dict[str, str]) -> dict[str, str]:
+    """Rotate a legacy-mode user token that is about to expire and save it.
+
+    Args:
+        cfg: The stored config dict.
+
+    Returns:
+        *cfg* itself when no refresh is due or possible, else the
+        updated dict (unchanged when Discord refuses the refresh; the
+        old token is then reported as expired by the next API call).
+    """
+    expires_at = float(cfg.get("expires_at") or 0)
+    if not cfg.get("refresh_token") or expires_at - _REFRESH_MARGIN > time.time():
+        return cfg
+    form = {
+        "grant_type": "refresh_token",
+        "refresh_token": cfg["refresh_token"],
+        "client_id": cfg.get("client_id", ""),
+    }
+    try:
+        data = requests.post(_pkce_provider().token_url, data=form, timeout=30).json()
+    except (requests.RequestException, ValueError):
+        return cfg
+    if not isinstance(data, dict) or not data.get("access_token"):
+        return cfg
+    grant = TokenGrant.from_response(data)
+    new_cfg = {
+        **cfg,
+        "access_token": grant.access_token,
+        "refresh_token": grant.refresh_token or cfg["refresh_token"],
+        "expires_at": str(grant.acquired_at + (grant.expires_in or 3600.0)),
+    }
+    _config.save(new_cfg)
+    return new_cfg
 
 
 def _scrub_config_token() -> None:
-    """Remove a vault-migrated ``bot_token`` from config.json.
+    """Remove vault-migrated secrets (``bot_token``/``access_token``) from config.json.
 
-    Finishes the Muse migration automatically: the non-secret
-    ``application_id`` and ``guild_ids`` metadata are kept and the file
-    is deleted when nothing but the token was stored.
+    Finishes the Muse migration automatically: the non-secret metadata
+    (``application_id``, ``guild_ids``, ``auth_mode``) is kept and the
+    file is deleted when nothing but the token was stored.
     """
     try:
         cfg = json.loads(_config.path.read_text())
     except (OSError, ValueError):
         return
-    if not isinstance(cfg, dict) or "bot_token" not in cfg:
+    if not isinstance(cfg, dict) or not any(k in cfg for k in _SECRET_KEYS):
         return
-    kept = {k: str(v) for k, v in cfg.items() if k != "bot_token" and v}
+    # A migrated bot token supersedes an older user sign-in marker.
+    drop: tuple[str, ...] = _SECRET_KEYS + ("expires_at", "client_id")
+    if "bot_token" in cfg:
+        drop += ("auth_mode",)
+    kept = {k: str(v) for k, v in cfg.items() if k not in drop and v}
     if kept:
         save_json_config(_config.path, kept)
     else:
@@ -76,12 +194,46 @@ def _snowflake_key(msg: dict) -> int:  # type: ignore[type-arg]
         return 0
 
 
+def _probe_user(api_base: str, access_token: str) -> dict[str, Any]:
+    """Read ``/users/@me`` with a freshly issued user token.
+
+    Runs before the token is stored so a rejected sign-in never
+    replaces the credential in use.  Ambient proxy settings are ignored
+    because the request carries the new token.
+
+    Args:
+        api_base: Discord API base URL.
+        access_token: The OAuth user access token.
+
+    Returns:
+        The decoded user object, or the error body when ``id`` is missing.
+
+    Raises:
+        requests.RequestException: On a transport failure.
+    """
+    with requests.Session() as session:
+        session.trust_env = False
+        resp = session.get(
+            f"{api_base}/users/@me",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {"status": resp.status_code}
+    return body if isinstance(body, dict) else {"status": resp.status_code}
+
+
 class DiscordChannelBackend(ToolMethodBackend):
     """Channel backend for Discord REST API v10."""
 
     def __init__(self, api_base: str = "") -> None:
         self._api_base = api_base or os.environ.get("DISCORD_API_BASE", _API_BASE)
-        self._bot_token: str = ""
+        # The credential (or its Muse surrogate): a bot token, or a
+        # user OAuth token when ``_user_auth`` is set.
+        self._token: str = ""
+        self._user_auth: bool = False
         self._bot_user_id: str = ""
         self._http: Any = requests
         self._muse: bool = False
@@ -89,22 +241,39 @@ class DiscordChannelBackend(ToolMethodBackend):
         self._last_message_id: str = ""
 
     def _headers(self) -> dict[str, str]:
-        if self._muse:
-            # ``_bot_token`` holds a surrogate: the daemon swaps this
-            # bearer for the real ``Authorization: Bot ...`` header
-            # (a header-kind vault credential) at the network boundary.
-            return {"Authorization": f"Bearer {self._bot_token}"}
-        return {"Authorization": f"Bot {self._bot_token}"}
+        if self._muse or self._user_auth:
+            # In Muse mode ``_token`` is a surrogate the daemon swaps at
+            # the network boundary for the real ``Bearer`` user token or
+            # (header-kind entry) the real ``Authorization: Bot ...``.
+            return {"Authorization": f"Bearer {self._token}"}
+        return {"Authorization": f"Bot {self._token}"}
+
+    def _load_legacy_config(self) -> bool:
+        """Load the legacy ``config.json`` credential into the backend.
+
+        Returns:
+            True when a bot token or a user access token was found.
+        """
+        cfg = _config.load_metadata() or {}
+        if cfg.get("bot_token"):
+            self._token, self._user_auth = cfg["bot_token"], False
+            return True
+        if cfg.get("access_token"):
+            cfg = _refresh_legacy_user_token(cfg)
+            self._token, self._user_auth = cfg["access_token"], True
+            return True
+        return False
 
     def _wire_muse(self) -> bool:
         """Acquire a Discord surrogate and wire the boundary session.
 
-        A ``bot_token`` still in the legacy config is the newest user
-        intent (initial migration, or a rotation done while Muse was
-        off): it is enrolled as a header-kind credential
-        (``Authorization: Bot <token>``) replacing any vault entry, and
-        scrubbed from ``config.json`` only after the vault holds it.
-        No network round trip happens here.
+        A secret still in the legacy config is the newest user intent
+        (initial migration, or a rotation done while Muse was off): a
+        ``bot_token`` is enrolled as a header-kind credential
+        (``Authorization: Bot <token>``), an ``access_token`` from a
+        legacy user sign-in as a bearer; either replaces any vault
+        entry and is scrubbed from ``config.json`` only after the vault
+        holds it.  No network round trip happens here.
 
         Returns:
             True when the backend holds a surrogate and boundary session.
@@ -115,20 +284,22 @@ class DiscordChannelBackend(ToolMethodBackend):
             store_credentials,
         )
 
-        cfg = _config.load() or {}
-        token = cfg.get("bot_token", "")
-        if token:
+        cfg = _config.load_metadata() or {}
+        if cfg.get("bot_token"):
             store_credentials(
                 "discord",
-                {"kind": "header", "header": "Authorization", "token": f"Bot {token}"},
+                {"kind": "header", "header": "Authorization", "token": f"Bot {cfg['bot_token']}"},
                 [],
             )
+        elif cfg.get("access_token"):
+            store_credentials("discord", _legacy_vault_credential(cfg), [])
         handle = mint_surrogate("discord")
         if handle is None:
             self._connection_info = "No Discord credential in the Muse vault or config."
             return False
         _scrub_config_token()
-        self._bot_token = handle.token
+        self._token = handle.token
+        self._user_auth = not cfg.get("bot_token") and cfg.get("auth_mode") == "user"
         self._http = MuseBoundarySession("discord")
         self._muse = True
         return True
@@ -176,7 +347,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         return resp.json()
 
     def connect(self) -> bool:
-        """Authenticate with Discord using the stored bot token."""
+        """Authenticate with Discord using the stored bot or user token."""
         from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
         if muse_auth_enabled():
@@ -184,19 +355,17 @@ class DiscordChannelBackend(ToolMethodBackend):
             # /users/@me read through the daemon boundary (audited).
             if not self._wire_muse():
                 return False
-        else:
-            cfg = _config.load()
-            if not cfg:  # pragma: no branch
-                self._connection_info = "No Discord token found."
-                return False
-            self._bot_token = cfg["bot_token"]
+        elif not self._load_legacy_config():
+            self._connection_info = "No Discord token found."
+            return False
         try:
             result = self._get("/users/@me")
             if "id" in result:  # pragma: no branch
                 self._bot_user_id = str(result["id"])
                 username = result.get("username", "")
                 discriminator = result.get("discriminator", "")
-                self._connection_info = f"Authenticated as {username}#{discriminator}"
+                kind = "user sign-in" if self._user_auth else "bot"
+                self._connection_info = f"Authenticated as {username}#{discriminator} ({kind})"
                 return True
             self._connection_info = f"Discord auth failed: {result}"
             return False
@@ -220,6 +389,8 @@ class DiscordChannelBackend(ToolMethodBackend):
             return None
         if name.isdigit():
             return name
+        if self._user_auth:
+            return None
         try:
             guilds = self._get("/users/@me/guilds", params={"limit": 100})
             if not isinstance(guilds, list):
@@ -332,7 +503,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         self._last_message_id = ""
 
     def list_guilds(self, limit: int = 100) -> str:
-        """List guilds (servers) the bot is a member of.
+        """List guilds (servers) the bot or signed-in user is a member of.
 
         Args:
             limit: Maximum guilds to return (1-200). Default: 100.
@@ -359,6 +530,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with channel list (id, name, type, topic).
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._get(f"/guilds/{guild_id}/channels")
             if not isinstance(result, list):  # pragma: no branch
@@ -388,6 +561,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with channel details.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._get(f"/channels/{channel_id}")
             if "id" not in result:  # pragma: no branch
@@ -414,6 +589,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with message list.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             params: dict[str, Any] = {"limit": min(limit, 100)}
             if before:  # pragma: no branch
@@ -445,15 +622,22 @@ class DiscordChannelBackend(ToolMethodBackend):
     ) -> str:
         """Send a message to a Discord channel.
 
+        With a bot token the message is posted through the API to any
+        channel the bot can see.  With a user sign-in it goes through
+        the incoming webhook created at sign-in, so only the channel the
+        user authorized is reachable and replies are not possible.
+
         Args:
             channel_id: Channel ID.
             content: Message text (up to 2000 chars).
             tts: Text-to-speech flag. Default: False.
-            reply_to: Optional message ID to reply to.
+            reply_to: Optional message ID to reply to (bot token only).
 
         Returns:
             JSON string with ok status and message id.
         """
+        if self._user_auth:
+            return _post_webhook(channel_id, content, tts, reply_to)
         try:
             body: dict[str, Any] = {"content": content, "tts": tts}
             if reply_to:  # pragma: no branch
@@ -476,6 +660,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._patch(
                 f"/channels/{channel_id}/messages/{message_id}", {"content": content}
@@ -496,6 +682,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._delete(f"/channels/{channel_id}/messages/{message_id}")
             if isinstance(result, dict) and result.get("ok") is True:
@@ -515,6 +703,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             from urllib.parse import quote
 
@@ -543,6 +733,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with thread id and name.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._post(
                 f"/channels/{channel_id}/messages/{message_id}/threads",
@@ -565,6 +757,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with member list.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             params: dict[str, Any] = {"limit": min(limit, 1000)}
             if after:  # pragma: no branch
@@ -596,6 +790,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with invite code and URL.
         """
+        if self._user_auth:
+            return _BOT_ONLY_ERROR
         try:
             result = self._post(
                 f"/channels/{channel_id}/invites",
@@ -614,6 +810,50 @@ class DiscordChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
+def _post_webhook(channel_id: str, content: str, tts: bool, reply_to: str) -> str:
+    """Post *content* through the webhook authorized at user sign-in.
+
+    Args:
+        channel_id: Target channel; must be the webhook's channel.
+        content: Message text.
+        tts: Text-to-speech flag.
+        reply_to: Must be empty (webhooks cannot reply).
+
+    Returns:
+        JSON string with ok status and message id, or an error that
+        never contains the webhook URL.
+    """
+    webhook = _webhook_config.load()
+    if not webhook:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "No Discord webhook is stored; sign in again with "
+                "authenticate_discord() and pick a channel.",
+            }
+        )
+    if reply_to or channel_id != webhook.get("channel_id"):
+        error = (
+            f"The signed-in user can post only to channel {webhook.get('channel_id')} "
+            "(the one authorized at sign-in) and cannot reply. Anything else needs a "
+            "bot token: ask the user for one and call authenticate_discord(bot_token=...)."
+        )
+        return json.dumps({"ok": False, "error": error})
+    try:
+        resp = requests.post(
+            webhook["url"],
+            params={"wait": "true"},
+            json={"content": content, "tts": tts},
+            timeout=30,
+        )
+        result = resp.json() if resp.content else {}
+    except (requests.RequestException, ValueError) as e:
+        return json.dumps({"ok": False, "error": f"webhook post failed: {type(e).__name__}"})
+    if resp.ok and isinstance(result, dict) and "id" in result:
+        return json.dumps({"ok": True, "id": result["id"]})
+    return json.dumps({"ok": False, "error": f"webhook post failed (HTTP {resp.status_code})"})
+
+
 def _muse_authenticate(
     backend: DiscordChannelBackend, bot_token: str, application_id: str, guild_ids: str
 ) -> str:
@@ -629,7 +869,7 @@ def _muse_authenticate(
 
     Args:
         backend: The agent's Discord backend to (re)wire.
-        bot_token: Discord bot token from the Developer Portal.
+        bot_token: Discord bot token (advanced path for bot-only features).
         application_id: Optional application ID metadata.
         guild_ids: Optional comma-separated guild ID metadata.
 
@@ -652,15 +892,14 @@ def _muse_authenticate(
             [],
         )
         handle = mint_surrogate("discord")
-        backend._bot_token = handle.token if handle else ""
+        backend._token = handle.token if handle else ""
         backend._http = MuseBoundarySession("discord")
         backend._muse = True
+        backend._user_auth = False
         result = backend._get("/users/@me")
         if "id" in result:
             meta = {
-                k: v
-                for k, v in (("application_id", application_id), ("guild_ids", guild_ids))
-                if v
+                k: v for k, v in (("application_id", application_id), ("guild_ids", guild_ids)) if v
             }
             # Never persist the token; also drop any stale plaintext
             # copy a pre-Muse config may still hold.
@@ -682,10 +921,69 @@ def _muse_authenticate(
     # Roll the vault back so a bad token is not left enrolled.
     with contextlib.suppress(Exception):
         clear_credentials("discord")
-    backend._bot_token = ""
+    backend._token = ""
     backend._http = requests
     backend._muse = False
     return error
+
+
+def _store_user_grant(
+    backend: DiscordChannelBackend, session: LoopbackPkceSession, grant: TokenGrant
+) -> None:
+    """Persist a validated user sign-in and wire *backend* to use it.
+
+    Muse mode enrolls the grant in the vault under ``discord`` (the
+    daemon refreshes it with the public client ID; no secret exists);
+    legacy mode writes the access token to ``config.json``.  Either way
+    this replaces a stored bot token.  The webhook Discord created for
+    the chosen channel is saved to its own 0600 file.
+
+    Args:
+        backend: The agent's backend to (re)wire.
+        session: The finished PKCE session (token URL and client ID).
+        grant: The validated token grant.
+    """
+    from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
+
+    if muse_auth_enabled():
+        from kiss.agents.third_party_agents.muse_auth.client import (
+            MuseBoundarySession,
+            mint_surrogate,
+            store_credentials,
+        )
+
+        store_credentials(
+            "discord", grant.vault_credential(session.provider.token_url, session.client_id), []
+        )
+        _config.save({"auth_mode": "user"})
+        handle = mint_surrogate("discord")
+        backend._token = handle.token if handle else ""
+        backend._http = MuseBoundarySession("discord")
+        backend._muse = True
+    else:
+        cfg = {"auth_mode": "user", "access_token": grant.access_token}
+        if grant.refresh_token:
+            cfg.update(
+                refresh_token=grant.refresh_token,
+                expires_at=str(grant.acquired_at + (grant.expires_in or 3600.0)),
+                client_id=session.client_id,
+            )
+        _config.save(cfg)
+        backend._token = grant.access_token
+    backend._user_auth = True
+    webhook = grant.raw.get("webhook")
+    if isinstance(webhook, dict) and webhook.get("url") and webhook.get("channel_id"):
+        _webhook_config.save(
+            {
+                "url": str(webhook["url"]),
+                "channel_id": str(webhook["channel_id"]),
+                "guild_id": str(webhook.get("guild_id") or ""),
+            }
+        )
+    else:
+        # A new sign-in without a channel choice must not keep posting
+        # through the previous account's webhook.
+        _webhook_config.clear()
 
 
 class DiscordAgent(BaseChannelAgent):
@@ -697,29 +995,17 @@ class DiscordAgent(BaseChannelAgent):
         result = agent.run(prompt_template="List all channels in my server")
     """
 
-    channel_system_prompt = (
-        "\n\n## Discord Authentication\n"
-        "Always call check_discord_auth() first; if it returns ok, report the "
-        "bot username and id it returns and stop — never re-run setup over a "
-        "valid token.\n"
-        "If it reports not authenticated, the credential is a static bot token "
-        "created in the Discord Developer Portal "
-        "(https://discord.com/developers/applications), which sits behind the "
-        "user's Discord login: never ask for or type the user's Discord "
-        "password or 2FA code. Call start_discord_browser_auth(): it opens the "
-        "portal in the user's default browser on this machine when it can and "
-        "returns the steps for the user. Do not drive the portal or any Discord "
-        "login page with your own browser tools; on any failed page load, "
-        "missing display, or login wall, do not retry it or relaunch the "
-        "browser — hand off the token instead:\n"
-        "1. Call ask_user_question() asking the user to open "
-        "https://discord.com/developers/applications in their OWN browser (if it "
-        "did not open by itself), create an application (New Application), open "
-        "its Bot section, click Reset Token to reveal the bot token, enable the "
-        "Message Content intent under Privileged Gateway Intents, and paste the "
-        "bot token back.\n"
-        "2. Call authenticate_discord(bot_token=<pasted token>).\n"
-        "3. Finish by verifying with check_discord_auth()."
+    channel_system_prompt = connect_prompt(
+        "discord",
+        "Discord",
+        "authenticate_discord() with no arguments",
+        "It asks Discord for the scopes identify, guilds and webhook.incoming, so "
+        "on the approval page the user also picks the server and channel KISS may "
+        "post into.",
+    ).lstrip() + (
+        "\nReading messages, channel poll mode and message management need a bot "
+        "token because Discord offers no OAuth sign-in for them: only for those, ask "
+        "the user for a bot token and call authenticate_discord(bot_token=...)."
     )
 
     def __init__(self) -> None:
@@ -731,89 +1017,126 @@ class DiscordAgent(BaseChannelAgent):
             from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
 
             # Muse-auth mode: wire a vault surrogate and the boundary
-            # session (no network round trip); the real bot token never
+            # session (no network round trip); the real token never
             # enters this process once migrated.  A daemon failure
             # leaves the agent constructible (fail closed, tokenless) so
             # its authenticate/clear tools stay available.
             try:
                 self._backend._wire_muse()
             except MuseAuthError as e:
-                self._backend._bot_token = ""
+                self._backend._token = ""
                 self._backend._connection_info = f"Muse-auth wiring failed: {e}"
             return
-        cfg = _config.load()
-        if cfg:  # pragma: no branch
-            self._backend._bot_token = cfg["bot_token"]
+        self._backend._load_legacy_config()
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated."""
-        return bool(self._backend._bot_token)
+        return bool(self._backend._token)
 
     def _get_auth_tools(self) -> list:
         """Return channel-specific authentication tool functions."""
         agent = self
 
         def check_discord_auth() -> str:
-            """Check if the Discord bot token is configured and valid.
+            """Check whether a Discord credential is configured and valid.
 
             Returns:
-                Authentication status or instructions for how to authenticate.
+                JSON with the account, whether it is a user sign-in or a
+                bot, and the authorized webhook channel; or instructions
+                for how to authenticate.
             """
-            if not agent._backend._bot_token:  # pragma: no branch
+            if not agent._backend._token:  # pragma: no branch
                 return (
-                    "Not authenticated with Discord. Call start_discord_browser_auth() "
-                    "to open the Discord Developer Portal "
-                    "(https://discord.com/developers/applications) in the user's "
-                    "default browser, then ask the user (ask_user_question) to create "
-                    "the bot there in their OWN browser and paste back the bot token. "
-                    "Then call authenticate_discord(bot_token=...). Never ask for the user's "
-                    "Discord password or 2FA code."
+                    "Not authenticated with Discord. Call authenticate_discord() to "
+                    "start the browser sign-in: the user signs in to Discord in their "
+                    "OWN browser, picks a server and channel, and clicks Authorize; "
+                    "then call finish_discord_auth(). Never ask for the user's Discord "
+                    "password or 2FA code."
                 )
             try:
                 result = agent._backend._get("/users/@me")
-                if "id" in result:  # pragma: no branch
-                    return json.dumps(
-                        {
-                            "ok": True,
-                            "username": result.get("username", ""),
-                            "id": result.get("id", ""),
-                        }
+                if "id" not in result:  # pragma: no branch
+                    return json.dumps({"ok": False, "error": str(result)})
+                answer: dict[str, Any] = {
+                    "ok": True,
+                    "auth": "user" if agent._backend._user_auth else "bot",
+                    "username": result.get("username", ""),
+                    "id": result.get("id", ""),
+                }
+                webhook = _webhook_config.load()
+                if webhook:
+                    answer["webhook_channel_id"] = webhook.get("channel_id", "")
+                if agent._backend._user_auth:
+                    answer["note"] = (
+                        "User sign-in: list_guilds works and post_message can post to "
+                        "the webhook channel; other tools need a bot token."
                     )
-                return json.dumps({"ok": False, "error": str(result)})
+                return json.dumps(answer)
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
 
         def authenticate_discord(
-            bot_token: str,
+            bot_token: str = "",
             application_id: str = "",
             guild_ids: str = "",
         ) -> str:
-            """Store and validate a Discord bot token.
+            """Connect Discord by browser sign-in, or store a bot token.
+
+            Without ``bot_token`` this starts the OAuth sign-in (PKCE, KISS's
+            public Discord app, scopes ``identify guilds webhook.incoming``)
+            and returns a ``consent_required`` answer: give the user the URL
+            (ask_user_question) to open in their OWN browser, where they
+            sign in, pick a server and channel, and click Authorize; then
+            call finish_discord_auth().  A ``bot_token`` is the advanced
+            path, only for bot-only features (reading messages, channel
+            poll mode, managing messages); it is validated and stored.
 
             Args:
-                bot_token: Discord bot token from the Developer Portal.
-                application_id: Optional application ID.
-                guild_ids: Optional comma-separated guild IDs.
+                bot_token: Optional Discord bot token (bot-only features).
+                application_id: Optional application ID (bot token only).
+                guild_ids: Optional comma-separated guild IDs (bot token only).
 
             Returns:
-                Validation result with bot info, or error message.
+                A consent_required JSON answer, a validation result, or an
+                error message.
             """
-            bot_token = bot_token.strip()
-            if not bot_token:  # pragma: no branch
-                return "bot_token cannot be empty."
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
+            bot_token = bot_token.strip()
+            if not bot_token:
+                client_id = oauth_client_id("discord")
+                if not client_id:
+                    return json.dumps(
+                        {"ok": False, "error": missing_client_id_error("discord", "Discord")}
+                    )
+                try:
+                    session = LoopbackPkceSession(
+                        "discord",
+                        _pkce_provider(),
+                        client_id,
+                        LOOPBACK_REDIRECT_URI,
+                        {"scope": _OAUTH_SCOPES},
+                    )
+                except OSError as e:
+                    return json.dumps(
+                        {"ok": False, "error": f"cannot listen on {LOOPBACK_REDIRECT_URI}: {e}"}
+                    )
+                session.register()
+                return json.dumps(consent_required("discord", "Discord", session))
+            # A bot token supersedes any browser sign-in still pending.
+            ConsentSession.cancel_active("discord")
             if muse_auth_enabled():
                 return _muse_authenticate(
                     agent._backend, bot_token, application_id.strip(), guild_ids.strip()
                 )
-            agent._backend._bot_token = bot_token
+            agent._backend._token = bot_token
+            agent._backend._user_auth = False
             try:
                 result = agent._backend._get("/users/@me")
                 if "id" in result:  # pragma: no branch
                     _config.save(
                         {
-                            "bot_token": bot_token.strip(),
+                            "bot_token": bot_token,
                             "application_id": application_id.strip(),
                             "guild_ids": guild_ids.strip(),
                         }
@@ -826,20 +1149,75 @@ class DiscordAgent(BaseChannelAgent):
                             "id": result.get("id", ""),
                         }
                     )
-                agent._backend._bot_token = ""
+                agent._backend._token = ""
                 return json.dumps({"ok": False, "error": str(result)})
             except Exception as e:
-                agent._backend._bot_token = ""
+                agent._backend._token = ""
                 return json.dumps({"ok": False, "error": str(e)})
 
+        def finish_discord_auth() -> str:
+            """Complete a browser sign-in started by authenticate_discord().
+
+            Call after the user reports that they clicked Authorize.  The
+            user token Discord issued is validated with a ``/users/@me``
+            read and stored (Muse vault when enabled, where the daemon
+            refreshes it with the public client ID; no secret involved),
+            replacing any stored bot token.  The incoming webhook for the
+            channel the user picked is stored as a secret and never shown.
+
+            Returns:
+                The validation result (user, webhook channel and server
+                IDs), a pending status while the user has not approved
+                yet, or an error message.
+            """
+            session, status = ConsentSession.finish("discord")
+            if status == "pending":
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "status": "pending",
+                        "error": "The user has not authorized yet; ask them to finish "
+                        "the sign-in, then call this tool again.",
+                    }
+                )
+            if not isinstance(session, LoopbackPkceSession) or session.result is None:
+                return json.dumps({"ok": False, "error": f"Discord sign-in failed: {status}"})
+            grant = TokenGrant.from_session(session)
+            # Validate first: a rejected token must not disturb the
+            # credential that is currently in use.
+            try:
+                user = _probe_user(agent._backend._api_base, grant.access_token)
+            except requests.RequestException as e:
+                return json.dumps({"ok": False, "error": f"Discord unreachable: {e}"})
+            if "id" not in user:
+                return json.dumps({"ok": False, "error": f"Discord rejected the new token: {user}"})
+            try:
+                _store_user_grant(agent._backend, session, grant)
+            except Exception as e:
+                return json.dumps({"ok": False, "error": f"storing the sign-in failed: {e}"})
+            webhook = _webhook_config.load() or {}
+            return json.dumps(
+                {
+                    "ok": True,
+                    "message": "Discord sign-in saved (user token).",
+                    "username": user.get("username", ""),
+                    "id": user.get("id", ""),
+                    "webhook_channel_id": webhook.get("channel_id", ""),
+                    "webhook_guild_id": webhook.get("guild_id", ""),
+                }
+            )
+
         def clear_discord_auth() -> str:
-            """Clear the stored Discord bot token.
+            """Clear the stored Discord credential and webhook.
 
             Returns:
                 Status message.
             """
+            ConsentSession.cancel_active("discord")
             _config.clear()
-            agent._backend._bot_token = ""
+            _webhook_config.clear()
+            agent._backend._token = ""
+            agent._backend._user_auth = False
             agent._backend._http = requests
             agent._backend._muse = False
             from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
@@ -850,57 +1228,29 @@ class DiscordAgent(BaseChannelAgent):
                 clear_credentials("discord")
             return "Discord authentication cleared."
 
-        def start_discord_browser_auth() -> str:
-            """Open the Discord Developer Portal for the user to create a bot token.
-
-            Opens https://discord.com/developers/applications in the user's
-            default browser when this machine has one and returns the steps
-            to relay with ask_user_question():
-            1. Click "New Application", give it a name, and create it.
-            2. Go to the "Bot" section, click "Add Bot" (or "Reset Token").
-            3. Copy the bot token shown and paste it back.
-            4. Enable any required Privileged Gateway Intents (Message Content, etc.).
-            Then call authenticate_discord(bot_token=<the token>).
-            Do not drive the portal with your own browser tools; if a page
-            fails to load, do not retry. Never ask for the user's Discord
-            password or 2FA code.
-
-            Returns:
-                The portal URL, whether it was opened, and the user's steps.
-            """
-            return (
-                "The user creates the Discord bot themselves. "
-                + portal_handoff("https://discord.com/developers/applications")
-                + " Ask them to, in their OWN browser: 1. New Application (name it). "
-                "2. Bot section > Reset Token to reveal the bot token. 3. Enable the "
-                "Message Content intent under Privileged Gateway Intents. 4. Copy the "
-                "bot token and paste back the token here. Then call "
-                "authenticate_discord(bot_token=...)."
-            )
-
         return [
             check_discord_auth,
             authenticate_discord,
+            finish_discord_auth,
             clear_discord_auth,
-            start_discord_browser_auth,
         ]
 
 
 def _make_backend() -> DiscordChannelBackend:
-    """Create a configured backend for channel poll mode."""
+    """Create a configured backend for channel poll mode (needs a bot token)."""
     backend = DiscordChannelBackend()
     from kiss.agents.third_party_agents.muse_auth._common import muse_auth_enabled
 
-    if muse_auth_enabled():
-        if backend._wire_muse():
-            return backend
+    wired = backend._wire_muse() if muse_auth_enabled() else backend._load_legacy_config()
+    if not wired:
         print("Not authenticated. Run: kiss-discord -t 'authenticate'")
         sys.exit(1)
-    cfg = _config.load()
-    if not cfg:  # pragma: no branch
-        print("Not authenticated. Run: kiss-discord -t 'authenticate'")
+    if backend._user_auth:
+        print(
+            "Channel poll mode needs a Discord bot token (a user sign-in cannot read "
+            "messages). Run: kiss-discord -t 'authenticate with my bot token'"
+        )
         sys.exit(1)
-    backend._bot_token = cfg["bot_token"]
     return backend
 
 

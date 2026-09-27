@@ -89,8 +89,13 @@ function makeWebview() {
     value: {writeText: () => Promise.resolve()},
     configurable: true,
   });
-  win.prompt = () => null;
-  win.confirm = () => true;
+  // Native dialogs are gone from main.js; any call is a regression.
+  win.prompt = () => {
+    throw new Error('window.prompt must not be called');
+  };
+  win.confirm = () => {
+    throw new Error('window.confirm must not be called');
+  };
   win.eval(fs.readFileSync(path.join(MEDIA, 'marked.min.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));

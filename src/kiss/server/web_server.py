@@ -92,6 +92,7 @@ from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
     _load_subagent_rows_by_parent_task_id,
+    _queue_chat_event,
 )
 from kiss.core.brand import BRAND, PRODUCT_NAME
 from kiss.core.config import get_jobs_root as get_jobs_root
@@ -117,7 +118,7 @@ from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
 from kiss.server.tips import read_tips
-from kiss.server.tricks import read_tricks
+from kiss.server.tricks import read_tricks_data
 from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
     MODEL_NAME,
@@ -136,6 +137,10 @@ from kiss.viz_trajectory.server import (
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
 logger = logging.getLogger(__name__)
+
+# An outbound payload: serialised JSON, or a replay slot reserved by
+# ``JsonPrinter.replay_snapshot`` whose JSON is supplied later.
+Payload = str | ConcurrentFuture[str]
 
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "agents" / "vscode" / "media"
 
@@ -398,40 +403,6 @@ _SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
 _SHUTDOWN_EXIT_FAILSAFE = 30.0
 
 _MAX_PROMPT_BYTES = 1_000_000
-
-
-def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
-    """Return *text* capped to *max_bytes* and its original byte size.
-
-    ``json.loads`` may legitimately produce strings containing lone
-    UTF-16 surrogate code points (for example from ``"\\ud800"``).
-    Strict UTF-8 encoding raises ``UnicodeEncodeError`` for those
-    strings, which aborts that submit command (and can close transports
-    whose receive loop does not isolate command errors).  ``surrogatepass``
-    gives every Python string a
-    deterministic byte representation while preserving such code
-    points in an untruncated prompt.  If the cap lands inside any UTF-8
-    sequence, the incomplete suffix is removed before decoding.
-
-    Args:
-        text: Prompt text to measure and possibly truncate.
-        max_bytes: Maximum encoded size.
-
-    Returns:
-        ``(possibly_truncated_text, original_encoded_size)``.
-    """
-    encoded = text.encode("utf-8", errors="surrogatepass")
-    original_size = len(encoded)
-    if original_size <= max_bytes:
-        return text, original_size
-    prefix = encoded[:max_bytes]
-    while prefix:
-        try:
-            return prefix.decode("utf-8", errors="surrogatepass"), original_size
-        except UnicodeDecodeError as exc:
-            prefix = prefix[:exc.start]
-    return "", original_size
-
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 
@@ -2546,7 +2517,7 @@ class WebPrinter(JsonPrinter):
         """
         return self._tab_worktree_dirs.get(tab_id, "")
 
-    def cleanup_tab(self, tab_id: str) -> None:
+    def cleanup_tab(self, tab_id: str, keep_task_id: Any = None) -> None:
         """Drop *tab_id*'s per-tab state, including its worktree dir.
 
         A tab closed without merging (no successful ``worktree_result``
@@ -2573,8 +2544,9 @@ class WebPrinter(JsonPrinter):
 
         Args:
             tab_id: The frontend tab identifier to drop.
+            keep_task_id: See :meth:`JsonPrinter.cleanup_tab`.
         """
-        super().cleanup_tab(tab_id)
+        super().cleanup_tab(tab_id, keep_task_id)
         if tab_id:
             with self._lock:
                 self._tab_worktree_dirs.pop(tab_id, None)
@@ -2632,16 +2604,39 @@ class WebPrinter(JsonPrinter):
                     or os.getcwd()
                 )
 
+        slot = self._take_replay_slot(event)
+        if slot is not None:
+            # A running task's replay: its sends were reserved under
+            # ``delivery_lock`` by ``replay_snapshot``; supply the payload.
+            if "tabId" in event:
+                self._track_worktree_event(event, event.get("tabId"))
+            slot.set_result(json.dumps(event))
+            return
+
         if conn_id:
+            # A ``ready``-driven replay is delivered to one connection
+            # but still re-presents the tab's worktree (a running
+            # worktree task's ``worktree_created`` nested in the
+            # transcript), which the daemon tracks for every client.
+            if "tabId" in event:
+                self._track_worktree_event(event, event.get("tabId"))
             self._send_to_conn(conn_id, json.dumps(event))
             return
 
         if "tabId" in event:
-            self._track_worktree_event(event, event.get("tabId"))
-            self._keep_tab_stamped_task_event(event)
-            if record_only:
-                return
-            self._send_to_ws_clients(json.dumps(event))
+            # Recording and sending under ``delivery_lock``: a replay
+            # snapshot of the task either has this event and precedes
+            # it, or lacks it and follows it (see ``delivery_lock``).
+            # Encoded first: a transcript payload can be large, and the
+            # lock serializes every task's deliveries.
+            kept = self._tab_stamped_task_record(event)
+            data = "" if record_only else json.dumps(event)
+            with self.delivery_lock:
+                self._track_worktree_event(event, event.get("tabId"))
+                if kept is not None:
+                    self._keep_tab_stamped_task_event(*kept)
+                if data:
+                    self._send_to_ws_clients(data)
             return
 
         event = self._inject_task_id(event)
@@ -2652,22 +2647,35 @@ class WebPrinter(JsonPrinter):
             self._send_to_ws_clients(json.dumps(event))
             return
 
-        with self._lock:
-            self._record_event(event)
-            # Mirror JsonPrinter.broadcast: record the file paths of
-            # mutating tool calls so the end-of-task cross-repo
-            # auto-commit (_autocommit_changed_repos) also sees tasks
-            # run through the web printer.
-            self._track_changed_path(event)
+        # A ``talk`` event is never replayed (not a display event), and
+        # its playback arbitration takes the agent-state lock and may
+        # start a local player, so it fans out after the lock.
+        talk = event.get("type") == "talk"
+        # Resolved before ``delivery_lock`` (it takes ``STATE_LOCK`` and
+        # the agent's lock); queued under it so the events table keeps
+        # the order the clients saw.
+        persist_id = self._persistence_task_id(event)
+        # Encoded once, before the lock (a tool result can embed
+        # images): persisted as is, and spliced per subscribed tab.
+        # The tabId branch above returned, so ``event`` has no tabId.
+        data = "" if talk else json.dumps(event)
+        with self.delivery_lock:
+            with self._lock:
+                self._record_event(event)
+                # Mirror JsonPrinter.broadcast: record the file paths of
+                # mutating tool calls so the end-of-task cross-repo
+                # auto-commit (_autocommit_changed_repos) also sees tasks
+                # run through the web printer.
+                self._track_changed_path(event)
+            if persist_id:
+                _queue_chat_event(data, task_id=persist_id)
+            if not record_only and not talk:
+                self._fanout_stamped(event, data)
 
-        self._persist_event(event)
+        if talk and not record_only:
+            self._fanout_stamped(event)
 
-        if record_only:
-            return
-
-        self._fanout_stamped(event)
-
-    def _fanout_stamped(self, event: dict[str, Any]) -> None:
+    def _fanout_stamped(self, event: dict[str, Any], encoded: str = "") -> None:
         """Send one ``tabId``-stamped copy of *event* per subscribed tab.
 
         The frontend filters incoming events by ``tabId``; an event
@@ -2685,16 +2693,23 @@ class WebPrinter(JsonPrinter):
         marker), and splicing a second ``"tabId"`` member would
         produce ambiguous JSON with duplicate keys — routed correctly
         today only because parsers happen to keep the last member.
+
+        Args:
+            event: The task event (carrying ``taskId``).
+            encoded: ``json.dumps(event)`` from a caller that encodes
+                before taking ``delivery_lock``, or ``""``.  Ignored
+                when *event* carries a ``tabId``.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
         if "tabId" in event:
             event = {k: v for k, v in event.items() if k != "tabId"}
+            encoded = ""
         if event.get("type") == "talk":
             self._fanout_talk(event, targets)
             return
-        base = json.dumps(event)[:-1]
+        base = (encoded or json.dumps(event))[:-1]
         for tab_id in targets:
             self._track_worktree_event(event, tab_id, event.get("taskId"))
             self._send_to_ws_clients(
@@ -2982,7 +2997,7 @@ class WebPrinter(JsonPrinter):
             logger.exception("daemon-side talk clip playback failed")
             return False
 
-    def _send_to_wss_clients(self, data: str) -> None:
+    def _send_to_wss_clients(self, data: Payload) -> None:
         """Send a pre-serialised JSON payload to WSS clients only.
 
         WSS peers are remote browsers — separate devices from the
@@ -2990,14 +3005,15 @@ class WebPrinter(JsonPrinter):
         copy while the same-machine UDS peers get the muted one.
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         with self._ws_lock:
             endpoints = list(self._ws_clients)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_uds_writers(self, data: str, tab_id: str = "") -> None:
+    def _send_to_uds_writers(self, data: Payload, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
         UDS peers (VS Code extension webviews, Python clients) are
@@ -3005,7 +3021,8 @@ class WebPrinter(JsonPrinter):
         muted copies when a local player already owns the utterance.
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             tab_id: The tab the payload is stamped with, when it is a
                 task-event copy; only the peers that can show that tab
                 receive it (see :meth:`_uds_writers_for_tab`).  Empty
@@ -3019,7 +3036,7 @@ class WebPrinter(JsonPrinter):
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_ws_clients(self, data: str, tab_id: str = "") -> None:
+    def _send_to_ws_clients(self, data: Payload, tab_id: str = "") -> None:
         """Send a pre-serialised JSON payload to every connected client.
 
         Factored out of :meth:`broadcast` so fan-out copies for
@@ -3031,7 +3048,8 @@ class WebPrinter(JsonPrinter):
         preserved by each endpoint's ``send_lock``).
 
         Args:
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             tab_id: The stamped tab of a task-event copy (empty for
                 global events); UDS delivery is narrowed to the peers
                 that can show it.
@@ -3039,7 +3057,29 @@ class WebPrinter(JsonPrinter):
         self._send_to_wss_clients(data)
         self._send_to_uds_writers(data, tab_id)
 
-    def _send_to_conn(self, conn_id: str, data: str) -> None:
+    def _reserve_replay_send(
+        self, slot: ConcurrentFuture[str], conn_id: str,
+    ) -> None:
+        """Schedule a replay's sends now, with the payload supplied later.
+
+        Each recipient's send takes its FIFO place at once and waits
+        for *slot* (see :meth:`_locked_send`), so sends scheduled
+        afterwards follow the replay while the payload is built
+        outside ``delivery_lock``.  Recipients are those
+        :meth:`broadcast` picks for a ``task_events`` replay: the
+        requesting connection, or every client.  The caller owns
+        *slot* and cancels it if the payload never comes.
+
+        Args:
+            slot: The future the serialised replay is set on.
+            conn_id: Connection the replay is scoped to, or ``""``.
+        """
+        if conn_id:
+            self._send_to_conn(conn_id, slot)
+        else:
+            self._send_to_ws_clients(slot)
+
+    def _send_to_conn(self, conn_id: str, data: Payload) -> None:
         """Send a pre-serialised JSON payload to ONE connection.
 
         Used by :meth:`broadcast` for request/reply events stamped
@@ -3049,7 +3089,8 @@ class WebPrinter(JsonPrinter):
 
         Args:
             conn_id: The connection id registered via :meth:`bind_conn`.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         with self._ws_lock:
             endpoint = self._conn_endpoints.get(conn_id)
@@ -3083,14 +3124,15 @@ class WebPrinter(JsonPrinter):
     async def _locked_send(
         self,
         endpoint: Any,
-        data: str,
+        data: Payload,
         admit: Callable[[], bool] | None = None,
     ) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
         Args:
             endpoint: The client connection to write to.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
             admit: Optional last-moment admission check, evaluated
                 AFTER the send lock is acquired; a ``False`` result
                 drops the payload without touching the wire.  The
@@ -3103,14 +3145,23 @@ class WebPrinter(JsonPrinter):
                 review, finding 6).
         """
         async with self.send_lock(endpoint):
+            if isinstance(data, ConcurrentFuture):
+                # A reserved replay slot (``replay_snapshot``): hold this
+                # endpoint's FIFO place until the payload is set (or the
+                # slot is cancelled, which raises ``CancelledError``).
+                # Shielded so a disconnect cancelling this send cannot
+                # cancel the slot shared with the other recipients.
+                text = await asyncio.shield(asyncio.wrap_future(data))
+            else:
+                text = data
             if admit is not None and not admit():
                 return
             if isinstance(endpoint, asyncio.StreamWriter):
-                await self._uds_send(endpoint, data)
+                await self._uds_send(endpoint, text)
             else:
-                await endpoint.send(data)
+                await endpoint.send(text)
 
-    def _schedule_send(self, endpoint: Any, data: str) -> None:
+    def _schedule_send(self, endpoint: Any, data: Payload) -> None:
         """Schedule one payload send to one endpoint on the event loop.
 
         Shared by :meth:`_send_to_ws_clients` (fan-out) and
@@ -3122,7 +3173,8 @@ class WebPrinter(JsonPrinter):
 
         Args:
             endpoint: The client connection to write to.
-            data: The JSON payload (already encoded with ``json.dumps``).
+            data: The JSON payload (already encoded with ``json.dumps``)
+                or a reserved replay slot that resolves to it.
         """
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -3336,7 +3388,8 @@ receives (``src/vs/workbench/contrib/webview/browser/themeing.ts``)."""
 _VSCODE_DARK_MODERN_CSS = (
     # extensions/theme-defaults/themes/dark_modern.json, plus the
     # colour-registry defaults it inherits (list.*, terminal.ansi*,
-    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground).
+    # widget.shadow, toolbar.hoverBackground, editorWarning.foreground,
+    # charts.*: platform/theme/common/colors/chartsColors.ts).
     "      --vscode-foreground: #cccccc;\n"
     "      --vscode-descriptionForeground: #9d9d9d;\n"
     "      --vscode-errorForeground: #f85149;\n"
@@ -3345,6 +3398,10 @@ _VSCODE_DARK_MODERN_CSS = (
     "      --vscode-editor-background: #1f1f1f;\n"
     "      --vscode-editor-foreground: #cccccc;\n"
     "      --vscode-editor-selectionBackground: #264f78;\n"
+    "      --vscode-editor-inactiveSelectionBackground: #3a3d41;\n"
+    "      --vscode-editor-selectionHighlightBackground: #add6ff26;\n"
+    "      --vscode-editorLineNumber-foreground: #6e7681;\n"
+    "      --vscode-editorLineNumber-activeForeground: #cccccc;\n"
     "      --vscode-editorWidget-background: #202020;\n"
     "      --vscode-editorWarning-foreground: #cca700;\n"
     "      --vscode-editorGutter-addedBackground: #2ea043;\n"
@@ -3412,6 +3469,10 @@ _VSCODE_DARK_MODERN_CSS = (
     "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
     "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
     "      --vscode-terminal-ansiBrightWhite: #e5e5e5;\n"
+    "      --vscode-charts-green: #89d185;\n"
+    "      --vscode-charts-red: #f14c4c;\n"
+    "      --vscode-charts-yellow: #cca700;\n"
+    "      --vscode-charts-purple: #b180d7;\n"
 )
 """VS Code's "Dark Modern" theme as ``--vscode-*`` variables."""
 
@@ -3426,6 +3487,10 @@ _VSCODE_LIGHT_MODERN_CSS = (
     "      --vscode-editor-background: #ffffff;\n"
     "      --vscode-editor-foreground: #3b3b3b;\n"
     "      --vscode-editor-selectionBackground: #add6ff;\n"
+    "      --vscode-editor-inactiveSelectionBackground: #e5ebf1;\n"
+    "      --vscode-editor-selectionHighlightBackground: #add6ff80;\n"
+    "      --vscode-editorLineNumber-foreground: #6e7681;\n"
+    "      --vscode-editorLineNumber-activeForeground: #171184;\n"
     "      --vscode-editorWidget-background: #f8f8f8;\n"
     "      --vscode-editorWarning-foreground: #bf8803;\n"
     "      --vscode-editorGutter-addedBackground: #2ea043;\n"
@@ -3493,6 +3558,10 @@ _VSCODE_LIGHT_MODERN_CSS = (
     "      --vscode-terminal-ansiBrightMagenta: #d670d6;\n"
     "      --vscode-terminal-ansiBrightCyan: #29b8db;\n"
     "      --vscode-terminal-ansiBrightWhite: #a5a5a5;\n"
+    "      --vscode-charts-green: #388a34;\n"
+    "      --vscode-charts-red: #e51400;\n"
+    "      --vscode-charts-yellow: #bf8803;\n"
+    "      --vscode-charts-purple: #652d90;\n"
 )
 """VS Code's "Light Modern" theme as ``--vscode-*`` variables."""
 
@@ -3539,7 +3608,7 @@ html, body { height: auto; overflow: auto; }
 #tab-bar {
   position: sticky;
   top: 0;
-  z-index: 900;
+  z-index: var(--z-docked);
   padding-right: 56px;
 }
 /* A hidden section (a sub-agent transcript whose tab is not open, or
@@ -3551,13 +3620,13 @@ html, body { height: auto; overflow: auto; }
   position: fixed;
   top: 10px;
   right: 14px;
-  z-index: 1000;
+  z-index: var(--z-drawer);
   display: flex;
   align-items: center;
   justify-content: center;
   width: 34px;
   height: 34px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   border: 1px solid var(--border);
   background: var(--bg2);
   color: var(--fg);
@@ -3566,7 +3635,7 @@ html, body { height: auto; overflow: auto; }
 #share-theme-btn:hover { border-color: var(--accent); color: var(--accent); }
 /* One .share-task section per task of the chat, oldest first. */
 .share-task + .share-task {
-  margin-top: 14px;
+  margin-top: var(--space-3);
   border-top: 1px solid var(--border);
 }
 /* Each task's panel text carries a per-task unique id (its drawer's
@@ -3585,6 +3654,32 @@ html, body { height: auto; overflow: auto; }
 }
 """
 """Layout overrides appended after main.css on a shared chat page."""
+
+
+def _share_page_filename(title: str, chat_id: str) -> str:
+    """Return the file name for a shared chat page.
+
+    ``chat-<title-slug>-<chat-id>.html`` when the chat has a title,
+    so the file is recognisable in a folder listing (a slug of up to
+    60 characters: lower-case letters, digits and hyphens); the
+    filename-safe chat id (up to 80 characters) is always the suffix,
+    which keeps the name unique per chat and makes re-sharing the
+    same chat overwrite its previous page.  A chat without a usable
+    title gets the previous ``chat-<chat-id>.html`` name.
+
+    Args:
+        title: The chat title as shown in the tab (may be empty).
+        chat_id: The chat's id.
+
+    Returns:
+        The bare file name (no directory).
+    """
+    safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", chat_id)
+    safe_id = safe_id.strip("-.")[:80] or "chat"
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60].strip("-")
+    if slug:
+        return f"chat-{slug}-{safe_id}.html"
+    return f"chat-{safe_id}.html"
 
 
 def _build_share_page(title: str, body_html: str) -> str:
@@ -3672,7 +3767,8 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
-    tricks_json = json.dumps(read_tricks()).replace("</", "<\\/")
+    tricks_data = read_tricks_data()
+    tricks_json = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
     tips_json = json.dumps(
         {"tips": read_tips(), "show": False},
     ).replace("</", "<\\/")
@@ -3686,20 +3782,30 @@ def _build_html() -> str:
         + "    " + _SHARE_PAGE_LIGHT_VARS_CSS + "  </style>"
     )
     auth_modal = (
-        '    <div id="auth-modal" style="display:none;">\n'
+        '    <div id="auth-modal" style="display:none;" role="dialog" '
+        'aria-modal="true"\n'
+        '         aria-labelledby="auth-modal-title" '
+        'aria-describedby="auth-modal-error">\n'
         '      <div class="auth-modal-content">\n'
-        '        <div class="auth-modal-title">Remote access password</div>\n'
+        '        <div class="auth-modal-title" id="auth-modal-title">'
+        'Remote access password</div>\n'
+        '        <label for="auth-modal-input" id="auth-modal-label" '
+        'style="display:block; margin-bottom:6px;">'
+        'Password for this KISS Sorcar server</label>\n'
         '        <input type="password" id="auth-modal-input" '
         'class="auth-modal-input"\n'
         '               autocomplete="current-password" '
         'placeholder="Enter password">\n'
+        '        <div id="auth-modal-error" role="alert" '
+        'style="min-height:1.2em; margin-top:6px; '
+        'color: var(--vscode-errorForeground, #f14c4c);"></div>\n'
         '        <div class="auth-modal-actions">\n'
         '          <button id="auth-modal-cancel" '
         'class="auth-modal-btn auth-modal-cancel"\n'
         '                  type="button">Cancel</button>\n'
         '          <button id="auth-modal-ok" '
         'class="auth-modal-btn auth-modal-ok"\n'
-        '                  type="button">OK</button>\n'
+        '                  type="button">Unlock</button>\n'
         '        </div>\n'
         '      </div>\n'
         '    </div>\n'
@@ -3709,6 +3815,8 @@ def _build_html() -> str:
         "CSP_META": "",
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
+        "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
+        "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
         "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat"',
@@ -3739,6 +3847,7 @@ def _build_html() -> str:
             + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
         ),
         "TRICKS_JSON": tricks_json,
+        "MY_TRICKS_COUNT": str(tricks_data["userCount"]),
         "TIPS_JSON": tips_json,
         "TIPS_SRC": _media_url("tips.js"),
         "VOICE_SRC": _media_url("voice.js"),
@@ -4104,6 +4213,47 @@ _WS_SHIM_JS = r"""
 // kiss.server.sorcar.ServerApi.authenticate before the daemon starts
 // dispatching this connection's commands.
 (function() {
+  // A page script that never arrives leaves the app half-booted: with
+  // api.js missing, main.js throws at ``createSorcarApi`` and the
+  // loading overlay covers #app for good while the socket below
+  // authenticates happily.  Chromium aborts every in-flight request
+  // with ERR_NETWORK_CHANGED when the network path changes during the
+  // load (a Wi-Fi/cellular hand-over on a phone), so this is a
+  // transient a reload fixes.  Load errors do not bubble, but a
+  // capture-phase listener on window still sees them.  The timestamp
+  // in sessionStorage stops a reload loop when an asset is really
+  // broken: one reload per 30 s, then the failure stays visible.  This
+  // shim runs before every ``<script src>`` of the page (see
+  // media/chat.html; a script's load error fires when the parser
+  // reaches it, in document order) so a failed hljs/marked load is
+  // caught too.
+  //
+  // Only the page's own scripts count: same-origin ``<script src>``
+  // that fail while the document is still parsing.  Scripts main.js
+  // adds later on demand (the Monaco editor from its CDN, the voice
+  // model) have their own fallbacks and must not restart the app.
+  var _SCRIPT_RELOADED_AT = 'sorcar-script-reloaded-at';
+  function _reloadOnScriptLoadError(ev) {
+    var target = ev.target;
+    if (!target || target.tagName !== 'SCRIPT' || !target.src) return;
+    if (document.readyState !== 'loading') return;
+    if (target.src.indexOf(window.location.origin + '/') !== 0) return;
+    try {
+      var last = Number(sessionStorage.getItem(_SCRIPT_RELOADED_AT)) || 0;
+      if (Date.now() - last < 30000) return;
+      sessionStorage.setItem(_SCRIPT_RELOADED_AT, String(Date.now()));
+    } catch(e) {
+      // No storage means no loop guard: leave the failure visible.
+      return;
+    }
+    window.location.reload();
+  }
+  // Guarded like the wake-up listeners below: the DOM-less node
+  // harnesses of the tests load this shim with a bare window object.
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('error', _reloadOnScriptLoadError, true);
+  }
+
   var _state = null;
   try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
   var _ws = null;
@@ -4140,10 +4290,148 @@ _WS_SHIM_JS = r"""
   function _updateLoadingMsg(reconnecting) {
     var msg = document.getElementById('kiss-server-loading-msg');
     if (!msg) return;
-    var product = (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
+    _setOverlayAction(null, null);
     msg.textContent = reconnecting
-      ? 'Reconnecting to ' + product + ' Server ...'
-      : product + ' Server is starting ...';
+      ? 'Reconnecting to ' + _productName() + ' Server ...'
+      : _productName() + ' Server is starting ...';
+  }
+
+  function _productName() {
+    return (window.__BRAND__ && window.__BRAND__.productName) || 'KISS Sorcar';
+  }
+
+  // The overlay's single action button ("Retry now" / "Enter
+  // password").  Created on demand next to the message node — the
+  // overlay markup itself lives in media/chat.html — and removed
+  // whenever the overlay text is not about a choice the user can make.
+  var _overlayAction = null;
+
+  /**
+   * Show one button under the overlay message, or remove it.
+   *
+   * ``label`` is the verb on the button and ``handler`` runs on
+   * click; passing ``null`` for either removes the button.  A second
+   * call replaces the previous label/handler, so the button never
+   * accumulates listeners.
+   */
+  function _setOverlayAction(label, handler) {
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg || !msg.parentNode) return;
+    if (!label || !handler) {
+      if (_overlayAction && _overlayAction.parentNode) {
+        _overlayAction.parentNode.removeChild(_overlayAction);
+      }
+      _overlayAction = null;
+      return;
+    }
+    if (!_overlayAction) {
+      _overlayAction = document.createElement('button');
+      _overlayAction.type = 'button';
+      _overlayAction.id = 'kiss-server-loading-action';
+      _overlayAction.className = 'auth-modal-btn auth-modal-ok';
+      _overlayAction.style.marginTop = '12px';
+    }
+    _overlayAction.textContent = label;
+    _overlayAction.onclick = handler;
+    if (_overlayAction.parentNode !== msg.parentNode) {
+      msg.parentNode.insertBefore(_overlayAction, msg.nextSibling);
+    }
+  }
+
+  // Wall-clock start of the current outage (0 while connected).  Set
+  // by the first ``onclose`` after a connect attempt fails, cleared by
+  // ``auth_ok``.  Drives the overlay escalation below.
+  var _outageSince = 0;
+  // Once-a-second overlay refresh while disconnected: after
+  // OVERLAY_ESCALATE_MS of failed reconnects the message gains the
+  // elapsed time, a plain hint and a "Retry now" button, and during
+  // an auth lockout it counts the wait down.  Cleared on ``auth_ok``.
+  var _overlayTick = null;
+  var OVERLAY_ESCALATE_MS = 8000;
+
+  function _startOverlayTick() {
+    if (_overlayTick) return;
+    _overlayTick = setInterval(_refreshOverlay, 1000);
+  }
+
+  function _stopOverlayTick() {
+    if (!_overlayTick) return;
+    clearInterval(_overlayTick);
+    _overlayTick = null;
+  }
+
+  /**
+   * Re-render the overlay text for the current disconnected state.
+   *
+   * Lockout wins (the server told us exactly how long to wait); then
+   * an outage past OVERLAY_ESCALATE_MS gets the escalated wording
+   * with the elapsed seconds and a "Retry now" button, so the user is
+   * never left with a bare spinner and no idea whether waiting helps.
+   * The tick only runs between ``onclose`` / ``auth_locked`` (which set
+   * ``_outageSince`` / ``_lockedUntil``) and the next ``auth_ok`` /
+   * ``auth_required`` (which clear them and stop it).  A lockout that
+   * has run out with no server answer hands over to the outage (or
+   * cancelled-dialog) wording via ``_endLockout`` instead of counting
+   * "0 s" forever.
+   */
+  function _refreshOverlay() {
+    if (_lockedUntil && Date.now() < _lockedUntil) {
+      _showLockedMsg(Math.ceil((_lockedUntil - Date.now()) / 1000));
+      return;
+    }
+    if (_lockedUntil) _endLockout();
+    if (!_outageSince) return;
+    var elapsed = Date.now() - _outageSince;
+    if (elapsed < OVERLAY_ESCALATE_MS) return;
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (!msg) return;
+    msg.textContent = 'Still trying to reach the ' + _productName() +
+      ' server (' + Math.floor(elapsed / 1000) + ' s). ' +
+      'Check that it is running on this machine.';
+    _setOverlayAction('Retry now', _retryNow);
+  }
+
+  /**
+   * The lockout deadline passed without a server answer clearing it.
+   *
+   * Only ``auth_ok`` / ``auth_required`` reset ``_lockedUntil``, so an
+   * expired lockout with the socket still down means the reconnect
+   * scheduled for its end is failing (server gone, device offline).
+   * Stop the countdown and hand the overlay to the state that now
+   * applies: the cancelled-dialog explanation ("A password is
+   * needed" + "Enter password"), or the outage wording, whose clock
+   * starts at the lockout's end so "Still trying ..." + "Retry now"
+   * follows OVERLAY_ESCALATE_MS later.  An open socket is about to
+   * be answered by the server, so only the countdown ends.
+   */
+  function _endLockout() {
+    var until = _lockedUntil;
+    _lockedUntil = 0;
+    if (_ws && _ws.readyState === WebSocket.OPEN) return;
+    if (_promptDeclined) {
+      _stopOverlayTick();
+      _showPasswordNeeded();
+      return;
+    }
+    if (_outageSince) return;
+    _outageSince = until;
+    _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
+  }
+
+  /**
+   * "Retry now" on the overlay: drop the backoff and reconnect at once.
+   *
+   * The escalated text and the button stay (the tick keeps the
+   * seconds current); ``auth_ok`` or ``auth_required`` clears them.
+   */
+  function _retryNow() {
+    if (_ws && _ws.readyState === WebSocket.OPEN) return;
+    if (_reconnectTimer) {
+      clearTimeout(_reconnectTimer);
+      _reconnectTimer = null;
+    }
+    _reconnectAttempt = 0;
+    connect();
   }
 
   // Non-zero while the server has told us (via an ``auth_locked``
@@ -4154,6 +4442,12 @@ _WS_SHIM_JS = r"""
   // so the overlay keeps showing the lockout explanation rather than
   // the generic "starting ..." label.
   var _lockedRetryMs = 0;
+  // Wall-clock end of the lockout (0 when not locked) for the countdown.
+  var _lockedUntil = 0;
+  // True after a pre-auth ``error`` frame was written onto the overlay
+  // (e.g. "remote access is turned off"); the close that follows must
+  // not replace that explanation with the generic "starting" label.
+  var _preAuthErrorShown = false;
 
   /**
    * Replace the overlay text with the auth-lockout explanation.
@@ -4162,12 +4456,16 @@ _WS_SHIM_JS = r"""
    * without this the user would stare at a promptless "KISS Sorcar
    * Server is starting ..." spinner with no hint that the remote
    * password rate-limit is what is keeping the password modal away.
+   * The lock is per source network (the tunnel collapses every
+   * visitor onto one IP), so the wording does not blame the reader,
+   * and the seconds count down once a second via the overlay tick.
    */
   function _showLockedMsg(secs) {
     var msg = document.getElementById('kiss-server-loading-msg');
     if (!msg) return;
-    msg.textContent = 'Too many failed login attempts. ' +
-      'Asking for the password again in ' + secs + 's ...';
+    _setOverlayAction(null, null);
+    msg.textContent = 'Too many wrong passwords from this network. ' +
+      'You can try again in ' + secs + ' s.';
   }
 
   // A page the service worker answered from its cache because the
@@ -4328,36 +4626,158 @@ _WS_SHIM_JS = r"""
   // rendered tall with wasted space below its buttons on most desktop
   // browsers.  Falls back to prompt() when the modal nodes are not in
   // the DOM (e.g. unit tests that load the shim in isolation).
-  function _showAuthModal() {
-    return new Promise(function(resolve) {
-      var modal  = document.getElementById('auth-modal');
-      var input  = document.getElementById('auth-modal-input');
-      var okBtn  = document.getElementById('auth-modal-ok');
-      var cnclBtn = document.getElementById('auth-modal-cancel');
-      if (!modal || !input || !okBtn || !cnclBtn) {
-        resolve(prompt('Enter remote access password:'));
-        return;
-      }
-      input.value = '';
-      modal.style.display = 'flex';
-      setTimeout(function() { try { input.focus(); } catch(e) {} }, 0);
+  //
+  // The dialog stays open until the server accepts the password
+  // (``auth_ok`` calls ``_hideAuthModal``) or the user cancels: a
+  // wrong password is reported INSIDE the dialog, with the typed
+  // text kept and selected, instead of the dialog vanishing and a
+  // generic spinner taking its place.
+  //
+  // ``_authPrompt`` is the one pending prompt promise.  Every
+  // ``auth_required`` (and every silent reconnect while the dialog is
+  // open — the server drops an idle unauthenticated socket after
+  // 60 s) goes through ``_promptForPassword``, which returns early
+  // while a prompt is pending: no duplicate listeners, no duplicate
+  // ``auth`` frames, and the value the user is typing is never
+  // cleared under them.
+  var _authPrompt = null;
+  // Detaches the pending prompt's listeners without resolving it;
+  // set while a prompt is pending, used by ``_hideAuthModal`` so a
+  // dialog hidden from outside (``auth_ok`` won on a reconnect with
+  // a password stored by another tab) never leaves a stale prompt
+  // that would make the next ``_promptForPassword`` a no-op.
+  var _authPromptCancel = null;
 
-      function cleanup() {
-        modal.style.display = 'none';
-        okBtn.removeEventListener('click', onOk);
-        cnclBtn.removeEventListener('click', onCancel);
-        input.removeEventListener('keydown', onKey);
-      }
-      function onOk()     { var v = input.value; cleanup(); resolve(v); }
-      function onCancel() { cleanup(); resolve(null); }
-      function onKey(e) {
-        if (e.key === 'Enter')        { e.preventDefault(); onOk();     }
-        else if (e.key === 'Escape')  { e.preventDefault(); onCancel(); }
-      }
-      okBtn.addEventListener('click', onOk);
-      cnclBtn.addEventListener('click', onCancel);
-      input.addEventListener('keydown', onKey);
-    });
+  // True after the user cancelled the password dialog: the overlay then
+  // says a password is needed and offers "Enter password", and the
+  // ``auth_required`` of every quiet reconnect underneath (the server
+  // drops idle unauthenticated sockets after 60 s) must NOT pop the
+  // dialog back up.  Cleared by that button and by ``auth_ok``.
+  var _promptDeclined = false;
+
+  function _showAuthModal() {
+    var pending = new Promise(_runAuthModal);
+    // Only a dialog that is waiting for the user is "pending".  The
+    // prompt() fallback resolves inside the executor, so remembering
+    // its promise would make every later ``_promptForPassword`` a
+    // no-op and leave the revealed app without a way to log in
+    // (SECURITY: the frontend gate must always re-prompt or re-gate).
+    if (_authPromptCancel) _authPrompt = pending;
+    return pending;
+  }
+
+  function _runAuthModal(resolve) {
+    var modal  = document.getElementById('auth-modal');
+    var input  = document.getElementById('auth-modal-input');
+    var okBtn  = document.getElementById('auth-modal-ok');
+    var cnclBtn = document.getElementById('auth-modal-cancel');
+    if (!modal || !input || !okBtn || !cnclBtn) {
+      resolve(prompt('Enter remote access password:'));
+      return;
+    }
+    var wasOpen = modal.style.display === 'flex';
+    if (!wasOpen) {
+      input.value = '';
+      _setAuthError('');
+      modal.style.display = 'flex';
+    }
+    setTimeout(function() {
+      try { input.focus(); if (wasOpen) input.select(); } catch(e) {}
+    }, 0);
+
+    function cleanup() {
+      okBtn.removeEventListener('click', onOk);
+      cnclBtn.removeEventListener('click', onCancel);
+      input.removeEventListener('keydown', onKey);
+      _authPrompt = null;
+      _authPromptCancel = null;
+    }
+    function onOk() {
+      var v = input.value;
+      cleanup();
+      resolve(v);
+    }
+    function onCancel() { cleanup(); _hideAuthModal(); resolve(null); }
+    function onKey(e) {
+      if (e.key === 'Enter')        { e.preventDefault(); onOk();     }
+      else if (e.key === 'Escape')  { e.preventDefault(); onCancel(); }
+    }
+    okBtn.addEventListener('click', onOk);
+    cnclBtn.addEventListener('click', onCancel);
+    input.addEventListener('keydown', onKey);
+    _authPromptCancel = cleanup;
+  }
+
+  function _hideAuthModal() {
+    if (_authPromptCancel) _authPromptCancel();
+    var modal = document.getElementById('auth-modal');
+    if (modal) modal.style.display = 'none';
+    _setAuthError('');
+  }
+
+  function _authModalOpen() {
+    var modal = document.getElementById('auth-modal');
+    return !!(modal && modal.style.display === 'flex');
+  }
+
+  /** Write ``text`` into the dialog's ``role="alert"`` line ('' clears). */
+  function _setAuthError(text) {
+    var err = document.getElementById('auth-modal-error');
+    if (err) err.textContent = text;
+  }
+
+  /**
+   * Ask for the password (once) and send it on the current socket.
+   *
+   * Idempotent: while a prompt is pending this is a no-op, so a
+   * repeated ``auth_required`` (reconnect with the dialog open) or a
+   * wrong-password ``error`` re-uses the open dialog.  On Cancel the
+   * app is re-gated behind the overlay, which then explains that a
+   * password is needed and offers "Enter password" to re-open the
+   * dialog — never a spinner that pretends the server is starting.
+   */
+  function _promptForPassword() {
+    if (_authPrompt) return;
+    _showAuthModal().then(_onPasswordEntered);
+  }
+
+  /**
+   * Gate the app behind the overlay after a cancelled password dialog.
+   *
+   * The overlay explains why (never a spinner that pretends the server
+   * is starting) and offers "Enter password" to re-open the dialog.
+   */
+  function _showPasswordNeeded() {
+    _promptDeclined = true;
+    _dispatchToApp({type: 'daemonStatus', connected: false});
+    var msg = document.getElementById('kiss-server-loading-msg');
+    if (msg) msg.textContent = 'A password is needed to use this server.';
+    _setOverlayAction('Enter password', _reopenPasswordPrompt);
+  }
+
+  function _onPasswordEntered(pwd) {
+    if (pwd === null) {
+      _showPasswordNeeded();
+      return;
+    }
+    try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
+    if (_ws && _ws.readyState === WebSocket.OPEN) {
+      _ws.send(JSON.stringify({type: 'auth', password: pwd}));
+    } else {
+      // The server dropped the idle socket while the user typed; the
+      // stored password goes out in ``onopen`` of the reconnect.
+      _reconnectNowIfNeeded();
+    }
+  }
+
+  /** "Enter password" on the overlay after a Cancel: show the dialog again. */
+  function _reopenPasswordPrompt() {
+    _promptDeclined = false;
+    _setOverlayAction(null, null);
+    _updateLoadingMsg(_hadAuthThenClosed);
+    _dispatchToApp({type: 'daemonStatus', connected: true});
+    _promptForPassword();
+    if (!_ws || _ws.readyState !== WebSocket.OPEN) _reconnectNowIfNeeded();
   }
 
   window.acquireVsCodeApi = function() {
@@ -4430,11 +4850,35 @@ _WS_SHIM_JS = r"""
       }, lockedDelay);
       return;
     }
+    if (_authPrompt || _authModalOpen()) {
+      // The server drops an idle unauthenticated socket after 60 s.
+      // The user is still typing the password: keep the dialog (and
+      // the typed text) exactly as it is, say nothing on the overlay,
+      // and reconnect underneath; the reconnect's ``auth_required``
+      // is a no-op on the open dialog and the Unlock sends on the
+      // new socket.
+      _scheduleReconnect();
+      return;
+    }
+    if (_preAuthErrorShown || _promptDeclined) {
+      // The overlay already explains why the server refused us (or
+      // that a password is needed); a spinner label would hide that.
+      // Keep retrying quietly.
+      _preAuthErrorShown = false;
+      _scheduleReconnect();
+      return;
+    }
+    if (!_outageSince) _outageSince = Date.now();
+    _startOverlayTick();
     // Switch the overlay text BEFORE re-revealing it: once this page
     // has had a successful handshake (or came from the worker's cache,
     // which only exists because the server was reachable before) every
     // overlay appearance is a reconnect from the user's perspective.
-    _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
+    // Past OVERLAY_ESCALATE_MS the tick owns the text (elapsed time,
+    // hint, "Retry now"); do not flip it back to the bare label.
+    if (Date.now() - _outageSince < OVERLAY_ESCALATE_MS) {
+      _updateLoadingMsg(_hadAuthThenClosed || _offlineShell);
+    }
     // Tell the app the socket is down.  Symmetric to the ``auth_ok``
     // dispatch above and to ``SorcarSidebarView.ts``'s disconnect
     // handler in the VS Code path.  ``reconnecting: true`` — the
@@ -4524,6 +4968,12 @@ _WS_SHIM_JS = r"""
         _stopStaleCheck();
         _staleTimer = setTimeout(_checkStale, _STALE_CHECK_MS);
         _reconnectAttempt = 0;
+        _outageSince = 0;
+        _lockedUntil = 0;
+        _promptDeclined = false;
+        _stopOverlayTick();
+        _setOverlayAction(null, null);
+        _hideAuthModal();
         // Re-establish this instance's pinned work_dir BEFORE flushing
         // any queued commands: the server stamps each connection's
         // work_dir onto later commands, so the pin must arrive first.
@@ -4585,27 +5035,49 @@ _WS_SHIM_JS = r"""
         // overlay forever and the user can never enter their
         // password.  Symmetric to the auth_ok dispatch above — both
         // states prove the server is reachable.
+        //
+        // SECURITY — ``_onPasswordEntered`` re-gates the app
+        // (``connected: false``) when the prompt is cancelled, so the
+        // reveal never exposes the unauthenticated webapp.
+        // The server answered, so any outage is over: stop the
+        // overlay escalation / lockout countdown.
+        _outageSince = 0;
+        _lockedUntil = 0;
+        _stopOverlayTick();
+        if (_promptDeclined) {
+          // The user closed the dialog earlier; the overlay still says
+          // a password is needed and how to enter it.  Do not pop the
+          // dialog back up on every reconnect.
+          _showPasswordNeeded();
+          return;
+        }
+        _setOverlayAction(null, null);
         _dispatchToApp({type: 'daemonStatus', connected: true});
-        _showAuthModal().then(function(pwd) {
-          if (pwd === null || pwd === undefined) {
-            // SECURITY — do NOT leave the app usable when the user
-            // dismisses the password prompt without authenticating.
-            // The ``auth_required`` branch above revealed ``#app`` so
-            // the modal (a child of #app) could render; once the modal
-            // is cancelled that reveal would otherwise expose the whole
-            // unauthenticated webapp, bypassing the remote-password
-            // check at the UI layer.  Re-gate by re-showing the loading
-            // overlay (``connected:false``).  The still-open, still-
-            // unauthenticated socket times out server-side and the
-            // ensuing reconnect re-prompts for the password.
-            _dispatchToApp({type: 'daemonStatus', connected: false});
+        _promptForPassword();
+        return;
+      }
+      if (msg.type === 'error' && !_authenticated) {
+        // Pre-auth errors are the server's last word before it closes
+        // the socket.  A wrong password (``code: 'auth_failed'``) is
+        // reported inside the still-open dialog — the typed text is
+        // kept and selected so the user can retype at once — and the
+        // stored copy is dropped so the reconnect's probe is the
+        // uncounted empty one, not a second wrong guess.  Any other
+        // pre-auth error (e.g. remote access disabled) replaces the
+        // overlay spinner text so the user is told why.
+        var text = (msg.text && String(msg.text)) || 'Something went wrong.';
+        if (msg.code === 'auth_failed') {
+          try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
+          if (_authModalOpen()) {
+            _setAuthError(text);
+            _promptForPassword();
             return;
           }
-          try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
-          if (_ws && _ws.readyState === WebSocket.OPEN) {
-            _ws.send(JSON.stringify({type: 'auth', password: pwd}));
-          }
-        });
+        }
+        var over = document.getElementById('kiss-server-loading-msg');
+        if (over) over.textContent = text;
+        _preAuthErrorShown = true;
+        _dispatchToApp({type: 'daemonStatus', connected: false});
         return;
       }
       if (msg.type === 'auth_locked') {
@@ -4621,7 +5093,9 @@ _WS_SHIM_JS = r"""
         var secs = Math.ceil(Number(msg.retry_after));
         if (!(secs > 0)) secs = 60;
         _lockedRetryMs = secs * 1000;
+        _lockedUntil = Date.now() + _lockedRetryMs;
         _showLockedMsg(secs);
+        _startOverlayTick();
         // Re-gate the app while we wait (idempotent when the loading
         // overlay is already up, e.g. on a fresh page load).
         _dispatchToApp({type: 'daemonStatus', connected: false});
@@ -4711,6 +5185,50 @@ def _http_response(
             *(extra_headers or []),
         ]),
         body,
+    )
+
+
+def _error_page(
+    status: int, heading: str, advice: str, details: str = "",
+) -> Response:
+    """Return a small plain-language HTML error page.
+
+    Browsers show HTTP error bodies to people, so they read like a
+    note, not a log line: ``heading`` says what happened, ``advice``
+    what to do next, and ``details`` (optional, for the person who
+    administers the server) is tucked into a collapsed ``<details>``.
+
+    Args:
+        status: The HTTP status code (403, 404, 502, ...).
+        heading: One short sentence naming the problem.
+        advice: One or two sentences telling the reader what to do.
+        details: Optional technical hint for administrators.
+
+    Returns:
+        A ``text/html`` response carrying the page.
+    """
+    details_html = (
+        "<details><summary>For the server administrator</summary>"
+        f"<p>{html.escape(details)}</p></details>"
+        if details else ""
+    )
+    page = (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html.escape(heading)}</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:0;padding:48px 20px;"
+        "max-width:36em;line-height:1.5;color:#222;background:#fff}"
+        "h1{font-size:1.4em;margin:0 0 .5em}details{margin-top:2em;color:#555}"
+        "summary{cursor:pointer}a{color:#0a58ca}</style></head><body>"
+        f"<h1>{html.escape(heading)}</h1>"
+        f"<p>{html.escape(advice)}</p>"
+        "<p><a href=\"/\">Go to the KISS Sorcar start page</a></p>"
+        f"{details_html}"
+        f"<p style=\"color:#888;font-size:.85em\">HTTP {status}</p>"
+        "</body></html>"
+    )
+    return _http_response(
+        status, "text/html; charset=utf-8", page.encode("utf-8"),
     )
 
 
@@ -5007,12 +5525,16 @@ class RemoteAccessServer:
                     "Refusing non-localhost request from %s: "
                     "remote_password is empty", addr,
                 )
-                return _http_response(
+                return _error_page(
                     403,
-                    "text/plain",
-                    b"Forbidden: no remote_password is configured, so "
-                    b"only localhost may connect. Set remote_password "
-                    b"in ~/.kiss/config.json to allow remote access.",
+                    "This device is not allowed yet",
+                    "Remote access to this KISS Sorcar server is turned "
+                    "off. On the computer running KISS Sorcar, open "
+                    "Settings and set a Remote password to allow it; "
+                    "then come back to this page.",
+                    "Only localhost may connect while remote_password is "
+                    "empty. Set remote_password in ~/.kiss/config.json "
+                    "(or in the app's Settings) to allow remote access.",
                 )
         request_path = urlsplit(request.path).path
         path = unquote(request_path)
@@ -5061,7 +5583,15 @@ class RemoteAccessServer:
                 _local_ca_cert_bytes,
             ) if self._serves_local_ca else None
             if ca_bytes is None:
-                return _http_response(404, "text/plain", b"Not Found")
+                return _error_page(
+                    404,
+                    "There is no certificate to download here",
+                    "This server runs with its own certificate files, so "
+                    "it has no local CA certificate to install. Go back "
+                    "to the start page.",
+                    "/ca.crt is only served when the daemon generated "
+                    "its own local CA (no --certfile/--keyfile).",
+                )
             return _http_response(
                 200, "application/x-x509-ca-cert", ca_bytes,
                 [("Content-Disposition",
@@ -5070,8 +5600,14 @@ class RemoteAccessServer:
         if path == "/voice-model.tar.gz":
             model_file = await asyncio.to_thread(_ensure_voice_model)
             if model_file is None:
-                return _http_response(
-                    502, "text/plain", b"voice model unavailable"
+                return _error_page(
+                    502,
+                    "The voice model could not be downloaded",
+                    "The server could not fetch the speech-recognition "
+                    "model right now. Check the server's internet "
+                    "connection and try again in a minute.",
+                    "_ensure_voice_model() returned None: the download "
+                    "from the model host failed or timed out.",
                 )
             body = await asyncio.to_thread(model_file.read_bytes)
             return _http_response(200, "application/gzip", body)
@@ -5081,7 +5617,13 @@ class RemoteAccessServer:
             if media_body is not None:
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
                 return _http_response(200, ctype, media_body)
-        return _http_response(404, "text/plain", b"Not Found")
+        return _error_page(
+            404,
+            "There is nothing at this address",
+            "The link may be old or mistyped. Go to the start page to "
+            "open KISS Sorcar.",
+            f"No route matches {path[:200]!r}.",
+        )
 
 
     @staticmethod
@@ -6010,7 +6552,7 @@ class RemoteAccessServer:
 
         Browser-mode voice.js cannot call gpt-audio itself (the API
         key lives on this machine), so after the in-page wake-word
-        detector hears "Sorcar" it captures the utterance that follows
+        detector hears "Hey Sorcar" it captures the utterance that follows
         and ships it here as ``{type: 'voiceTranscribe', audio:
         <base64 16kHz mono s16le PCM>}``.  The audio is translated
         into English by the same KISS transcription agent
@@ -6608,7 +7150,8 @@ class RemoteAccessServer:
         and every event panel of its transcript, and this handler
         wraps them into a self-contained page
         (:func:`_build_share_page`) written to
-        ``<workDir>/reports/chat-<chatId>.html``.  Both clients take
+        ``<workDir>/reports/chat-<title-slug>-<chatId>.html`` (see
+        :func:`_share_page_filename`).  Both clients take
         this path — the VS Code extension forwards the command over
         UDS, the remote webapp sends it over WSS — so the page is
         built in exactly one place.  The reply is a single
@@ -6647,14 +7190,12 @@ class RemoteAccessServer:
             if not isinstance(body_html, str) or not body_html.strip():
                 reply["error"] = "Nothing to share: the chat is empty"
                 return reply
-            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", chat_id)
-            safe_id = safe_id.strip("-.")[:80] or "chat"
             try:
                 page = _build_share_page(title, body_html)
                 out_path = (
                     Path(work_dir).expanduser()
                     / "reports"
-                    / f"chat-{safe_id}.html"
+                    / _share_page_filename(title, chat_id)
                 )
                 # Atomic: a reader with the previous share of this chat
                 # open, or a concurrent share of the same chat from
@@ -7873,21 +8414,6 @@ class RemoteAccessServer:
         the URL file, or — for tunnel-enabled servers only — the
         ``cloudflared`` metrics API as successive fallbacks.
 
-        Historically this method also broadcast a
-        ``welcome_suggestions`` event with an empty list because the
-        remote-chat webview hides the sample-task suggestions panel
-        via CSS (``body.remote-chat #welcome > #suggestions { display:
-        none }``).  That broadcast was redundant for the webapp and
-        actively harmful for the VS Code extension: the extension is
-        a *second* client of the same broadcaster (over its UDS
-        connection), and it populates its own ``#suggestions``
-        container locally from ``~/.kiss/MY_TASK_TEMPLATES.md`` plus
-        the bundled ``src/kiss/SAMPLE_TASKS.md``.  The empty-list
-        broadcast was forwarded to the extension's webview and
-        cleared every chip on the welcome page whenever any webapp
-        client opened a new chat tab — see
-        ``test_welcome_suggestions_not_broadcast.py``.
-
         M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
         call (which spawns ``pgrep`` and does HTTP requests) are
         blocking I/O.  They run in :meth:`asyncio.AbstractEventLoop.run_in_executor`
@@ -8034,10 +8560,20 @@ class RemoteAccessServer:
         the client's legacy ``restoredTabs`` are adopted only into an
         EMPTY registry (one-time migration), a canonical ``tabs_state``
         snapshot is broadcast, and every chat-bound registry tab is
-        replayed so all connected clients converge on identical
-        transcripts.  Tab state is server-canonical — clients never
-        keep a tab set of their own — so the same path serves VS Code
-        webviews (UDS) and remote web apps (WSS) alike.
+        replayed TO THIS CLIENT so it converges on the transcripts the
+        other clients already show (``replayConnId``: the other windows
+        have those transcripts and must not rebuild them because a new
+        panel connected).  A client that mirrors exactly one registry
+        tab (a VS Code editor-tab panel, which names it in
+        ``singleTabId``) receives only that tab's replay: it drops
+        every other tab's events on arrival, so sending them only costs
+        the serialization of every transcript.  The one exception is a
+        ``ready`` whose legacy ``restoredTabs`` seed an EMPTY registry:
+        those tabs are new to every client, so all of them are replayed
+        to everyone.
+        Tab state is server-canonical — clients never keep a tab set
+        of their own — so the same path serves VS Code webviews (UDS)
+        and remote web apps (WSS) alike.
 
         Args:
             cmd: The ``ready`` message from the client (already
@@ -8047,6 +8583,7 @@ class RemoteAccessServer:
         """
         tab_id = self._cmd_str(cmd, "tabId")
         conn_id = cmd.get("connId", "")
+        single_tab_id = self._cmd_str(cmd, "singleTabId")
         work_dir = cmd.get("workDir", "")
         for init_cmd in (
             "getModels", "getInputHistory", "getConfig", "getMyModels",
@@ -8072,16 +8609,24 @@ class RemoteAccessServer:
             pass
         restored = self._sanitized_restored_tabs(cmd)
         try:
-            bound = await asyncio.to_thread(
+            bound, adopted = await asyncio.to_thread(
                 self._vscode_server.ready_tab_sync, restored,
             )
         except Exception:
             logger.exception("ready tab-registry sync failed")
-            bound = []
+            bound, adopted = [], False
+        # Tabs this ready just seeded the empty registry with (legacy
+        # migration) are new to every other client too: those clients
+        # adopt them from the ``tabs_state`` snapshot without asking for
+        # their transcripts, so the replays must reach everyone — every
+        # seeded tab's, even when the seeding client shows only one.
+        replay_conn_id = "" if adopted else conn_id
         for rt_id, rt_chat, rt_task in bound:
+            if single_tab_id and not adopted and rt_id != single_tab_id:
+                continue
             resume: dict[str, Any] = {
                 "type": "resumeSession", "chatId": rt_chat,
-                "tabId": rt_id,
+                "tabId": rt_id, "replayConnId": replay_conn_id,
             }
             # A tab pinned to a specific historical task replays THAT
             # task; without the taskId the replay would silently
@@ -8104,31 +8649,52 @@ class RemoteAccessServer:
         if self._shutdown_initiated:
             # Shutdown admission gate (F4-06): a task submitted after
             # the shutdown sweep snapshotted the active workers would
-            # be silently killed when the process exits.
-            self._printer.broadcast(
-                {"type": "status", "running": False, "tabId": tab_id},
+            # be silently killed when the process exits.  A refusal
+            # like any other: the composer keeps the draft.
+            self._vscode_server._refuse_run(
+                tab_id, "Server is shutting down; task not started.",
             )
-            self._printer.broadcast({
-                "type": "error",
-                "text": "Server is shutting down; task not started.",
-                "tabId": tab_id,
-            })
             return
         prompt = cmd.get("prompt", "")
         if isinstance(prompt, str):
-            prompt, prompt_size = _truncate_utf8_bytes(
-                prompt, _MAX_PROMPT_BYTES,
-            )
+            # ``surrogatepass``: json.loads may yield lone surrogates
+            # (``"\ud800"``), which strict UTF-8 refuses to encode.
+            prompt_size = len(prompt.encode("utf-8", errors="surrogatepass"))
             if prompt_size > _MAX_PROMPT_BYTES:
+                # Refuse rather than silently cut the prompt: the tab's
+                # composer keeps the draft (only a ``status
+                # running:false`` lowers its optimistic running state,
+                # which ``_refuse_run`` sends first) and the user is
+                # told the limit instead of the agent running on a
+                # prompt with its end missing.
                 logger.warning(
-                    "prompt size %d bytes exceeds cap %d bytes; truncating",
+                    "prompt size %d bytes exceeds cap %d bytes; refusing",
                     prompt_size, _MAX_PROMPT_BYTES,
                 )
+                self._vscode_server._refuse_run(
+                    tab_id,
+                    f"This prompt is too long to send: it is "
+                    f"{prompt_size / 1_000_000:.1f} MB and the limit is "
+                    f"{_MAX_PROMPT_BYTES / 1_000_000:.0f} MB. Shorten it, or "
+                    f"put the long part in a file and attach that.",
+                )
+                return
         attachments = cmd.get("attachments")
+        notice = ""
         if isinstance(attachments, list) and len(attachments) > _MAX_ATTACHMENTS:
+            dropped = len(attachments) - _MAX_ATTACHMENTS
             logger.warning(
-                "attachments count %d exceeds cap %d; truncating",
-                len(attachments), _MAX_ATTACHMENTS,
+                "attachments count %d exceeds cap %d; dropping %d",
+                len(attachments), _MAX_ATTACHMENTS, dropped,
+            )
+            # Carried into the run (``_notice``) and broadcast by
+            # ``_cmd_run`` right after the new task's ``clear``: sent
+            # from here it would land before that reset and be wiped
+            # from the transcript it is meant to explain.
+            notice = (
+                f"Only the first {_MAX_ATTACHMENTS} attachments were "
+                f"sent (the limit per prompt); the last {dropped} "
+                f"of your {len(attachments)} were left out."
             )
             attachments = attachments[:_MAX_ATTACHMENTS]
         # NOTE: no setTaskText here — the common run path (_cmd_run)
@@ -8167,6 +8733,7 @@ class RemoteAccessServer:
             # empty owning connection while the identical VS Code
             # ``run`` records the real one (F08-7).
             "connId": cmd.get("connId", ""),
+            "_notice": notice,
         }
         await self._run_cmd(run_cmd)
 
@@ -10107,6 +10674,13 @@ class RemoteAccessServer:
         stall_watchdog = start_stall_watchdog()
 
         self._install_signal_handlers()
+        # Index the home directory for the ``@``-mention picker now, on
+        # the registry's worker thread, so the first ``@`` in any tab
+        # below it answers from a warm index instead of waiting on a
+        # scan (a restart reloads the persisted listings in well under
+        # a second).
+        file_index = self._vscode_server._file_index
+        file_index.ensure(file_index.home)
 
         try:
             asyncio.run(self._serve_async())
@@ -10147,6 +10721,7 @@ class RemoteAccessServer:
                 self._sea_command_subscriber = None
             self._sea_command_watcher_started = False
             sea_commands.stop_registry_watcher()
+            file_index.stop()
             if stall_watchdog is not None:
                 stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)
@@ -10362,6 +10937,7 @@ def main() -> None:  # pragma: no cover — CLI entry point
         tunnel_url=tunnel_url,
         work_dir=args.workdir,
     )
+    server._vscode_server.prewarm_worktree_pool()
     server.start()
 
 

@@ -16,13 +16,19 @@
 #
 # The memory is a flat directory of Markdown pages (kiss.core.memoryfield), each
 # with a frontmatter ``updated`` timestamp, plus a ``*.sqlite3`` vector index
-# that is a cache keyed by page content.  Two passes, in this order:
+# that is a cache keyed by page content; its domain memories (the memory of a
+# repository, for example) are such directories nested one level down and
+# travel with it.  A deleted page leaves a tombstone (``.tombstones/<name>``,
+# holding the time of the deletion), which travels too.  Two passes, in this
+# order:
 #
-#   1. remote -> here.  The remote's pages travel as a tar stream over the ssh
-#      connection itself (a fresh cloud image has no rsync) into a scratch
-#      directory here, and src/kiss/scripts/merge_memory_pages.py folds them
-#      into this machine's memory: a page this machine lacks is added, a page
-#      both have keeps whichever copy was updated last, nothing is deleted.
+#   1. remote -> here.  The remote's pages and tombstones travel as a tar
+#      stream over the ssh connection itself (a fresh cloud image has no
+#      rsync) into a scratch directory here, and
+#      src/kiss/scripts/merge_memory_pages.py folds them into this machine's
+#      memory: a page this machine lacks is added, a page both have keeps
+#      whichever copy was updated last, a page the remote deleted after it
+#      was last written is deleted here as well.
 #   2. here -> remote.  The mirror image: this machine's pages -- by now the
 #      union of both -- go to a scratch directory under the remote's ~/.kiss,
 #      and the same script, copied there first, folds them into the remote's
@@ -31,16 +37,21 @@
 #
 # What this never does:
 #
-#   * delete a page anywhere -- a page that exists on one machine ends up on
-#     both, and the only way a page changes is to become the newer of the two
-#     copies;
+#   * delete a page nobody deleted -- a page that exists on one machine ends
+#     up on both, unless the other machine deleted it after its last change;
 #   * copy the index: it is rebuilt incrementally by the next agent that opens
 #     the memory, from the pages themselves;
 #   * write a page in place: every page lands by an atomic rename, so an agent
 #     reading the memory meanwhile sees a whole page, old or new;
-#   * pick between two copies of a page that were written in the very same
-#     second with different content: that is a conflict, each machine keeps
-#     its own copy, and the page is named so a person can decide.
+#   * pick between two copies of a page that were changed at the same moment
+#     with different content: that is a conflict, each machine keeps its own
+#     copy, and the page is named so a person can decide.  "The same moment"
+#     is the same second when the two machines' clocks agree; when they do
+#     not, the opening probe measures the difference and any two changes
+#     closer together than that are a conflict too, so a clock running ahead
+#     cannot make an older edit overwrite a newer one.  A page edited by hand
+#     -- which moves the file's modification time but not its ``updated``
+#     stamp -- is the newer copy by that modification time.
 #
 # A pass that could not finish leaves both memories as they were, says so, and
 # makes the script exit non-zero.  Needs python3 and tar here and on the remote.
@@ -68,17 +79,18 @@ MERGE="$(dirname "$SCRIPT_DIR")/src/kiss/scripts/merge_memory_pages.py"
 
 KISS_DIR="${KISS_HOME:-$HOME/.kiss}"
 
-# The three directories of one machine, one per line: its kiss directory, the
-# scratch directory pass 2 unpacks into (``memories.incoming`` beside the
-# memory's default place), and its memory -- the ``memory_dir`` of its
-# config.json when set, else ``memories`` in the kiss directory
-# (kiss.agents.sorcar.sorcar_agent decides the same way).  Every path is
-# canonical (symlinks and ``.`` components resolved), so that the check below
-# -- the memory must not be the scratch directory or lie inside it, since the
-# scratch directory is removed wholesale -- cannot be fooled by another
-# spelling of the same directory.  A relative memory_dir is printed as it is.
-# Run here with this machine's kiss directory, and on the remote with its own.
-MEMORY_DIRS_PY='import json, os, sys
+# What one machine says about itself, one item per line: the reading of its
+# clock (seconds since the epoch), its kiss directory, the scratch directory
+# pass 2 unpacks into (``memories.incoming`` beside the memory's default
+# place), and its memory -- the ``memory_dir`` of its config.json when set,
+# else ``memories`` in the kiss directory (kiss.agents.sorcar.sorcar_agent
+# decides the same way).  Every path is canonical (symlinks and ``.``
+# components resolved), so that the check below -- the memory must not be the
+# scratch directory or lie inside it, since the scratch directory is removed
+# wholesale -- cannot be fooled by another spelling of the same directory.  A
+# relative memory_dir is printed as it is.  Run here with this machine's kiss
+# directory, and on the remote with its own.
+MEMORY_DIRS_PY='import json, os, sys, time
 kiss_dir = os.path.realpath(sys.argv[1])
 memory_dir = ""
 try:
@@ -87,28 +99,56 @@ try:
 except Exception:
     pass
 memory_dir = os.path.expanduser(memory_dir) if memory_dir else os.path.join(kiss_dir, "memories")
+print(time.time())
 print(kiss_dir)
 print(os.path.join(kiss_dir, "memories.incoming"))
 print(os.path.realpath(memory_dir) if os.path.isabs(memory_dir) else memory_dir)'
 
-LOCAL_MEM="$(python3 -c "$MEMORY_DIRS_PY" "$KISS_DIR" | sed -n 3p)"
-REMOTE_ANSWER="$(ssh "$TARGET" "python3 -c $(shquote "$MEMORY_DIRS_PY") \"\$HOME/.kiss\"")" \
-    || die "Could not ask $TARGET where it keeps its memory."
-REMOTE_KISS_DIR="${REMOTE_ANSWER%%$'\n'*}"
-REMOTE_REST="${REMOTE_ANSWER#*$'\n'}"
-REMOTE_STAGING="${REMOTE_REST%%$'\n'*}"
-REMOTE_MEM="${REMOTE_REST#*$'\n'}"
-[[ "$REMOTE_ANSWER" == *$'\n'*$'\n'* && "$REMOTE_MEM" != *$'\n'* \
-   && "$REMOTE_KISS_DIR" == /* && "$REMOTE_STAGING" == /* ]] \
-    || die "Could not tell where $TARGET keeps its memory (answer: '$REMOTE_ANSWER')."
+# How far apart the two clocks are, in whole seconds, from the remote's
+# reading and the local time before and after the probe that fetched it.
+# The reading was taken somewhere within the round trip, so the offset is
+# known to within half of it; the merge gets the largest value it may have,
+# rounded up, so that two changes it orders are always farther apart than
+# the clocks are.  Clocks that agree within that uncertainty plus the one
+# second the stamps resolve count as one clock (0): the ordinary case of two
+# machines on network time, where every stamp is comparable as it is.  The
+# merge treats two changes closer together than this as the same moment (a
+# conflict), never as an order, because the stamps may have come from
+# either clock.
+CLOCK_SKEW_PY='import math, sys, time
+before, remote = float(sys.argv[1]), float(sys.argv[2])
+after = time.time()
+offset, uncertainty = abs(remote - (before + after) / 2), (after - before) / 2
+print(0 if offset <= uncertainty + 1 else math.ceil(offset + uncertainty))'
+
+LOCAL_MEM="$(python3 -c "$MEMORY_DIRS_PY" "$KISS_DIR" | sed -n 4p)"
 # A relative memory_dir is relative to the working directory of whichever
 # process opens the memory, which nothing here can know.
+[[ "$LOCAL_MEM" == /* ]] \
+    || die "This machine keeps its memory in '$LOCAL_MEM', which is not an absolute path; set memory_dir in $KISS_DIR/config.json to one."
+PROBE_STARTED="$(python3 -c 'import time; print(time.time())')"
+REMOTE_ANSWER="$(ssh "$TARGET" "python3 -c $(shquote "$MEMORY_DIRS_PY") \"\$HOME/.kiss\"")" \
+    || die "Could not ask $TARGET where it keeps its memory."
+REMOTE_CLOCK="${REMOTE_ANSWER%%$'\n'*}"
+REMOTE_REST="${REMOTE_ANSWER#*$'\n'}"
+REMOTE_KISS_DIR="${REMOTE_REST%%$'\n'*}"
+REMOTE_REST="${REMOTE_REST#*$'\n'}"
+REMOTE_STAGING="${REMOTE_REST%%$'\n'*}"
+REMOTE_MEM="${REMOTE_REST#*$'\n'}"
+[[ "$REMOTE_ANSWER" == *$'\n'*$'\n'*$'\n'* && "$REMOTE_MEM" != *$'\n'* \
+   && "$REMOTE_CLOCK" =~ ^[0-9]+(\.[0-9]+)?$ \
+   && "$REMOTE_KISS_DIR" == /* && "$REMOTE_STAGING" == /* ]] \
+    || die "Could not tell where $TARGET keeps its memory (answer: '$REMOTE_ANSWER')."
 [[ "$REMOTE_MEM" == /* ]] \
     || die "$TARGET keeps its memory in '$REMOTE_MEM', which is not an absolute path; set memory_dir in its ~/.kiss/config.json to one."
 case "$REMOTE_MEM" in
     "$REMOTE_STAGING"|"$REMOTE_STAGING"/*)
         die "$TARGET keeps its memory in $REMOTE_MEM, which this sync uses as its scratch directory; move it." ;;
 esac
+TOLERANCE="$(python3 -c "$CLOCK_SKEW_PY" "$PROBE_STARTED" "$REMOTE_CLOCK")"
+if (( TOLERANCE > 0 )); then
+    warn "The clock on $TARGET is about ${TOLERANCE}s off this machine's; two changes to a page closer together than that cannot be ordered and count as a conflict."
+fi
 
 TMP_DIR="$(mktemp -d)"
 # Set once the remote may hold the scratch directory of pass 2: a transfer cut
@@ -117,9 +157,15 @@ REMOTE_STAGING_MADE=0
 # Set by a pass that did not do what it set out to do.  Such a run has not
 # synced the two machines, and must not report that it has.
 INCOMPLETE=0
-# Pages that were written in the same second on both machines with different
-# content; pass 1 names and counts them, for the closing message.
+# Pages that were changed (or deleted) at the same moment on both machines
+# with different outcomes; pass 1 names and counts them, for the closing
+# message.
 CONFLICTS=0
+if (( TOLERANCE > 0 )); then
+    SAME_MOMENT="within ${TOLERANCE}s of each other (the clocks differ by that much)"
+else
+    SAME_MOMENT="in the same second"
+fi
 
 incomplete() {
     warn "$@"
@@ -145,7 +191,8 @@ report_merge() {
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue
         CONFLICTS=$((CONFLICTS + 1))
-        printf '         both machines changed %s in the same second; each keeps its own copy.\n' "$name"
+        printf '         both machines changed (or one deleted) %s %s; each keeps its own copy.\n' \
+            "$name" "$SAME_MOMENT"
     done <<< "$conflicts"
 }
 
@@ -168,7 +215,7 @@ pull_from_remote() {
         incomplete "Could not fetch the memory pages from $TARGET — nothing brought back."
         return 0
     fi
-    if report="$(python3 "$MERGE" "$TMP_DIR/incoming" "$LOCAL_MEM")"; then
+    if report="$(python3 "$MERGE" --tolerance "$TOLERANCE" "$TMP_DIR/incoming" "$LOCAL_MEM")"; then
         report_merge "$report" "This machine's memory"
     else
         incomplete "Could not merge $TARGET's pages into $LOCAL_MEM —" \
@@ -198,7 +245,7 @@ push_to_remote() {
     if ! report="$(COPYFILE_DISABLE=1 tar -cf - --no-xattrs --exclude='*.sqlite3*' -C "$LOCAL_MEM" . \
             | ssh "$TARGET" "rm -rf $(shquote "$REMOTE_STAGING") && mkdir -p $(shquote "$REMOTE_STAGING") \
                 && tar -xf - -C $(shquote "$REMOTE_STAGING") \
-                && python3 $(shquote "$REMOTE_KISS_DIR/merge_memory_pages.py") $(shquote "$REMOTE_STAGING") $(shquote "$REMOTE_MEM")")"; then
+                && python3 $(shquote "$REMOTE_KISS_DIR/merge_memory_pages.py") --tolerance $TOLERANCE $(shquote "$REMOTE_STAGING") $(shquote "$REMOTE_MEM")")"; then
         incomplete "Could not merge this machine's pages into $TARGET:$REMOTE_MEM —" \
                    "no page there was lost; the next sync finishes the job."
         return 0

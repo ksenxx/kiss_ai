@@ -274,13 +274,16 @@ async function run() {
 
   const ctx3 = makeContext();
   extension.activate(ctx3);
-  check('after extension update marker: tips re-open', () => {
+  // The tips are a first-run affordance: an extension update no longer
+  // re-opens them (ui_antipattern_tips_reset.test.js).
+  check('after extension update marker: tips stay closed', () => {
     assert.deepStrictEqual(renderTipsConfig(), {
       tips: ['Hello **rebuild** tips.'],
-      show: true,
+      show: false,
     });
+    assert.ok(fs.existsSync(tipsShownPath), 'TIPS_SHOWN survives the update');
   });
-  check('after update: tips shown once, closed on later renders', () => {
+  check('after update: still closed on later renders', () => {
     assert.strictEqual(renderTipsConfig().show, false);
   });
   extension.deactivate();

@@ -32,7 +32,6 @@ from urllib.parse import quote, urlparse
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -40,6 +39,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.browser_handoff import portal_handoff
 
 logger = logging.getLogger(__name__)
 

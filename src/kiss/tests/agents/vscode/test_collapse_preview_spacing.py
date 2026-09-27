@@ -128,6 +128,33 @@ _MiniEl.prototype.querySelector = function(sel) {
     return null;
 };
 
+_MiniEl.prototype.querySelectorAll = function(sel) {
+    var cls = sel.replace(/^\./,'');
+    var out = [];
+    for (var i = 0; i < this.children.length; i++) {
+        if (this.children[i].classList.contains(cls)) out.push(this.children[i]);
+        out = out.concat(this.children[i].querySelectorAll(sel));
+    }
+    return out;
+};
+
+_MiniEl.prototype.closest = function(sel) {
+    var cls = sel.replace(/^\./,'');
+    for (var el = this; el; el = el.parentElement) {
+        if (el.classList.contains(cls)) return el;
+    }
+    return null;
+};
+
+_MiniEl.prototype.setAttribute = function(name, value) {
+    this._attrs = this._attrs || {};
+    this._attrs[name] = String(value);
+};
+
+_MiniEl.prototype.getAttribute = function(name) {
+    return this._attrs && name in this._attrs ? this._attrs[name] : null;
+};
+
 _MiniEl.prototype.addEventListener = function() {};
 
 // textContent: concatenate all descendant text WITHOUT separators (like real textContent)
@@ -175,10 +202,12 @@ function buildPanel(bodyChildren) {
     // Panel element (like .tc)
     var panel = mkTestEl('div');
     panel.classList.add('tc');
+    panel.classList.add('collapsible');
 
-    // Header (like .tc-h)
+    // Header (like .tc-h after addCollapse)
     var hdr = mkTestEl('div');
     hdr.classList.add('tc-h');
+    hdr.classList.add('collapse-header');
     hdr.textContent = 'Bash';
     panel.appendChild(hdr);
 
@@ -224,12 +253,14 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     source = _MAIN_JS.read_text()
     collect_fn = _extract_function(source, "collectText")
     collapse_fn = _extract_function(source, "collapsePreview")
+    sync_aria_fn = _extract_function(source, "syncCollapseAria")
     mkel_fn = _extract_function(source, "mkEl")
 
     script = _NODE_SHIM + "\n"
     script += "var document = { createElement: mkTestEl };\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
+    script += sync_aria_fn + "\n"
     script += collapse_fn + "\n"
     script += f"var bodyChildren = {body_children_json};\n"
     script += "var panel = buildPanel(bodyChildren);\n"

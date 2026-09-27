@@ -6,13 +6,12 @@
 
 Locks in the **runtime** contract of the
 :func:`ensure_user_asset_from_default` helper used for
-``MY_TASK_TEMPLATES.md`` (welcome-screen chips) and
-``MY_INJECTION.md`` (Inject instruction panel) — both seeded from an
+``MY_INJECTION.md`` (Inject instruction panel) — seeded from an
 inline default string on first read and never overwritten thereafter.
 
-Neither ``INJECTIONS.md`` nor ``SAMPLE_TASKS.md`` is copied into
-``~/.kiss/`` by either ``install.sh`` or ``installMarkdownAssets`` in
-``DependencyInstaller.ts``; both are read directly from the bundled
+``INJECTIONS.md`` is not copied into ``~/.kiss/`` by either
+``install.sh`` or ``installMarkdownAssets`` in
+``DependencyInstaller.ts``; it is read directly from the bundled
 extension package.
 
 The contract:
@@ -61,13 +60,13 @@ def test_ensure_user_asset_from_default_seeds_with_default_content(
 ) -> None:
     """When ``~/.kiss/<name>`` is missing, write the supplied default."""
     result = ensure_user_asset_from_default(
-        "MY_TASK_TEMPLATES.md", "## Task\n\nHi!\n",
+        "MY_INJECTION.md", "## Trick\n\nHi!\n",
     )
-    expected = kiss_home / "MY_TASK_TEMPLATES.md"
+    expected = kiss_home / "MY_INJECTION.md"
     assert result == expected
     assert result is not None
     assert expected.exists()
-    assert result.read_text() == "## Task\n\nHi!\n"
+    assert result.read_text() == "## Trick\n\nHi!\n"
 
 
 def test_ensure_user_asset_from_default_preserves_user_edits(
@@ -75,14 +74,14 @@ def test_ensure_user_asset_from_default_preserves_user_edits(
 ) -> None:
     """An existing user copy must NEVER be overwritten by the default."""
     kiss_home.mkdir(parents=True, exist_ok=True)
-    user = kiss_home / "MY_TASK_TEMPLATES.md"
-    user.write_text("## Task\n\nMy curated chip\n")
+    user = kiss_home / "MY_INJECTION.md"
+    user.write_text("## Trick\n\nMy curated trick\n")
     result = ensure_user_asset_from_default(
-        "MY_TASK_TEMPLATES.md", "## Task\n\nHi!\n",
+        "MY_INJECTION.md", "## Trick\n\nHi!\n",
     )
     assert result == user
     assert result is not None
-    assert result.read_text() == "## Task\n\nMy curated chip\n"
+    assert result.read_text() == "## Trick\n\nMy curated trick\n"
 
 
 def test_ensure_user_asset_from_default_creates_kiss_home_directory(
@@ -92,12 +91,12 @@ def test_ensure_user_asset_from_default_creates_kiss_home_directory(
     monkeypatch.setenv("KISS_HOME", str(home))
     assert not home.exists()
     result = ensure_user_asset_from_default(
-        "MY_TASK_TEMPLATES.md", "## Task\n\nHi!\n",
+        "MY_INJECTION.md", "## Trick\n\nHi!\n",
     )
-    assert result == home / "MY_TASK_TEMPLATES.md"
+    assert result == home / "MY_INJECTION.md"
     assert result is not None
     assert home.is_dir()
-    assert result.read_text() == "## Task\n\nHi!\n"
+    assert result.read_text() == "## Trick\n\nHi!\n"
 
 
 @posix_only("chmod-based permission denial")
@@ -113,7 +112,7 @@ def test_ensure_user_asset_from_default_falls_back_to_none_when_unwritable(
     try:
         monkeypatch.setenv("KISS_HOME", str(readonly_parent / ".kiss"))
         result = ensure_user_asset_from_default(
-            "MY_TASK_TEMPLATES.md", "## Task\n\nHi!\n",
+            "MY_INJECTION.md", "## Trick\n\nHi!\n",
         )
         assert result is None
     finally:

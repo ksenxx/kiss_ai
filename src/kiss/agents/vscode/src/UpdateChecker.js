@@ -172,7 +172,15 @@ function readCache(cachePath) {
       typeof data.snoozeUntilMs === 'number' ? data.snoozeUntilMs : 0;
     const snoozedLatest =
       typeof data.snoozedLatest === 'string' ? data.snoozedLatest : '';
-    return {lastCheckMs: ts, lastLatest: latest, snoozeUntilMs, snoozedLatest};
+    const skippedVersion =
+      typeof data.skippedVersion === 'string' ? data.skippedVersion : '';
+    return {
+      lastCheckMs: ts,
+      lastLatest: latest,
+      snoozeUntilMs,
+      snoozedLatest,
+      skippedVersion,
+    };
   } catch {
     return null;
   }
@@ -187,6 +195,22 @@ function isSnoozeActive(cached, candidateLatest, nowMs) {
   if (!cached || !cached.snoozeUntilMs) return false;
   if (nowMs >= cached.snoozeUntilMs) return false;
   return compareVersions(candidateLatest, cached.snoozedLatest) <= 0;
+}
+
+// "Skip this version" state: releases up to and including the skipped
+// one are never announced again; a newer release still notifies.
+function isSkipped(cached, candidateLatest) {
+  if (!cached || !cached.skippedVersion) return false;
+  return compareVersions(candidateLatest, cached.skippedVersion) <= 0;
+}
+
+// Whether the popup for candidateLatest is suppressed by either a
+// running snooze or a permanent skip.
+function isSuppressed(cached, candidateLatest, nowMs) {
+  return (
+    isSnoozeActive(cached, candidateLatest, nowMs) ||
+    isSkipped(cached, candidateLatest)
+  );
 }
 
 // audit0902-coverage:start
@@ -228,6 +252,19 @@ async function checkForExtensionUpdate(opts) {
       ? o.fetchLatest
       : url => defaultFetchLatest(url, fetchTimeoutMs);
 
+  // The `kissSorcar.checkForUpdates` setting: the caller reads the
+  // configuration and passes `enabled: false` to turn the check off
+  // entirely (no network request, no cache write, no popup).
+  if (o.enabled === false) {
+    return {
+      checked: false,
+      notified: false,
+      latest: null,
+      current: null,
+      reason: 'disabled',
+    };
+  }
+
   const current =
     o.currentVersion ||
     resolveCurrentVersion(o.kissProjectPath, o.extensionsRoot);
@@ -245,13 +282,13 @@ async function checkForExtensionUpdate(opts) {
   const nowMs = now();
   if (cached && nowMs - cached.lastCheckMs < cooldownMs) {
     if (compareVersions(cached.lastLatest, current) > 0) {
-      if (isSnoozeActive(cached, cached.lastLatest, nowMs)) {
+      if (isSuppressed(cached, cached.lastLatest, nowMs)) {
         return {
           checked: false,
           notified: false,
           latest: cached.lastLatest,
           current,
-          reason: 'snoozed',
+          reason: isSkipped(cached, cached.lastLatest) ? 'skipped' : 'snoozed',
         };
       }
       notify({latest: cached.lastLatest, current});
@@ -297,16 +334,19 @@ async function checkForExtensionUpdate(opts) {
     nextCache.snoozeUntilMs = fresh.snoozeUntilMs;
     nextCache.snoozedLatest = fresh.snoozedLatest;
   }
+  if (fresh && fresh.skippedVersion) {
+    nextCache.skippedVersion = fresh.skippedVersion;
+  }
   writeCache(cachePath, nextCache);
 
   if (compareVersions(latest, current) > 0) {
-    if (isSnoozeActive(fresh, latest, nowMs)) {
+    if (isSuppressed(fresh, latest, nowMs)) {
       return {
         checked: true,
         notified: false,
         latest,
         current,
-        reason: 'snoozed',
+        reason: isSkipped(fresh, latest) ? 'skipped' : 'snoozed',
       };
     }
     notify({latest, current});
@@ -342,13 +382,39 @@ function snoozeUpdateNotification(opts) {
   const snoozedLatest =
     typeof o.latest === 'string' && o.latest ? o.latest : cached.lastLatest;
   const snoozeUntilMs = nowMs + snoozeMs;
-  writeCache(cachePath, {
+  const next = {
     lastCheckMs: cached.lastCheckMs,
     lastLatest: cached.lastLatest,
     snoozeUntilMs,
     snoozedLatest,
-  });
+  };
+  if (cached.skippedVersion) next.skippedVersion = cached.skippedVersion;
+  writeCache(cachePath, next);
   return {snoozeUntilMs, snoozedLatest};
+}
+
+// Records a "Skip this version" click: `latest` (default: the last
+// release seen) and every older release are never announced again.
+// A newer release still notifies.  Cooldown and snooze fields in the
+// cache are preserved.
+function skipUpdateVersion(opts) {
+  const o = opts || {};
+  const cachePath =
+    o.cacheFilePath || path.join(kissHomeDir(), '.update-check.json');
+  const cached = readCache(cachePath) || {lastCheckMs: 0, lastLatest: ''};
+  const skippedVersion =
+    typeof o.latest === 'string' && o.latest ? o.latest : cached.lastLatest;
+  const next = {
+    lastCheckMs: cached.lastCheckMs,
+    lastLatest: cached.lastLatest,
+    skippedVersion,
+  };
+  if (cached.snoozeUntilMs) {
+    next.snoozeUntilMs = cached.snoozeUntilMs;
+    next.snoozedLatest = cached.snoozedLatest;
+  }
+  writeCache(cachePath, next);
+  return {skippedVersion};
 }
 
 module.exports = {
@@ -357,5 +423,6 @@ module.exports = {
   readVersionPy,
   resolveCurrentVersion,
   scanInstalledExtensionVersions,
+  skipUpdateVersion,
   snoozeUpdateNotification,
 };

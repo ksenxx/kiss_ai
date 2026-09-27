@@ -255,16 +255,6 @@ class Config(BaseModel):
             "instead of the full toolset (KISS_TOOL_PROFILES=0 disables)."
         ),
     )
-    review_budget_fraction: float = Field(
-        default_factory=lambda: _env_float("KISS_REVIEW_BUDGET_FRACTION", 0.0),
-        description=(
-            "Fallback share of a top-level task's budget that reviewer "
-            "sub-agents may spend in total when the task prompt names none "
-            "(the prompt's own 'at most N% of the budget for reviewing' wins); "
-            "review fan-outs beyond it are refused or clipped "
-            "(KISS_REVIEW_BUDGET_FRACTION; 0 or >= 1 = no fallback cap)."
-        ),
-    )
     chat_history_digest: bool = Field(
         default_factory=lambda: _env_flag("KISS_CHAT_HISTORY_DIGEST", True),
         description=(

@@ -31,7 +31,7 @@ from kiss.tests.server.test_voice_wake_word import (
 
 @unittest.skipUnless(HAVE_MAC_TTS, "requires macOS `say` and `afconvert`")
 class TestVoiceWakeWordMicBrowser(unittest.TestCase):
-    """Speaking 'Sorcar' into the (fake-device) microphone of a real
+    """Speaking 'Hey Sorcar' into the (fake-device) microphone of a real
     Chromium visiting the real web app fires the wake indicator and
     never types the literal word 'sorcar' into the input."""
 

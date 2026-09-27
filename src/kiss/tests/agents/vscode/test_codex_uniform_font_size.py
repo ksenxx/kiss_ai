@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from kiss.tests.agents.vscode.design_tokens import inline_design_tokens
+
 MEDIA_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 )
@@ -67,13 +69,13 @@ def test_main_js_result_status_uses_class_not_inline_style() -> None:
 
 
 def test_main_css_styles_rc_status_like_old_inline_style() -> None:
-    """main.css replicates the old inline declarations so the VS Code
-    webview keeps its exact former look (yellow/red, bold, fs-xl)."""
-    css = MAIN_CSS.read_text(encoding="utf-8")
+    """main.css carries the status line's declarations (bold, fs-xl) and
+    colours it by state: the theme's success green, or its failure red."""
+    css = inline_design_tokens(MAIN_CSS.read_text(encoding="utf-8"))
     m = re.search(r"\.rc-status\s*\{([^}]*)\}", css)
     assert m, ".rc-status rule missing from main.css"
     rule = m.group(1)
-    assert "color: var(--yellow)" in rule
+    assert "color: var(--green)" in rule
     assert "font-weight: 700" in rule
     assert "font-size: var(--fs-xl)" in rule
     assert "margin-bottom: 10px" in rule

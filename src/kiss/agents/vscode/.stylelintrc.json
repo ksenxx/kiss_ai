@@ -1,5 +1,8 @@
 {
   "extends": "stylelint-config-standard",
+  "plugins": [
+    "./scripts/stylelint-design-tokens.mjs"
+  ],
   "ignoreFiles": [
     "media/**/*.min.css",
     "out/**",
@@ -13,6 +16,25 @@
     "declaration-block-no-redundant-longhand-properties": null,
     "declaration-block-single-line-max-declarations": null,
     "declaration-property-value-keyword-no-deprecated": null,
-    "keyframes-name-pattern": null
-  }
+    "keyframes-name-pattern": null,
+    "kiss/design-tokens": [
+      true,
+      {
+        "tokenSelectors": [
+          ":root",
+          "body.remote-chat"
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "media/highlight-*.css"
+      ],
+      "rules": {
+        "kiss/design-tokens": null
+      }
+    }
+  ]
 }
