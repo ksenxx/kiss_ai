@@ -15,6 +15,7 @@ import contextlib
 import enum
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -28,6 +29,7 @@ from typing import IO, Any
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.core.file_lock import lock_exclusive, unlock
+from kiss.core.html_to_markdown import html_to_markdown
 from kiss.core.processes import (
     SIGKILL,
     kill_process_group,
@@ -220,6 +222,60 @@ _REPO_SCOPED_GIT_ENV = (
 USER_PROMPT_HEADING = "\n\nUser prompt:\n"
 TASK_RESULT_HEADING = "\n\nResult:\n"
 
+_HTML_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
+
+
+def result_to_commit_text(task_result: str | None) -> str:
+    """Return the task result as the text stamped into a commit message.
+
+    ``finish()`` produces the result as HTML, but a commit message is
+    plain text: ``git log`` and GitHub would print the tags literally,
+    and VS Code's Git hovers (blame, Timeline, Source Control Graph)
+    render the message as Markdown with raw HTML disabled, so an HTML
+    result body disappears entirely.  An HTML result is therefore
+    converted to Markdown; a result without any HTML tag is only
+    stripped.
+
+    Args:
+        task_result: The task's result summary, or ``None``/empty.
+
+    Returns:
+        The stripped Markdown (or plain) text, ``""`` when empty.
+    """
+    text = task_result.strip() if task_result else ""
+    if text and _HTML_TAG_RE.search(text):
+        return html_to_markdown(text)
+    return text
+
+
+def git_cleanup_whitespace(message: str) -> str:
+    """Normalise *message* the way ``git commit --cleanup=whitespace`` does.
+
+    ``git commit -m`` strips trailing whitespace from every line,
+    collapses consecutive blank lines and drops leading/trailing blank
+    lines before storing the message.  Any comparison between a stored
+    commit message and text that is about to be committed must apply
+    the same normalisation to both sides.
+
+    Only space, tab and CR count as trailing whitespace and only
+    ``\\n`` separates lines, exactly as in git: NBSP, U+2028, ``\\v``
+    and ``\\f`` are ordinary characters and stay.
+
+    Args:
+        message: The raw commit message or message fragment.
+
+    Returns:
+        The normalised text without a trailing newline.
+    """
+    lines: list[str] = []
+    for line in message.split("\n"):
+        line = line.rstrip(" \t\r")
+        if line or (lines and lines[-1]):
+            lines.append(line)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines)
+
 
 def _ensure_task_metadata(
     message: str,
@@ -232,7 +288,8 @@ def _ensure_task_metadata(
     the current values to *message* unless the message ALREADY ends
     with those exact canonical blocks (the framework auto-commit path
     appends the same blocks, so a branch-HEAD message it produced must
-    not be double-stamped).
+    not be double-stamped).  The result is stamped as Markdown via
+    :func:`result_to_commit_text`.
 
     Dedup is by exact current-value suffix — NEVER by heading
     substring: a hand-written commit body that merely mentions
@@ -242,6 +299,16 @@ def _ensure_task_metadata(
     ends with only the current result block, the missing prompt block
     is inserted before it to preserve canonical prompt-then-result
     order.
+
+    *message* is the branch HEAD's stored message, which git has
+    already normalised (``--cleanup=whitespace``: trailing whitespace
+    stripped, blank lines collapsed), while the prompt and result are
+    raw.  Both sides are normalised with :func:`git_cleanup_whitespace`
+    before comparing; otherwise a prompt with a trailing space on some
+    line would never match its stored copy and would be stamped twice.
+    A branch HEAD stamped before results were converted to Markdown
+    ends with the raw HTML result; that legacy block is replaced by
+    the Markdown one instead of being kept alongside it.
 
     Args:
         message: The base commit message (subject + optional body).
@@ -253,11 +320,16 @@ def _ensure_task_metadata(
         The commit message ending with the canonical metadata blocks
         for every non-empty current value.
     """
-    msg = message.rstrip()
-    prompt = user_prompt.strip() if user_prompt else ""
-    result = task_result.strip() if task_result else ""
+    msg = git_cleanup_whitespace(message)
+    prompt = git_cleanup_whitespace((user_prompt or "").strip())
+    result = git_cleanup_whitespace(result_to_commit_text(task_result))
     prompt_block = f"{USER_PROMPT_HEADING}{prompt}" if prompt else ""
     result_block = f"{TASK_RESULT_HEADING}{result}" if result else ""
+    raw_result = git_cleanup_whitespace((task_result or "").strip())
+    if raw_result and raw_result != result:
+        legacy_suffix = f"{prompt_block}{TASK_RESULT_HEADING}{raw_result}"
+        if msg.endswith(legacy_suffix):
+            msg = msg[: -len(legacy_suffix)] + prompt_block
     if prompt and result:
         if msg.endswith(prompt_block + result_block):
             return msg
