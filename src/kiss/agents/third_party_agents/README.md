@@ -1,21 +1,22 @@
 # Third-Party Agents
 
-This package contains KISS Sorcar's **channel agents**: 45 SEA folders, each
+This package contains KISS Sorcar's **channel agents**: 44 SEA folders, each
 `<name>/<name>_sea.py` (`slack/slack_sea.py`, `gmail/gmail_sea.py`, ...) with its
-helper modules and data files, plus the `govee.py` smart-light helper. All but one wrap
+helper modules and data files, plus the `govee.py` smart-light helper. Every one wraps
 an external service — a messaging platform (Slack, Telegram, WhatsApp, ...), a service
 API (GitHub, Notion, PostgreSQL, ...), or a piece of agent infrastructure (A2A,
-OpenAI-compatible server) — and expose it as a set of authenticated LLM tools; the
-exception is `ask/ask_sea.py`, the `/ask` command that answers questions about a
-running task from its own event log.
+OpenAI-compatible server) — and exposes it as a set of authenticated LLM tools. (The
+`/ask` command that answers questions about a running task from its own event log wraps
+no service; it lives with the Sorcar-extending SEAs in `src/kiss/agents/seas/ask/`, see
+[Task Q&A](#task-qa-the-ask-command).)
 
 For ordinary service actions you do not run these agents directly. You **prompt KISS
 Sorcar in plain language** on any of its UI surfaces, name the service you want acted
-on, and Sorcar dispatches the work to the right channel agent. Every module except
-`ask/ask_sea.py` also has a console entry point (`kiss-slack`, `kiss-gmail`, ...; see
-`pyproject.toml` `[project.scripts]`), used for one-off shell runs, gateway poll ticks,
-and infrastructure setup. This document explains what prompts you can send, on
-which surfaces, and what each channel can do.
+on, and Sorcar dispatches the work to the right channel agent. Every module also has a
+console entry point (`kiss-slack`, `kiss-gmail`, ...; see `pyproject.toml`
+`[project.scripts]`), used for one-off shell runs, gateway poll ticks, and
+infrastructure setup. This document explains what prompts you can send, on which
+surfaces, and what each channel can do.
 
 - [The surfaces: where prompts go](#the-surfaces-where-prompts-go)
 - [How a prompt reaches a channel](#how-a-prompt-reaches-a-channel)
@@ -82,10 +83,8 @@ ignored, so "Home Assistant", "home-assistant", and "HOMEASSISTANT" all resolve 
 `homeassistant` channel. For multi-account
 channels, name the workspace in the prompt ("using the acme Slack workspace, ...") and
 Sorcar passes it through; you can likewise ask for a specific model or budget for the
-sub-task. Three modules are hidden from this channel dispatch: the two infrastructure
-modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on, and
-`ask/ask_sea.py` is reached only through its `/ask` slash command (see
-[Task Q&A](#task-qa-the-ask-command)).
+sub-task. Two modules are hidden from this channel dispatch: the infrastructure
+modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
@@ -112,11 +111,7 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Every module defines `description()`, the one-sentence summary `/xxx help` prints,
-  and each service module defines a `tools()` function (`ask/ask_sea.py`, which wraps
-  no service, returns its three trajectory tools `task_overview`, `task_transcript`,
-  and `task_step` from `tools()` and defines the agent-script getters
-  `system_prompt()`, `append_to_system_prompt()`, `tool_profile()`, `is_parallel()`,
-  `use_web_tools()`, and `use_memory()`; see "Task Q&A" below). The daemon calls
+  and a `tools()` function. The daemon calls
   `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
@@ -381,7 +376,9 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 
 ### Task Q&A: the `/ask` command
 
-`ask/ask_sea.py` is the one module that wraps no external service. On an idle tab,
+`/ask` wraps no external service, so its SEA is not in this package: it is
+`src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
+described here because it is used from the same chat surfaces. On an idle tab,
 `/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
 plus an instruction naming the task you are asking about and telling the agent to call
 `task_overview` on it first. The script gives the answering session three read-only
@@ -391,7 +388,7 @@ sub-agents it dispatched, later user messages, progress summaries, and its last 
 transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
 page of the digested transcript, optionally filtered), and `task_step(task_id, index,
 max_chars)` (one entry in full). It swaps the system prompt
-for the compact SYSTEM_LITE prompt (the bundled `ask/_ask_system_lite.md`, a copy of the
+for the compact SYSTEM_LITE prompt (the bundled `seas/ask/_ask_system_lite.md`, a copy of the
 ablation prompt with the brand identity as a `{{IDENTITY}}` placeholder) with a
 no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
 `review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and

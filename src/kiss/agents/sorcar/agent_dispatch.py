@@ -170,18 +170,13 @@ def stop_unconfirmed_error(name: str, timeout: float) -> str:
         f"before retrying with a larger `timeout` argument."
     )
 
-_NON_CHANNEL_MODULES = frozenset({"a2a", "ask", "oai"})
+_NON_CHANNEL_MODULES = frozenset({"a2a", "oai"})
 """SEA folders of the third-party package that are not user-facing channels.
 
 ``a2a`` (agent-to-agent protocol plumbing) and
 ``oai`` (an OpenAI-compatible HTTP server) subclass
 ``BaseChannelAgent`` for infrastructure reasons but are not services a
 user asks Sorcar to act on, so they are hidden from the tool.
-``ask`` (the ``/ask`` side-channel Q&A over a running task's
-persisted events) is a slash-command-only SEA that does not implement
-a ``BaseChannelAgent`` subclass, so listing it as a channel would
-make ``test_every_channel_module_is_dispatchable`` fail on the very
-first import.
 """
 
 

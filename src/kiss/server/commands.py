@@ -1373,17 +1373,16 @@ class _CommandsMixin:
             question: The user's question, already stripped of the
                 ``/ask`` prefix and surrounding whitespace.
         """
-        from kiss.agents.sorcar import daemon_client, sea_commands
+        from kiss.agents.seas.ask import ask_sea
+        from kiss.agents.sorcar import daemon_client
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
-        from kiss.agents.third_party_agents.ask import ask_sea
 
-        sea_path = sea_commands.get_command("ask")
-        if sea_path is None:
-            logger.warning(
-                "/ask received on tab %s but ask_sea is not registered",
-                tab_id,
-            )
-            return
+        # Always the bundled script: ``seas/`` has the lowest registry
+        # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
+        # chat command, but the side channel reads ``APPEND_TO_PROMPT``
+        # and ``append_to_system_prompt()`` from this module and must
+        # dispatch the file those texts belong to.
+        sea_path = Path(ask_sea.__file__)
         append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()

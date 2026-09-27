@@ -38,9 +38,9 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
-from kiss.agents.third_party_agents.ask import ask_sea
 from kiss.core.brand import BRAND, render_brand
 
 # The literal placeholder the /ask flow substitutes at dispatch time.
@@ -142,16 +142,20 @@ def test_system_lite_is_bundled_next_to_the_module() -> None:
     assert "{{IDENTITY}}" in path.read_text(encoding="utf-8")
 
 
-def test_ask_sea_lives_in_third_party_agents_package() -> None:
+def test_ask_sea_lives_in_seas_package() -> None:
     """The SEA file MUST be discoverable by the slash-command registry.
 
-    The registry scans the third-party package folder; if the file
-    were somewhere else the /ask command would silently disappear.
+    The registry scans the bundled ``seas`` package folder; if the
+    file were somewhere else the /ask command would silently disappear.
     """
     module_path = Path(ask_sea.__file__).resolve()
     assert module_path.parent.name == "ask"
-    assert module_path.parents[1].name == "third_party_agents"
+    assert module_path.parents[1].name == "seas"
     assert module_path.name == "ask_sea.py"
+    sea_commands.refresh_registry()
+    registered = sea_commands.get_command("ask")
+    assert registered is not None
+    assert registered.resolve() == module_path
 
 
 def test_ask_command_is_registered_by_default() -> None:
@@ -218,6 +222,40 @@ def test_rewriter_leaves_unrelated_slash_commands_alone(
     assert "append_to_prompt" not in rewritten
     assert "append_to_system_prompt" not in rewritten
     assert _EXPECTED_APPEND_TO_SYSTEM_PROMPT not in rewritten
+
+
+def test_rewriter_uses_generic_directive_for_user_sea_shadowing_ask(
+    tmp_path: Path,
+) -> None:
+    """A ``SEAS.md`` folder that shadows ``/ask`` MUST still rewrite.
+
+    The bundled ``seas/ask`` has the lowest registry precedence, so a
+    user SEA named ``ask`` wins.  It does not define the private
+    ``APPEND_TO_PROMPT`` constant, so the rewriter must fall back to
+    the ordinary directive for that path instead of raising.
+    """
+    shadow = tmp_path / "user-seas" / "ask"
+    shadow.mkdir(parents=True)
+    (shadow / "ask_sea.py").write_text("# stub\n", encoding="utf-8")
+    from kiss.core.config import kiss_home
+
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    seas_md = kiss_home() / "SEAS.md"
+    seas_md.write_text(str(shadow.parent) + "\n", encoding="utf-8")
+    try:
+        sea_commands.refresh_registry()
+        assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
+        hit = sea_commands.rewrite_prompt_if_command("/ask what happened?")
+    finally:
+        # A leftover shadow of ``ask`` would leak into every later test
+        # that expects the bundled ``/ask``.
+        seas_md.unlink()
+    assert hit is not None
+    rewritten, sea_path = hit
+    assert sea_path == shadow / "ask_sea.py"
+    assert f'agent = "{sea_path}"' in rewritten
+    assert "append_to_prompt" not in rewritten
+    assert rewritten.endswith("what happened?")
 
 
 def test_rewriter_rejects_bare_ask_without_question() -> None:

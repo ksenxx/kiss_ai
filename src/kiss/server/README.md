@@ -919,8 +919,12 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 14 bundled SEA folders register
-  these commands: `/autorouter` (runs a task on the cheapest model tier
+  folder can shadow them.  The 15 bundled SEA folders register
+  these commands: `/ask` (answers a question about the current task
+  from a digest of its persisted events; typed into a running task's
+  tab it runs as a side channel that always dispatches the bundled
+  `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
+  command), `/autorouter` (runs a task on the cheapest model tier
   that will finish it), `/bestrouter` (runs a task on
   `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
   container; the module defines no top-level run-parameter getters, its

@@ -140,7 +140,7 @@ files. Patch its prompt with `patch_sea_prompt("rsi7d", ...)` exactly as for the
   `src/kiss/agents/third_party_agents/`, never edit a SEA whose `editable_path` or
   `prompt_constant` is empty in `indexed_seas()` (user SEAs, and the channel SEAs such as
   `slack` or `gmail`, whose prompts are assembled at run time): analyse those and put
-  recommendations in the report instead. `/ask` (`third_party_agents/ask/ask_sea.py`) does
+  recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
   have a prompt constant and is optimized like the SEAs in `seas/`.
 - Every instruction you add must be grounded in evidence from the trajectories: cite the
   task id and digest entry index (from `run_findings` / `run_transcript`) in your notes. No

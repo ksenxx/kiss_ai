@@ -711,6 +711,7 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     if sea_path is None:
         return None
     abs_path = str(sea_path)
+    append_to_prompt = None
     if command == "ask":
         # ``/ask <question>`` is a fixed side-channel Q&A over the
         # calling task's persisted events: ``append_to_prompt`` must
@@ -722,9 +723,13 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         # ``ask_sea.py`` and read from the resolved SEA file itself;
         # the system-prompt suffix is not repeated in the directive
         # because the SEA's ``append_to_system_prompt()`` getter
-        # overrides the wire value daemon-side anyway.
+        # overrides the wire value daemon-side anyway.  The bundled
+        # ``seas/ask`` has the lowest registry precedence, so a
+        # ``SEAS.md`` folder may resolve ``/ask`` to a user SEA; one
+        # without ``APPEND_TO_PROMPT`` gets the ordinary rewrite below.
         with _load_sea_module(sea_path) as module:
-            append_to_prompt = module.APPEND_TO_PROMPT
+            append_to_prompt = getattr(module, "APPEND_TO_PROMPT", None)
+    if append_to_prompt is not None:
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "

@@ -31,7 +31,10 @@ schedules its daily refresh, or :mod:`kiss.agents.seas.remember.remember_sea`
 and :mod:`kiss.agents.seas.forget.forget_sea`, which add the prompt to, or
 remove it from, the standing instructions in ``~/.kiss/SORCAR.md``
 (the file appended to every task's system prompt; storage in
-:mod:`kiss.agents.seas.sorcar_md`), or
+:mod:`kiss.agents.seas.sorcar_md`), or :mod:`kiss.agents.seas.ask.ask_sea`,
+which answers a question about a running task from a digest of its
+persisted events (the ``/ask`` command; typed into a running task's tab
+the server dispatches it as a side channel next to the agent), or
 :mod:`kiss.agents.seas.coding.coding_sea`, the :class:`ContainerHarness` that runs
 Sorcar unattended inside a Docker container (the trial runners in
 ``benchmarkings/harnesstax`` generate a per-trial SEA file that binds to it).
