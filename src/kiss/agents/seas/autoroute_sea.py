@@ -76,10 +76,10 @@ TIERS: dict[str, tuple[tuple[str, str], ...]] = {
         ("openrouter/x-ai/grok-4.7", "xAI"),
         ("gpt-6-sol", "OpenAI mid model, 400k context; cheapest measured per step"),
         ("claude-sonnet-5", "Anthropic mid model; default when Anthropic is required"),
-        ("kimi-k3", "Moonshot, 1M context"),
+        ("claude-opus-5-5", "Anthropic frontier; cheapest, fastest frontier per step measured"),
+        ("kimi-k3", "Moonshot, 1M context. Best cheaper alternative to claude-fable-5-1. Got to model for security analysis and hardening."),
     ),
     "frontier": (
-        ("claude-opus-5-5", "Anthropic frontier; cheapest, fastest frontier per step measured"),
         ("gpt-6-astra", "OpenAI frontier; priciest per step measured, reliable reviewer"),
         ("claude-fable-5-1", "Anthropic top model; longest, hardest tasks only; measured stalls"),
     ),
