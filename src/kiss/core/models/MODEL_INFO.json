@@ -3037,13 +3037,13 @@
   "openrouter/deepseek/deepseek-v4-flash-vision-exp": {
     "context_length": 500000,
     "input_price_per_1M": 0.22,
-    "output_price_per_1M": 0.66,
+    "output_price_per_1M": 0.647,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.007
+    "cache_read_price_per_1M": 0.00686
   },
   "openrouter/deepseek/deepseek-v4-pro": {
     "context_length": 500000,
@@ -3057,25 +3057,25 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.264,
-    "output_price_per_1M": 0.792,
+    "input_price_per_1M": 0.245,
+    "output_price_per_1M": 3.5,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.0088
+    "cache_read_price_per_1M": 0.24452
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
-    "input_price_per_1M": 0.3,
-    "output_price_per_1M": 1.2,
+    "input_price_per_1M": 0.035,
+    "output_price_per_1M": 0.29,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.006
+    "cache_read_price_per_1M": 0.001
   },
   "openrouter/fireworks/ember-1": {
     "context_length": 500000,
@@ -6270,25 +6270,25 @@
   },
   "openrouter/z-ai/glm-5.3": {
     "context_length": 500000,
-    "input_price_per_1M": 0.379,
-    "output_price_per_1M": 1.192,
+    "input_price_per_1M": 1.4,
+    "output_price_per_1M": 4.4,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.07046
+    "cache_read_price_per_1M": 0.26
   },
   "openrouter/z-ai/glm-5.3-flash": {
     "context_length": 500000,
     "input_price_per_1M": 0.04,
-    "output_price_per_1M": 0.5,
+    "output_price_per_1M": 0.14,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.015
+    "cache_read_price_per_1M": 0.01
   },
   "openrouter/z-ai/glm-5.3-flashx": {
     "context_length": 500000,
@@ -6380,14 +6380,14 @@
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.249,
-    "output_price_per_1M": 0.748,
+    "input_price_per_1M": 0.244,
+    "output_price_per_1M": 0.733,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.007938
+    "cache_read_price_per_1M": 0.00777
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
@@ -6424,13 +6424,13 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 1.03,
-    "output_price_per_1M": 9.043,
+    "input_price_per_1M": 0.988,
+    "output_price_per_1M": 5.53,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.3
+    "cache_read_price_per_1M": 0.11455
   },
   "openrouter/~openai/gpt-astra-latest": {
     "context_length": 500000,
@@ -6742,24 +6742,24 @@
   "openrouter/~z-ai/glm-flash-latest": {
     "context_length": 500000,
     "input_price_per_1M": 0.045,
-    "output_price_per_1M": 0.5,
+    "output_price_per_1M": 0.14,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.015
+    "cache_read_price_per_1M": 0.01
   },
   "openrouter/~z-ai/glm-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.379,
-    "output_price_per_1M": 1.192,
+    "input_price_per_1M": 0.274,
+    "output_price_per_1M": 2.574,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.07046
+    "cache_read_price_per_1M": 0.044965
   },
   "text-embedding-3-large": {
     "context_length": 8191,
