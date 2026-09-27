@@ -11,7 +11,21 @@ alone is not dispatched)::
 
     run_agent(agent="src/kiss/agents/seas/rsi7d/rsi7d_sea.py", task="all")
 
-Either makes the agent go over every indexed SEA's runs of the last 7
+The task text starts with the *scope* (:func:`parse_scope`)::
+
+    /rsi7d all                               every indexed SEA
+    /rsi7d review_paper write_paper          just those SEAs
+    /rsi7d --seas-dir ~/s10s/src/s10s/seas   the SEAs of that folder, now editable
+    /rsi7d --seas-dir ~/s10s/src/s10s/seas triage    one SEA of that folder
+
+Free-form instructions may follow the scope (``/rsi7d review_paper.
+Replay the costliest run.``).  The tools read the scope from the running
+task's text (``current_agent().last_user_prompt``) and enforce it:
+``indexed_seas`` lists only the SEAs in scope, ``sea_runs`` and
+``sea_findings`` mine only their runs, and ``sea_prompt`` /
+``patch_sea_prompt`` / ``replay_in_clone`` refuse any other SEA.
+
+Either makes the agent go over the runs of every SEA in scope of the last 7
 days in ``~/.kiss/sorcar.db`` and improve each SEA by AI discovery: it
 mines the trajectories for agentic mistakes, speed and cost sinks and
 quality problems, proposes concrete instructions, judges them pairwise,
@@ -55,14 +69,15 @@ table on the history timestamp.
 Prompt editing
 --------------
 Edits are confined to ``SYSTEM_PROMPT``-style string constants (plain
-literals or f-strings) of SEA files inside the ``src/kiss/agents/seas``
-and ``src/kiss/agents/third_party_agents`` directories of the task's
-work dir (the SEA's own directory when the task does not run inside a
-KISS checkout): the gate rejects any candidate
-whose AST differs outside the constant's text, so code and f-string
-placeholders are never changed.  SEAs registered from other folders
-(channel agents, user folders) are analysed and reported on, never
-edited.
+literals or f-strings) of SEA files inside the editable folders: the
+``--seas-dir`` folder when the scope names one, else the
+``src/kiss/agents/seas`` and ``src/kiss/agents/third_party_agents``
+directories of the task's work dir (the SEA's own directory when the
+task does not run inside a KISS checkout).  The gate rejects any
+candidate whose AST differs outside the constant's text, so code and
+f-string placeholders are never changed.  SEAs registered from other
+folders (channel agents, user folders) are analysed and reported on,
+never edited.
 
 Replays in clones
 -----------------
@@ -90,6 +105,7 @@ import subprocess
 import textwrap
 import time
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -116,15 +132,17 @@ STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
 REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
+SEAS_DIR_OPTION = "--seas-dir"
+"""Task-text option naming the folder whose SEAs the sweep is restricted to (and may edit)."""
 
 SYSTEM_PROMPT = """\
 You are rsi7d, the KISS Sorcar agent that improves the other agents. Every indexed SEA
 (Sorcar Extension Agent, a `<name>/<name>_sea.py` file registered as the slash command
-`/<name>`) has a `SYSTEM_PROMPT` constant. Your job is to read the last 7 days of every SEA's
-trajectories in the task history and make each SEA finish with higher quality (most
-important), fewer agentic mistakes, lower cost and higher speed, mostly by adding precise
-instructions to its system prompt. You also refresh the observed model evidence the autorouter
-SEA routes on.
+`/<name>`) has a `SYSTEM_PROMPT` constant. Your job is to read the last 7 days of the
+trajectories of every SEA in scope in the task history and make each of them finish with
+higher quality (most important), fewer agentic mistakes, lower cost and higher speed, mostly
+by adding precise instructions to its system prompt. You also refresh the observed model
+evidence the autorouter SEA routes on.
 
 rsi7d itself is one of those SEAs: its `src/kiss/agents/seas/rsi7d/rsi7d_sea.py` prompt is
 editable through the same tools and its own finished sweeps (every run except the current
@@ -133,14 +151,25 @@ verification claimed without a replay id, costs quoted from the running estimate
 `run_findings`, replays skipped for eligible runs, a report that does not list the changed
 files. Patch its prompt with `patch_sea_prompt("rsi7d", ...)` exactly as for the others.
 
+## Scope
+Your task text starts with the scope: `all` (every indexed SEA), one or more SEA names
+(`review_paper write_paper`), or `--seas-dir <folder>` (the SEAs of that folder, which then
+are the editable ones instead of this checkout's, optionally followed by names). Free-form
+instructions may follow the scope. The tools enforce the scope: `indexed_seas()` returns it
+as `scope` and lists only the SEAs in it, `sea_runs` / `sea_findings` mine only their runs,
+and `sea_prompt` / `patch_sea_prompt` / `replay_in_clone` refuse any other SEA. A SEA the
+task text names but `scope.names` lacks was not recognised (a typo or an unregistered
+name): stop and tell the user the recognised names. When `autorouter` is out of scope, skip
+step 6 (`write_autorouter_evidence` refuses).
+
 ## Hard rules
 - Change SEA files only through `patch_sea_prompt` and `write_autorouter_evidence`. They edit
   one string constant and reject anything that changes code. Never edit a SEA with
-  Edit/Write, never touch files outside `src/kiss/agents/seas/` and
-  `src/kiss/agents/third_party_agents/`, never edit a SEA whose `editable_path` or
-  `prompt_constant` is empty in `indexed_seas()` (user SEAs, and the channel SEAs such as
-  `slack` or `gmail`, whose prompts are assembled at run time): analyse those and put
-  recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
+  Edit/Write, never touch files outside the editable folders (`src/kiss/agents/seas/` and
+  `src/kiss/agents/third_party_agents/`, or the `--seas-dir` folder), never edit a SEA whose
+  `editable_path` or `prompt_constant` is empty in `indexed_seas()` (user SEAs, and the
+  channel SEAs such as `slack` or `gmail`, whose prompts are assembled at run time): analyse
+  those and put recommendations in the report instead. `/ask` (`seas/ask/ask_sea.py`) does
   have a prompt constant and is optimized like the SEAs in `seas/`.
 - Every instruction you add must be grounded in evidence from the trajectories: cite the
   task id and digest entry index (from `run_findings` / `run_transcript`) in your notes. No
@@ -162,10 +191,10 @@ files. Patch its prompt with `patch_sea_prompt("rsi7d", ...)` exactly as for the
   `./reports/rsi7d-<YYYY-MM-DD>.md` and is `git add`ed.
 
 ## Procedure (AI discovery loop)
-1. Baseline. Call `indexed_seas()`, `sea_runs()` and `model_scorecard()`. Write
-   `./tmp/rsi7d/baseline.md`: per SEA the number of runs, success/unsuccessful/failed
-   counts, median cost, steps, seconds per step, models used; per model the scorecard row.
-   Skip SEAs with zero runs in the window (say so in the report).
+1. Baseline. Call `indexed_seas()` (check its `scope` against your task text), `sea_runs()`
+   and `model_scorecard()`. Write `./tmp/rsi7d/baseline.md`: per SEA the number of runs,
+   success/unsuccessful/failed counts, median cost, steps, seconds per step, models used; per
+   model the scorecard row. Skip SEAs with zero runs in the window (say so in the report).
 2. Mine mistakes per editable SEA with runs. Call `sea_findings(name)` for the aggregated
    signals, then drill into the runs that carry the most signal: every failed or
    unsuccessful run, the costliest, the slowest (seconds per step) and one typical
@@ -275,11 +304,14 @@ _ERROR_KIND_WORDS = ("ERROR", "FAIL", "EXCEPTION", "TRACEBACK")
 def description() -> str:
     """Return the one-sentence help text shown by ``/rsi7d help``."""
     return (
-        "Mines the last 7 days of every indexed SEA's runs in ~/.kiss/sorcar.db for agentic "
+        "Mines the last 7 days of the indexed SEAs' runs in ~/.kiss/sorcar.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
         "SEA's SYSTEM_PROMPT (its own included; file-modifying tasks are replayed in a clone "
-        "at the task's commit) and refreshes the autorouter SEA's model evidence; run it with "
-        '`/rsi7d all` in the chat or `run_agent(agent="rsi7d", task="all")`.'
+        "at the task's commit) and refreshes the autorouter SEA's model evidence. The task "
+        "text starts with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper "
+        "write_paper` (those SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of "
+        "that folder, which become the editable ones); instructions may follow. Or "
+        '`run_agent(agent="rsi7d", task="all")`.'
     )
 
 
@@ -772,16 +804,6 @@ def _execute_sea(path: Path) -> dict[str, Any]:
     return execute_python_file(str(path), ValueError, "SEA")
 
 
-def build_prompt(text: str) -> str:
-    """Return the task prompt for ``/rsi7d <text>``; an empty *text* runs the default sweep."""
-    text = text.strip()
-    default = (
-        f"Go over the last {DEFAULT_DAYS} days of every indexed SEA's trajectories and "
-        "optimize each editable SEA following the procedure; refresh the autorouter evidence."
-    )
-    return f"{default}\n\nAdditional instructions: {text}" if text else default
-
-
 def system_prompt() -> str:
     """Replace the default Sorcar system prompt with the rsi7d procedure."""
     return SYSTEM_PROMPT
@@ -807,8 +829,84 @@ def use_web_tools() -> bool:
     return False
 
 
-def _seas_dir() -> Path:
-    """Return the editable ``seas`` directory: the task work dir's checkout, else this file's.
+@dataclass(frozen=True)
+class Scope:
+    """What a ``/rsi7d`` task text restricts the sweep to (see :func:`parse_scope`)."""
+
+    seas_dir: Path | None = None
+    """The ``--seas-dir`` folder, resolved; ``None`` for the checkout's editable folders."""
+    names: tuple[str, ...] = ()
+    """The SEA names the task text starts with; empty for every SEA of the folders."""
+    error: str = ""
+    """Why the scope is unusable (``--seas-dir`` without a folder, or not a directory):
+    nothing is then listed, mined or editable."""
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the JSON form ``indexed_seas`` reports: ``seas_dir`` (``""`` when unset),
+        ``names`` and, when set, ``error``."""
+        block: dict[str, Any] = {
+            "seas_dir": str(self.seas_dir) if self.seas_dir is not None else "",
+            "names": list(self.names),
+        }
+        if self.error:
+            block["error"] = self.error
+        return block
+
+
+_SEAS_DIR_OPTION_RE = re.compile(re.escape(SEAS_DIR_OPTION) + r"(?:=|[ \t]+|(?=\s|$))(\S*)")
+"""``--seas-dir <folder>`` or ``--seas-dir=<folder>`` anywhere in the task text (the
+folder group is empty when the option ends the line or has no argument)."""
+_SEA_NAME_RE = sea_commands._COMMAND_NAME_RE
+"""A bare SEA name (the registry's command-name pattern): no path separators, no ``..``."""
+
+
+def parse_scope(text: str) -> Scope:
+    """Return the :class:`Scope` a ``/rsi7d`` task *text* names.
+
+    ``--seas-dir <folder>`` (``~`` and a relative path resolve against
+    the task's work dir) may appear anywhere; the SEA names are the
+    leading whitespace-separated tokens (trailing ``.,;:`` ignored) that
+    are SEAs of that folder or, without a folder, registered slash
+    commands or SEAs of the checkout's editable folders.  Parsing stops
+    at the first other token, so ``all``, ``all. Work inside …`` or
+    ``Optimize review_paper`` name no SEA and keep every SEA in scope;
+    ``review_paper write_paper. Replay …`` names two.  Runs are
+    identified by SEA name (a bundled SEA runs from many worktree paths),
+    so a same-named SEA of another folder shares the mined runs.
+    """
+    seas_dir: Path | None = None
+    match = _SEAS_DIR_OPTION_RE.search(text)
+    if match:
+        if not match.group(1):
+            return Scope(error=f"{SEAS_DIR_OPTION} needs a folder")
+        try:
+            seas_dir = (_work_root() / Path(match.group(1)).expanduser()).resolve()
+        except (OSError, RuntimeError, ValueError) as e:  # ``~nobody``, a NUL byte, ...
+            return Scope(error=f"{SEAS_DIR_OPTION} {match.group(1)!r}: {e}")
+        if not seas_dir.is_dir():
+            return Scope(seas_dir, error=f"{SEAS_DIR_OPTION} {seas_dir} is not a directory")
+        text = text[: match.start()] + text[match.end() :]
+    known: set[str] = set() if seas_dir is not None else set(sea_commands.list_commands())
+    for folder in _dirs_of(seas_dir):
+        known.update(sea_commands._scan_folder(folder))
+    names: list[str] = []
+    for token in text.split():
+        token = token.rstrip(".,;:")
+        if token not in known:
+            break
+        if token not in names:
+            names.append(token)
+    return Scope(seas_dir, tuple(names))
+
+
+def _scope() -> Scope:
+    """Return the scope of the running task's text (everything outside a task)."""
+    agent = current_agent()
+    return parse_scope(str(getattr(agent, "last_user_prompt", "") or ""))
+
+
+def _checkout_seas_dir() -> Path:
+    """Return the checkout's ``seas`` directory: the task work dir's, else this file's.
 
     Any ``src/kiss/agents/seas`` directory of the work dir counts, even
     one from an older layout without ``rsi7d/rsi7d_sea.py``: a replay of
@@ -829,37 +927,61 @@ def _seas_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _editable_dirs() -> list[Path]:
-    """Return the checkout folders whose SEAs may be edited: ``seas`` and, next to it, the
-    bundled channel SEAs in ``third_party_agents`` (their prompts are assembled at run time
-    by ``_channel_agent_utils``, so only the few with a prompt constant, e.g. ``ask``, end up
+def _dirs_of(seas_dir: Path | None) -> list[Path]:
+    """Return the editable folders for a scope's *seas_dir*: that folder alone when given,
+    else the checkout's ``seas`` and, next to it, the bundled channel SEAs in
+    ``third_party_agents`` (their prompts are assembled at run time by
+    ``_channel_agent_utils``, so only the few with a prompt constant, e.g. ``ask``, end up
     patchable; the rest are analysed and reported on)."""
-    seas = _seas_dir()
+    if seas_dir is not None:
+        return [seas_dir]
+    seas = _checkout_seas_dir()
     third_party = seas.parent / "third_party_agents"
     return [seas, third_party] if third_party.is_dir() else [seas]
 
 
+def _editable_dirs() -> list[Path]:
+    """Return the folders whose SEAs the running task may edit (:func:`_dirs_of`; none
+    when the scope is unusable)."""
+    scope = _scope()
+    return [] if scope.error else _dirs_of(scope.seas_dir)
+
+
 def _editable_seas() -> dict[str, Path]:
-    """Return ``{name: file}`` of every SEA in the editable folders."""
+    """Return ``{name: file}`` of every SEA in scope in the editable folders."""
     found: dict[str, Path] = {}
     for folder in reversed(_editable_dirs()):  # ``seas`` wins a name clash
         found.update(sea_commands._scan_folder(folder))
-    return found
+    names = _scope().names
+    return {name: path for name, path in found.items() if name in names} if names else found
 
 
 def _editable_path(name: str) -> Path | None:
-    """Return the editable file of SEA *name*, or ``None`` when it is not a bundled SEA.
+    """Return the editable file of SEA *name*, or ``None`` when it is not an editable SEA
+    in scope.
 
     *name* must be a bare module stem (``review_paper``); a path or ``..``
     can never escape the editable folders.
     """
-    if not name.isidentifier():
+    scope = _scope()
+    if not _SEA_NAME_RE.match(name) or (scope.names and name not in scope.names):
         return None
     for folder in _editable_dirs():
         path = sea_commands.sea_script_in(folder / name)
         if path.is_file():
             return path
     return None
+
+
+def _not_editable(name: str) -> str:
+    """Return the error for a *name* :func:`_editable_path` rejected."""
+    scope = _scope()
+    if scope.error:
+        return f"Error: {scope.error}"
+    if scope.names and name not in scope.names:
+        return f"Error: {name!r} is outside this run's scope {list(scope.names)}"
+    folders = ", ".join(str(folder) for folder in _dirs_of(scope.seas_dir))
+    return f"Error: {name!r} is not an editable SEA under {folders}"
 
 
 def _prompt_constant(source: str) -> tuple[str, str]:
@@ -961,20 +1083,28 @@ def _sea_info(name: str, registered: Path | None) -> dict[str, Any]:
 
 
 def indexed_seas() -> str:
-    """List every indexed SEA with its registered path, editable path and prompt shape.
+    """List the indexed SEAs in scope with registered path, editable path and prompt shape.
 
-    Returns a JSON list of ``{"name", "registered_path", "editable_path",
-    "prompt_getter", "prompt_constant", "prompt_chars"}``.  ``editable_path``
-    is the file ``patch_sea_prompt`` edits (empty when the SEA is not a
-    bundled one under ``src/kiss/agents/seas`` or
-    ``src/kiss/agents/third_party_agents``); ``prompt_constant`` is the
-    module constant the prompt getter returns (empty when the SEA has no
-    editable prompt).  Bundled SEAs that are not registered are listed too.
+    Returns JSON ``{"scope": {"seas_dir", "names"[, "error"]}, "seas": [...]}``:
+    ``scope`` is what the task text restricts the sweep to (see
+    :func:`parse_scope`; ``error`` when its ``--seas-dir`` is not a
+    directory) and ``seas`` the rows ``{"name", "registered_path",
+    "editable_path", "prompt_getter", "prompt_constant", "prompt_chars"}``.
+    Without a scope every registered SEA and every SEA of the editable
+    folders is listed; with ``--seas-dir`` only that folder's SEAs; with
+    names only those; with an ``error`` none.  ``editable_path`` is the file ``patch_sea_prompt``
+    edits (empty when the SEA is not in an editable folder);
+    ``prompt_constant`` is the module constant the prompt getter returns
+    (empty when the SEA has no editable prompt).
     """
-    names = set(sea_commands.list_commands())
-    names.update(_editable_seas())
+    scope = _scope()
+    names = set(scope.names)
+    if not names and not scope.error:
+        names = set(_editable_seas())
+        if scope.seas_dir is None:
+            names.update(sea_commands.list_commands())
     rows = [_sea_info(name, sea_commands.get_command(name)) for name in sorted(names)]
-    return json.dumps(rows, indent=1)
+    return json.dumps({"scope": scope.as_dict(), "seas": rows}, indent=1)
 
 
 def _signatures() -> dict[str, str]:
@@ -1003,12 +1133,20 @@ def _signatures() -> dict[str, str]:
 
 
 def _sea_runs(days: float) -> dict[str, Any]:
-    """Mine the SEA runs of the window, matching by dispatch and by prompt signature."""
-    return _mine_sea_runs(days, _signatures())
+    """Mine the SEA runs of the window, matching by dispatch and by prompt signature, and
+    keep only the SEAs in scope (the named ones, or the ``--seas-dir`` folder's)."""
+    scope = _scope()
+    if scope.error:
+        return {"error": scope.error, "seas": {}}
+    data = _mine_sea_runs(days, _signatures())
+    if scope.names or scope.seas_dir is not None:
+        keep = set(scope.names) or set(_editable_seas())
+        data["seas"] = {name: sea for name, sea in data["seas"].items() if name in keep}
+    return data
 
 
 def sea_runs(days: float = DEFAULT_DAYS, name: str = "") -> str:
-    """Return the SEA runs of the last *days* days (all SEAs, or just *name*) as JSON.
+    """Return the SEA runs of the last *days* days (every SEA in scope, or just *name*) as JSON.
 
     Per SEA: ``agents`` (the ``run_agent`` agent arguments seen, or
     ``(system prompt signature)`` for runs the server started directly),
@@ -1034,6 +1172,8 @@ def sea_findings(name: str, runs: int = 8, days: float = DEFAULT_DAYS) -> str:
     into with ``run_entry``.
     """
     data = _sea_runs(days)
+    if data.get("error"):
+        return f"Error: {data['error']}"
     entry = data["seas"].get(name)
     if entry is None:
         return f"Error: no runs of SEA {name!r} in the last {days} days"
@@ -1109,7 +1249,7 @@ def sea_prompt(name: str) -> str:
     """Return the prompt constant of editable SEA *name*: getter, constant name and text."""
     path = _editable_path(name)
     if path is None:
-        return f"Error: {name!r} is not an editable SEA under {_seas_dir()}"
+        return _not_editable(name)
     source = path.read_text(encoding="utf-8")
     getter, constant = _prompt_constant(source)
     if not constant:
@@ -1263,7 +1403,7 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
     """
     path = _editable_path(name)
     if path is None:
-        return f"Error: {name!r} is not an editable SEA under {_seas_dir()}"
+        return _not_editable(name)
     source = path.read_text(encoding="utf-8")
     getter, constant = _prompt_constant(source)
     if not constant:
@@ -1476,7 +1616,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
         return f"Error: run {task_id} does not record its SEA; pass name=<sea>"
     sea_file = _editable_path(sea)
     if sea_file is None:
-        return f"Error: {sea!r} is not an editable SEA of this checkout"
+        return _not_editable(sea)
     work_dir = str(row.get("work_dir") or "")
     located = _task_tree(work_dir)
     if located is None:

@@ -8,9 +8,9 @@ The mining tools run against tasks persisted in the test session's real
 SQLite history (``KISS_HOME`` is a temporary directory, see
 ``conftest.py``).  The prompt editors run against a fake KISS checkout
 under ``tmp_path`` (``src/kiss/agents/seas`` holding demo SEAs with a
-plain, an f-string and no prompt constant) that ``_seas_dir`` resolves
+plain, an f-string and no prompt constant) that ``_checkout_seas_dir`` resolves
 through the working directory.  The agent-level test drives a real
-:class:`ChatSorcarAgent` ReAct loop against the scripted local
+:class:`WorktreeSorcarAgent` ReAct loop against the scripted local
 chat-completions server so a patch really flows from the model's tool
 call into the SEA file.
 """
@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,6 @@ import yaml
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import sea_commands
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -40,6 +40,8 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -104,7 +106,7 @@ def tools() -> list:
 
 @pytest.fixture
 def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A fake KISS checkout in *tmp_path* that ``_seas_dir`` resolves through the cwd."""
+    """A fake KISS checkout in *tmp_path* that ``_checkout_seas_dir`` resolves through the cwd."""
     seas = tmp_path / "src" / "kiss" / "agents" / "seas"
     for name in ("rsi7d", "autorouter", "demo", "fdemo", "tdemo", "noprompt"):
         (seas / name).mkdir(parents=True)
@@ -162,10 +164,7 @@ def _dispatch(agent: str, task: str) -> dict[str, Any]:
 def test_sea_getters_and_prompt_follow_the_contract() -> None:
     """The SEA replaces the system prompt, exposes its tools, and runs without a browser."""
     assert sea.system_prompt() == sea.SYSTEM_PROMPT
-    assert sea.build_prompt("") == sea.build_prompt("   ")
-    assert sea.build_prompt("only review_paper").endswith(
-        "Additional instructions: only review_paper"
-    )
+    assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
     assert sea.max_budget() == 2000.0
     assert sea.use_memory() is True
     assert sea.use_web_tools() is False
@@ -214,7 +213,9 @@ def test_editable_dirs_include_the_bundled_channel_seas(checkout: Path) -> None:
     assert sea._editable_dirs() == [checkout, third_party]
     assert sea._editable_path("ask") == third_party / "ask" / "ask_sea.py"
     assert sea._editable_seas()["demo"] == checkout / "demo" / "demo_sea.py"
-    rows = {row["name"]: row for row in json.loads(sea.indexed_seas())}
+    listed = json.loads(sea.indexed_seas())
+    assert listed["scope"] == {"seas_dir": "", "names": []}
+    rows = {row["name"]: row for row in listed["seas"]}
     assert rows["ask"]["editable_path"] == str(third_party / "ask" / "ask_sea.py")
     assert rows["ask"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["demo"]["editable_path"] == str(checkout / "demo" / "demo_sea.py")
@@ -226,7 +227,7 @@ def test_editable_dirs_include_the_bundled_channel_seas(checkout: Path) -> None:
 
 def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -> None:
     """Bundled SEAs are editable with their prompt shape; registered foreign SEAs are not."""
-    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())}
+    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}
     assert rows["demo"]["editable_path"] == str(checkout / "demo" / "demo_sea.py")
     assert (rows["demo"]["prompt_getter"], rows["demo"]["prompt_constant"]) == (
         "system_prompt",
@@ -753,7 +754,7 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
 ) -> None:
     """Outside a KISS checkout (no task, no ``src/kiss/agents/seas`` in cwd) the SEA's dir wins."""
     monkeypatch.chdir(tmp_path)
-    assert sea._seas_dir() == _SEAS_DIR
+    assert sea._checkout_seas_dir() == _SEAS_DIR
     assert sea._editable_path("sh") == _SEAS_DIR / "sh" / "sh_sea.py"
     assert sea._editable_path("no-such") is None
     # An old-layout checkout (flat ``seas/rsi7d_sea.py``) is still the editable directory:
@@ -761,12 +762,12 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     old_layout = tmp_path / "src" / "kiss" / "agents" / "seas"
     old_layout.mkdir(parents=True)
     (old_layout / "rsi7d_sea.py").write_text("SYSTEM_PROMPT = 'x'\n", encoding="utf-8")
-    assert sea._seas_dir() == old_layout.resolve()
+    assert sea._checkout_seas_dir() == old_layout.resolve()
     assert sea._editable_path("sh") is None
     init_repo(tmp_path)  # from a sub-directory of a checkout, the checkout's seas dir wins
     (tmp_path / "docs").mkdir()
     monkeypatch.chdir(tmp_path / "docs")
-    assert sea._seas_dir() == old_layout.resolve()
+    assert sea._checkout_seas_dir() == old_layout.resolve()
     monkeypatch.chdir(tmp_path)
     shutil.rmtree(tmp_path / "src")
     shutil.rmtree(tmp_path / ".git")
@@ -774,6 +775,99 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     assert signatures["sh"] == ast.literal_eval(repr(signatures["sh"]))  # plain text
     assert len(signatures["sh"]) == sea.SIGNATURE_CHARS and "review_paper" in signatures
     assert "dummy" not in signatures  # no prompt getter
+
+
+def test_parse_scope_reads_leading_names_and_the_seas_dir_option(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """The scope is the leading SEA names plus ``--seas-dir``; other text ends the names."""
+    assert sea.parse_scope("all") == sea.Scope()
+    assert sea.parse_scope("") == sea.Scope()
+    # The weekly cron relay: ``all.`` stops the names, the later ``rsi7d`` is free text.
+    assert sea.parse_scope("all. Optimize every SEA including rsi7d itself.") == sea.Scope()
+    assert sea.parse_scope("demo").names == ("demo",)
+    assert sea.parse_scope("demo, fdemo demo. Replay the costliest run.").names == ("demo", "fdemo")
+    assert sea.parse_scope("only demo").names == ()  # "only" is no SEA: unscoped
+    assert sea.parse_scope("slack demo").names == ("slack", "demo")  # registered, not editable
+    assert sea.parse_scope("my-sea").names == ()  # unknown; a hyphenated name would be accepted
+    folder = tmp_path / "userseas"
+    (folder / "alpha").mkdir(parents=True)
+    (folder / "alpha" / "alpha_sea.py").write_text(_PLAIN_SEA, encoding="utf-8")
+    scope = sea.parse_scope(f"--seas-dir {folder} alpha. Be brief.")
+    assert scope == sea.Scope(folder.resolve(), ("alpha",))
+    assert sea.parse_scope(f"alpha --seas-dir={folder}").names == ("alpha",)
+    assert sea.parse_scope("--seas-dir userseas alpha") == scope  # relative to the work dir
+    home = Path.home()
+    tilde = Path("~") / folder.relative_to(home) if folder.is_relative_to(home) else folder
+    assert sea.parse_scope(f"--seas-dir {tilde}").seas_dir == folder.resolve()
+    # With a folder only its SEAs are names: neither the checkout's nor registered ones.
+    assert sea.parse_scope(f"--seas-dir {folder} demo").names == ()
+    assert sea.parse_scope(f"--seas-dir {folder} slack alpha").names == ()
+    missing = (tmp_path / "no" / "such" / "dir").resolve()
+    assert sea.parse_scope("--seas-dir no/such/dir alpha").as_dict() == {
+        "seas_dir": str(missing),
+        "names": [],
+        "error": f"--seas-dir {missing} is not a directory",
+    }
+    for text in ("--seas-dir", "alpha --seas-dir", "--seas-dir=", "--seas-dir\nalpha"):
+        assert sea.parse_scope(text) == sea.Scope(error="--seas-dir needs a folder"), text
+    unusable = sea.parse_scope("--seas-dir ~no_such_user_rsi7d/seas alpha")
+    assert unusable.error.startswith("--seas-dir '~no_such_user_rsi7d/seas': ")
+    assert unusable.names == () and unusable.seas_dir is None
+    assert sea.parse_scope("--seas-dir /bad\x00dir").error.startswith("--seas-dir '/bad\\x00dir': ")
+    assert sea.parse_scope("demo").as_dict() == {"seas_dir": "", "names": ["demo"]}
+
+
+def _run_rsi7d(task: str, script: list[bytes], work_dir: Path) -> tuple[Any, list[Any]]:
+    """Run the rsi7d SEA on *task* against a scripted model; return the parsed result and requests.
+
+    The agent is registered under the calling (task) thread the way the
+    daemon registers a run before starting it (``commands.py``), which
+    is how the SEA's tools find their task text through ``current_agent``.
+    """
+    agent = WorktreeSorcarAgent("rsi7d-sea-test")
+    state = agent_state.AgentState(
+        "rsi7d-sea-test", agent=agent, task_thread=threading.current_thread(), is_task_active=True
+    )
+    agent_state.register(state)
+    try:
+        result = _run_registered(agent, task, script, work_dir)
+    finally:
+        agent_state.unregister(state.task_id, state)
+    return yaml.safe_load(result[0]), [r for r in result[1] if r.get("tools")]
+
+
+def _run_registered(
+    agent: WorktreeSorcarAgent, task: str, script: list[bytes], work_dir: Path
+) -> tuple[str, list[dict[str, Any]]]:
+    """Run *agent* on *task* against the scripted model; return the raw result and requests."""
+    with serve(script) as (url, requests):
+        result = agent.run(
+            prompt_template=task,
+            use_worktree=False,
+            model_name=MODEL,
+            work_dir=str(work_dir),
+            max_steps=8,
+            max_budget=sea.max_budget(),
+            model_config={"base_url": url, "api_key": "local"},
+            tools=sea.tools(),
+            base_system_prompt=sea.system_prompt(),
+            web_tools=sea.use_web_tools(),
+            use_memory=False,
+            is_parallel=False,
+            verbose=False,
+        )
+    return result, requests
+
+
+def _tool_results(agentic: list[Any]) -> list[str]:
+    """Return the last tool result the model saw before each request after the first."""
+    return [
+        str([m for m in request["messages"] if m["role"] == "tool"][-1]["content"]).split(
+            "\n\nSteps: "
+        )[0]
+        for request in agentic[1:]
+    ]
 
 
 def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
@@ -784,46 +878,110 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
 
     Checks the tools offered to the model, the system prompt, that the
     tool results carry real data, and that the patch landed in the file.
+    The task ``demo fdemo. …`` scopes the run: the listing holds those
+    two SEAs only, and patching ``tdemo`` is refused.
     """
     section = "## Lessons from recent runs (rsi7d)\n- Report the exit code before the output."
     script = [
         tool_call_body("indexed_seas", {}, prompt_tokens=500),
         tool_call_body(
+            "patch_sea_prompt", {"name": "tdemo", "old": "", "new": section}, prompt_tokens=550
+        ),
+        tool_call_body(
             "patch_sea_prompt", {"name": "demo", "old": "", "new": section}, prompt_tokens=600
         ),
         finish_body("<p>Patched demo.</p>", prompt_tokens=700),
     ]
-    with serve(script) as (url, requests):
-        agent = ChatSorcarAgent("rsi7d-sea-test")
-        result = agent.run(
-            prompt_template=sea.build_prompt(""),
-            model_name=MODEL,
-            work_dir=str(tmp_path),
-            max_steps=5,
-            max_budget=sea.max_budget(),
-            model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
-            base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
-            use_memory=False,
-            is_parallel=False,
-            verbose=False,
-        )
-    parsed = yaml.safe_load(result)
-    assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>"
-    agentic = [r for r in requests if r.get("tools")]
-    assert len(agentic) == 3, [list(r) for r in requests]
+    parsed, agentic = _run_rsi7d("demo fdemo. Patch demo only.", script, tmp_path)
+    assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>", parsed
+    assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
     assert {t.__name__ for t in sea.tools()} <= names
     assert {"Bash", "run_agent", "decide", "finish"} <= names
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
     assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
-    listing = [m for m in agentic[1]["messages"] if m["role"] == "tool"][-1]
-    assert '"name": "demo"' in str(listing["content"])
-    patched = [m for m in agentic[2]["messages"] if m["role"] == "tool"][-1]
-    assert str(patched["content"]).startswith("Patched SYSTEM_PROMPT of")
+    listing, refused, patched = _tool_results(agentic)
+    scoped = json.loads(listing)
+    assert scoped["scope"] == {"seas_dir": "", "names": ["demo", "fdemo"]}
+    assert [row["name"] for row in scoped["seas"]] == ["demo", "fdemo"]
+    assert refused == "Error: 'tdemo' is outside this run's scope ['demo', 'fdemo']"
+    assert patched.startswith("Patched SYSTEM_PROMPT of")
     demo_prompt = sea._execute_sea(checkout / "demo" / "demo_sea.py")["system_prompt"]()
     assert demo_prompt.endswith(section + "\n")
+    assert section not in (checkout / "tdemo" / "tdemo_sea.py").read_text(encoding="utf-8")
+
+
+def test_agent_run_with_seas_dir_edits_only_that_folder(checkout: Path, tmp_path: Path) -> None:
+    """``--seas-dir <folder>`` makes the folder's SEAs the editable ones and hides the rest.
+
+    The listing holds only ``alpha``; its runs are the only ones mined;
+    the checkout's ``demo`` is refused; the autorouter evidence refresh
+    is refused because ``autorouter`` is out of scope; ``alpha`` is
+    patched in the user folder.
+    """
+    folder = tmp_path / "userseas"
+    (folder / "alpha").mkdir(parents=True)
+    alpha = folder / "alpha" / "alpha_sea.py"
+    alpha.write_text(_PLAIN_SEA, encoding="utf-8")
+    parent = _persist(
+        "/alpha go",
+        [_dispatch(str(alpha), "go"), _dispatch(str(checkout / "demo" / "demo_sea.py"), "do")],
+    )
+    _persist("go", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
+    _persist("do", [_result_event(True)], result="<p>ok</p>", parent_task_id=parent)
+    section = "## Lessons from recent runs (rsi7d)\n- Cite the run id."
+    script = [
+        tool_call_body("indexed_seas", {}, prompt_tokens=500),
+        tool_call_body("sea_runs", {}, prompt_tokens=520),
+        tool_call_body(
+            "patch_sea_prompt", {"name": "demo", "old": "", "new": section}, prompt_tokens=550
+        ),
+        tool_call_body("write_autorouter_evidence", {"text": "| m | t |"}, prompt_tokens=580),
+        tool_call_body(
+            "patch_sea_prompt", {"name": "alpha", "old": "", "new": section}, prompt_tokens=600
+        ),
+        finish_body("<p>Patched alpha.</p>", prompt_tokens=700),
+    ]
+    parsed, agentic = _run_rsi7d(f"--seas-dir {folder}", script, tmp_path)
+    assert parsed["success"] is True and parsed["summary"] == "<p>Patched alpha.</p>"
+    listing, runs, refused, evidence, patched = _tool_results(agentic)
+    scoped = json.loads(listing)
+    assert scoped["scope"] == {"seas_dir": str(folder.resolve()), "names": []}
+    assert [row["name"] for row in scoped["seas"]] == ["alpha"]
+    assert scoped["seas"][0]["editable_path"] == str(alpha.resolve())
+    assert list(json.loads(runs)["seas"]) == ["alpha"]
+    assert refused == f"Error: 'demo' is not an editable SEA under {folder.resolve()}"
+    assert evidence == f"Error: 'autorouter' is not an editable SEA under {folder.resolve()}"
+    assert patched.startswith("Patched SYSTEM_PROMPT of")
+    assert sea._execute_sea(alpha)["system_prompt"]().endswith(section + "\n")
+    assert section not in (checkout / "demo" / "demo_sea.py").read_text(encoding="utf-8")
+
+
+def test_agent_run_with_an_unusable_seas_dir_lists_mines_and_edits_nothing(
+    checkout: Path, tmp_path: Path
+) -> None:
+    """A ``--seas-dir`` that is not a directory is an error every tool reports, not a sweep."""
+    _persist("/demo go", [_dispatch(str(checkout / "demo" / "demo_sea.py"), "go")])
+    script = [
+        tool_call_body("indexed_seas", {}, prompt_tokens=500),
+        tool_call_body("sea_runs", {}, prompt_tokens=520),
+        tool_call_body("sea_findings", {"name": "demo"}, prompt_tokens=540),
+        tool_call_body(
+            "patch_sea_prompt", {"name": "demo", "old": "", "new": "x"}, prompt_tokens=560
+        ),
+        finish_body("<p>Bad folder.</p>", prompt_tokens=700),
+    ]
+    parsed, agentic = _run_rsi7d("--seas-dir no/such/dir demo", script, tmp_path)
+    assert parsed["success"] is True
+    listing, runs, findings, patched = _tool_results(agentic)
+    missing = (tmp_path / "no" / "such" / "dir").resolve()
+    error = f"--seas-dir {missing} is not a directory"
+    assert json.loads(listing) == {
+        "scope": {"seas_dir": str(missing), "names": [], "error": error},
+        "seas": [],
+    }
+    assert json.loads(runs) == {"error": error, "seas": {}}
+    assert findings == patched == f"Error: {error}"
 
 
 def _commit(
@@ -974,7 +1132,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
         f"Error: run {no_sea} does not record its SEA; pass name=<sea>"
     )
     assert sea.prepare_replay_clone(no_sea, name="slack") == (
-        "Error: 'slack' is not an editable SEA of this checkout"
+        f"Error: 'slack' is not an editable SEA under {', '.join(map(str, sea._editable_dirs()))}"
     )
     (tmp_path / "plain").mkdir()
     for work_dir in (str(tmp_path / "plain"), str(tmp_path / "missing"), ""):

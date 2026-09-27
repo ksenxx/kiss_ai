@@ -40,7 +40,7 @@ A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complet
 
 # Tip
 
-**Recursive self improvement (RSI)** of a SEA is enabled based on past trajectories of the SEA.  Run `/rsi7d <SEA_NAME>` to self improve a SEA based on the trajectories of the SEA from last 7 days.
+**Recursive self improvement (RSI)** of a SEA is enabled based on past trajectories of the SEA.  Run `/rsi7d <SEA_NAME> [<SEA_NAME> ...]` to self improve those SEAs from their trajectories of the last 7 days, `/rsi7d all` for every indexed SEA, or `/rsi7d --seas-dir <folder> [<SEA_NAME> ...]` for the SEAs of your own folder (one listed in `~/.kiss/SEAS.md`, for instance): the tools mine and patch only the SEAs in that scope.  Free-form instructions may follow the scope.
 
 # Tip
 

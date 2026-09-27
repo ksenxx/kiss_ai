@@ -937,7 +937,10 @@ class TaskResult:
   only when asked), `/remember` (appends a standing instruction to
   `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
   a venue), `/rsi7d` (7-day self-improvement of the indexed SEAs from
-  their recorded runs; needs task text, e.g. `/rsi7d all`), `/sh`
+  their recorded runs; the task text starts with the scope: `/rsi7d
+  all`, `/rsi7d <name> [<name> ...]` for those SEAs only, or `/rsi7d
+  --seas-dir <folder> [<name> ...]` for the SEAs of that folder, which
+  then are the ones it may edit), `/sh`
   (runs the command with the `bash` tool profile), `/skillopt`
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),

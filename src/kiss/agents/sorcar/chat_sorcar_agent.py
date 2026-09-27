@@ -226,6 +226,22 @@ class ChatSorcarAgent(SorcarAgent):
         with self._task_id_lock:
             return self._last_task_id or ""
 
+    @property
+    def last_user_prompt(self) -> str:
+        """Return the task text of this agent's current (or last) :meth:`run`.
+
+        The text as submitted — what the user typed, or the ``task`` a
+        ``run_agent`` dispatch passed — before the chat history, the
+        bare-path directive or ``SORCAR.md`` are added to the prompt the
+        model sees.  A SEA's tool reads it through
+        :func:`kiss.server.agent_state.current_agent` to parse options
+        out of its own task (rsi7d's scope).
+
+        Returns:
+            The text, or ``""`` before this agent's first ``run``.
+        """
+        return self._last_user_prompt
+
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').
 

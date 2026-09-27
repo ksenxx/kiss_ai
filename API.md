@@ -200,6 +200,9 @@
 - **last_task_id** — Return the ``task_history`` row id this agent last allocated. The readers live on other threads — the WebSocket command handler stamping a queued user message, the merge/discard flow, the printer's broadcast fan-out — so the read takes ``_task_id_lock``, the same lock the publishing assignment in :meth:`run` takes.  That pairing is what makes the lock mean anything: a lock only the writer holds excludes nobody.<br/>`last_task_id() -> str` *(property)*
   - **Returns:** The row id, or ``""`` before this agent's first ``run``.
 
+- **last_user_prompt** — Return the task text of this agent's current (or last) :meth:`run`. The text as submitted — what the user typed, or the ``task`` a ``run_agent`` dispatch passed — before the chat history, the bare-path directive or ``SORCAR.md`` are added to the prompt the model sees.  A SEA's tool reads it through :func:`kiss.server.agent_state.current_agent` to parse options out of its own task (rsi7d's scope).<br/>`last_user_prompt() -> str` *(property)*
+  - **Returns:** The text, or ``""`` before this agent's first ``run``.
+
 - **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear'). Also drops any pending one-shot :meth:`resume_from_task_id` seed: a brand-new chat must never have its first prompt augmented with the previous task's parent-chain context.<br/>`new_chat() -> None`
 - **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
   - `chat_id`: String chat session identifier to resume.
