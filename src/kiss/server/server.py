@@ -1327,8 +1327,9 @@ class VSCodeServer(
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
         # The chat-panel headers in the History sidebar show each chat's
-        # FIRST task, which may be older than any row on this page, and
-        # the launch time of its LATEST task (``chat_summaries``).
+        # summary (``chat_summaries``, once a task has finished) or else
+        # its FIRST task, which may be older than any row on this page,
+        # and the launch time of its LATEST task (``chat_summaries``).
         chat_ids = [str(s["id"]) for s in sessions]
         first_tasks = _chat_first_tasks(chat_ids)
         summaries = _chat_summaries(chat_ids)

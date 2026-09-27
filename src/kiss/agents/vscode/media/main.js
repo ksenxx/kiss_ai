@@ -20599,11 +20599,13 @@
   }
 
   /**
-   * Keep *group*'s header naming the chat's FIRST task. The daemon
-   * stamps every row with `chat_first_task`; without it (an older
-   * daemon) the header follows the oldest row loaded so far — rows
-   * arrive newest first, so each of the chat's rows is older than the
-   * one before.
+   * Keep *group*'s header naming the chat. The daemon stamps every row
+   * with the chat's `chat_summary` (the 6–8 word summary written to
+   * `chat_summaries` when a task finishes) and its `chat_first_task`;
+   * the header shows the summary, or the first task while the chat has
+   * none yet. Without either (an older daemon) the header follows the
+   * oldest row loaded so far — rows arrive newest first, so each of the
+   * chat's rows is older than the one before.
    */
   function updateHistoryGroupHeader(group, session) {
     updateHistoryGroupLaunched(group, session);
@@ -20611,11 +20613,14 @@
       ':scope > .history-chat-header .history-chat-title',
     );
     if (!titleEl) return;
+    const summary =
+      typeof session.chat_summary === 'string' ? session.chat_summary : '';
     const first =
       typeof session.chat_first_task === 'string'
         ? session.chat_first_task
         : '';
-    if (first) {
+    const named = summary.trim() || first;
+    if (named) {
       group.dataset.firstFromServer = '1';
     } else if (group.dataset.firstFromServer === '1') {
       return;
@@ -20624,7 +20629,7 @@
     // anyway (white-space: nowrap), but the first line alone reads as
     // the title rather than a run-on of the whole prompt.
     const text =
-      (first || session.preview || session.title || 'Untitled')
+      (named || session.preview || session.title || 'Untitled')
         .split('\n')
         .map(l => l.trim())
         .filter(Boolean)[0] || 'Untitled';
@@ -20658,9 +20663,9 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'history-chat-header';
-    // No fixed aria-label: the first-task title span IS the button's
-    // accessible name, so screen readers can tell the chats apart
-    // (aria-expanded carries the toggle state).
+    // No fixed aria-label: the title span (chat summary or first task)
+    // IS the button's accessible name, so screen readers can tell the
+    // chats apart (aria-expanded carries the toggle state).
     btn.innerHTML =
       '<svg class="history-chat-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
     const titleEl = document.createElement('span');

@@ -18,9 +18,18 @@ export interface SessionInfo {
   has_events?: boolean;
   /**
    * The chat's FIRST task text (bounded by the daemon), naming the
-   * chat's collapsible panel in the history view.
+   * chat's collapsible panel in the history view while the chat has no
+   * `chat_summary` yet.
    */
   chat_first_task?: string;
+  /**
+   * The chat's 6–8 word summary from the daemon's `chat_summaries`
+   * table (written when a task finishes); '' until then. When present
+   * it names the chat's collapsible panel instead of `chat_first_task`.
+   */
+  chat_summary?: string;
+  /** Epoch ms when the chat's latest task was launched, 0 when unknown. */
+  chat_last_launched?: number;
 }
 
 /**

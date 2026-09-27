@@ -869,6 +869,72 @@ async function main() {
     win.close();
   });
 
+  await test("History: the chat header shows the daemon's chat_summary, falling back to the first task until one exists", async () => {
+    const {win, posted} = makeWebview();
+    const title = g => g.querySelector('.history-chat-title').textContent;
+    // A is summarised; B has only its first task; C has neither (an
+    // older daemon) and follows its oldest loaded row.
+    sendHistory(win, posted, 0, [
+      Object.assign(session('A', 'a2', todayNoon), {
+        chat_first_task: 'first task of A',
+        chat_summary: 'Fix login and add tests',
+      }),
+      Object.assign(session('B', 'b1', todayNoon - 600), {
+        chat_first_task: 'first task of B',
+        chat_summary: '',
+      }),
+      session('C', 'c2', todayNoon - 1200),
+      Object.assign(session('A', 'a1', todayNoon - 1800), {
+        chat_first_task: 'first task of A',
+        chat_summary: 'Fix login and add tests',
+      }),
+      session('C', 'c1', todayNoon - 2400),
+    ]);
+    let [gA, gB, gC] = groups(win);
+    assert.strictEqual(title(gA), 'Fix login and add tests');
+    assert.strictEqual(title(gB), 'first task of B');
+    assert.strictEqual(title(gC), 'task c1');
+    assert.strictEqual(
+      gA.querySelector('.history-chat-header').textContent.trim(),
+      'Fix login and add tests',
+      'the summary is the header button\'s accessible name',
+    );
+    // B's task finishes and the daemon summarises the chat: the next
+    // refresh renames the panel. A summary of only whitespace does not
+    // count as one, so C keeps following its first task instead.
+    sendHistory(win, posted, 0, [
+      Object.assign(session('A', 'a2', todayNoon), {
+        chat_first_task: 'first task of A',
+        chat_summary: 'Fix login and add tests',
+      }),
+      Object.assign(session('B', 'b1', todayNoon - 600), {
+        chat_first_task: 'first task of B',
+        chat_summary: 'Refactor the billing module',
+      }),
+      Object.assign(session('C', 'c2', todayNoon - 1200), {
+        chat_first_task: 'first task of C',
+        chat_summary: '   \n',
+      }),
+    ]);
+    [gA, gB, gC] = groups(win);
+    assert.strictEqual(title(gA), 'Fix login and add tests');
+    assert.strictEqual(title(gB), 'Refactor the billing module');
+    assert.strictEqual(title(gC), 'first task of C');
+    // Only the first line of a multi-line summary is shown, and a row
+    // that arrives without the chat-level fields (mixed daemon
+    // payloads) never overwrites a name the daemon already gave.
+    sendHistory(win, posted, 0, [
+      Object.assign(session('A', 'a2', todayNoon), {
+        chat_first_task: 'first task of A',
+        chat_summary: '  Fix login\nand add tests',
+      }),
+      session('A', 'a1', todayNoon - 1800),
+    ]);
+    [gA] = groups(win);
+    assert.strictEqual(title(gA), 'Fix login');
+    win.close();
+  });
+
   await test('History: a search expands every chat — past saved collapses and through the identical-refresh fast path — and clearing it restores the defaults', async () => {
     const {win, posted} = makeWebview();
     const collapsed = g => g.classList.contains('collapsed');
