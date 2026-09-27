@@ -7,9 +7,12 @@ endpoints. No hosted gateway, aggregator, or third-party runtime ever sits in
 the path.
 
 Sorcar discovers servers from `~/.kiss/mcp.json` (all projects),
-`<project>/.mcp.json` (Claude-Code compatible), and `<project>/.kiss/mcp.json`.
-Each server's tools appear to the agent as `<server>_<tool>` and are filtered
-by the `mcp_permissions` wildcard rules in `~/.kiss/config.json`.
+`<project>/.mcp.json` (Claude-Code compatible), and `<project>/.kiss/mcp.json`,
+in that order of increasing precedence (on a name clash the later file wins).
+The files are re-read at the start of each task, and the servers' tools are
+added only to runs with the full tool profile. Each server's tools appear to the agent as
+`<server>_<tool>` and are filtered by the `mcp_permissions` wildcard rules in
+`~/.kiss/config.json`.
 
 ## Quick start
 
@@ -74,8 +77,10 @@ missing: it names the missing items and, for env vars, prints the setup steps
 from `catalog.json`; `--force` writes the entry anyway. Export
 credentials in your shell profile — Sorcar's stdio launcher passes your
 environment to the server at launch, so **no secret is ever stored in
-`mcp.json` or this repository**. Restart Sorcar after changing env vars or
-configs: servers launch with the environment Sorcar started with.
+`mcp.json` or this repository**. Restart Sorcar after changing env vars:
+servers launch with the environment Sorcar started with. Edits to the
+`mcp.json` files take effect at the next task (a changed entry gets a fresh
+connection; unchanged entries keep their live one).
 
 Twilio's team advises against running community MCP servers alongside their
 official one (prompt-injection isolation); if you enable `twilio-sms`, prefer
@@ -92,6 +97,41 @@ cd ~/.kiss/connectors/whatsapp-mcp/whatsapp-bridge && go run main.go   # scan QR
 Messages sync into a local SQLite DB; nothing new sees your traffic (it is the
 normal end-to-end-encrypted WhatsApp Web protocol). Unofficial API — use
 judiciously. Re-pair about every 20 days.
+
+## Remote servers with OAuth sign-in (Notion, Linear, Asana, Zoom, ...)
+
+Hosted MCP servers that follow the MCP authorization spec are not in
+`catalog.json`; Sorcar signs in to them directly, with no KISS-owned app and
+no broker in between. Ask the agent to connect (it has the
+`connect_mcp_server(name, url="", transport="")` and
+`finish_mcp_server_connect(name)` tools) or run it yourself:
+
+```bash
+uv run python -m kiss.agents.sorcar.mcp_oauth notion                 # known name
+uv run python -m kiss.agents.sorcar.mcp_oauth acme https://mcp.acme.com/mcp http   # any URL; transport http (default) or sse
+```
+
+The names `notion`, `linear`, `asana` (`sse`) and `zoom` map to the vendors'
+endpoints; any other name needs its URL. A server that is not yet configured
+is written to `~/.kiss/mcp.json` first (user scope). Sorcar then registers
+itself with the server's authorization server as a public PKCE client (Client
+ID Metadata Document or Dynamic Client Registration), opens the authorization
+URL in your default browser and also returns it, and waits for the redirect on
+the fixed loopback address `http://localhost:53683/callback`. You sign in and
+click Allow; `finish_mcp_server_connect` reports `pending` until then and the
+sign-in gives up after 10 minutes. One sign-in runs at a time (starting
+another cancels the first). Tokens and the registered client are stored in
+`~/.kiss/mcp_auth/<server>.json` (mode `0600`); later runs reuse and refresh
+them and never open a browser: a remote server without stored tokens fails
+with a hint to run the sign-in. Servers whose authorization server allows
+neither registration method (Zoom) need your own OAuth app: export
+`KISS_MCP_<NAME>_CLIENT_ID` (and `KISS_MCP_<NAME>_CLIENT_SECRET` for a
+confidential app; `<NAME>` is the server name upper-cased with non-alphanumerics
+as `_`) and register the redirect URI above with it.
+`KISS_MCP_CLIENT_METADATA_URL` points at a hosted Client ID Metadata Document
+when you prefer CIMD. Local `stdio` servers need no sign-in and the tools
+refuse them. The `notion` catalog entry above is the other route to Notion: a
+local server with an internal-integration token instead of the hosted one.
 
 ## Anthropic & OpenAI billing — no MCP server needed
 

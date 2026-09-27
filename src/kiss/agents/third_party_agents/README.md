@@ -135,7 +135,17 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 Auth tools are always present, so a fresh, unconfigured channel sets itself up in
 conversation:
 
-> Check my GitHub auth; if it's missing, walk me through creating a token and store it.
+> Check my GitHub auth; if it's missing, sign me in and store the credential.
+
+You do not have to type such a prompt yourself. The right sidebar's **Apps** panel
+(kiss-web and the VS Code extension) lists every channel agent with a connected /
+not-connected / unknown badge — the daemon probes them in a short-lived subprocess
+(`python -m kiss.agents.third_party_agents.auth_status`, 20-second deadline, result
+cached for 30 seconds; a probe that fails or times out shows as unknown; a service
+enrolled in the Muse vault counts as connected, except the six Google services, whose
+Composio connection is probed directly) — and clicking an app that is not connected
+opens a new chat that runs a "Connect my *X* app" task
+through `run_agent`, which drives the same auth tools described below.
 
 Each channel's `check_<service>_auth` returns setup instructions when unconfigured,
 and several channels go further with a guided sign-in. Three styles exist, and in
@@ -157,10 +167,16 @@ turns the automatic opening off.
   until your approval lands). WhatsApp has its own variant of this:
   `start_whatsapp_bridge` + `get_whatsapp_qr_code` open a pairing QR page that you
   scan from the phone, and `wait_for_whatsapp_pairing` waits for the scan.
-  GitHub, Microsoft Teams, Slack and Discord sign in through KISS-owned public OAuth
-  apps (device flow for GitHub and Teams, PKCE with a loopback redirect for Slack and
-  Discord), so you register nothing: you sign in and click Allow. The client IDs live
-  in `_oauth_apps.py`; `KISS_<PROVIDER>_CLIENT_ID` substitutes your own app. A
+  GitHub, Microsoft Teams, Slack and Discord sign in through *public* OAuth apps
+  (device flow for GitHub and Teams, PKCE with the fixed loopback redirect
+  `http://localhost:53682/callback` for Slack and Discord): no client secret exists,
+  you sign in and click Allow. `_oauth_apps.py` is where the KISS-owned apps' client
+  IDs are embedded; in this checkout those entries are still empty, so
+  `authenticate_<service>` answers with the `KISS_<PROVIDER>_CLIENT_ID` variable to
+  set; that variable overrides an embedded ID as well, for example with an app you
+  registered yourself (the module docstring lists the settings such an app needs). Microsoft Teams additionally requires
+  Muse-auth: its delegated token pair must live in the vault for the daemon to
+  refresh it, so with `KISS_MUSE_AUTH=0` the Teams sign-in refuses. A
   Slack or Discord sign-in yields a *user* token: Slack acts as you (its posts appear
   under your name, and in channel mode it answers other people, not messages you
   wrote yourself), and Discord can list your servers and post to the one channel you
@@ -222,7 +238,11 @@ not whether the network call afterwards succeeded.
 Covered services: `slack`, `github`, `notion`, `discord`, `homeassistant`, `firecrawl`, `brave_search`, `ntfy`, `govee`,
 `line`, `mattermost`, `msteams`, `nextcloud`, `synology`, `telegram`, `twitch`, `zalo`,
 and `bluebubbles`. Other channels keep their legacy direct-credential path; the
-Google agents go through Composio instead.
+Google agents go through Composio instead. (The daemon's host table,
+`SERVICE_HOSTS` in `muse_auth/_common.py`, still lists the six Google service names
+— 24 entries in all — so a Google token imported into the vault before the Composio
+switch stays managed there, but no Google agent reads it any more, and the Apps panel
+ignores such stale enrollments.)
 
 The boundary is managed with `python -m kiss.agents.third_party_agents.muse_auth`
 (verbs: `status`, `import SERVICE`, `grant SERVICE read|write`,
@@ -234,10 +254,16 @@ you can run it yourself or simply ask Sorcar to do it:
 > Grant the github service a single-use write permission.
 
 Every covered service enrolls itself when its legacy credential auto-migrates on first use — and the
-Connect-style browser sign-ins for GitHub, Twitch, and Microsoft Teams store their
-grant straight into the vault: as a refresh-token credential the daemon renews itself
-when the grant includes a refresh token (Teams requires one; GitHub OAuth apps issue
-one only with expiring tokens enabled), otherwise as a plain bearer token.
+Connect-style browser sign-ins for GitHub, Twitch, Microsoft Teams, Slack and Discord
+store their grant straight into the vault while Muse-auth is enabled (with
+`KISS_MUSE_AUTH=0`, GitHub, Slack and Discord fall back to their legacy credential
+files and Teams refuses to sign in): as a refresh-token credential the daemon
+renews itself when the grant includes a refresh token (Teams rejects a grant without
+one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
+plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
+header). The daemon starts on demand: agents that find none
+serialize the start behind `$KISS_HOME/muse_auth/spawn.lock`, so concurrent agents
+never race to launch two.
 `grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
 `KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
@@ -273,7 +299,7 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | LINE | `line` | yes | channel access token, `line/config.json` | `push_text_message`, `reply_message`, `get_profile`, `get_quota`, `leave_group`, `push_image_message` |
 | Matrix | `matrix` | yes | browser sign-in via the homeserver's OAuth 2.0 device grant (`authenticate_matrix(homeserver_url)`, `finish_matrix_auth`; matrix.org and other MAS-backed servers; the agent renews the short-lived token itself) or a hand-supplied access token (matrix-nio), `matrix/config.json` | `list_rooms`, `join_room`, `leave_room`, `send_text_message`, `send_notice`, `get_room_members`, `invite_user`, `kick_user`, `create_room`, `get_profile`, `refresh_if_needed` (renews an OAuth-issued token) |
 | Mattermost | `mattermost` | yes | server URL + personal access token, `mattermost/config.json` | `list_teams`, `list_third_party_agents` (channels), `get_channel`, `list_channel_posts`, `create_post`, `delete_post`, `get_user`, `list_users`, `create_direct_message_channel`, `add_reaction` |
-| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow through the KISS multi-tenant app (`authenticate_msteams()`, optional `tenant_id`; `finish_msteams_auth`; delegated token refreshed by the Muse daemon), `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
+| Microsoft Teams | `msteams` | yes | browser sign-in via the Entra device code flow through the KISS multi-tenant app (`authenticate_msteams()`, optional `tenant_id`; `finish_msteams_auth`; delegated token refreshed by the Muse daemon, so Muse-auth must be enabled), `msteams/config.json` | `list_teams`, `get_team`, `list_third_party_agents` (channels), `list_channel_messages`, `post_channel_message`, `reply_to_message`, `list_chats`, `post_chat_message`, `list_team_members` |
 | Nextcloud Talk | `nextcloud` | yes | browser sign-in via Login Flow v2 (`authenticate_nextcloud(url)`, `finish_nextcloud_auth`; app password issued by the server) or username + app password, `nextcloud/config.json` | `list_rooms`, `get_room`, `create_room`, `list_participants`, `list_messages`, `post_message`, `set_room_name`, `delete_message`, `revoke_app_password` |
 | Nostr | `nostr` | no | private key, optional relays (default `wss://relay.damus.io`; pynostr), `nostr/config.json` | `publish_note`, `publish_reply`, `send_dm`, `get_profile`, `set_profile`, `list_relays`, `add_relay`, `remove_relay` |
 | ntfy pub-sub | `ntfy` | yes | `topic` (+ optional `server`, `token`), `ntfy/config.json` | `publish_notification`, `poll_topic` |
@@ -430,7 +456,11 @@ directly:
    reminder help center uses "Remind me to call the dentist tomorrow at 10am" and
    "Every Monday at 9am, remind me to submit my timesheet", then cancels by name
    ("Cancel my dentist reminder"). Phrase scheduled prompts to Sorcar the same way: a
-   name, an exact schedule, a bounded prompt, a delivery target.
+   name, an exact schedule, a bounded prompt, a delivery target. Cron expressions and
+   timestamps without a UTC offset are read as Pacific time (`America/Los_Angeles`,
+   PDT or PST), not UTC; a timestamp with an offset keeps its instant, and intervals
+   are zone-free. Say "9am Eastern" and the cron agent converts it to Pacific before
+   storing the job.
 7. **Meet people in the channel they already use.** Muse's biggest distribution bet is
    living inside WhatsApp rather than a new app. The KISS equivalent: have scheduled
    results delivered where the audience already is (a Telegram chat, `#eng` on Slack,
@@ -454,9 +484,10 @@ explicit target:
 
 > Post "deploy of v2.3 finished, all green" to the Slack channel #eng.
 
-**2. Authenticate in chat, not in config files:**
+**2. Authenticate in chat, not in config files** (or click the app in the sidebar's
+Apps panel, which submits an equivalent prompt for you):
 
-> Check my GitHub auth; if it's missing, walk me through creating a token and store it.
+> Check my GitHub auth; if it's missing, sign me in and store the credential.
 
 Then, as a second prompt (the session that stores a fresh token cannot use the new
 backend tools itself — they are snapshotted at session start):
@@ -561,8 +592,10 @@ link from the channel login.)
 
 ### Schedules and always-on gateways
 
-The built-in cron agent understands plain-language schedules; the kiss-web daemon
-ticks the scheduler automatically, and a job's result can be delivered to any
+The built-in cron agent understands plain-language schedules (wall-clock times are
+Pacific, `America/Los_Angeles`, unless a timestamp carries its own offset; the job
+listing shows next-run times in Pacific too); the
+kiss-web daemon ticks the scheduler automatically, and a job's result can be delivered to any
 gateway-capable channel (25 of the 32 messaging channels; a `[SILENT]` or `NO_REPLY`
 result suppresses delivery). Jobs due at the same time run concurrently, each in its
 own scratch directory (`~/.kiss/cron/runs/<job_id>-<random>`, removed when the run
