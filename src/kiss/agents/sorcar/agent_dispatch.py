@@ -614,10 +614,10 @@ def _dispatch(
         )
     parent_tab_id = ""
     if parent_task_id:
-        # The tab really watching the caller (its own tab id, or —
-        # when the caller is itself a sub-agent — the viewer tab the
-        # printer's fan-out registry knows), the same resolution
-        # nested ``run_parallel`` fan-outs use.  A persisted task id
+        # The tab the webviews show the caller under (its own tab id,
+        # or — when the caller is itself a sub-agent — its
+        # ``{parent}__sub_{task}`` tab), the same resolution nested
+        # ``run_parallel`` fan-outs use.  A persisted task id
         # proves the caller is a ``ChatSorcarAgent``, which always has
         # the resolver; the guard only covers duck-typed callers.
         resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)

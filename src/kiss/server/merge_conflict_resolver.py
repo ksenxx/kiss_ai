@@ -60,11 +60,14 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         _live_agent_usage,
         _notify_subagent_done,
         _persisted_task_id,
+        subagent_parent_tab_id_of,
     )
 
     printer = getattr(parent_agent, "printer", None)
     parent_task_id = _persisted_task_id(parent_agent)
-    parent_tab_id = str(getattr(parent_agent, "_tab_id", "") or "")
+    # The tab the webviews show the parent under — for a sub-agent
+    # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
+    parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{parent_task_id or parent_tab_id}__merge"
     model_getter = getattr(merge_sea, "model", None)
     model_name = str(
@@ -72,10 +75,18 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     )
     agent = ChatSorcarAgent("Merge conflict resolver")
     agent._tab_id = sub_tab_id
+    # A side channel like the task-update child: its work is the
+    # resolved merge in the parent's repo, so its finished tab is not
+    # worth reopening.  The daemon replays a finished side channel as
+    # ``subagentDone`` instead of ``openSubagentTab`` (see
+    # ``server._is_side_channel_row``); without the stamp every
+    # reconnect re-opened the finished resolver's tab, since no
+    # fan-out panel of the parent's transcript owns it.
     agent._subagent_info = {
         "parent_task_id": parent_task_id,
         "parent_tab_id": parent_tab_id,
         "reviewer": False,
+        "side_channel": True,
     }
     try:
         agent.run(

@@ -896,6 +896,29 @@ class _AbandonedSubagent:
         return delta
 
 
+def subagent_parent_tab_id_of(parent_agent: Any) -> str:
+    """Return the frontend tab id children of *parent_agent* hang off.
+
+    The daemon's helper sub-agents (task update, merge-conflict
+    resolver, ``run_agent`` dispatches) stamp this as their
+    ``parent_tab_id``; it is :meth:`SorcarAgent._subagent_parent_tab_id`
+    when the parent has it, else the parent's raw ``_tab_id`` (a
+    duck-typed parent).  A parent that is itself a sub-agent carries a
+    synthetic ``_tab_id`` no webview has, so stamping that raw id
+    would make every surface drop the child's ``new_tab``.
+
+    Args:
+        parent_agent: The agent spawning the child.
+
+    Returns:
+        The tab id, or ``""`` when the parent runs headless.
+    """
+    resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
+    if callable(resolve_tab):
+        return str(resolve_tab() or "")
+    return str(getattr(parent_agent, "_tab_id", "") or "")
+
+
 def _persisted_task_id(agent: Any) -> str:
     """Return *agent*'s persisted ``task_history`` row id, or ``""``.
 
@@ -1583,27 +1606,41 @@ class SorcarAgent(RelentlessAgent):
         itself a sub-agent (nested ``run_parallel``, or a ``run_agent``
         dispatch), its ``_tab_id`` is a synthetic id — the fan-out's
         invented one, or the daemon dispatch's ``api-…`` id — which no
-        webview has opened; the printer's viewer registry knows which
-        tab is really watching this task, so that one wins.  The
-        agent's own synthetic id is excluded from the candidates: a
-        ``run_agent`` dispatch registers it as a subscriber too (see
-        ``register_task_ui``), and picking it would parent the nested
-        children under a tab no client has, dropping their tabs.
+        webview has opened.  Every webview opens a sub-agent's tab
+        under the deterministic id ``{parent_tab_id}__sub_{task_id}``
+        (``subagentTabIdFor`` in ``media/main.js``; ``task`` stands in
+        for a missing parent), and the daemon replays it under the
+        same id, so that id is derived here: a sub-agent that fans out
+        right away — before any client's ``resumeSession`` for its tab
+        has arrived — has no viewer registered yet, and parenting its
+        children under the synthetic id would keep every surface from
+        opening their tabs.  Once viewers ARE registered in the
+        printer's fan-out registry they are authoritative: a parent
+        chat reopened under another tab id shows this sub-agent as
+        ``{new_tab}__sub_{task_id}``, which only the registry knows.
+        The agent's own synthetic id is never a candidate (a
+        ``run_agent`` dispatch registers it as a subscriber too, see
+        ``register_task_ui``).
 
         Returns:
             The tab id, or ``""`` when running headless.
         """
         tab_id = str(getattr(self, "_tab_id", "") or "")
-        if getattr(self, "_subagent_info", None) is None or self.printer is None:
-            return tab_id
-        fanout = getattr(self.printer, "_fanout_targets", None)
+        info = getattr(self, "_subagent_info", None)
         own_task_id = _persisted_task_id(self)
-        if fanout is None or not own_task_id:
+        if info is None or not own_task_id:
             return tab_id
+        parent_tab_id = str(info.get("parent_tab_id") or "") or "task"
+        derived = f"{parent_tab_id}__sub_{own_task_id}"
+        fanout = getattr(self.printer, "_fanout_targets", None)
         viewer_ids = sorted(
-            v for v in fanout(own_task_id) if v and v != tab_id
+            str(v) for v in (fanout(own_task_id) if fanout else [])
+            if v and v != tab_id
         )
-        return viewer_ids[0] if viewer_ids else tab_id
+        if not viewer_ids or derived in viewer_ids:
+            return derived
+        return viewer_ids[0]
+
 
     def _run_tasks_parallel(
         self,

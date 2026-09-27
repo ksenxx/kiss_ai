@@ -2189,6 +2189,7 @@ class VSCodeServer(
                 parent_task_id=parent_tid,
                 chat_id=chat_id,
                 sub_tab_id=tab_id,
+                sub_task_id=_coerce_id(result.get("task_id")) or "",
             )
             self.printer.broadcast(
                 {
@@ -2316,6 +2317,7 @@ class VSCodeServer(
         parent_task_id: str | None,
         chat_id: str,
         sub_tab_id: str,
+        sub_task_id: str = "",
     ) -> str:
         """Return the frontend tab id of the parent agent owning the
         sub-agent currently being opened on *sub_tab_id*.
@@ -2327,7 +2329,20 @@ class VSCodeServer(
         return value breaks that cascade, so this helper tries every
         signal we have before giving up.
 
-        Lookup order (each tier skips sub-agent states):
+        Lookup order:
+
+        0. **Tab-id suffix match.**  Every webview names a sub-agent's
+           tab ``f"{parent_tab_id}__sub_{task_id}"`` after the parent
+           tab it was spawned under (``subagentTabIdFor`` in
+           media/main.js), so a *sub_tab_id* ending in
+           ``__sub_{sub_task_id}`` settles the parent: the prefix.
+           This is the only tier that can name a parent which is
+           itself a sub-agent (a nested fan-out's grandchild; the
+           tiers below skip sub-agent states and would hand the
+           grandchild to the top-level chat tab instead).  The
+           ``task`` prefix of a parentless spawn means "no parent".
+
+        Then, each tier skipping sub-agent states:
 
         1. **Task-id match.**  Scan
            the agent-state registry for a non-subagent state registered
@@ -2352,6 +2367,11 @@ class VSCodeServer(
         manifest as the cascade-close bug from a downstream
         feature) and return ``""``.
         """
+        suffix = f"__sub_{sub_task_id}" if sub_task_id else ""
+        if suffix and sub_tab_id.endswith(suffix):
+            prefix = sub_tab_id[: -len(suffix)]
+            if prefix and prefix != "task":
+                return prefix
         with self._state_lock:
             if parent_task_id is not None:
                 parent = agent_state.get(parent_task_id)
@@ -2395,7 +2415,8 @@ class VSCodeServer(
         conn_id: str = "",
     ) -> None:
         """Broadcast ``openSubagentTab`` + ``task_events`` for every
-        persisted sub-agent row whose parent is *parent_task_id*.
+        persisted sub-agent row whose parent is *parent_task_id*, and
+        recursively for the children of every sub-agent still running.
 
         The sub-tab ids are deterministic
         (``f"{parent_tab_id}__sub_{sub_task_id}"``) so that clicking
@@ -2491,7 +2512,9 @@ class VSCodeServer(
                     }
                 )
             self._emit_pending_ask(sub_tab_id)
-            if not is_done and _subagent_is_done(sub_task_id):
+            if is_done:
+                continue
+            if _subagent_is_done(sub_task_id):
                 self.printer.broadcast(
                     {
                         "type": "subagentDone",
@@ -2500,6 +2523,17 @@ class VSCodeServer(
                         **scope,
                     }
                 )
+                continue
+            # A running sub-agent may be fanning out itself: its own
+            # children's tabs hang off the tab just announced, so this
+            # client gets them too (a running sub-agent's tab must be
+            # open on every surface, at any depth).  Their ids chain
+            # the same way (``{sub_tab_id}__sub_{grandchild_task_id}``).
+            self._open_persisted_subagent_tabs(
+                parent_task_id=str(sub_task_id),
+                parent_tab_id=sub_tab_id,
+                conn_id=conn_id,
+            )
 
     def _live_task_start_ms(
         self,
