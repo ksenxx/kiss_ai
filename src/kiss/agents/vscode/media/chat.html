@@ -322,6 +322,22 @@
         <ul id="meta-apps-list" class="meta-section-body sidebar-panel-list"></ul>
       </section>
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Apps section" aria-controls="meta-apps-list" tabindex="0"></div>
+      <!-- Spend section: global too.  The sidebarpanels block of
+           main.js draws the task history's all-time cost, a daily
+           cost heatmap (weeks as columns, Monday first, latest week
+           at the right) and cost-by-model bars into #meta-spend-graph
+           from the daemon's spendReport reply. -->
+      <section class="meta-section" id="meta-spend" aria-label="Spend">
+        <div class="sidebar-hdr meta-section-hdr">
+          <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-spend-body"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Spend</span></button>
+          <button type="button" id="meta-spend-refresh" class="meta-section-refresh" title="Reload the spend figures" aria-label="Refresh spend"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path fill="currentColor" d="M14.5 1.5v5h-5z"/></svg></button>
+        </div>
+        <div id="meta-spend-status" class="meta-info-status" aria-live="polite">Loading&hellip;</div>
+        <div id="meta-spend-body" class="meta-section-body">
+          <div id="meta-spend-graph"></div>
+        </div>
+      </section>
+      <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Spend section" aria-controls="meta-spend-body" tabindex="0"></div>
       <div id="meta-resizer" role="separator" aria-orientation="vertical" aria-label="Resize task info panel" aria-controls="meta-panel" tabindex="0"></div>
     </div>
     <div id="meta-overlay"></div>

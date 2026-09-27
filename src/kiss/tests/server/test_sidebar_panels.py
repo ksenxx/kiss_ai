@@ -2,17 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the right sidebar's Schedule and Apps data.
+"""End-to-end tests of the right sidebar's Schedule, Apps and Spend data.
 
 * :func:`kiss.server.sidebar_panels.cron_jobs_report` reads the real
   cron store under the session ``$KISS_HOME``.
+* :func:`kiss.server.sidebar_panels.spend_report` sums the task
+  history's ``cost`` / ``tokens`` columns per local day and model from
+  a real SQLite ``task_history`` (in a temporary ``.kiss`` dir).
 * :mod:`kiss.agents.third_party_agents.auth_status` probes the real
   channel agents: a Brave Search key written to the store turns that
   app "connected", every other app stays "not connected".
 * :func:`kiss.server.sidebar_panels.apps_status` runs the probe
   subprocess and caches its answer.
-* ``getCronJobs`` / ``getAppsStatus`` are answered over the UDS
-  transport of a real :class:`RemoteAccessServer`.
+* ``getCronJobs`` / ``getAppsStatus`` / ``getSpendReport`` are
+  answered over the UDS transport of a real :class:`RemoteAccessServer`.
 
 Not covered in-process: the probe-failure branch of ``_probe_apps``
 (the subprocess crashing, timing out or printing no JSON) cannot be
@@ -27,8 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import datetime
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -37,11 +42,17 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.agent_dispatch import available_channels
 from kiss.agents.third_party_agents import auth_status
 from kiss.core.config import kiss_home
 from kiss.server import sidebar_panels
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.sorcar.test_history_date_range import (
+    _redirect,
+    _restore,
+    _set_timestamp,
+)
 from kiss.tests.conftest import requires_unix_sockets
 
 
@@ -112,6 +123,104 @@ class TestCronJobsReport(_StoreTestCase):
     def test_empty_store(self) -> None:
         cron_agent.save_jobs([])
         self.assertEqual(sidebar_panels.cron_jobs_report(), [])
+
+
+def _noon(days_ago: int) -> tuple[str, float]:
+    """The local calendar day *days_ago* days back: its key and its noon."""
+    day = datetime.date.today() - datetime.timedelta(days=days_ago)
+    noon = datetime.datetime.combine(day, datetime.time(12)).timestamp()
+    return day.isoformat(), noon
+
+
+def _spent(
+    model: str, cost: float, tokens: int, ts: float, parent: str = ""
+) -> str:
+    """Add a finished task row with *model*, *cost* and *tokens* at *ts*."""
+    extra: dict[str, object] = {"model": model, "cost": cost, "tokens": tokens}
+    if parent:
+        extra["parent_task_id"] = parent
+    task_id, _ = th._add_task(f"task {model} {cost}", "", extra)
+    _set_timestamp(task_id, ts)
+    return task_id
+
+
+class _SpendDbTestCase(unittest.TestCase):
+    """Point the persistence DB at an empty temporary ``.kiss`` dir."""
+
+    def setUp(self) -> None:
+        self.db_dir = tempfile.mkdtemp()
+        self.saved_db = _redirect(self.db_dir)
+
+    def tearDown(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved_db)
+        shutil.rmtree(self.db_dir, ignore_errors=True)
+
+
+class TestSpendReport(_SpendDbTestCase):
+    """``spend_report`` sums the history per day and model."""
+
+    def test_empty_history(self) -> None:
+        self.assertEqual(th._spend_by_day_and_model(), [])
+        self.assertEqual(sidebar_panels.spend_report(), {
+            "total": {"cost": 0.0, "tokens": 0, "tasks": 0},
+            "days": [],
+            "totalByModel": [],
+            "daysByModel": {},
+        })
+
+    def test_sums_per_local_day_and_model_without_subagent_rows(self) -> None:
+        old_key, old_noon = _noon(40)
+        new_key, new_noon = _noon(1)
+        parent = _spent("claude-fable-5-1", 1.5, 1000, old_noon)
+        _spent("gpt-6-astra", 0.5, 200, old_noon + 3600)
+        _spent("claude-fable-5-1", 2.0, 3000, new_noon)
+        # An empty model is reported as "unknown"; a sub-agent's usage
+        # is already in its parent's totals and is not counted again.
+        _spent("", 0.25, 10, new_noon + 60)
+        _spent("gpt-6-astra", 100.0, 999999, new_noon + 120, parent=parent)
+
+        self.assertEqual(th._spend_by_day_and_model(), [
+            {"date": old_key, "model": "claude-fable-5-1", "cost": 1.5, "tokens": 1000, "tasks": 1},
+            {"date": old_key, "model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+            {"date": new_key, "model": "claude-fable-5-1", "cost": 2.0, "tokens": 3000, "tasks": 1},
+            {"date": new_key, "model": "unknown", "cost": 0.25, "tokens": 10, "tasks": 1},
+        ])
+        report = sidebar_panels.spend_report()
+        self.assertEqual(report["total"], {"cost": 4.25, "tokens": 4210, "tasks": 4})
+        self.assertEqual(report["days"], [
+            {"date": old_key, "cost": 2.0, "tokens": 1200, "tasks": 2},
+            {"date": new_key, "cost": 2.25, "tokens": 3010, "tasks": 2},
+        ])
+        self.assertEqual(report["totalByModel"], [
+            {"model": "claude-fable-5-1", "cost": 3.5, "tokens": 4000, "tasks": 2},
+            {"model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+            {"model": "unknown", "cost": 0.25, "tokens": 10, "tasks": 1},
+        ])
+        self.assertEqual(report["daysByModel"], {
+            old_key: [
+                {"model": "claude-fable-5-1", "cost": 1.5, "tokens": 1000, "tasks": 1},
+                {"model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+            ],
+            new_key: [
+                {"model": "claude-fable-5-1", "cost": 2.0, "tokens": 3000, "tasks": 1},
+                {"model": "unknown", "cost": 0.25, "tokens": 10, "tasks": 1},
+            ],
+        })
+        # The reply is JSON-serialisable as the daemon sends it.
+        json.dumps(report)
+
+    def test_a_day_boundary_is_the_local_one(self) -> None:
+        """A task at 23:30 and one at 00:30 the next day are two days."""
+        key, noon = _noon(3)
+        next_key = (datetime.date.fromisoformat(key) + datetime.timedelta(days=1)).isoformat()
+        _spent("m", 1.0, 1, noon + 11.5 * 3600)
+        _spent("m", 1.0, 1, noon + 12.5 * 3600)
+        self.assertEqual(
+            [d["date"] for d in sidebar_panels.spend_report()["days"]], [key, next_key]
+        )
 
 
 class TestAuthStatusProbe(_StoreTestCase):
@@ -292,6 +401,31 @@ class TestSidebarPanelCommandsOverUds(_StoreTestCase):
         self.assertGreater(event["checkedAt"], 0)
         by_name = {a["name"]: a for a in event["apps"]}
         self.assertIs(by_name["brave"]["authenticated"], True)
+
+    def test_get_spend_report(self) -> None:
+        db_dir = tempfile.mkdtemp()
+        saved_db = _redirect(db_dir)
+        try:
+            key, noon = _noon(2)
+            _spent("claude-fable-5-1", 0.75, 500, noon)
+            (event,) = self._ask({"type": "getSpendReport"})
+        finally:
+            if th._db_conn is not None:
+                th._db_conn.close()
+                th._db_conn = None
+            _restore(saved_db)
+            shutil.rmtree(db_dir, ignore_errors=True)
+        self.assertEqual(event, {
+            "type": "spendReport",
+            "total": {"cost": 0.75, "tokens": 500, "tasks": 1},
+            "days": [{"date": key, "cost": 0.75, "tokens": 500, "tasks": 1}],
+            "totalByModel": [
+                {"model": "claude-fable-5-1", "cost": 0.75, "tokens": 500, "tasks": 1}
+            ],
+            "daysByModel": {
+                key: [{"model": "claude-fable-5-1", "cost": 0.75, "tokens": 500, "tasks": 1}]
+            },
+        })
 
 
     def test_an_apps_probe_does_not_hold_up_later_commands(self) -> None:

@@ -2143,6 +2143,204 @@ button.app-row-main:focus-visible {
 
 button.app-row-main .app-state { color: var(--accent); }
 
+/* Spend section (every surface): the all-time totals line, the daily
+   cost heatmap and the cost-by-model bars.  The heatmap is a row of
+   week columns (Monday at the top, latest week at the right) in a
+   horizontally scrollable viewport whose scrollbar stays hidden;
+   hover-revealed pagers page through older weeks.  Cells and bars
+   share four brightness levels of the accent colour, so they follow
+   the theme.  ``position: relative`` anchors the pagers and the
+   custom tooltip. */
+#meta-spend-graph {
+  position: relative;
+  padding: var(--space-1) var(--space-0-5);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+}
+
+.spend-total {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1-5);
+  padding-bottom: var(--space-1-5);
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The heatmap's viewport plus its two pagers, which sit over ITS
+   edges (not the whole graph's, or the model bars below would push
+   them out of view). */
+.spend-heatmap { position: relative; }
+
+.spend-viewport {
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.spend-viewport::-webkit-scrollbar { display: none; }
+
+/* ``margin-left: auto`` keeps the latest week at the RIGHT edge when
+   every column fits without scrolling. */
+.spend-grid {
+  display: flex;
+  gap: 3px;
+  width: max-content;
+  margin-left: auto;
+}
+
+.spend-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.spend-cell {
+  width: 11px;
+  height: 11px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.spend-cell.blank { visibility: hidden; }
+
+.spend-cell.l1,
+.spend-model-bar.l1 { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+.spend-cell.l2,
+.spend-model-bar.l2 { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+.spend-cell.l3,
+.spend-model-bar.l3 { background: color-mix(in srgb, var(--accent) 80%, transparent); }
+
+.spend-cell.l4,
+.spend-model-bar.l4 { background: var(--accent); }
+
+.spend-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: var(--z-raised);
+}
+
+.spend-nav.left { left: 0; }
+
+.spend-nav.right { right: 0; }
+
+#meta-spend-graph:hover .spend-nav { opacity: 0.9; }
+
+.spend-nav:hover { color: var(--fg); opacity: 1; }
+
+.spend-nav.nav-hidden {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.spend-nav svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Custom tooltip for the hovered cell or bar: the native ``title``
+   would be lost to the re-render every poll triggers.  It never gets
+   wider than the graph (a narrow sidebar wraps its lines) so the
+   centering clamp in main.js can always keep it inside. */
+.spend-tip {
+  position: absolute;
+  box-sizing: border-box;
+  max-width: calc(100% - 4px);
+  padding: 2px var(--space-1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+  text-align: center;
+  pointer-events: none;
+  z-index: var(--z-float);
+}
+
+.spend-models {
+  margin-top: var(--space-1-5);
+  padding-top: var(--space-1-5);
+  border-top: 1px solid var(--panel-line);
+}
+
+.spend-models-title {
+  padding-bottom: var(--space-1);
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-size: var(--fs-xs);
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.spend-model-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  padding: 2px 0;
+  cursor: default;
+}
+
+.spend-model-row:hover { background: color-mix(in srgb, var(--fg) 10%, transparent); }
+
+.spend-model-name {
+  max-width: 45%;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spend-model-track {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  height: 8px;
+  overflow: hidden;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.spend-model-bar {
+  display: inline-block;
+  min-width: 2px;
+  height: 8px;
+  border-radius: var(--radius-xs);
+}
+
+.spend-model-value {
+  flex-shrink: 0;
+  min-width: 34px;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
 /* Every VS Code webview drops the burger — the history panel lives in
    the PRIMARY sidebar in both editor-tabs and sidebar mode. Only the
    remote webapp keeps its own in-page history drawer. */

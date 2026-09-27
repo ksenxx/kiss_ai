@@ -46,6 +46,7 @@
     'getTaskUpdate',
     'getCronJobs',
     'getAppsStatus',
+    'getSpendReport',
     'listDir',
     'gitStatus',
     'gitLog',

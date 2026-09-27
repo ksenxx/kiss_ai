@@ -79,6 +79,22 @@ export interface AppStatusRow {
 }
 
 /**
+ * One cost/token/task-count sum in the right sidebar's Spend subpanel
+ * (see kiss/server/sidebar_panels.py spend_report): the all-time
+ * total, one calendar day (`date`), one model (`model`), or one model
+ * within one day.
+ */
+export interface SpendSum {
+  cost: number;
+  tokens: number;
+  tasks: number;
+  /** Local calendar day, "YYYY-MM-DD" (per-day sums only). */
+  date?: string;
+  /** The task rows' model column, "unknown" when empty (per-model sums only). */
+  model?: string;
+}
+
+/**
  * The task-info values a chat editor panel mirrors to the secondary
  * sidebar's Task Info view (editor-tabs mode): the display strings of
  * the panel's own #meta-list items in media/chat.html. All values are
@@ -405,6 +421,9 @@ export type FromWebviewMessage =
   // authentication state instead of serving the daemon's cached one.
   | {type: 'getCronJobs'}
   | {type: 'getAppsStatus'; refresh?: boolean}
+  // The right sidebar's Spend subpanel: the daemon answers with a
+  // direct `spendReport` reply.
+  | {type: 'getSpendReport'}
   // Editor-tabs mode (host-only): this panel's live task-info values —
   // the mirror the secondary sidebar's Task Info view renders for the
   // ACTIVE panel. taskUpdate is the running task's task-update report
@@ -1065,6 +1084,16 @@ type ToWebviewMessageBody =
   // agent's authentication state and the epoch ms it was probed (0
   // before the first successful probe).
   | {type: 'appsStatus'; apps: AppStatusRow[]; checkedAt: number}
+  // The daemon's direct reply to `getSpendReport`: the task history's
+  // spend all time, per local day (ascending), per model (dearest
+  // first) and per model within each day (dearest first).
+  | {
+      type: 'spendReport';
+      total: SpendSum;
+      days: SpendSum[];
+      totalByModel: SpendSum[];
+      daysByModel: Record<string, SpendSum[]>;
+    }
   // Host relay to the ACTIVE chat panel: the Task Info view's refresh
   // button was pressed — poll `getTaskUpdate` with `refresh: true`.
   | {type: 'refreshTaskUpdate'}
@@ -1116,7 +1145,8 @@ export interface AgentCommand {
     | 'updateWhenIdle'
     | 'getTaskUpdate'
     | 'getCronJobs'
-    | 'getAppsStatus';
+    | 'getAppsStatus'
+    | 'getSpendReport';
   prompt?: string;
   model?: string;
   workDir?: string;

@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Data behind the right sidebar's "Schedule" and "Apps" subpanels.
+"""Data behind the right sidebar's "Schedule", "Apps" and "Spend" subpanels.
 
 Every chat surface (the remote webapp's task-info panel, the VS Code
-sidebar chat's drawer and the editor-tabs Task Info view) stacks two
+sidebar chat's drawer and the editor-tabs Task Info view) stacks three
 global subpanels under the per-task ones:
 
 * **Schedule** lists the scheduled cron jobs
@@ -13,7 +13,10 @@ global subpanels under the per-task ones:
   :func:`cron_jobs_report` for the ``getCronJobs`` command;
 * **Apps** lists every third-party channel agent with its
   authentication state, answered by :func:`apps_status` for the
-  ``getAppsStatus`` command.
+  ``getAppsStatus`` command;
+* **Spend** draws a daily cost heatmap and cost-by-model bars from the
+  task history, answered by :func:`spend_report` for the
+  ``getSpendReport`` command.
 
 Probing the apps imports every channel module and builds its agent, so
 it runs in a short-lived subprocess
@@ -33,6 +36,7 @@ import time
 from typing import Any
 
 from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar.persistence import _spend_by_day_and_model
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +99,55 @@ def cron_jobs_report() -> list[dict[str, Any]]:
     for row in rows:
         del row["_next"]
     return rows
+
+
+def _add_spend(bucket: dict[str, Any], row: dict[str, Any]) -> None:
+    """Add *row*'s ``cost``, ``tokens`` and ``tasks`` into *bucket*."""
+    bucket["cost"] += row["cost"]
+    bucket["tokens"] += row["tokens"]
+    bucket["tasks"] += row["tasks"]
+
+
+def _spend_bucket(**tags: str) -> dict[str, Any]:
+    """Return a zeroed ``{cost, tokens, tasks}`` sum carrying *tags* (``date``, ``model``)."""
+    return {**tags, "cost": 0.0, "tokens": 0, "tasks": 0}
+
+
+def spend_report() -> dict[str, Any]:
+    """Return the task history's spend, by day, by model and by day and model.
+
+    Sums the persisted ``cost`` and ``tokens`` columns over the same
+    row set the History sidebar lists (sub-agent rows excluded: their
+    usage is already folded into their parent's totals), so the Spend
+    subpanel's all-time line, daily heatmap and cost-by-model bars
+    agree with each other and with the history.
+
+    Returns:
+        ``total``: all-time ``{cost, tokens, tasks}``;
+        ``days``: ``{date, cost, tokens, tasks}`` per local calendar
+        day with at least one task, in ascending date order;
+        ``totalByModel``: ``{model, cost, tokens, tasks}`` per model, in
+        descending cost order;
+        ``daysByModel``: ``{"YYYY-MM-DD": [{model, cost, tokens,
+        tasks}, ...]}``, each day's models in descending cost order.
+    """
+    total = _spend_bucket()
+    days: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
+    days_by_model: dict[str, list[dict[str, Any]]] = {}
+    for row in _spend_by_day_and_model():
+        date, model = str(row["date"]), str(row["model"])
+        _add_spend(total, row)
+        _add_spend(days.setdefault(date, _spend_bucket(date=date)), row)
+        _add_spend(by_model.setdefault(model, _spend_bucket(model=model)), row)
+        day_models = days_by_model.setdefault(date, [])
+        day_models.append({key: row[key] for key in ("model", "cost", "tokens", "tasks")})
+    return {
+        "total": total,
+        "days": list(days.values()),
+        "totalByModel": sorted(by_model.values(), key=lambda m: -m["cost"]),
+        "daysByModel": days_by_model,
+    }
 
 
 def _probe_apps() -> list[dict[str, Any]]:

@@ -5338,9 +5338,9 @@
   // metarelay-coverage:end
 
   // sidebarpanels-coverage:start
-  // ---- Right sidebar: Schedule and Apps subpanels ----
+  // ---- Right sidebar: Schedule, Apps and Spend subpanels ----
   //
-  // Two GLOBAL subpanels under the per-task ones in #meta-panel, on
+  // Three GLOBAL subpanels under the per-task ones in #meta-panel, on
   // every surface that shows it (remote webapp, sidebar-chat drawer,
   // editor-tabs Task Info view):
   //
@@ -5348,9 +5348,12 @@
   //   to getCronJobs, kiss/server/sidebar_panels.py cron_jobs_report);
   // * Apps lists every third-party agent with its authentication state
   //   (reply `appsStatus` to getAppsStatus).  Clicking an app that is
-  //   not connected launches a new task that connects it.
+  //   not connected launches a new task that connects it;
+  // * Spend shows the task history's all-time cost, a daily cost
+  //   heatmap and cost-by-model bars (reply `spendReport` to
+  //   getSpendReport, sidebar_panels.py spend_report).
   //
-  // Both are requested at boot and whenever the daemon (re)connects,
+  // All are requested at boot and whenever the daemon (re)connects,
   // and polled every SIDEBAR_PANELS_POLL_MS once the daemon has
   // answered (the daemon caches the apps probe).
   // Chat editor panels (their own panel is hidden: they relay to the
@@ -5361,6 +5364,9 @@
   const appsList = document.getElementById('meta-apps-list');
   const appsStatusLine = document.getElementById('meta-apps-status');
   const appsRefreshBtn = document.getElementById('meta-apps-refresh');
+  const spendGraph = document.getElementById('meta-spend-graph');
+  const spendStatus = document.getElementById('meta-spend-status');
+  const spendRefreshBtn = document.getElementById('meta-spend-refresh');
   const SIDEBAR_PANELS_POLL_MS = 30000;
   const SIDEBAR_PANELS_SHOWN = !POST_META_UPDATES && !HISTORY_PANEL_MODE;
   // Apps with a connect task launched from this webview (name -> launch
@@ -5372,7 +5378,7 @@
   let sidebarPanelsTimer = 0;
 
   /**
-   * Ask the daemon for the Schedule and Apps data.
+   * Ask the daemon for the Schedule, Apps and Spend data.
    *
    * @param {boolean} refreshApps Re-probe the apps' authentication
    *     state instead of accepting the daemon's cached answer.
@@ -5381,17 +5387,24 @@
     if (!SIDEBAR_PANELS_SHOWN) return;
     api.getCronJobs();
     api.getAppsStatus(refreshApps ? {refresh: true} : undefined);
+    api.getSpendReport();
     if (refreshApps) {
       appsRefreshBtn.disabled = true;
       appsRefreshBtn.classList.add('spinning');
     }
   }
 
-  /** Boot the subpanels: refresh buttons and the first request. */
+  /** Boot the subpanels: refresh buttons, hover and resize handlers, the first request. */
   function startSidebarPanels() {
     if (!SIDEBAR_PANELS_SHOWN) return;
     scheduleRefreshBtn.addEventListener('click', () => api.getCronJobs());
     appsRefreshBtn.addEventListener('click', () => requestSidebarPanels(true));
+    spendRefreshBtn.addEventListener('click', () => api.getSpendReport());
+    spendGraph.addEventListener('mouseover', onSpendGraphHover);
+    spendGraph.addEventListener('mouseleave', hideSpendTip);
+    spendGraph.addEventListener('click', onSpendGraphClick);
+    if (typeof ResizeObserver === 'function')
+      new ResizeObserver(onSpendGraphResize).observe(spendGraph);
     requestSidebarPanels(false);
   }
 
@@ -5648,6 +5661,460 @@
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     setMetaDrawerOpen(false);
     sendMessage();
+  }
+
+  // ---- Spend subpanel ----
+  //
+  // The heatmap is GitHub's contribution graph for dollars: one cell
+  // per local calendar day, weeks as columns (Monday at the top),
+  // the latest week at the right, each cell shaded by the day's cost
+  // relative to the dearest day.  The grid reaches back to the oldest
+  // day of the history (at least SPEND_MIN_DAYS, at most
+  // SPEND_MAX_DAYS: a stray decades-old row must not draw thousands
+  // of cells), and grows with the panel's width so it always fills
+  // it; the surplus scrolls in a viewport pinned to the right edge,
+  // paged by hover-revealed arrows.  Under it, one bar per model,
+  // sized by its share of the all-time cost and shaded like the
+  // cells.  Hovering a cell or a bar shows a tooltip with the
+  // dollars, tokens and task count, a day's tooltip also listing the
+  // models that spent that day.
+  const SPEND_CELL_PX = 11;
+  const SPEND_GAP_PX = 3;
+  const SPEND_MIN_DAYS = 98;
+  const SPEND_MAX_DAYS = 3 * 366;
+  // The last `spendReport` reply, redrawn when the panel widens.
+  let spendReport = null;
+  // The reply's days by "YYYY-MM-DD", for the cells and their tooltips.
+  let spendByDate = new Map();
+  // How far back (pixels from the right edge) the heatmap is scrolled,
+  // kept across redraws so a poll or a resize keeps the same weeks in
+  // view instead of jumping back to the latest ones.
+  let spendScrollFromRight = 0;
+
+  /**
+   * "YYYY-MM-DD" of a local date, the key of the reply's days.
+   *
+   * @param {Date} d The date.
+   * @returns {string} The key.
+   */
+  function spendDateKey(d) {
+    return (
+      d.getFullYear() +
+      '-' +
+      String(d.getMonth() + 1).padStart(2, '0') +
+      '-' +
+      String(d.getDate()).padStart(2, '0')
+    );
+  }
+
+  /**
+   * A short dollar amount: cents below $1000 ("$4.20"), then the
+   * three-significant-digit K/M/B form of fmtTokens ("$2.04K").
+   *
+   * @param {number} n The amount.
+   * @returns {string} The text.
+   */
+  function fmtCostAbbrev(n) {
+    n = Math.max(0, Number(n) || 0);
+    return n < 1000 ? fmtCost(n) : '$' + fmtTokens(n);
+  }
+
+  /**
+   * "$1.23 · 12.3K tok · 3 tasks" for a reply sum.
+   *
+   * @param {{cost: number, tokens: number, tasks: number}} sum The sum.
+   * @returns {string} The text.
+   */
+  function spendSumText(sum) {
+    const tasks = Number(sum.tasks) || 0;
+    return (
+      fmtCostAbbrev(sum.cost) +
+      ' \u00b7 ' +
+      fmtTokens(sum.tokens) +
+      ' tok \u00b7 ' +
+      tasks +
+      (tasks === 1 ? ' task' : ' tasks')
+    );
+  }
+
+  /**
+   * Shade level 1-4 of *value* against *max* (1 when nothing has a
+   * value yet, so a recorded day with no cost still shows).
+   *
+   * @param {number} value The cost.
+   * @param {number} max The largest cost of the set.
+   * @returns {number} The level.
+   */
+  function spendLevel(value, max) {
+    return max > 0 ? Math.min(4, 1 + Math.floor((value / max) * 3.999)) : 1;
+  }
+
+  /**
+   * Week columns that fit the graph's width, at least one.
+   *
+   * @returns {number} The column count.
+   */
+  function spendColumnsThatFit() {
+    return Math.max(
+      1,
+      Math.floor(
+        (spendGraph.clientWidth + SPEND_GAP_PX) /
+          (SPEND_CELL_PX + SPEND_GAP_PX),
+      ),
+    );
+  }
+
+  /**
+   * The local midnight of a "YYYY-MM-DD" key.
+   *
+   * @param {string} key The day.
+   * @returns {Date} Its midnight.
+   */
+  function spendDateOf(key) {
+    const [y, m, d] = String(key).split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+
+  /**
+   * Days from the oldest day of the reply to *last*, both included;
+   * 0 for an empty history.
+   *
+   * @param {Array<{date: string}>} days The reply's days (ascending).
+   * @param {Date} last The grid's last day, a local midnight.
+   * @returns {number} The day count.
+   */
+  function spendHistoryDays(days, last) {
+    if (!days.length) return 0;
+    return Math.round((last - spendDateOf(days[0].date)) / 86400000) + 1;
+  }
+
+  /**
+   * Render the daemon's `spendReport` reply into the Spend subpanel.
+   *
+   * @param {{total: Object, days: Array<Object>, totalByModel: Array<Object>,
+   *     daysByModel: Object}} ev The reply.
+   */
+  function renderSpendReport(ev) {
+    if (!SIDEBAR_PANELS_SHOWN) return;
+    ensureSidebarPanelsPoll();
+    spendReport = {
+      total: ev.total || {cost: 0, tokens: 0, tasks: 0},
+      days: Array.isArray(ev.days) ? ev.days : [],
+      totalByModel: Array.isArray(ev.totalByModel) ? ev.totalByModel : [],
+      daysByModel: ev.daysByModel || {},
+    };
+    spendByDate = new Map(spendReport.days.map(day => [day.date, day]));
+    spendStatus.textContent = spendReport.total.tasks
+      ? ''
+      : 'No spend recorded yet.';
+    drawSpendGraph();
+    applyMetaSectionLayout();
+  }
+
+  /** Draw the totals line, the heatmap and the model bars from spendReport. */
+  function drawSpendGraph() {
+    spendGraph.textContent = '';
+    const total = document.createElement('div');
+    total.className = 'spend-total';
+    total.title = 'Cost, tokens and tasks, all time';
+    total.textContent = 'All time \u00b7 ' + spendSumText(spendReport.total);
+    spendGraph.appendChild(total);
+    const heatmap = document.createElement('div');
+    heatmap.className = 'spend-heatmap';
+    spendGraph.appendChild(heatmap);
+    const viewport = document.createElement('div');
+    viewport.className = 'spend-viewport';
+    heatmap.appendChild(viewport);
+    const grid = document.createElement('div');
+    grid.className = 'spend-grid';
+    // The grid ends at the later of the viewer's today and the newest
+    // reported day: the daemon keys days by ITS local date, so a
+    // daemon whose clock is ahead of the viewer's (another time zone)
+    // reports a day the viewer has not reached yet.
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const reported = spendReport.days;
+    const newest = reported.length
+      ? spendDateOf(reported[reported.length - 1].date)
+      : today;
+    const last = newest > today ? newest : today;
+    const lastIdx = (last.getDay() + 6) % 7;
+    const days = Math.max(
+      (spendColumnsThatFit() - 1) * 7 + lastIdx + 1,
+      SPEND_MIN_DAYS,
+      Math.min(spendHistoryDays(reported, last), SPEND_MAX_DAYS),
+    );
+    const start = new Date(
+      last.getFullYear(),
+      last.getMonth(),
+      last.getDate() - (days - 1),
+    );
+    // Leading blanks pad the first column so every column starts on
+    // Monday and the cells line up by weekday.
+    const offset = (start.getDay() + 6) % 7;
+    let maxCost = 0;
+    for (const day of spendReport.days)
+      maxCost = Math.max(maxCost, Number(day.cost) || 0);
+    let col = null;
+    for (let slot = 0; slot < offset + days; slot++) {
+      if (slot % 7 === 0) {
+        col = document.createElement('div');
+        col.className = 'spend-col';
+        grid.appendChild(col);
+      }
+      const cell = document.createElement('span');
+      cell.className = 'spend-cell';
+      col.appendChild(cell);
+      if (slot < offset) {
+        cell.classList.add('blank');
+        continue;
+      }
+      const key = spendDateKey(
+        new Date(
+          start.getFullYear(),
+          start.getMonth(),
+          start.getDate() + slot - offset,
+        ),
+      );
+      cell.dataset.spendDate = key;
+      const day = spendByDate.get(key);
+      if (day)
+        cell.classList.add('l' + spendLevel(Number(day.cost) || 0, maxCost));
+    }
+    viewport.appendChild(grid);
+    viewport.addEventListener('scroll', onSpendScroll);
+    // The pagers sit over the heatmap's own edges, not the graph's:
+    // the model bars below must not push them out of view.
+    heatmap.appendChild(spendNavButton('left', 'Earlier weeks'));
+    heatmap.appendChild(spendNavButton('right', 'Later weeks'));
+    const tip = document.createElement('div');
+    tip.className = 'spend-tip';
+    tip.hidden = true;
+    spendGraph.appendChild(tip);
+    drawSpendModels();
+    pinSpendScroll();
+  }
+
+  /** Draw the cost-by-model bars under the heatmap, dearest model first. */
+  function drawSpendModels() {
+    const models = spendReport.totalByModel;
+    if (!models.length) return;
+    const maxCost = Math.max(...models.map(m => Number(m.cost) || 0));
+    const totalCost = Number(spendReport.total.cost) || 0;
+    const hist = document.createElement('div');
+    hist.className = 'spend-models';
+    hist.appendChild(sidebarPanelSpan('spend-models-title', 'Cost by model'));
+    for (const m of models) {
+      const cost = Number(m.cost) || 0;
+      const row = document.createElement('div');
+      row.className = 'spend-model-row';
+      row.dataset.spendModel = m.model;
+      row.appendChild(sidebarPanelSpan('spend-model-name', m.model));
+      const track = sidebarPanelSpan('spend-model-track', '');
+      const bar = sidebarPanelSpan(
+        'spend-model-bar l' + spendLevel(cost, maxCost),
+        '',
+      );
+      bar.style.width =
+        Math.max(spendShare(cost, totalCost), cost > 0 ? 2 : 0) + '%';
+      track.appendChild(bar);
+      row.appendChild(track);
+      row.appendChild(
+        sidebarPanelSpan('spend-model-value', fmtCostAbbrev(cost)),
+      );
+      hist.appendChild(row);
+    }
+    spendGraph.appendChild(hist);
+  }
+
+  /**
+   * *part*'s percentage of *whole*, 0 when *whole* is 0.
+   *
+   * @param {number} part The part.
+   * @param {number} whole The whole.
+   * @returns {number} The percentage.
+   */
+  function spendShare(part, whole) {
+    return whole > 0 ? (part / whole) * 100 : 0;
+  }
+
+  /**
+   * One of the heatmap's hover-revealed pagers.
+   *
+   * @param {string} dir 'left' (earlier weeks) or 'right' (later weeks).
+   * @param {string} label The accessible name.
+   * @returns {HTMLButtonElement} The button.
+   */
+  function spendNavButton(dir, label) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'spend-nav ' + dir;
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    b.innerHTML =
+      dir === 'left'
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="15 6 9 12 15 18"/></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>';
+    return b;
+  }
+
+  /**
+   * A pager click: scroll the heatmap most of a viewport that way.
+   *
+   * @param {MouseEvent} ev The click, anywhere in the graph.
+   */
+  function onSpendGraphClick(ev) {
+    const nav = ev.target.closest('.spend-nav');
+    const viewport = spendGraph.querySelector('.spend-viewport');
+    if (!nav || !viewport) return;
+    const step = Math.max(viewport.clientWidth * 0.8, 56);
+    viewport.scrollLeft += nav.classList.contains('left') ? -step : step;
+  }
+
+  /**
+   * The heatmap scrolled: remember the offset from the right edge and
+   * hide the pager at the end that was reached.
+   *
+   * @param {Event} ev The scroll event.
+   */
+  function onSpendScroll(ev) {
+    const viewport = ev.currentTarget;
+    spendScrollFromRight = Math.max(
+      0,
+      viewport.scrollWidth - viewport.clientWidth - viewport.scrollLeft,
+    );
+    syncSpendNav(viewport);
+  }
+
+  /**
+   * Hide the pager at each end of the range the heatmap has reached.
+   *
+   * @param {HTMLElement} viewport The heatmap's viewport.
+   */
+  function syncSpendNav(viewport) {
+    const max = viewport.scrollWidth - viewport.clientWidth;
+    spendGraph
+      .querySelector('.spend-nav.left')
+      .classList.toggle('nav-hidden', viewport.scrollLeft <= 1);
+    spendGraph
+      .querySelector('.spend-nav.right')
+      .classList.toggle('nav-hidden', viewport.scrollLeft >= max - 1);
+  }
+
+  /** Scroll the heatmap back to where it was, from the right edge. */
+  function pinSpendScroll() {
+    const viewport = spendGraph.querySelector('.spend-viewport');
+    viewport.scrollLeft = Math.max(
+      0,
+      viewport.scrollWidth - viewport.clientWidth - spendScrollFromRight,
+    );
+    syncSpendNav(viewport);
+  }
+
+  /**
+   * The graph changed width: a wider panel fits more week columns
+   * than were drawn, so redraw; otherwise keep the same weeks in view.
+   */
+  function onSpendGraphResize() {
+    const grid = spendGraph.querySelector('.spend-grid');
+    if (!grid) return;
+    if (spendColumnsThatFit() > grid.childElementCount) drawSpendGraph();
+    else pinSpendScroll();
+  }
+
+  /**
+   * The tooltip lines of a day cell: the day's totals, then one line
+   * per model that spent that day (dearest first) with its share.
+   *
+   * @param {string} key The day, "YYYY-MM-DD".
+   * @returns {Array<string>} The lines.
+   */
+  function spendDayTipLines(key) {
+    const label = spendDateOf(key).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+    });
+    const day = spendByDate.get(key);
+    if (!day) return [label + ' \u00b7 no usage'];
+    const dayCost = Number(day.cost) || 0;
+    const lines = [label + ' \u00b7 ' + spendSumText(day)];
+    for (const model of spendReport.daysByModel[key] || [])
+      lines.push(spendModelTipLine(model, dayCost));
+    return lines;
+  }
+
+  /**
+   * "model · $1.23 · 12.3K tok · 3 tasks · 40%": a model's sum and
+   * its share of *whole* (omitted when *whole* is 0).
+   *
+   * @param {{model: string, cost: number}} sum The model's sum.
+   * @param {number} whole The cost the share is of.
+   * @returns {string} The line.
+   */
+  function spendModelTipLine(sum, whole) {
+    const share =
+      whole > 0
+        ? ' \u00b7 ' +
+          Math.round(spendShare(Number(sum.cost) || 0, whole)) +
+          '%'
+        : '';
+    return sum.model + ' \u00b7 ' + spendSumText(sum) + share;
+  }
+
+  /**
+   * Show the graph's tooltip over a hovered day cell or model bar;
+   * hide it over anything else.
+   *
+   * @param {MouseEvent} ev The mouseover event, anywhere in the graph.
+   */
+  function onSpendGraphHover(ev) {
+    const target = ev.target.closest('[data-spend-date], [data-spend-model]');
+    if (!target) {
+      hideSpendTip();
+      return;
+    }
+    const lines =
+      target.dataset.spendDate !== undefined
+        ? spendDayTipLines(target.dataset.spendDate)
+        : [
+            spendModelTipLine(
+              spendReport.totalByModel.find(
+                m => m.model === target.dataset.spendModel,
+              ),
+              Number(spendReport.total.cost) || 0,
+            ),
+          ];
+    const tip = spendGraph.querySelector('.spend-tip');
+    tip.replaceChildren();
+    lines.forEach((text, i) => {
+      if (i) tip.appendChild(document.createElement('br'));
+      tip.appendChild(document.createTextNode(text));
+    });
+    tip.hidden = false;
+    // Measure at the graph's left edge: an absolutely positioned box
+    // shrinks to the room right of its `left`, so a tooltip measured
+    // where the last hover put it (near the right edge) would report
+    // a narrowed, wrapped width.
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    const width = tip.offsetWidth;
+    const height = tip.offsetHeight;
+    // Centered over the target, above it (below it when the graph's
+    // top is too close), kept inside the graph's edges.
+    const rect = target.getBoundingClientRect();
+    const graphRect = spendGraph.getBoundingClientRect();
+    const x = rect.left - graphRect.left + rect.width / 2 - width / 2;
+    tip.style.left =
+      Math.max(2, Math.min(x, graphRect.width - width - 2)) + 'px';
+    const above = rect.top - graphRect.top - height - 6;
+    const y = above >= 0 ? above : rect.bottom - graphRect.top + 6;
+    tip.style.top = Math.max(0, Math.min(y, graphRect.height - height)) + 'px';
+  }
+
+  /** Hide the graph's tooltip (the pointer left the graph or a cell). */
+  function hideSpendTip() {
+    const tip = spendGraph.querySelector('.spend-tip');
+    if (tip) tip.hidden = true;
   }
   // sidebarpanels-coverage:end
 
@@ -13924,6 +14391,9 @@
         break;
       case 'appsStatus':
         renderAppsStatus(ev);
+        break;
+      case 'spendReport':
+        renderSpendReport(ev);
         break;
       case 'metaState':
         // The host relays the ACTIVE chat editor panel's task-info

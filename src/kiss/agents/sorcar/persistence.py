@@ -2001,6 +2001,44 @@ def _history_date_range() -> tuple[float | None, float | None]:
     return (float(row["mn"]), float(row["mx"]))
 
 
+def _spend_by_day_and_model() -> list[dict[str, object]]:
+    """Aggregate cost, tokens and task count per local calendar day and model.
+
+    Groups the same row set the History sidebar lists (i.e. excluding
+    sub-agent rows, whose usage is already folded into their parent's
+    totals) by the daemon's local date and the task's ``model`` column
+    over the whole history, so the sidebar's Spend subpanel can draw
+    its daily heatmap and cost-by-model bars.  An empty or NULL model
+    is reported as ``"unknown"``.  Thread-safe.
+
+    Returns:
+        ``{"date": "YYYY-MM-DD", "model": str, "cost": float,
+        "tokens": int, "tasks": int}`` dicts in ascending date order;
+        a day's models in descending cost order.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT date(timestamp, 'unixepoch', 'localtime') AS d, "
+            "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
+            "COALESCE(SUM(cost), 0) AS c, "
+            "COALESCE(SUM(tokens), 0) AS t, COUNT(*) AS n "
+            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT} "
+            "GROUP BY d, m ORDER BY d ASC, c DESC"
+        ).fetchall()
+    return [
+        {
+            "date": str(row["d"]),
+            "model": str(row["m"]),
+            "cost": float(row["c"] or 0.0),
+            "tokens": int(row["t"] or 0),
+            "tasks": int(row["n"] or 0),
+        }
+        for row in rows
+        if row["d"]
+    ]
+
+
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     """Find recent unique tasks starting with *query* (case-sensitive).
 

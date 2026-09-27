@@ -307,6 +307,10 @@
   - `cmd`: The ``getAppsStatus`` command (optional ``refresh``).
   - `ctx`: The transport context of the current call.
 
+- **get_spend_report** — Send a client the task history's spend for its Spend subpanel. The right sidebar's "Spend" subpanel (every surface: remote webapp, VS Code sidebar chat, editor-tabs Task Info view) polls this command for its all-time totals, daily cost heatmap and cost-by-model bars.  The direct reply is ``{"type": "spendReport", ...}`` carrying the ``total``, ``days``, ``totalByModel`` and ``daysByModel`` fields of :func:`kiss.server.sidebar_panels.spend_report`.<br/>`async get_spend_report(cmd: dict[str, Any], ctx: ApiContext) -> None`
+  - `cmd`: The ``getSpendReport`` command (no fields).
+  - `ctx`: The transport context of the current call.
+
 - **list_dir** — List a directory for the remote webapp's Explorer view. The remote webapp's task-history panel carries a VS Code-like activity bar whose Explorer view browses the workspace: opening the view lists the work dir, expanding a folder lists that folder, and clicking a file goes through ``openFile``.  The reply is a ``dirListing`` event sent to the requester only. UDS clients (VS Code windows) have a real Explorer, so a UDS-delivered ``listDir`` is dropped as a defensive no-op, exactly like ``checkPaths``.<br/>`async list_dir(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``listDir`` command (optional ``path``, ``workDir``, ``tabId``, ``token``).
   - `ctx`: The transport context of the current call.

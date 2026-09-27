@@ -382,10 +382,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // agent when due (or when `refresh` is set) and answers with a
   // direct `taskUpdate` that the client-listener relay passes back.
   getTaskUpdate: ['tabId', 'knownSig', 'token', 'refresh'],
-  // The right sidebar's Schedule / Apps subpanels; the direct
-  // `cronJobs` / `appsStatus` replies come back through the client relay.
+  // The right sidebar's Schedule / Apps / Spend subpanels; the direct
+  // `cronJobs` / `appsStatus` / `spendReport` replies come back through
+  // the client relay.
   getCronJobs: [],
   getAppsStatus: ['refresh'],
+  getSpendReport: [],
   // The daemon owns the model-catalog refresh: it spawns
   // kiss.scripts.update_models against ~/.kiss/MODEL_INFO.json and
   // reports progress/failures back over the connection, so the settings

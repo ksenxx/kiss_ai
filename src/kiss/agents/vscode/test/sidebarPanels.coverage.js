@@ -4,7 +4,7 @@
 // add your name here
 
 // Coverage gate: requires 100% line coverage of the right sidebar's
-// Schedule and Apps subpanel code in media/main.js (the region fenced
+// Schedule, Apps and Spend subpanel code in media/main.js (the region fenced
 // by `// sidebarpanels-coverage:start` / `// sidebarpanels-coverage:end`)
 // when running the functional jsdom suite in test/sidebarPanels.test.js.
 // That suite drives every branch -- every surface, empty and filled
@@ -139,7 +139,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    'coverage gate passed: 100% line coverage of the Schedule / Apps ' +
+    'coverage gate passed: 100% line coverage of the Schedule / Apps / Spend ' +
       'subpanel code.',
   );
 }

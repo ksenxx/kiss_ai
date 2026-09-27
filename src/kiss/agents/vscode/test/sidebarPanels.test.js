@@ -3,15 +3,19 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 //
-// End-to-end tests for the right sidebar's Schedule and Apps subpanels
-// (the sidebarpanels block of media/main.js), on every surface that
-// shows the panel (remote webapp, sidebar-chat drawer, editor-tabs
-// Task Info view) and the ones that must stay quiet (chat editor
-// panels, the history panel):
+// End-to-end tests for the right sidebar's Schedule, Apps and Spend
+// subpanels (the sidebarpanels block of media/main.js), on every
+// surface that shows the panel (remote webapp, sidebar-chat drawer,
+// editor-tabs Task Info view) and the ones that must stay quiet (chat
+// editor panels, the history panel):
 //
-// * boot and a daemon (re)connect request getCronJobs + getAppsStatus;
-//   the poll timer starts on the first reply, once, and skips hidden
-//   pages;
+// * boot and a daemon (re)connect request getCronJobs + getAppsStatus
+//   + getSpendReport; the poll timer starts on the first reply, once,
+//   and skips hidden pages;
+// * spendReport replies render the all-time line, the daily heatmap
+//   (Monday-first week columns back to the oldest day, at least 98
+//   days, more when the panel is wide; shaded by cost), the
+//   cost-by-model bars, the hover tooltips and the pagers;
 // * cronJobs replies render rows (running / paused badges, next / last
 //   run, tooltip with the prompt or command and the last outcome) or
 //   the empty-state hint;
@@ -77,6 +81,18 @@ function makeWebview(bodyAttrs) {
     return intervals.length;
   };
   win.clearInterval = function () {};
+  // jsdom has no ResizeObserver: record the observers so a test can
+  // fire a resize by hand.
+  const observers = [];
+  win.ResizeObserver = class {
+    constructor(fn) {
+      this.fn = fn;
+      observers.push(this);
+    }
+    observe(target) {
+      this.target = target;
+    }
+  };
   const posted = [];
   win.acquireVsCodeApi = function () {
     let state;
@@ -105,7 +121,7 @@ function makeWebview(bodyAttrs) {
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=sidebarpanels-main.js',
   );
-  return {win, posted, intervals};
+  return {win, posted, intervals, observers};
 }
 
 const REMOTE = ' class="remote-chat"';
@@ -181,22 +197,93 @@ function appRows(win) {
   return Array.from(win.document.querySelectorAll('#meta-apps-list .app-row'));
 }
 
+const PANEL_COMMANDS = ['getCronJobs', 'getAppsStatus', 'getSpendReport'];
+
+/** "YYYY-MM-DD" of the local day *daysAgo* days before today. */
+function dayKey(daysAgo) {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+  return (
+    d.getFullYear() +
+    '-' +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    '-' +
+    String(d.getDate()).padStart(2, '0')
+  );
+}
+
+/** "Sep 27" for a "YYYY-MM-DD" key, as the tooltip shows it. */
+function dayLabel(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
+function sum(fields) {
+  return Object.assign({cost: 0, tokens: 0, tasks: 0}, fields);
+}
+
+/** A spendReport reply: today, yesterday and a day 200 days back. */
+function spendReport() {
+  const [today, yesterday, old] = [dayKey(0), dayKey(1), dayKey(200)];
+  return {
+    type: 'spendReport',
+    total: sum({cost: 2037.92, tokens: 1234567, tasks: 6}),
+    days: [
+      sum({date: old, cost: 0, tokens: 12, tasks: 1}),
+      sum({date: yesterday, cost: 2000, tokens: 1000000, tasks: 4}),
+      sum({date: today, cost: 37.92, tokens: 234555, tasks: 1}),
+    ],
+    totalByModel: [
+      sum({model: 'claude-fable-5', cost: 2000, tokens: 1000000, tasks: 4}),
+      sum({model: 'gpt-6-astra', cost: 37.92, tokens: 234555, tasks: 1}),
+      sum({model: 'unknown', cost: 0, tokens: 12, tasks: 1}),
+    ],
+    daysByModel: {
+      [old]: [sum({model: 'unknown', cost: 0, tokens: 12, tasks: 1})],
+      [yesterday]: [
+        sum({model: 'claude-fable-5', cost: 1500, tokens: 900000, tasks: 3}),
+        sum({model: 'gpt-6-astra', cost: 500, tokens: 100000, tasks: 1}),
+      ],
+    },
+  };
+}
+
+function cells(win) {
+  return Array.from(win.document.querySelectorAll('#meta-spend-graph .spend-cell'));
+}
+
+function cellOf(win, key) {
+  return win.document.querySelector(`.spend-cell[data-spend-date="${key}"]`);
+}
+
+function hover(win, target) {
+  target.dispatchEvent(new win.MouseEvent('mouseover', {bubbles: true}));
+}
+
+function tipText(win) {
+  const tip = win.document.querySelector('#meta-spend-graph .spend-tip');
+  return tip.hidden ? null : tip.innerHTML.split('<br>');
+}
+
 async function main() {
   for (const [label, attrs] of [
     ['remote webapp', REMOTE],
     ['sidebar-chat drawer', SIDEBAR],
     ['Task Info view', META_VIEW],
   ]) {
-    await test(`${label}: boot requests both subpanels; the poll starts on the first reply`, () => {
+    await test(`${label}: boot requests the three subpanels; the poll starts on the first reply`, () => {
       const {win, posted, intervals} = makeWebview(attrs);
-      const boot = posted.filter(
-        m => m.type === 'getCronJobs' || m.type === 'getAppsStatus',
-      );
+      const boot = posted.filter(m => PANEL_COMMANDS.includes(m.type));
       eq(boot, [
         {type: 'getCronJobs'},
         {type: 'getAppsStatus'},
+        {type: 'getSpendReport'},
       ]);
       assert.strictEqual(el(win, 'meta-apps-status').textContent, 'Checking\u2026');
+      assert.strictEqual(el(win, 'meta-spend-status').textContent, 'Loading\u2026');
       const polls = () => intervals.filter(i => i.ms === 30000);
       assert.strictEqual(polls().length, 0, 'no poll before the daemon answers');
       send(win, {type: 'cronJobs', jobs: []});
@@ -204,7 +291,7 @@ async function main() {
       assert.strictEqual(polls().length, 1, 'one poll timer, started once');
       posted.length = 0;
       polls()[0].fn();
-      eq(types(posted), ['getCronJobs', 'getAppsStatus']);
+      eq(types(posted), PANEL_COMMANDS);
       Object.defineProperty(win.document, 'hidden', {
         value: true,
         configurable: true,
@@ -331,8 +418,12 @@ async function main() {
     eq(posted, [
       {type: 'getCronJobs'},
       {type: 'getAppsStatus', refresh: true},
+      {type: 'getSpendReport'},
     ]);
     assert.ok(btn.disabled && btn.classList.contains('spinning'));
+    posted.length = 0;
+    el(win, 'meta-spend-refresh').click();
+    eq(posted, [{type: 'getSpendReport'}]);
     send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
     assert.ok(!btn.disabled && !btn.classList.contains('spinning'));
     // A dropped connection never answers: the button recovers.
@@ -341,12 +432,209 @@ async function main() {
     assert.ok(!btn.disabled && !btn.classList.contains('spinning'));
   });
 
-  await test('a daemon (re)connect requests both subpanels again', () => {
+  await test('a daemon (re)connect requests the three subpanels again', () => {
     const {win, posted} = makeWebview(REMOTE);
     posted.length = 0;
     send(win, {type: 'daemonStatus', connected: true});
-    assert.ok(types(posted).includes('getCronJobs'));
-    assert.ok(types(posted).includes('getAppsStatus'));
+    for (const cmd of PANEL_COMMANDS) assert.ok(types(posted).includes(cmd), cmd);
+  });
+
+  await test('Spend: an empty history draws the all-time line and a blank 98-day grid', () => {
+    const {win, intervals} = makeWebview(REMOTE);
+    send(win, {
+      type: 'spendReport',
+      total: 'bogus',
+      days: 'bogus',
+      totalByModel: 'bogus',
+    });
+    assert.strictEqual(intervals.filter(i => i.ms === 30000).length, 1, 'poll started');
+    assert.strictEqual(el(win, 'meta-spend-status').textContent, 'No spend recorded yet.');
+    assert.strictEqual(
+      win.document.querySelector('.spend-total').textContent,
+      'All time \u00b7 $0.00 \u00b7 0 tok \u00b7 0 tasks',
+    );
+    const dated = cells(win).filter(c => c.dataset.spendDate);
+    assert.strictEqual(dated.length, 98);
+    assert.strictEqual(dated[97].dataset.spendDate, dayKey(0));
+    assert.strictEqual(dated[0].dataset.spendDate, dayKey(97));
+    assert.ok(!dated.some(c => /\bl[1-4]\b/.test(c.className)), 'no shaded cell');
+    assert.strictEqual(win.document.querySelector('.spend-models'), null, 'no model bars');
+    // Every column is a Monday-first week: the first one is padded
+    // with blanks up to the first day's weekday.
+    const cols = Array.from(win.document.querySelectorAll('.spend-col'));
+    const [y, m, d] = dayKey(97).split('-').map(Number);
+    const offset = (new Date(y, m - 1, d).getDay() + 6) % 7;
+    assert.strictEqual(cols[0].querySelectorAll('.spend-cell.blank').length, offset);
+    for (const col of cols.slice(0, -1))
+      assert.strictEqual(col.children.length, 7);
+    assert.strictEqual(cols.length, Math.ceil((offset + 98) / 7));
+    // Hovering a blank cell or the grid itself shows nothing.
+    hover(win, win.document.querySelector('.spend-grid'));
+    assert.strictEqual(tipText(win), null);
+    hover(win, dated[0]);
+    eq(tipText(win), [dayLabel(dayKey(97)) + ' \u00b7 no usage']);
+    if (offset) {
+      hover(win, cols[0].firstElementChild);
+      assert.strictEqual(tipText(win), null);
+    }
+  });
+
+  await test('Spend: the heatmap reaches back to the oldest day, shaded by cost, with model bars', () => {
+    const {win} = makeWebview(REMOTE);
+    const report = spendReport();
+    send(win, report);
+    assert.strictEqual(el(win, 'meta-spend-status').textContent, '');
+    assert.strictEqual(
+      win.document.querySelector('.spend-total').textContent,
+      'All time \u00b7 $2.04K \u00b7 1.23M tok \u00b7 6 tasks',
+    );
+    const dated = cells(win).filter(c => c.dataset.spendDate);
+    assert.strictEqual(dated.length, 201, '200 days back to the oldest day, plus today');
+    assert.strictEqual(dated[0].dataset.spendDate, dayKey(200));
+    // Levels: the dearest day is l4, a day with a task but no cost l1,
+    // today's $37.92 of a $2000 max is l1 too, and days without tasks
+    // have no level.
+    assert.ok(cellOf(win, dayKey(1)).classList.contains('l4'));
+    assert.ok(cellOf(win, dayKey(200)).classList.contains('l1'));
+    assert.ok(cellOf(win, dayKey(0)).classList.contains('l1'));
+    assert.strictEqual(cellOf(win, dayKey(2)).className, 'spend-cell');
+    // Model bars: dearest first, width = share of the total (2% floor
+    // for a model with any cost, none for a free one), shaded against
+    // the dearest model, value abbreviated.
+    const rows = Array.from(win.document.querySelectorAll('.spend-model-row'));
+    eq(
+      rows.map(r => r.dataset.spendModel),
+      ['claude-fable-5', 'gpt-6-astra', 'unknown'],
+    );
+    eq(
+      rows.map(r => r.querySelector('.spend-model-value').textContent),
+      ['$2.00K', '$37.92', '$0.00'],
+    );
+    const bars = rows.map(r => r.querySelector('.spend-model-bar'));
+    assert.ok(bars[0].classList.contains('l4'));
+    assert.ok(bars[1].classList.contains('l1'));
+    assert.ok(bars[2].classList.contains('l1'));
+    assert.strictEqual(bars[0].style.width, (2000 / 2037.92) * 100 + '%');
+    assert.strictEqual(bars[1].style.width, '2%');
+    assert.strictEqual(bars[2].style.width, '0%');
+
+    // Tooltips: a day lists its totals then its models with their
+    // share of the day; a free day's models have no share; a model bar
+    // shows its all-time sum and share of the total.
+    hover(win, cellOf(win, dayKey(1)));
+    eq(tipText(win), [
+      dayLabel(dayKey(1)) + ' \u00b7 $2.00K \u00b7 1.00M tok \u00b7 4 tasks',
+      'claude-fable-5 \u00b7 $1.50K \u00b7 900K tok \u00b7 3 tasks \u00b7 75%',
+      'gpt-6-astra \u00b7 $500.00 \u00b7 100K tok \u00b7 1 task \u00b7 25%',
+    ]);
+    hover(win, cellOf(win, dayKey(200)));
+    eq(tipText(win), [
+      dayLabel(dayKey(200)) + ' \u00b7 $0.00 \u00b7 12 tok \u00b7 1 task',
+      'unknown \u00b7 $0.00 \u00b7 12 tok \u00b7 1 task',
+    ]);
+    // A day the reply has no model breakdown for lists only its totals.
+    hover(win, cellOf(win, dayKey(0)));
+    eq(tipText(win), [dayLabel(dayKey(0)) + ' \u00b7 $37.92 \u00b7 235K tok \u00b7 1 task']);
+    hover(win, rows[1].querySelector('.spend-model-name'));
+    eq(tipText(win), ['gpt-6-astra \u00b7 $37.92 \u00b7 235K tok \u00b7 1 task \u00b7 2%']);
+    el(win, 'meta-spend-graph').dispatchEvent(new win.MouseEvent('mouseleave'));
+    assert.strictEqual(tipText(win), null);
+
+    // Pagers scroll the viewport (56px steps at jsdom's zero width);
+    // the scroll offset from the right edge survives a redraw.
+    const viewport = win.document.querySelector('.spend-viewport');
+    assert.strictEqual(viewport.scrollLeft, 0);
+    win.document.querySelector('.spend-nav.right').click();
+    assert.strictEqual(viewport.scrollLeft, 56);
+    win.document.querySelector('.spend-nav.left').click();
+    assert.strictEqual(viewport.scrollLeft, 0);
+    win.document.querySelector('.spend-grid').click();
+    assert.strictEqual(viewport.scrollLeft, 0);
+    // Scrolled off the left end, the left pager shows; the right one
+    // hides at the right end (which is everywhere at jsdom's zero width).
+    viewport.scrollLeft = 30;
+    viewport.dispatchEvent(new win.Event('scroll'));
+    const hidden = dir =>
+      win.document.querySelector('.spend-nav.' + dir).classList.contains('nav-hidden');
+    assert.ok(!hidden('left') && hidden('right'));
+    viewport.scrollLeft = 0;
+    viewport.dispatchEvent(new win.Event('scroll'));
+    assert.ok(hidden('left') && hidden('right'));
+    send(win, report);
+    assert.strictEqual(win.document.querySelectorAll('.spend-total').length, 1, 'redrawn, not appended');
+  });
+
+  await test('Spend: a wider panel redraws with more week columns; a narrower one keeps the view', () => {
+    const {win, observers} = makeWebview(REMOTE);
+    const graph = el(win, 'meta-spend-graph');
+    const resize = observers.find(o => o.target === graph);
+    assert.ok(resize, 'the graph is observed');
+    resize.fn();
+    assert.strictEqual(win.document.querySelector('.spend-grid'), null, 'nothing drawn yet');
+    send(win, spendReport());
+    const columns = () => win.document.querySelectorAll('.spend-col').length;
+    const before = columns();
+    resize.fn();
+    assert.strictEqual(columns(), before, 'zero width: same grid');
+    // 1000px fits 71 columns of 11px cells with 3px gaps: the grid
+    // grows to fill them (the oldest day is only 29 weeks back).
+    Object.defineProperty(graph, 'clientWidth', {value: 1000, configurable: true});
+    resize.fn();
+    assert.strictEqual(columns(), 71);
+    const dated = cells(win).filter(c => c.dataset.spendDate);
+    assert.strictEqual(dated[dated.length - 1].dataset.spendDate, dayKey(0));
+    assert.ok(dated.length >= 71 * 7 - 6 && dated.length <= 71 * 7);
+    Object.defineProperty(graph, 'clientWidth', {value: 0, configurable: true});
+    resize.fn();
+    assert.strictEqual(columns(), 71, 'narrower: no redraw');
+  });
+
+  await test('Spend: a daemon day ahead of the viewer (another time zone) ends the grid', () => {
+    const {win} = makeWebview(REMOTE);
+    const report = spendReport();
+    report.days.push(sum({date: dayKey(-1), cost: 1, tokens: 1, tasks: 1}));
+    send(win, report);
+    const dated = cells(win).filter(c => c.dataset.spendDate);
+    assert.strictEqual(dated[dated.length - 1].dataset.spendDate, dayKey(-1));
+    assert.strictEqual(dated[0].dataset.spendDate, dayKey(200));
+    assert.strictEqual(dated.length, 202);
+    assert.ok(cellOf(win, dayKey(-1)).classList.contains('l1'));
+    // The last column still ends on that day: Monday-first columns of
+    // seven, the last one cut after it.
+    const cols = Array.from(win.document.querySelectorAll('.spend-col'));
+    const [y, m, d] = dayKey(-1).split('-').map(Number);
+    const weekday = (new Date(y, m - 1, d).getDay() + 6) % 7;
+    assert.strictEqual(cols[cols.length - 1].children.length, weekday + 1);
+  });
+
+  await test('Spend: the grid reaches back at most three years, however old the history', () => {
+    const {win} = makeWebview(REMOTE);
+    const report = spendReport();
+    report.days.unshift(sum({date: '2009-02-13', cost: 0, tokens: 0, tasks: 2}));
+    send(win, report);
+    const dated = cells(win).filter(c => c.dataset.spendDate);
+    assert.strictEqual(dated.length, 3 * 366);
+    assert.strictEqual(dated[0].dataset.spendDate, dayKey(3 * 366 - 1));
+    assert.strictEqual(dated[dated.length - 1].dataset.spendDate, dayKey(0));
+  });
+
+  await test('Spend: a history that cost nothing still shows its day and its model', () => {
+    const {win} = makeWebview(REMOTE);
+    send(win, {
+      type: 'spendReport',
+      total: sum({cost: 0, tokens: 5, tasks: 1}),
+      days: [sum({date: dayKey(0), cost: 0, tokens: 5, tasks: 1})],
+      totalByModel: [sum({model: 'unknown', cost: 0, tokens: 5, tasks: 1})],
+      daysByModel: {},
+    });
+    assert.strictEqual(el(win, 'meta-spend-status').textContent, '');
+    // Nothing cost anything: the recorded day and the model still show.
+    assert.ok(cellOf(win, dayKey(0)).classList.contains('l1'));
+    const bar = win.document.querySelector('.spend-model-bar');
+    assert.ok(bar.classList.contains('l1'));
+    assert.strictEqual(bar.style.width, '0%');
+    hover(win, win.document.querySelector('.spend-model-row'));
+    eq(tipText(win), ['unknown \u00b7 $0.00 \u00b7 5 tok \u00b7 1 task']);
   });
 
   for (const [label, attrs] of [
@@ -428,12 +716,13 @@ async function main() {
     await test(`${label}: never requests nor renders the subpanels`, () => {
       const {win, posted, intervals} = makeWebview(attrs);
       send(win, {type: 'daemonStatus', connected: true});
-      assert.ok(!types(posted).includes('getCronJobs'));
-      assert.ok(!types(posted).includes('getAppsStatus'));
+      for (const cmd of PANEL_COMMANDS) assert.ok(!types(posted).includes(cmd), cmd);
       send(win, {type: 'cronJobs', jobs: [job({})]});
       send(win, {type: 'appsStatus', apps: APPS, checkedAt: 1});
+      send(win, spendReport());
       assert.strictEqual(el(win, 'meta-schedule-list').children.length, 0);
       assert.strictEqual(appRows(win).length, 0);
+      assert.strictEqual(cells(win).length, 0);
       assert.ok(!intervals.some(i => i.ms === 30000));
     });
   }

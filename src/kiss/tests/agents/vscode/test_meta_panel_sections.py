@@ -17,8 +17,12 @@ Chromium and measure:
   equally, whatever their content; the Task update body reaches the
   bottom of the panel and scrolls;
 * on every surface (remote desktop and mobile drawer, VS Code Task Info
-  view and sidebar-chat drawer) all four expanded bodies are equally
+  view and sidebar-chat drawer) all five expanded bodies are equally
   tall, and a drag leaves the bodies above the moved boundary alone;
+* the Spend section's heatmap fills the panel's width with 11px week
+  columns, pinned to the latest week, scrolls back to the oldest day
+  with its pager, shades the cells by cost and shows a tooltip above
+  the hovered cell;
 * dragging the separator down grows the list and shrinks the report by
   the same amount, the height persists across a reload, and a
   double-click restores the equal share; the arrow keys resize too;
@@ -37,8 +41,10 @@ answer the ``getTaskUpdate`` poll with the token the page chose.
 
 from __future__ import annotations
 
+import datetime
 import functools
 import http.server
+import math
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -114,9 +120,11 @@ _GEOMETRY_JS = """
   const pad = parseFloat(getComputedStyle(panel).paddingBottom);
   const list = document.getElementById('meta-list');
   const content = document.getElementById('meta-info-content');
-  // The per-task sections only: the global Schedule and Apps sections
-  // (hidden by _open_page unless asked for) are measured separately.
-  const isGlobal = el => el && (el.id === 'meta-schedule' || el.id === 'meta-apps');
+  // The per-task sections only: the global Schedule, Apps and Spend
+  // sections (hidden by _open_page unless asked for) are measured
+  // separately.
+  const isGlobal = el =>
+    el && ['meta-schedule', 'meta-apps', 'meta-spend'].includes(el.id);
   const resizers = Array.from(
     document.querySelectorAll('#meta-panel > .meta-section-resizer'))
     .filter(r => !isGlobal(r.previousElementSibling));
@@ -209,13 +217,14 @@ def browser() -> Iterator[Browser]:
             chromium.close()
 
 
-# Takes the global Schedule and Apps sections out of the stack (the
-# `hidden` attribute; a Task Info toggle round trip re-applies the
+# Takes the global Schedule, Apps and Spend sections out of the stack
+# (the `hidden` attribute; a Task Info toggle round trip re-applies the
 # layout), leaving the per-task sections these geometry tests measure.
 _HIDE_GLOBAL_SECTIONS_JS = """
 () => {
   document.getElementById('meta-schedule').hidden = true;
   document.getElementById('meta-apps').hidden = true;
+  document.getElementById('meta-spend').hidden = true;
   const toggle = document.querySelector('#meta-section-info .meta-section-toggle');
   toggle.click();
   toggle.click();
@@ -232,8 +241,8 @@ def _open_page(
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
-    Unless ``global_sections``, the Schedule and Apps sections are
-    hidden so only the per-task sections share the panel."""
+    Unless ``global_sections``, the Schedule, Apps and Spend sections
+    are hidden so only the per-task sections share the panel."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
     page.goto(url)
@@ -670,6 +679,232 @@ _APPS = [
     {"name": "matrix", "label": "Matrix", "authenticated": None, "error": "TimeoutError: slow"},
 ]
 
+
+def _day_key(days_ago: int) -> str:
+    """The local calendar day *days_ago* days back, as the reply keys it."""
+    return (datetime.date.today() - datetime.timedelta(days=days_ago)).isoformat()
+
+
+def _spend_report() -> dict[str, Any]:
+    """A ``spendReport`` reply: a cheap day 300 days back and today's dear one."""
+    old, today = _day_key(300), _day_key(0)
+    return {
+        "type": "spendReport",
+        "total": {"cost": 12.1, "tokens": 300000, "tasks": 3},
+        "days": [
+            {"date": old, "cost": 0.1, "tokens": 1000, "tasks": 1},
+            {"date": today, "cost": 12.0, "tokens": 299000, "tasks": 2},
+        ],
+        "totalByModel": [
+            {"model": "claude-fable-5-1", "cost": 9.0, "tokens": 200000, "tasks": 2},
+            {"model": "gpt-6-astra", "cost": 3.1, "tokens": 100000, "tasks": 1},
+        ],
+        "daysByModel": {
+            old: [{"model": "gpt-6-astra", "cost": 0.1, "tokens": 1000, "tasks": 1}],
+            today: [
+                {"model": "claude-fable-5-1", "cost": 9.0, "tokens": 200000, "tasks": 2},
+                {"model": "gpt-6-astra", "cost": 3.0, "tokens": 99000, "tasks": 1},
+            ],
+        },
+    }
+
+
+_SPEND_GEOMETRY_JS = """
+() => {
+  const graph = document.getElementById('meta-spend-graph');
+  const viewport = graph.querySelector('.spend-viewport');
+  const cols = Array.from(graph.querySelectorAll('.spend-col'));
+  const cell = graph.querySelector('.spend-cell[data-spend-date]');
+  const cellRect = cell.getBoundingClientRect();
+  const vp = viewport.getBoundingClientRect();
+  const nav = dir => {
+    const b = graph.querySelector('.spend-nav.' + dir);
+    return {hidden: b.classList.contains('nav-hidden'),
+            opacity: getComputedStyle(b).opacity};
+  };
+  const bars = Array.from(graph.querySelectorAll('.spend-model-row')).map(r => ({
+    model: r.dataset.spendModel,
+    bar: r.querySelector('.spend-model-bar').getBoundingClientRect().width,
+    track: r.querySelector('.spend-model-track').getBoundingClientRect().width,
+    level: r.querySelector('.spend-model-bar').className,
+  }));
+  const dated = graph.querySelectorAll('.spend-cell[data-spend-date]');
+  return {
+    graphWidth: graph.clientWidth,
+    cellWidth: cellRect.width,
+    cellHeight: cellRect.height,
+    columns: cols.length,
+    columnWidth: cols[0].getBoundingClientRect().width,
+    gap: cols[1].getBoundingClientRect().left - cols[0].getBoundingClientRect().right,
+    days: dated.length,
+    firstDay: dated[0].dataset.spendDate,
+    lastDay: dated[dated.length - 1].dataset.spendDate,
+    scrollLeft: viewport.scrollLeft,
+    scrollMax: viewport.scrollWidth - viewport.clientWidth,
+    lastCellRight: dated[dated.length - 1].getBoundingClientRect().right,
+    firstCellRight: dated[0].getBoundingClientRect().right,
+    viewportLeft: vp.left,
+    viewportRight: vp.right,
+    total: graph.querySelector('.spend-total').textContent,
+    left: nav('left'),
+    right: nav('right'),
+    bars,
+  };
+}
+"""
+
+
+def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
+    browser: Browser, remote_url: str
+) -> None:
+    """The Spend heatmap lays its week columns out to the panel's width,
+    reaches back to the oldest day, scrolls with its pagers and tells
+    the hovered day's cost."""
+    page = _open_page(browser, remote_url, 1200, height=900, global_sections=True)
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, {"type": "cronJobs", "jobs": []})
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        report = _spend_report()
+        _deliver(page, report)
+        geo = page.evaluate(_SPEND_GEOMETRY_JS)
+        assert geo["total"] == "All time \u00b7 $12.10 \u00b7 300K tok \u00b7 3 tasks"
+        assert (geo["cellWidth"], geo["cellHeight"]) == (11, 11), geo
+        assert geo["gap"] == pytest.approx(3, abs=0.5), geo
+        # 300 days back to the oldest day: more week columns than fit
+        # the panel, each column a Monday-first week.
+        assert geo["days"] == 301, geo
+        assert geo["firstDay"] == _day_key(300) and geo["lastDay"] == _day_key(0), geo
+        first = datetime.date.fromisoformat(geo["firstDay"])
+        assert geo["columns"] == math.ceil((first.weekday() + 301) / 7), geo
+        fits = (geo["graphWidth"] + 3) // 14
+        assert geo["columns"] > fits > 10, geo
+        # Pinned to the right: the latest week hugs the viewport's right
+        # edge and the oldest one is scrolled out of view to the left.
+        assert geo["scrollLeft"] == pytest.approx(geo["scrollMax"], abs=1), geo
+        assert geo["lastCellRight"] == pytest.approx(geo["viewportRight"], abs=1), geo
+        assert geo["firstCellRight"] < geo["viewportLeft"], geo
+        assert not geo["left"]["hidden"] and geo["right"]["hidden"], geo
+        # The pagers are invisible until the graph is hovered.
+        assert geo["left"]["opacity"] == "0", geo
+        page.hover("#meta-spend-graph .spend-total")
+        page.wait_for_function(
+            "() => getComputedStyle(document.querySelector('.spend-nav.left')).opacity > 0.5"
+        )
+        # Shading: today's $12 is the dearest day (l4), the 10-cent day l1.
+        levels = page.evaluate(
+            "keys => keys.map(k => document.querySelector("
+            "`.spend-cell[data-spend-date=\"${k}\"]`).className)",
+            [_day_key(0), _day_key(300), _day_key(1)],
+        )
+        assert levels == ["spend-cell l4", "spend-cell l1", "spend-cell"], levels
+        # Model bars: the dearest model's bar is its share of the track.
+        assert [b["model"] for b in geo["bars"]] == ["claude-fable-5-1", "gpt-6-astra"]
+        assert geo["bars"][0]["bar"] == pytest.approx(
+            geo["bars"][0]["track"] * 9.0 / 12.1, abs=1
+        ), geo
+        assert geo["bars"][0]["level"] == "spend-model-bar l4", geo
+        assert geo["bars"][1]["level"] == "spend-model-bar l2", geo
+
+        # Hovering today's cell shows the tooltip right above it.
+        today_cell = page.locator(f'.spend-cell[data-spend-date="{_day_key(0)}"]')
+        today_cell.hover()
+        tip = page.locator("#meta-spend-graph .spend-tip")
+        assert tip.is_visible()
+        text = tip.inner_text()
+        assert text.splitlines() == [
+            f"{datetime.date.today():%b} {datetime.date.today().day} · $12.00 · 299K tok · 2 tasks",
+            "claude-fable-5-1 · $9.00 · 200K tok · 2 tasks · 75%",
+            "gpt-6-astra · $3.00 · 99.0K tok · 1 task · 25%",
+        ], text
+        tip_box = tip.bounding_box()
+        cell_box = today_cell.bounding_box()
+        graph_box = page.locator("#meta-spend-graph").bounding_box()
+        assert tip_box is not None and cell_box is not None and graph_box is not None
+        # Above the cell, or below it when the cell is in the top rows;
+        # never over it, and never wider than the graph.
+        assert (
+            tip_box["y"] + tip_box["height"] <= cell_box["y"]
+            or tip_box["y"] >= cell_box["y"] + cell_box["height"]
+        ), (tip_box, cell_box)
+        assert tip_box["x"] >= graph_box["x"] - 1, (tip_box, graph_box)
+        assert tip_box["x"] + tip_box["width"] <= graph_box["x"] + graph_box["width"] + 1, (
+            tip_box,
+            graph_box,
+        )
+        page.hover("#meta-spend-graph .spend-total")
+        assert not tip.is_visible()
+        # Hovering cells at the right edge, then the left edge, then the
+        # bottom row: the tooltip keeps one width (it is measured at the
+        # left edge, not where the last hover left it) and stays inside
+        # the graph both ways, whichever row the cell is in.
+        widths = set()
+        for days_ago in (0, 1, 2, 3, 6, 5, 4, 200, 0):
+            cell = page.locator(f'.spend-cell[data-spend-date="{_day_key(days_ago)}"]')
+            # The oldest cell is scrolled out of the viewport: bring it in.
+            cell.scroll_into_view_if_needed()
+            cell.hover()
+            box = tip.bounding_box()
+            cell_box = cell.bounding_box()
+            assert box is not None and cell_box is not None
+            widths.add(round(box["width"], 1))
+            assert box["x"] >= graph_box["x"] - 1, (days_ago, box, graph_box)
+            assert box["x"] + box["width"] <= graph_box["x"] + graph_box["width"] + 1, (
+                days_ago, box, graph_box,
+            )
+            assert box["y"] >= graph_box["y"] - 1, (days_ago, box, graph_box)
+            assert box["y"] + box["height"] <= graph_box["y"] + graph_box["height"] + 1, (
+                days_ago, box, graph_box,
+            )
+            assert (
+                box["y"] + box["height"] <= cell_box["y"]
+                or box["y"] >= cell_box["y"] + cell_box["height"]
+            ), (days_ago, box, cell_box)
+        assert len(widths) <= 3, widths  # one width per distinct text, not per position
+        assert page.evaluate(
+            "() => { const b = document.getElementById('meta-spend-body');"
+            " return b.scrollWidth <= b.clientWidth; }"
+        ), "no horizontal overflow"
+        page.hover("#meta-spend-graph .spend-total")
+        # The pagers sit over the heatmap itself, not over the model bars.
+        heatmap_box = page.locator("#meta-spend-graph .spend-heatmap").bounding_box()
+        nav_box = page.locator(".spend-nav.left").bounding_box()
+        assert heatmap_box is not None and nav_box is not None
+        assert nav_box["y"] >= heatmap_box["y"], (nav_box, heatmap_box)
+        assert nav_box["y"] + nav_box["height"] <= heatmap_box["y"] + heatmap_box["height"], (
+            nav_box,
+            heatmap_box,
+        )
+
+        # The left pager scrolls back towards the oldest week; enough
+        # clicks reach it, hiding the pager.
+        page.evaluate(
+            "() => { const v = document.querySelector('.spend-viewport');"
+            " v.scrollLeft = v.scrollWidth; }"
+        )
+        before = page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft")
+        page.locator(".spend-nav.left").click()
+        after = page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft")
+        assert after < before, (before, after)
+        for _ in range(30):
+            if page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft") == 0:
+                break
+            page.locator(".spend-nav.left").click()
+        assert page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft") == 0
+        page.hover("#meta-spend-graph .spend-total")
+        assert page.evaluate(
+            "() => document.querySelector('.spend-nav.left').classList.contains('nav-hidden')"
+        )
+        assert not page.evaluate(
+            "() => document.querySelector('.spend-nav.right').classList.contains('nav-hidden')"
+        )
+        # A fresh reply redraws where the user left off (the oldest week).
+        _deliver(page, report)
+        assert page.evaluate("() => document.querySelector('.spend-viewport').scrollLeft") == 0
+    finally:
+        page.close()
+
+
 _GLOBAL_GEOMETRY_JS = """
 () => {
   const rect = id => document.getElementById(id).getBoundingClientRect();
@@ -683,6 +918,8 @@ _GLOBAL_GEOMETRY_JS = """
     appsTop: rect('meta-apps-list').top,
     appsBottom: rect('meta-apps-list').bottom,
     appsHeight: rect('meta-apps-list').height,
+    spendBottom: rect('meta-spend-body').bottom,
+    spendHeight: rect('meta-spend-body').height,
     listHeight: rect('meta-list').height,
     appsScrolls: apps.scrollHeight > apps.clientHeight + 1,
     headers: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
@@ -704,6 +941,7 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         page.wait_for_selector("body.remote-desktop", state="attached")
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert "getCronJobs" in posted and "getAppsStatus" in posted
+        assert "getSpendReport" in posted
         _deliver(page, {
             "type": "cronJobs",
             "jobs": [{
@@ -714,15 +952,17 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
             }],
         })
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
+        _deliver(page, _spend_report())
         geo = page.evaluate(_GLOBAL_GEOMETRY_JS)
-        # No running task: Task Info, Schedule and Apps are on screen.
-        assert geo["headers"] == ["Task Info", "Schedule", "Apps"], geo
-        # The three bodies are equally tall; Apps reaches the bottom
-        # and scrolls.
+        # No running task: Task Info, Schedule, Apps and Spend are on screen.
+        assert geo["headers"] == ["Task Info", "Schedule", "Apps", "Spend"], geo
+        # The four bodies are equally tall; Spend reaches the bottom
+        # and Apps scrolls.
         assert geo["scheduleTop"] < geo["appsTop"], geo
         assert geo["scheduleHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
         assert geo["listHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
-        assert geo["appsBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
+        assert geo["spendHeight"] == pytest.approx(geo["appsHeight"], abs=1), geo
+        assert geo["spendBottom"] == pytest.approx(geo["panelInnerBottom"], abs=2), geo
         assert geo["appsScrolls"], geo
         assert geo["appsStatus"] == "1 of 40 connected"
         assert geo["firstApp"] == "App 07", "connected apps are listed first"
@@ -730,11 +970,12 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
 
         # The static server never completes the websocket handshake, so
         # the page believes the daemon is down (sends are held back).
-        # Connecting re-requests both subpanels.
+        # Connecting re-requests the three subpanels.
         page.evaluate("() => { window.__posted.length = 0; }")
         _deliver(page, {"type": "daemonStatus", "connected": True})
         posted = page.evaluate("() => window.__posted.map(m => m.type)")
         assert "getCronJobs" in posted and "getAppsStatus" in posted
+        assert "getSpendReport" in posted
 
         # Clicking an app that is not connected submits a connect task
         # in a NEW tab.
@@ -797,7 +1038,8 @@ _SURFACES = {
 }
 
 _BODY_HEIGHTS_JS = """
-() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-apps-list']
+() => ['meta-list', 'meta-info-content', 'meta-schedule-list', 'meta-apps-list',
+       'meta-spend-body']
   .map(id => document.getElementById(id).getBoundingClientRect().height)
 """
 
@@ -806,10 +1048,11 @@ _BODY_HEIGHTS_JS = """
 def test_every_surface_gives_the_expanded_sections_equal_heights(
     browser: Browser, remote_url: str, surface: str
 ) -> None:
-    """All four sections expanded: their bodies are equally tall by
+    """All five sections expanded: their bodies are equally tall by
     default on every surface, whatever their content.  Dragging the
     Schedule / Apps boundary moves only that boundary: the bodies above
-    it keep their heights."""
+    it keep their heights, the two below absorb the loss between them
+    (Spend, last, keeps at least its minimum share)."""
     width, setup = _SURFACES[surface]
     page = _open_page(browser, remote_url, width, height=900, global_sections=True)
     try:
@@ -821,6 +1064,7 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         )
         _deliver(page, {"type": "cronJobs", "jobs": []})
         _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": 1})
+        _deliver(page, _spend_report())
         # The VS Code surfaces get their Task update relayed from the
         # editor chat, so show the section directly (as setMetaInfoHTML
         # does) and re-apply the layout with a toggle round trip.
@@ -851,6 +1095,9 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         assert dragged[0] == pytest.approx(heights[0], abs=1), (heights, dragged)
         assert dragged[1] == pytest.approx(heights[1], abs=1), (heights, dragged)
         assert dragged[2] == pytest.approx(heights[2] + 30, abs=2), (heights, dragged)
-        assert dragged[3] == pytest.approx(heights[3] - 30, abs=2), (heights, dragged)
+        assert dragged[3] < heights[3] and dragged[4] < heights[4], (heights, dragged)
+        assert dragged[3] + dragged[4] == pytest.approx(
+            heights[3] + heights[4] - 30, abs=2
+        ), (heights, dragged)
     finally:
         page.close()

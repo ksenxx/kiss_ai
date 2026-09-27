@@ -287,6 +287,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getTaskUpdate", handler="get_task_update"),
     ApiCommand("getCronJobs", handler="get_cron_jobs"),
     ApiCommand("getAppsStatus", handler="get_apps_status"),
+    ApiCommand("getSpendReport", handler="get_spend_report"),
     ApiCommand("listDir", handler="list_dir"),
     ApiCommand("gitStatus", handler="git_status"),
     ApiCommand("gitLog", handler="git_log"),
@@ -1168,6 +1169,26 @@ class ServerApi:
             )
         except Exception:  # noqa: BLE001 - a background task must not die silently
             logger.warning("getAppsStatus reply failed", exc_info=True)
+
+    async def get_spend_report(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Send a client the task history's spend for its Spend subpanel.
+
+        The right sidebar's "Spend" subpanel (every surface: remote
+        webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
+        this command for its all-time totals, daily cost heatmap and
+        cost-by-model bars.  The direct reply is ``{"type":
+        "spendReport", ...}`` carrying the ``total``, ``days``,
+        ``totalByModel`` and ``daysByModel`` fields of
+        :func:`kiss.server.sidebar_panels.spend_report`.
+
+        Args:
+            cmd: The ``getSpendReport`` command (no fields).
+            ctx: The transport context of the current call.
+        """
+        report = await asyncio.to_thread(sidebar_panels.spend_report)
+        await self._backend._reply_direct(
+            ctx.endpoint, {"type": "spendReport", **report}, "getSpendReport"
+        )
 
     async def list_dir(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """List a directory for the remote webapp's Explorer view.
