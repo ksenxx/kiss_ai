@@ -43,8 +43,8 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import requests
 from requests.structures import CaseInsensitiveDict
 
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
+from kiss.core.browser_handoff import open_in_default_browser
 from kiss.core.config import kiss_home
 
 # KISS service name -> Composio toolkit slug.

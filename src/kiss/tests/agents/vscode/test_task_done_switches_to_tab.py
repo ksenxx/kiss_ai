@@ -2,34 +2,33 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end test: when a task completes in a chat tab the user is
-not viewing, the webview switches to that tab -- but only while the
-switch away from it was the agent's, not the user's.
+"""End-to-end test: when a task completes in a chat tab, the webview
+must automatically switch focus to that tab so the user immediately
+sees the result panel.
 
 The Sorcar chat webview has its own internal tab bar (rendered by
 ``media/main.js``).  Multiple chat tabs can each run their own task in
-parallel.  When a task ends in a background tab, the daemon-emitted
-terminal event (``task_done`` / ``task_error`` / ``task_stopped`` /
-``task_interrupted``) marks the tab not running, records its done
-label and updates the tab-bar status dot; ``focusFinishedTab`` then
-decides whether to pull the user onto that tab:
+parallel.  Before this fix, when a task finished in a background tab
+(i.e. a tab the user is not currently viewing), the daemon-emitted
+``task_done`` event only:
 
-  * The user has NOT typed, clicked, scrolled or tapped since they
-    submitted the task (``userInteractedSinceSubmit`` is false): the
-    tab they are looking at was opened by the agent -- a sub-agent
-    tab, a report tab -- so the finish undoes that agent-made switch
-    and shows them the result.
-  * The user HAS interacted since submitting: their place is theirs
-    to keep, and the finish only updates the background tab's state.
-    Stealing focus from a user who deliberately moved on is the
-    anti-pattern commit 3dfa67328 removed.
+  * marked the tab's ``isRunning`` flag false,
+  * recorded the tab's done label / duration in the per-tab state
+    object (so a later manual click would re-render the "Done (Xm Ys)"
+    status), and
+  * updated the in-tab-bar status dot (red ●  / green ●).
+
+It did NOT switch ``activeTabId`` to the just-finished tab, so a user
+whose task in tab A was moved aside by an agent-opened tab B (a
+sub-agent tab, a report tab) had to manually click back to tab A to
+see the result.  The user-facing contract (``focusFinishedTab`` in
+``main.js``): **when a task completes in a tab, the webview switches
+to that tab, unless the user themselves moved away (clicked, typed or
+scrolled) since submitting** -- their own place is theirs to keep.
 
 The tests below load the real ``media/main.js`` into a headless
-Chromium (Playwright) so the real event handlers, the real DOM, the
-real document-level interaction listeners and the real per-tab state
-run end-to-end.  ``_testApi.createNewTab()`` stands in for an
-agent-made tab switch (no DOM event fires); ``_switch_to_tab`` clicks
-a tab and is therefore a real user interaction.
+Chromium (Playwright) so the real event handlers, the real DOM, and
+the real per-tab state run end-to-end.
 
 The fixture-injected synthetic page mimics the same harness used by
 ``test_history_running_spinner.py`` so the behaviour is exercised
@@ -178,8 +177,14 @@ def _open_page(_browser, width: int = 800, height: int = 900):
     return context, page
 
 
-def _make_two_tabs(page) -> tuple[str, str]:
-    """Allocate two chat tabs and return ``(tab_a, tab_b)`` ids."""
+def _open_agent_tab(page) -> str:
+    """Open a second tab the way the agent does (programmatically, not
+    by a user click) and return its id; it becomes the active tab.
+
+    This is the "agent-made switch" ``focusFinishedTab`` undoes: a
+    sub-agent or report tab opening on top of the user's running tab.
+    """
+    before = _active_tab_id(page)
     page.evaluate("() => window._testApi.createNewTab()")
     page.wait_for_function(
         "document.querySelectorAll("
@@ -187,18 +192,18 @@ def _make_two_tabs(page) -> tuple[str, str]:
         ").length === 2",
         timeout=5000,
     )
-    ids: list[str] = page.evaluate(
-        "() => Array.from(document.querySelectorAll("
-        "'#tab-list .chat-tab[data-tab-id]'"
-        ")).map(el => el.dataset.tabId)"
-    )
-    assert len(ids) == 2
-    assert ids[0] != ids[1]
-    return ids[0], ids[1]
+    after = _active_tab_id(page)
+    assert after != before
+    assert _active_dom_tab_id(page) == after
+    return after
 
 
-def _switch_to_tab(page, tab_id: str) -> None:
-    """Click the tab in the tab bar so it becomes the active tab."""
+def _click_tab(page, tab_id: str) -> None:
+    """Click the tab in the tab bar so it becomes the active tab.
+
+    A real click: main.js records it as the user's own interaction,
+    so a later task end must leave them where they are.
+    """
     page.evaluate(
         """(id) => {
             const el = document.querySelector(
@@ -284,30 +289,25 @@ def _active_dom_tab_id(page) -> str | None:
 
 
 def test_task_done_switches_to_target_tab(_browser) -> None:
-    """``task_done`` for a background tab the AGENT switched away from
-    must bring the user back to it.
+    """``task_done`` for an owned tab the agent switched away from must
+    switch focus back to it.
 
     Steps:
-      1. Open the harness, allocate a second tab through
-         ``_testApi.createNewTab()`` -- an agent-made switch, as when
-         a sub-agent or report tab opens; no click, key or scroll
-         reaches the document, so the user counts as not having
-         interacted.  Tab A (the original) is now the background
-         tab and tab B the active one.
+      1. Open the harness; tab A is the active tab.
       2. Send ``status: running=true`` for tab A so it's marked
          running (mirrors the live daemon event sequence).
-      3. Send ``task_done`` targeting tab A.
-      4. Assert the webview switched back: both the in-JS
+      3. Open tab B the way the agent does (programmatically): tab B
+         is now active, tab A is in the background.
+      4. Send ``task_done`` targeting tab A.
+      5. Assert the webview auto-switched: both the in-JS
          ``activeTabId`` state and the ``.chat-tab.active`` DOM class
-         move to tab A.
+         move back to tab A.
     """
     context, page = _open_page(_browser)
     try:
-        tab_a, tab_b = _make_two_tabs(page)
-        assert _active_tab_id(page) == tab_b
-        assert _active_dom_tab_id(page) == tab_b
-
+        tab_a = _active_tab_id(page)
         _mark_tab_running(page, tab_a)
+        tab_b = _open_agent_tab(page)
         assert _active_tab_id(page) == tab_b
 
         _post_task_done(page, tab_a)
@@ -318,8 +318,7 @@ def test_task_done_switches_to_target_tab(_browser) -> None:
         )
         assert _active_tab_id(page) == tab_a, (
             "Webview must switch the active tab to the tab whose task "
-            "just completed (tab_a) when the user never interacted "
-            "since submitting, but activeTabId stayed at the "
+            "just completed (tab_a), but activeTabId stayed at the "
             "agent-opened tab."
         )
         assert _active_dom_tab_id(page) == tab_a, (
@@ -335,19 +334,19 @@ def test_task_done_switches_to_target_tab(_browser) -> None:
     ["task_error", "task_stopped", "task_interrupted"],
 )
 def test_terminal_event_switches_to_target_tab(_browser, ev_type) -> None:
-    """Every terminal task event must also undo an agent-made switch.
+    """Every terminal task event must also switch to the target tab.
 
     ``task_done`` is the success path; ``task_error``,
     ``task_stopped`` and ``task_interrupted`` are the failure /
     cancellation / shutdown paths.  All three end the task in the
-    background tab, so a user who did not interact since submitting
-    is brought back to it to see the final status banner, exactly
-    the same as for ``task_done``.
+    target tab so the user must be switched to that tab to see the
+    final status banner, exactly the same as for ``task_done``.
     """
     context, page = _open_page(_browser)
     try:
-        tab_a, tab_b = _make_two_tabs(page)
+        tab_a = _active_tab_id(page)
         _mark_tab_running(page, tab_a)
+        tab_b = _open_agent_tab(page)
         assert _active_tab_id(page) == tab_b
 
         _post_terminal_event(page, ev_type, tab_a)
@@ -366,47 +365,64 @@ def test_terminal_event_switches_to_target_tab(_browser, ev_type) -> None:
         context.close()
 
 
-@pytest.mark.parametrize(
-    "ev_type",
-    ["task_done", "task_error", "task_stopped", "task_interrupted"],
-)
-def test_finish_after_user_interaction_keeps_focus(_browser, ev_type) -> None:
-    """A user who clicked onto another tab since submitting stays
-    there when the background task ends.
+def test_task_done_keeps_user_chosen_tab(_browser) -> None:
+    """A tab the user clicked to since submitting is theirs to keep.
 
-    Clicking tab A in the tab bar is a real ``click`` on the
-    document, which sets ``userInteractedSinceSubmit``; the terminal
-    event for tab B then only records B's state (its tab-bar spinner
-    becomes a tick / cross) and must not move ``activeTabId`` or the
-    ``.chat-tab.active`` class off the tab the user chose.
+    The user ran a task in tab A, then clicked over to tab B
+    themselves.  Tab A finishing must not yank them back: only an
+    agent-made switch (see :func:`_open_agent_tab`) is undone.
     """
     context, page = _open_page(_browser)
     try:
-        tab_a, tab_b = _make_two_tabs(page)
-        _switch_to_tab(page, tab_a)
-        assert _active_tab_id(page) == tab_a
+        tab_a = _active_tab_id(page)
+        _mark_tab_running(page, tab_a)
+        tab_b = _open_agent_tab(page)
+        _click_tab(page, tab_a)
+        _click_tab(page, tab_b)
+        assert _active_tab_id(page) == tab_b
 
-        _mark_tab_running(page, tab_b)
-        assert _active_tab_id(page) == tab_a
-
-        if ev_type == "task_done":
-            _post_task_done(page, tab_b)
-        else:
-            _post_terminal_event(page, ev_type, tab_b)
-        # The event was handled once B's tab-bar spinner gave way to
-        # its done tick / cross.
+        _post_task_done(page, tab_a)
         page.wait_for_function(
-            "id => document.querySelector("
-            "`#tab-list .chat-tab[data-tab-id=\"${id}\"] .chat-tab-status`"
-            ") !== null && document.querySelector("
-            "`#tab-list .chat-tab[data-tab-id=\"${id}\"] .chat-tab-spinner`"
-            ") === null",
-            arg=tab_b,
+            "() => true", timeout=500,
+        )
+        assert _active_tab_id(page) == tab_b, (
+            "task_done must not pull the user off a tab they clicked "
+            "to themselves."
+        )
+        assert _active_dom_tab_id(page) == tab_b
+    finally:
+        context.close()
+
+
+def test_real_submit_resets_earlier_interaction(_browser) -> None:
+    """A submit through the composer forgets the clicks made before it.
+
+    The user clicks around, then types a prompt and presses Send in
+    tab A; an agent tab opens on top of it while the task runs.  The
+    clicks predate the submit, so when tab A finishes the webview must
+    pull the user back to it — ``sendMessage`` has to clear the
+    interaction flag, otherwise those earlier clicks would count as
+    the user choosing the agent tab.
+    """
+    context, page = _open_page(_browser)
+    try:
+        tab_a = _active_tab_id(page)
+        page.mouse.click(400, 450)  # a real interaction before the submit
+        page.fill("#task-input", "run the tests")
+        page.click("#send-btn")
+        page.wait_for_function(
+            "() => window.__postedMessages.some(m => m.type === 'submit')",
             timeout=5000,
         )
-        assert _active_tab_id(page) == tab_a, (
-            f"{ev_type!r} for a background tab must not pull a user "
-            f"who clicked onto tab_a since submitting away from it."
+        _mark_tab_running(page, tab_a)
+        tab_b = _open_agent_tab(page)
+        assert _active_tab_id(page) == tab_b
+
+        _post_task_done(page, tab_a)
+        page.wait_for_function(
+            "id => window._testApi.getActiveTabId() === id",
+            arg=tab_a,
+            timeout=5000,
         )
         assert _active_dom_tab_id(page) == tab_a
     finally:
@@ -420,20 +436,19 @@ def test_task_done_on_active_tab_keeps_focus(_browser) -> None:
     """
     context, page = _open_page(_browser)
     try:
-        tab_a, tab_b = _make_two_tabs(page)
-        _switch_to_tab(page, tab_a)
-        _mark_tab_running(page, tab_a)
-        assert _active_tab_id(page) == tab_a
+        tab_b = _open_agent_tab(page)
+        _mark_tab_running(page, tab_b)
+        assert _active_tab_id(page) == tab_b
 
-        _post_task_done(page, tab_a)
+        _post_task_done(page, tab_b)
         page.wait_for_function(
             "() => true", timeout=500,
         )
-        assert _active_tab_id(page) == tab_a, (
+        assert _active_tab_id(page) == tab_b, (
             "task_done for the already-active tab must not switch "
             "the active tab away."
         )
-        assert _active_dom_tab_id(page) == tab_a
+        assert _active_dom_tab_id(page) == tab_b
     finally:
         context.close()
 
@@ -447,14 +462,13 @@ def test_task_done_for_unknown_tab_id_is_safe(_browser) -> None:
     """
     context, page = _open_page(_browser)
     try:
-        tab_a, tab_b = _make_two_tabs(page)
-        _switch_to_tab(page, tab_a)
+        tab_b = _open_agent_tab(page)
 
         _post_task_done(page, "this-tab-does-not-exist")
         page.wait_for_function(
             "() => true", timeout=500,
         )
-        assert _active_tab_id(page) == tab_a, (
+        assert _active_tab_id(page) == tab_b, (
             "task_done for an unknown tab must not change the "
             "active tab."
         )

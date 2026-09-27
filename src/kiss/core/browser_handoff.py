@@ -21,11 +21,6 @@ platform opener (``open`` on macOS, ``os.startfile`` on Windows,
 ``xdg-open`` elsewhere).  It never waits for the browser to finish
 (only a few seconds to catch an opener that fails at once) and never
 raises; a headless environment simply yields ``False``.
-
-The module lives in ``kiss.core`` because both the connector layer
-(``kiss.agents.third_party_agents``) and the Sorcar layer
-(``kiss.agents.sorcar.mcp_oauth``) hand pages to the user, and Sorcar
-code may depend only on ``kiss.core``.
 """
 
 from __future__ import annotations

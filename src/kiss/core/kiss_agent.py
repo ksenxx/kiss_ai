@@ -496,13 +496,8 @@ class KISSAgent(Base):
         try:
             response_text, response = self.model.generate()
         except Exception as e:
-            # A run that failed mid-stream may still have observed
-            # billable usage (e.g. Claude Code's per-message deltas);
-            # account it before propagating so a timed-out whole-task run
-            # does not erase its known spend.
-            partial = self.model.take_partial_usage_response()
-            if partial is not None:
-                self._update_tokens_and_budget_from_response(partial)
+            # A timed-out whole-task run must not erase its known spend.
+            self._bill_partial_usage()
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
@@ -781,9 +776,17 @@ class KISSAgent(Base):
         # already-hooked messages to the hook on the next attempt ...
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
-        function_calls, response_text, response = self.model.generate_and_process_with_tools(
-            self.function_map, tools_schema=self._cached_tools_schema
-        )
+        try:
+            function_calls, response_text, response = (
+                self.model.generate_and_process_with_tools(
+                    self.function_map, tools_schema=self._cached_tools_schema
+                )
+            )
+        except Exception:
+            # A truncated, incomplete or refused response raises but was
+            # still billed; the retry/fallback loop must not drop it.
+            self._bill_partial_usage()
+            raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call.
         self._llm_hook_conversation_index = len(self.model.conversation)
@@ -1197,6 +1200,20 @@ class KISSAgent(Base):
                 )
                 raise KISSError(error_msg)
             self.function_map[tool.__name__] = tool
+
+    def _bill_partial_usage(self) -> None:
+        """Account the usage of a generation call that raised, if any.
+
+        The model may have been billed for a call that then failed: a
+        complete response the adapter rejected (truncated, incomplete,
+        refused) or usage observed mid-stream (Claude Code's per-message
+        deltas).  :meth:`Model.take_partial_usage_response` hands it over
+        exactly once.  Duck-typed model stand-ins may predate the hook.
+        """
+        take_partial = getattr(self.model, "take_partial_usage_response", None)
+        partial = take_partial() if callable(take_partial) else None
+        if partial is not None:
+            self._update_tokens_and_budget_from_response(partial)
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
         """Updates token counter and budget from API response.

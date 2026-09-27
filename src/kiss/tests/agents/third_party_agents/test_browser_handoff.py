@@ -33,13 +33,6 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents import _browser_handoff
-from kiss.agents.third_party_agents._browser_handoff import (
-    _launch_commands,
-    browser_handoff_note,
-    open_in_default_browser,
-    portal_handoff,
-)
 from kiss.agents.third_party_agents._device_auth import (
     ConsentSession,
     consent_instructions,
@@ -52,6 +45,13 @@ from kiss.agents.third_party_agents.signal_sea import SignalAgent
 from kiss.agents.third_party_agents.slack_sea import SlackAgent
 from kiss.agents.third_party_agents.telegram_sea import TelegramAgent
 from kiss.agents.third_party_agents.whatsapp_sea import _qr_handoff
+from kiss.core import browser_handoff as _browser_handoff
+from kiss.core.browser_handoff import (
+    _launch_commands,
+    browser_handoff_note,
+    open_in_default_browser,
+    portal_handoff,
+)
 from kiss.tests.agents.third_party_agents.composio_test_utils import start_fake_composio
 from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script

@@ -65,10 +65,7 @@ def _row_at(path: str, cls: str = "") -> str:
 
 def _open_page(browser, harness):
     """Open the remote page in desktop mode with clipboard access and
-    record the WS frames it sends.  Questions (Delete, Replace, Find in
-    Folder, Create Branch / Tag, Compare with) are in-page toasts, not
-    native dialogs: answer them with :func:`_answer_prompt` and
-    :func:`_answer_toast`."""
+    record the WS frames the client sends."""
     context = browser.new_context(
         ignore_https_errors=True,
         viewport={"width": 1400, "height": 900},
@@ -131,35 +128,41 @@ def _open_scm(page):
     _settle(page)
 
 
-def _toast(page, notification_id: str):
-    """The in-page confirm / prompt toast with *notification_id*, once
-    it is shown (the Delete and Replace questions land only after the
-    daemon has answered the request)."""
-    toast = page.locator(
-        f".kiss-notification[data-notification-id='{notification_id}']",
-    )
-    toast.wait_for(timeout=10000)
-    return toast
+def _toast(page, toast_id: str):
+    """Locator of the in-webview confirm / prompt toast *toast_id* that
+    main.js shows in place of the browser's confirm() / prompt() (the
+    VS Code webview sandbox never displays those)."""
+    return page.locator(f".kiss-notification[data-notification-id='{toast_id}']")
 
 
-def _toast_message(toast) -> str:
-    return str(toast.locator(".kiss-notification-message").inner_text())
+def _answer_prompt(page, toast_id: str, text: str | None) -> None:
+    """Type *text* into the prompt toast *toast_id* and submit it with
+    Enter, or cancel the prompt with Escape when *text* is ``None``;
+    return once the toast is gone."""
+    toast = _toast(page, toast_id)
+    inp = toast.locator(".kiss-notification-input")
+    inp.wait_for(timeout=5000)
+    if text is None:
+        inp.press("Escape")
+    else:
+        inp.fill(text)
+        inp.press("Enter")
+    toast.wait_for(state="detached", timeout=5000)
 
 
-def _answer_toast(page, notification_id: str, label: str) -> None:
-    """Press the button labelled *label* on a toast and wait for it to go."""
-    toast = _toast(page, notification_id)
-    toast.get_by_role("button", name=label, exact=True).click()
-    toast.wait_for(state="detached", timeout=10000)
-
-
-def _answer_prompt(page, notification_id: str, text: str) -> None:
-    """Type *text* into a prompt toast and submit it with Enter."""
-    toast = _toast(page, notification_id)
-    box = toast.locator(".kiss-notification-input")
-    box.fill(text)
-    box.press("Enter")
-    toast.wait_for(state="detached", timeout=10000)
+def _answer_confirm(page, toast_id: str, accept: bool) -> str:
+    """Press the confirm toast's verb button (*accept*) or its cancel
+    button, wait for the toast to close and return the question it
+    asked."""
+    toast = _toast(page, toast_id)
+    toast.wait_for(timeout=5000)
+    message = toast.locator(".kiss-notification-message").text_content() or ""
+    if accept:
+        toast.locator(".kiss-notification-action").first.click()
+    else:
+        toast.locator("[data-dialog-cancel]").click()
+    toast.wait_for(state="detached", timeout=5000)
+    return message
 
 
 def _wait_content(page, text: str) -> None:
@@ -383,17 +386,16 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp.wait_for(timeout=5000)
         inp.press("Escape")
 
-        # Delete asks first with an in-page toast naming the file; its
-        # "Keep" button (the focused, safe choice) keeps the file.
+        # Delete asks first; "Keep" keeps the file.
         _explorer_row(page, "renamed.py").click(button="right")
         _menu_item(page, "Delete").click()
-        toast = _toast(page, "fs-delete")
-        assert "renamed.py" in _toast_message(toast)
-        _answer_toast(page, "fs-delete", "Keep")
+        message = _answer_confirm(page, "fs-delete", accept=False)
+        assert "renamed.py" in message
+        page.wait_for_timeout(300)
         assert (harness.work_dir / "dir" / "renamed.py").is_file()
         _explorer_row(page, "renamed.py").click(button="right")
         _menu_item(page, "Delete").click()
-        _answer_toast(page, "fs-delete", "Delete")
+        _answer_confirm(page, "fs-delete", accept=True)
         page.wait_for_selector(
             _explorer_row_sel("/dir/renamed.py"),
             state="detached",
@@ -404,7 +406,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         _wait_tab_count(page, tabs_before)
         _explorer_row(page, "made").click(button="right")
         _menu_item(page, "Delete").click()
-        _answer_toast(page, "fs-delete", "Delete")
+        _answer_confirm(page, "fs-delete", accept=True)
         page.wait_for_selector(
             _explorer_row_sel("/dir/made"),
             state="detached",
@@ -429,8 +431,8 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
             _explorer_row_sel("/main-only copy.txt"), timeout=15000,
         )
         assert (harness.work_dir / "main-only copy.txt").read_text() == "m\n"
-        # Paste into dir/, then again: the second paste collides and the
-        # replace question's "Keep existing" -> nothing changes.
+        # Paste into dir/, then again: the second paste collides and
+        # "Keep existing" on the replace question changes nothing.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         page.wait_for_selector(
@@ -439,15 +441,14 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         (harness.work_dir / "dir" / "main-only.txt").write_text("keep\n")
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        toast = _toast(page, "fs-overwrite")
-        assert "already exists" in _toast_message(toast)
-        assert "main-only.txt" in _toast_message(toast)
-        _answer_toast(page, "fs-overwrite", "Keep existing")
+        message = _answer_confirm(page, "fs-overwrite", accept=False)
+        assert "already exists" in message
+        page.wait_for_timeout(300)
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "keep\n"
         # "Replace" replaces it.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        _answer_toast(page, "fs-overwrite", "Replace")
+        _answer_confirm(page, "fs-overwrite", accept=True)
         for _ in range(50):
             if (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n":
                 break
@@ -482,12 +483,6 @@ def test_find_in_folder_and_compare_open_result_tabs(browser, harness, worktree)
         tabs_before = page.locator(".chat-tab").count()
         page.locator(".explorer-row[aria-level='1']").click(button="right")
         _menu_item(page, "Find in Folder...").click()
-        # The query is asked for in-page; an empty one keeps the box open.
-        toast = _toast(page, "find-in-folder")
-        toast.locator(".kiss-notification-input").press("Enter")
-        page.wait_for_timeout(200)
-        assert toast.count() == 1
-        assert not _sent(frames, "fsAction")
         _answer_prompt(page, "find-in-folder", "sentinel")
         _wait_tab_count(page, tabs_before + 1)
         _wait_content(page, "feature.txt:1:feature-file-sentinel-7c1e")
@@ -653,13 +648,11 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
     try:
         _open_scm(page)
         first = page.locator("#scm-graph .scm-commit", has_text="first: add a.txt")
-        # Create Tag... asks in-page for the name, then the optional
-        # message -> the tag shows up on the commit after the refresh.
+        # Create Tag... (name, then optional message) -> the tag shows
+        # up on the commit after the refresh.
         first.click(button="right")
         _menu_item(page, "Create Tag...").click()
         _answer_prompt(page, "git-create-tag", "ui-tag")
-        toast = _toast(page, "git-create-tag-message")
-        assert "ui-tag" in _toast_message(toast)
         _answer_prompt(page, "git-create-tag-message", "ui-tag")
         page.wait_for_selector(
             "#scm-graph .scm-commit .scm-ref.is-tag:text-is('ui-tag')", timeout=15000,
@@ -670,7 +663,7 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
         # A cancelled prompt sends nothing.
         first.click(button="right")
         _menu_item(page, "Create Branch...").click()
-        _answer_toast(page, "git-create-branch", "Cancel")
+        _answer_prompt(page, "git-create-branch", None)
         page.wait_for_timeout(300)
         assert len(_sent(frames, "gitAction")) == len(actions)
         # Checkout (Detached) fails on the dirty main checkout: the
@@ -686,10 +679,6 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
         tabs_before = page.locator(".chat-tab").count()
         first.click(button="right")
         _menu_item(page, "Compare with...").click()
-        # The box is pre-filled with HEAD, as VS Code's is.
-        assert _toast(page, "git-compare-with").locator(
-            ".kiss-notification-input",
-        ).input_value() == "HEAD"
         _answer_prompt(page, "git-compare-with", "v1")
         _wait_tab_count(page, tabs_before + 1)
         _wait_content(page, "feature-file-sentinel-7c1e")

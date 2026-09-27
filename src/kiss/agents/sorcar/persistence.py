@@ -2263,6 +2263,7 @@ def _log_orphaned_task_forensics(
 _USAGE_STEPS_RE = re.compile(r"Steps:\s*(\d+)")
 _USAGE_TOKENS_RE = re.compile(r"Total tokens:\s*([\d,]+)")
 _USAGE_COST_RE = re.compile(r"Budget:\s*\$([0-9][\d,]*\.?\d*)")
+_COST_FIELD_RE = re.compile(r"\$?(\d+(?:\.\d+)?)")
 
 
 def _recovered_progress_from_events(
@@ -2283,9 +2284,11 @@ def _recovered_progress_from_events(
         db: Active database connection (caller holds the write lock).
         task_id: Task whose events should be inspected.
 
-    Only the per-task counter text emitted once per agent step
-    (``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
-    $56.4682/$1000.00"``) is trusted.  The live-usage monitor's
+    Only the per-task counter events emitted once per agent step
+    (text ``"Steps: 175/10000, ... Total tokens: 33,641,687, Budget:
+    $56.4682/$1000.00"``) are trusted; their structured
+    ``total_steps``/``total_tokens``/``cost`` fields (task totals across
+    continuation sessions) win over the session-relative text.  The live-usage monitor's
     ``usage_info`` events carry a different text form and structured
     ``total_tokens``/``total_steps``/``cost`` fields, but those are
     CROSS-TASK aggregates ("incl. parallel sub-agents") — writing them
@@ -2344,9 +2347,39 @@ def _recovered_progress_from_events(
             # unconvertible digit groups; a corrupt event must not
             # abort the recovery sweep.
             continue
+        # The text is the executor's own session-relative counter, but
+        # the printer rewrites the structured fields of the same event
+        # to task totals (sessions banked by earlier continuations
+        # added), which is what the task actually spent.
+        found.update(_structured_usage_totals(event))
         progress.update(found)
         break
     return progress
+
+
+def _structured_usage_totals(event: dict[str, Any]) -> dict[str, int | float]:
+    """Return the task-total counters carried by a per-step ``usage_info`` event.
+
+    Args:
+        event: A decoded ``usage_info`` event whose text is the per-step
+            counter form.
+
+    Returns:
+        The subset of ``steps``/``tokens``/``cost`` present as valid
+        ``total_steps``/``total_tokens``/``cost`` fields (events written
+        by versions that predate these fields contribute nothing).
+    """
+    totals: dict[str, int | float] = {}
+    steps = event.get("total_steps")
+    tokens = event.get("total_tokens")
+    if isinstance(steps, int) and not isinstance(steps, bool):
+        totals["steps"] = steps
+    if isinstance(tokens, int) and not isinstance(tokens, bool):
+        totals["tokens"] = tokens
+    cost_m = _COST_FIELD_RE.fullmatch(str(event.get("cost", "")))
+    if cost_m:
+        totals["cost"] = float(cost_m.group(1))
+    return totals
 
 
 def _backfill_orphan_progress(

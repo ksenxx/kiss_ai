@@ -1206,10 +1206,7 @@ class RelentlessAgent(Base):
                 if partial is None:
                     raise exhausted
                 return partial
-            if self.printer:
-                self.printer.tokens_offset = tokens_banked  # type: ignore[attr-defined]
-                self.printer.budget_offset = budget_banked  # type: ignore[attr-defined]
-                self.printer.steps_offset = steps_banked  # type: ignore[attr-defined]
+            self._set_printer_offsets(budget_banked, tokens_banked, steps_banked)
             logger.info(
                 "Session %d start: agent=%s budget_remaining=$%.4f "
                 "total_tokens=%d total_steps=%d",
@@ -1452,6 +1449,23 @@ class RelentlessAgent(Base):
         result: str = yaml.dump(payload, sort_keys=False)
         return result
 
+    def _set_printer_offsets(self, budget: float, tokens: int, steps: int) -> None:
+        """Make the printer add this task's banked totals to every event.
+
+        Each sub-session (and the failed-session summarizer) is a fresh
+        :class:`KISSAgent` whose counters start at zero; the printer adds
+        these offsets so the UI shows the task's cumulative usage.
+
+        Args:
+            budget: Banked spend in USD.
+            tokens: Banked token count.
+            steps: Banked step count.
+        """
+        if self.printer:
+            self.printer.tokens_offset = tokens  # type: ignore[attr-defined]
+            self.printer.budget_offset = budget  # type: ignore[attr-defined]
+            self.printer.steps_offset = steps  # type: ignore[attr-defined]
+
     def _summarize_failed_session(
         self,
         executor: KISSAgent,
@@ -1500,6 +1514,11 @@ class RelentlessAgent(Base):
             # subtraction — subtracting ``executor.budget_used`` again
             # would double-count it.
             summarizer_budget = max(0.01, self.max_budget - self.budget_used)
+            # The summarizer prints through the task's printer, whose
+            # offsets still exclude the failed session just banked; its
+            # usage events would show the task's cost dropping by that
+            # session's spend until the next session re-bases them.
+            self._set_printer_offsets(*self.usage_snapshot())
             summarizer_agent = KISSAgent(f"{self.name} Summarizer")
             try:
                 summarizer_result = summarizer_agent.run(
@@ -1557,29 +1576,55 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
-        # The printer adds its per-task offsets to every result event's
-        # totals, but this agent's snapshot is already CUMULATIVE, so
-        # the raw values passed down are the snapshot MINUS the current
-        # offsets.  The previous design zeroed the offsets around the
-        # print and restored them afterwards; round-4 finding 5 showed
-        # an asynchronously injected stop could land after the zeroing
-        # and skip (or interrupt) the restoration, leaving the task's
-        # offsets zeroed.  Reading the offsets without ever mutating
-        # them removes that failure mode entirely: there is no shared
-        # state to restore, so no injection point can corrupt it.
+        budget, tokens, steps = self._usage_net_of_printer_offsets()
+        self.printer.print(
+            yaml.dump(payload, sort_keys=False),
+            type="result",
+            step_count=steps,
+            total_tokens=tokens,
+            cost=f"${budget:.4f}",
+        )
+
+    def _emit_usage_totals(self) -> None:
+        """Emit a ``usage_info`` event carrying this task's cumulative totals.
+
+        For spend banked after the last session's final event (the
+        pre-run classifier's, folded at the end of ``SorcarAgent.run``),
+        so the UI's cost matches the persisted task cost.
+        """
+        if self.printer is None:
+            return
+        budget, tokens, steps = self.usage_snapshot()
+        net_budget, net_tokens, net_steps = self._usage_net_of_printer_offsets()
+        self.printer.print(
+            f"Steps: {steps}/{self.max_steps}, Total tokens: {tokens:,}, "
+            f"Budget: ${budget:.4f}/${self.max_budget:.2f}, ",
+            type="usage_info",
+            total_tokens=net_tokens,
+            cost=f"${net_budget:.4f}",
+            total_steps=net_steps,
+        )
+
+    def _usage_net_of_printer_offsets(self) -> tuple[float, int, int]:
+        """Return this task's cumulative ``(budget, tokens, steps)`` minus the printer offsets.
+
+        The printer adds its per-task offsets to every event's totals,
+        but this agent's snapshot is already CUMULATIVE, so the raw
+        values passed down are the snapshot MINUS the current offsets.
+        The offsets are read, never mutated: an earlier design zeroed
+        them around the print, and an asynchronously injected stop
+        could skip the restoration (round-4 finding 5).
+
+        Returns:
+            The net ``(budget, tokens, steps)`` triple.
+        """
         tokens_offset = int(getattr(self.printer, "tokens_offset", 0) or 0)
         budget_offset = float(getattr(self.printer, "budget_offset", 0.0) or 0.0)
         steps_offset = int(getattr(self.printer, "steps_offset", 0) or 0)
         # One coherent triple (see usage_snapshot): three separate
         # property reads could tear across a concurrent bank.
         budget, tokens, steps = self.usage_snapshot()
-        self.printer.print(
-            yaml.dump(payload, sort_keys=False),
-            type="result",
-            step_count=steps - steps_offset,
-            total_tokens=tokens - tokens_offset,
-            cost=f"${budget - budget_offset:.4f}",
-        )
+        return budget - budget_offset, tokens - tokens_offset, steps - steps_offset
 
     def run(
         self,

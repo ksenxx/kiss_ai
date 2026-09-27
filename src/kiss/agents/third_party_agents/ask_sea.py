@@ -43,22 +43,13 @@ from typing import Any
 
 from kiss.core.brand import render_brand
 
-# ``src/kiss/agents/third_party_agents/ask_sea.py`` → repo root is
-# ``parents[4]`` (third_party_agents → agents → kiss → src → repo).
-# The authoritative SYSTEM_LITE ablation prompt lives under
-# ``papers/`` at the repo root; a byte-identical copy is packaged
-# next to this file as ``_ask_system_lite.md`` so wheel installs
-# (which exclude ``papers/`` per ``pyproject.toml``) still work.
-# The tests pin that the two files are byte-identical.
-_SYSTEM_LITE_PATH = (
-    Path(__file__).resolve().parents[4]
-    / "papers"
-    / "kisssorcar"
-    / "ablation"
-    / "prompts"
-    / "SYSTEM_LITE.md"
-)
-_BUNDLED_SYSTEM_LITE_PATH = Path(__file__).resolve().parent / "_ask_system_lite.md"
+# The /ask base prompt: the SYSTEM_LITE ablation prompt with the brand
+# identity as a ``{{IDENTITY}}`` placeholder (see ``kiss.core.brand``).
+# It is packaged next to this file so wheel installs (which exclude
+# ``papers/`` per ``pyproject.toml``) work; the frozen copy under
+# ``papers/kisssorcar/ablation/prompts/`` records what the ablation
+# study actually ran and is not read by the product.
+_SYSTEM_LITE_PATH = Path(__file__).resolve().parent / "_ask_system_lite.md"
 
 # The prompt suffix both dispatch paths append to the user's question.
 # ``<task_id>`` is a literal placeholder: the idle-tab rewrite keeps it
@@ -112,15 +103,11 @@ paths for the key facts."""
 def system_prompt() -> str:
     """Return the SYSTEM_LITE ablation prompt as the base system prompt.
 
-    Prefers the repo copy at
-    ``./papers/kisssorcar/ablation/prompts/SYSTEM_LITE.md`` so an
-    ablation-time edit is picked up immediately; falls back to the
-    bundled copy (``_ask_system_lite.md``, kept byte-identical by
-    ``test_bundled_system_lite_is_byte_identical``) so a wheel
-    install without the ``papers/`` tree still works.
+    Reads the bundled ``_ask_system_lite.md`` next to this module and
+    fills the brand placeholders, so the same text is served from a
+    source checkout and from a wheel install.
     """
-    src = _SYSTEM_LITE_PATH if _SYSTEM_LITE_PATH.is_file() else _BUNDLED_SYSTEM_LITE_PATH
-    return render_brand(src.read_text(encoding="utf-8"))
+    return render_brand(_SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
 
 
 def append_to_system_prompt() -> str:

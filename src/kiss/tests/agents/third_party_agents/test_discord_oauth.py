@@ -11,8 +11,8 @@ webhook the token answer hands out.  ``DISCORD_OAUTH_BASE`` and
 browser by issuing a real GET to the loopback callback on the fixed
 redirect port 53682 (Discord matches redirect URIs exactly, so the
 port cannot vary; tests in one process never overlap because a new
-session cancels the previous owner of the port, and ``_start`` waits
-while another process's test holds it).
+session cancels the previous owner of the port, and ``discord_server``
+reserves the port across pytest processes).
 
 Unreachable without test doubles: the ``OSError`` branch when port
 53682 is held by another process, and transport failures of the
@@ -38,7 +38,7 @@ import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._device_auth import ConsentSession
-from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_REDIRECT_URI
+from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT, LOOPBACK_REDIRECT_URI
 from kiss.agents.third_party_agents.discord_sea import (
     DiscordAgent,
     _config,
@@ -51,6 +51,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.conftest import hold_loopback_port
 
 _USER_TOKEN = "user-access-token"
 _BOT_TOKEN = "bot-secret-token"
@@ -136,7 +137,11 @@ class _DiscordServer(ThreadedHTTPServer):
 def discord_server(
     isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[_DiscordServer]:
-    """Run the emulator and point the agent at it (legacy, non-Muse mode)."""
+    """Run the emulator and point the agent at it (legacy, non-Muse mode).
+
+    Reserves the fixed redirect port across pytest processes for the
+    test's duration.
+    """
     server = _DiscordServer()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -145,13 +150,18 @@ def discord_server(
     monkeypatch.setenv("KISS_DISCORD_CLIENT_ID", "kiss-discord-app")
     monkeypatch.setenv("KISS_HEADLESS", "1")
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
-    yield server
-    ConsentSession.cancel_active("discord")
+    with hold_loopback_port(LOOPBACK_PORT):
+        yield server
+        ConsentSession.cancel_active("discord")
     stop_http_server(server, thread)
 
 
 def _start(tools: dict[str, Any]) -> str:
-    """Call authenticate_discord(), waiting while another process holds port 53682.
+    """Call authenticate_discord(), waiting while a foreign process holds port 53682.
+
+    ``discord_server`` already serialises the port across pytest
+    processes; the retry covers a non-test owner (a real Discord sign-in
+    on this machine), which the file lock cannot see.
 
     Args:
         tools: The agent's auth tools.

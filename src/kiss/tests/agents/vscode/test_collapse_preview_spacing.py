@@ -140,16 +140,14 @@ _MiniEl.prototype.querySelectorAll = function(sel) {
 
 _MiniEl.prototype.closest = function(sel) {
     var cls = sel.replace(/^\./,'');
-    var el = this;
-    while (el) {
+    for (var el = this; el; el = el.parentElement) {
         if (el.classList.contains(cls)) return el;
-        el = el.parentElement;
     }
     return null;
 };
 
 _MiniEl.prototype.setAttribute = function(name, value) {
-    if (!this._attrs) this._attrs = {};
+    this._attrs = this._attrs || {};
     this._attrs[name] = String(value);
 };
 
@@ -204,16 +202,16 @@ function buildPanel(bodyChildren) {
     // Panel element (like .tc)
     var panel = mkTestEl('div');
     panel.classList.add('tc');
+    panel.classList.add('collapsible');
 
-    // Header (like .tc-h)
+    // Header (like .tc-h after addCollapse)
     var hdr = mkTestEl('div');
     hdr.classList.add('tc-h');
+    hdr.classList.add('collapse-header');
     hdr.textContent = 'Bash';
     panel.appendChild(hdr);
 
-    // Add collapse infrastructure the way main.js addCollapse does:
-    // .collapsible panel, .collapse-header header with chevron and preview
-    panel.classList.add('collapsible');
+    // Add collapse infrastructure: chevron and preview on header
     var chv = mkTestEl('span');
     chv.classList.add('collapse-chv');
     chv.textContent = '\u25BE';
@@ -222,7 +220,6 @@ function buildPanel(bodyChildren) {
     var prev = mkTestEl('span');
     prev.classList.add('collapse-preview');
     hdr.appendChild(prev);
-    hdr.classList.add('collapse-header');
 
     // Body element (like .tc-b)
     var body = mkTestEl('div');
@@ -255,10 +252,8 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     """
     source = _MAIN_JS.read_text()
     collect_fn = _extract_function(source, "collectText")
-    # collapsePreview first syncs the header's aria-expanded through
-    # syncCollapseAria, so the real helper is evaluated alongside it.
-    sync_aria_fn = _extract_function(source, "syncCollapseAria")
     collapse_fn = _extract_function(source, "collapsePreview")
+    sync_aria_fn = _extract_function(source, "syncCollapseAria")
     mkel_fn = _extract_function(source, "mkEl")
 
     script = _NODE_SHIM + "\n"

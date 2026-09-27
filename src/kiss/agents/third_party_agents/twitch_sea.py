@@ -29,7 +29,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import portal_handoff
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -45,6 +44,7 @@ from kiss.agents.third_party_agents._device_auth import (
     connect_prompt,
     consent_required,
 )
+from kiss.core.browser_handoff import portal_handoff
 
 _TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"

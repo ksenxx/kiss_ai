@@ -41,8 +41,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import requests
 
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.browser_handoff import open_in_default_browser
 
 DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 USER_AGENT = PRODUCT_NAME
@@ -684,7 +684,7 @@ def consent_required(service: str, label: str, session: ConsentSession) -> dict[
 
     The verification page is opened in the user's default browser when
     this process can reach one (see
-    :func:`~kiss.agents.third_party_agents._browser_handoff.open_in_default_browser`);
+    :func:`~kiss.core.browser_handoff.open_in_default_browser`);
     the URL and code are returned in every case so the agent can show
     them for a manual sign-in.
 
