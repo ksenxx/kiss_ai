@@ -1047,6 +1047,8 @@ class AnthropicModel(Model):
             ModelRefusalError: When ``response.stop_reason`` is ``"refusal"``.
         """
         if getattr(response, "stop_reason", None) == "refusal":
+            # The refused request's input was still billed.
+            self._rejected_response = response
             raise ModelRefusalError(
                 f"Model {self.model_name} refused the request for safety "
                 f'reasons (stop_reason="refusal", empty response). Retrying '

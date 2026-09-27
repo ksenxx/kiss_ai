@@ -690,6 +690,9 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # A complete, billed response the adapter refused to use
+        # (truncated, incomplete, refused); see take_partial_usage_response.
+        self._rejected_response: Any = None
         # Seconds of event-level silence tolerated before a streamed
         # request is aborted with a retryable TimeoutError.  Read here
         # once for every streaming transport (the key is in
@@ -1143,19 +1146,23 @@ class Model(ABC):
     def take_partial_usage_response(self) -> Any:
         """Return (and consume) usage for a generation that raised, if known.
 
-        A ``generate()`` call that fails mid-stream (stall timeout, parse
-        error) may still have observed billable usage before the failure.
-        Adapters that can track it (e.g. Claude Code's per-message
-        ``message_delta`` events) override this to hand the caller a
-        response object suitable for
-        :meth:`extract_input_output_token_counts_from_response`; the base
-        implementation knows of none.  Consuming clears the stored value so
-        the same usage is never counted twice.
+        A generation call can raise after the provider already billed it:
+        adapters reject a complete response they cannot use (output
+        truncated at the token limit, an ``incomplete`` Responses status,
+        a safety refusal) and record it in ``self._rejected_response``
+        just before raising.  Adapters that observe usage mid-stream (e.g.
+        Claude Code's per-message ``message_delta`` events) override this.
+        The returned object suits
+        :meth:`extract_input_output_token_counts_from_response`.
+        Consuming clears the stored value so the same usage is never
+        counted twice.
 
         Returns:
-            A response object carrying the partial usage, or ``None``.
+            A response object carrying the billed usage, or ``None``.
         """
-        return None
+        response = self._rejected_response
+        self._rejected_response = None
+        return response
 
     @abstractmethod
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:

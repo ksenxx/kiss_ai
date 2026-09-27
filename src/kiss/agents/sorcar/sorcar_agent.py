@@ -2553,7 +2553,7 @@ class SorcarAgent(RelentlessAgent):
             )
         return self._task_classification
 
-    def _fold_classifier_usage(self) -> None:
+    def _fold_classifier_usage(self) -> bool:
         """Bank the pre-run classifier's spend into this run's totals.
 
         Runs from :meth:`run`'s ``finally``, AFTER ``super().run`` — the
@@ -2581,6 +2581,10 @@ class SorcarAgent(RelentlessAgent):
         way (round-4 finding 2b: the previous unkeyed append-once
         design lost the spend on a pre-append stop and could not be
         retried safely).
+
+        Returns:
+            True when non-zero classifier spend was banked, i.e. the
+            run's last usage event no longer shows the task's total.
         """
         spend = self._classifier_spend
         if spend is not None:
@@ -2592,6 +2596,7 @@ class SorcarAgent(RelentlessAgent):
             )
             self._classifier_spend = None
         self._reset_task_classification()
+        return spend is not None and bool(spend.budget or spend.tokens)
 
     def run(  # type: ignore[override]
         self,
@@ -2826,7 +2831,7 @@ class SorcarAgent(RelentlessAgent):
                 tool_call_hook=tool_call_hook,
             )
         finally:
-            self._fold_classifier_usage()
+            classifier_spend_folded = self._fold_classifier_usage()
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
@@ -2834,6 +2839,11 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
             self.pre_step_hook = None
             self.tool_call_guard = None
+            if classifier_spend_folded:
+                # The run's last event predates the fold, so the UI's
+                # cost would omit the classifier.  Emitted after the
+                # cleanup: printing raises the task's stop when it is set.
+                self._emit_usage_totals()
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
