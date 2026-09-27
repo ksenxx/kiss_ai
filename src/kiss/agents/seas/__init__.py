@@ -23,6 +23,10 @@ with tools for the AI-slop gates and the LaTeX build, or
 :mod:`kiss.agents.seas.review_paper.review_paper_sea`, which reviews a paper for any
 venue with tools that read the PDF page by page and check the review's
 structure and AI-slop gates, or
+:mod:`kiss.agents.seas.revise_and_review_paper.revise_and_review_paper_sea`, which
+runs the two as a loop (write, fresh review, revise with experiments or
+ablations where the review asks for evidence) until the review says
+strong accept or the paper cannot improve further, or
 :mod:`kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea`, which builds the
 durable memory of a git repository (a full-text block store of every
 file, chunk, symbol, commit, change, tag, branch, contributor and
@@ -45,7 +49,8 @@ shared helpers such as :mod:`kiss.agents.seas.sorcar_md` stay at the
 package top level.  :mod:`kiss.agents.sorcar.sea_commands` exposes every
 such folder as the chat slash command ``/<name>`` (``/merge``, ``/sh``,
 ``/autorouter``, ``/bestrouter``, ``/skillopt``, ``/write_paper``, ``/review_paper``,
-``/git_extract_knowledge``, ``/remember``, ``/forget``, ...); a script
+``/revise_and_review_paper``, ``/git_extract_knowledge``, ``/remember``, ``/forget``,
+...); a script
 placed directly in the package, outside its own folder, is not
 registered.  Every SEA
 defines ``description()``, a zero-argument function returning one

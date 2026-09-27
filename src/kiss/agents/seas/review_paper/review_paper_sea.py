@@ -524,3 +524,12 @@ def is_parallel() -> bool:
 def classify_tasks() -> bool:
     """Skip the task classifier: reviewing a paper always needs the full system prompt."""
     return False
+
+
+def dispatch_timeout() -> float:
+    """Seconds the ``/review_paper`` relay waits for the agent before stopping it.
+
+    Reading the paper, searching the related work and the second-opinion round take
+    well over the default 300 s ``run_agent`` wait.
+    """
+    return 2 * 3600

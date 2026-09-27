@@ -680,6 +680,27 @@ def help_text_if_command(prompt: str) -> str | None:
     return sea_description(sea_path)
 
 
+def _timeout_argument_line(sea_path: Path) -> str:
+    """Return the ``timeout`` argument line of a ``/xxx`` directive, or ``""``.
+
+    ``run_agent`` waits :data:`~kiss.agents.sorcar.agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS`
+    (300 s) for a sub-task and stops it afterwards, which kills any SEA
+    that works for longer (a paper writer, a multi-round loop).  An SEA
+    that needs more declares ``dispatch_timeout()`` returning the
+    seconds; the relay then passes ``timeout`` explicitly.  A missing
+    getter, a non-positive value or a broken script yield no line, so
+    the directive of every other SEA is unchanged (a broken script
+    fails at dispatch, as before).
+    """
+    try:
+        seconds = sea_getter_value(sea_path, "dispatch_timeout")
+    except SeaScriptError:
+        return ""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    return f'  timeout = "{seconds:g}"\n'
+
+
 def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     """Rewrite a slash-command prompt into an explicit ``run_agent`` call.
 
@@ -687,7 +708,9 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     ``(rewritten_prompt, sea_path)`` where ``rewritten_prompt``
     instructs the calling agent to invoke the ``run_agent`` tool
     immediately with the SEA's absolute path and the user's trailing
-    text as the sub-task.  Returns ``None`` when the prompt does not
+    text as the sub-task (plus ``timeout`` when the SEA defines
+    ``dispatch_timeout()``; see :func:`_timeout_argument_line`).
+    Returns ``None`` when the prompt does not
     begin with a slash command, when the command is unknown, or when
     the trailing text is empty (an empty ``run_agent`` task would be
     rejected downstream).
@@ -753,6 +776,7 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         f"these arguments and no others:\n"
         f'  agent = "{abs_path}"\n'
         f"  task  = the text below, verbatim\n"
+        f"{_timeout_argument_line(sea_path)}"
         f"Do not explore any source code, do not paraphrase the task, "
         f"and do not call any other tool first.  When run_agent "
         f"returns, relay its result to the user.\n\n"

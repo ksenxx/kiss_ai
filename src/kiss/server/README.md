@@ -200,6 +200,21 @@ SEA without a callable `description()`, or whose `description()`
 raises or returns something other than a non-empty string, yields a
 diagnostic instead.
 
+### `dispatch_timeout()` — optional, for SEAs that run longer than five minutes
+
+| Function             | Return type              | Used by                                   |
+|----------------------|--------------------------|-------------------------------------------|
+| `dispatch_timeout()` | `int` or `float` seconds | the `/<name>` relay's `run_agent` call (`sea_commands.rewrite_prompt_if_command`) |
+
+The `/<name>` rewrite makes the tab's agent call `run_agent`, whose
+wait defaults to 300 s and stops the sub-task when it runs out.  An SEA
+whose runs take longer (`/write_paper` returns 6 h, `/review_paper`
+2 h, `/revise_and_review_paper` 24 h) defines `dispatch_timeout()`;
+the directive then carries `timeout = "<seconds>"`.  A missing getter,
+a value that is not a positive number, or a script that fails to
+import adds no line, so the relay behaves as before.  Not a run
+parameter: `apply_agent_overrides()` ignores it.
+
 ### `add_to_system_prompt()` and `register_as_model()` — model routing SEAs
 
 | Function                 | Return type | Effect                                                     |
@@ -919,7 +934,7 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 15 bundled SEA folders register
+  folder can shadow them.  The 16 bundled SEA folders register
   these commands: `/ask` (answers a question about the current task
   from a digest of its persisted events; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
@@ -936,11 +951,14 @@ class TaskResult:
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
   `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
-  a venue), `/rsi7d` (7-day self-improvement of the indexed SEAs from
-  their recorded runs; the task text starts with the scope: `/rsi7d
-  all`, `/rsi7d <name> [<name> ...]` for those SEAs only, or `/rsi7d
-  --seas-dir <folder> [<name> ...]` for the SEAs of that folder, which
-  then are the ones it may edit), `/sh`
+  a venue), `/revise_and_review_paper` (writes a paper with
+  `/write_paper`, has `/review_paper` review it fresh, and repeats until
+  strong accept or no further improvement; task text carries `Writing:`
+  and `Review:` instructions), `/rsi7d` (7-day self-improvement of the
+  indexed SEAs from their recorded runs; the task text starts with the
+  scope: `/rsi7d all`, `/rsi7d <name> [<name> ...]` for those SEAs only,
+  or `/rsi7d --seas-dir <folder> [<name> ...]` for the SEAs of that
+  folder, which then are the ones it may edit), `/sh`
   (runs the command with the `bash` tool profile), `/skillopt`
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),

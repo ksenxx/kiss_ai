@@ -668,3 +668,12 @@ def is_parallel() -> bool:
 def classify_tasks() -> bool:
     """Skip the task classifier: writing a paper always needs the full system prompt."""
     return False
+
+
+def dispatch_timeout() -> float:
+    """Seconds the ``/write_paper`` relay waits for the agent before stopping it.
+
+    Writing a paper with its research, experiments, builds and review rounds takes
+    hours; the default 300 s ``run_agent`` wait would stop it during the research.
+    """
+    return 6 * 3600
