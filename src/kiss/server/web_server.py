@@ -10076,6 +10076,13 @@ class RemoteAccessServer:
         stall_watchdog = start_stall_watchdog()
 
         self._install_signal_handlers()
+        # Index the home directory for the ``@``-mention picker now, on
+        # the registry's worker thread, so the first ``@`` in any tab
+        # below it answers from a warm index instead of waiting on a
+        # scan (a restart reloads the persisted listings in well under
+        # a second).
+        file_index = self._vscode_server._file_index
+        file_index.ensure(file_index.home)
 
         try:
             asyncio.run(self._serve_async())
@@ -10116,6 +10123,7 @@ class RemoteAccessServer:
                 self._sea_command_subscriber = None
             self._sea_command_watcher_started = False
             sea_commands.stop_registry_watcher()
+            file_index.stop()
             if stall_watchdog is not None:
                 stall_watchdog.stop()
             logger.info("Server stopped: pid=%d", pid)

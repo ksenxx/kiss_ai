@@ -35,10 +35,11 @@ values:
   (``AttributeError`` in ``_prefix_match_task``); the worker is never
   restarted, so ghost-text autocomplete died for the daemon's whole
   lifetime, for every window.
-* ``getFiles`` with a dict ``prefix``: crashed the background
-  ``_do_refresh`` thread (uncaught ``TypeError`` in
-  ``rank_file_suggestions``), so the file picker never received its
-  reply.
+* ``getFiles`` with a dict ``prefix``: crashed the background scan
+  thread (uncaught ``TypeError`` while ranking), so the file picker
+  never received its reply.  The scan now runs on the
+  ``FileIndexRegistry`` worker and the reply is delivered from there;
+  the test waits for that populated reply.
 """
 
 from __future__ import annotations
@@ -224,14 +225,49 @@ class TestMalformedFields(unittest.TestCase):
         )
 
     def test_malformed_get_files_prefix_no_thread_crash(self) -> None:
-        with _ThreadCrashRecorder() as rec:
-            self.server._handle_command(
-                {"type": "getFiles", "prefix": {"a": 1}},
-            )
-            time.sleep(1.0)
+        """A dict ``prefix`` is coerced to ``""`` and the picker still gets
+        its reply: the ``loading`` placeholder at once (the root is not
+        indexed yet) and the populated list from the registry's worker
+        thread, which must not crash on the malformed field.
+
+        A private registry rooted at a temp dir keeps the build off the
+        real home directory and lets the test wait for the populated
+        reply instead of guessing how long a scan takes.
+        """
+        from kiss.server.file_index import FileIndexRegistry
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-bughunt6-"))
+        work_dir = tmpdir / "work"
+        work_dir.mkdir()
+        (work_dir / "a.py").write_text("")
+        self.server.work_dir = str(work_dir)
+        self.server._file_index.stop()
+        self.server._file_index = FileIndexRegistry(
+            home=str(tmpdir / "home"), cache_dir=tmpdir / "cache",
+        )
+        try:
+            with _ThreadCrashRecorder() as rec:
+                self.server._handle_command(
+                    {"type": "getFiles", "prefix": {"a": 1}},
+                )
+                deadline = time.time() + 5.0
+                populated: list[dict[str, Any]] = []
+                while time.time() < deadline and not populated:
+                    populated = [
+                        e for e in self.events
+                        if e.get("type") == "files" and not e.get("loading")
+                    ]
+                    time.sleep(0.02)
+        finally:
+            self.server._file_index.stop()
         assert not rec.crashes, (
             f"getFiles with non-string prefix crashed a thread: {rec.crashes}"
         )
+        files_events = [e for e in self.events if e.get("type") == "files"]
+        assert files_events and files_events[0].get("loading"), files_events
+        assert populated, f"the picker never received its reply: {self.events}"
+        assert populated[0]["prefix"] == ""
+        assert [f["text"] for f in populated[0]["files"]] == ["a.py"]
 
 
 if __name__ == "__main__":

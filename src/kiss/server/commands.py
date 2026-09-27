@@ -45,6 +45,7 @@ from kiss.server.task_runner import (
 )
 
 if TYPE_CHECKING:
+    from kiss.server.file_index import FileIndexRegistry
     from kiss.server.json_printer import JsonPrinter
     from kiss.server.tab_registry import TabRegistry
 
@@ -334,7 +335,7 @@ class _CommandsMixin:
         )
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
-        _file_cache: dict[str, list[str]]
+        _file_index: FileIndexRegistry
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
         _commit_msg_tabs: set[str]
@@ -367,13 +368,6 @@ class _CommandsMixin:
         def _get_files(
             self,
             prefix: str,
-            work_dir: str = "",
-            conn_id: str = "",
-            tab_id: str = "",
-        ) -> None: ...
-        def _refresh_file_cache(
-            self,
-            then_emit_for_prefix: str | None = None,
             work_dir: str = "",
             conn_id: str = "",
             tab_id: str = "",
@@ -454,9 +448,9 @@ class _CommandsMixin:
         Single shared implementation of the work-dir update used by
         both :meth:`_cmd_set_work_dir` and :meth:`_cmd_save_config`
         (D-R1: the latter used to copy-paste the former's block).
-        Invalidates the autocomplete file cache only when the
-        directory actually changes, and mirrors the value onto the
-        printer either way.  Takes ``_state_lock`` itself; the lock is
+        Starts indexing the new directory for the ``@``-mention picker
+        when the directory actually changes, and mirrors the value onto
+        the printer either way.  Takes ``_state_lock`` itself; the lock is
         re-entrant, so callers already holding it may call this
         directly.
 
@@ -480,7 +474,7 @@ class _CommandsMixin:
         with self._state_lock:
             if self.work_dir != new_dir:
                 self.work_dir = new_dir
-                self._file_cache = {}
+                self._file_index.ensure(new_dir)
             if hasattr(self.printer, "work_dir"):
                 setattr(self.printer, "work_dir", new_dir)
         # Every surface's "Working directory" panel lists the directories

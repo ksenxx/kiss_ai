@@ -67,6 +67,7 @@ from kiss.server.autocomplete import (
     ranked_function_calling_models,
 )
 from kiss.server.commands import _CommandsMixin
+from kiss.server.file_index import FileIndexRegistry
 from kiss.server.helpers import (
     generate_commit_message_from_diff,
     model_vendor,
@@ -506,7 +507,7 @@ class VSCodeServer(
             queue.Queue[tuple[str, int, str, str | None, str, str, str]] | None
         ) = None
         self._complete_worker: threading.Thread | None = None
-        self._file_cache: dict[str, list[str]] = {}
+        self._file_index = FileIndexRegistry()
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
 
