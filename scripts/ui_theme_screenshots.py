@@ -260,10 +260,12 @@ def vscode_page_html(theme: str) -> str:
         "CSP_META": "",
         "STYLE_HREF": media + "main.css",
         "BRAND_STYLE_HREF": media + "brand.css",
-        "HLJS_CSS_HREF": media + (
-            "highlight-vscode-light.css" if theme == "light-plus"
-            else "highlight-vscode-dark.css"
-        ),
+        "WELCOME_LOGO_SRC": media + "welcome-logo.png",
+        "WELCOME_LOGO_DARK_SRC": media + "welcome-logo-dark.png",
+        # The dark sheet, as SorcarTab.ts serves it; main.js swaps in
+        # the light one from __HLJS_THEME_CSS__ when the body class
+        # says the editor theme is light.
+        "HLJS_CSS_HREF": media + "highlight-vscode-dark.css",
         "HEAD_STYLE": "<style>" + theme_vars_css(values) + "</style>",
         "BODY_CLASS_ATTR": f' class="{body_class}"',
         "PRODUCT_NAME": "KISS Sorcar",
@@ -282,7 +284,12 @@ def vscode_page_html(theme: str) -> str:
         "CTX_MENU_SRC": media + "contentContextMenu.js",
         "TREE_MENU_SRC": media + "treeContextMenu.js",
         "MAIN_SRC": media + "main.js",
-        "SHIM_SCRIPT": "<script>" + STUB_API_JS + "</script>",
+        "SHIM_SCRIPT": (
+            "<script>window.__HLJS_THEME_CSS__ = {"
+            f'"dark": "{media}highlight-vscode-dark.css", '
+            f'"light": "{media}highlight-vscode-light.css"'
+            "};</script><script>" + STUB_API_JS + "</script>"
+        ),
         "TRICKS_JSON": "[]",
         "TIPS_JSON": '{"tips": [], "show": false}',
         "TIPS_SRC": media + "tips.js",

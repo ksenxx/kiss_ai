@@ -350,11 +350,12 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getMyModels: [],
   saveMyModel: ['name', 'endpoint', 'apiKey', 'headers', 'originalName'],
   deleteMyModel: ['name'],
-  // The Inject promptlet panel's Add button and per-row delete button:
-  // the daemon owns ~/.kiss/MY_INJECTION.md and answers with an unstamped
-  // `tricksData` list that every window's panel repaints from.
+  // The Inject promptlet panel's Add button and per-row delete and edit
+  // buttons: the daemon owns ~/.kiss/MY_INJECTION.md and answers with an
+  // unstamped `tricksData` list that every window's panel repaints from.
   addTrick: ['text'],
   deleteTrick: ['text'],
+  editTrick: ['text', 'newText'],
   // The daemon builds and writes the shared chat page for both the
   // extension and the remote webapp, so the webview's serialized
   // transcript travels through whole; the daemon answers with a

@@ -310,13 +310,11 @@ body.remote-chat #send-btn {
   width: 36px;
   height: 36px;
   border-radius: var(--radius-round);
-  box-shadow: none;
 }
 
 body.remote-chat #send-btn:hover {
   background: var(--send-hover-bg);
   color: var(--send-fg);
-  box-shadow: none;
 }
 
 body.remote-chat #send-btn:disabled {
@@ -385,11 +383,6 @@ body.remote-chat .sidebar-hdr {
   font-size: var(--fs-sm);
 }
 
-body.remote-chat .sidebar-item {
-  border-radius: var(--radius-xl);
-  transition: background var(--dur-base);
-}
-
 body.remote-chat .sidebar-item:hover {
   background: var(--hover);
 }
@@ -410,6 +403,7 @@ body.remote-chat #history-view-toggle {
 body.remote-chat .config-label input[type="text"],
 body.remote-chat .config-label input[type="password"],
 body.remote-chat .config-label input[type="number"],
+body.remote-chat .config-label select,
 body.remote-chat .config-label textarea {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -432,11 +426,6 @@ body.remote-chat .server-reset-confirm-content {
 body.remote-chat .auth-modal-btn,
 body.remote-chat .server-reset-confirm-btn {
   border-radius: var(--radius-pill);
-}
-
-/* The update badge keeps the theme's flat look: no glow. */
-body.remote-chat .config-update-btn .update-available-icon {
-  filter: none;
 }
 
 /* VS Code hands every webview a base stylesheet (links in
@@ -465,7 +454,6 @@ body.remote-chat .sidebar-confirm-no {
 body.remote-chat .sidebar-confirm-yes:hover,
 body.remote-chat .sidebar-confirm-no:hover {
   background: var(--hover);
-  filter: none;
 }
 
 /* The frequent-tasks list: main.js skips its hashed pastel row
@@ -558,11 +546,6 @@ body.remote-chat #meta-resizer {
    is being dragged. */
 body.remote-chat.sidebar-resizing {
   user-select: none;
-}
-
-body.remote-chat .running-item {
-  background-color: var(--selected);
-  color: var(--fg);
 }
 
 body.remote-chat .running-item-metrics {

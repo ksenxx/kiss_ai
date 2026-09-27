@@ -318,6 +318,11 @@ export type FromWebviewMessage =
   | {type: 'addTrick'; text: string}
   /** Inject promptlet panel: drop `text` from ~/.kiss/MY_INJECTION.md. */
   | {type: 'deleteTrick'; text: string}
+  /**
+   * Inject promptlet panel: rewrite the ~/.kiss/MY_INJECTION.md section
+   * whose body is `text` so it reads `newText`.
+   */
+  | {type: 'editTrick'; text: string; newText: string}
   | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
   | {type: 'runUpdate'}
   | {type: 'updateModels'}
@@ -1103,6 +1108,7 @@ export interface AgentCommand {
     | 'deleteMyModel'
     | 'addTrick'
     | 'deleteTrick'
+    | 'editTrick'
     | 'serverReset'
     | 'shareChat'
     | 'shareChatTasks'
@@ -1152,8 +1158,10 @@ export interface AgentCommand {
   headers?: string;
   /** saveMyModel: the entry's name before an edit-and-rename. */
   originalName?: string;
-  /** addTrick / deleteTrick: the promptlet body to append or remove. */
+  /** addTrick / deleteTrick / editTrick: the promptlet body to append, remove or edit. */
   text?: string;
+  /** editTrick: the promptlet body that replaces `text`. */
+  newText?: string;
   /** getTaskUpdate: fingerprint of the report state the client holds. */
   knownSig?: string;
   /** getTaskUpdate: generation token echoed on the `taskUpdate` reply. */

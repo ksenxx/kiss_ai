@@ -235,6 +235,27 @@ into the margin.
 File paths, page count, the gate counts before and after, the list of citations verified
 with their source URLs, each reviewer finding and what you did with it, and anything the
 paper claims that you could not verify.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Pass absolute paths inside the current worktree (`pwd` first) to `build_paper`,
+  `check_paper` and every script you run; never `cd ../..` out of the worktree. A relative
+  path resolves against the daemon's working directory and has rebuilt the main
+  checkout's PDF and read another checkout's .tex.
+- Fit a page limit in at most two rounds. After one build, measure the overflow once
+  (`pdftotext -f <last main page> -l <last main page + 1> ... | wc -l`), plan cuts worth
+  about 1.3 times that amount in a single edit (move whole paragraphs to the appendix
+  before trimming sentences), rebuild once and re-measure.
+- Report the task's total spend. The `Budget:` figure after a tool result is your own
+  steps only; add the cost each `run_parallel` or `run_agent` result reports for its
+  sub-agents, and use that total when the task caps the reviewer's share.
+- `run_commands_parallel` takes a JSON array of strings: double every backslash, prefer
+  `grep -E 'a|b'` over `\\\\|`, and run multi-line Python through Bash with a heredoc instead.
+- When `run_parallel` answers "You are a reviewer sub-agent and may not spawn further
+  reviewers", do not retry with `run_agent`: do the check yourself read-only and mark
+  the report "independent review not run".
 """
 """The template's rules, appended to the default system prompt."""
 

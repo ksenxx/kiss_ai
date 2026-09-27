@@ -96,14 +96,23 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn("/media/main.js", html)
 
     def test_welcome_page_has_logo_and_no_suggestions(self) -> None:
-        """The remote welcome page shows the logo and no suggested prompts."""
+        """The remote welcome page shows the two-theme logo and no suggested prompts."""
         html = _build_html()
-        self.assertIn('<img id="welcome-logo" src="/media/welcome-logo.png?v=', html)
-        logo = Path(__file__).resolve().parents[2] / (
-            "agents/vscode/media/welcome-logo.png"
+        self.assertIn(
+            '<img id="welcome-logo" class="welcome-logo welcome-logo-light" '
+            'src="/media/welcome-logo.png?v=',
+            html,
         )
-        self.assertEqual(logo.read_bytes()[1:4], b"PNG")
+        self.assertIn(
+            '<img id="welcome-logo-dark" class="welcome-logo welcome-logo-dark" '
+            'src="/media/welcome-logo-dark.png?v=',
+            html,
+        )
+        media = Path(__file__).resolve().parents[2] / "agents/vscode/media"
+        for name in ("welcome-logo.png", "welcome-logo-dark.png"):
+            self.assertEqual((media / name).read_bytes()[1:4], b"PNG", name)
         self.assertNotIn('id="suggestions"', html)
+        self.assertNotIn('id="welcome-config"', html)
         self.assertNotIn("{{", html)
 
 

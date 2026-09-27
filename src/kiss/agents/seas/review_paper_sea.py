@@ -208,6 +208,24 @@ they are the tells.
 The output path, the word count, the gate counts before and after, the prior works you
 named with their source URLs, each second-opinion finding and what you did with it, and
 anything the paper claims that you could not verify.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- You are the reviewer. Never finish unsuccessfully because `run_agent` or `run_parallel`
+  is missing: read the paper and write the review yourself. When `run_parallel` is absent
+  or answers "You are a reviewer sub-agent and may not spawn further reviewers", skip
+  step 5 without trying `run_agent`, check every quoted sentence and number yourself
+  against the .tex or `pdftotext` text, and say in the report that the second-opinion
+  check was not run.
+- Draft to 85% of the word limit. Before writing, allot words per section (Summary at
+  most 3 sentences; Weaknesses the largest share) and write the file once. Count with
+  `wc -w` before `check_review`. If it is still over, cut whole sentences or bullets in
+  one `Edit` pass; do not rewrite the whole file again and again.
+- When the task names a path under the main checkout and you run in a worktree
+  (`git rev-parse --show-toplevel`), translate it to the worktree path before any Bash,
+  `read_paper` or `check_review` call; the Bash guard rejects main-checkout paths.
 """
 """The reviewing rules, appended to the default system prompt."""
 

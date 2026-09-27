@@ -25,7 +25,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
@@ -292,6 +291,21 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
     assert store.get("note:overview") is not None
     assert store.counts()["commit"] == 4
 
+    # A file edited and reverted between two runs has the blob the store knows,
+    # but its last commit is now the revert: the ``file`` block is refreshed.
+    guide = repo / "docs" / "guide.md"
+    original = guide.read_text()
+    guide.write_text(original + "\ntemporary line\n")
+    _git(repo, "commit", "-q", "-am", "guide: temporary line")
+    guide.write_text(original)
+    _git(repo, "commit", "-q", "-am", "guide: revert the temporary line")
+    revert = _git(repo, "rev-parse", "HEAD")
+    report = index.index_repo(repo, store)
+    assert report.commits_indexed == 2 and report.changed_paths == ["docs/guide.md"]
+    block = store.get("file:docs/guide.md")
+    assert block is not None and f"last commit: {revert[:12]}" in block.text
+    assert store.counts()["file"] == 7  # re-indexed, not duplicated
+
 
 def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     """Branch-only commits, merge resolutions, spaces, non-ASCII, tabs and control bytes."""
@@ -371,14 +385,19 @@ def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     (repo / "staged.txt").write_text("STAGEDFACT\n")
     _git(repo, "add", "staged.txt")
     report = index.index_repo(repo, store)
-    assert report.changed_paths == ["rules.txt", "staged.txt"] and report.commits_indexed == 1
+    # The mode-only change left the blob alone, but the file's last commit moved.
+    assert report.changed_paths == ["rules.txt", "staged.txt", "tab\tname.txt"]
+    assert report.commits_indexed == 1
     rules = store.get("file:rules.txt")
     assert rules is not None and f"last commit: {side[:12]}" in rules.text
+    tab = store.get("file:tab\tname.txt")
+    assert tab is not None and f"last commit: {mode_only[:12]}" in tab.text
     staged = store.get("file:staged.txt")
     assert staged is not None and "last commit" not in staged.text
     change = store.get(f"change:{mode_only}:tab\tname.txt")
     assert change is not None and "new mode 100755" in change.text
-    # Above MAX_LAST_TOUCH_LOOKUPS unattributed files the per-file lookups are skipped.
+    # Above MAX_LAST_TOUCH_LOOKUPS unattributed files, the lookups past the budget wait
+    # for the next run (none of these staged files has a commit to find anyway).
     for i in range(index.MAX_LAST_TOUCH_LOOKUPS + 1):
         (repo / f"bulk{i}.txt").write_text(f"bulk {i}\n")
     _git(repo, "add", "-A")
@@ -412,6 +431,98 @@ def test_unshallowed_history_is_indexed_on_the_next_run(tmp_path: Path) -> None:
     assert store.get(f"change:{head}:README.md") is None
     assert store.get(f"change:{head}:docs/notes.txt") is not None
     assert index.index_repo(shallow, store).commits_indexed == 0
+
+
+def test_revealed_history_does_not_age_a_file_s_last_commit(tmp_path: Path) -> None:
+    """An unshallowed ancestor touching a file is older than the commit already named.
+
+    Regression: the touched-but-unchanged rule re-indexed the file with the
+    newest of the NEW commits, an ancestor here, and the recreation commit
+    gave way to the deletion commit.  The per-file lookup decides instead.
+    """
+    shutil.rmtree(kiss_home() / "memories" / "recreated", ignore_errors=True)
+    origin = _init(tmp_path, "origin-recreated")
+    (origin / "f.txt").write_text("first\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "add f")
+    _git(origin, "rm", "-q", "f.txt")
+    (origin / "g.txt").write_text("g\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "delete f, add g")
+    (origin / "f.txt").write_text("first\n")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "recreate f")
+    recreate = _git(origin, "rev-parse", "HEAD")
+    shallow = tmp_path / "recreated"
+    _git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
+    store = _store(shallow)
+    index.index_repo(shallow, store)
+    block = store.get("file:f.txt")
+    assert block is not None and f"last commit: {recreate[:12]}" in block.text
+    _git(shallow, "fetch", "-q", "--unshallow")
+    report = index.index_repo(shallow, store)
+    assert report.commits_indexed == 2  # the revealed root and the re-indexed boundary
+    block = store.get("file:f.txt")
+    assert block is not None and f"last commit: {recreate[:12]}" in block.text
+
+
+def test_unshallowing_keeps_the_head_commit_of_a_file_the_boundary_changed(
+    tmp_path: Path,
+) -> None:
+    """Re-indexing the former boundary commit must not attribute a file to it.
+
+    Three commits change ``f.txt``; a depth-2 clone is indexed (f.txt -> HEAD),
+    then unshallowed.  The boundary commit is re-indexed and touches f.txt,
+    so f.txt is re-indexed too — with the HEAD lookup, not with that older
+    commit as its "last commit".
+    """
+    shutil.rmtree(kiss_home() / "memories" / "thrice", ignore_errors=True)
+    origin = _init(tmp_path, "origin-thrice")
+    for i in range(3):
+        (origin / "f.txt").write_text(f"version {i}\n")
+        _git(origin, "add", "-A")
+        _git(origin, "commit", "-q", "-m", f"f version {i}")
+    head = _git(origin, "rev-parse", "HEAD")
+    shallow = tmp_path / "thrice"
+    _git(tmp_path, "clone", "-q", "--depth", "2", origin.as_uri(), str(shallow))
+    store = _store(shallow)
+    index.index_repo(shallow, store)
+    _git(shallow, "fetch", "-q", "--unshallow")
+    report = index.index_repo(shallow, store)
+    assert report.commits_indexed == 2 and report.changed_paths == ["f.txt"]
+    block = store.get("file:f.txt")
+    assert block is not None and f"last commit: {head[:12]}" in block.text
+
+
+def test_lookups_beyond_the_budget_are_drained_by_the_next_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Touched files past MAX_LAST_TOUCH_LOOKUPS wait in ``pending_touch`` for the next runs."""
+    shutil.rmtree(kiss_home() / "memories" / "budget", ignore_errors=True)
+    repo = _init(tmp_path, "budget")
+    for i in range(3):
+        (repo / f"f{i}.txt").write_text(f"file {i}\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "three files")
+    store = _store(repo)
+    index.index_repo(repo, store)
+    for i in range(3):
+        (repo / f"f{i}.txt").chmod(0o755)  # mode-only: blobs unchanged, all three touched
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "executable")
+    executable = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(index, "MAX_LAST_TOUCH_LOOKUPS", 2)
+    report = index.index_repo(repo, store)
+    assert report.commits_indexed == 1 and report.changed_paths == ["f0.txt", "f1.txt"]
+    assert index.pending_touches(store) == ["f2.txt"]
+    stale = store.get("file:f2.txt")
+    assert stale is not None and f"last commit: {executable[:12]}" not in stale.text
+    report = index.index_repo(repo, store)  # nothing new in the repository
+    assert report.commits_indexed == 0 and report.changed_paths == ["f2.txt"]
+    assert index.pending_touches(store) == []
+    drained = store.get("file:f2.txt")
+    assert drained is not None and f"last commit: {executable[:12]}" in drained.text
+    assert index.index_repo(repo, store).changed_paths == []
 
 
 def test_index_errors_for_bad_specs_and_empty_repositories(tmp_path: Path) -> None:
@@ -507,9 +618,31 @@ def test_search_tokenizes_queries_filters_kinds_and_paths(repo: Path) -> None:
     assert store.search('"unbalanced (parens -zzq^', k=5) == []
     assert [h.block.kind for h in store.search("NOT indexed", k=5, kinds=["file"])] == ["file"] * 3
 
+    # History ranks below the current state: a change block and a chunk block
+    # with the same text tie on BM25, and the chunk wins, even over a change
+    # whose BM25 score is better (a title match) but not 1/0.6 = 1.7x better.
+    store.upsert([
+        Block(
+            "change", "change:deadbeef:src/x.py", "x.py in deadbeef", "quorum quorum",
+            "src/x.py", "deadbeef",
+        ),
+        Block("chunk", "chunk:src/x.py:1", "src/x.py lines 1-2", "quorum quorum", "src/x.py", ""),
+        Block(
+            "change", "change:cafebabe:src/y.py", "quorum quorum in y.py",
+            "quorum quorum quorum", "src/y.py", "cafebabe",
+        ),
+    ], "2026-01-01T00:00:00Z")
+    ranked = [h.block.key for h in store.search("quorum", k=3)]
+    assert ranked == ["chunk:src/x.py:1", "change:cafebabe:src/y.py", "change:deadbeef:src/x.py"]
+    only_changes = [h.block.key for h in store.search("quorum", k=3, kinds=["change"])]
+    assert only_changes == ["change:cafebabe:src/y.py", "change:deadbeef:src/x.py"]
+    store.delete(key="change:deadbeef:src/x.py")
+    store.delete(key="chunk:src/x.py:1")
+    store.delete(key="change:cafebabe:src/y.py")
+
     text = sea.knowledge_search(str(repo), "withdraw", k=2, kinds="symbol,change")
     assert text.startswith("1. symbol:src/pkg/bank.py:18:withdraw\n")
-    assert "2. change:" in text
+    assert "change:" in sea.knowledge_search(str(repo), "withdraw", k=6, kinds="symbol,change")
     error = sea.knowledge_search(str(repo), "withdraw", kinds="bogus")
     assert error.startswith("Error: unknown block kinds")
     assert sea.knowledge_search(str(repo), "zzzqqq") == "No blocks match 'zzzqqq'."
@@ -556,15 +689,23 @@ def test_pages_are_written_to_the_domain_memory_and_mirrored(
 
 
 def test_daily_schedule_is_four_in_the_morning_pacific() -> None:
-    """The cron expression is 04:00 America/Los_Angeles in local time, summer or winter."""
+    """The cron scheduler, fed the expression, fires at 04:00 Pacific, summer or winter.
+
+    The scheduler evaluates cron expressions in America/Los_Angeles whatever
+    the machine's clock (``cron_agent.SCHEDULE_TZ``), so the expression names
+    the Pacific hour directly; converting it to the machine's local time
+    (an earlier version) made a UTC daemon run the job at 11:00 Pacific.
+    """
+    from kiss.agents.sorcar.cron_agent import SCHEDULE_TZ, compute_next_run
+
+    assert sea.daily_update_schedule() == f"0 {sea.DAILY_UPDATE_HOUR_PACIFIC} * * *"
     for stamp in ("2026-07-15T12:00:00+00:00", "2026-01-15T12:00:00+00:00"):
-        now = datetime.fromisoformat(stamp)
-        minute, hour, dom, month, dow = sea.daily_update_schedule(now).split()
-        assert (dom, month, dow) == ("*", "*", "*")
-        local_day = now.astimezone()
-        local = local_day.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
-        pacific = local.astimezone(ZoneInfo("America/Los_Angeles"))
-        assert (pacific.hour, pacific.minute) == (sea.DAILY_UPDATE_HOUR_PACIFIC, 0), stamp
+        now = datetime.fromisoformat(stamp).timestamp()
+        next_run = compute_next_run(sea.daily_update_schedule(), now)
+        assert next_run is not None
+        fired = datetime.fromtimestamp(next_run, SCHEDULE_TZ)
+        assert (fired.hour, fired.minute) == (sea.DAILY_UPDATE_HOUR_PACIFIC, 0), stamp
+        assert 0 < next_run - now <= 24 * 3600
 
 
 def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
@@ -581,15 +722,64 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         jobs = [job for job in load_jobs() if job["name"] == name]
         assert len(jobs) == 1
         job = jobs[0]
-        assert job["schedule"] == sea.daily_update_schedule()
-        assert job["max_budget"] == 2.5 and job["timeout"] == sea.DAILY_UPDATE_TIMEOUT_SECONDS
+        assert job["schedule"] == sea.daily_update_schedule() == "0 4 * * *"
+        assert job["model_name"] == sea.DAILY_UPDATE_MODEL == "claude-fable-5-1"
+        assert job["max_budget"] == 2.5 + sea.DAILY_UPDATE_RELAY_BUDGET_USD
+        assert job["timeout"] == sea.DAILY_UPDATE_TIMEOUT_SECONDS
         assert job["enabled"] is True and job["one_shot"] is False and job["deliver"] == "local"
-        assert f"agent   = {str(_SEA_PATH)!r}" in job["prompt"]
-        assert f"task    = {f'update {repo}'!r}" in job["prompt"]
-        assert f"timeout = {str(sea.DAILY_UPDATE_TIMEOUT_SECONDS)!r}" in job["prompt"]
-        again = sea.schedule_daily_update(str(repo))
+        assert f"agent      = {str(_SEA_PATH)!r}" in job["prompt"]
+        assert f"task       = {f'update {repo}'!r}" in job["prompt"]
+        assert f"timeout    = {str(sea.DAILY_UPDATE_TIMEOUT_SECONDS)!r}" in job["prompt"]
+        assert "max_budget = '2.5'" in job["prompt"]
+        assert f"model_name = {sea.DAILY_UPDATE_MODEL!r}" in job["prompt"]
+        again = sea.schedule_daily_update(str(repo), max_budget=2.5)
         assert again.startswith(f"Already scheduled: job {job_id} ({name})")
+        assert "Pacific time" in again
         assert len([job for job in load_jobs() if job["name"] == name]) == 1
+        # An outdated job for the same repository (another budget here; an
+        # older schedule or prompt likewise) is replaced, not duplicated.
+        replaced = sea.schedule_daily_update(str(repo))
+        assert replaced.startswith(f"Removed outdated job(s) {job_id}.\ncreated:\n")
+        jobs = [job for job in load_jobs() if job["name"] == name]
+        assert len(jobs) == 1 and jobs[0]["id"] != job_id
+        job_id = jobs[0]["id"]
+        # A job in the format of an older version of this SEA (host-local
+        # schedule, no model or budget in the directive) is recognised and
+        # removed too, while the up-to-date job stays.
+        old = yaml.safe_load(cron_job(
+            "create", name=name, schedule="0 11 * * *", max_budget="5", timeout="300",
+            prompt=(
+                "Call the run_agent tool IMMEDIATELY, as your very first action, with "
+                f"these arguments and no others:\n  agent   = {str(_SEA_PATH)!r}\n"
+                f"  task    = {f'update {repo}'!r}\n  timeout = '14400'\nDo not explore."
+            ),
+        ))
+        assert [job for job in load_jobs() if job["id"] == old["created"]["id"]]
+        again = sea.schedule_daily_update(str(repo))
+        assert again.startswith(
+            f"Removed outdated job(s) {old['created']['id']}.\nAlready scheduled: job {job_id}"
+        )
+        assert [job["id"] for job in load_jobs() if job["name"] == name] == [job_id]
+        assert jobs[0]["max_budget"] == (
+            sea.DAILY_UPDATE_BUDGET_USD + sea.DAILY_UPDATE_RELAY_BUDGET_USD
+        )
+        assert f"max_budget = {str(sea.DAILY_UPDATE_BUDGET_USD)!r}" in jobs[0]["prompt"]
+        # The unrelated job is untouched.
+        assert [job for job in load_jobs() if job["name"] == "unrelated"]
+        # Same prompt, schedule, model and budget but a short timeout: outdated too.
+        current = [job for job in load_jobs() if job["id"] == job_id][0]
+        cron_job("remove", job_id=job_id)
+        short = yaml.safe_load(cron_job(
+            "create", name=name, schedule=current["schedule"], prompt=current["prompt"],
+            model_name=current["model_name"], max_budget=str(current["max_budget"]),
+            timeout="300",
+        ))
+        assert "created" in short, short
+        renewed = sea.schedule_daily_update(str(repo))
+        assert renewed.startswith(f"Removed outdated job(s) {short['created']['id']}.\ncreated:")
+        jobs = [job for job in load_jobs() if job["name"] == name]
+        assert len(jobs) == 1 and jobs[0]["timeout"] == sea.DAILY_UPDATE_TIMEOUT_SECONDS
+        job_id = jobs[0]["id"]
     finally:
         cron_job("remove", job_id=job_id)
         cron_job("remove", job_id=other["created"]["id"])
@@ -1048,7 +1238,9 @@ def test_interrupted_run_is_repaired_and_shallowing_keeps_the_store(tmp_path: Pa
     assert store.delete(key=f"commit:{head}") == 1
     assert store.get("symbol:src/pkg/bank.py:11:Ledger") is not None
     report = index.index_repo(origin, store)
-    assert report.mode == "incremental" and report.changed_paths == ["src/pkg/bank.py"]
+    # bank.py for its missing marker; notes.txt because the re-indexed commit touched it.
+    assert report.mode == "incremental"
+    assert report.changed_paths == ["docs/notes.txt", "src/pkg/bank.py"]
     assert report.commits_indexed == 1 and report.new_commits[0].endswith(" notes on interest")
     assert store.get("file:src/pkg/bank.py") is not None and store.get(f"commit:{head}") is not None
     assert store.counts()["symbol"] == symbols  # re-indexed symbols replaced, not doubled

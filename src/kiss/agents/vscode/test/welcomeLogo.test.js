@@ -3,12 +3,16 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The welcome page shows the KISS Sorcar logo and no suggested-prompt
-// chips.  Checks the HTML the extension builds (buildChatHtml) and the
-// live webview (chat.html + main.js in JSDOM): the logo is present with a
-// content-versioned URL, the #suggestions container and its chips are
-// gone, and opening a new chat asks the host only for the welcome info
-// (remote URL), never for suggestions.
+// The welcome page is the same as the remote webapp's: the KISS Sorcar
+// logo (transparent art, a light-theme and a dark-theme colouring), the
+// greeting and the tagline; no suggested-prompt chips and no remote
+// URL / password block.  Checks the HTML the extension builds
+// (buildChatHtml) and the live webview (chat.html + main.js in JSDOM):
+// both logos are present with content-versioned URLs, the highlight.js
+// sheet follows the editor theme (light sheet on body.vscode-light,
+// swapped live when VS Code rewrites the body classes), the
+// #suggestions and #welcome-config containers are gone, and opening a
+// new chat asks the host only for the welcome info (remote URL).
 
 'use strict';
 
@@ -60,40 +64,129 @@ function testBuiltHtmlHasLogoAndNoSuggestions() {
   const html = buildChatHtml(webview, {fsPath: projectRoot}, 'test-model');
   const doc = new JSDOM(html).window.document;
 
-  const logo = doc.querySelector('#welcome > img#welcome-logo');
-  assert.ok(logo, 'the welcome page must show the logo image');
-  const url = new URL(logo.getAttribute('src'));
-  assert.ok(
-    url.pathname.endsWith('/media/welcome-logo.png'),
-    `logo src must point at media/welcome-logo.png, got ${url}`,
-  );
-  const bytes = fs.readFileSync(path.join(MEDIA, 'welcome-logo.png'));
-  assert.strictEqual(
-    url.searchParams.get('v'),
-    crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16),
-    'the logo URL must carry a content-hash cache-buster',
-  );
-  assert.strictEqual(
-    logo.getAttribute('alt'),
-    '',
-    'the logo is decorative: the heading next to it names the product',
-  );
-  assert.strictEqual(
-    bytes.subarray(1, 4).toString('latin1'),
-    'PNG',
-    'media/welcome-logo.png must be a PNG image',
-  );
+  for (const [id, file] of [
+    ['welcome-logo', 'welcome-logo.png'],
+    ['welcome-logo-dark', 'welcome-logo-dark.png'],
+  ]) {
+    const logo = doc.querySelector(`#welcome > img#${id}.welcome-logo`);
+    assert.ok(logo, `the welcome page must show the ${id} image`);
+    const url = new URL(logo.getAttribute('src'));
+    assert.ok(
+      url.pathname.endsWith('/media/' + file),
+      `${id} src must point at media/${file}, got ${url}`,
+    );
+    const bytes = fs.readFileSync(path.join(MEDIA, file));
+    assert.strictEqual(
+      url.searchParams.get('v'),
+      crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16),
+      'the logo URL must carry a content-hash cache-buster',
+    );
+    assert.strictEqual(
+      logo.getAttribute('alt'),
+      '',
+      'the logo is decorative: the heading next to it names the product',
+    );
+    assert.strictEqual(
+      bytes.subarray(1, 4).toString('latin1'),
+      'PNG',
+      `media/${file} must be a PNG image`,
+    );
+    // Transparent art: an RGBA PNG (colour type 6 in the IHDR chunk)
+    // whose corner pixel is fully transparent, so the logo sits directly
+    // on the theme background instead of on a white card.
+    assert.strictEqual(bytes[25], 6, `media/${file} must be an RGBA PNG`);
+  }
   assert.ok(
     doc.querySelector('#welcome h2').textContent.includes('Welcome to'),
     'the greeting heading stays under the logo',
   );
   assert.strictEqual(doc.getElementById('suggestions'), null);
+  assert.strictEqual(
+    doc.getElementById('welcome-config'),
+    null,
+    'the remote URL / password block is not on the welcome page',
+  );
   assert.ok(!html.includes('{{'), 'every template placeholder is filled');
-  console.log('  ok - buildChatHtml renders the logo and no suggestions');
+
+  // The highlight.js sheet: the dark VS Code sheet is linked, and both
+  // theme sheets are handed to main.js so it can follow the editor theme.
+  const sheet = doc.getElementById('hljs-theme').getAttribute('href');
+  assert.ok(
+    new URL(sheet).pathname.endsWith('/media/highlight-vscode-dark.css'),
+    `the linked highlight sheet is the VS Code dark one, got ${sheet}`,
+  );
+  const shim = /window\.__HLJS_THEME_CSS__ = (\{.*?\});<\/script>/.exec(html);
+  assert.ok(shim, 'buildChatHtml provides window.__HLJS_THEME_CSS__');
+  const urls = JSON.parse(shim[1]);
+  assert.ok(
+    new URL(urls.dark).pathname.endsWith('/media/highlight-vscode-dark.css'),
+  );
+  assert.ok(
+    new URL(urls.light).pathname.endsWith('/media/highlight-vscode-light.css'),
+  );
+  assert.ok(!html.includes('highlight-github'), 'the github sheets are gone');
+  console.log(
+    '  ok - buildChatHtml renders both logos, the theme sheets and no config',
+  );
 }
 
-function makeWebview() {
+// The webview follows the editor theme: a light body class selects the
+// light highlight sheet at start-up, and a theme change (VS Code
+// rewriting the body classes) swaps it live, both ways.
+// A MutationObserver callback runs as a microtask; yielding one macrotask
+// on the page's own timer queue lets it fire before the next assertion.
+function nextTick(win) {
+  return new Promise(resolve => win.setTimeout(resolve, 0));
+}
+
+async function testHighlightSheetFollowsTheEditorTheme() {
+  const {win} = makeWebview({
+    bodyClass: 'vscode-light',
+    hljs: {dark: '/m/dark.css', light: '/m/light.css'},
+  });
+  try {
+    const link = win.document.getElementById('hljs-theme');
+    assert.strictEqual(
+      link.getAttribute('href'),
+      '/m/light.css',
+      'light at start',
+    );
+    win.document.body.className = 'vscode-dark';
+    await nextTick(win);
+    assert.strictEqual(
+      link.getAttribute('href'),
+      '/m/dark.css',
+      'dark after switch',
+    );
+    win.document.body.className =
+      'vscode-high-contrast vscode-high-contrast-light';
+    await nextTick(win);
+    assert.strictEqual(
+      link.getAttribute('href'),
+      '/m/light.css',
+      'high-contrast light is a light theme',
+    );
+    win.document.body.className = 'vscode-high-contrast';
+    await nextTick(win);
+    assert.strictEqual(
+      link.getAttribute('href'),
+      '/m/dark.css',
+      'high contrast is dark',
+    );
+  } finally {
+    win.close();
+  }
+  console.log('  ok - the highlight sheet follows the editor theme');
+}
+
+function makeWebview(opts) {
+  const {bodyClass, hljs} = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
+  html = html.replace('{{HLJS_CSS_HREF}}', (hljs && hljs.dark) || '');
+  html = html.replace(
+    ' {{BODY_CLASS_ATTR}}',
+    bodyClass ? ` class="${bodyClass}"` : '',
+  );
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
   const dom = new JSDOM(html, {
@@ -102,6 +195,7 @@ function makeWebview() {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  if (hljs) win.__HLJS_THEME_CSS__ = hljs;
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   const posted = [];
@@ -156,3 +250,7 @@ function testNewChatRequestsWelcomeInfoOnly() {
 
 testBuiltHtmlHasLogoAndNoSuggestions();
 testNewChatRequestsWelcomeInfoOnly();
+testHighlightSheetFollowsTheEditorTheme().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

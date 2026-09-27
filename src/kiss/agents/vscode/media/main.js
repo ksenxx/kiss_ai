@@ -1378,14 +1378,74 @@
     btn.setAttribute('aria-label', label);
   }
 
-  function applyRemoteTheme(theme) {
-    if (!document.body.classList.contains('remote-chat')) return;
-    document.body.classList.toggle('light-theme', theme === 'light');
+  /**
+   * Point the highlight.js stylesheet at the sheet for `theme`
+   * ('dark' or 'light').  The page provides both URLs in
+   * window.__HLJS_THEME_CSS__ (web_server.py for the remote page,
+   * SorcarTab.ts for the webview).  A single dark sheet on a light
+   * theme would paint near-white code tokens on the theme's light code
+   * block, since main.css gives .hljs the theme's own background.
+   */
+  function setHljsTheme(theme) {
     const hljsLink = document.getElementById('hljs-theme');
     const hljsUrls = window.__HLJS_THEME_CSS__;
     if (hljsLink && hljsUrls && hljsUrls[theme]) {
       hljsLink.setAttribute('href', hljsUrls[theme]);
     }
+  }
+
+  /**
+   * Whether the VS Code webview's editor theme is light.  VS Code
+   * stamps the body with exactly one of vscode-light / vscode-dark /
+   * vscode-high-contrast / vscode-high-contrast-light (the last one
+   * also carries vscode-high-contrast), and updates the classes live
+   * when the user switches themes.
+   */
+  function vscodeThemeIsLight() {
+    const cls = document.body.classList;
+    return (
+      cls.contains('vscode-light') || cls.contains('vscode-high-contrast-light')
+    );
+  }
+
+  /**
+   * Whether the page is on a light theme: the remote page's own toggle
+   * (body.light-theme) or, in the webview, VS Code's light editor theme.
+   */
+  function pageThemeIsLight() {
+    return (
+      document.body.classList.contains('light-theme') || vscodeThemeIsLight()
+    );
+  }
+
+  /** Recolour the code highlighting (and Monaco, once loaded) for the VS Code theme. */
+  function syncVscodeTheme() {
+    setHljsTheme(vscodeThemeIsLight() ? 'light' : 'dark');
+    if (window.monaco && window.monaco.editor) {
+      applyContentMonacoTheme(window.monaco);
+    }
+  }
+
+  /**
+   * Keep the highlight.js sheet in step with the VS Code editor theme:
+   * applied once at start-up and again whenever VS Code rewrites the
+   * body's theme classes.  No-op on the remote page, whose theme is
+   * the user's own toggle (applyRemoteTheme).
+   */
+  function followVscodeTheme() {
+    if (document.body.classList.contains('remote-chat')) return;
+    syncVscodeTheme();
+    if (typeof MutationObserver !== 'function') return;
+    new MutationObserver(syncVscodeTheme).observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+
+  function applyRemoteTheme(theme) {
+    if (!document.body.classList.contains('remote-chat')) return;
+    document.body.classList.toggle('light-theme', theme === 'light');
+    setHljsTheme(theme);
     const btn = document.getElementById('theme-btn');
     if (btn) updateThemeButton(btn);
     // Monaco's theme is global: one call recolours every open editor.
@@ -1430,7 +1490,7 @@
    * @returns {string} The name of the theme now in use.
    */
   function applyContentMonacoTheme(monaco) {
-    const light = document.body.classList.contains('light-theme');
+    const light = pageThemeIsLight();
     const name = light ? 'kiss-light' : 'kiss-dark';
     const style = window.getComputedStyle(document.body);
     const colors = {};
@@ -13844,13 +13904,16 @@
         renderCustomModels();
         break;
       case 'tricksData':
-        // The daemon's full promptlet list after an Add or Delete (from
-        // this or any other window): it replaces the list frozen into
-        // the page at load time so the panel repaints right away.  The
-        // first `userCount` entries are the user's own (deletable) rows.
+        // The daemon's full promptlet list after an Add, Edit or Delete
+        // (from this or any other window): it replaces the list frozen
+        // into the page at load time so the panel repaints right away.
+        // The first `userCount` entries are the user's own (editable,
+        // deletable) rows.  An in-place editor still open on a row is
+        // closed: its index may point at another promptlet now.
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
+        closeTrickEditor();
         renderTricks(window.__TRICKS__);
         break;
       case 'taskUpdate':
@@ -14174,7 +14237,6 @@
         renderRemoteUrl(
           ev.url,
           ev.ntfyUrl,
-          ev.tunnelActive,
           ev.loopbackUrl,
           ev.lanUrls,
           ev.localCa === true,
@@ -15867,14 +15929,7 @@
     return hint;
   }
 
-  function renderRemoteUrl(
-    url,
-    ntfyUrl,
-    tunnelActive,
-    loopbackUrl,
-    lanUrls,
-    localCa,
-  ) {
+  function renderRemoteUrl(url, ntfyUrl, loopbackUrl, lanUrls, localCa) {
     const displayUrl = ntfyUrl || url;
     // Alongside the Cloudflare (or ntfy) URL, always show how to
     // reach the webapp from this machine (127.0.0.1) and from other
@@ -15899,26 +15954,13 @@
     const caBaseUrl = localCa
       ? (lanUrls || []).find(u => !!u) || loopbackUrl
       : '';
-    const containerIds = ['remote-url', 'welcome-remote-url'];
-    for (const id of containerIds) {
-      const container = document.getElementById(id);
-      if (!container) continue;
-      container.innerHTML = '';
-      for (const [barUrl, isNtfy, labelText] of bars) {
-        container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
-      }
-      if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
+    const container = document.getElementById('remote-url');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const [barUrl, isNtfy, labelText] of bars) {
+      container.appendChild(_buildRemoteUrlBar(barUrl, isNtfy, labelText));
     }
-    const welcomeCfg = document.getElementById('welcome-config');
-    if (welcomeCfg) {
-      const isRemoteChat = document.body.classList.contains('remote-chat');
-      const visible = isRemoteChat
-        ? false
-        : tunnelActive === undefined
-          ? !!displayUrl
-          : !!tunnelActive;
-      welcomeCfg.style.display = visible ? '' : 'none';
-    }
+    if (caBaseUrl) container.appendChild(_buildTlsTrustHint(caBaseUrl));
   }
 
   const UPDATE_NOTIFICATION_ID = 'kiss-update-available';
@@ -16951,46 +16993,15 @@
       input.click();
     });
     setupPasswordToggle('cfg-remote-password-toggle', 'cfg-remote-password');
-    setupPasswordToggle(
-      'welcome-cfg-remote-password-toggle',
-      'welcome-cfg-remote-password',
-    );
     FIRST_PARTY_KEY_IDS.map(k => 'cfg-key-' + k)
       .concat(['cfg-custom-api-key'])
       .forEach(setupSecretInput);
-    const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
     const settingsPwInp = document.getElementById('cfg-remote-password');
-    function _flushPw() {
-      saveSettingsIfPopulated();
-    }
-    if (welcomePwInp && settingsPwInp) {
-      welcomePwInp.addEventListener('input', () => {
-        settingsPwInp.value = welcomePwInp.value;
-        // Assigning .value fires no input event, so the mirrored field
-        // has to be marked by hand or the very first password a user
-        // sets from the welcome screen is dropped.
-        markSettingsFieldEdited('cfg-remote-password');
-      });
-      settingsPwInp.addEventListener('input', () => {
-        welcomePwInp.value = settingsPwInp.value;
-      });
-    }
-    if (welcomePwInp) {
-      welcomePwInp.addEventListener('change', _flushPw);
-      welcomePwInp.addEventListener('blur', _flushPw);
-      welcomePwInp.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          _flushPw();
-          welcomePwInp.blur();
-        }
-      });
-    }
     if (settingsPwInp) {
       settingsPwInp.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
           e.preventDefault();
-          _flushPw();
+          saveSettingsIfPopulated();
           settingsPwInp.blur();
         }
       });
@@ -17290,6 +17301,7 @@
     setupActivityBar();
     setupWorkDirPanel();
     applyRemoteTheme(getSavedRemoteTheme());
+    followVscodeTheme();
     if (SIDEBAR_CHAT_MODE) {
       // The sidebar chat's task-info drawer starts closed AND inert:
       // its off-screen close button must not sit in the keyboard tab
@@ -18943,17 +18955,6 @@
     return btn;
   }
 
-  function chatIdBgColor(chatId) {
-    if (!chatId) return 'hsl(0, 0%, 75%)';
-    let hash = 5381;
-    for (let i = 0; i < chatId.length; i++) {
-      hash = (hash << 5) + hash + chatId.charCodeAt(i);
-      hash |= 0;
-    }
-    const hue = Math.abs(hash) % 360;
-    return 'hsl(' + hue + ', 55%, 75%)';
-  }
-
   // ---- History grouping: one block per chat, day separators ----
   //
   // The daemon lists tasks newest first, so the first task seen for a
@@ -20060,10 +20061,7 @@
         closeSidebar();
       });
       if (historyLegacyView) {
-        // The flat list: rows in the daemon's newest-first order, each
-        // with its chat's color (a hue hashed from the chat id) as a
-        // narrow bar on its right edge.
-        div.style.setProperty('--task-color', chatIdBgColor(chatId));
+        // The flat list: rows in the daemon's newest-first order.
         historyList.appendChild(div);
       } else {
         const group = historyGroupFor(s);
@@ -20573,6 +20571,9 @@
     const tricks = window.__TRICKS__ || [];
     api.deleteTrick({text: tricks[index]});
     tricks.splice(index, 1);
+    // The indices shift: an editor open on another row would now edit
+    // the wrong promptlet, so it is closed.
+    closeTrickEditor();
     window.__MY_TRICKS_COUNT__ = Math.max(
       0,
       (window.__MY_TRICKS_COUNT__ || 0) - 1,
@@ -20581,12 +20582,141 @@
   }
 
   /**
+   * Index into `window.__TRICKS__` of the user-owned promptlet whose
+   * row is currently an in-place editor (pencil button pressed), or -1.
+   * `renderTricks` paints that row as a textarea with Save / Cancel
+   * buttons instead of its text and buttons.
+   */
+  let editingTrickIndex = -1;
+
+  /**
+   * The row element holding the open editor, or null.  `renderTricks`
+   * re-attaches this very element on every repaint (a search keystroke
+   * repaints the list) so the draft and the focus survive; a fresh one
+   * is built only when the editor is opened.
+   */
+  let editingTrickRow = null;
+
+  /** Open the in-place editor on the promptlet at *index*. */
+  function openTrickEditor(index) {
+    closeTrickEditor();
+    editingTrickIndex = index;
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /** Forget the open editor (if any) without repainting. */
+  function closeTrickEditor() {
+    editingTrickIndex = -1;
+    editingTrickRow = null;
+  }
+
+  /** Close the promptlet editor without saving and repaint the list. */
+  function cancelTrickEdit() {
+    closeTrickEditor();
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /**
+   * Post `editTrick` for the user-owned promptlet at *index* so it reads
+   * *newText*, and show the new text right away: the daemon rewrites
+   * its section of ~/.kiss/MY_INJECTION.md in place and answers every
+   * window with a fresh `tricksData` (or the sender alone with an
+   * `error` followed by the list on disk, which puts the old text
+   * back).  An unchanged or emptied text only closes the editor.
+   */
+  function saveTrickEdit(index, newText) {
+    const tricks = window.__TRICKS__ || [];
+    const text = newText.trim();
+    closeTrickEditor();
+    if (text && text !== tricks[index]) {
+      api.editTrick({text: tricks[index], newText: text});
+      tricks[index] = text;
+    }
+    renderTricks(tricks);
+  }
+
+  const SIDEBAR_EDIT_SVG =
+    '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+
+  /**
+   * Build the promptlet row that is the in-place editor for the
+   * promptlet at *index*: a textarea holding *text* plus Save and
+   * Cancel buttons.  Enter (Ctrl/Cmd+Enter too) saves, Shift+Enter
+   * inserts a newline, Escape cancels (keys typed into an IME
+   * composition are left alone); clicks inside the editor never reach
+   * a row click, so they do not inject the promptlet.  The caller
+   * attaches the row and then calls `focusTrickEditor`.
+   */
+  function makeTrickEditor(index, text) {
+    const div = document.createElement('div');
+    div.className = 'sidebar-item tricks-item editing';
+    const textarea = document.createElement('textarea');
+    textarea.className = 'tricks-edit-input';
+    textarea.setAttribute('aria-label', 'Edit promptlet');
+    textarea.rows = 1;
+    textarea.value = text;
+    const actions = document.createElement('span');
+    actions.className = 'tricks-edit-actions';
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'config-update-btn tricks-edit-save';
+    saveBtn.textContent = 'Save';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'config-update-btn tricks-edit-cancel';
+    cancelBtn.textContent = 'Cancel';
+    actions.appendChild(saveBtn);
+    actions.appendChild(cancelBtn);
+    div.appendChild(textarea);
+    div.appendChild(actions);
+    saveBtn.addEventListener('click', () =>
+      saveTrickEdit(index, textarea.value),
+    );
+    cancelBtn.addEventListener('click', cancelTrickEdit);
+    textarea.addEventListener('input', () => growTrickEditor(textarea));
+    textarea.addEventListener('keydown', e => {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cancelTrickEdit();
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        saveTrickEdit(index, textarea.value);
+      }
+    });
+    div.addEventListener('click', e => e.stopPropagation());
+    return div;
+  }
+
+  /**
+   * Size the textarea of the freshly attached editor *row* and put the
+   * caret at the end of its text.
+   */
+  function focusTrickEditor(row) {
+    const textarea = row.querySelector('.tricks-edit-input');
+    growTrickEditor(textarea);
+    textarea.focus();
+    const end = textarea.value.length;
+    try {
+      textarea.setSelectionRange(end, end);
+    } catch (_e) {}
+  }
+
+  /** Size the promptlet editor's textarea to its content. */
+  function growTrickEditor(textarea) {
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  }
+
+  /**
    * Repaint #tricks-list with the promptlets matching the search box
    * (case-insensitive substring; every promptlet when the box is
    * empty).  Clicking a row injects it at the composer's caret; every
    * row ends with a copy button, and the first
    * `window.__MY_TRICKS_COUNT__` rows (the user's own, from
-   * ~/.kiss/MY_INJECTION.md) also with a delete button.
+   * ~/.kiss/MY_INJECTION.md) also with an edit (pencil) and a delete
+   * button.  The row at `editingTrickIndex` is painted as the in-place
+   * editor instead.
    */
   function renderTricks(tricks) {
     if (!tricksList) return;
@@ -20600,6 +20730,15 @@
     tricksList.innerHTML = '';
     tricks.forEach((text, index) => {
       if (query && !text.toLowerCase().includes(query)) return;
+      if (index === editingTrickIndex && index < userCount) {
+        // The open editor is re-attached as is (draft and focus kept);
+        // a fresh one is attached first, then sized and focused.
+        const fresh = !editingTrickRow;
+        if (fresh) editingTrickRow = makeTrickEditor(index, text);
+        tricksList.appendChild(editingTrickRow);
+        if (fresh) focusTrickEditor(editingTrickRow);
+        return;
+      }
       const div = document.createElement('div');
       div.className = 'sidebar-item tricks-item';
       div.dataset.tooltip = text;
@@ -20614,6 +20753,17 @@
       copyBtn.dataset.tooltip = 'Copy promptlet';
       div.appendChild(copyBtn);
       if (index < userCount) {
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'sidebar-item-edit';
+        editBtn.dataset.tooltip = 'Edit promptlet';
+        editBtn.setAttribute('aria-label', 'Edit promptlet');
+        editBtn.innerHTML = SIDEBAR_EDIT_SVG;
+        editBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          openTrickEditor(index);
+        });
+        div.appendChild(editBtn);
         const delBtn = document.createElement('button');
         delBtn.type = 'button';
         delBtn.className = 'sidebar-item-delete';
@@ -21192,11 +21342,6 @@
       setValue('cfg-custom-headers', cfg.custom_headers || '');
     }
     setValue('cfg-remote-password', cfg.remote_password || '');
-    // The welcome screen's password box mirrors the settings one, so it
-    // follows the same edited mark.
-    if (!settingsEditedFields.has('cfg-remote-password')) {
-      setValue('welcome-cfg-remote-password', cfg.remote_password || '');
-    }
     configFormPopulated = true;
     FIRST_PARTY_KEY_IDS.forEach(k => {
       setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');

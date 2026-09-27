@@ -158,7 +158,7 @@ def _build_extension_html() -> str:
         "VIEWPORT": "width=device-width, initial-scale=1.0",
         "CSP_META": "",
         "STYLE_HREF": "main.css",
-        "HLJS_CSS_HREF": "highlight-github-dark.min.css",
+        "HLJS_CSS_HREF": "highlight-vscode-dark.css",
         "HEAD_STYLE": _vars_style_block(),
         "BODY_CLASS_ATTR": "",
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",

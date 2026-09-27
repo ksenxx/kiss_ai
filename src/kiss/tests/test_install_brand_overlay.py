@@ -36,7 +36,7 @@ MEDIA_REL = Path("src/kiss/agents/vscode/media")
 MANIFEST_REL = Path("src/kiss/agents/vscode/package.json")
 BRAND_FILES = (
     "brand.json", "brand.css", "kiss-icon.svg", "kiss-icon.png", "thumbnail.jpeg",
-    "welcome-logo.png",
+    "welcome-logo.png", "welcome-logo-dark.png",
 )
 STOCK_MANIFEST = '{"displayName": "KISS Sorcar", "version": "0.0.0"}\n'
 
