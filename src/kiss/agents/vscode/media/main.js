@@ -14376,13 +14376,30 @@
     historyGeneration++;
   }
 
+  /** The tag chosen in the history panel's tag dropdown ('' = all). */
+  function historyTagFilter() {
+    const sel = document.getElementById('hf-tag');
+    return sel && sel.value ? sel.value : '';
+  }
+
+  /**
+   * Ask the daemon for one page of history under the current search
+   * text and tag filter.  `offset` 0 (the default) is the first page of
+   * a fresh view; callers reset pagination before requesting it.
+   */
+  function requestHistory(offset = 0) {
+    api.getHistory({
+      query: historySearch ? historySearch.value : '',
+      tag: historyTagFilter(),
+      offset,
+      generation: historyGeneration,
+    });
+  }
+
   function refreshHistory() {
     if (sidebar.classList.contains('open')) {
       resetHistoryPagination();
-      api.getHistory({
-        query: historySearch.value,
-        generation: historyGeneration,
-      });
+      requestHistory();
     }
     // Task news (a run started or finished, a commit landed) may have
     // changed the workspace: re-list the Explorer folders on screen /
@@ -18500,10 +18517,7 @@
           sidebarOverlay.classList.add('open');
         }
         resetHistoryPagination();
-        api.getHistory({
-          query: historySearch ? historySearch.value : '',
-          generation: historyGeneration,
-        });
+        requestHistory();
         // The drawer may have missed task news while closed.
         refreshSidebarDataViews(false);
       }
@@ -18518,10 +18532,7 @@
       // being hidden re-syncs whatever it missed.
       sidebar.classList.add('open');
       resetHistoryPagination();
-      api.getHistory({
-        query: historySearch ? historySearch.value : '',
-        generation: historyGeneration,
-      });
+      requestHistory();
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') refreshHistory();
       });
@@ -18650,10 +18661,7 @@
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
             resetHistoryPagination();
-            api.getHistory({
-              query: historySearch ? historySearch.value : '',
-              generation: historyGeneration,
-            });
+            requestHistory();
             refreshSidebarDataViews(false);
           }
           sidebarOverlay.classList.remove('open');
@@ -18996,10 +19004,7 @@
       // to the right default NOW (the refetch below may be answered by
       // the identical-refresh fast path, which rebuilds nothing).
       reapplyAllHistoryGroupCollapse(true);
-      api.getHistory({
-        query: historySearch.value,
-        generation: historyGeneration,
-      });
+      requestHistory();
       if (historySearchClear)
         historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
@@ -19009,7 +19014,7 @@
         if (historySearchClear) historySearchClear.style.display = 'none';
         resetHistoryPagination();
         reapplyAllHistoryGroupCollapse(true);
-        api.getHistory({query: '', generation: historyGeneration});
+        requestHistory();
         historySearch.focus();
       });
     }
@@ -19042,6 +19047,7 @@
       hfFrom,
       hfTo,
       hfSea,
+      hfTag,
     } = getHistoryFilterEls();
     [
       hfRunning,
@@ -19052,9 +19058,20 @@
       hfFrom,
       hfTo,
       hfSea,
+      hfTag,
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    if (hfTag) {
+      // The tag is applied by the daemon's SQL query (rare tags live
+      // beyond the loaded page), so a change is a fresh view: refetch
+      // page one, like a changed search text.
+      hfTag.addEventListener('change', () => {
+        resetHistoryPagination();
+        reapplyAllHistoryGroupCollapse(true);
+        requestHistory();
+      });
+    }
     [hfFrom, hfTo].forEach(el => {
       if (el) {
         el.addEventListener('change', () => {
@@ -19130,11 +19147,7 @@
         loader.id = 'history-loader';
         loader.textContent = 'Loading...';
         historyList.appendChild(loader);
-        api.getHistory({
-          query: historySearch.value,
-          offset: historyOffset,
-          generation: historyGeneration,
-        });
+        requestHistory(historyOffset);
       }
     });
     document.addEventListener('click', e => {
@@ -20615,9 +20628,16 @@
     }
   }
 
-  /** Whether a history search is being shown right now. */
+  /**
+   * Whether a history search is being shown right now: a search text
+   * or a tag filter, both of which narrow the list to matches that
+   * must not hide behind collapsed chat headers.
+   */
   function historySearchActive() {
-    return !!(historySearch && historySearch.value.trim());
+    return !!(
+      (historySearch && historySearch.value.trim()) ||
+      historyTagFilter()
+    );
   }
 
   /**
@@ -21341,6 +21361,7 @@
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
       div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
+      div.dataset.tags = typeof s.tags === 'string' ? s.tags : '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
@@ -21858,6 +21879,7 @@
       hfFrom: document.getElementById('hf-from'),
       hfTo: document.getElementById('hf-to'),
       hfSea: document.getElementById('hf-sea'),
+      hfTag: document.getElementById('hf-tag'),
     };
   }
 
@@ -21871,6 +21893,7 @@
       hfFrom,
       hfTo,
       hfSea,
+      hfTag,
     } = getHistoryFilterEls();
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
@@ -21881,6 +21904,11 @@
     // '' = every agent script, HF_SEA_NONE = plain runs only, otherwise
     // the exact SEA name.
     const seaFilter = hfSea ? hfSea.value : '';
+    // The daemon already filters each page by tag; checking the rows
+    // too hides the stale rows of the previous view the instant the
+    // dropdown changes, before the refetch lands.
+    const onlyTag = hfTag && hfTag.value ? hfTag.value : '';
+    if (hfTag) hfTag.parentElement.classList.toggle('active', !!onlyTag);
     const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // "/Users/me/proj" -> "/Users/me/proj/", but "/" stays "/", so that
     // subdirectory matching below never looks for a doubled separator.
@@ -21908,6 +21936,8 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      const tagOk =
+        !onlyTag || (row.dataset.tags || '').split(',').includes(onlyTag);
       const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
       // A task that ran in a git worktree (".kiss-worktrees/kiss_wt-...")
       // or any other subdirectory still belongs to this workspace.
@@ -21922,7 +21952,7 @@
       const seaOk =
         seaFilter === '' ||
         (seaFilter === HF_SEA_NONE ? rowSea === '' : rowSea === seaFilter);
-      if (catOk && dateOk && favOk && wsOk && seaOk) {
+      if (catOk && dateOk && favOk && tagOk && wsOk && seaOk) {
         row.style.display = '';
         visible++;
       } else {

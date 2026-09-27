@@ -365,6 +365,7 @@ class _CommandsMixin:
             offset: int = 0,
             generation: int = 0,
             conn_id: str = "",
+            tag: str = "",
         ) -> None: ...
         def _get_frequent_tasks(
             self, limit: int = 50, conn_id: str = "",
@@ -929,11 +930,13 @@ class _CommandsMixin:
             query = None
         offset = _parse_int(cmd.get("offset", 0))
         generation = _parse_int(cmd.get("generation", 0))
+        tag = cmd.get("tag", "")
         self._get_history(
             query,
             0 if offset is None else offset,
             0 if generation is None else generation,
             cmd.get("connId", ""),
+            tag if isinstance(tag, str) else "",
         )
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:

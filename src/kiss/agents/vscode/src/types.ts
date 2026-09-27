@@ -158,7 +158,13 @@ export type FromWebviewMessage =
   | {type: 'interruptTool'; tabId: string; toolName?: string; callId?: number}
   | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
-  | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
+  | {
+      type: 'getHistory';
+      query?: string;
+      tag?: string;
+      offset?: number;
+      generation?: number;
+    }
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
@@ -1177,6 +1183,7 @@ export interface AgentCommand {
   activeFile?: string;
   attachments?: Attachment[];
   query?: string;
+  tag?: string;
   offset?: number;
   generation?: number;
   limit?: number;

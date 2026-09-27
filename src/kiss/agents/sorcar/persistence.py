@@ -1934,13 +1934,36 @@ def _mark_legacy_side_channel_rows(task_template: str) -> int:
     return int(cursor.rowcount or 0)
 
 
-def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
+_TAG_FILTER_RE = re.compile(r"^[a-z]+$")
+
+
+def _tag_filter_sql(tag: str) -> tuple[str, tuple[str, ...]]:
+    """Build the ``AND`` clause that keeps only rows tagged ``tag``.
+
+    ``tags`` is a comma-joined string (``"work,coding,testing"``), so the
+    row matches when ``,tag,`` occurs in ``,tags,``.  A tag that is not a
+    plain lowercase word (the whole vocabulary is) cannot come from the
+    history panel's dropdown and is ignored: no clause, no filtering.
+
+    Args:
+        tag: The tag to keep, or ``""`` for no tag filter.
+
+    Returns:
+        The SQL fragment (empty or ``"AND ... "``) and its parameters.
+    """
+    if not _TAG_FILTER_RE.match(tag):
+        return "", ()
+    return "AND (',' || COALESCE(tags, '') || ',') LIKE ? ", (f"%,{tag},%",)
+
+
+def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
     Args:
         limit: Maximum number of entries to return.
             0 returns all entries (no cap).
         offset: Number of entries to skip before returning results.
+        tag: When set, only entries carrying this tag are returned.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
@@ -1949,12 +1972,14 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
+        tag_sql, tag_params = _tag_filter_sql(tag)
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + tag_sql
             + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
         )
-        rows = db.execute(sql, (effective_limit, offset)).fetchall()
+        rows = db.execute(sql, (*tag_params, effective_limit, offset)).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
 
@@ -2164,7 +2189,7 @@ def _record_steer_input(text: str) -> None:
 
 
 def _search_history(
-    query: str, limit: int = 50, offset: int = 0
+    query: str, limit: int = 50, offset: int = 0, tag: str = ""
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
@@ -2172,21 +2197,24 @@ def _search_history(
         query: Case-insensitive substring to match against task text.
         limit: Maximum number of matching entries to return.
         offset: Number of entries to skip before returning results.
+        tag: When set, only entries carrying this tag are returned.
 
     Returns:
         List of matching entries, most-recent-first.
     """
     if not query:
-        return _load_history(limit=limit, offset=offset)
+        return _load_history(limit=limit, offset=offset, tag=tag)
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        tag_sql, tag_params = _tag_filter_sql(tag)
         rows = db.execute(
             _HISTORY_SELECT
             + "WHERE task LIKE ? ESCAPE '\\' "
             + f"AND {_HISTORY_NOT_SUBAGENT} "
+            + tag_sql
             + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?",
-            (f"%{escaped}%", limit, offset),
+            (f"%{escaped}%", *tag_params, limit, offset),
         ).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 

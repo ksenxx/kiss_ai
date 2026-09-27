@@ -144,6 +144,19 @@ _ACTIVITY_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+#: Every tag :func:`classify_task_tags` can emit, in the order it emits
+#: them.  The history panel's tag filter offers exactly this list.
+ALL_TAGS: tuple[str, ...] = (
+    "work",
+    "personal",
+    "secret",
+    "chore",
+    "question",
+    *(tag for tag, _ in _ACTIVITY_RULES),
+    "subagent",
+    "failed",
+)
+
 
 def classify_task_tags(task: str, *, is_subagent: bool = False, failed: bool = False) -> list[str]:
     """Classify a task's text into tags.

@@ -205,6 +205,39 @@
               <option value="__none__">None</option>
             </select>
           </div>
+          <!-- Tag filter: one of the classification tags the daemon
+               stamps on every finished task (task_metadata.ALL_TAGS,
+               minus "subagent": sub-agent runs are never listed here,
+               they live inside their parent's transcript).  The daemon
+               applies it in SQL, so a rare tag is found on every page,
+               not only among the rows already loaded. -->
+          <div class="history-filter-tag">
+            <label for="hf-tag" class="history-filter-date-lbl">Tag</label>
+            <select id="hf-tag" class="history-filter-tag-select" title="Show only tasks carrying this tag" aria-label="Filter tasks by tag">
+              <option value="" selected>All tags</option>
+              <option value="work">work</option>
+              <option value="personal">personal</option>
+              <option value="secret">secret</option>
+              <option value="chore">chore</option>
+              <option value="question">question</option>
+              <option value="coding">coding</option>
+              <option value="testing">testing</option>
+              <option value="debugging">debugging</option>
+              <option value="review">review</option>
+              <option value="research">research</option>
+              <option value="paper">paper</option>
+              <option value="writing">writing</option>
+              <option value="docs">docs</option>
+              <option value="data">data</option>
+              <option value="devops">devops</option>
+              <option value="messaging">messaging</option>
+              <option value="browsing">browsing</option>
+              <option value="shopping">shopping</option>
+              <option value="finance">finance</option>
+              <option value="scheduling">scheduling</option>
+              <option value="failed">failed</option>
+            </select>
+          </div>
         </div>
           </div>
         </div>

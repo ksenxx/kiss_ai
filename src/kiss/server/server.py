@@ -1229,8 +1229,12 @@ class VSCodeServer(
         offset: int = 0,
         generation: int = 0,
         conn_id: str = "",
+        tag: str = "",
     ) -> None:
         """Send conversation history with pagination support.
+
+        ``tag`` (the history panel's tag dropdown) restricts the page to
+        tasks carrying that classification tag; ``""`` means every task.
 
         The reply is stamped with the requesting connection's
         ``conn_id`` (when non-empty) so it reaches only the VS Code
@@ -1238,9 +1242,9 @@ class VSCodeServer(
         must not repaint another window's history panel.
         """
         if query:
-            entries = _search_history(query, limit=50, offset=offset)
+            entries = _search_history(query, limit=50, offset=offset, tag=tag)
         else:
-            entries = _load_history(limit=50, offset=offset)
+            entries = _load_history(limit=50, offset=offset, tag=tag)
 
         running_task_ids = self._get_running_task_ids()
 
