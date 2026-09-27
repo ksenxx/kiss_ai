@@ -15,22 +15,23 @@ add your name here
     <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/highlight.min.js"></script>
     <style>
         :root {
-            --bg: #0b0d10;
-            --panel: #11151b;
-            --panel-2: #0f1318;
-            --border: #232a34;
-            --text: #e7edf5;
-            --muted: #9aa7b5;
-            --accent: #7ab8e0;
-            --accent-2: #b87ae0;
-            --accent-3: #7ae0b8;
-            --accent-4: #e0b87a;
-            --code-bg: #0a0f16;
-            --code-border: #233246;
-            --code-fg: #9ad8f0;
-            --code-block-fg: #d7e6f5;
-            --quote-fg: #bfe7db;
-            --surface-tint: rgb(255 255 255 / 2%);
+            color-scheme: dark;
+
+            /* VS Code "Dark Modern" - the palette of the KISS Sorcar chat
+               UI and remote webapp (media/main.css, remote-codex.css):
+               neutral greys, one accent, status colours for roles. */
+            --bg: #1f1f1f;
+            --panel: #181818;
+            --panel-2: #181818;
+            --border: #2b2b2b;
+            --text: #ccc;
+            --muted: #9d9d9d;
+            --accent: #4daafc;
+            --green: #89d185;
+            --yellow: #cca700;
+            --code-bg: rgb(0 0 0 / 30%);
+            --code-border: color-mix(in srgb, var(--text) 8%, transparent);
+            --surface-tint: color-mix(in srgb, var(--text) 4%, transparent);
 
             /* Design tokens: the same names and steps as the KISS Sorcar
                chat UI (media/main.css), so both tools share one scale. */
@@ -48,11 +49,12 @@ add your name here
             --radius-xl: 10px;
             --radius-pill: 999px;
 
-            /* Role colours: user, model, tool, system. */
+            /* Role colours: the user speaks in the accent, the model in
+               the plain foreground, tools and system in status colours. */
             --role-user: var(--accent);
-            --role-model: var(--accent-2);
-            --role-tool: var(--accent-3);
-            --role-system: var(--accent-4);
+            --role-model: var(--text);
+            --role-tool: var(--green);
+            --role-system: var(--yellow);
         }
 
         * { box-sizing: border-box; }
@@ -120,7 +122,7 @@ add your name here
         }
         .content-header h2 { margin: 0; font-size: 18px; }
         .content-header-command {
-            color: var(--accent-3);
+            color: var(--muted);
             font-size: 12px;
             margin-top: var(--space-1-5);
             word-break: break-all;
@@ -162,9 +164,9 @@ add your name here
         }
 
         .message-content h1, .message-content h2, .message-content h3 { margin: var(--space-4) 0 var(--space-2); }
-        .message-content h1 { font-size: 20px; color: var(--accent); }
-        .message-content h2 { font-size: 17px; color: var(--accent-2); }
-        .message-content h3 { font-size: 15px; color: var(--accent-4); }
+        .message-content h1 { font-size: 20px; }
+        .message-content h2 { font-size: 17px; }
+        .message-content h3 { font-size: 15px; }
         .message-content p { margin: 0 0 var(--space-2-5); }
         .message-content a { color: var(--accent); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 50%, transparent); }
         .message-content a:hover { border-bottom-color: color-mix(in srgb, var(--accent) 90%, transparent); }
@@ -173,7 +175,6 @@ add your name here
             border: 1px solid var(--code-border);
             padding: 1px var(--space-1-5);
             border-radius: var(--radius-md);
-            color: var(--code-fg);
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             font-size: 0.92em;
         }
@@ -190,20 +191,19 @@ add your name here
             padding: 0;
             background: transparent;
             font-size: 13px;
-            color: var(--code-block-fg);
         }
         .message-content blockquote {
             margin: var(--space-2-5) 0;
             padding: var(--space-2-5) var(--space-3);
-            border-left: 3px solid color-mix(in srgb, var(--accent-3) 80%, transparent);
-            background: color-mix(in srgb, var(--accent-3) 5%, transparent);
+            border-left: 3px solid color-mix(in srgb, var(--text) 25%, transparent);
+            background: var(--surface-tint);
             border-radius: var(--radius-lg);
-            color: var(--quote-fg);
+            color: var(--muted);
         }
         .message-content ul, .message-content ol { margin: 0 0 var(--space-2-5) var(--space-6); }
         .message-content table { border-collapse: collapse; width: 100%; margin: var(--space-2-5) 0; }
         .message-content th, .message-content td { border: 1px solid var(--border); padding: var(--space-2); }
-        .message-content th { background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent); text-align: left; }
+        .message-content th { background: var(--surface-tint); text-align: left; }
 
         .empty-state, .loading { padding: var(--space-8) var(--space-4); color: var(--muted); text-align: center; }
     </style>

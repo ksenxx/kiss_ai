@@ -5,6 +5,7 @@
 
 :root {
   font-size: var(--vscode-font-size);
+  color-scheme: dark;
 
   /* Fallbacks are VS Code Dark Modern, one neutral grey ramp with a
      single blue accent; inside VS Code the active theme supplies all. */
@@ -153,6 +154,18 @@
 
 /* stylelint-disable-next-line property-no-vendor-prefix */
 html { max-width: 100vw; overflow-x: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+/* Native form controls follow the page: the same typeface as the body
+   (browsers default them to Arial, which VS Code's host stylesheet
+   overrides in the webview but nothing does on the remote and share
+   pages) and the accent for checkboxes, radios and sliders.  The
+   colour scheme tells the browser to draw its own widgets - select
+   popups, checkboxes, scrollbars - in the page's dark or light
+   scheme instead of always light (the dark default is set on :root
+   above). */
+button, input, select, textarea { font-family: inherit; }
+input { accent-color: var(--accent); }
+html.light-theme, body.light-theme, body.vscode-light, body.vscode-high-contrast-light { color-scheme: light; }
 
 body {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
@@ -425,7 +438,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--fg);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   font-family: inherit;
   box-sizing: border-box;
 }
@@ -459,11 +472,14 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: var(--space-3) 0; }
 
-/* Collapsible settings subpanels (API Keys, Custom Models): the same
-   chevron-toggle pattern as the history panel's Filters drawer. */
+/* Collapsible section toggles - the settings dialog's API Keys and
+   Custom Models subpanels and the history panel's Filters drawer -
+   share one chevron-toggle pattern: a small uppercase label in the
+   dimmed foreground, accent on hover, chevron turning when open. */
 .config-subpanel { margin-top: var(--space-2); }
 
-.config-subpanel-toggle {
+.config-subpanel-toggle,
+.history-filters-toggle {
   display: flex; align-items: center; gap: var(--space-1);
   width: 100%; padding: var(--space-0-5) 0; margin: 0 0 var(--space-1-5);
   background: none; border: none;
@@ -474,15 +490,19 @@ body {
   cursor: pointer; user-select: none;
 }
 
-.config-subpanel-toggle:hover { color: var(--accent); }
+.config-subpanel-toggle:hover,
+.history-filters-toggle:hover { color: var(--accent); }
 
-.config-subpanel-toggle:focus-visible {
+.config-subpanel-toggle:focus-visible,
+.history-filters-toggle:focus-visible {
   outline: 1px solid var(--accent); outline-offset: 1px;
 }
 
-.config-subpanel-chevron { flex: none; transition: transform var(--dur-slow) var(--ease); }
+.config-subpanel-chevron,
+.history-filters-chevron { flex: none; transition: transform var(--dur-slow) var(--ease); }
 
-.config-subpanel-toggle.expanded .config-subpanel-chevron {
+.config-subpanel-toggle.expanded .config-subpanel-chevron,
+.history-filters-toggle.expanded .history-filters-chevron {
   transform: rotate(90deg);
 }
 
@@ -562,7 +582,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--fg);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   font-family: inherit;
   cursor: pointer;
 }
@@ -587,7 +607,6 @@ body {
 
 .config-update-btn .update-available-icon {
   color: var(--status-ok);
-  filter: drop-shadow(0 0 1px color-mix(in srgb, var(--status-ok) 50%, transparent));
 }
 
 .config-password-wrap { position: relative; margin-top: var(--space-1); }
@@ -1337,7 +1356,7 @@ body.ask-answering #input-container {
   display: flex; flex-direction: column; gap: var(--space-1);
   padding: var(--space-2) var(--space-3); margin: var(--space-2) 0;
   background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
-  border-radius: var(--radius-lg); cursor: pointer; transition: all var(--dur-base);
+  border-radius: var(--radius-lg); cursor: pointer; transition: background var(--dur-base), border-color var(--dur-base);
   animation: fadeIn var(--dur-slow) var(--ease);
 }
 
@@ -1519,21 +1538,21 @@ body.content-tab-open #send-btn { display: none !important; }
 #send-btn {
   background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border: none;
   border-radius: var(--radius-round); width: 34px; height: 34px; cursor: pointer;
-  transition: all var(--dur-slow); display: flex; align-items: center; justify-content: center;
+  transition: background var(--dur-base), color var(--dur-base); display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
 }
 #send-btn svg { width: 16px; height: 16px; }
-#send-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent); }
-#send-btn:disabled { opacity: 0.3; cursor: not-allowed; box-shadow: none; }
+#send-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); }
+#send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 #stop-btn {
   background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red);
   border: 1px solid color-mix(in srgb, var(--red) 15%, transparent); border-radius: var(--radius-round);
-  width: 34px; height: 34px; cursor: pointer; transition: all var(--dur-slow); display: none;
+  width: 34px; height: 34px; cursor: pointer; transition: background var(--dur-base), border-color var(--dur-base); display: none;
   align-items: center; justify-content: center; flex-shrink: 0;
 }
 #stop-btn svg { width: 15px; height: 15px; }
-#stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--red) 15%, transparent); }
+#stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
 
 /* Stop requested, agent not there yet: pulse so a pending stop cannot be
    mistaken for a click the daemon never received. */
@@ -1574,20 +1593,26 @@ body.content-tab-open #send-btn { display: none !important; }
 
 #upload-btn svg { width: 16px; height: 16px; }
 
+/* The composer's icon buttons: quiet at rest, and on hover the same
+   soft square that every other icon button in the app shows (tab
+   close, panel close, password toggle, custom-model actions). */
 #menu-btn,
 #new-chat-btn,
 #more-btn,
 .toggle-btn {
-  background: none; border: none;
+  background: none; border: none; border-radius: var(--radius-sm);
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: var(--space-0-5); transition: color var(--dur-base), opacity var(--dur-base);
+  padding: var(--space-1); transition: color var(--dur-base), background var(--dur-base), opacity var(--dur-base);
   display: flex; align-items: center; position: relative;
 }
 
 #menu-btn:hover:not(:disabled),
 #new-chat-btn:hover:not(:disabled),
 #more-btn:hover:not(:disabled),
-.toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+.toggle-btn:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
 
 #menu-btn:disabled,
 #new-chat-btn:disabled,
@@ -3438,28 +3463,9 @@ body.sidebar-chat-mode #meta-info-content {
 }
 #history-view-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
+/* The Filters toggle itself is styled with .config-subpanel-toggle
+   (the shared section-toggle pattern) next to the settings dialog. */
 .history-filters-panel { margin-bottom: var(--space-1); }
-
-.history-filters-toggle {
-  display: flex; align-items: center; gap: var(--space-1);
-  width: 100%; padding: var(--space-0-5) 0; margin: 0 0 var(--space-1-5);
-  background: none; border: none;
-  color: var(--fg);
-  font-family: inherit; font-size: var(--fs-md); font-weight: 600;
-  text-align: left;
-  cursor: pointer; user-select: none;
-}
-.history-filters-toggle:hover { color: var(--accent); }
-
-.history-filters-toggle:focus-visible {
-  outline: 1px solid var(--accent); outline-offset: 1px;
-}
-
-.history-filters-chevron { flex: none; transition: transform var(--dur-slow) var(--ease); }
-
-.history-filters-toggle.expanded .history-filters-chevron {
-  transform: rotate(90deg);
-}
 
 .history-filters-body[hidden] { display: none !important; }
 
@@ -3745,7 +3751,7 @@ body.sidebar-chat-mode #meta-info-content {
   color: var(--fg);
   font-family: inherit;
   font-size: var(--fs-base);
-  font-weight: 500;
+  font-weight: 400;
   line-height: 1.35;
   transition: background var(--dur-base);
 }
@@ -3795,7 +3801,7 @@ body.sidebar-chat-mode #meta-info-content {
   border: 1px solid transparent; border-radius: var(--radius-md);
   margin-bottom: var(--space-1); cursor: pointer; font-size: var(--fs-base);
   color: var(--fg); overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; transition: background var(--dur-base), border-color var(--dur-base); font-weight: 400;
+  white-space: nowrap; transition: background var(--dur-base), border-color var(--dur-base), color var(--dur-base); font-weight: 500;
   display: flex; align-items: center;
 }
 
@@ -4191,7 +4197,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .wt-btn {
   padding: var(--space-1) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);
   font-size: var(--fs-sm); font-family: inherit; cursor: pointer;
-  transition: all var(--dur-base); background: transparent; color: var(--fg);
+  transition: background var(--dur-base), border-color var(--dur-base), color var(--dur-base); background: transparent; color: var(--fg);
 }
 .wt-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
