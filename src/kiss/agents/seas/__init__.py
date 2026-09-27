@@ -29,7 +29,10 @@ schedules its daily refresh, or :mod:`kiss.agents.seas.remember_sea`
 and :mod:`kiss.agents.seas.forget_sea`, which add the prompt to, or
 remove it from, the standing instructions in ``~/.kiss/SORCAR.md``
 (the file appended to every task's system prompt; storage in
-:mod:`kiss.agents.seas.sorcar_md`).
+:mod:`kiss.agents.seas.sorcar_md`), or
+:mod:`kiss.agents.seas.coding_sea`, the :class:`ContainerHarness` that runs
+Sorcar unattended inside a Docker container (the trial runners in
+``benchmarkings/harnesstax`` generate a per-trial SEA file that binds to it).
 Every ``*_sea.py`` module in this package is also exposed as a chat
 slash command (``/merge``, ``/sh``, ``/autoroute``, ``/skillopt``, ``/write_paper``,
 ``/review_paper``, ``/git_extract_knowledge``, ``/remember``, ``/forget``, ...) by
