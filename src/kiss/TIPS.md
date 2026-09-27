@@ -1,11 +1,5 @@
 # Tip
 
-You can ask a question about the current task by prefixing the question with the command /ask. 
-
-# Tip
-
-{{PRODUCT_NAME}} supports commands prefixed with /. Type / in the chat textbox to see all available commands. To build your own command say /xyz, write a Sorcar Extension Agent (or a SEA) in a folder /path/to/seas and append the folder to the file ~/.kiss/SEAS.md.  Coammnd /xyz will then be availble to {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
-
 ## Update button in the settings
 
 If the Update button in settings fails, run the full installation command again.  It will not delete your history.
@@ -16,17 +10,44 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 # Tip
 
-In VS Code, you can run {{PRODUCT_NAME}} in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar.  You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the {{PRODUCT_NAME}} settings page.
+You can ask a question about the current task by prefixing the question with the command /ask. 
+
+# Tip
+
+{{PRODUCT_NAME}} supports commands prefixed with `/`. Type `/` in the chat textbox to see all available commands. To build your own command say `/xyz`, write a Sorcar Extension Agent (or a SEA) in a folder `/path/to/seas` and append the folder to the file `~/.kiss/SEAS.md`.  Coammnd `/xyz` will then be availble to {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
 
 # Tip 
+## Autorouter as model
 
-{{PRODUCT_NAME}} now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple.  You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task); deselect "Classify with Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models).
+In the model picker, select autorouter as a model to enable {{PRODUCT_NAME}} 
+to route the subtasks of a task to various capable models to perform 
+the task at a lower cost and higher speed without degrading quality.
 
 # Tip
 
 ## Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `X()` functions — named after `sorcar.run()`'s parameters — compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in {{PRODUCT_NAME}} as SEAs. See the "Sorcar Extension Agents (SEAs)" section in README.md for a full example, and the detailed SEA guide at <https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md>.
+A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `X()` functions — named after `sorcar.run()`'s parameters — compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in {{PRODUCT_NAME}} as SEAs. See the "Sorcar Extension Agents (SEAs)" section in `README.md` for a full example, and the detailed SEA guide at <https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md>.
+
+# Tip
+
+**Recursive self improvement (RSI)** of a SEA is enabled based on past trajectories of the SEA.  Run `/rsi7d <SEA_NAME>` to self improve a SEA based on the trajectories of the SEA from last 7 days.
+
+# Tip
+
+Run `/git_extract_knowledge <repo-name>` to create a memory/context based on the 
+repository <rep-name>.  While running a task, {{PRODUCT_NAME}} can quickly lookup 
+the memory about the repository to perform complex tasks on the repository or to
+quickly answer questions about the repository.
+
+
+# Tip
+
+In VS Code, you can run {{PRODUCT_NAME}} in two modes: full editor mode, where the chats open as editor tabs, and non-editor mode, where the chats open in the sidebar.  You can switch between the two modes by selecting/deselecting the "Chat in the editor" option on the {{PRODUCT_NAME}} settings page.
+
+# Tip 
+
+{{PRODUCT_NAME}} now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple.  You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task); deselect "Classify with Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models).
 
 # Tip
 
@@ -46,14 +67,8 @@ See the commit messages at https://github.com/ksenxx/kiss_ai which include the p
 - Add the following text to your prompt:
 
 ```
-Use 'claude-fable-5-1' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 50% of the task budget in gpt-5.6-sol for reviewing and debugging, and ask the model not to invent new problems. Use model names literally; don't hallucinate new model names.
+claude-fable-5-1 model be used for all tasks, including software development. Use gpt-6-astra (not codex) using `run_parallel` tool for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 75% of the task budget in gpt-6-astra for reviewing and debugging, and ask the model not to invent new problems. Use the model names literally without hallucinating new model names.
 ```
-
-# Tip
-
-## What is the status of an agent performing a task?
-
-To get the status of a task, open a new chat and ask {{PRODUCT_NAME}} what the status is of the task being done…
 
 # Tip
 
@@ -129,19 +144,10 @@ rsorcar username@ip_address
 
 # Tip
 
-## If You Get a git Merge Conflict
-
-Then run the following task:
-
-```
-Can you check the following merge conflict message and help me fix it? <<copy_paste_the_conflict_message_from_the_chat>>
-```
-
-# Tip
-
 ## No Need to Use a Shell
 
-Just type or speak your shell command in the chat input textbox.
+Just type or speak your shell command prefixed with the command `/sh` in 
+the chat input textbox.
 
 # Tip
 
@@ -165,12 +171,6 @@ Can you run the command \<<command>> in the background and monitor its output in
 
 # Tip
 
-## More Prompt Examples for Connecting to Slack, SMS, Gmail ...
-
-See them on the welcome page when you create a new chat. Click on them to copy them to the chat input textbox.
-
-# Tip
-
 ## Useful Promptlets
 
 Click on the "Inject Promptlet" button below the chat input textbox to insert a useful promptlet into your prompt.
@@ -186,13 +186,3 @@ Click the burger menu button in the bottom-left corner to see all agents in {{PR
 ## Settings
 
 Click on the settings button in the "..." menu. Use the Settings interface to get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint.
-
-# Tip
-
-## Use Optimized Multi-Model Routing to Save Cost or Improve Quality
-
-**Add the following text to your prompt:**
-
-```
-If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-fable-5 and openrouter/moonshotai/kimi-k3 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/qwen/qwen3.8-max, openrouter/x-ai/grok-4.6, openrouter/z-ai/glm-5.3, openrouter/deepseek/deepseek-v4-pro-0813 — for SWE tasks when budget is low; and gpt-5.6-luna and openrouter/deepseek/deepseek-v4-pro-0813 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.
-```
