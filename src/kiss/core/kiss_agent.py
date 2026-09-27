@@ -367,8 +367,10 @@ class KISSAgent(Base):
 
         Run-to-completion models (``cc/*``, ``codex/*`` — see
         ``Model.runs_task_to_completion``) skip the ReAct loop entirely:
-        the whole task, with *system_prompt* appended after
-        ``CLI_SYSTEM_PROMPT_HEADER``, is handed to the CLI agent in one
+        the whole task, with *system_prompt* as the model's
+        ``system_instruction`` (``--append-system-prompt`` for ``cc/*``,
+        appended after ``CLI_SYSTEM_PROMPT_HEADER`` for ``codex/*``), is
+        handed to the CLI agent in one
         ``generate()`` call and its final output is returned (wrapped in
         the registered ``finish`` contract).  *tools* are registered but
         never exposed to such a model; it uses its own native tools.
@@ -540,7 +542,8 @@ class KISSAgent(Base):
         CLI-backed models (``cc/*``, ``codex/*``) are full coding agents
         with their own native tools, so instead of the turn-by-turn KISS
         tool loop the task is sent in a single ``generate()`` call — the
-        system prompt rides inside the prompt, appended to the task after
+        system prompt goes to ``claude`` as ``--append-system-prompt`` and
+        to ``codex`` inside the prompt, appended to the task after
         ``CLI_SYSTEM_PROMPT_HEADER`` (see ``CLITextModel._build_prompt``).
         KISS tools are not exposed to the CLI; its final message becomes
         the run's result, wrapped in the registered ``finish`` tool's

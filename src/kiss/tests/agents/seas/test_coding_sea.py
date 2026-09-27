@@ -541,8 +541,18 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
 
 def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
     """A dead container or the root workdir disables the notes without disturbing the run."""
+    import docker
+
     from kiss.agents.seas import coding_sea
 
+    # Only a reachable daemon can report the container as gone; when the
+    # daemon itself is down the liveness check treats that as a transient
+    # hiccup and lets the trial go on (see ``ContainerHarness.container_alive``).
+    try:
+        docker.from_env().ping()
+        daemon_up = True
+    except Exception:
+        daemon_up = False
     for workdir in ("/app", "/"):
         config = tmp_path / f"config-{len(workdir)}.json"
         config.write_text(json.dumps({
@@ -556,8 +566,11 @@ def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
         # the liveness check is what ends the trial; the notes must not raise first
         from kiss.core.kiss_error import BudgetExceededError
 
-        with pytest.raises(BudgetExceededError):
-            harness.on_llm_call([result])
+        if daemon_up:
+            with pytest.raises(BudgetExceededError):
+                harness.on_llm_call([result])
+        else:
+            assert harness.on_llm_call([result]) == [result]
         assert result["content"] == "ran" and harness.file_baseline == {}
         assert harness.file_snapshot() is None
 

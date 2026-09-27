@@ -360,22 +360,28 @@ class TestContentTabEditing:
             _open_editor(page, str(path), "lnk-e8")
             _type_at_end(page, "unsaved = 1")
             page.wait_for_selector(_DIRTY_TAB, timeout=10000)
-            dialogs: list[str] = []
-
-            def _dismiss(dialog) -> None:
-                dialogs.append(dialog.message)
-                dialog.dismiss()
-
-            page.once("dialog", _dismiss)
+            # The question is an in-page toast (the VS Code webview has
+            # no native dialogs), with "Keep editing" as the focused,
+            # safe choice.
+            toast = page.locator(
+                ".kiss-notification[data-notification-id^='close-dirty-']",
+            )
             page.click(".chat-tab.content-tab .chat-tab-close")
-            page.wait_for_timeout(300)
-            assert dialogs and "unsaved changes" in dialogs[0]
-            assert "edit_close.py" in dialogs[0]
+            toast.wait_for(timeout=10000)
+            message = toast.locator(".kiss-notification-message").inner_text()
+            assert "unsaved changes" in message
+            assert "edit_close.py" in message
+            assert page.evaluate(
+                "document.activeElement && document.activeElement.textContent",
+            ) == "Keep editing"
+            toast.get_by_role("button", name="Keep editing", exact=True).click()
+            toast.wait_for(state="detached", timeout=10000)
             assert page.locator(".chat-tab.content-tab").count() == 1
             assert "unsaved = 1" in _editor_text(page)
 
-            page.once("dialog", lambda d: d.accept())
             page.click(".chat-tab.content-tab .chat-tab-close")
+            toast.wait_for(timeout=10000)
+            toast.get_by_role("button", name="Don't save", exact=True).click()
             page.wait_for_function(
                 "() => document.querySelectorAll('.chat-tab.content-tab').length === 0",
                 timeout=10000,

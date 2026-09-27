@@ -1372,10 +1372,11 @@ class CLITextModel(Model):
 
     Both transports are full coding agents in their own right, so
     ``runs_task_to_completion`` is True: :class:`~kiss.core.kiss_agent.KISSAgent`
-    hands them the whole task in one ``generate()`` call — with the system
-    prompt appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` —
-    and returns their final output, instead of driving a turn-by-turn
-    KISS tool loop.
+    hands them the whole task in one ``generate()`` call and returns their
+    final output, instead of driving a turn-by-turn KISS tool loop.  The
+    system prompt reaches Claude Code as ``--append-system-prompt``;
+    Codex's CLI has no such flag, so it gets the prompt appended to the
+    task after :data:`CLI_SYSTEM_PROMPT_HEADER`.
 
     Both transports flatten the conversation into a single text prompt,
     support tool calling only via the text-based ``tool_calls`` JSON
@@ -1394,24 +1395,34 @@ class CLITextModel(Model):
     # early at the first complete ``tool_calls`` block consult it.
     _tool_bearing_turn = False
 
-    def _build_prompt(self) -> str:
-        """Build the single prompt string sent to the CLI.
+    def _task_text(self) -> str:
+        """Return the conversation as the task text sent to the CLI.
 
         A one-message conversation (the normal run-to-completion case) is
         the task text itself; a multi-turn conversation is flattened into
-        a ``[User]/[Assistant]/[Tool Result]`` transcript.  When
-        ``system_instruction`` is set in ``model_config`` it is appended
-        to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the CLIs are
-        agents with their own system prompts, so KISS's system prompt
-        rides inside the task instead of replacing theirs.
+        a ``[User]/[Assistant]/[Tool Result]`` transcript.
+
+        Returns:
+            The task text, without any system instruction.
+        """
+        if len(self.conversation) == 1:
+            return flatten_content_to_text(self.conversation[0]["content"])
+        return self._conversation_as_dialogue()
+
+    def _build_prompt(self) -> str:
+        """Build the single prompt string sent to the CLI.
+
+        When ``system_instruction`` is set in ``model_config`` it is
+        appended to the task after :data:`CLI_SYSTEM_PROMPT_HEADER` — the
+        CLIs are agents with their own system prompts, so KISS's system
+        prompt rides inside the task instead of replacing theirs.  A CLI
+        with a real channel for an appended system prompt overrides this
+        (see :class:`~kiss.core.models.claude_code_model.ClaudeCodeModel`).
 
         Returns:
             The assembled prompt string.
         """
-        if len(self.conversation) == 1:
-            task = flatten_content_to_text(self.conversation[0]["content"])
-        else:
-            task = self._conversation_as_dialogue()
+        task = self._task_text()
         system_instruction = self.model_config.get("system_instruction")
         if system_instruction:
             return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"

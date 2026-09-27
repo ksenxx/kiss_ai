@@ -835,10 +835,11 @@ def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
         page.hover("#meta-spend-graph .spend-total")
         assert not tip.is_visible()
         # Hovering cells at the right edge, then the left edge, then the
-        # bottom row: the tooltip keeps one width (it is measured at the
-        # left edge, not where the last hover left it) and stays inside
-        # the graph both ways, whichever row the cell is in.
-        widths = set()
+        # bottom row: the tooltip keeps one width per text (it is
+        # measured at the left edge, not where the last hover left it)
+        # and stays inside the graph both ways, whichever row the cell
+        # is in.
+        widths: dict[str, set[float]] = {}
         for days_ago in (0, 1, 2, 3, 6, 5, 4, 200, 0):
             cell = page.locator(f'.spend-cell[data-spend-date="{_day_key(days_ago)}"]')
             # The oldest cell is scrolled out of the viewport: bring it in.
@@ -847,7 +848,7 @@ def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
             box = tip.bounding_box()
             cell_box = cell.bounding_box()
             assert box is not None and cell_box is not None
-            widths.add(round(box["width"], 1))
+            widths.setdefault(tip.inner_text(), set()).add(round(box["width"], 1))
             assert box["x"] >= graph_box["x"] - 1, (days_ago, box, graph_box)
             assert box["x"] + box["width"] <= graph_box["x"] + graph_box["width"] + 1, (
                 days_ago, box, graph_box,
@@ -860,7 +861,14 @@ def test_spend_heatmap_fills_the_panel_pinned_to_the_latest_week(
                 box["y"] + box["height"] <= cell_box["y"]
                 or box["y"] >= cell_box["y"] + cell_box["height"]
             ), (days_ago, box, cell_box)
-        assert len(widths) <= 3, widths  # one width per distinct text, not per position
+        # One width per distinct text, not per position: today's cell is
+        # hovered first after a right-edge tooltip and again after a
+        # left-edge one, and must measure the same both times.  The seven
+        # empty days each read "<date> · no usage", and in a proportional
+        # font every date has a width of its own (Sep 21 is narrower than
+        # Sep 26), so distinct texts are not expected to share widths.
+        assert len(widths) == 8, widths
+        assert all(len(seen) == 1 for seen in widths.values()), widths
         assert page.evaluate(
             "() => { const b = document.getElementById('meta-spend-body');"
             " return b.scrollWidth <= b.clientWidth; }"
@@ -980,9 +988,18 @@ def test_schedule_and_apps_sections_fill_scroll_and_launch_a_connect_task(
         # Clicking an app that is not connected submits a connect task
         # in a NEW tab.
         tabs_before = page.locator("#tab-list .chat-tab").count()
-        page.locator('.app-row[data-app="slack"] button').click()
+        # The shim keeps retrying the websocket and reports the daemon
+        # down again after every failed attempt (sendMessage then holds
+        # the prompt back), so the "connected" report and the click run
+        # in one JS turn where no retry can interleave.
         submit = page.evaluate(
-            "() => window.__posted.filter(m => m.type === 'submit').pop() || null"
+            """() => {
+              window.dispatchEvent(new MessageEvent('message', {
+                data: {type: 'daemonStatus', connected: true},
+              }));
+              document.querySelector('.app-row[data-app="slack"] button').click();
+              return window.__posted.filter(m => m.type === 'submit').pop() || null;
+            }"""
         )
         assert submit is not None
         assert submit["prompt"].startswith('Connect my Slack app: authenticate the "slack"')

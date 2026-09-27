@@ -23,6 +23,7 @@ blocks the CDN on purpose to pin the fallback behavior).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -198,7 +199,13 @@ class TestContentTabMenuBar:
             _choose(page, "Edit", "Copy")
             clip = page.evaluate("() => navigator.clipboard.readText()")
             assert clip == "alpha = 1\nbeta = 2\n"
-            page.keyboard.press("Control+End")
+            # Monaco binds "go to end of document" per platform: Ctrl+End
+            # on Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound
+            # there, so the Select All selection would stay and Paste
+            # would replace it with the same text).
+            page.keyboard.press(
+                "Meta+ArrowDown" if sys.platform == "darwin" else "Control+End",
+            )
             _choose(page, "Edit", "Paste")
             page.wait_for_function(
                 "() => window.monaco.editor.getEditors()[0].getModel()"

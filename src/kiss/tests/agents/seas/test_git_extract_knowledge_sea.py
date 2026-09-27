@@ -15,6 +15,7 @@ index report and the page write really flow through tool results.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import re
@@ -1107,7 +1108,15 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     (repo / "café.sh").write_text("echo QUOTEDFACT\n")
     (repo / "nel.txt").write_text("one\u0085still one\ntwo\n")
     (repo / "skew.txt").write_text("v1\n")
-    os.link(repo / "f:2", repo / b"raw\xff.txt".decode("utf-8", "surrogateescape"))
+    # APFS (macOS) refuses file names that are not valid UTF-8 with EILSEQ; the
+    # non-UTF-8 name is exercised only where the filesystem can hold one.
+    try:
+        os.link(repo / "f:2", repo / b"raw\xff.txt".decode("utf-8", "surrogateescape"))
+        has_raw_name = True
+    except OSError as exc:
+        if exc.errno != errno.EILSEQ:
+            raise
+        has_raw_name = False
     _git(repo, "add", "-A")
     future = "2030-01-01T00:00:00+00:00"  # both dates: the committer date drives traversal
     skewed = {**os.environ, "GIT_AUTHOR_DATE": future, "GIT_COMMITTER_DATE": future}
@@ -1144,7 +1153,10 @@ def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     nel = store.get("file:nel.txt")
     assert nel is not None and "lines: 2" in nel.text
     raw = store.get("file:raw\\xff.txt")
-    assert raw is not None and "content: not indexed" not in raw.text
+    if has_raw_name:
+        assert raw is not None and "content: not indexed" not in raw.text
+    else:
+        assert raw is None
     tag = store.get("tag:v1")
     assert tag is not None and tag.sha == root and "TAGCTRLFACT" in tag.text
     assert store.get("branch:main") is not None

@@ -43,20 +43,27 @@ class TestClaudeCodeAgenticFlags(unittest.TestCase):
         idx = args.index("--model")
         self.assertEqual(args[idx + 1], "sonnet")
 
-    def test_system_instruction_rides_in_prompt_not_cli_args(self) -> None:
-        """The system prompt is appended to the task prompt after
-        ``CLI_SYSTEM_PROMPT_HEADER``, never passed as ``--system-prompt``
-        (the CLI keeps its own native system prompt)."""
+    def test_system_instruction_is_appended_system_prompt(self) -> None:
+        """The system prompt is passed as ``--append-system-prompt`` (the CLI
+        keeps its own native system prompt), never as ``--system-prompt``
+        and never inside the task prompt, which Claude reads as an
+        injected fake system prompt."""
         m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "be brief"})
         args = m._build_cli_args()
         self.assertIn("--disable-slash-commands", args)
         self.assertIn("--dangerously-skip-permissions", args)
         self.assertNotIn("--system-prompt", args)
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "be brief")
         m.initialize("do the task")
-        self.assertEqual(
-            m._build_prompt(),
-            "do the task" + CLI_SYSTEM_PROMPT_HEADER + "be brief",
-        )
+        self.assertEqual(m._build_prompt(), "do the task")
+        self.assertNotIn(CLI_SYSTEM_PROMPT_HEADER, m._build_prompt())
+
+    def test_no_system_instruction_means_no_append_flag(self) -> None:
+        """Without a system instruction the CLI keeps only its own prompt."""
+        m = ClaudeCodeModel("cc/opus")
+        self.assertNotIn("--append-system-prompt", m._build_cli_args())
+        m.initialize("do the task")
+        self.assertEqual(m._build_prompt(), "do the task")
 
 
 if __name__ == "__main__":

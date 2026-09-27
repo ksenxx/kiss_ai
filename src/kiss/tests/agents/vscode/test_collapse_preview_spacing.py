@@ -128,6 +128,35 @@ _MiniEl.prototype.querySelector = function(sel) {
     return null;
 };
 
+_MiniEl.prototype.querySelectorAll = function(sel) {
+    var cls = sel.replace(/^\./,'');
+    var out = [];
+    for (var i = 0; i < this.children.length; i++) {
+        if (this.children[i].classList.contains(cls)) out.push(this.children[i]);
+        out = out.concat(this.children[i].querySelectorAll(sel));
+    }
+    return out;
+};
+
+_MiniEl.prototype.closest = function(sel) {
+    var cls = sel.replace(/^\./,'');
+    var el = this;
+    while (el) {
+        if (el.classList.contains(cls)) return el;
+        el = el.parentElement;
+    }
+    return null;
+};
+
+_MiniEl.prototype.setAttribute = function(name, value) {
+    if (!this._attrs) this._attrs = {};
+    this._attrs[name] = String(value);
+};
+
+_MiniEl.prototype.getAttribute = function(name) {
+    return this._attrs && name in this._attrs ? this._attrs[name] : null;
+};
+
 _MiniEl.prototype.addEventListener = function() {};
 
 // textContent: concatenate all descendant text WITHOUT separators (like real textContent)
@@ -182,7 +211,9 @@ function buildPanel(bodyChildren) {
     hdr.textContent = 'Bash';
     panel.appendChild(hdr);
 
-    // Add collapse infrastructure: chevron and preview on header
+    // Add collapse infrastructure the way main.js addCollapse does:
+    // .collapsible panel, .collapse-header header with chevron and preview
+    panel.classList.add('collapsible');
     var chv = mkTestEl('span');
     chv.classList.add('collapse-chv');
     chv.textContent = '\u25BE';
@@ -191,6 +222,7 @@ function buildPanel(bodyChildren) {
     var prev = mkTestEl('span');
     prev.classList.add('collapse-preview');
     hdr.appendChild(prev);
+    hdr.classList.add('collapse-header');
 
     // Body element (like .tc-b)
     var body = mkTestEl('div');
@@ -223,6 +255,9 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     """
     source = _MAIN_JS.read_text()
     collect_fn = _extract_function(source, "collectText")
+    # collapsePreview first syncs the header's aria-expanded through
+    # syncCollapseAria, so the real helper is evaluated alongside it.
+    sync_aria_fn = _extract_function(source, "syncCollapseAria")
     collapse_fn = _extract_function(source, "collapsePreview")
     mkel_fn = _extract_function(source, "mkEl")
 
@@ -230,6 +265,7 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     script += "var document = { createElement: mkTestEl };\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
+    script += sync_aria_fn + "\n"
     script += collapse_fn + "\n"
     script += f"var bodyChildren = {body_children_json};\n"
     script += "var panel = buildPanel(bodyChildren);\n"

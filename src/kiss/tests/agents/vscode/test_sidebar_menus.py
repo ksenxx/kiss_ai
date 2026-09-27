@@ -65,7 +65,10 @@ def _row_at(path: str, cls: str = "") -> str:
 
 def _open_page(browser, harness):
     """Open the remote page in desktop mode with clipboard access and
-    dialogs auto-answered; record sent WS frames and dialog messages."""
+    record the WS frames it sends.  Questions (Delete, Replace, Find in
+    Folder, Create Branch / Tag, Compare with) are in-page toasts, not
+    native dialogs: answer them with :func:`_answer_prompt` and
+    :func:`_answer_toast`."""
     context = browser.new_context(
         ignore_https_errors=True,
         viewport={"width": 1400, "height": 900},
@@ -73,8 +76,6 @@ def _open_page(browser, harness):
     )
     page = context.new_page()
     sent_frames: list[dict] = []
-    dialogs: list[dict] = []
-    answers: dict[str, object] = {"prompt": None, "confirm": True}
 
     def _on_ws(ws) -> None:
         def _on_sent(payload) -> None:
@@ -85,24 +86,7 @@ def _open_page(browser, harness):
 
         ws.on("framesent", _on_sent)
 
-    def _on_dialog(dialog) -> None:
-        dialogs.append({"type": dialog.type, "message": dialog.message})
-        if dialog.type == "prompt":
-            answer = answers["prompt"]
-            if answer is None:
-                dialog.dismiss()
-            else:
-                dialog.accept(str(answer))
-        elif dialog.type == "confirm":
-            if answers["confirm"]:
-                dialog.accept()
-            else:
-                dialog.dismiss()
-        else:
-            dialog.accept()
-
     page.on("websocket", _on_ws)
-    page.on("dialog", _on_dialog)
     page.goto(harness.base_url + "/")
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_selector("body.remote-desktop", state="attached")
@@ -110,7 +94,7 @@ def _open_page(browser, harness):
         "document.getElementById('meta-workdir').textContent.length > 1",
         timeout=30000,
     )
-    return context, page, sent_frames, dialogs, answers
+    return context, page, sent_frames
 
 
 def _menu_labels(page) -> list[str]:
@@ -147,13 +131,35 @@ def _open_scm(page):
     _settle(page)
 
 
-def _wait_dialog(page, dialogs: list[dict], before: int) -> None:
-    """Wait until a browser dialog beyond the first *before* was seen."""
-    for _ in range(100):
-        if len(dialogs) > before:
-            return
-        page.wait_for_timeout(50)
-    raise AssertionError("no dialog appeared")
+def _toast(page, notification_id: str):
+    """The in-page confirm / prompt toast with *notification_id*, once
+    it is shown (the Delete and Replace questions land only after the
+    daemon has answered the request)."""
+    toast = page.locator(
+        f".kiss-notification[data-notification-id='{notification_id}']",
+    )
+    toast.wait_for(timeout=10000)
+    return toast
+
+
+def _toast_message(toast) -> str:
+    return str(toast.locator(".kiss-notification-message").inner_text())
+
+
+def _answer_toast(page, notification_id: str, label: str) -> None:
+    """Press the button labelled *label* on a toast and wait for it to go."""
+    toast = _toast(page, notification_id)
+    toast.get_by_role("button", name=label, exact=True).click()
+    toast.wait_for(state="detached", timeout=10000)
+
+
+def _answer_prompt(page, notification_id: str, text: str) -> None:
+    """Type *text* into a prompt toast and submit it with Enter."""
+    toast = _toast(page, notification_id)
+    box = toast.locator(".kiss-notification-input")
+    box.fill(text)
+    box.press("Enter")
+    toast.wait_for(state="detached", timeout=10000)
 
 
 def _wait_content(page, text: str) -> None:
@@ -188,7 +194,7 @@ def _wait_explorer_root(page, name: str) -> None:
 
 
 def test_explorer_file_menu_matches_vscode(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         _explorer_row(page, "feature.txt").click(button="right")
@@ -259,7 +265,7 @@ def test_explorer_file_menu_matches_vscode(browser, harness, worktree):
 
 
 def test_explorer_folder_menu_and_root_guards(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         _explorer_row(page, "dir").click(button="right")
@@ -301,7 +307,7 @@ def test_explorer_folder_menu_and_root_guards(browser, harness, worktree):
 
 
 def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         tabs_before = page.locator(".chat-tab").count()
@@ -377,18 +383,17 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         inp.wait_for(timeout=5000)
         inp.press("Escape")
 
-        # Delete asks first; a dismissed dialog keeps the file.
-        answers["confirm"] = False
+        # Delete asks first with an in-page toast naming the file; its
+        # "Keep" button (the focused, safe choice) keeps the file.
         _explorer_row(page, "renamed.py").click(button="right")
-        n_dialogs = len(dialogs)
         _menu_item(page, "Delete").click()
-        _wait_dialog(page, dialogs, n_dialogs)
-        assert dialogs[-1]["type"] == "confirm"
-        assert "renamed.py" in dialogs[-1]["message"]
+        toast = _toast(page, "fs-delete")
+        assert "renamed.py" in _toast_message(toast)
+        _answer_toast(page, "fs-delete", "Keep")
         assert (harness.work_dir / "dir" / "renamed.py").is_file()
-        answers["confirm"] = True
         _explorer_row(page, "renamed.py").click(button="right")
         _menu_item(page, "Delete").click()
+        _answer_toast(page, "fs-delete", "Delete")
         page.wait_for_selector(
             _explorer_row_sel("/dir/renamed.py"),
             state="detached",
@@ -399,6 +404,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
         _wait_tab_count(page, tabs_before)
         _explorer_row(page, "made").click(button="right")
         _menu_item(page, "Delete").click()
+        _answer_toast(page, "fs-delete", "Delete")
         page.wait_for_selector(
             _explorer_row_sel("/dir/made"),
             state="detached",
@@ -409,7 +415,7 @@ def test_new_file_rename_and_delete_act_on_disk(browser, harness, worktree):
 
 
 def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         _explorer_row(page, "main-only.txt").click(button="right")
@@ -424,25 +430,24 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         )
         assert (harness.work_dir / "main-only copy.txt").read_text() == "m\n"
         # Paste into dir/, then again: the second paste collides and the
-        # replace confirmation is dismissed -> nothing changes.
+        # replace question's "Keep existing" -> nothing changes.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         page.wait_for_selector(
             _explorer_row_sel("/dir/main-only.txt"), timeout=15000,
         )
         (harness.work_dir / "dir" / "main-only.txt").write_text("keep\n")
-        answers["confirm"] = False
-        n_dialogs = len(dialogs)
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
-        _wait_dialog(page, dialogs, n_dialogs)
-        assert dialogs[-1]["type"] == "confirm"
-        assert "already exists" in dialogs[-1]["message"]
+        toast = _toast(page, "fs-overwrite")
+        assert "already exists" in _toast_message(toast)
+        assert "main-only.txt" in _toast_message(toast)
+        _answer_toast(page, "fs-overwrite", "Keep existing")
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "keep\n"
-        # Accepting replaces it.
-        answers["confirm"] = True
+        # "Replace" replaces it.
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
+        _answer_toast(page, "fs-overwrite", "Replace")
         for _ in range(50):
             if (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n":
                 break
@@ -471,13 +476,19 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
 
 
 def test_find_in_folder_and_compare_open_result_tabs(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         tabs_before = page.locator(".chat-tab").count()
-        answers["prompt"] = "sentinel"
         page.locator(".explorer-row[aria-level='1']").click(button="right")
         _menu_item(page, "Find in Folder...").click()
+        # The query is asked for in-page; an empty one keeps the box open.
+        toast = _toast(page, "find-in-folder")
+        toast.locator(".kiss-notification-input").press("Enter")
+        page.wait_for_timeout(200)
+        assert toast.count() == 1
+        assert not _sent(frames, "fsAction")
+        _answer_prompt(page, "find-in-folder", "sentinel")
         _wait_tab_count(page, tabs_before + 1)
         _wait_content(page, "feature.txt:1:feature-file-sentinel-7c1e")
         titles = page.eval_on_selector_all(
@@ -502,7 +513,7 @@ def test_find_in_folder_and_compare_open_result_tabs(browser, harness, worktree)
 
 
 def test_open_to_the_side_keeps_the_current_tab(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         active_before = page.evaluate(
@@ -522,7 +533,7 @@ def test_open_to_the_side_keeps_the_current_tab(browser, harness, worktree):
 
 
 def test_source_control_lists_every_worktree(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_scm(page)
         page.wait_for_selector("#scm-changes .scm-worktree-hdr", timeout=15000)
@@ -565,7 +576,7 @@ def test_source_control_lists_every_worktree(browser, harness, worktree):
 
 
 def test_commit_menu_matches_vscode_and_open_changes(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_scm(page)
         second = page.locator("#scm-graph .scm-commit", has_text="second: rename")
@@ -638,25 +649,28 @@ def test_commit_menu_matches_vscode_and_open_changes(browser, harness, worktree)
 
 
 def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_scm(page)
         first = page.locator("#scm-graph .scm-commit", has_text="first: add a.txt")
-        # Create Tag... (name, then optional message) -> the tag shows
-        # up on the commit after the refresh.
-        answers["prompt"] = "ui-tag"
+        # Create Tag... asks in-page for the name, then the optional
+        # message -> the tag shows up on the commit after the refresh.
         first.click(button="right")
         _menu_item(page, "Create Tag...").click()
+        _answer_prompt(page, "git-create-tag", "ui-tag")
+        toast = _toast(page, "git-create-tag-message")
+        assert "ui-tag" in _toast_message(toast)
+        _answer_prompt(page, "git-create-tag-message", "ui-tag")
         page.wait_for_selector(
             "#scm-graph .scm-commit .scm-ref.is-tag:text-is('ui-tag')", timeout=15000,
         )
         actions = _sent(frames, "gitAction")
         assert actions[-1]["action"] == "createTag"
         assert actions[-1]["name"] == "ui-tag" and actions[-1]["message"] == "ui-tag"
-        # A dismissed prompt sends nothing.
-        answers["prompt"] = None
+        # A cancelled prompt sends nothing.
         first.click(button="right")
         _menu_item(page, "Create Branch...").click()
+        _answer_toast(page, "git-create-branch", "Cancel")
         page.wait_for_timeout(300)
         assert len(_sent(frames, "gitAction")) == len(actions)
         # Checkout (Detached) fails on the dirty main checkout: the
@@ -670,9 +684,13 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
         )
         # Compare with... -> a diff tab against the typed revision.
         tabs_before = page.locator(".chat-tab").count()
-        answers["prompt"] = "v1"
         first.click(button="right")
         _menu_item(page, "Compare with...").click()
+        # The box is pre-filled with HEAD, as VS Code's is.
+        assert _toast(page, "git-compare-with").locator(
+            ".kiss-notification-input",
+        ).input_value() == "HEAD"
+        _answer_prompt(page, "git-compare-with", "v1")
         _wait_tab_count(page, tabs_before + 1)
         _wait_content(page, "feature-file-sentinel-7c1e")
         titles = page.eval_on_selector_all(
@@ -684,7 +702,7 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
 
 
 def test_folder_picker_changes_the_workspace(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         assert page.locator("#explorer-pick-folder").is_visible()
@@ -799,7 +817,7 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
 
 
 def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         tabs_before = page.locator(".chat-tab").count()
@@ -866,7 +884,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
     switch of the working directory reaches the daemon and the removed
     folder leaves nothing behind but the files on disk.
     """
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     plain = str(harness.plain_dir)
     repo = str(harness.work_dir)
     try:
@@ -991,7 +1009,7 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
     chat_c = _add("gamma one", "", today - day)
     _add("beta zero", chat_b, today - day - 60)
     chat_d = _add("delta one", "", today - 3 * day)
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
@@ -1118,7 +1136,7 @@ def test_history_click_survives_mid_press_refresh(browser, harness, worktree):
     today = noon.timestamp()
     chat_a = _add("hold target", today - 60)
     chat_b = _add("other row", today - 120)
-    context, page, frames, dialogs, answers = _open_page(browser, harness)
+    context, page, frames = _open_page(browser, harness)
     try:
         # Capture INBOUND WebSocket frames over CDP so the test can
         # prove the changed-data reply arrived while the mouse was still

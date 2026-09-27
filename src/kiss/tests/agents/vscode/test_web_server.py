@@ -199,6 +199,11 @@ function runChecks() {
     console.error('FAIL: #app still visible after socket close'); process.exit(7);
   }
   console.log('OK');
+  // While the socket is down the shim keeps a once-a-second overlay
+  // tick (elapsed time + "Retry now" escalation) and a reconnect
+  // backoff timer alive; in a browser they end on the next auth_ok,
+  // here nothing ever reconnects, so exit explicitly.
+  process.exit(0);
 }
 if (window.document.readyState === 'loading') {
   window.document.addEventListener('DOMContentLoaded', () => {

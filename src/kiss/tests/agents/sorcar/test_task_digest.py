@@ -302,7 +302,9 @@ def test_step_returns_one_entry_in_full_and_clamps() -> None:
 
 def test_event_time_prefers_ts_and_falls_back_to_the_row_timestamp() -> None:
     """The ``Last event`` line uses the event's ``ts``; without one, the events row time."""
-    stamped = _NOW_MS - 600_000
+    # Measured from now, not from the module-level _NOW_MS: the digest computes the
+    # age against time.time(), and a long test session ages _NOW_MS past 10 minutes.
+    stamped = int(time.time() * 1000) - 600_000
     task_id = _persist("p", [
         {"type": "prompt", "text": "p"},
         {"type": "tool_call", "name": "Bash", "ts": stamped},

@@ -46,8 +46,8 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     save_mcp_server,
 )
-from kiss.agents.third_party_agents._browser_handoff import open_in_default_browser
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.browser_handoff import open_in_default_browser
 
 #: Well-known remote MCP servers: name -> (transport, URL).
 KNOWN_MCP_SERVERS: dict[str, tuple[str, str]] = {

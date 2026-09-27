@@ -13,6 +13,7 @@ Every test drives real directories on disk; nothing is mocked.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -273,19 +274,28 @@ class TestSearch:
         many = FileView([f"src/f{i}.py" for i in range(30)] + ["runs/r/f.py"], 30)
         assert _texts(many.search("f", {})) == [f"src/f{i}.py" for i in range(20)]
 
-    def test_non_ascii_and_undecodable_names_are_searchable(self, tmp_path: Path) -> None:
+    def test_non_ascii_names_are_searchable(self, tmp_path: Path) -> None:
         _touch(tmp_path, "docs/résumé.md", "plain.py")
-        raw = os.path.join(os.fsencode(tmp_path), b"bad_\xff.py")
-        with open(raw, "wb"):
-            pass
         index = FileIndex.scan(str(tmp_path))
         view = index.view("")
-        bad = os.fsdecode(b"bad_\xff.py")
-        assert bad in view.paths and "docs/résumé.md" in view.paths
+        assert "docs/résumé.md" in view.paths and "docs/résumé.md" in view
         assert _texts(view.search("RÉSUMÉ", {})) == ["docs/résumé.md"]
-        assert _texts(view.search("bad_", {})) == [bad]
-        assert bad in view and "docs/résumé.md" in view
         assert _texts(index.view("docs/").search("", {})) == ["résumé.md"]
+
+    def test_undecodable_names_are_searchable(self, tmp_path: Path) -> None:
+        _touch(tmp_path, "plain.py")
+        raw = os.path.join(os.fsencode(tmp_path), b"bad_\xff.py")
+        try:
+            with open(raw, "wb"):
+                pass
+        except OSError as exc:  # APFS (macOS) refuses names that are not valid UTF-8
+            if exc.errno != errno.EILSEQ:
+                raise
+            pytest.skip("filesystem rejects non-UTF-8 file names")
+        view = FileIndex.scan(str(tmp_path)).view("")
+        bad = os.fsdecode(b"bad_\xff.py")
+        assert bad in view.paths and bad in view
+        assert _texts(view.search("bad_", {})) == [bad]
 
 
 class TestRegistry:
