@@ -52,6 +52,7 @@ from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.memoryfield.tools import MemoryTools
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
+    AUTOROUTER,
     MODEL_INFO,
     OPENAI_COMPATIBLE_PROVIDERS,
     _match_openai_compatible_provider,
@@ -2392,13 +2393,23 @@ class SorcarAgent(RelentlessAgent):
         history row and ``task_settings`` event) persist the resolved
         value instead of a blank.
 
+        The picker persists the ``autorouter`` entry like any pick, but
+        it is not a model: the daemon resolves it into an agent-script
+        run before any agent sees it, and a run launched without the
+        daemon cannot route, so here it counts as no pick at all.
+
         Args:
             model_name: The caller-supplied model name, possibly None.
 
         Returns:
             The resolved model name.
         """
-        return model_name or _load_last_model() or get_default_model()
+        if model_name:
+            return model_name
+        last_model = _load_last_model()
+        if last_model == AUTOROUTER:
+            last_model = ""
+        return last_model or get_default_model()
 
     def _system_prompt_task_settings(self) -> dict[str, str]:
         """Extend the base settings with this agent's parallel mode.

@@ -55,6 +55,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core import config as config_module
 from kiss.core.models.model_info import (
+    AUTOROUTER,
     MODEL_INFO,
     get_default_model,
     list_custom_models,
@@ -1067,7 +1068,8 @@ class VSCodeServer(
         """
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
-        for name in ranked_function_calling_models():
+        catalog_names = ranked_function_calling_models()
+        for name in catalog_names:
             info = MODEL_INFO[name]
             models_list.append(
                 {
@@ -1111,7 +1113,16 @@ class VSCodeServer(
                 "extra_headers": _parse_custom_headers(cm["headers"]),
             })
 
+        # The ``autorouter`` entry is not a model: picking it runs every
+        # task through the autoroute SEA (``_resolve_autorouter`` in the
+        # task runner), whose tier menu names catalog models — so it is
+        # offered only when at least one catalog model is runnable, and
+        # it is a valid pick but never the fallback a stale pick lands
+        # on (that stays the first real model).  It heads the list.
+        offer_autorouter = bool(catalog_names)
         available_names = {m["name"] for m in models_list}
+        if offer_autorouter:
+            available_names.add(AUTOROUTER)
         with self._state_lock:
             self._refresh_default_model(available_names)
 
@@ -1124,6 +1135,16 @@ class VSCodeServer(
                 else:
                     self._default_model = refreshed
             selected = self._default_model
+
+        if offer_autorouter:
+            models_list.insert(0, {
+                "name": AUTOROUTER,
+                "inp": 0,
+                "out": 0,
+                "uses": usage.get(AUTOROUTER, 0),
+                "vendor": "Autoroute",
+                "cost_label": "cheapest tier per unit of work",
+            })
 
         event: dict[str, Any] = {
             "type": "models",

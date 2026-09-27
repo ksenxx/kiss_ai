@@ -123,6 +123,8 @@ You can also set API keys, a custom model endpoint, and custom HTTP headers in t
 
 You can register your own models (e.g. a local vLLM/Ollama endpoint or a provider model not in the bundled catalog) in the **Custom Models** section of the Settings panel; entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
+The picker also lists **`autorouter`**, which is not a model: with it selected, every task you type runs through `src/kiss/agents/seas/autoroute_sea.py` (the same agent as the `/autoroute` command, described below), which splits the task into units and dispatches each to the cheapest model tier that passes its acceptance check. The routing agent itself runs on the first runnable frontier-tier model of that file's `TIERS` menu; `/xxx` slash commands keep their own agent and only take that model from the pick. The entry appears once at least one model is runnable.
+
 ### VS Code Extension Installation
 
 To install only the KISS Sorcar extension, open Visual Studio Code, search for **KISS Sorcar** in the extension marketplace, install it, and relaunch VS Code. Press ESC if you do not have a specific API key ready, but configure at least one model backend before running tasks.

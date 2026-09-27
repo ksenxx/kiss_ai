@@ -19927,7 +19927,12 @@
       'div',
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
-    const price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+    // Entries that are not priced models (the ``autorouter`` router)
+    // carry a ``cost_label`` string instead of per-1M prices.
+    const price =
+      typeof m.cost_label === 'string'
+        ? esc(m.cost_label)
+        : '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
     // The name span ellipsizes from the START (RTL line, like the
     // pill label) so the distinctive end of a long name stays visible
     // and the list never scrolls horizontally on narrow screens; the

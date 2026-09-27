@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.core.config import kiss_home
-from kiss.core.models.model_info import MODEL_INFO, get_available_models
+from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 from kiss.server.agent_state import current_agent
 
 TIER_NAMES = ("small", "medium", "frontier")
@@ -424,6 +424,33 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     with path.open("a", encoding="utf-8") as handle:
         handle.write("| " + " | ".join(cells) + " |\n")
     return f"logged to {path}"
+
+
+def orchestrator_model() -> str:
+    """Return the model the routing agent itself runs on when picked as ``autorouter``.
+
+    ``autorouter`` (:data:`kiss.core.models.model_info.AUTOROUTER`) is the
+    model-picker entry that runs every task through this SEA; the daemon's
+    task runner (``kiss.server.task_runner._resolve_autorouter``) turns such
+    a run into an agent-script run of this file on the model returned here.
+    The protocol plans, verifies and accepts on the frontier tier, so this is
+    the first runnable candidate of ``TIERS["frontier"]``.  When none is
+    runnable it is the best runnable function-calling model in the picker's
+    order (the picker offers ``autorouter`` exactly when that list is
+    non-empty, so an offered entry always has a runnable orchestrator), and
+    on a keyless install the default model, as any run would get.
+
+    Returns:
+        A model name from the catalog.
+    """
+    from kiss.server.autocomplete import ranked_function_calling_models
+
+    runnable = set(get_available_models())
+    for name, _note in TIERS["frontier"]:
+        if name in runnable:
+            return name
+    ranked = ranked_function_calling_models()
+    return ranked[0] if ranked else get_default_model()
 
 
 def system_prompt() -> str:
