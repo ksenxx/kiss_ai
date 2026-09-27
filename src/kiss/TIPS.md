@@ -16,15 +16,21 @@ You can ask a question about the current task by prefixing the question with the
 
 {{PRODUCT_NAME}} supports commands prefixed with `/`. Type `/` in the chat textbox to see all available commands. To build your own command say `/xyz`, write a Sorcar Extension Agent (or a SEA) in a folder `/path/to/seas` and append the folder to the file `~/.kiss/SEAS.md`.  Coammnd `/xyz` will then be availble to {{PRODUCT_NAME}} UI.  More information on Sorcar Extension Agents (SEAs) can be found at [https://github.com/ksenxx/kiss_ai/blob/main/README.md](https://github.com/ksenxx/kiss_ai/blob/main/README.md).
 
-# Tip 
-## Routers as models
+# Tip
 
-In the model picker, select autorouter as a model to enable {{PRODUCT_NAME}} 
-to route the subtasks of a task to various capable models to perform 
-the task at a lower cost and higher speed without degrading quality. 
-Select bestrouter to run every task on claude-fable-5-1 and have 
-gpt-6-astra review and debug the result. Any SEA whose 
-`register_as_model()` returns True appears in the picker the same way.
+## Run `/autorouter` and `/bestrouter` as Models
+
+`autorouter` and `bestrouter` are two bundled SEAs that decide which model runs your task. Each can be used in three ways:
+
+1. **As a model.** Open the model picker and select `autorouter` or `bestrouter` in place of a model name. Every task you send from that tab then runs through the chosen router, so you never have to prefix your prompts.
+2. **As a command.** Prefix a single task: `/autorouter add a --json flag to the export command and cover it with tests`. Run `/autorouter help` or `/bestrouter help` to print what each does.
+3. **From a running agent or a Python script.** `run_agent(agent="autorouter", task="...")` or `run_agent(agent="bestrouter", task="...")`.
+
+**What `autorouter` does.** Frontier models cost 40 to 100 times more per token than small models, while most agent tokens go to exploration, file reads, test output, and mechanical edits that a small model handles as well. `autorouter` splits the task into units of work that each have a mechanical acceptance check, classifies every unit into a `small`, `medium`, or `frontier` tier with the cheap non-generative `decide` tool, dispatches each unit to the cheapest model of that tier that your installation can run, verifies the result through the acceptance check, and escalates one tier up on a verified failure. Its objective is cost per accepted task, not cost per token. Every routing decision is appended to the ledger `~/.kiss/MODEL_DECISIONS.md`, and `/rsi7d all` refreshes the router's per-model cost, speed, and reliability evidence from your own task history.
+
+**What `bestrouter` does.** It runs every task, including software development, on `claude-fable-5-1`, then dispatches `gpt-6-astra` through `run_parallel` for a read-only review and debugging pass over that work, on at most 75% of the task budget. Use it when quality matters more than cost; it needs both `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` set in Settings.
+
+Any SEA whose `register_as_model()` returns `True` appears in the model picker the same way, so you can write your own router.
 
 # Tip
 
