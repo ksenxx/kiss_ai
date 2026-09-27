@@ -1457,6 +1457,18 @@ class _TaskRunnerMixin:
             _raw_parent_task_id.strip()
             if isinstance(_raw_parent_task_id, str) else ""
         )
+        # An agent-script run (``agentPath``, e.g. the SEA an
+        # ``/xxx text`` relay dispatches) or another agent's sub-task
+        # (``parentTaskId``) is not a user typing into a chat box: a
+        # task that is nothing but a path is the script's/parent's
+        # business (``/git_extract_knowledge /path/to/repo`` indexes
+        # the repository), not a request to open it — see
+        # ``ChatSorcarAgent.run`` and ``bare_path_task``.
+        _raw_agent_path = cmd.get("agentPath")
+        _agent_script_run = bool(
+            _raw_agent_path.strip() if isinstance(_raw_agent_path, str) else "",
+        )
+        _open_bare_path = not _agent_script_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
         parent_tab_id = (
             _raw_parent_tab_id if isinstance(_raw_parent_tab_id, str) else ""
@@ -1802,6 +1814,16 @@ class _TaskRunnerMixin:
                 # user-visible ``prompt`` intact for classification,
                 # persistence and the tab's task-panel echo.
                 subtasks = [_sea_dispatch[0]]
+            elif _agent_script_run and isinstance(prompt, str):
+                # The run the ``run_agent`` directive then starts
+                # against the SEA itself (``agentPath``) gets the
+                # user's trailing text as its whole task — the same
+                # text, so the same rule: ``<task>`` blocks in it are
+                # the SEA's to interpret, and splitting them here would
+                # hand the SEA one fragment (``hello`` out of ``ask
+                # /repo what does <task>hello</task> mean?``) and lose
+                # the rest.
+                subtasks = [prompt]
             if append_to_prompt:
                 # The suffix is part of the EXECUTED prompt: appending
                 # here (once per subtask, before the loop) keeps the
@@ -1974,6 +1996,7 @@ class _TaskRunnerMixin:
                         tools=client_tools,
                         append_basic_tools=_append_basic_tools,
                         base_system_prompt=system_prompt_override,
+                        _open_bare_path=_open_bare_path,
                         # ``SorcarAgent.run``'s ``system_prompt`` is an
                         # append-only suffix on the base system prompt
                         # — exactly the ``appendToSystemPrompt``

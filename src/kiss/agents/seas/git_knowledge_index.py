@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import re
 import subprocess
 import tempfile
@@ -943,6 +944,15 @@ def shallow_boundary(repo: Path) -> set[str]:
     return set(shallow.read_text(encoding="utf-8", errors="replace").split())
 
 
+def pending_touches(store: KnowledgeStore) -> list[str]:
+    """The paths whose ``git log -1`` lookup the previous runs had no budget left for."""
+    try:
+        pending = json.loads(store.get_meta("pending_touch") or "[]")
+    except ValueError:
+        return []
+    return [path for path in pending if isinstance(path, str)]
+
+
 def last_touch_of(repo: Path, path: str) -> tuple[str, str] | None:
     """``(sha, date)`` of the newest commit in HEAD's history touching *path*, if any.
 
@@ -959,7 +969,8 @@ def last_touch_of(repo: Path, path: str) -> tuple[str, str] | None:
 
 
 MAX_LAST_TOUCH_LOOKUPS = 200
-"""Per-path ``git log -1`` calls a run makes for files the commit stream did not attribute."""
+"""Per-path ``git log -1`` calls a run makes to settle files' "last commit" (see
+:func:`index_repo`); the paths beyond it wait for the next runs in the ``pending_touch`` meta."""
 
 
 def index_repo(repo: Path, store: KnowledgeStore) -> IndexReport:
@@ -1012,18 +1023,39 @@ def index_repo(repo: Path, store: KnowledgeStore) -> IndexReport:
     stale = sorted(stored.difference(all_shas) | (unshallowed & stored))
     changed.update(path for path in store.paths_of_shas(stale) if path in files)
     store.delete_shas(stale)
-    store.delete_paths(removed + sorted(changed))
 
     last_touch: dict[str, tuple[str, str]] = {}
     subjects: list[str] = []
     new = [sha for sha in all_shas if sha not in stored or sha in unshallowed]
     store.upsert(history_blocks(iter_commits(repo, new), on_head, last_touch, subjects), stamp)
-    unattributed = [path for path in sorted(changed) if path not in last_touch]
-    if len(unattributed) <= MAX_LAST_TOUCH_LOOKUPS:
-        for path in unattributed:
-            touch = last_touch_of(repo, path)
-            if touch:
-                last_touch[path] = touch
+    # Per-file ``git log -1`` lookups, at most MAX_LAST_TOUCH_LOOKUPS per run,
+    # for the files whose "last commit" the new-commit stream cannot settle:
+    # changed files it did not attribute (a checkout of another branch
+    # changes files without any new commit); files it attributed to a commit
+    # that is OLDER than the previous run's HEAD (history revealed by
+    # ``fetch --unshallow`` or a re-indexed former boundary commit — the
+    # newest commit touching the file may be one indexed long ago); files a
+    # new HEAD commit touched although their blob is what the store has
+    # (edited and reverted between two runs, a mode-only change); and the
+    # files a previous run had no budget left for.  The paths left over are
+    # kept in the ``pending_touch`` meta and drained by the next runs.
+    old_history = (
+        set(run_git(repo, "rev-list", previous, check=False).split())
+        if previous and mode == "incremental" else set()
+    )
+    doubtful = {path for path, (sha, _) in last_touch.items() if sha in old_history}
+    queue = list(dict.fromkeys(
+        [path for path in sorted(changed) if path not in last_touch or path in doubtful]
+        + [path for path in sorted(last_touch) if path in files and path not in changed]
+        + [path for path in pending_touches(store) if path in files],
+    ))
+    for path in queue[:MAX_LAST_TOUCH_LOOKUPS]:
+        touch = last_touch_of(repo, path)
+        if touch:
+            last_touch[path] = touch
+            changed.add(path)  # a no-op for a path already changed
+    store.set_meta(pending_touch=json.dumps(queue[MAX_LAST_TOUCH_LOOKUPS:]))
+    store.delete_paths(removed + sorted(changed))
     store.upsert(indexed_file_blocks(repo, sorted(changed), files, last_touch), stamp)
 
     for kind in ("tag", "branch", "author", "dir"):

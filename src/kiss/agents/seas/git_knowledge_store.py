@@ -75,6 +75,19 @@ RANK = "bm25(blocks_fts, 4.0, 1.0, 2.0)"
 """BM25 with the title weighted 4x and the key 2x over the text, so a definition or a
 file named after the query outranks a block that merely mentions it often."""
 
+HISTORY_RANK_FACTOR = {"change": 0.6, "commit": 0.8}
+"""Rank factors of the history kinds (BM25 scores are negative: nearer zero ranks
+lower).  A ``change`` block is a short patch and a ``commit`` block a short message,
+which BM25 favours over the longer current-state blocks (``chunk``, ``symbol``,
+``file``, ``note``), so a question about the code as it is found mostly old diffs
+and tests that mention it: with these factors, a history block outranks a
+current-state block only when its BM25 score is clearly better (1/0.6 = 1.7x for a
+change, 1.25x for a commit).  ``kinds=["change"]`` still returns history alone."""
+
+_ORDER = f"{RANK} * CASE b.kind " + " ".join(
+    f"WHEN '{kind}' THEN {factor}" for kind, factor in HISTORY_RANK_FACTOR.items()
+) + " ELSE 1.0 END"
+
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
@@ -102,7 +115,7 @@ class Block:
 
 @dataclass(frozen=True)
 class Hit:
-    """One search result: the block plus its BM25 rank and a snippet."""
+    """One search result: the block plus its rank (scaled BM25, lower is better) and a snippet."""
 
     block: Block
     rank: float
@@ -330,9 +343,10 @@ class KnowledgeStore:
             path_prefix: Restrict to blocks whose path starts with this prefix.
 
         Returns:
-            Hits in BM25 order — every hit matching all tokens first, then
-            hits matching some of them when the first pass returned fewer
-            than *k* rows.  An empty query returns no hits.
+            Hits in rank order (BM25 scaled by :data:`HISTORY_RANK_FACTOR`
+            for the history kinds) — every hit matching all tokens first,
+            then hits matching some of them when the first pass returned
+            fewer than *k* rows.  An empty query returns no hits.
         """
         tokens = query_tokens(query)
         if not tokens or k <= 0:
@@ -358,10 +372,10 @@ class KnowledgeStore:
             params.extend([len(path_prefix), path_prefix])
         params.append(k)
         sql = (
-            f"SELECT b.kind, b.key, b.title, b.text, b.path, b.sha, {RANK},"
+            f"SELECT b.kind, b.key, b.title, b.text, b.path, b.sha, {_ORDER},"
             " snippet(blocks_fts, 1, '[', ']', ' … ', 24)"
             " FROM blocks_fts JOIN blocks AS b ON b.id = blocks_fts.rowid"
-            f" WHERE {' AND '.join(clauses)} ORDER BY {RANK} LIMIT ?"
+            f" WHERE {' AND '.join(clauses)} ORDER BY {_ORDER} LIMIT ?"
         )
         with closing(self._connect()) as conn:
             rows = conn.execute(sql, params).fetchall()

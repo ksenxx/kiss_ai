@@ -46,10 +46,9 @@ import argparse
 import os
 import shlex
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from kiss.agents.seas.git_knowledge_index import (
     IndexReport,
@@ -75,8 +74,21 @@ LOOKUP_PAGE = "knowledge-lookup"
 DAILY_UPDATE_HOUR_PACIFIC = 4
 """Hour (America/Los_Angeles) of the daily memory refresh."""
 
-DAILY_UPDATE_BUDGET_USD = 5.0
-"""Default per-run budget of the daily refresh job."""
+DAILY_UPDATE_BUDGET_USD = 25.0
+"""Default budget (USD) of one daily refresh: the SEA run that re-indexes the
+repository and revises the pages.  Indexing costs nothing; the revision of
+the pages of a busy day (dozens of commits, several pages rewritten) is what
+this pays for."""
+
+DAILY_UPDATE_RELAY_BUDGET_USD = 2.0
+"""Extra budget of the cron job's relay session — the one that only calls
+``run_agent`` and relays its result — on top of the refresh's own budget.
+The nested run's spending is attributed to the relay when it returns, so the
+job's budget is the sum of the two."""
+
+DAILY_UPDATE_MODEL = "claude-fable-5-1"
+"""Model of the daily refresh (the cron job and the nested SEA run).  Pinned:
+an unattended job must not silently follow the daemon's default model."""
 
 DAILY_UPDATE_TIMEOUT_SECONDS = 4 * 3600
 """Per-run timeout of the daily refresh job (a big repository can take a while)."""
@@ -87,17 +99,21 @@ JOB_NAME_PREFIX = "git-knowledge daily update: "
 DAILY_PROMPT = (
     "Call the run_agent tool IMMEDIATELY, as your very first action, with these "
     "arguments and no others:\n"
-    "  agent   = {sea!r}\n"
-    "  task    = {task!r}\n"
-    "  timeout = {timeout!r}\n"
+    "  agent      = {sea!r}\n"
+    "  task       = {task!r}\n"
+    "  timeout    = {timeout!r}\n"
+    "  max_budget = {max_budget!r}\n"
+    "  model_name = {model!r}\n"
     "Do not explore any source code, do not paraphrase the task, and do not call any "
     "other tool first.  When run_agent returns, relay its result as your final summary."
 )
 """Prompt of the daily cron job: a ``run_agent`` directive to this SEA.
 
-The ``timeout`` argument matters: without it the nested ``run_agent`` call
-would stop the refresh after ``agent_dispatch``'s default of 300 seconds,
-whatever the cron job's own timeout says.
+The ``timeout``, ``max_budget`` and ``model_name`` arguments matter: the
+nested run gets the daemon's defaults for whatever the directive leaves out
+— a 300-second timeout (``agent_dispatch``), the configured default budget
+(thousands of dollars, not the job's) and the daemon's current model —
+whatever the cron job's own settings say.
 """
 
 SYSTEM_PROMPT = """You build and maintain the durable memory of a git repository: the domain \
@@ -122,7 +138,7 @@ any-word matches fill the remaining slots).
 
 # The task text
 It names the repository — a local path or a clone URL — and optionally a mode word:
-- no mode word: BUILD the memory, then schedule the daily update;
+- `build` or no mode word: BUILD the memory, then schedule the daily update;
 - `update`: REFRESH the memory incrementally (the daily cron run); schedule nothing;
 - `ask <question>`: ANSWER the question from the memory.
 The tools run in the daemon, not in your working directory: a local repository must \
@@ -203,6 +219,14 @@ first, then pass it with `--file`.
 
 # Rules
 - Cite evidence for every fact: `path:line`, `symbol`, `commit abc1234`, `tag v1.2`.
+- State only what you verified. A number comes from a command you ran (`git rev-list \
+--count main`, `git shortlog -sn`, `wc -l`, `grep -c`) and names its scope; a command, \
+CLI or console-script name comes from the manifest you read (`[project.scripts]`, \
+`bin`, `Makefile` targets), never from what a project usually has; a commit hash comes \
+from `git log` output; "A depends on B" comes from an import or a call, not from a \
+docstring that mentions B. When you cannot verify a claim, leave it out.
+- Describe what the code does today; when a commit removed a behaviour, do not \
+describe it as current.
 - Never edit, commit or push anything in the repository; the memory is the only output.
 - Plain, specific prose. No filler sentences, no marketing language, no emoji.
 - Call the `summary` tool every ten steps when it is available.
@@ -277,10 +301,8 @@ The memory of the repository `{repo}` has two tiers.
    `author:<email>`, `dir:src`.
 
 Last indexed {report.head[:12]} on {now_iso()} ({report.mode} run, {report.seconds} s).
-Refreshed every morning by the cron job "{JOB_NAME_PREFIX}{slug}" while the kiss-web
-daemon runs ({DAILY_UPDATE_HOUR_PACIFIC:02d}:00 America/Los_Angeles on the day the job was
-created; one hour earlier or later after a daylight-saving change unless the daemon's
-clock is itself on Pacific time).
+Refreshed every morning at {DAILY_UPDATE_HOUR_PACIFIC:02d}:00 America/Los_Angeles (PDT or
+PST) by the cron job "{JOB_NAME_PREFIX}{slug}" while the kiss-web daemon runs.
 """
 
 
@@ -509,24 +531,43 @@ def delete_knowledge_page(repo: str, name: str) -> str:
     return result
 
 
-def daily_update_schedule(now: datetime | None = None) -> str:
-    """The 5-field cron expression, in this machine's local time, of the daily refresh.
+def daily_update_schedule() -> str:
+    """The 5-field cron expression of the daily refresh.
 
-    Cron schedules are evaluated in the daemon machine's local time, so
-    :data:`DAILY_UPDATE_HOUR_PACIFIC` o'clock America/Los_Angeles is
-    converted with today's offset.  Unless that clock is itself on Pacific
-    time, a daylight-saving change moves the run one hour (03:00 or 05:00
-    Pacific) until the job is removed and scheduled again.
+    The cron scheduler (:data:`kiss.agents.sorcar.cron_agent.SCHEDULE_TZ`)
+    evaluates every cron expression in America/Los_Angeles wall-clock time,
+    whatever the daemon machine's own time zone, so the expression names
+    :data:`DAILY_UPDATE_HOUR_PACIFIC` o'clock directly and follows daylight
+    saving by itself.
+    """
+    return f"0 {DAILY_UPDATE_HOUR_PACIFIC} * * *"
+
+
+def daily_update_job(repo: str, max_budget: float = DAILY_UPDATE_BUDGET_USD) -> dict[str, str]:
+    """The ``cron_job("create", ...)`` arguments of the daily refresh of *repo*.
 
     Args:
-        now: The reference instant (default: now).
+        repo: A local path inside the repository or a clone URL.
+        max_budget: Budget (USD) of the nested SEA run; the job gets
+            :data:`DAILY_UPDATE_RELAY_BUDGET_USD` more for its relay session.
+
+    Raises:
+        KnowledgeError: When *repo* is not a git repository or clone URL.
     """
-    moment = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/Los_Angeles"))
-    pacific = moment.replace(
-        hour=DAILY_UPDATE_HOUR_PACIFIC, minute=0, second=0, microsecond=0,
-    )
-    local = pacific.astimezone()
-    return f"{local.minute} {local.hour} * * *"
+    slug = memory_location(_repo(repo))[0]
+    target = canonical_spec(repo)
+    return {
+        "name": JOB_NAME_PREFIX + slug,
+        "schedule": daily_update_schedule(),
+        "prompt": DAILY_PROMPT.format(
+            sea=str(Path(__file__).resolve()), task=f"update {target}",
+            timeout=str(DAILY_UPDATE_TIMEOUT_SECONDS), max_budget=str(max_budget),
+            model=DAILY_UPDATE_MODEL,
+        ),
+        "model_name": DAILY_UPDATE_MODEL,
+        "max_budget": str(max_budget + DAILY_UPDATE_RELAY_BUDGET_USD),
+        "timeout": str(DAILY_UPDATE_TIMEOUT_SECONDS),
+    }
 
 
 def schedule_daily_update(repo: str, max_budget: float = DAILY_UPDATE_BUDGET_USD) -> str:
@@ -535,39 +576,57 @@ def schedule_daily_update(repo: str, max_budget: float = DAILY_UPDATE_BUDGET_USD
     The job runs this SEA with the task ``update <repo>`` every day at
     :data:`DAILY_UPDATE_HOUR_PACIFIC` o'clock America/Los_Angeles (the
     kiss-web daemon must be running for cron jobs to fire).  Idempotent:
-    an existing job for this repository is reported, not duplicated.
+    an existing up-to-date job for this repository is reported, not
+    duplicated; an existing job for it whose schedule, model, budget or
+    prompt differ (created by an older version of this SEA, or with
+    another budget) is replaced.
 
     Args:
         repo: A local path inside the repository or a clone URL; the job
             stores the URL, or the checkout's root directory, so it does
             not depend on any working directory.
-        max_budget: Per-run budget of the daily refresh in USD.
+        max_budget: Budget of the nested SEA run in USD (the job itself
+            gets :data:`DAILY_UPDATE_RELAY_BUDGET_USD` more for its relay).
 
     Returns:
         The created or existing job (id, schedule, next run), or an error.
     """
-    from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
+    from kiss.agents.sorcar.cron_agent import SCHEDULE_TZ, cron_job, load_jobs
 
     try:
-        slug = memory_location(_repo(repo))[0]
-        target = canonical_spec(repo)
+        wanted = daily_update_job(repo, max_budget)
+        task_marker = f"= {f'update {canonical_spec(repo)}'!r}\n"  # in every prompt version
     except KnowledgeError as exc:
         return f"Error: {exc}"
-    name = JOB_NAME_PREFIX + slug
-    prompt = DAILY_PROMPT.format(
-        sea=str(Path(__file__).resolve()), task=f"update {target}",
-        timeout=str(DAILY_UPDATE_TIMEOUT_SECONDS),
-    )
+    replaced: list[str] = []
+    current: dict[str, Any] | None = None
     for job in load_jobs():
-        if job.get("prompt") == prompt:  # same repository (two repositories may share a slug)
-            when = datetime.fromtimestamp(float(job["next_run_at"])).isoformat(timespec="minutes")
-            return (
-                f"Already scheduled: job {job['id']} ({name}), schedule {job['schedule']!r} "
-                f"local time, next run {when}."
-            )
-    return cron_job(
-        "create", name=name, schedule=daily_update_schedule(), prompt=prompt,
-        max_budget=str(max_budget), timeout=str(DAILY_UPDATE_TIMEOUT_SECONDS),
+        if job.get("name") != wanted["name"] or task_marker not in str(job.get("prompt", "")):
+            continue  # another repository (two repositories may share a slug)
+        if (
+            current is None
+            and job.get("prompt") == wanted["prompt"]
+            and job.get("schedule") == wanted["schedule"]
+            and job.get("model_name") == wanted["model_name"]
+            and float(job.get("max_budget") or 0) == float(wanted["max_budget"])
+            and float(job.get("timeout") or 0) == float(wanted["timeout"])
+        ):
+            current = job
+            continue
+        cron_job("remove", job_id=str(job["id"]))
+        replaced.append(str(job["id"]))
+    note = f"Removed outdated job(s) {', '.join(replaced)}.\n" if replaced else ""
+    if current is not None:
+        when = datetime.fromtimestamp(float(current["next_run_at"]), SCHEDULE_TZ)
+        return (
+            f"{note}Already scheduled: job {current['id']} ({wanted['name']}), schedule "
+            f"{current['schedule']!r} Pacific time, next run "
+            f"{when.isoformat(timespec='minutes')}."
+        )
+    return note + cron_job(
+        "create", name=wanted["name"], schedule=wanted["schedule"], prompt=wanted["prompt"],
+        model_name=wanted["model_name"], max_budget=wanted["max_budget"],
+        timeout=wanted["timeout"],
     )
 
 
