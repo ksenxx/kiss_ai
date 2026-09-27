@@ -199,7 +199,7 @@ class TestHttpEndpointMatrix(_ServerTestBase):
             r'"/media/main\.js\?v=[0-9a-f]+"',
             "served chat page is missing a cache-busted main.js script tag",
         )
-        self.assertIn('class="remote-chat"', html)
+        self.assertIn('class="remote-chat light-theme"', html)
 
 
 class TestVscodeOnlyCommandsDropped(_ServerTestBase):

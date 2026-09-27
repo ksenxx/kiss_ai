@@ -3817,9 +3817,13 @@ def _build_html() -> str:
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
         "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
-        "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
+        # Light Modern is the remote page's default theme: the body is
+        # rendered with ``light-theme`` (and the light highlight sheet)
+        # so the first paint is already light; main.js drops the class
+        # again for a client whose saved choice is dark.
+        "HLJS_CSS_HREF": _media_url("highlight-vscode-light.css"),
         "HEAD_STYLE": head_style,
-        "BODY_CLASS_ATTR": ' class="remote-chat"',
+        "BODY_CLASS_ATTR": ' class="remote-chat light-theme"',
         "PRODUCT_NAME": html.escape(PRODUCT_NAME),
         "TAGLINE": html.escape(BRAND["tagline"]),
         "BRAND_JSON": json.dumps(
@@ -3868,7 +3872,7 @@ def _build_html() -> str:
         # are empty); the template writes them after a separating space
         # (``<body {{BODY_CLASS_ATTR}}>``) only so htmlhint can parse the
         # tag.  Drop that space so the page renders exactly
-        # ``<body class="remote-chat">`` / ``<script src=...>``.
+        # ``<body class="remote-chat light-theme">`` / ``<script src=...>``.
         if key in _ATTR_STRING_KEYS:
             return subs[key]
         return space + subs[key]

@@ -1468,3 +1468,125 @@ else
     echo "Launching VS Code to finish setup..."
     launch_vscode || true
 fi
+
+# ---------------------------------------------------------------------------
+# Open the webapp
+# ---------------------------------------------------------------------------
+# The kiss-web daemon is started by the extension once VS Code has finished
+# the runtime setup (uv sync, cloudflared, ...), which takes a few minutes
+# on a fresh install.  Wait for the daemon's URL file, trust its local
+# certificate authority in this user's browsers (``kiss-web --trust-ca``,
+# so the browser does not warn about the Local URL), then open the Local
+# URL (https://127.0.0.1:PORT) in the default browser.  On a remote
+# machine (an SSH session, or Linux without a display) there is no
+# browser to open here, so the cloudflared URL is printed for the user to
+# open on their own device.  ``KISS_SKIP_LAUNCH`` (Docker) skips this too.
+# BEGIN: kiss-open-webapp
+KISS_WEBAPP_WAIT_SECS="${KISS_WEBAPP_WAIT_SECS:-900}"
+
+find_kiss_web() {
+    # kiss-web lives in the venv the extension builds inside its installed
+    # copy of the project (``kiss_project/.venv``); a development checkout
+    # may carry its own.  Any copy will do: ``--trust-ca`` reads the CA
+    # from $KISS_HOME/tls and the URLs come from remote-url.json.
+    local candidate
+    for candidate in \
+        "$(command -v kiss-web 2>/dev/null || true)" \
+        "$PROJECT_DIR/.venv/bin/kiss-web" \
+        "$HOME"/.vscode*/extensions/ksenxx.kiss-sorcar-*/kiss_project/.venv/bin/kiss-web \
+        "$HOME"/.local/share/code-server/extensions/ksenxx.kiss-sorcar-*/kiss_project/.venv/bin/kiss-web; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+url_file_field() {
+    # Print the string value of key $2 in the daemon's remote-url.json ($1),
+    # a flat object written with one ``"key": "value"`` pair per line.
+    sed -n "s/^[[:space:]]*\"$2\":[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -n 1
+}
+
+machine_is_remote() {
+    # An SSH session, or Linux without a display, has no browser to open.
+    [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}${SSH_CLIENT:-}" ] && return 0
+    [ "$OS" = "Linux" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && return 0
+    return 1
+}
+
+open_in_browser() {
+    case "$OS" in
+        Darwin)
+            open "$1" >/dev/null 2>&1 9>&-
+            ;;
+        Linux)
+            command -v xdg-open >/dev/null 2>&1 || return 1
+            (nohup xdg-open "$1" >/dev/null 2>&1 9>&- &)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+open_webapp() {
+    local url_file="${KISS_HOME:-$HOME/.kiss}/remote-url.json"
+    local remote=0 kiss_web="" tunnel="" loopback="" waited=0
+    machine_is_remote && remote=1
+    echo ""
+    echo "Waiting for the kiss-web daemon (the extension starts it inside VS Code)..."
+    while :; do
+        [ -n "$kiss_web" ] || kiss_web="$(find_kiss_web || true)"
+        if [ -n "$kiss_web" ] && [ -s "$url_file" ]; then
+            tunnel="$(url_file_field "$url_file" tunnel)"
+            loopback="$(url_file_field "$url_file" loopback)"
+            # A remote machine needs the cloudflared URL, which the daemon
+            # adds to the file a little after its Local URL.
+            if [ "$remote" = 0 ] || [ -n "$tunnel" ]; then
+                break
+            fi
+        fi
+        if [ "$waited" -ge "$KISS_WEBAPP_WAIT_SECS" ]; then
+            echo "   The kiss-web daemon did not come up within ${KISS_WEBAPP_WAIT_SECS}s."
+            echo "   Once VS Code has finished the setup, trust its certificate and"
+            echo "   print the webapp URL with:"
+            # kiss-web is usually not on PATH: name the binary if found.
+            echo "       '${kiss_web:-kiss-web}' --trust-ca && '${kiss_web:-kiss-web}' --url"
+            return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        if [ $((waited % 60)) -eq 0 ]; then
+            echo "   ... still waiting (${waited}s)"
+        fi
+    done
+
+    echo "   Trusting the webapp's certificate authority in this user's browsers..."
+    if ! "$kiss_web" --trust-ca 9>&-; then
+        echo "   WARNING: 'kiss-web --trust-ca' failed; browsers may warn about the Local URL."
+    fi
+
+    if [ "$remote" = 1 ]; then
+        echo ""
+        echo "This machine is remote; open the webapp on your own device at:"
+        echo "    $tunnel"
+        return 0
+    fi
+    if [ -z "$loopback" ]; then
+        # Older daemons wrote only the localhost URL.
+        loopback="$(url_file_field "$url_file" local)"
+        loopback="${loopback/localhost/127.0.0.1}"
+    fi
+    echo ""
+    echo "Opening the webapp at $loopback"
+    if ! open_in_browser "$loopback"; then
+        echo "   Could not open a browser; open the URL above yourself."
+    fi
+}
+
+if [ -z "${KISS_SKIP_LAUNCH:-}" ]; then
+    open_webapp || true
+fi
+# END: kiss-open-webapp

@@ -1608,9 +1608,10 @@
 
   // Light / dark theme toggle for the REMOTE webapp only.  The VS Code
   // webview always follows the editor theme, so none of this runs there
-  // (the toggle button is only created for body.remote-chat).  The dark
-  // palette is the default; "light" mimics VS Code's Light Modern theme
-  // (see remote-codex.css).  The choice is persisted in localStorage.
+  // (the toggle button is only created for body.remote-chat).  Light
+  // (VS Code's Light Modern palette) is the default and is what the
+  // server renders (body.light-theme); "dark" is Dark Modern (see
+  // remote-codex.css).  The choice is persisted in localStorage.
   const REMOTE_THEME_KEY = 'kissRemoteTheme';
 
   const THEME_SUN_SVG =
@@ -1621,11 +1622,11 @@
 
   function getSavedRemoteTheme() {
     try {
-      return localStorage.getItem(REMOTE_THEME_KEY) === 'light'
-        ? 'light'
-        : 'dark';
+      return localStorage.getItem(REMOTE_THEME_KEY) === 'dark'
+        ? 'dark'
+        : 'light';
     } catch (_e) {
-      return 'dark';
+      return 'light';
     }
   }
 
@@ -22904,9 +22905,10 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    // Off unless explicitly enabled: the default is the LLM classifier.
     setChecked(
       classifyWithDecisionsToggleBtn,
-      cfg.classify_with_decisions !== false,
+      cfg.classify_with_decisions === true,
     );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     // Recorded even while an edit is active (the boxes themselves are
