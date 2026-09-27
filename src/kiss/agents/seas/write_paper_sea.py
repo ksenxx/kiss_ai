@@ -256,7 +256,15 @@ paper claims that you could not verify.
 - When `run_parallel` answers "You are a reviewer sub-agent and may not spawn further
   reviewers", do not retry with `run_agent`: do the check yourself read-only and mark
   the report "independent review not run".
-"""
+- A task that asks for a target review score without new experiments gets one fresh
+  review round. When that round's main reason is an experiment, baseline or dataset the
+  task rules out, state the limitation in the paper, run at most one more round to
+  confirm the wording, and report that the score is capped by the evidence. Do not run a
+  third fresh review for the same reason.
+- When the task names a writer model other than yours and you run the writing as a
+  sub-agent, copy the reviewer model name, the reviewer's budget share and the "do not
+  invent new problems" clause verbatim into each child's task text; the child cannot see
+  your task."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table
