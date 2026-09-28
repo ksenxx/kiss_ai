@@ -665,46 +665,54 @@ def test_patch_sea_prompt_preserves_format_fields_and_restores_on_load_failure(
     assert fragile.read_text(encoding="utf-8") == original
 
 
-def test_write_autorouter_evidence_replaces_the_marker_block(checkout: Path) -> None:
-    """The evidence block is replaced in place, stamped, and never duplicated."""
+def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
+    checkout: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evidence lands in ``$KISS_HOME/AUTOROUTER.md``, stamped, and the SEA file is untouched.
+
+    The autorouter SEA splices the file into its prompt when it loads; a
+    missing or empty file leaves the "no evidence yet" sentence in place.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("KISS_HOME", str(home))
     path = checkout / "autorouter" / "autorouter_sea.py"
-    assert (
-        sea.EVIDENCE_START in autorouter_sea.SYSTEM_PROMPT
-        and sea.EVIDENCE_END in autorouter_sea.SYSTEM_PROMPT
-    )
-    table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
-    assert sea.write_autorouter_evidence(table).startswith("Patched SYSTEM_PROMPT of")
+    source = path.read_text(encoding="utf-8")
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    assert autorouter_sea.NO_EVIDENCE in prompt and "{observed_evidence()}" not in prompt
+    table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
+    report = sea.write_autorouter_evidence(table)
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
-    assert prompt.count(sea.EVIDENCE_START) == 1 and prompt.count(sea.EVIDENCE_END) == 1
-    block = prompt[prompt.index(sea.EVIDENCE_START) : prompt.index(sea.EVIDENCE_END)]
-    assert f"refreshed {stamp} by /rsi7d" in block and table in block
-    assert "No evidence recorded yet" not in prompt
-    assert "## Hard rules" in prompt.split(sea.EVIDENCE_END)[1]
+    assert report == f"Wrote {home / 'AUTOROUTER.md'} (5 lines, refreshed {stamp})"
+    written = (home / "AUTOROUTER.md").read_text(encoding="utf-8")
+    assert written == f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{table}\n"
+    assert path.read_text(encoding="utf-8") == source
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    assert written.strip() in prompt and autorouter_sea.NO_EVIDENCE not in prompt
+    assert prompt.index("## Observed model evidence") < prompt.index(table) < prompt.index(
+        "## Hard rules"
+    )
     table_y = "| model | tasks |\n|---|---|\n| model-y | 3 |"
-    assert sea.write_autorouter_evidence(table_y).startswith("Patched")
+    assert sea.write_autorouter_evidence(table_y).startswith("Wrote ")
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert "model-x" not in prompt and "model-y | 3" in prompt
-    assert prompt.count(sea.EVIDENCE_START) == 1
     # A caller that repeats the stamp line does not duplicate it; a long
-    # bullet is wrapped; a table row that does not fit is refused.
+    # bullet is wrapped; a table row that does not fit is refused; an
+    # empty text is refused; nothing partial is left behind.
     repeated = f"{sea.STAMP_PREFIX}, refreshed 2020-01-01 by /rsi7d._\n\n- " + "word " * 40
-    assert sea.write_autorouter_evidence(repeated).startswith("Patched")
+    assert sea.write_autorouter_evidence(repeated).startswith("Wrote ")
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert prompt.count(sea.STAMP_PREFIX) == 1 and "2020-01-01" not in prompt
     assert "\n  word word" in prompt and max(len(line) for line in prompt.splitlines()) <= 92
     wide = "| model | " + "x" * 100 + " |"
     refused = sea.write_autorouter_evidence(wide)
     assert refused.startswith("Error: a line of the new text is longer than 92 characters")
-    assert "| model | xxxx" not in sea._execute_sea(path)["add_to_system_prompt"]()
-    # Without markers the tool refuses instead of appending.
-    source = (
-        path.read_text(encoding="utf-8")
-        .replace(sea.EVIDENCE_START, "")
-        .replace(sea.EVIDENCE_END, "")
-    )
-    path.write_text(source, encoding="utf-8")
-    assert sea.write_autorouter_evidence("x").startswith("Error: the autorouter prompt has no")
+    assert sea.write_autorouter_evidence("  \n") == "Error: the evidence text is empty"
+    assert "word word" in sea._execute_sea(path)["add_to_system_prompt"]()
+    assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md"]
+    # Blank file: the SEA falls back to the sentence.  No autorouter SEA in
+    # the editable folders: the tool refuses.
+    (home / "AUTOROUTER.md").write_text("\n", encoding="utf-8")
+    assert autorouter_sea.NO_EVIDENCE in sea._execute_sea(path)["add_to_system_prompt"]()
     path.unlink()
     refused = sea.write_autorouter_evidence("x")
     assert refused.startswith("Error: 'autorouter' is not an editable SEA")

@@ -36,11 +36,12 @@ and the decision ledger — are the tools this module exposes through
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
-evidence" block (between the ``rsi7d:model-evidence`` markers) holds what
-this installation's own task history shows about each model's cost, speed
-and reliability; :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` refreshes it from
-``~/.kiss/sorcar.db`` and the protocol treats it as the posterior over the
-tier-order prior.
+evidence" section is read from ``~/.kiss/AUTOROUTER.md`` (:func:`evidence_path`)
+when this file loads: a dated table plus bullets on what this installation's
+own task history shows about each model's cost, speed and reliability.
+:mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
+``~/.kiss/sorcar.db`` (so refreshing the evidence never edits this SEA) and
+the protocol treats it as the posterior over the tier-order prior.
 
 Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
 ``model()``, ``is_parallel()``, ...) follow the SEA contract in
@@ -121,7 +122,43 @@ LEDGER_HEADER = (
 )
 """Title and table header written when the ledger is created."""
 
-SYSTEM_PROMPT = """\
+EVIDENCE_NAME = "AUTOROUTER.md"
+"""File name, inside the KISS home directory, of the observed model evidence
+``/rsi7d`` refreshes: a stamp line, a dated table and bullets."""
+
+NO_EVIDENCE = (
+    "_No observed evidence yet: `~/.kiss/AUTOROUTER.md` is missing or empty. Route on the "
+    "tier order alone until `/rsi7d all` has measured this installation's task history._"
+)
+"""What the prompt says in place of the evidence when the file is missing or empty."""
+
+
+def evidence_path() -> Path:
+    """Return the path of the observed model evidence: ``<KISS home>/AUTOROUTER.md``.
+
+    The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss`` (the directory
+    of ``sorcar.db`` and the ledger), so the evidence ``/rsi7d`` measures from
+    the task history lives next to that history and travels with it.
+    """
+    return kiss_home() / EVIDENCE_NAME
+
+
+def observed_evidence() -> str:
+    """Return the observed-model-evidence Markdown spliced into :data:`SYSTEM_PROMPT`.
+
+    The content of :func:`evidence_path` with surrounding blank lines removed,
+    or :data:`NO_EVIDENCE` when the file is missing, unreadable or blank.
+    Evaluated when this module loads, which the daemon does for every task
+    the SEA runs, so a refreshed file reaches the next task's prompt.
+    """
+    try:
+        text = evidence_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    return text or NO_EVIDENCE
+
+
+SYSTEM_PROMPT = f"""\
 ## Model routing protocol (autorouter)
 
 You are the autorouter agent. You receive a task and finish it at the lowest cost per
@@ -217,61 +254,16 @@ name or a price.
 
 ## Observed model evidence
 
-The block below is measured from this installation's own task history (`~/.kiss/sorcar.db`)
-and refreshed by the `/rsi7d` agent; the tier order above is the prior, this block is the
-posterior. Use it as follows: a model whose observed failure or task-error share is high
-for the role you need goes into `exclude` even when `pick_model` ranks it first; among
-runnable models of a tier prefer the lower observed median cost per step and seconds per
-step when the evidence covers at least 10 tasks; a model listed with "insufficient data"
-keeps its tier-order position. Prices still come from `model_menu`, never from here.
+The evidence below is measured from this installation's own task history
+(`~/.kiss/sorcar.db`) and kept in `~/.kiss/AUTOROUTER.md`, which the `/rsi7d` agent
+rewrites; the tier order above is the prior, this evidence is the posterior. Use it as
+follows: a model whose observed failure or task-error share is high for the role you need
+goes into `exclude` even when `pick_model` ranks it first; among runnable models of a tier
+prefer the lower observed median cost per step and seconds per step when the evidence
+covers at least 10 tasks; a model listed with "insufficient data" keeps its tier-order
+position. Prices still come from `model_menu`, never from here.
 
-<!-- rsi7d:model-evidence -->
-_Observed in the task history, refreshed 2026-09-27 by /rsi7d._
-
-Window: 2026-09-20 21:58 to 2026-09-27 21:58 UTC (`window_start` 2026-09-20 21:58:34 UTC),
-2,684 tasks. "$/step" and "s/step" are medians of a task's own cost and wall time per own
-step (sub-agents excluded); "roles" counts sub-agent/top-level/reviewer tasks; "tool-err"
-is the number of tool results that returned an error per own step (not per tool call).
-
-| model | tasks | roles sub/top/rev | fail | unsucc | $/step | s/step | tool-err |
-|---|---|---|---|---|---|---|---|
-| claude-fable-5-1 | 1809 | 1374/433/2 | 96 | 53 | 0.1015 | 10.8 | 1.05% |
-| claude-opus-5-5 | 396 | 310/86/0 | 10 | 4 | 0.0378 | 7.0 | 0.84% |
-| gpt-6-astra | 177 | 165/1/11 | 5 | 1 | 0.1185 | 10.3 | 0.32% |
-| gpt-5.6-sol | 147 | 134/0/13 | 0 | 0 | 0.0582 | 11.9 | 1.89% |
-| claude-opus-4-8 | 45 | 41/4/0 | 3 | 1 | 0.0630 | 8.1 | 2.61% |
-| gpt-6-sol | 42 | 41/0/1 | 0 | 1 | 0.0246 | 7.8 | 1.05% |
-| claude-fable-5 | 22 | 4/18/0 | 4 | 0 | 0.0822 | 9.8 | 3.78% |
-| claude-opus-4-7 | 20 | 1/19/0 | 1 | 1 | 0.0521 | 4.9 | 0.96% |
-| others (7 models) | 26 | | | | insufficient data | | |
-
-Others: openrouter/openai/gpt-6-astra 7, openrouter/openai/gpt-6-sol 6, claude-opus-4-6 6,
-gpt-4.1-nano-2025-04-14 3, claude-haiku-4-5 1, openrouter/moonshotai/kimi-k3 1, plus a
-broken repro profile (2 tasks, "Unknown model name").
-
-- claude-opus-5-5 is the best-measured frontier pick: cheapest and fastest large model
-  ($0.038/step, 7.0 s/step over 396 tasks), 0 task errors, 10 failed + 4 unsuccessful
-  (3.5%), and 86 top-level runs, so it is proven for long agentic work.
-- claude-fable-5-1 carries the most work (1809 tasks) and the most failures (96 + 53), but
-  its 42 task errors are 34 task_update $1-budget overruns (prompt fixed; 0 since
-  2026-09-27 08:10 UTC), 4 stream stalls, 2 billing errors, 1 other budget overrun ($100
-  cap) and 1 model refusal. Tool-error rate 1.05% is
-  low; it costs 2.7x claude-opus-5-5 per step.
-- gpt-5.6-sol: 0 failed / 0 unsuccessful in 147 tasks, all sub-agent or reviewer roles
-  (read-only second opinions at about $1 each), but the slowest (11.9 s/step) and the
-  third-highest tool-error rate in the table (1.89%).
-- gpt-6-astra: 5 failures, all OpenAI "no credits" billing errors; the lowest tool-error
-  rate (0.32%); costliest per step ($0.1185) with the biggest median context (50k
-  tokens/step). 20 review-role tasks (11 reviewer + 9 bestrouter review children) all
-  finished; fewer than 10 fresh paper reviews, insufficient data for that role.
-- gpt-6-sol: cheapest per step ($0.0246), 0 failed of 42, 1 unsuccessful; sub-agent role
-  only.
-- claude-opus-4-8 and claude-fable-5 are superseded: higher tool-error rates (2.61%, 3.78%)
-  and 3 and 4 failures in 45 and 22 tasks.
-- claude-opus-4-7: 20 tasks, mostly short top-level chats (median 2.5 steps); adequate, no
-  agentic evidence.
-- Small and openrouter/* models: insufficient data (26 tasks in total).
-<!-- /rsi7d:model-evidence -->
+{observed_evidence()}
 
 ## Hard rules
 

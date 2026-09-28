@@ -33,7 +33,9 @@ applies the winners to the SEA's ``SYSTEM_PROMPT`` constant, evaluates
 the change (a real replay of the past task that best exercises the new
 instructions; any run that cost below $500 is eligible) and keeps or
 reverts it.  It also refreshes the observed model evidence the
-autorouter SEA routes on.  rsi7d is itself one of the indexed SEAs: its
+autorouter SEA routes on, by rewriting ``~/.kiss/AUTOROUTER.md`` (the
+file that SEA splices into its prompt; :func:`write_autorouter_evidence`),
+so the evidence never changes a SEA file.  rsi7d is itself one of the indexed SEAs: its
 own finished sweeps are mined and its prompt patched the same way.
 
 KISS Sorcar itself is mined as the pseudo-SEA ``sorcar`` (the top-level
@@ -125,6 +127,7 @@ from kiss.agents.sorcar.git_worktree import (
     strip_worktree_suffix,
 )
 from kiss.core.brand import render_brand
+from kiss.core.config import kiss_home
 from kiss.server.agent_state import current_agent
 from kiss.server.tools_file import execute_python_file
 
@@ -135,11 +138,12 @@ WRAP_COLUMNS = 92
 SIGNATURE_CHARS = 200
 """Prompt prefix length that identifies a SEA run's ``system_prompt`` event."""
 PROMPT_GETTERS = ("system_prompt", "append_to_system_prompt", "add_to_system_prompt")
-EVIDENCE_START = "<!-- rsi7d:model-evidence -->"
-EVIDENCE_END = "<!-- /rsi7d:model-evidence -->"
-"""Markers delimiting the observed-model-evidence block in the autorouter SEA's prompt."""
 STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
+EVIDENCE_NAME = "AUTOROUTER.md"
+"""File in the KISS home the autorouter SEA splices into its prompt (its ``EVIDENCE_NAME``;
+named here rather than imported so this SEA loads under an installed package older than
+that one)."""
 REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
 SEAS_DIR_OPTION = "--seas-dir"
@@ -248,8 +252,8 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
   in the report.
 
 ## Hard rules
-- Change SEA files only through `patch_sea_prompt` and `write_autorouter_evidence`. They edit
-  one string constant and reject anything that changes code. Never edit a SEA with
+- Change SEA files only through `patch_sea_prompt`. It edits one string constant and rejects
+  anything that changes code. Never edit a SEA with
   Edit/Write, never edit a SEA whose `editable_path` or `prompt_constant` is empty in
   `indexed_seas()` (user SEAs, and the channel SEAs such as `slack` or `gmail`, whose
   prompts are assembled at run time): analyse those and put recommendations in the report
@@ -333,13 +337,15 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    src/kiss/tests/agents/seas/test_<name>_sea.py` (when that test exists), and mark it "not
    replay-verified" in the report.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
-   evidence block for the router with `write_autorouter_evidence(text)`: a Markdown table
-   (model, tasks, role mix, failed/unsuccessful, median $ per step, median s per step,
-   tool-error rate; keep every row under 92 characters by abbreviating headers or dropping a
-   column, the tool rejects longer rows) followed by at most 8 bullets naming what each
-   model is observed to be good or bad at, with the counts that support the claim. Only
-   claim what at least 10 tasks support; say "insufficient data" otherwise. Include the
-   window (`window_start`) so a reader can tell how fresh the evidence is.
+   evidence block for the router with `write_autorouter_evidence(text)`, which rewrites
+   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into its prompt; its
+   `autorouter_sea.py` is not edited for this): a Markdown table (model, tasks, role mix,
+   failed/unsuccessful, median $ per step, median s per step, tool-error rate; keep every
+   row under 92 characters by abbreviating headers or dropping a column, the tool rejects
+   longer rows) followed by at most 8 bullets naming what each model is observed to be good
+   or bad at, with the counts that support the claim. Only claim what at least 10 tasks
+   support; say "insufficient data" otherwise. Include the window (`window_start`) so a
+   reader can tell how fresh the evidence is.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: baseline table, per SEA the findings,
    the added or changed bullets, the evaluation result (replay ids and metrics, or why not
    replayed), the autorouter evidence update, recommendations for non-editable SEAs, the
@@ -1609,30 +1615,37 @@ def patch_sea_prompt(name: str, old: str, new: str) -> str:
 
 
 def write_autorouter_evidence(text: str) -> str:
-    """Replace the observed-model-evidence block of the autorouter SEA's prompt with *text*.
+    """Rewrite ``~/.kiss/AUTOROUTER.md``, the observed model evidence of the autorouter SEA.
 
     *text* is Markdown (a table plus a few bullets) describing what the
-    task history shows about each model's cost, speed and reliability;
-    the block is stamped with the current UTC date.  Goes through the
-    same gate and wrapping as ``patch_sea_prompt``, so every table row
-    must fit in 92 columns.
+    task history shows about each model's cost, speed and reliability.
+    It is stamped with the current UTC date and its prose wrapped at 92
+    columns like a prompt edit (a table row that does not fit is refused),
+    then written in one atomic rename.  The autorouter SEA splices the
+    file into its prompt when it loads, so refreshing the evidence never
+    edits a SEA file; the tool still refuses when ``autorouter`` is not
+    an editable SEA in the run's scope.  Returns a one-line description.
     """
-    current = sea_prompt("autorouter")
-    if current.startswith("Error:"):
-        return current
-    start = current.find(EVIDENCE_START)
-    end = current.find(EVIDENCE_END)
-    if start < 0 or end < start:
-        return f"Error: the autorouter prompt has no {EVIDENCE_START} ... {EVIDENCE_END} block"
-    old = current[start : end + len(EVIDENCE_END)]
-    stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    if _editable_path("autorouter") is None:
+        return _not_editable("autorouter")
     if text.lstrip().startswith(STAMP_PREFIX):  # the caller repeated the stamp line
         text = text.lstrip().split("\n", 1)[1] if "\n" in text.lstrip() else ""
-    new = (
-        f"{EVIDENCE_START}\n{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n"
-        f"{text.strip()}\n{EVIDENCE_END}"
-    )
-    return patch_sea_prompt("autorouter", old, new)
+    body = _wrap_markdown(text.strip())
+    long_line = _too_long(body)
+    if long_line:
+        return (
+            f"Error: a line of the new text is longer than {WRAP_COLUMNS} characters and cannot "
+            f"be wrapped (shorten it or break it into several lines): {long_line[:60]}..."
+        )
+    if not body:
+        return "Error: the evidence text is empty"
+    stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    path = kiss_home() / EVIDENCE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".tmp")
+    partial.write_text(f"{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{body}\n", "utf-8")
+    partial.replace(path)
+    return f"Wrote {path} ({len(body.splitlines())} lines, refreshed {stamp})"
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
