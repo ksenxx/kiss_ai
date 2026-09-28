@@ -84,9 +84,12 @@ def make_google_auth_tools(
         if agent._is_authenticated():
             return json.dumps({"ok": True, "message": f"{label} is connected."})
         missing_key = "" if composio_api_key() else (
-            " No Composio API key is configured: ask the user for one "
-            "(https://dashboard.composio.dev, Settings > API Keys) and pass it "
-            f"as authenticate_{service}(api_key='...')."
+            " No Composio API key is configured: ask the user for a project "
+            "API key (ak_...) from "
+            "https://dashboard.composio.dev/~/project/settings/api-keys "
+            "(Settings → Project Settings → API Keys) and pass it "
+            f"as authenticate_{service}(api_key='...'). Note: old consumer "
+            "keys (ck_...) no longer work."
         )
         return (
             f"Not authenticated with {label}. Call authenticate_{service}() to get "

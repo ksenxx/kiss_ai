@@ -137,8 +137,11 @@ def _client() -> Any:
     api_key = composio_api_key()
     if not api_key:
         raise RuntimeError(
-            "No Composio API key. Get one at https://dashboard.composio.dev "
-            "(Settings > API Keys) and set COMPOSIO_API_KEY, or pass it as api_key=..."
+            "No Composio API key. Get a project API key (ak_...) at "
+            "https://dashboard.composio.dev/~/project/settings/api-keys "
+            "(Settings → Project Settings → API Keys) and set COMPOSIO_API_KEY, "
+            "or pass it as api_key=... . Note: old consumer keys (ck_...) no "
+            "longer work; use a project key starting with ak_."
         )
     from composio import Composio
 
