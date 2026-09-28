@@ -30,7 +30,7 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError
+from kiss.agents.sorcar.sea_commands import SeaScriptError, run_picked_hook
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as sea_help_text,
 )
@@ -907,7 +907,9 @@ class _CommandsMixin:
 
         An empty ``tabId`` (malformed payload) updates only the
         daemon-wide default model (when a model was actually
-        supplied).
+        supplied).  Picking a model-routing SEA (``autorouter``) also
+        fires its ``on_picked_as_model(work_dir)`` hook with the tab's
+        work directory, without waiting for it.
         """
         tab_id = cmd.get("tabId", "")
         model = cmd.get("model", "")
@@ -922,6 +924,17 @@ class _CommandsMixin:
                 return
             self._default_model = model
             _record_model_usage(model)
+        # A real model name runs no hook; the registry look-up that tells
+        # happens on the hook's thread, so a changed SEA's re-import never
+        # stalls the command loop.
+        run_picked_hook(model, self._tab_work_dir(tab_id), wait=False)
+
+    def _tab_work_dir(self, tab_id: str) -> str:
+        """Return the tab's pinned work directory, else the daemon's."""
+        for entry in self.tab_registry.snapshot():
+            if entry["tabId"] == tab_id:
+                return entry["workDir"] or self.work_dir
+        return self.work_dir
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""

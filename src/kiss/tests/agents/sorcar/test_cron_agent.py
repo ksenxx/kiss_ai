@@ -963,3 +963,66 @@ def test_cli_create_with_work_dir_flags(
     assert created["model_name"] == "some-model"
     listed = yaml.safe_load(_run_cli(monkeypatch, capsys, "--list"))["jobs"][0]
     assert listed["work_dir"] == str(project.resolve())
+
+
+def _ensure(prompt: str = "do the thing") -> dict:
+    """Parse the reply of ``cron_job("ensure")`` for the test's weekly job spec."""
+    return dict(yaml.safe_load(
+        cron_job("ensure", name="weekly thing", schedule="0 1 * * 6", prompt=prompt)
+    ))
+
+
+def test_ensure_creates_once_keeps_an_enabled_job_and_resumes_a_paused_one() -> None:
+    """``ensure`` is keyed by name: created, then ``exists``, then ``resumed`` after a pause.
+
+    A same-named job with another prompt is still one job (the name is
+    the identity), while ``create`` of the identical spec is refused as a
+    duplicate; the store's lock makes racing ``ensure`` calls create one.
+    """
+    assert yaml.safe_load(cron_job("ensure", command="x")) == {
+        "error": "ensure requires name and schedule",
+    }
+    created = _ensure()
+    assert "created" in created, created
+    job_id = created["created"]["id"]
+    assert _ensure() == {"exists": created["created"]}
+    assert _ensure("do it differently")["exists"]["id"] == job_id
+    refused = cron_job("create", name="weekly thing", schedule="0 1 * * 6", prompt="do the thing")
+    assert "duplicate" in yaml.safe_load(refused)["error"]
+    cron_job("pause", job_id=job_id)
+    assert load_jobs()[0]["enabled"] is False
+    assert _ensure()["resumed"]["id"] == job_id
+    assert load_jobs()[0]["enabled"] is True
+    assert len(load_jobs()) == 1
+    # A hand-renamed equivalent job (same prompt, schedule, delivery) is the job too.
+    _set_job_fields(job_id, name="my renamed weekly thing")
+    assert _ensure()["exists"]["id"] == job_id
+    cron_job("pause", job_id=job_id)
+    assert _ensure()["resumed"]["id"] == job_id
+    assert len(load_jobs()) == 1
+
+    barrier = threading.Barrier(6)
+    replies: list[str] = []
+
+    def ensure(i: int) -> None:
+        barrier.wait()
+        replies.append(cron_job("ensure", name="raced", schedule="every 1h", prompt=f"p{i}"))
+
+    threads = [threading.Thread(target=ensure, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    raced = [job for job in load_jobs() if job["name"] == "raced"]
+    assert len(raced) == 1, raced
+    assert sum("created" in yaml.safe_load(reply) for reply in replies) == 1, replies
+
+
+def test_ensure_of_a_finished_one_shot_reports_the_resume_error() -> None:
+    """A paused one-shot job that already ran cannot be re-enabled by ``ensure`` either."""
+    created = _create(cron_job("create", name="once", schedule="5m", prompt="ping"))
+    _set_job_fields(created["id"], enabled=False, next_run_at=None)
+    reply = yaml.safe_load(cron_job("ensure", name="once", schedule="5m", prompt="ping"))
+    assert reply == {
+        "error": f"one-shot job {created['id']!r} already ran; create a new job instead",
+    }

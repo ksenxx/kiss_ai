@@ -215,12 +215,13 @@ a value that is not a positive number, or a script that fails to
 import adds no line, so the relay behaves as before.  Not a run
 parameter: `apply_agent_overrides()` ignores it.
 
-### `add_to_system_prompt()` and `register_as_model()` — model routing SEAs
+### `add_to_system_prompt()`, `register_as_model()` and `on_picked_as_model()` — model routing SEAs
 
 | Function                 | Return type | Effect                                                     |
 |--------------------------|-------------|------------------------------------------------------------|
 | `add_to_system_prompt()` | `str`       | text **added** to `appendToSystemPrompt` after the value already there |
 | `register_as_model()`    | `bool`      | `True` lists the SEA in the model picker under its command name |
+| `on_picked_as_model(work_dir)` | any   | hook run once per run whose model is the SEA; its result is logged |
 
 `add_to_system_prompt()` carries a SEA's *model routing protocol*: the
 returned text is appended to the run's system prompt after whatever
@@ -238,6 +239,29 @@ becomes an agent-script run of the SEA on the model its `model()`
 getter names (else the default model) — `/xxx` slash commands and runs
 that already carry an `agentPath` keep their agent and only take that
 model.  The bundled `autorouter` and `bestrouter` are such SEAs.
+
+`on_picked_as_model(work_dir)` is the picked SEA's chance to act on
+being chosen.  `kiss.agents.sorcar.sea_commands.run_picked_hook` runs it
+on a daemon thread at two moments: when the user picks the SEA in the
+model picker (`selectModel`, with the tab's pinned work directory,
+without waiting), and once per run whose model is the SEA (after the
+agent-script overrides, with the run's effective work directory,
+waiting at most `PICKED_HOOK_TIMEOUT_SECONDS`, 15 s, before the task
+starts).  It is not a run parameter: the return value is only logged,
+a hook that raises is logged as a warning, and one that blocks is
+abandoned on its thread; none of them fails the run.  It does not run
+for a `/xxx` command's agent or an explicit `agentPath`, only for the
+SEA the model pick names.  `autorouter` uses it to make sure an
+enabled weekly cron job that runs `/rsi7d autorouter` exists
+(`autorouter_sea.schedule_weekly_rsi7d`: an enabled job of that name is
+kept as is, a paused one is resumed, and when there is none one is
+created — a relay prompt job in the KISS checkout the work directory
+is in, with worktree and auto-commit, or a scratch-directory job that
+still refreshes `$KISS_HOME/AUTOROUTER.md` when there is no checkout;
+a linked task worktree resolves to its owning checkout).  Hooks from
+concurrent picks may overlap — a SEA file is executed afresh on every
+call and cannot hold a lock of its own — so the look-up-then-create is
+the cron store's atomic `cron_job("ensure")`, not the SEA's.
 
 The parameters without getters:
 

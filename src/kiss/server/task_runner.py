@@ -41,7 +41,12 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError, model_sea, sea_getter_value
+from kiss.agents.sorcar.sea_commands import (
+    SeaScriptError,
+    model_sea,
+    run_picked_hook,
+    sea_getter_value,
+)
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as _sea_help_text,
 )
@@ -738,7 +743,7 @@ class _TaskRunnerMixin:
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
-    def _resolve_sea_model(self, cmd: dict[str, Any]) -> None:
+    def _resolve_sea_model(self, cmd: dict[str, Any]) -> str | None:
         """Turn a run whose model is a model-picker SEA into a run of that SEA.
 
         A SEA whose ``register_as_model()`` returns ``True`` (``autorouter``,
@@ -770,13 +775,17 @@ class _TaskRunnerMixin:
         Args:
             cmd: The ``run`` command, mutated in place.
 
+        Returns:
+            The picked SEA's name (the model the run was submitted with),
+            or ``None`` when the run's model is a real model.
+
         Raises:
             AgentFileError: When the SEA's ``model()`` getter raises.
         """
         model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
         sea_path = model_sea(model) if isinstance(model, str) and model else None
         if sea_path is None:
-            return
+            return None
         prompt = cmd.get("prompt", "")
         is_slash_command = (
             isinstance(prompt, str) and _rewrite_sea_command_prompt(prompt) is not None
@@ -788,6 +797,7 @@ class _TaskRunnerMixin:
         except SeaScriptError as exc:
             raise AgentFileError(str(exc)) from exc
         cmd["model"] = picked if isinstance(picked, str) and picked else get_default_model()
+        return model
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -835,8 +845,15 @@ class _TaskRunnerMixin:
                 # an agent script, not a model: resolve it before the
                 # overrides run so they see the SEA as this run's
                 # ``agentPath``.
-                self._resolve_sea_model(cmd)
+                picked_sea = self._resolve_sea_model(cmd)
                 overridden_fields = apply_agent_overrides(cmd)
+                # Once per run whose model is a picker SEA, with the
+                # effective work dir (a ``work_dir()`` override included):
+                # the hook's side effects (autorouter's weekly cron job)
+                # get up to PICKED_HOOK_TIMEOUT_SECONDS to land before the
+                # task starts.
+                if picked_sea is not None:
+                    run_picked_hook(picked_sea, str(cmd.get("workDir") or self.work_dir))
             except AgentFileError as exc:
                 agent_file_error = exc
             client_task_id = _client_task_id_of(cmd)

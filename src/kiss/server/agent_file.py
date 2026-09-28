@@ -153,7 +153,11 @@ getter and whose ``register_as_model()`` returns ``True`` is also listed
 in the model picker under its command name
 (:func:`kiss.agents.sorcar.sea_commands.model_seas`); picking it runs
 every task of the tab through the SEA.  ``register_as_model`` is a
-registry flag, not a run parameter, so it is not evaluated here.
+registry flag, not a run parameter, so it is not evaluated here; nor is
+``on_picked_as_model(work_dir)``, the hook
+:func:`kiss.agents.sorcar.sea_commands.run_picked_hook` runs when the SEA
+is picked and once per run whose model is the SEA (``autorouter``
+schedules its weekly ``/rsi7d autorouter`` cron job there).
 """
 
 

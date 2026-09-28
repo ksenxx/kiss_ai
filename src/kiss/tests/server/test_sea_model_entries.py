@@ -27,6 +27,11 @@ applies instead of forcing each one.
 
 from __future__ import annotations
 
+import json
+import socket
+import time
+import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +39,7 @@ from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.cron_agent import load_jobs, save_jobs
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
@@ -118,6 +124,10 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
     def setUp(self) -> None:
         super().setUp()
         sea_commands._reset_for_tests()
+        # Every ``autorouter`` pick schedules a cron job in the test ``$KISS_HOME``:
+        # start each test from an empty store and leave none behind.
+        save_jobs([])
+        self.addCleanup(save_jobs, [])
 
     def tearDown(self) -> None:
         sea_commands._reset_for_tests()
@@ -386,3 +396,126 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert run["model_name"] == model
         assert AUTOROUTER_MARKER not in run["system_prompt"]
         assert BESTROUTER_MARKER not in run["system_prompt"]
+
+    def test_autorouter_pick_schedules_the_weekly_rsi7d_job_once(self) -> None:
+        """Every run picked on ``autorouter`` makes sure one enabled weekly job exists.
+
+        The first pick creates it in the real cron store of ``$KISS_HOME``;
+        the second finds it enabled and leaves the store alone.  The test
+        repo is not a KISS checkout, so the job runs in a scratch directory.
+        """
+        with self.assertLogs("kiss.sea_commands", level="INFO") as logs:
+            self._run("say hello", model=AUTOROUTER)
+        assert any("picked as model: created:" in line for line in logs.output), logs.output
+        (job,) = load_jobs()
+        assert job["name"] == autorouter_sea.RSI7D_JOB_NAME
+        assert job["enabled"] is True
+        assert job["schedule"] == autorouter_sea.RSI7D_JOB_SCHEDULE
+        assert job["work_dir"] == "" and job["use_worktree"] is False
+        assert f"task         = {autorouter_sea.RSI7D_TASK!r}" in job["prompt"]
+        with self.assertLogs("kiss.sea_commands", level="INFO") as logs:
+            self._run("say hello again", model=AUTOROUTER)
+        assert any(
+            "picked as model: exists:" in line and job["id"] in line for line in logs.output
+        ), logs.output
+        assert load_jobs() == [job]
+
+    def test_picked_sea_hook_runs_once_with_the_work_dir_and_never_fails_the_run(self) -> None:
+        """``on_picked_as_model(work_dir)`` fires once per picked run; a raising hook is logged.
+
+        The hook does not run for a SEA that is dispatched as an explicit
+        agent script on a real model, only for the SEA picked as the model.
+        """
+        calls = Path(self.tmpdir) / "hook_calls.txt"
+        hooked = self._write_user_sea(
+            "hooked",
+            "def register_as_model() -> bool:\n    return True\n"
+            "def on_picked_as_model(work_dir: str) -> str:\n"
+            f"    with open({str(calls)!r}, 'a') as f:\n"
+            "        f.write(work_dir + '\\n')\n"
+            "    return 'hook ran in ' + work_dir\n",
+        )
+        self._write_user_sea(
+            "badhook",
+            "def register_as_model() -> bool:\n    return True\n"
+            "def on_picked_as_model(work_dir: str) -> str:\n"
+            "    raise RuntimeError('hook exploded')\n",
+        )
+        self._register_user_seas()
+        with self.assertLogs("kiss.sea_commands", level="INFO") as logs:
+            run = self._run("say hello", model="hooked")
+        assert run["model_name"] == get_default_model()
+        assert calls.read_text(encoding="utf-8") == f"{self.repo}\n"
+        assert any(f"picked as model: hook ran in {self.repo}" in line for line in logs.output)
+        # Dispatched as an explicit agent script on a real model: not a pick, no hook.
+        self._run("say hello", model=orchestrator_model(), extension_agent_path=str(hooked))
+        assert calls.read_text(encoding="utf-8") == f"{self.repo}\n"
+        with self.assertLogs("kiss.sea_commands", level="WARNING") as logs:
+            run = self._run("say hello", model="badhook")
+        assert run["model_name"] == get_default_model()
+        assert any("on_picked_as_model() failed" in line for line in logs.output), logs.output
+        assert any("hook exploded" in line for line in logs.output), logs.output
+
+    def _send(self, cmd: dict[str, Any], done: Callable[[], bool]) -> None:
+        """Send one raw command over the UDS as a client would and wait until *done()* holds."""
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        try:
+            sock.connect(self.sock_path)
+            sock.sendall(json.dumps(cmd).encode() + b"\n")
+            deadline = time.monotonic() + 10
+            while not done() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert done(), cmd
+        finally:
+            sock.close()
+
+    def test_selecting_autorouter_in_the_picker_schedules_the_weekly_job_without_a_task(
+        self,
+    ) -> None:
+        """A ``selectModel`` pick alone fires the hook with the tab's work dir; a real model
+        does not.
+
+        The test repo is not a KISS checkout, so the scheduled job has no work dir.
+        """
+        vs = self.server._vscode_server
+        tab_id = f"pick-{uuid.uuid4().hex}"
+        real = orchestrator_model()
+        self._send(
+            {"type": "openTab", "tabId": tab_id, "title": "t", "workDir": self.repo},
+            lambda: vs.tab_registry.has_tab(tab_id),
+        )
+        self._send(
+            {"type": "selectModel", "tabId": tab_id, "model": real},
+            lambda: vs._tab_models.get(tab_id) == real,
+        )
+        time.sleep(0.5)
+        assert load_jobs() == []
+        self._send(
+            {"type": "selectModel", "tabId": tab_id, "model": AUTOROUTER},
+            lambda: bool(load_jobs()),
+        )
+        (job,) = load_jobs()
+        assert job["name"] == autorouter_sea.RSI7D_JOB_NAME and job["enabled"] is True
+        assert job["work_dir"] == autorouter_sea.kiss_checkout(self.repo) == ""
+        assert vs._tab_models[tab_id] == AUTOROUTER
+
+    def test_blocking_hook_is_abandoned_and_the_run_goes_on(self) -> None:
+        """A hook that never returns holds the run for the timeout only, then is logged."""
+        self._write_user_sea(
+            "stuckhook",
+            "import threading\n"
+            "def register_as_model() -> bool:\n    return True\n"
+            "def on_picked_as_model(work_dir: str) -> str:\n"
+            "    threading.Event().wait()\n    return 'never'\n",
+        )
+        self._register_user_seas()
+        original = sea_commands.PICKED_HOOK_TIMEOUT_SECONDS
+        sea_commands.PICKED_HOOK_TIMEOUT_SECONDS = 0.5
+        self.addCleanup(setattr, sea_commands, "PICKED_HOOK_TIMEOUT_SECONDS", original)
+        started = time.monotonic()
+        with self.assertLogs("kiss.sea_commands", level="WARNING") as logs:
+            run = self._run("say hello", model="stuckhook")
+        assert run["model_name"] == get_default_model()
+        assert time.monotonic() - started < 30
+        assert any("still running after 0 s" in line for line in logs.output), logs.output

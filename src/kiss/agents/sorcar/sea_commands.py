@@ -486,12 +486,15 @@ class SeaScriptError(RuntimeError):
     """
 
 
-def sea_getter_value(sea_path: Path, getter: str) -> Any:
-    """Return ``getter()`` of the SEA at *sea_path*, or ``None`` when it defines none.
+def sea_getter_value(sea_path: Path, getter: str, *args: Any) -> Any:
+    """Return ``getter(*args)`` of the SEA at *sea_path*, or ``None`` when it defines none.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
-        getter: Name of the zero-argument getter, e.g. ``"model"``.
+        getter: Name of the getter, e.g. ``"model"``.
+        args: Positional arguments of the getter; the run-parameter
+            getters take none, the ``on_picked_as_model(work_dir)`` hook
+            takes the run's work directory.
 
     Returns:
         The getter's return value when the script defines a callable
@@ -504,12 +507,73 @@ def sea_getter_value(sea_path: Path, getter: str) -> Any:
     try:
         with _load_sea_module(sea_path) as module:
             fn = getattr(module, getter, None)
-            return fn() if callable(fn) else None
+            return fn(*args) if callable(fn) else None
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
             f"SEA {sea_path} failed while evaluating {getter}(): "
             f"{type(exc).__name__}: {exc}"
         ) from exc
+
+
+PICKED_HOOK_TIMEOUT_SECONDS = 15.0
+"""How long :func:`run_picked_hook` waits for ``on_picked_as_model()`` before moving on."""
+
+def _log_picked_hook(model: str, work_dir: str) -> None:
+    """Run ``on_picked_as_model(work_dir)`` of the SEA picked as *model*; log note or failure."""
+    sea_path = model_sea(model)
+    if sea_path is None:
+        return
+    try:
+        note = sea_getter_value(sea_path, "on_picked_as_model", work_dir)
+    except SeaScriptError:
+        logger.warning("SEA %s: on_picked_as_model() failed", model, exc_info=True)
+        return
+    if note:
+        logger.info("SEA %s picked as model: %s", model, note)
+
+
+def run_picked_hook(model: str, work_dir: str, wait: bool = True) -> None:
+    """Run the picked SEA's ``on_picked_as_model(work_dir)`` hook, when it defines one, on a thread.
+
+    The hook is a model-picker SEA's chance to act on being chosen as a
+    tab's model — ``autorouter`` makes sure its weekly ``/rsi7d autorouter``
+    cron job is scheduled.  The daemon calls it when the user picks the SEA
+    (``selectModel``) and once per run whose model is the SEA.  The thread
+    resolves *model* through the registry (which may import a changed SEA)
+    and runs the hook.  Hooks from concurrent picks may overlap: a SEA
+    file is executed afresh on every call and cannot hold a lock of its
+    own, so a hook that must not race gets its atomicity from what it
+    calls (``cron_job("ensure")`` for autorouter).  Whatever the hook
+    returns is logged; a hook that raises is logged and never fails the
+    caller, one that blocks is abandoned on its daemon thread after
+    :data:`PICKED_HOOK_TIMEOUT_SECONDS`, and a thread that cannot start is
+    logged too, because the task the user typed does not depend on it.
+
+    Args:
+        model: The picked model name, a SEA command name
+            (:func:`model_sea` maps it to the file; a real model name runs nothing).
+        work_dir: The tab's or run's work directory, passed to the hook.
+        wait: Block up to :data:`PICKED_HOOK_TIMEOUT_SECONDS` for the hook
+            (a run wants its side effects in place before it starts);
+            ``False`` returns at once (the picker handler must not stall
+            the daemon's command loop).
+    """
+    thread = threading.Thread(
+        target=_log_picked_hook, args=(model, work_dir), name="sea-picked-hook", daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:  # the process is out of threads
+        logger.warning("SEA %s: on_picked_as_model() not run", model, exc_info=True)
+        return
+    if not wait:
+        return
+    thread.join(PICKED_HOOK_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        logger.warning(
+            "SEA %s: on_picked_as_model() still running after %.0f s; going on without it",
+            model, PICKED_HOOK_TIMEOUT_SECONDS,
+        )
 
 
 def sea_getter_is_false(sea_path: Path, getter: str) -> bool:

@@ -1244,6 +1244,24 @@ def _job_view(job: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
+def _enable(job: dict[str, Any]) -> str:
+    """Re-enable a paused *job* in place (its next run recomputed when it has none).
+
+    Args:
+        job: The stored job record, mutated; the caller saves the store.
+
+    Returns:
+        ``""`` on success, else the error text: a one-shot job that has
+        already run cannot be resumed.
+    """
+    if job.get("one_shot") and job.get("next_run_at") is None:
+        return f"one-shot job {job['id']!r} already ran; create a new job instead"
+    job["enabled"] = True
+    if job.get("next_run_at") is None:
+        job["next_run_at"] = compute_next_run(str(job["schedule"]), time.time())
+    return ""
+
+
 def _find_duplicate(
     jobs: list[dict[str, Any]], candidate: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -1311,6 +1329,12 @@ def cron_job(
       prompt/command, schedule and delivery targets is already
       scheduled or paused — do not retry under another name; tell the
       user it exists, or ``remove``/``resume`` the existing job.
+    - ``ensure``: ``create`` unless a job with the same ``name`` (or,
+      failing that, a ``create``-duplicate of the spec) already exists:
+      an enabled one is left as it is (``exists``), a paused one is
+      resumed (``resumed``); only when there is none is the job created.
+      Atomic under the store lock, for a job that code re-registers on
+      every trigger (autorouter's weekly ``/rsi7d``).
     - ``list``: list all jobs with their next/last run times.
     - ``remove`` / ``pause`` / ``resume``: manage the job named by
       ``job_id``.
@@ -1368,10 +1392,11 @@ def cron_job(
     but prompt jobs still need a reachable kiss-web daemon.
 
     Args:
-        action: One of ``create``, ``list``, ``remove``, ``pause``,
-            ``resume``, ``run_now``.
+        action: One of ``create``, ``ensure``, ``list``, ``remove``,
+            ``pause``, ``resume``, ``run_now``.
         job_id: Job identifier (required for remove/pause/resume/run_now).
-        name: Short human-readable job name (create).
+        name: Short human-readable job name (create; the identity an
+            ``ensure`` looks up).
         prompt: The LLM task to run on schedule (create).
         command: Shell command to run instead of an LLM task (create).
         schedule: Schedule string in one of the four forms above (create).
@@ -1401,11 +1426,11 @@ def cron_job(
     def _dump(data: Any) -> str:
         return str(yaml.safe_dump(data, sort_keys=False))
 
-    if action == "create":
+    if action in ("create", "ensure"):
         if not name or not schedule:
-            return _dump({"error": "create requires name and schedule"})
+            return _dump({"error": f"{action} requires name and schedule"})
         if bool(prompt.strip()) == bool(command.strip()):
-            return _dump({"error": "create requires exactly one of prompt or command"})
+            return _dump({"error": f"{action} requires exactly one of prompt or command"})
         try:
             next_run = compute_next_run(schedule, time.time())
         except ValueError as e:
@@ -1457,6 +1482,17 @@ def cron_job(
         with _jobs_lock(blocking=True):
             jobs = load_jobs()
             duplicate = _find_duplicate(jobs, job)
+            if action == "ensure":
+                named = [j for j in jobs if j.get("name") == name]
+                existing = named[0] if named else duplicate
+                if existing is not None:
+                    if existing.get("enabled"):
+                        return _dump({"exists": _job_view(existing)})
+                    error = _enable(existing)
+                    if error:
+                        return _dump({"error": error})
+                    save_jobs(jobs)
+                    return _dump({"resumed": _job_view(existing)})
             if duplicate is not None:
                 state = "paused" if not duplicate.get("enabled") else "scheduled"
                 hint = (
@@ -1491,16 +1527,9 @@ def cron_job(
             elif action == "pause":
                 match[0]["enabled"] = False
             else:
-                if match[0].get("one_shot") and match[0].get("next_run_at") is None:
-                    return _dump({
-                        "error": f"one-shot job {job_id!r} already ran; "
-                        "create a new job instead"
-                    })
-                match[0]["enabled"] = True
-                if match[0].get("next_run_at") is None:
-                    match[0]["next_run_at"] = compute_next_run(
-                        str(match[0]["schedule"]), time.time()
-                    )
+                error = _enable(match[0])
+                if error:
+                    return _dump({"error": error})
             save_jobs(jobs)
         return _dump({action: job_id})
 
@@ -1513,7 +1542,7 @@ def cron_job(
         return _dump({"ran": _job_view(refreshed[0] if refreshed else match[0])})
 
     return _dump({
-        "error": f"unknown action {action!r}: use create, list, remove, "
+        "error": f"unknown action {action!r}: use create, ensure, list, remove, "
         "pause, resume, or run_now"
     })
 
