@@ -139,7 +139,7 @@ def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path)
 
 def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Path) -> None:
     """The ``sorcar`` row names the editable SYSTEM.md, the targets and the grants so far."""
-    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())}
+    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}
     row = rows[sea.SORCAR]
     assert row["editable_path"] == str(checkout / "src" / "kiss" / "SYSTEM.md")
     assert row["prompt_constant"] == "" and row["prompt_chars"] == len(_SYSTEM_MD)
@@ -147,7 +147,7 @@ def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Pat
     assert row["permission"].startswith("required") and row["granted"] == []
     with _Registered("Sweep. Additional instructions: " + _PERMIT):
         sea.request_sorcar_permission("SYSTEM.md", "evidence", prompt_quote=_PERMIT)
-    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())}
+    rows = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}
     assert rows[sea.SORCAR]["granted"] == [str(checkout / "src" / "kiss" / "SYSTEM.md")]
 
 
@@ -159,7 +159,7 @@ def test_indexed_seas_marks_sorcar_not_editable_outside_a_git_checkout(
     (pkg / "agents" / "seas").mkdir(parents=True)
     (pkg / "SYSTEM.md").write_text(_SYSTEM_MD, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    row = {r["name"]: r for r in json.loads(sea.indexed_seas())}[sea.SORCAR]
+    row = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}[sea.SORCAR]
     assert row["editable_path"] == "" and row["prompt_chars"] == len(_SYSTEM_MD)
     assert sea.sorcar_text("SYSTEM.md") == (
         f"Error: {pkg.resolve()} is not inside a git checkout; only SORCAR.md can be changed here"
@@ -430,7 +430,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
         agent_state.register(state)
         try:
             result = agent.run(
-                prompt_template=sea.build_prompt("all"),
+                prompt_template="all",
                 model_name=MODEL,
                 work_dir=str(checkout),
                 max_steps=6,
