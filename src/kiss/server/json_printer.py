@@ -82,6 +82,12 @@ _DISPLAY_EVENT_TYPES = frozenset(
         # stop/error, when no ``result`` event exists) shows only the
         # step count in the status row.
         "usage_info",
+        # One per model call (``KissAgent._print_llm_call``): the call's
+        # own model, tokens, USD cost and duration.  Persisted so the
+        # autorouter can read observed per-call prices back from the
+        # events table and replays show the cost under each thoughts
+        # panel.
+        "llm_call",
         # Persisted so replays repopulate the static task panel's
         # settings info (model, worktree / parallel modes, budget,
         # start time, chat / task / parent ids); broadcast once per
@@ -2046,6 +2052,21 @@ class JsonPrinter(Printer):
                 if key in kwargs:
                     event[key] = kwargs[key]
             self.broadcast(event)
+            return ""
+        if type == "llm_call":
+            self.broadcast(
+                {
+                    "type": "llm_call",
+                    "model": str(kwargs.get("model") or ""),
+                    "step": int(kwargs.get("step", 0) or 0),
+                    "duration_ms": int(kwargs.get("duration_ms", 0) or 0),
+                    "input_tokens": int(kwargs.get("input_tokens", 0) or 0),
+                    "output_tokens": int(kwargs.get("output_tokens", 0) or 0),
+                    "cache_read": int(kwargs.get("cache_read", 0) or 0),
+                    "cache_write": int(kwargs.get("cache_write", 0) or 0),
+                    "cost": float(kwargs.get("cost", 0.0) or 0.0),
+                }
+            )
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})

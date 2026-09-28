@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas import merge_sea
+from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar import persistence, sea_commands
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
 from kiss.agents.sorcar.persistence import _add_task, _add_task_usage
@@ -403,7 +403,8 @@ class TestMergeSea:
             sea_commands.refresh_registry()
             path = sea_commands.get_command("merge")
             assert path is not None and path.name == "merge_sea.py"
-            assert path.parent.name == "seas"
+            assert path.parent.name == "merge"
+            assert path.parents[1].name == "seas"
             rewritten = sea_commands.rewrite_prompt_if_command("/merge finish the merge")
             assert rewritten is not None and str(path) in rewritten[0]
         finally:

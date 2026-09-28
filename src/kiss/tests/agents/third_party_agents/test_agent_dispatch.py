@@ -609,7 +609,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
 def test_default_agent_is_the_bundled_dummy_sea(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``run_agent(task)`` with no ``agent`` runs ``seas/dummy_sea.py`` in path mode.
+    """``run_agent(task)`` with no ``agent`` runs ``seas/dummy/dummy_sea.py`` in path mode.
 
     The default is the installed file's absolute path (not a path
     relative to the calling work directory), so it resolves from any
@@ -621,7 +621,7 @@ def test_default_agent_is_the_bundled_dummy_sea(
 
     default = Path(DEFAULT_AGENT_PATH)
     assert default.is_absolute() and default.is_file()
-    assert default.parts[-3:] == ("agents", "seas", "dummy_sea.py")
+    assert default.parts[-4:] == ("agents", "seas", "dummy", "dummy_sea.py")
     # The dummy SEA defines no getters: a plain Sorcar session.
     cmd = {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
     assert apply_agent_overrides(cmd) == set()
@@ -792,7 +792,7 @@ def test_dispatch_uses_recorded_daemon_socket(
 
 
 def test_agent_class_resolution() -> None:
-    import kiss.agents.third_party_agents.slack_sea as slack_sea
+    import kiss.agents.third_party_agents.slack.slack_sea as slack_sea
 
     cls = _agent_class(slack_sea)
     assert cls is not None and cls.__name__ == "SlackAgent"
@@ -806,7 +806,7 @@ def test_every_channel_module_is_dispatchable() -> None:
 
     for channel in available_channels():
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_sea"
+            f"kiss.agents.third_party_agents.{channel}.{channel}_sea"
         )
         cls = _agent_class(module)
         assert cls is not None, channel
@@ -821,7 +821,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
     # module as ``extension_agent_path`` makes the daemon use the module as its
     # own tools file (its ``tools()`` returns the tool list).
-    import kiss.agents.third_party_agents.ntfy_sea as ntfy_sea
+    import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
 
     cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": ""}
     overridden = apply_agent_overrides(cmd)

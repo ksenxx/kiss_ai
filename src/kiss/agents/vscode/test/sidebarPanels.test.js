@@ -346,11 +346,12 @@ async function main() {
     assert.strictEqual(rows.length, 7);
     assert.strictEqual(rows[0].querySelector('.sidebar-panel-name').textContent, 'Digest');
     assert.strictEqual(sub(rows[0]), `every 5m \u00b7 next ${pt(times.a)} (in 5m)`);
-    assert.strictEqual(rows[0].title, 'do it\nLast run: ok');
+    assert.strictEqual(rows[0].dataset.tooltip, 'do it\n\nLast run: ok');
+    assert.strictEqual(rows[0].title, '', 'no native title: the custom tooltip shows the task');
     assert.strictEqual(badge(rows[0]), '');
     assert.strictEqual(badge(rows[1]), 'running');
     assert.strictEqual(sub(rows[1]), `every 5m \u00b7 next ${pt(times.b)} (in 3h)`);
-    assert.strictEqual(rows[1].title, '$ rsync -a src dst');
+    assert.strictEqual(rows[1].dataset.tooltip, '$ rsync -a src dst');
     assert.strictEqual(sub(rows[2]), `every 5m \u00b7 next ${pt(times.c)} (in 3d)`);
     assert.strictEqual(sub(rows[3]), `every 5m \u00b7 next ${pt(times.d)} (now)`);
     assert.strictEqual(sub(rows[4]), 'every 5m');
@@ -375,6 +376,128 @@ async function main() {
     );
     assert.match(subs[0], /^every 5m \u00b7 next Sun, Sep 27, 5:00\s?AM PDT \(/);
     assert.match(subs[1], /^every 5m \u00b7 next Tue, Dec 1, 9:00\s?AM PST \(/);
+  });
+
+  for (const [label, attrs] of [
+    ['remote webapp', REMOTE],
+    ['sidebar chat', SIDEBAR],
+    ['Task Info view', META_VIEW],
+  ]) {
+    await test(`${label}: each Schedule row copies its exact task and shows it in the tooltip`, async () => {
+      const {win} = makeWebview(attrs);
+      const writes = [];
+      Object.defineProperty(win.navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText(text) {
+            writes.push(String(text));
+            return Promise.resolve();
+          },
+        },
+      });
+      // A prompt with newlines, quotes and a shell-looking line: the
+      // clipboard and the tooltip get it verbatim, never a summary.
+      const prompt =
+        'Call the run_agent tool IMMEDIATELY with:\n' +
+        "  agent = 'src/kiss/agents/seas/rsi7d_sea.py'\n" +
+        '  task  = "all. Work inside this checkout."\n\n' +
+        'Use \'claude-fable-5-1\' for all tasks.';
+      send(win, {
+        type: 'cronJobs',
+        jobs: [
+          job({id: 'p', name: 'Weekly rsi7d', what: prompt, lastStatus: 'ok in 12m'}),
+          job({id: 'c', name: 'Sync', kind: 'command', what: 'rsync -a src dst'}),
+          job({id: 'n', name: 'No text', what: null}),
+        ],
+      });
+      const rows = Array.from(el(win, 'meta-schedule-list').children);
+      const copies = rows.map(r => r.querySelector('.sidebar-panel-row-top > .sidebar-item-copy'));
+      assert.ok(copies.every(Boolean), 'every row has a copy button on its name line');
+      assert.strictEqual(
+        copies[0].getAttribute('aria-label'),
+        'Copy the scheduled task to clipboard',
+      );
+      assert.strictEqual(copies[0].dataset.tooltip, 'Copy the scheduled task');
+      assert.strictEqual(
+        copies[1].getAttribute('aria-label'),
+        'Copy the scheduled command to clipboard',
+      );
+      assert.strictEqual(copies[1].dataset.tooltip, 'Copy the scheduled command');
+
+      copies[0].click();
+      copies[1].click();
+      copies[2].click();
+      await new Promise(r => setImmediate(r));
+      eq(writes, [prompt, 'rsync -a src dst', ''], 'the exact prompt or command, unchanged');
+      assert.ok(copies[0].classList.contains('copied'), 'the button flashes a check mark');
+
+      // The row's tooltip is the same text (commands prefixed "$ "),
+      // then the last run's outcome; it opens on keyboard focus too.
+      assert.strictEqual(rows[0].dataset.tooltip, prompt + '\n\nLast run: ok in 12m');
+      assert.strictEqual(rows[1].dataset.tooltip, '$ rsync -a src dst');
+      assert.strictEqual(rows[2].dataset.tooltip, '');
+      assert.strictEqual(rows[0].tabIndex, 0, 'rows take keyboard focus');
+      const tip = win.document.getElementById('custom-tooltip');
+      rows[0].dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+      assert.ok(tip.classList.contains('visible'));
+      assert.strictEqual(tip.textContent, prompt + '\n\nLast run: ok in 12m');
+      rows[0].dispatchEvent(new win.FocusEvent('focusout', {bubbles: true}));
+      assert.ok(!tip.classList.contains('visible'));
+      // Hovering the copy button shows its own tooltip, not the task.
+      copies[1].dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+      assert.strictEqual(tip.textContent, 'Copy the scheduled command');
+    });
+  }
+
+  await test('a tooltip that would run off the bottom or right edge stays on screen', () => {
+    const {win} = makeWebview(REMOTE);
+    send(win, {type: 'cronJobs', jobs: [job({id: 'p', name: 'Tall', what: 'x'.repeat(2000)})]});
+    const row = el(win, 'meta-schedule-list').firstElementChild;
+    const tip = win.document.getElementById('custom-tooltip');
+    // jsdom has no layout: give the row and the tooltip sizes by hand.
+    // The tooltip is measured at the origin (a fixed box near the right
+    // edge would shrink to the room left of it), so the stub reports
+    // its natural size and records where the measurement happened.
+    Object.defineProperty(win, 'innerHeight', {configurable: true, value: 600});
+    Object.defineProperty(win, 'innerWidth', {configurable: true, value: 800});
+    let measuredAt = null;
+    let size = {width: 350, height: 300};
+    tip.getBoundingClientRect = () => {
+      measuredAt = tip.style.left + ' ' + tip.style.top;
+      return {left: 0, top: 0, right: size.width, bottom: size.height, ...size};
+    };
+    // The row sits near the bottom right; the tooltip is tall and wide.
+    row.getBoundingClientRect = () => ({left: 600, top: 500, bottom: 540, right: 800, width: 200, height: 40});
+    row.dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+    assert.strictEqual(measuredAt, '0px 0px', 'measured at the origin');
+    assert.ok(tip.classList.contains('visible'));
+    assert.strictEqual(tip.style.top, 500 - 4 - 300 + 'px', 'flipped above the row');
+    assert.strictEqual(tip.style.left, 800 - 350 - 8 + 'px', 'slid left of the right edge');
+    row.dispatchEvent(new win.FocusEvent('focusout', {bubbles: true}));
+
+    // Room below and to the right: left-aligned with the row, under it.
+    row.getBoundingClientRect = () => ({left: 20, top: 100, bottom: 140, right: 220, width: 200, height: 40});
+    row.dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+    assert.strictEqual(tip.style.top, '144px');
+    assert.strictEqual(tip.style.left, '20px');
+    row.dispatchEvent(new win.FocusEvent('focusout', {bubbles: true}));
+
+    // Too tall for either side: it slides up to end at the bottom edge
+    // (the CSS caps its height at the viewport, so this never goes
+    // above the top edge).
+    size = {width: 350, height: 500};
+    row.dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+    assert.strictEqual(tip.style.top, 600 - 500 - 8 + 'px');
+    assert.strictEqual(tip.style.left, '20px');
+    row.dispatchEvent(new win.FocusEvent('focusout', {bubbles: true}));
+    size = {width: 350, height: 600};
+    row.dispatchEvent(new win.FocusEvent('focusin', {bubbles: true}));
+    assert.strictEqual(tip.style.top, '0px', 'never above the top edge');
+
+    const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+    const rule = css.match(/#custom-tooltip \{[^}]*\}/)[0];
+    assert.match(rule, /max-height: calc\(100vh - 16px\)/, 'capped at the viewport height');
+    assert.match(rule, /overflow: hidden/);
   });
 
   await test('Apps: connected first, status line, buttons for the rest, failure hint', () => {

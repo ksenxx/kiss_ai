@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Any
 
-from kiss.agents.seas import task_update_sea
+from kiss.agents.seas.task_update import task_update_sea
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.server.server import _is_side_channel_row
 from kiss.tests.conftest import requires_unix_sockets

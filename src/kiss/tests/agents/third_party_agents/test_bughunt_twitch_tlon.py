@@ -23,9 +23,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
-from kiss.agents.third_party_agents.tlon_sea import _config as _tlon_config
-from kiss.agents.third_party_agents.twitch_sea import TwitchChannelBackend
+from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
+from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchChannelBackend
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -231,7 +231,7 @@ class TestTlonBackendBugs:
 
     def test_authenticate_tlon_persists_normalized_ship_url(self) -> None:
         """authenticate_tlon must save the rstrip('/')-normalized ship_url."""
-        from kiss.agents.third_party_agents.tlon_sea import TlonAgent
+        from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent
 
         agent = TlonAgent()
         tools = {t.__name__: t for t in agent._get_auth_tools()}

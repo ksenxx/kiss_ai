@@ -32,11 +32,16 @@
 #
 # Nothing is lost, by construction:
 #
-#   * sync_db.py only ever inserts rows.  Task ids are unique and a task row
-#     is immutable once created, so a task travels exactly when the other
-#     machine does not have its id; a row both machines have is left alone,
-#     no row is ever deleted or updated, and no table other than
-#     ``task_history`` and ``events`` is touched.
+#   * sync_db.py only ever inserts rows of the history.  Task ids are unique
+#     and a task row is immutable once created, so a task travels exactly
+#     when the other machine does not have its id; a row both machines have
+#     is left alone, no row is ever deleted or updated, and no table other
+#     than ``task_history``, ``events`` and ``chat_summaries`` is touched.
+#     ``chat_summaries`` is a cache (one row per chat: a few-word summary and
+#     the launch time of the chat's newest task) that the web app rewrites as
+#     tasks finish; there the row computed later -- the larger launch time --
+#     replaces the older one, so both machines end up with the fresher
+#     summary of every chat.
 #   * Neither live database is ever rewritten by the relocation step: work
 #     directories are translated in the throw-away snapshot that travels, and
 #     a relocation that fails stops its direction rather than let one
@@ -195,8 +200,9 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # What the two sides have
 #
-# A delta merge needs a database with the two synced tables on the receiving
-# end.  A missing or unreadable one (first deploy, torn earlier upload) or a
+# A delta merge needs a database with the two history tables (task_history
+# and events; chat_summaries is optional and skipped where absent) on the
+# receiving end.  A missing or unreadable one (first deploy, torn earlier upload) or a
 # database without those tables is reported here and decides both passes:
 # pass 1 has nothing to bring back, and pass 2 falls back to a full upload.
 #

@@ -29,7 +29,8 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import review_paper_sea, write_paper_sea
+from kiss.agents.seas.review_paper import review_paper_sea
+from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.tests.agents.sorcar.local_model_server import (

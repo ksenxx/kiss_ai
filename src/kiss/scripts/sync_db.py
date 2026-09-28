@@ -6,8 +6,9 @@
 """One-way synchronization of ``sorcar.db``-shaped SQLite databases.
 
 Copies rows of the task table (``task_history``) and the ``events``
-table from SOURCE into TARGET.  Nothing is ever written to SOURCE and no
-other table of TARGET is touched.
+table from SOURCE into TARGET, and refreshes TARGET's per-chat summaries
+(``chat_summaries``) from SOURCE's.  Nothing is ever written to SOURCE
+and no other table of TARGET is touched.
 
 Both SOURCE and TARGET are unix-style paths to a SQLite database file,
 optionally prefixed with ``user@host:`` when the database lives on a
@@ -41,13 +42,22 @@ that run travel; when the run has a gap -- left by an interrupted
 earlier sync, say -- the source ships that task's events in full and the
 gap heals.
 
-Both databases must have the same columns for the two tables; a mismatch
-is refused rather than half-applied.
+Both databases must have the same columns for the synced tables; a
+mismatch is refused rather than half-applied.
 
 Task ids are unique and a task row, once created, is never modified, so
 the sync never has to compare row contents: a task travels exactly when
 TARGET does not have its id, and a ``task_history`` row that exists on
 both sides is always left as TARGET recorded it.
+
+``chat_summaries`` is the one table whose rows are replaced: it is a
+cache with one row per chat -- a few-word summary of the chat's tasks and
+``last_launched``, the launch instant of its newest task -- that the web
+app rewrites whenever a task of the chat finishes.  The copy whose
+``last_launched`` is larger was computed from more of the chat's tasks,
+so a chat travels when TARGET lacks it or SOURCE's row is newer by that
+clock, and on merge the newer row replaces the older one.  Databases
+from before the table existed simply have no chat rows to sync.
 
 The remote side runs this very file through ``ssh <host> python3 -c
 ...``: the script is stdlib-only and self-contained, so nothing has to
@@ -87,8 +97,14 @@ from typing import Any, BinaryIO
 
 TASK_TABLE = "task_history"
 EVENT_TABLE = "events"
+CHAT_TABLE = "chat_summaries"
 # Where each table's column list lives in the manifest.
-MANIFEST_COLUMN_KEYS = {TASK_TABLE: "task_columns", EVENT_TABLE: "event_columns"}
+MANIFEST_COLUMN_KEYS = {
+    TASK_TABLE: "task_columns",
+    EVENT_TABLE: "event_columns",
+    CHAT_TABLE: "chat_columns",
+}
+CHAT_KEYS = ("chat_id", "last_launched")
 COPY_BUFFER = 1 << 20
 INSERT_BATCH = 1000
 
@@ -390,7 +406,10 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
     target holds never has to travel again; when the event count matches
     the span, the target owns an unbroken run of events and only rows
     outside it have to travel, and otherwise the source ships every event
-    of that task so earlier gaps heal.
+    of that task so earlier gaps heal.  When the target has a
+    ``chat_summaries`` table, the manifest also lists each chat with its
+    ``last_launched``, so only chats the target lacks or holds an older
+    row of travel; a target without the table gets no chat rows.
 
     Args:
         path: Target database path.
@@ -407,6 +426,21 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         require_columns(
             event_cols, ("task_id", "seq"), f"{EVENT_TABLE} in the target database"
         )
+        chats: dict[str, Any] | None = None
+        chat_cols: list[str] = []
+        if has_table(conn, "main", CHAT_TABLE):
+            chat_cols = table_columns(conn, "main", CHAT_TABLE)
+            require_columns(chat_cols, CHAT_KEYS, f"{CHAT_TABLE} in the target database")
+            # SQLite's own CAST reads the stamp, as the extract and merge
+            # phases do, so an odd value means the same thing everywhere.
+            chats = {
+                str(chat_id): launched
+                for chat_id, launched in conn.execute(
+                    'SELECT "chat_id", COALESCE(CAST("last_launched" AS INTEGER), 0)'
+                    f" FROM main.{quote_name(CHAT_TABLE)}"
+                    ' WHERE "chat_id" IS NOT NULL'
+                )
+            }
         tasks = [
             str(row[0])
             for row in conn.execute(
@@ -424,15 +458,25 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         }
     finally:
         conn.close()
-    write_json_gz(
-        {
-            MANIFEST_COLUMN_KEYS[TASK_TABLE]: sorted(task_cols),
-            MANIFEST_COLUMN_KEYS[EVENT_TABLE]: sorted(event_cols),
-            "tasks": tasks,
-            "events": events,
-        },
-        out,
-    )
+    manifest: dict[str, Any] = {
+        MANIFEST_COLUMN_KEYS[TASK_TABLE]: sorted(task_cols),
+        MANIFEST_COLUMN_KEYS[EVENT_TABLE]: sorted(event_cols),
+        "tasks": tasks,
+        "events": events,
+    }
+    if chats is not None:
+        manifest[MANIFEST_COLUMN_KEYS[CHAT_TABLE]] = sorted(chat_cols)
+        manifest["chats"] = chats
+    write_json_gz(manifest, out)
+
+
+def has_table(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    """Report whether *table* exists in the *schema* database of *conn*."""
+    row = conn.execute(
+        f"SELECT 1 FROM {quote_name(schema)}.sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 # --------------------------------------------------------------------------
@@ -463,12 +507,13 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
             conn.execute("ATTACH DATABASE ? AS src", (source,))
             _create_delta_tables(conn)
             for table, key in MANIFEST_COLUMN_KEYS.items():
-                if manifest.get(key):
+                if manifest.get(key) and has_table(conn, "src", table):
                     compare_columns(
                         table_columns(conn, "src", table), list(manifest[key]), table
                     )
             _extract_tasks(conn, manifest)
             _extract_events(conn, manifest)
+            _extract_chats(conn, manifest)
             conn.execute("DETACH DATABASE src")
         finally:
             conn.close()
@@ -478,21 +523,23 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
 
 
 def _create_delta_tables(conn: sqlite3.Connection) -> None:
-    """Recreate the source's task and event tables inside the delta db.
+    """Recreate the source's task, event and (when it has one) chat tables in the delta db.
 
     Args:
         conn: Connection to the delta database with the source attached
             as ``src``.
 
     Raises:
-        SyncError: If the source lacks one of the two tables.
+        SyncError: If the source lacks the task or the event table.
     """
-    for table in (TASK_TABLE, EVENT_TABLE):
+    for table in (TASK_TABLE, EVENT_TABLE, CHAT_TABLE):
         row = conn.execute(
             "SELECT sql FROM src.sqlite_master WHERE type='table' AND name=?",
             (table,),
         ).fetchone()
         if not row or not row[0]:
+            if table == CHAT_TABLE:
+                continue  # a database from before chat summaries existed
             raise SyncError(f"table {table!r} is missing from the source database")
         conn.execute(row[0])
 
@@ -580,6 +627,43 @@ def _extract_events(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
     _warn_on_duplicate_event_keys(conn)
 
 
+def _extract_chats(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
+    """Copy the chat summaries the target lacks or holds an older copy of into the delta.
+
+    A chat travels when the target reported no row for it or a row with
+    a smaller ``last_launched`` (compared as SQLite casts it to an
+    integer, the merge's rule too).  Nothing travels when the source has
+    no ``chat_summaries`` table, or when the target reported none (an
+    older schema that could not store the rows) -- except on a ``--full``
+    sync, whose empty manifest ships every source row and leaves it to
+    the merge to skip a target without the table.
+
+    Args:
+        conn: Connection to the delta database with the source attached.
+        manifest: Target manifest; empty for a ``--full`` sync.
+    """
+    if not has_table(conn, "src", CHAT_TABLE) or (manifest and "chats" not in manifest):
+        return
+    columns = table_columns(conn, "src", CHAT_TABLE)
+    require_columns(columns, CHAT_KEYS, f"{CHAT_TABLE} in the source database")
+    have: dict[str, Any] = manifest.get("chats") or {}
+    conn.execute('CREATE TABLE main."_sync_chats" (chat_id TEXT PRIMARY KEY, launched INTEGER)')
+    conn.executemany(
+        'INSERT OR REPLACE INTO main."_sync_chats" VALUES (?, ?)',
+        [(chat_id, int(launched or 0)) for chat_id, launched in have.items()],
+    )
+    table = quote_name(CHAT_TABLE)
+    names = ", ".join(quote_name(c) for c in columns)
+    conn.execute(
+        f"INSERT INTO main.{table} ({names})"
+        f" SELECT {', '.join('s.' + quote_name(c) for c in columns)} FROM src.{table} s"
+        ' LEFT JOIN main."_sync_chats" w ON w.chat_id = s."chat_id"'
+        ' WHERE s."chat_id" IS NOT NULL AND (w.chat_id IS NULL'
+        ' OR COALESCE(CAST(s."last_launched" AS INTEGER), 0) > w.launched)'
+    )
+    conn.execute('DROP TABLE main."_sync_chats"')
+
+
 def _create_watermark_table(
     conn: sqlite3.Connection, watermarks: dict[str, Any]
 ) -> None:
@@ -660,7 +744,8 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, i
             reports exactly what a real run would do.
 
     Returns:
-        Counts of the task rows and event rows inserted.
+        Counts of the task rows and event rows inserted and of the chat
+        summary rows inserted or replaced.
     """
     conn = open_db(target_path)
     try:
@@ -675,6 +760,7 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, i
         try:
             tasks_inserted = _merge_tasks(conn)
             events_inserted = _merge_events(conn)
+            chats_refreshed = _merge_chats(conn)
             conn.execute("COMMIT" if commit else "ROLLBACK")
         except BaseException as exc:
             conn.execute("ROLLBACK")
@@ -690,6 +776,7 @@ def _apply_delta(target_path: str, delta_path: str, commit: bool) -> dict[str, i
     return {
         "tasks_inserted": tasks_inserted,
         "events_inserted": events_inserted,
+        "chats_refreshed": chats_refreshed,
     }
 
 
@@ -755,6 +842,52 @@ def _merge_events(conn: sqlite3.Connection) -> int:
             ' WHERE t."task_id" = d."task_id" AND t."seq" = d."seq")'
         )
     return conn.execute(sql).rowcount
+
+
+def _merge_chats(conn: sqlite3.Connection) -> int:
+    """Refresh the target's chat summaries from the delta's.
+
+    A chat the target lacks is inserted; a chat whose delta row has the
+    larger ``last_launched`` replaces the target's row (that copy was
+    computed from more of the chat's tasks); every other target row is
+    left alone.  Nothing happens when either database lacks the table.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``.
+
+    Returns:
+        The number of chat rows inserted or replaced.
+    """
+    if not has_table(conn, "delta", CHAT_TABLE) or not has_table(conn, "main", CHAT_TABLE):
+        return 0
+    columns = table_columns(conn, "main", CHAT_TABLE)
+    require_columns(columns, CHAT_KEYS, f"{CHAT_TABLE} in the target database")
+    compare_columns(table_columns(conn, "delta", CHAT_TABLE), columns, CHAT_TABLE)
+    table = quote_name(CHAT_TABLE)
+    # Correlated on the fully qualified target column rather than a table
+    # alias, which ``UPDATE`` only accepts from SQLite 3.33 on.  The stamps
+    # are compared as integers (an unusable one counts as 0, as in the
+    # extract phase); a bare comparison would rank any text above every number.
+    same_chat = f'd."chat_id" = main.{table}."chat_id"'
+    assignments = ", ".join(
+        f"{quote_name(c)} = (SELECT d.{quote_name(c)} FROM delta.{table} d WHERE {same_chat})"
+        for c in columns
+        if c != "chat_id"
+    )
+    replaced = conn.execute(
+        f"UPDATE main.{table} SET {assignments}"
+        f" WHERE EXISTS (SELECT 1 FROM delta.{table} d WHERE {same_chat}"
+        ' AND COALESCE(CAST(d."last_launched" AS INTEGER), 0)'
+        f' > COALESCE(CAST(main.{table}."last_launched" AS INTEGER), 0))'
+    ).rowcount
+    names = ", ".join(quote_name(c) for c in columns)
+    inserted = conn.execute(
+        f"INSERT INTO main.{table} ({names})"
+        f" SELECT {', '.join('d.' + quote_name(c) for c in columns)} FROM delta.{table} d"
+        ' WHERE d."chat_id" IS NOT NULL AND NOT EXISTS'
+        f' (SELECT 1 FROM main.{table} m WHERE m."chat_id" = d."chat_id")'
+    ).rowcount
+    return max(replaced, 0) + max(inserted, 0)
 
 
 def _has_unique_event_key(conn: sqlite3.Connection) -> bool:
@@ -960,7 +1093,7 @@ def synchronize(
     full: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Copy task and event rows from a source database into a target.
+    """Copy task and event rows, and newer chat summaries, from a source database into a target.
 
     Args:
         source: Database rows are read from; never modified.
@@ -1035,15 +1168,18 @@ def format_stats(source: Location, target: Location, stats: dict[str, Any]) -> s
     Returns:
         A single summary line.
     """
+    chats = stats.get("chats_refreshed", 0)
     if stats["dry_run"]:
         applied = (
             f"would add {stats['tasks_inserted']} task row(s)"
             f" and {stats['events_inserted']} event row(s)"
+            f" and refresh {chats} chat summary row(s)"
         )
     else:
         applied = (
             f"{stats['tasks_inserted']} task row(s) added,"
-            f" {stats['events_inserted']} event row(s) added"
+            f" {stats['events_inserted']} event row(s) added,"
+            f" {chats} chat summary row(s) refreshed"
         )
     return (
         f"{source} -> {target}: {applied}"
@@ -1061,7 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sync_db",
         description=(
-            "One-way sync of the task_history and events tables of "
+            "One-way sync of the task_history, events and chat_summaries tables of "
             "sorcar.db-shaped SQLite databases. SOURCE and TARGET are "
             "unix paths, optionally prefixed with user@host: for a "
             "database reachable over ssh."

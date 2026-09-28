@@ -184,6 +184,11 @@ class ChatSorcarAgent(SorcarAgent):
         self._chat_id: str = ""
         self._context_task_id: str = ""
         self._subagent_info: dict[str, object] | None = None
+        # File stem of the SEA (agent script, wire field ``agentPath``)
+        # this run executes on behalf of, e.g. ``write_paper_sea`` or
+        # ``cron_agent``; set by the task runner and persisted in the
+        # ``task_history.sea`` column.  Empty for a plain run.
+        self.sea_name: str = ""
         # Frontend tab this agent's events belong to.  The fan-out
         # engine assigns each sub-agent its own synthetic tab id, so
         # the attribute lives here rather than on the worktree
@@ -220,6 +225,22 @@ class ChatSorcarAgent(SorcarAgent):
         """
         with self._task_id_lock:
             return self._last_task_id or ""
+
+    @property
+    def last_user_prompt(self) -> str:
+        """Return the task text of this agent's current (or last) :meth:`run`.
+
+        The text as submitted — what the user typed, or the ``task`` a
+        ``run_agent`` dispatch passed — before the chat history, the
+        bare-path directive or ``SORCAR.md`` are added to the prompt the
+        model sees.  A SEA's tool reads it through
+        :func:`kiss.server.agent_state.current_agent` to parse options
+        out of its own task (rsi7d's scope).
+
+        Returns:
+            The text, or ``""`` before this agent's first ``run``.
+        """
+        return self._last_user_prompt
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear').
@@ -333,6 +354,8 @@ class ChatSorcarAgent(SorcarAgent):
             payload["max_budget"] = max_budget
         if self._subagent_info is not None:
             payload["subagent"] = self._subagent_info
+        if self.sea_name:
+            payload["sea"] = self.sea_name
         return payload
 
     def _system_prompt_task_settings(self) -> dict[str, str]:

@@ -39,12 +39,12 @@ from kiss.agents.third_party_agents._device_auth import (
     consent_instructions,
 )
 from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
-from kiss.agents.third_party_agents.github_sea import GitHubAgent
-from kiss.agents.third_party_agents.github_sea import _config as gh_config
-from kiss.agents.third_party_agents.matrix_sea import MatrixAgent, MatrixChannelBackend
-from kiss.agents.third_party_agents.matrix_sea import _config as mx_config
-from kiss.agents.third_party_agents.msteams_sea import MSTeamsAgent
-from kiss.agents.third_party_agents.msteams_sea import _config as ms_config
+from kiss.agents.third_party_agents.github.github_sea import GitHubAgent
+from kiss.agents.third_party_agents.github.github_sea import _config as gh_config
+from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixAgent, MatrixChannelBackend
+from kiss.agents.third_party_agents.matrix.matrix_sea import _config as mx_config
+from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent
+from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.muse_auth._common import muse_auth_dir
 from kiss.agents.third_party_agents.muse_auth.client import (
     MuseAuthError,
@@ -53,12 +53,12 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.nextcloud_sea import NextcloudTalkAgent
-from kiss.agents.third_party_agents.nextcloud_sea import _config as nc_config
-from kiss.agents.third_party_agents.signal_sea import SignalAgent, SignalLinkSession
-from kiss.agents.third_party_agents.signal_sea import _config as sg_config
-from kiss.agents.third_party_agents.twitch_sea import TwitchAgent
-from kiss.agents.third_party_agents.twitch_sea import _config as tw_config
+from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkAgent
+from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import _config as nc_config
+from kiss.agents.third_party_agents.signal.signal_sea import SignalAgent, SignalLinkSession
+from kiss.agents.third_party_agents.signal.signal_sea import _config as sg_config
+from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
+from kiss.agents.third_party_agents.twitch.twitch_sea import _config as tw_config
 from kiss.core.brand import PRODUCT_NAME
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
@@ -2072,7 +2072,7 @@ def test_signal_link_flow_renders_qr_and_records_linked_account(
     assert "Linked devices" in started["instructions"]
     assert "PIN" in started["instructions"] and "verification code" in started["instructions"]
     # The QR decodes back to the URI (module matrix round trip).
-    from kiss.agents.third_party_agents.signal_sea import _qr_rows, _qr_text
+    from kiss.agents.third_party_agents.signal.signal_sea import _qr_rows, _qr_text
 
     assert _qr_text(_qr_rows(uri)) == qr_text
     assert not sg_config.path.exists()

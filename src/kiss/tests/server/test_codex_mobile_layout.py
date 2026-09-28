@@ -24,9 +24,10 @@ def _build_html() -> str:
 
 
 def test_body_keeps_remote_chat_class() -> None:
-    """The remote page body keeps the remote-chat scoping class."""
+    """The remote page body keeps the remote-chat scoping class (and the
+    default light theme)."""
     html = _build_html()
-    assert '<body class="remote-chat">' in html
+    assert '<body class="remote-chat light-theme">' in html
 
 
 def test_built_html_links_codex_stylesheet_cache_busted() -> None:
