@@ -1123,6 +1123,39 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
         f"Edit {prepared['clone']}/docs/paper.tex and {prepared['clone']}/notes.md"
     )
 
+    # A work dir reached through a symlink (macOS tempdirs live under /var ->
+    # /private/var): git reports the real tree, the task text names the link.
+    (repo / "docs").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(repo, target_is_directory=True)
+    linked = _persist(
+        f"Edit {link}/docs/paper.tex, {link}/notes.md and "
+        f"{link}/.kiss-worktrees/kiss_wt-old/notes.md",
+        [], work_dir=str(link / "docs"), sea="demo_sea", startTs=future,
+    )
+    prepared = sea.prepare_replay_clone(linked)
+    assert isinstance(prepared, dict), prepared
+    assert prepared["task"] == (
+        f"Edit {prepared['clone']}/docs/paper.tex, {prepared['clone']}/notes.md and "
+        f"{prepared['clone']}/notes.md"
+    )
+    assert prepared["work_dir"] == f"{prepared['clone']}/docs"
+
+    # A symlink INTO the tree names only its own directory of the clone; the
+    # link's parent is not part of the checkout and stays as it is.
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(repo / "docs", target_is_directory=True)
+    into = _persist(
+        f"Edit {docs_link}/paper.tex; see {tmp_path}/reference.md",
+        [], work_dir=str(docs_link), sea="demo_sea", startTs=future,
+    )
+    prepared = sea.prepare_replay_clone(into)
+    assert isinstance(prepared, dict), prepared
+    assert prepared["task"] == (
+        f"Edit {prepared['clone']}/docs/paper.tex; see {tmp_path}/reference.md"
+    )
+    assert prepared["work_dir"] == f"{prepared['clone']}/docs"
+
     rooted = tmp_path / "rooted"
     rooted.mkdir()
     run_git(rooted, "init", "-q")
