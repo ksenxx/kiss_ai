@@ -4,12 +4,17 @@
 # add your name here
 """Slash-command registry for Sorcar Extension Agents (SEAs).
 
-Every ``*_sea.py`` script visible to the daemon is exposed as a chat
-command named ``/<stem>`` (stem = filename minus ``_sea.py``).  When a
-user submits a prompt that starts with ``/xxx`` — optionally followed
-by whitespace and free-form text — the daemon rewrites the prompt so
-the agent immediately calls ``run_agent`` with the absolute path of
-the resolved ``xxx_sea.py`` and the trailing text as the sub-task.
+A SEA named ``xxx`` is a folder ``xxx/`` that contains the script
+``xxx_sea.py`` plus whatever helper modules and data files the SEA
+needs.  Every such folder visible to the daemon is exposed as a chat
+command named after the folder: ``/xxx``.  When a user submits a
+prompt that starts with ``/xxx`` — optionally followed by whitespace
+and free-form text — the daemon rewrites the prompt so the agent
+immediately calls ``run_agent`` with the absolute path of the resolved
+``xxx/xxx_sea.py`` and the trailing text as the sub-task.  The special
+prompt ``/xxx help`` does not run the SEA: the daemon answers with the
+return value of the script's mandatory ``description()`` function (see
+:func:`help_text_if_command`).
 
 The registry is built from three sources, in decreasing precedence:
 
@@ -29,8 +34,17 @@ The registry is built from three sources, in decreasing precedence:
 The registry is refreshed lazily on every lookup and, in the daemon,
 proactively by a background polling watcher (see
 :func:`start_registry_watcher`) so edits to ``SEAS.md`` — or the
-appearance/removal of ``*_sea.py`` files in any of its folders — take
+appearance/removal of SEA folders in any of its folders — take
 effect while the daemon is running.
+
+A registered SEA whose script defines ``register_as_model()`` returning
+``True`` is also a *model-picker entry*: :func:`model_seas` lists such
+SEAs under their command names and the daemon offers them in the model
+picker next to the real models.  Picking one runs every task of the tab
+through the SEA (on the model its ``model()`` getter names, else the
+default model), with the model routing protocol its
+``add_to_system_prompt()`` getter returns added to the system prompt
+(see :mod:`kiss.server.agent_file`).
 
 Locking: two module locks, always acquired in the order
 ``_notify_lock`` -> ``_lock``.  ``_lock`` guards the registry and the
@@ -53,6 +67,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from kiss.core.config import kiss_home
 
@@ -100,6 +115,11 @@ _subscribers: list[Callable[[list[str]], None]] = []
 # rescans so the daemon does not spam clients with unchanged lists.
 _last_broadcast: tuple[str, ...] = ()
 
+# ``register_as_model()`` verdict per SEA script, keyed by path and
+# stamped with the file's (mtime_ns, size, inode) so an edited or
+# replaced script is re-read.  Guarded by ``_lock``.
+_model_sea_cache: dict[Path, tuple[tuple[int, int, int], bool]] = {}
+
 # Watcher-thread coordination.
 _watcher_thread: threading.Thread | None = None
 _watcher_stop = threading.Event()
@@ -143,44 +163,59 @@ def _seas_dir() -> Path | None:
     return _package_dir("kiss.agents.seas")
 
 
+def sea_script_in(sea_dir: Path) -> Path:
+    """Return the path of the SEA script that *sea_dir* must contain.
+
+    Under the folder convention a SEA named ``xxx`` lives in a folder
+    ``xxx/`` together with its helper modules and data files, and its
+    entry script is ``xxx/xxx_sea.py``.
+
+    Args:
+        sea_dir: The SEA's folder; its name is the command name.
+
+    Returns:
+        ``sea_dir / "<folder name>_sea.py"`` (not checked for existence).
+    """
+    return sea_dir / f"{sea_dir.name}{_SEA_SUFFIX}"
+
+
 def _scan_folder(folder: Path) -> dict[str, Path]:
     """Return ``{command_name: absolute_path}`` for every SEA in *folder*.
 
-    Silently skips folders that are missing, unreadable, or not a
-    directory: a stale ``SEAS.md`` entry must not break the daemon.
+    A SEA is a sub-folder ``xxx/`` of *folder* that contains the script
+    ``xxx_sea.py`` (see :func:`sea_script_in`); the sub-folder's name is
+    the command name.  Loose ``*_sea.py`` files directly inside
+    *folder* are NOT commands.  Silently skips folders that are
+    missing, unreadable, or not a directory: a stale ``SEAS.md`` entry
+    must not break the daemon.
 
     Args:
         folder: The directory to scan.
 
     Returns:
-        Mapping from command name (filename minus ``_sea.py``) to the
-        absolute, resolved SEA-script path.  An underscore-prefixed
-        stem is a valid command (``_helper_sea.py`` becomes
-        ``/_helper``); only stems outside ``[A-Za-z0-9_-]`` are
-        skipped.
+        Mapping from command name (sub-folder name) to the absolute,
+        resolved SEA-script path.  An underscore-prefixed folder is a
+        valid command (``_helper/_helper_sea.py`` becomes ``/_helper``);
+        only names outside ``[A-Za-z0-9_-]`` are skipped.
     """
     out: dict[str, Path] = {}
     try:
         entries = list(folder.iterdir())
     except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
         return out
-    for path in entries:
-        name = path.name
-        if not name.endswith(_SEA_SUFFIX):
+    for sea_dir in entries:
+        command = sea_dir.name
+        # Reject folder names that would produce a command name outside
+        # the ``[A-Za-z0-9_-]`` alphabet the parser and the autocomplete
+        # accept — ``foo.bar/`` and ``space name/`` are silently skipped
+        # rather than surfacing as commands that cannot be typed.
+        if not _COMMAND_NAME_RE.match(command):
             continue
+        path = sea_script_in(sea_dir)
         try:
             if not path.is_file():
                 continue
         except OSError:
-            continue
-        stem = name[: -len(".py")]
-        command = stem[: -len("_sea")]
-        # Reject stems that would produce a command name outside the
-        # ``[A-Za-z0-9_-]`` alphabet the parser and the autocomplete
-        # accept — ``foo.bar_sea.py`` and ``space name_sea.py`` are
-        # silently skipped rather than surfacing as commands that
-        # cannot be typed.
-        if not command or not _COMMAND_NAME_RE.match(command):
             continue
         try:
             out[command] = path.resolve()
@@ -414,7 +449,11 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
     SEAs concurrently, and two same-stem files (or two loads of one
     file) sharing a name would overwrite each other's entry mid-use.
     The entry is removed when the ``with`` block ends, so a long-lived
-    daemon does not accumulate one module per relay.
+    daemon does not accumulate one module per relay.  The source is
+    compiled and executed directly — no ``__pycache__`` bytecode is read
+    or written — so an edit that keeps the file's size and whole-second
+    mtime (the bytecode cache's staleness key) is still seen, exactly as
+    the daemon's agent-file loader (``kiss.server.tools_file``) behaves.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
@@ -423,12 +462,13 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
         The freshly executed module, registered for the block's duration.
     """
     name = f"_kiss_sea_{sea_path.stem}_{uuid.uuid4().hex}"
-    spec = importlib.util.spec_from_file_location(name, sea_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
+    module = ModuleType(name)
+    module.__file__ = str(sea_path)
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        source = sea_path.read_text(encoding="utf-8")
+        code = compile(source, str(sea_path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102 — the SEA script is the user's own code
         yield module
     finally:
         sys.modules.pop(name, None)
@@ -444,6 +484,96 @@ class SeaScriptError(RuntimeError):
     requested stop that landed inside the import stays recognisable
     through the cause chain (``task_runner._stop_interrupt_wrapped``).
     """
+
+
+def sea_getter_value(sea_path: Path, getter: str, *args: Any) -> Any:
+    """Return ``getter(*args)`` of the SEA at *sea_path*, or ``None`` when it defines none.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+        getter: Name of the getter, e.g. ``"model"``.
+        args: Positional arguments of the getter; the run-parameter
+            getters take none, the ``on_picked_as_model(work_dir)`` hook
+            takes the run's work directory.
+
+    Returns:
+        The getter's return value when the script defines a callable
+        *getter*, else ``None``.
+
+    Raises:
+        SeaScriptError: When the script fails to import or *getter*
+            raises (whatever it raises).
+    """
+    try:
+        with _load_sea_module(sea_path) as module:
+            fn = getattr(module, getter, None)
+            return fn(*args) if callable(fn) else None
+    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        raise SeaScriptError(
+            f"SEA {sea_path} failed while evaluating {getter}(): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+
+PICKED_HOOK_TIMEOUT_SECONDS = 15.0
+"""How long :func:`run_picked_hook` waits for ``on_picked_as_model()`` before moving on."""
+
+def _log_picked_hook(model: str, work_dir: str) -> None:
+    """Run ``on_picked_as_model(work_dir)`` of the SEA picked as *model*; log note or failure."""
+    sea_path = model_sea(model)
+    if sea_path is None:
+        return
+    try:
+        note = sea_getter_value(sea_path, "on_picked_as_model", work_dir)
+    except SeaScriptError:
+        logger.warning("SEA %s: on_picked_as_model() failed", model, exc_info=True)
+        return
+    if note:
+        logger.info("SEA %s picked as model: %s", model, note)
+
+
+def run_picked_hook(model: str, work_dir: str, wait: bool = True) -> None:
+    """Run the picked SEA's ``on_picked_as_model(work_dir)`` hook, when it defines one, on a thread.
+
+    The hook is a model-picker SEA's chance to act on being chosen as a
+    tab's model — ``autorouter`` makes sure its weekly ``/rsi7d autorouter``
+    cron job is scheduled.  The daemon calls it when the user picks the SEA
+    (``selectModel``) and once per run whose model is the SEA.  The thread
+    resolves *model* through the registry (which may import a changed SEA)
+    and runs the hook.  Hooks from concurrent picks may overlap: a SEA
+    file is executed afresh on every call and cannot hold a lock of its
+    own, so a hook that must not race gets its atomicity from what it
+    calls (``cron_job("ensure")`` for autorouter).  Whatever the hook
+    returns is logged; a hook that raises is logged and never fails the
+    caller, one that blocks is abandoned on its daemon thread after
+    :data:`PICKED_HOOK_TIMEOUT_SECONDS`, and a thread that cannot start is
+    logged too, because the task the user typed does not depend on it.
+
+    Args:
+        model: The picked model name, a SEA command name
+            (:func:`model_sea` maps it to the file; a real model name runs nothing).
+        work_dir: The tab's or run's work directory, passed to the hook.
+        wait: Block up to :data:`PICKED_HOOK_TIMEOUT_SECONDS` for the hook
+            (a run wants its side effects in place before it starts);
+            ``False`` returns at once (the picker handler must not stall
+            the daemon's command loop).
+    """
+    thread = threading.Thread(
+        target=_log_picked_hook, args=(model, work_dir), name="sea-picked-hook", daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:  # the process is out of threads
+        logger.warning("SEA %s: on_picked_as_model() not run", model, exc_info=True)
+        return
+    if not wait:
+        return
+    thread.join(PICKED_HOOK_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        logger.warning(
+            "SEA %s: on_picked_as_model() still running after %.0f s; going on without it",
+            model, PICKED_HOOK_TIMEOUT_SECONDS,
+        )
 
 
 def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
@@ -471,15 +601,168 @@ def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
             raises (whatever it raises), so the relay fails with the
             diagnostic instead of running against a broken SEA.
     """
+    return sea_getter_value(sea_path, getter) is False
+
+
+def _registers_as_model(sea_path: Path) -> bool:
+    """Return whether the SEA at *sea_path* defines ``register_as_model()`` returning ``True``.
+
+    The verdict is cached per file stamp (mtime, size, inode), so both an
+    edit and an atomic replacement are re-read.  Only a script whose
+    source mentions ``register_as_model`` is imported: importing every
+    registered SEA (channel agents with heavy dependencies among them)
+    on each picker refresh would be slow for nothing.  A script that
+    cannot be read, fails to import or whose getter raises is logged and
+    treated as not registered, so one broken SEA cannot break the model
+    picker.
+    """
+    try:
+        st = sea_path.stat()
+        stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+        with _lock:
+            cached = _model_sea_cache.get(sea_path)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        source = sea_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.warning("SEA %s: cannot be read", sea_path, exc_info=True)
+        return False
+    verdict = False
+    if "register_as_model" in source:
+        try:
+            verdict = sea_getter_value(sea_path, "register_as_model") is True
+        except SeaScriptError:
+            logger.warning("SEA %s: register_as_model() failed", sea_path, exc_info=True)
+    with _lock:
+        _model_sea_cache[sea_path] = (stamp, verdict)
+    return verdict
+
+
+def model_seas() -> dict[str, Path]:
+    """Return the registered SEAs that are model-picker entries, by command name.
+
+    A SEA is a model-picker entry when its script defines
+    ``register_as_model()`` returning ``True``.  The daemon offers each
+    entry in the model picker under its command name; a task run with
+    such a pick goes through the SEA (``task_runner._resolve_sea_model``).
+
+    Returns:
+        ``{command_name: absolute_sea_path}``, sorted by name.
+    """
+    list_commands()  # populate the registry on a cold start
+    with _lock:
+        entries = sorted(_registry.items())
+    return {name: path for name, path in entries if _registers_as_model(path)}
+
+
+def model_sea(name: str) -> Path | None:
+    """Return the script of the model-picker SEA *name*, or ``None``.
+
+    A *name* that is no registered command (every real model name)
+    costs one :func:`get_command` lookup — a folder rescan on the miss,
+    as for an unknown slash command — and touches no script, so the
+    task runner can ask this for every run's model and a SEA installed
+    after the registry was built is still found.
+
+    Args:
+        name: The model-picker value, e.g. ``"autorouter"`` or
+            ``"gpt-6-astra"``.
+
+    Returns:
+        The absolute SEA path when *name* is a registered command whose
+        ``register_as_model()`` returns ``True``, else ``None``.
+    """
+    path = get_command(name) if name else None
+    if path is None or not _registers_as_model(path):
+        return None
+    return path
+
+
+def sea_description(sea_path: Path) -> str:
+    """Return the ``description()`` text of the SEA at *sea_path*.
+
+    Every SEA must define a zero-argument ``description()`` returning
+    one sentence that says what the SEA does and how to use it; this
+    is the text ``/xxx help`` shows the user.
+
+    Args:
+        sea_path: Absolute path of the SEA ``.py`` file.
+
+    Returns:
+        The stripped, non-empty string ``description()`` returned.
+
+    Raises:
+        SeaScriptError: When the script fails to import, does not define
+            a callable ``description``, ``description()`` raises, or it
+            returns anything but a non-empty string.
+    """
     try:
         with _load_sea_module(sea_path) as module:
-            fn = getattr(module, getter, None)
-            return callable(fn) and fn() is False
+            fn = getattr(module, "description", None)
+            if not callable(fn):
+                raise TypeError("description must be a zero-argument function")
+            text = fn()
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
-            f"SEA {sea_path} failed while evaluating {getter}(): "
+            f"SEA {sea_path} failed while evaluating description(): "
             f"{type(exc).__name__}: {exc}"
         ) from exc
+    if not isinstance(text, str) or not text.strip():
+        raise SeaScriptError(
+            f"SEA {sea_path}: description() must return a non-empty "
+            f"string, got {type(text).__name__}"
+        )
+    return text.strip()
+
+
+def help_text_if_command(prompt: str) -> str | None:
+    """Return the SEA description when *prompt* is ``/xxx help``.
+
+    ``help`` (case-insensitive, nothing after it) is the one sub-task
+    every command reserves: instead of relaying it to the SEA, the
+    daemon answers with the return value of the SEA's ``description()``.
+
+    Args:
+        prompt: The raw user prompt (as submitted by the client).
+
+    Returns:
+        The description text when *prompt* is ``/xxx help`` for a
+        registered command ``xxx``, else ``None``.
+
+    Raises:
+        SeaScriptError: Propagated from :func:`sea_description` when the
+            SEA is broken or lacks ``description()``.
+    """
+    if not isinstance(prompt, str):
+        return None
+    parsed = _split_slash_command(prompt)
+    if parsed is None or parsed[1].lower() != "help":
+        return None
+    sea_path = get_command(parsed[0])
+    if sea_path is None:
+        return None
+    return sea_description(sea_path)
+
+
+def _timeout_argument_line(sea_path: Path) -> str:
+    """Return the ``timeout`` argument line of a ``/xxx`` directive, or ``""``.
+
+    ``run_agent`` waits :data:`~kiss.agents.sorcar.agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS`
+    (300 s) for a sub-task and stops it afterwards, which kills any SEA
+    that works for longer (a paper writer, a multi-round loop).  An SEA
+    that needs more declares ``dispatch_timeout()`` returning the
+    seconds; the relay then passes ``timeout`` explicitly.  A missing
+    getter, a non-positive value or a broken script yield no line, so
+    the directive of every other SEA is unchanged (a broken script
+    fails at dispatch, as before).
+    """
+    try:
+        seconds = sea_getter_value(sea_path, "dispatch_timeout")
+    except SeaScriptError:
+        return ""
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    return f'  timeout = "{seconds:g}"\n'
 
 
 def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
@@ -489,7 +772,9 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     ``(rewritten_prompt, sea_path)`` where ``rewritten_prompt``
     instructs the calling agent to invoke the ``run_agent`` tool
     immediately with the SEA's absolute path and the user's trailing
-    text as the sub-task.  Returns ``None`` when the prompt does not
+    text as the sub-task (plus ``timeout`` when the SEA defines
+    ``dispatch_timeout()``; see :func:`_timeout_argument_line`).
+    Returns ``None`` when the prompt does not
     begin with a slash command, when the command is unknown, or when
     the trailing text is empty (an empty ``run_agent`` task would be
     rejected downstream).
@@ -513,6 +798,7 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     if sea_path is None:
         return None
     abs_path = str(sea_path)
+    append_to_prompt = None
     if command == "ask":
         # ``/ask <question>`` is a fixed side-channel Q&A over the
         # calling task's persisted events: ``append_to_prompt`` must
@@ -524,9 +810,13 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         # ``ask_sea.py`` and read from the resolved SEA file itself;
         # the system-prompt suffix is not repeated in the directive
         # because the SEA's ``append_to_system_prompt()`` getter
-        # overrides the wire value daemon-side anyway.
+        # overrides the wire value daemon-side anyway.  The bundled
+        # ``seas/ask`` has the lowest registry precedence, so a
+        # ``SEAS.md`` folder may resolve ``/ask`` to a user SEA; one
+        # without ``APPEND_TO_PROMPT`` gets the ordinary rewrite below.
         with _load_sea_module(sea_path) as module:
-            append_to_prompt = module.APPEND_TO_PROMPT
+            append_to_prompt = getattr(module, "APPEND_TO_PROMPT", None)
+    if append_to_prompt is not None:
         rewritten = (
             f"The user invoked the slash command /ask.  Call the "
             f"run_agent tool IMMEDIATELY, as your very first action, "
@@ -550,6 +840,7 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
         f"these arguments and no others:\n"
         f'  agent = "{abs_path}"\n'
         f"  task  = the text below, verbatim\n"
+        f"{_timeout_argument_line(sea_path)}"
         f"Do not explore any source code, do not paraphrase the task, "
         f"and do not call any other tool first.  When run_agent "
         f"returns, relay its result to the user.\n\n"
@@ -639,4 +930,5 @@ def _reset_for_tests() -> None:
     with _lock:
         _registry.clear()
         _subscribers.clear()
+        _model_sea_cache.clear()
         _last_broadcast = ()

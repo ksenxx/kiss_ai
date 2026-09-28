@@ -2,14 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Load the fresh-install tips shown by the chat webview.
+"""Load the tips shown by the chat webview.
 
-Python counterpart to ``getTips`` in ``SorcarTab.ts``: parses the
-bundled ``src/kiss/TIPS.md`` into a list of markdown tip strings, one
-per ``# Tip`` section.  The remote webapp builder
-(``web_server._build_html``) injects the list as ``window.__TIPS__``
-so the shared ``media/chat.html`` template never contains an
-unsubstituted ``{{TIPS_JSON}}`` placeholder.
+Python counterpart to ``getTips`` / ``tipsDisabled`` in
+``SorcarTab.ts``: parses the bundled ``src/kiss/TIPS.md`` into a list
+of markdown tip strings, one per ``# Tip`` section, and reads the
+"don't show tips again" marker shared with the extension.  The remote
+webapp builder (``web_server._build_html``) injects both as
+``window.__TIPS__`` so the shared ``media/chat.html`` template never
+contains an unsubstituted ``{{TIPS_JSON}}`` placeholder.
 
 The file path can be overridden via the ``KISS_TIPS_PATH`` environment
 variable, which the test suite uses to pin deterministic tips.
@@ -22,8 +23,22 @@ import re
 from pathlib import Path
 
 from kiss.core.brand import render_brand
+from kiss.core.config import kiss_home
 
 _TIP_DELIMITER = re.compile(r"^# Tip.*$", re.MULTILINE)
+
+TIPS_OPT_OUT_MARKER = "TIPS_DISABLED"
+"""Basename, under ``$KISS_HOME``, of the "don't show tips again" marker."""
+
+
+def tips_disabled() -> bool:
+    """Whether the user opted out of the tips window on any surface.
+
+    The marker ``$KISS_HOME/TIPS_DISABLED`` is written by the VS Code
+    extension (``SorcarTab.recordTipsOptOut``) and by the server's
+    ``tips_opt_out`` API alike, so one choice holds everywhere.
+    """
+    return (kiss_home() / TIPS_OPT_OUT_MARKER).exists()
 
 
 def _bundled_tips_path() -> Path:

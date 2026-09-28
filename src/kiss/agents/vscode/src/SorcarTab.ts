@@ -149,32 +149,42 @@ export function clearTipsOptOut(): void {
   fs.rmSync(tipsOptOutPath(), {force: true});
 }
 
+/** `$KISS_HOME/TIPS_SHOWN-<version>`: the popup was opened for `version`. */
+function tipsShownMarker(version: string): string {
+  const safe = version.replace(/[^A-Za-z0-9.]/g, '_') || 'unknown';
+  return path.join(kissHomeDir(), 'TIPS_SHOWN-' + safe);
+}
+
 /**
- * Claim the one-time first-run tips popup.  The popup opens exactly
- * once per `$KISS_HOME`, on the very first run: an extension update
- * never re-opens it (the "what's new" nag was removed), and a persisted
- * opt-out (recordTipsOptOut) keeps it closed for good.
+ * Claim the tips popup for the running version.  The popup opens once
+ * per `$KISS_HOME` for every version: on the first run and again after
+ * each update, so the user sees what changed.  A persisted opt-out
+ * (recordTipsOptOut) keeps it closed for good.
  *
  * @returns true for the single caller that may open the popup.
  */
-export function consumeTipsFirstRun(): boolean {
+export function claimTipsPopup(): boolean {
   if (tipsDisabled()) return false;
-  const marker = path.join(kissHomeDir(), 'TIPS_SHOWN');
+  const marker = tipsShownMarker(getVersion());
   // audit0903-coverage:start
   try {
     fs.mkdirSync(path.dirname(marker), {recursive: true});
     // 'wx' claims the marker atomically.  An existsSync-then-write check
     // raced: two windows activating at once both passed the check before
-    // either wrote, and the one-time tips popup opened in both.  With
-    // 'wx' exactly one writer wins; every other caller (a concurrent
-    // window, a later run, or an unwritable ~/.kiss) lands here in the
-    // catch and stays quiet.
+    // either wrote, and the popup opened in both.  With 'wx' exactly one
+    // writer wins; every other caller (a concurrent window, a later run,
+    // or an unwritable ~/.kiss) lands in the catch and stays quiet.
     fs.writeFileSync(marker, new Date().toISOString() + '\n', {flag: 'wx'});
-    return true;
   } catch {
     return false;
   }
   // audit0903-coverage:end
+  // The pre-2026.10 unversioned `TIPS_SHOWN` is spent: retire it.  The
+  // claims of other versions stay, so two installations of different
+  // versions sharing one home (KISS_PROJECT_PATH override, a bundled
+  // copy) cannot erase each other's claim and reopen the popup.
+  fs.rmSync(path.join(path.dirname(marker), 'TIPS_SHOWN'), {force: true});
+  return true;
 }
 
 export function getNonce(): string {
@@ -345,7 +355,8 @@ export function buildChatHtml(
   const tips = getTips();
   const tipsJson = JSON.stringify({
     tips,
-    show: tips.length > 0 && consumeTipsFirstRun(),
+    show: tips.length > 0 && claimTipsPopup(),
+    version,
   }).replace(/<\//g, '<\\/');
   const mod = process.platform === 'darwin' ? '⌘' : 'Ctrl+';
 

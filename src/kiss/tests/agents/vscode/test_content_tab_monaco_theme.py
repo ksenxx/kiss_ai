@@ -142,15 +142,15 @@ class TestContentTabMonacoTheme:
     """Browser E2E: the editor's colours are the page's Modern palette."""
 
     def test_toggle_recolours_open_editors(self, browser, harness) -> None:
-        """Dark page -> kiss-dark editors in Dark Modern colours; toggling
-        to light recolours every open editor to kiss-light in Light Modern
-        colours, and toggling back restores kiss-dark."""
+        """Light page (the default) -> kiss-light editors in Light Modern
+        colours; toggling to dark recolours every open editor to kiss-dark
+        in Dark Modern colours, and toggling back restores kiss-light."""
         context, page, _sent = _open_page(browser, harness)
         try:
             page.evaluate("() => localStorage.removeItem('kissRemoteTheme')")
             page.reload()
             page.wait_for_selector(".chat-tab", timeout=30000)
-            assert not page.evaluate(
+            assert page.evaluate(
                 "() => document.body.classList.contains('light-theme')",
             )
             _open_editor(page, str(_fresh_file(harness, "theme_a.py")), "lnk-t1")
@@ -162,11 +162,6 @@ class TestContentTabMonacoTheme:
                 f"() => document.querySelectorAll('{_MONACO}').length === 2",
                 timeout=30000,
             )
-            assert _editor_themes(page) == ["vs-dark", "vs-dark"]
-            _assert_editor_matches_palette(
-                page, "rgb(31, 31, 31)", "rgb(38, 79, 120)",
-            )
-            _toggle_theme(page)
             assert _editor_themes(page) == ["vs", "vs"]
             _assert_editor_matches_palette(
                 page, "rgb(255, 255, 255)", "rgb(173, 214, 255)",
@@ -176,26 +171,31 @@ class TestContentTabMonacoTheme:
             _assert_editor_matches_palette(
                 page, "rgb(31, 31, 31)", "rgb(38, 79, 120)",
             )
+            _toggle_theme(page)
+            assert _editor_themes(page) == ["vs", "vs"]
+            _assert_editor_matches_palette(
+                page, "rgb(255, 255, 255)", "rgb(173, 214, 255)",
+            )
         finally:
             context.close()
 
-    def test_editor_opened_under_saved_light_theme_is_light(
+    def test_editor_opened_under_saved_dark_theme_is_dark(
         self, browser, harness,
     ) -> None:
-        """A page reloaded with the light theme saved creates its editor
-        in the Light Modern colours from the start."""
+        """A page reloaded with the dark theme saved creates its editor
+        in the Dark Modern colours from the start."""
         context, page, _sent = _open_page(browser, harness)
         try:
-            page.evaluate("() => localStorage.setItem('kissRemoteTheme', 'light')")
+            page.evaluate("() => localStorage.setItem('kissRemoteTheme', 'dark')")
             page.reload()
             page.wait_for_selector(".chat-tab", timeout=30000)
-            assert page.evaluate(
+            assert not page.evaluate(
                 "() => document.body.classList.contains('light-theme')",
             )
             _open_editor(page, str(_fresh_file(harness, "theme_c.py")), "lnk-t3")
-            assert _editor_themes(page) == ["vs"]
+            assert _editor_themes(page) == ["vs-dark"]
             _assert_editor_matches_palette(
-                page, "rgb(255, 255, 255)", "rgb(173, 214, 255)",
+                page, "rgb(31, 31, 31)", "rgb(38, 79, 120)",
             )
         finally:
             context.close()

@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import daemon_client, sea_commands
-from kiss.agents.third_party_agents import ask_sea
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.commands import _split_ask_command
@@ -214,6 +215,45 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
         "tabId": "tab-1",
         "taskId": "task-abc",
     }]
+
+
+def test_ask_help_answers_with_the_description_without_dispatch() -> None:
+    """``/ask help`` on a live tab is answered with ``ask_sea.description()``.
+
+    Like every ``/xxx help``, it never launches the answering agent:
+    the echo and ONE ``ask_answer`` carrying the bundled ``ask`` SEA's
+    description (stamped with the owner task) are broadcast, and the
+    steering queue stays empty.  ``/ask help me`` is a real question
+    and is dispatched as before.
+    """
+    from kiss.agents.seas.ask import ask_sea
+
+    server, events = _make_server()
+    _register_running_task("task-abc", "tab-1", chat_id="chat-1")
+    calls = _install_dispatch_capture(server)
+    sea_commands.refresh_registry()
+
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": "/ask HELP"})
+
+    st = agent_state.find_by_tab("tab-1")
+    assert st is not None
+    assert st.pending_user_messages == []
+    assert calls == []
+    assert [e for e in events if e.get("type") == "prompt"] == [{
+        "type": "prompt", "text": "/ask HELP", "tabId": "tab-1", "taskId": "task-abc",
+    }]
+    assert [e for e in events if e.get("type") == "ask_answer"] == [{
+        "type": "ask_answer",
+        "question": "HELP",
+        "text": ask_sea.description(),
+        "success": True,
+        "tabId": "tab-1",
+        "taskId": "task-abc",
+    }]
+
+    # ``/ask help me`` is a real question: dispatched as before.
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": "/ask help me"})
+    assert [c["question"] for c in calls] == ["help me"]
 
 
 def test_non_ask_message_still_queues_and_does_not_dispatch() -> None:
@@ -406,9 +446,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
 
     kwargs = calls[0]
     assert kwargs["prompt"] == "why did the last step fail?"
-    assert kwargs["extension_agent_path"] == str(
-        sea_commands.get_command("ask")
-    )
+    assert kwargs["extension_agent_path"] == str(Path(ask_sea.__file__))
     assert kwargs["append_to_prompt"] == (
         "The question above is about the task with id task-abc. "
         "Call task_overview with that task id first, then answer the question."
@@ -425,25 +463,41 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     assert kwargs["auto_commit"] is False
 
 
-def test_side_channel_ask_sea_path_resolves_to_third_party_agents_file(
-    monkeypatch: pytest.MonkeyPatch,
+def test_side_channel_ask_sea_path_resolves_to_bundled_seas_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """The dispatched agent path MUST be the real ``ask_sea.py``.
+    """The dispatched agent path MUST be the bundled ``ask_sea.py``.
 
-    Guard against a future rename or accidental shadowing by a
-    ``SEAS.md`` folder: the /ask side channel always dispatches the
-    bundled ``ask_sea.py`` under ``third_party_agents``.
+    The bundled ``seas/`` folder has the lowest registry precedence, so
+    a ``SEAS.md`` folder shipping ``ask/ask_sea.py`` shadows the ``/ask``
+    chat command.  The side channel reads ``APPEND_TO_PROMPT`` and
+    ``append_to_system_prompt()`` from the bundled module, so it must
+    dispatch that file even while the command is shadowed.
     """
-    from pathlib import Path
+    from kiss.core.config import kiss_home
 
-    server, _ = _make_server()
-    calls = _install_daemon_run_capture(monkeypatch)
-
-    server._dispatch_ask_side_channel(
-        tab_id="tab-1", owner_task_id="task-1",
-        chat_id="chat-1", question="q",
+    shadow = tmp_path / "user-seas" / "ask"
+    shadow.mkdir(parents=True)
+    (shadow / "ask_sea.py").write_text(
+        'def description() -> str:\n    return "shadow"\n', encoding="utf-8",
     )
-    _wait_for(lambda: len(calls) == 1)
+    kiss_home().mkdir(parents=True, exist_ok=True)
+    seas_md = kiss_home() / "SEAS.md"
+    seas_md.write_text(str(shadow.parent) + "\n", encoding="utf-8")
+    try:
+        sea_commands.refresh_registry()
+        assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
+
+        server, _ = _make_server()
+        calls = _install_daemon_run_capture(monkeypatch)
+
+        server._dispatch_ask_side_channel(
+            tab_id="tab-1", owner_task_id="task-1",
+            chat_id="chat-1", question="q",
+        )
+        _wait_for(lambda: len(calls) == 1)
+    finally:
+        seas_md.unlink()
 
     dispatched = Path(calls[0]["extension_agent_path"]).resolve()
     assert dispatched == Path(ask_sea.__file__).resolve()

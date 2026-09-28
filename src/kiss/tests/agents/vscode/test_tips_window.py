@@ -36,8 +36,12 @@ class TestTipsInRemoteHtml(unittest.TestCase):
         self.assertIsNotNone(m, "window.__TIPS__ must be defined")
         assert m is not None
         cfg = json.loads(m.group(1).replace("<\\/", "</"))
-        self.assertEqual(sorted(cfg), ["show", "tips"])
-        self.assertFalse(cfg["show"], "remote webapp never auto-shows tips")
+        self.assertEqual(sorted(cfg), ["show", "tips", "version"])
+        # The test session's $KISS_HOME carries the TIPS_DISABLED opt-out
+        # (conftest), so the page must not auto-open; the per-version
+        # auto-open itself is covered by tests/server/test_tips_window.py.
+        self.assertFalse(cfg["show"], "a persisted opt-out holds on the remote page")
+        self.assertEqual(cfg["version"], web_server._read_version())  # type: ignore[attr-defined]
         self.assertEqual(cfg["tips"], read_tips())
         self.assertRegex(html, r'src="/media/tips\.js\?v=[0-9a-f]{16}"')
         self.assertNotIn("{{TIPS", html)

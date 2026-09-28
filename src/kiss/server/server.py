@@ -33,10 +33,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar import sea_commands, worktree_pool
 from kiss.agents.sorcar.git_worktree import _WORKTREE_SUBDIR, GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _chat_first_tasks,
+    _chat_summaries,
     _delete_frequent_task,
     _get_adjacent_task_by_chat_id,
     _history_date_range,
@@ -1067,7 +1068,8 @@ class VSCodeServer(
         """
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
-        for name in ranked_function_calling_models():
+        catalog_names = ranked_function_calling_models()
+        for name in catalog_names:
             info = MODEL_INFO[name]
             models_list.append(
                 {
@@ -1111,7 +1113,16 @@ class VSCodeServer(
                 "extra_headers": _parse_custom_headers(cm["headers"]),
             })
 
-        available_names = {m["name"] for m in models_list}
+        # A SEA whose ``register_as_model()`` returns True (``autorouter``,
+        # ``bestrouter``) is listed under its command name but is not a
+        # model: picking it runs every task through the SEA
+        # (``_resolve_sea_model`` in the task runner) on catalog models —
+        # so the entries are offered only when at least one catalog model
+        # is runnable, and each is a valid pick but never the fallback a
+        # stale pick lands on (that stays the first real model).  They
+        # head the list.
+        routers = sea_commands.model_seas() if catalog_names else {}
+        available_names = {m["name"] for m in models_list} | set(routers)
         with self._state_lock:
             self._refresh_default_model(available_names)
 
@@ -1124,6 +1135,18 @@ class VSCodeServer(
                 else:
                     self._default_model = refreshed
             selected = self._default_model
+
+        models_list[:0] = [
+            {
+                "name": name,
+                "inp": 0,
+                "out": 0,
+                "uses": usage.get(name, 0),
+                "vendor": "Router",
+                "cost_label": "routes by its own protocol",
+            }
+            for name in routers
+        ]
 
         event: dict[str, Any] = {
             "type": "models",
@@ -1206,8 +1229,12 @@ class VSCodeServer(
         offset: int = 0,
         generation: int = 0,
         conn_id: str = "",
+        tag: str = "",
     ) -> None:
         """Send conversation history with pagination support.
+
+        ``tag`` (the history panel's tag dropdown) restricts the page to
+        tasks carrying that classification tag; ``""`` means every task.
 
         The reply is stamped with the requesting connection's
         ``conn_id`` (when non-empty) so it reaches only the VS Code
@@ -1215,9 +1242,9 @@ class VSCodeServer(
         must not repaint another window's history panel.
         """
         if query:
-            entries = _search_history(query, limit=50, offset=offset)
+            entries = _search_history(query, limit=50, offset=offset, tag=tag)
         else:
-            entries = _load_history(limit=50, offset=offset)
+            entries = _load_history(limit=50, offset=offset, tag=tag)
 
         running_task_ids = self._get_running_task_ids()
 
@@ -1291,6 +1318,9 @@ class VSCodeServer(
                     session["is_worktree"] = bool(extra_obj.get("is_worktree", False))
                     session["is_parallel"] = bool(extra_obj.get("is_parallel", False))
                     session["auto_commit_mode"] = bool(extra_obj.get("auto_commit_mode", False))
+                    for key in ("tags", "sea"):
+                        raw = extra_obj.get(key, "")
+                        session[key] = raw if isinstance(raw, str) else ""
                     try:
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
@@ -1301,10 +1331,18 @@ class VSCodeServer(
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
         # The chat-panel headers in the History sidebar show each chat's
-        # FIRST task, which may be older than any row on this page.
-        first_tasks = _chat_first_tasks([str(s["id"]) for s in sessions])
+        # summary (``chat_summaries``, once a task has finished) or else
+        # its FIRST task, which may be older than any row on this page,
+        # and the launch time of its LATEST task (``chat_summaries``).
+        chat_ids = [str(s["id"]) for s in sessions]
+        first_tasks = _chat_first_tasks(chat_ids)
+        summaries = _chat_summaries(chat_ids)
         for session in sessions:
-            session["chat_first_task"] = first_tasks.get(str(session["id"]), "")
+            chat_id = str(session["id"])
+            session["chat_first_task"] = first_tasks.get(chat_id, "")
+            summary = summaries.get(chat_id, {})
+            session["chat_summary"] = summary.get("summary", "")
+            session["chat_last_launched"] = summary.get("last_launched", 0)
         min_ts, max_ts = _history_date_range()
         event: dict[str, Any] = {
             "type": "history",

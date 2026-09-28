@@ -19,7 +19,7 @@ what those agents are and how they work.
 
 The channel agents are looked up dynamically, the same soft-plugin
 style the cron deliverer uses: any module named
-``kiss.agents.third_party_agents.<channel>_sea`` that defines a
+``kiss.agents.third_party_agents.<channel>.<channel>_sea`` that defines a
 ``BaseChannelAgent`` subclass is dispatchable.  This module never
 imports ``kiss.agents.third_party_agents`` statically — only the
 requested channel module is imported, dynamically, at dispatch time
@@ -85,6 +85,8 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.daemon_client import TaskResult
+from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.useful_tools import rewrite_parent_repo_paths
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 
@@ -106,11 +108,11 @@ stop-confirmation grace (``daemon_client._STOP_CONFIRM_GRACE_SECONDS``,
 """
 
 DEFAULT_AGENT_PATH = str(
-    Path(__file__).resolve().parents[1] / "seas" / "dummy_sea.py"
+    Path(__file__).resolve().parents[1] / "seas" / "dummy" / "dummy_sea.py"
 )
 """Agent script run when the ``run_agent`` tool's ``agent`` is empty.
 
-The bundled ``src/kiss/agents/seas/dummy_sea.py`` — an SEA that defines
+The bundled ``src/kiss/agents/seas/dummy/dummy_sea.py`` — an SEA that defines
 no getters, so the sub-task is a plain Sorcar session on the given task
 in the calling task's work directory (path mode, with the standard
 worktree/auto-commit lifecycle).  Held as the absolute path of the
@@ -168,18 +170,13 @@ def stop_unconfirmed_error(name: str, timeout: float) -> str:
         f"before retrying with a larger `timeout` argument."
     )
 
-_NON_CHANNEL_MODULES = frozenset({"a2a_sea", "ask_sea", "oai_sea"})
-"""Modules matching ``*_sea.py`` that are not user-facing channels.
+_NON_CHANNEL_MODULES = frozenset({"a2a", "oai"})
+"""SEA folders of the third-party package that are not user-facing channels.
 
-``a2a_sea`` (agent-to-agent protocol plumbing) and
-``oai_sea`` (an OpenAI-compatible HTTP server) subclass
+``a2a`` (agent-to-agent protocol plumbing) and
+``oai`` (an OpenAI-compatible HTTP server) subclass
 ``BaseChannelAgent`` for infrastructure reasons but are not services a
 user asks Sorcar to act on, so they are hidden from the tool.
-``ask_sea`` (the ``/ask`` side-channel Q&A over a running task's
-persisted events) is a slash-command-only SEA that does not implement
-a ``BaseChannelAgent`` subclass, so listing it as a channel would
-make ``test_every_channel_module_is_dispatchable`` fail on the very
-first import.
 """
 
 
@@ -361,10 +358,10 @@ def _package_dir() -> Path | None:
 def available_channels() -> list[str]:
     """Return the names of the installed third-party channel agents.
 
-    A channel is any ``<channel>_sea.py`` module in the third-party
-    agents package (private ``_``-prefixed helpers and the known
-    non-channel infrastructure modules excluded).  The scan reads the
-    directory listing only — no channel module is imported.
+    A channel is any SEA folder ``<channel>/<channel>_sea.py`` in the
+    third-party agents package (private ``_``-prefixed folders and the
+    known non-channel infrastructure SEAs excluded).  The scan reads
+    the directory listing only — no channel module is imported.
 
     Returns:
         Sorted channel names, e.g. ``["discord", ..., "slack", ...]``;
@@ -374,10 +371,11 @@ def available_channels() -> list[str]:
     if package_dir is None:
         return []
     return sorted(
-        path.stem[: -len("_sea")]
-        for path in package_dir.glob("*_sea.py")
-        if not path.name.startswith("_")
-        and path.stem not in _NON_CHANNEL_MODULES
+        sea_dir.name
+        for sea_dir in package_dir.iterdir()
+        if not sea_dir.name.startswith("_")
+        and sea_dir.name not in _NON_CHANNEL_MODULES
+        and sea_script_in(sea_dir).is_file()
     )
 
 
@@ -405,7 +403,7 @@ def _agent_class(module: Any) -> type | None:
     own.  Classes merely imported into the module are ignored.
 
     Args:
-        module: An imported ``<channel>_sea`` module.
+        module: An imported ``<channel>.<channel>_sea`` module.
 
     Returns:
         The agent class, or ``None`` when the module defines none.
@@ -496,12 +494,49 @@ def _dispatch(
     classify: bool = True,
     options: RunOptions = RunOptions(),
 ) -> str:
+    """Submit an agent-script task to the kiss-web daemon and wait for its YAML result.
+
+    :func:`dispatch_result` with the same arguments, formatted for the
+    calling model: the sub-task's YAML result ("success" and "summary"
+    keys), or the error message.
+    """
+    result = dispatch_result(
+        name, prompt, agent_path, work_dir, model_name, budget, timeout,
+        parent_agent=parent_agent, scope_work_dir=scope_work_dir,
+        git_lifecycle=git_lifecycle, classify=classify, options=options,
+    )
+    if isinstance(result, str):
+        return result
+    summary = result.text or ("" if result.success else "Task failed")
+    return str(yaml.safe_dump(
+        {"success": result.success, "summary": summary}, sort_keys=False,
+    ))
+
+
+def dispatch_result(
+    name: str,
+    prompt: str,
+    agent_path: str,
+    work_dir: str,
+    model_name: str,
+    budget: float | None,
+    timeout: float,
+    parent_agent: Any = None,
+    scope_work_dir: str = "",
+    git_lifecycle: bool = True,
+    classify: bool = True,
+    options: RunOptions = RunOptions(),
+) -> TaskResult | str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
     The shared tail of :func:`_run_agent`'s channel and path modes:
     calls :func:`kiss.server.sorcar.run` with *agent_path* as its
-    *extension_agent_path* and returns
-    the result — or a clean error string — never raising.
+    *extension_agent_path* and returns the daemon's
+    :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
+    carries the sub-task's persisted ``task_id``) — or a clean error
+    string — never raising.  Callers that need the sub-task's id
+    (rsi7d's clone replays) use this; :func:`_dispatch` formats the
+    result for a model.
 
     Args:
         name: Display name of the agent for error messages (the
@@ -562,8 +597,7 @@ def _dispatch(
             *git_lifecycle*), so asking for one is an error.
 
     Returns:
-        The sub-task's YAML result ("success" and "summary" keys), or
-        an error message.
+        The sub-task's :class:`TaskResult`, or an error message.
     """
     if not git_lifecycle and (options.use_worktree or options.auto_commit):
         return (
@@ -692,10 +726,7 @@ def _dispatch(
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
     _attribute_dispatch_usage(parent_agent, result)
-    summary = result.text or ("" if result.success else "Task failed")
-    return str(yaml.safe_dump(
-        {"success": result.success, "summary": summary}, sort_keys=False,
-    ))
+    return result
 
 
 def _run_agent(
@@ -846,7 +877,7 @@ def _run_agent(
     channel = matches[0]
     try:
         module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}_sea"
+            f"kiss.agents.third_party_agents.{channel}.{channel}_sea"
         )
     except Exception as e:
         logger.warning("channel module import failed", exc_info=True)
@@ -1057,7 +1088,7 @@ def make_run_agent_tool(
                 (recognized by its ``.py`` suffix or a path separator;
                 must exist; a relative path is resolved against this
                 task's work directory).  The default is the bundled
-                ``src/kiss/agents/seas/dummy_sea.py``, an SEA with no
+                ``src/kiss/agents/seas/dummy/dummy_sea.py``, an SEA with no
                 getters: a plain Sorcar session with the standard
                 tools on ``task`` in this task's work directory.
             workspace: Workspace/account identifier for multi-account

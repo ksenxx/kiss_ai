@@ -50,10 +50,10 @@ from typing import Any
 import pytest
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.brave_sea import BraveSearchChannelBackend
-from kiss.agents.third_party_agents.brave_sea import _config as brave_config
-from kiss.agents.third_party_agents.firecrawl_sea import FirecrawlChannelBackend
-from kiss.agents.third_party_agents.firecrawl_sea import _config as firecrawl_config
+from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchChannelBackend
+from kiss.agents.third_party_agents.brave.brave_sea import _config as brave_config
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlChannelBackend
+from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import _config as firecrawl_config
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     PROTOCOL_VERSION,
@@ -71,7 +71,7 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     mint_surrogate,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.slack_sea import (
+from kiss.agents.third_party_agents.slack.slack_sea import (
     SlackChannelBackend,
     _muse_service,
     _muse_web_client,
@@ -376,7 +376,7 @@ def test_slack_sign_in_rotation_and_clear_via_tools(
     muse_env: Path, slack_sign_in: _ApiServer
 ) -> None:
     """Signed-in user tokens land in the vault; the daemon refreshes them."""
-    from kiss.agents.third_party_agents.slack_sea import SlackAgent
+    from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
     api_server = slack_sign_in
     agent = SlackAgent()
@@ -490,7 +490,7 @@ def test_firecrawl_selfhosted_enrollment_hosts(muse_env: Path, api_server: _ApiS
 
 def test_firecrawl_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServer) -> None:
     """authenticate_firecrawl re-enrolls; clear_firecrawl_auth wipes the vault."""
-    from kiss.agents.third_party_agents.firecrawl_sea import FirecrawlAgent
+    from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlAgent
 
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     agent = FirecrawlAgent()
@@ -548,7 +548,7 @@ def test_brave_header_kind_credential_swap(muse_env: Path, api_server: _ApiServe
 
 def test_brave_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServer) -> None:
     """authenticate_brave_search re-enrolls; clear wipes the vault."""
-    from kiss.agents.third_party_agents.brave_sea import BraveSearchAgent
+    from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchAgent
 
     agent = BraveSearchAgent()
     tools = auth_tools(agent)
@@ -570,7 +570,7 @@ def test_brave_rotation_and_clear_via_tools(muse_env: Path, api_server: _ApiServ
 
 def test_slack_stale_surrogate_and_make_backend(muse_env: Path, api_server: _ApiServer) -> None:
     """Stale surrogates raise MuseAuthError; _make_backend is Muse-aware."""
-    from kiss.agents.third_party_agents.slack_sea import _make_backend
+    from kiss.agents.third_party_agents.slack.slack_sea import _make_backend
 
     _save_token(_REAL_SLACK_TOKEN, "default")
     backend = _make_backend("default")
@@ -744,7 +744,7 @@ def test_slack_workspace_list_and_delete_are_vault_aware(
     muse_env: Path, capsys: pytest.CaptureFixture
 ) -> None:
     """Vault-only workspaces are listed and deletion clears the vault."""
-    from kiss.agents.third_party_agents.slack_sea import (
+    from kiss.agents.third_party_agents.slack.slack_sea import (
         _delete_workspace,
         _list_workspaces,
     )
@@ -779,7 +779,7 @@ def test_slack_direct_muse_auth_workspace_is_listed(
     muse_env: Path, slack_sign_in: _ApiServer, capsys: pytest.CaptureFixture
 ) -> None:
     """A workspace signed in straight into the vault shows up in listings."""
-    from kiss.agents.third_party_agents.slack_sea import SlackAgent, _list_workspaces
+    from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent, _list_workspaces
 
     tools = auth_tools(SlackAgent(workspace="team3"))
     assert sign_in(tools, slack_sign_in.oauth)["ok"] is True
@@ -795,7 +795,7 @@ def test_slack_unreachable_api_stores_nothing(
     muse_env: Path, slack_sign_in: _ApiServer, refusing_port: int
 ) -> None:
     """A sign-in whose auth.test cannot reach Slack enrolls nothing."""
-    from kiss.agents.third_party_agents.slack_sea import SlackAgent
+    from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
     agent = SlackAgent()
     agent._backend._api_base_url = f"http://127.0.0.1:{refusing_port}/api/"
@@ -951,7 +951,7 @@ def test_cli_import_slack_and_token_services(muse_env: Path,
 def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer,
                                monkeypatch: pytest.MonkeyPatch) -> None:
     """With KISS_MUSE_AUTH=0 the connectors use plaintext directly."""
-    from kiss.agents.third_party_agents.slack_sea import SlackAgent, _make_backend
+    from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent, _make_backend
 
     monkeypatch.setenv("KISS_MUSE_AUTH", "0")
     api_base_url = f"http://127.0.0.1:{api_server.server_address[1]}/api/"

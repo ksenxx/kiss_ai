@@ -22,6 +22,7 @@ cannot fire during another.
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -43,9 +44,9 @@ def _reset_sea_commands() -> Iterator[None]:
 
 
 def _touch_sea(folder: Path, name: str) -> Path:
-    """Create an empty ``<name>_sea.py`` file in *folder* and return it."""
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{name}_sea.py"
+    """Create a stub SEA ``<name>/<name>_sea.py`` under *folder* and return it."""
+    path = folder / name / f"{name}_sea.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# stub SEA for tests\n", encoding="utf-8")
     return path
 
@@ -58,7 +59,7 @@ def _write_seas_md(lines: list[str]) -> None:
 
 
 def test_bundled_third_party_commands_are_registered() -> None:
-    """Every ``third_party_agents/*_sea.py`` is exposed as ``/<stem>``.
+    """Every ``third_party_agents/<x>/<x>_sea.py`` is exposed as ``/<x>``.
 
     The registry MUST include at least the ``slack`` and ``gmail``
     commands — both bundled with the repo — and their resolved paths
@@ -71,7 +72,8 @@ def test_bundled_third_party_commands_are_registered() -> None:
     slack_path = sea_commands.get_command("slack")
     assert slack_path is not None
     assert slack_path.name == "slack_sea.py"
-    assert slack_path.parent.name == "third_party_agents"
+    assert slack_path.parent.name == "slack"
+    assert slack_path.parents[1].name == "third_party_agents"
 
 
 def test_seas_md_precedence_bottom_beats_top(tmp_path: Path) -> None:
@@ -100,7 +102,7 @@ def test_third_party_dir_beats_seas_md(tmp_path: Path) -> None:
     """A bundled SEA name overrides any user folder that redefines it.
 
     Uses ``slack``, which the third-party dir ships.  A user-folder
-    ``slack_sea.py`` MUST be ignored so the daemon-installed agent
+    ``slack/slack_sea.py`` MUST be ignored so the daemon-installed agent
     always wins.
     """
     user = tmp_path / "override"
@@ -109,21 +111,22 @@ def test_third_party_dir_beats_seas_md(tmp_path: Path) -> None:
     sea_commands.refresh_registry()
     slack_path = sea_commands.get_command("slack")
     assert slack_path is not None
-    assert slack_path.parent.name == "third_party_agents"
+    assert slack_path.parents[1].name == "third_party_agents"
 
 
 def test_seas_md_beats_bundled_seas_dir(tmp_path: Path) -> None:
     """The bundled ``seas/`` package has the LOWEST precedence.
 
     Without any ``SEAS.md`` entry ``/merge`` resolves to the bundled
-    ``kiss/agents/seas/merge_sea.py``.  Once a user folder listed in
-    ``SEAS.md`` ships its own ``merge_sea.py``, that copy MUST win.
+    ``kiss/agents/seas/merge/merge_sea.py``.  Once a user folder listed in
+    ``SEAS.md`` ships its own ``merge/merge_sea.py``, that copy MUST win.
     """
     _write_seas_md([])
     sea_commands.refresh_registry()
     bundled = sea_commands.get_command("merge")
     assert bundled is not None
-    assert bundled.parent.name == "seas"
+    assert bundled.parent.name == "merge"
+    assert bundled.parents[1].name == "seas"
 
     user = tmp_path / "override"
     user_merge = _touch_sea(user, "merge")
@@ -154,7 +157,7 @@ def test_seas_md_ignores_blanks_comments_and_expands_env(
     sea_commands.refresh_registry()
     resolved = sea_commands.get_command("envcmd")
     assert resolved is not None
-    assert resolved.resolve() == (folder / "envcmd_sea.py").resolve()
+    assert resolved.resolve() == (folder / "envcmd" / "envcmd_sea.py").resolve()
 
 
 def test_missing_folder_in_seas_md_is_silently_skipped(
@@ -170,33 +173,43 @@ def test_missing_folder_in_seas_md_is_silently_skipped(
 
 
 def test_non_sea_files_are_ignored(tmp_path: Path) -> None:
-    """Only ``*_sea.py`` files surface; unrelated files never do.
+    """Only ``<x>/<x>_sea.py`` folders surface; anything else never does.
 
-    Also confirms that stems producing an invalid command name — a
-    name that contains characters outside ``[A-Za-z0-9_-]`` — are
-    silently skipped, because the parser and the autocomplete both
-    refuse them and surfacing them as commands would mean advertising
-    a slash command the user cannot type.
+    A loose ``xxx_sea.py`` at the top of the folder (the old flat
+    layout), a folder whose script is not named after it, a plain file
+    and a plain sub-folder are all skipped.  Also confirms that folder
+    names producing an invalid command name — a name that contains
+    characters outside ``[A-Za-z0-9_-]`` — are silently skipped,
+    because the parser and the autocomplete both refuse them and
+    surfacing them as commands would mean advertising a slash command
+    the user cannot type.
     """
     folder = tmp_path / "seas"
     _touch_sea(folder, "public")
+    (folder / "loose_sea.py").write_text("", encoding="utf-8")
     (folder / "notasea.py").write_text("", encoding="utf-8")
-    (folder / "foo.bar_sea.py").write_text("", encoding="utf-8")
-    (folder / "with space_sea.py").write_text("", encoding="utf-8")
+    (folder / "plaindir").mkdir()
+    (folder / "wrongname").mkdir()
+    (folder / "wrongname" / "other_sea.py").write_text("", encoding="utf-8")
+    _touch_sea(folder, "foo.bar")
+    _touch_sea(folder, "with space")
     _write_seas_md([str(folder)])
     commands = sea_commands.refresh_registry()
     assert "public" in commands
+    assert "loose" not in commands
     assert "notasea" not in commands
+    assert "plaindir" not in commands
+    assert "wrongname" not in commands
+    assert "other" not in commands
     assert "foo.bar" not in commands
     assert "with space" not in commands
 
 
 def test_private_underscore_prefixed_seas_are_included(tmp_path: Path) -> None:
-    """Every ``*_sea.py`` in a watched folder becomes a command.
+    """Every ``<x>/<x>_sea.py`` in a watched folder becomes a command.
 
-    The requirement is "convert all *_sea.py", so ``_helper_sea.py``
-    IS a command ``/_helper`` — the underscore is a valid character
-    for a command name.
+    ``_helper/_helper_sea.py`` IS a command ``/_helper`` — the
+    underscore is a valid character for a command name.
     """
     folder = tmp_path / "seas"
     _touch_sea(folder, "_helper")
@@ -441,8 +454,8 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
     import, which needs the entry to still be there.
     """
     folder = tmp_path / "seas"
-    folder.mkdir()
-    sea = folder / "verdict_sea.py"
+    sea = folder / "verdict" / "verdict_sea.py"
+    sea.parent.mkdir(parents=True)
     sea.write_text(_DATACLASS_SEA, encoding="utf-8")
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
@@ -525,3 +538,170 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
     thread_a.join(timeout=10)
     assert results == {"a": True, "b": True}, results
     assert not [n for n in sys.modules if n.startswith("_kiss_sea_shared_sea_")]
+
+
+_DESCRIBED_SEA = '''\
+"""SEA with the mandatory description() getter."""
+
+
+def description() -> str:
+    return "  Echoes the task back; use it as /echo <text>.  "
+
+
+def use_worktree() -> bool:
+    return False
+'''
+
+
+def test_help_returns_stripped_description(tmp_path: Path) -> None:
+    """``/xxx help`` (any letter case) yields the SEA's stripped ``description()``.
+
+    Anything but the bare word ``help`` is an ordinary sub-task, an
+    unknown command and a non-command prompt yield ``None``, and the
+    same prompt is never ALSO rewritten into a ``run_agent`` directive
+    by the caller because the task runner checks help first.
+    """
+    folder = tmp_path / "seas"
+    sea = _touch_sea(folder, "echo")
+    sea.write_text(_DESCRIBED_SEA, encoding="utf-8")
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+
+    expected = "Echoes the task back; use it as /echo <text>."
+    assert sea_commands.help_text_if_command("/echo help") == expected
+    assert sea_commands.help_text_if_command("/echo   HELP ") == expected
+    assert sea_commands.sea_description(sea) == expected
+    assert sea_commands.help_text_if_command("/echo help me") is None
+    assert sea_commands.help_text_if_command("/echo") is None
+    assert sea_commands.help_text_if_command("/unknown help") is None
+    assert sea_commands.help_text_if_command("help") is None
+    assert sea_commands.help_text_if_command(None) is None  # type: ignore[arg-type]
+
+
+def test_help_reports_missing_or_broken_description(tmp_path: Path) -> None:
+    """A SEA without a usable ``description()`` fails ``/xxx help`` with a diagnostic."""
+    folder = tmp_path / "seas"
+    _write_seas_md([str(folder)])
+
+    missing = _touch_sea(folder, "nodesc")
+    sea_commands.refresh_registry()
+    with pytest.raises(sea_commands.SeaScriptError, match="description must be"):
+        sea_commands.help_text_if_command("/nodesc help")
+
+    missing.write_text("description = 'not callable'\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="description must be"):
+        sea_commands.sea_description(missing)
+
+    missing.write_text("def description():\n    return 42\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="non-empty string, got int"):
+        sea_commands.sea_description(missing)
+
+    missing.write_text("def description():\n    return '   '\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="non-empty string, got str"):
+        sea_commands.sea_description(missing)
+
+    missing.write_text("def description():\n    raise KeyError('k')\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="KeyError") as info:
+        sea_commands.sea_description(missing)
+    assert isinstance(info.value.__cause__, KeyError)
+
+    missing.write_text("raise SystemExit(2)\n", encoding="utf-8")
+    with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 2"):
+        sea_commands.sea_description(missing)
+
+
+def test_every_bundled_sea_has_a_description() -> None:
+    """Every registered bundled SEA (``seas/`` and ``third_party_agents/``) describes itself.
+
+    ``description()`` must return one non-empty sentence, so ``/xxx
+    help`` works for every command shipped with the package.
+    """
+    _write_seas_md([])
+    commands = sea_commands.refresh_registry()
+    assert len(commands) >= 58
+    for name in commands:
+        path = sea_commands.get_command(name)
+        assert path is not None
+        assert path.parent.name == name, path
+        text = sea_commands.sea_description(path)
+        assert text.rstrip(".").strip(), name
+
+
+_ROUTER_TRUE = "def description():\n    return 'r'\ndef register_as_model():\n    return True \n"
+_ROUTER_FALSE = "def description():\n    return 'r'\ndef register_as_model():\n    return False\n"
+"""Same-length sources: an edit between them keeps the file size."""
+
+
+def _write_router(folder: Path, name: str, source: str) -> Path:
+    """Create ``<folder>/<name>/<name>_sea.py`` with *source* and return it."""
+    path = folder / name / f"{name}_sea.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_model_seas_rereads_an_edit_within_the_same_second(tmp_path: Path) -> None:
+    """A same-size edit whose mtime moves by one nanosecond is seen.
+
+    The bytecode cache keys staleness on whole-second mtime and size, so
+    an import-based loader would re-run the stale ``.pyc``; the SEA loader
+    compiles the source directly.
+    """
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "flip", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("flip") == router
+    stamp = router.stat().st_mtime_ns
+    router.write_text(_ROUTER_FALSE, encoding="utf-8")
+    os.utime(router, ns=(stamp + 1, stamp + 1))
+    assert router.stat().st_size == len(_ROUTER_TRUE)
+    assert sea_commands.model_sea("flip") is None
+    assert "flip" not in sea_commands.model_seas()
+
+
+def test_model_seas_rereads_an_atomic_replacement_with_the_same_mtime(tmp_path: Path) -> None:
+    """A file swapped in with identical size and mtime (new inode) is re-read."""
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "swap", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("swap") == router
+    st = router.stat()
+    replacement = router.with_name("swap_sea.py.new")
+    replacement.write_text(_ROUTER_FALSE, encoding="utf-8")
+    os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(replacement, router)
+    assert router.stat().st_mtime_ns == st.st_mtime_ns
+    assert router.stat().st_ino != st.st_ino
+    assert sea_commands.model_sea("swap") is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+def test_unreadable_sea_does_not_break_the_model_picker_registry(tmp_path: Path) -> None:
+    """A SEA without read permission is skipped, not raised through ``model_seas()``."""
+    folder = tmp_path / "seas"
+    router = _write_router(folder, "ok", _ROUTER_TRUE)
+    locked = _write_router(folder, "locked", _ROUTER_TRUE)
+    locked.chmod(0)
+    try:
+        _write_seas_md([str(folder)])
+        sea_commands.refresh_registry()
+        seas = sea_commands.model_seas()
+        assert seas["ok"] == router and "locked" not in seas
+        assert {"autorouter", "bestrouter"} <= set(seas)
+    finally:
+        locked.chmod(0o644)
+
+
+def test_model_sea_finds_a_router_installed_after_the_registry_was_built(
+    tmp_path: Path,
+) -> None:
+    """Without a watcher, a miss rescans the folders like ``get_command`` does."""
+    folder = tmp_path / "seas"
+    _write_router(folder, "early", _ROUTER_TRUE)
+    _write_seas_md([str(folder)])
+    sea_commands.refresh_registry()
+    assert sea_commands.model_sea("late") is None
+    late = _write_router(folder, "late", _ROUTER_TRUE)
+    assert sea_commands.model_sea("late") == late

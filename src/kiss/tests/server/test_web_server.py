@@ -75,7 +75,7 @@ class TestBuildHtml(unittest.TestCase):
         the remote webview, not the bundled VS Code extension webview.
         """
         html = _build_html()
-        self.assertIn('<body class="remote-chat">', html)
+        self.assertIn('<body class="remote-chat light-theme">', html)
 
     def test_html_includes_ws_shim(self) -> None:
         """The generated HTML injects the WebSocket shim before main.js."""

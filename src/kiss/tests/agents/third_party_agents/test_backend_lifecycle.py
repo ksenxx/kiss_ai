@@ -9,10 +9,10 @@ import threading
 import time
 from typing import Any, cast
 
-from kiss.agents.third_party_agents.irc_sea import IRCChannelBackend
-from kiss.agents.third_party_agents.line_sea import LineChannelBackend
-from kiss.agents.third_party_agents.synology_sea import SynologyChatChannelBackend
-from kiss.agents.third_party_agents.zalo_sea import ZaloChannelBackend
+from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
+from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
+from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
+from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 
 
 class _FakeSocket:

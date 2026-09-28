@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests of the bundled task-update agent
-(:mod:`kiss.agents.seas.task_update_sea`).
+(:mod:`kiss.agents.seas.task_update.task_update_sea`).
 
 The ``task_transcript`` tool is exercised against tasks persisted in
 the test session's real SQLite history (``KISS_HOME`` is a temporary
@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.seas import task_update_sea as sea
+from kiss.agents.seas.task_update import task_update_sea as sea
 from kiss.agents.sorcar import sea_commands, task_digest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (

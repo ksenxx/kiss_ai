@@ -191,19 +191,25 @@ const FLAT = [
   'row:task b1',
 ];
 
-test('chat headers carry no tooltip and show the first line of the first task', () => {
+test('chat headers carry no tooltip and show the first line of the chat summary or first task', () => {
   const {win, posted} = makeWebview();
   sendHistory(win, posted, 0, [
     Object.assign(session('A', 'a2', todayNoon), {
       chat_first_task: '  Fix the login bug\n\nSteps:\n1. reproduce\n2. fix',
+      chat_summary: '',
     }),
     Object.assign(session('B', 'b1', todayNoon - 600), {
       chat_first_task: '\n\n   \n',
+      chat_summary: '  \n',
     }),
     session('C', 'c1', todayNoon - 1200),
+    Object.assign(session('D', 'd1', todayNoon - 1800), {
+      chat_first_task: 'Please look at the billing code and refactor it',
+      chat_summary: 'Refactor billing module\nwith tests',
+    }),
   ]);
   const headers = all(win, '#history-list .history-chat-header');
-  assert.strictEqual(headers.length, 3);
+  assert.strictEqual(headers.length, 4);
   headers.forEach(h => {
     assert.ok(!h.hasAttribute('data-tooltip'), 'no data-tooltip on a header');
     assert.ok(!h.hasAttribute('title'), 'no title attribute on a header');
@@ -216,7 +222,12 @@ test('chat headers carry no tooltip and show the first line of the first task', 
   const titles = headers.map(
     h => h.querySelector('.history-chat-title').textContent,
   );
-  assert.deepStrictEqual(titles, ['Fix the login bug', 'Untitled', 'task c1']);
+  assert.deepStrictEqual(titles, [
+    'Fix the login bug',
+    'Untitled',
+    'task c1',
+    'Refactor billing module',
+  ]);
   // Toggling the panel repaints the ARIA state only — still no tooltip.
   headers[0].click();
   assert.strictEqual(headers[0].getAttribute('aria-expanded'), 'true');

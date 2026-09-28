@@ -29,15 +29,28 @@ const ORIG_ENV = {
 };
 process.env.HOME = TMP_HOME;
 process.env.KISS_HOME = KISS_HOME;
-delete process.env.KISS_PROJECT_PATH;
 fs.mkdirSync(KISS_HOME, {recursive: true});
+
+// A minimal KISS checkout whose version the test bumps to simulate an
+// update: getVersion() reads its src/kiss/core/_version.py.
+const PROJECT = path.join(TMP_HOME, 'kiss-project');
+fs.mkdirSync(path.join(PROJECT, 'src', 'kiss', 'core'), {recursive: true});
+fs.writeFileSync(path.join(PROJECT, 'pyproject.toml'), 'name = "kiss"\n');
+function setVersion(version) {
+  fs.writeFileSync(
+    path.join(PROJECT, 'src', 'kiss', 'core', '_version.py'),
+    `__version__ = "${version}"\n`,
+  );
+}
+process.env.KISS_PROJECT_PATH = PROJECT;
 
 const tipsFile = path.join(TMP_HOME, 'TIPS.md');
 fs.writeFileSync(tipsFile, '# Tip\n\nHello **rebuild** tips.\n');
 process.env.KISS_TIPS_PATH = tipsFile;
 
 const markerPath = path.join(KISS_HOME, '.extension-updated');
-const tipsShownPath = path.join(KISS_HOME, 'TIPS_SHOWN');
+const tipsMarkers = () =>
+  fs.readdirSync(KISS_HOME).filter(n => n.startsWith('TIPS_SHOWN'));
 
 function makeDisposable() {
   return {dispose: () => {}};
@@ -168,8 +181,16 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
   checkForExtensionUpdate: () => Promise.resolve(),
   // SorcarTab.getVersion() imports this from UpdateChecker; without it the
   // stub makes every buildChatHtml call throw "readVersionPy is not a
-  // function". An empty string is the real function's no-version fallback.
-  readVersionPy: () => '',
+  // function".  Reads the test project's _version.py like the real one
+  // so a version bump is seen as an update.
+  readVersionPy: file => {
+    try {
+      const m = fs.readFileSync(file, 'utf-8').match(/__version__\s*=\s*"([^"]+)"/);
+      return m ? m[1] : '';
+    } catch {
+      return '';
+    }
+  },
 });
 
 const extension = require(path.join(OUT_DIR, 'extension.js'));
@@ -247,14 +268,16 @@ function check(name, fn) {
 }
 
 async function run() {
+  setVersion('2026.9.25');
   const ctx1 = makeContext();
   extension.activate(ctx1);
   check('fresh install: tips auto-open on first chat render', () => {
     assert.deepStrictEqual(renderTipsConfig(), {
       tips: ['Hello **rebuild** tips.'],
       show: true,
+      version: '2026.9.25',
     });
-    assert.ok(fs.existsSync(tipsShownPath), 'TIPS_SHOWN marker written');
+    assert.deepStrictEqual(tipsMarkers(), ['TIPS_SHOWN-2026.9.25']);
   });
   check('fresh install: tips stay closed on later renders', () => {
     assert.strictEqual(renderTipsConfig().show, false);
@@ -270,20 +293,25 @@ async function run() {
   extension.deactivate();
   disposeContext(ctx2);
 
+  // An update: the installer bumps the version and writes its marker.
+  setVersion('2026.10.1');
   writeExtensionUpdateMarker();
 
   const ctx3 = makeContext();
   extension.activate(ctx3);
-  // The tips are a first-run affordance: an extension update no longer
-  // re-opens them (ui_antipattern_tips_reset.test.js).
-  check('after extension update marker: tips stay closed', () => {
+  check('after an update: tips reopen once with the new version', () => {
     assert.deepStrictEqual(renderTipsConfig(), {
       tips: ['Hello **rebuild** tips.'],
-      show: false,
+      show: true,
+      version: '2026.10.1',
     });
-    assert.ok(fs.existsSync(tipsShownPath), 'TIPS_SHOWN survives the update');
+    assert.deepStrictEqual(
+      tipsMarkers().sort(),
+      ['TIPS_SHOWN-2026.10.1', 'TIPS_SHOWN-2026.9.25'],
+      'one claim per version that ever ran in this home',
+    );
   });
-  check('after update: still closed on later renders', () => {
+  check('after update: closed again on later renders', () => {
     assert.strictEqual(renderTipsConfig().show, false);
   });
   extension.deactivate();

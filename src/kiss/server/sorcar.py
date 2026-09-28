@@ -127,16 +127,13 @@ from kiss.core.config import kiss_home
 from kiss.core.utils import is_root_dir
 from kiss.core.vscode_config import load_config
 from kiss.server import sidebar_panels
+from kiss.server.tips import TIPS_OPT_OUT_MARKER
 
 logger = logging.getLogger(__name__)
 
 # In-flight ``appsStatus`` replies (see ServerApi.get_apps_status): the
 # event loop keeps only weak references to tasks.
 _APPS_STATUS_REPLIES: set[asyncio.Task[None]] = set()
-
-TIPS_OPT_OUT_MARKER = "TIPS_DISABLED"
-"""Basename, under ``$KISS_HOME``, of the "don't show tips again" marker."""
-
 
 def _write_tips_opt_out_marker(opt_out: bool) -> None:
     """Create (``opt_out``) or remove the tips opt-out marker file.
@@ -1129,7 +1126,7 @@ class ServerApi:
         panels (editor-tabs mode, whose reports fill the secondary
         sidebar's Task Info view) poll this command while the visible
         tab's task runs: the info subpanel shows what the
-        :mod:`~kiss.agents.seas.task_update_sea` agent reports about that
+        :mod:`~kiss.agents.seas.task_update.task_update_sea` agent reports about that
         task.  The first poll for a task runs the agent (as a sub-agent
         of the task, in the task's chat; its cost counts towards the
         task), later polls re-run it every 10 minutes, and a poll with

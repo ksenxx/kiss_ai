@@ -3,9 +3,9 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""End-to-end tests of the coding SEA (:mod:`kiss.agents.seas.coding_sea`).
+"""End-to-end tests of the coding SEA (:mod:`kiss.agents.seas.coding.coding_sea`).
 
-The tests build a :class:`~kiss.agents.seas.coding_sea.ContainerHarness`
+The tests build a :class:`~kiss.agents.seas.coding.coding_sea.ContainerHarness`
 from a JSON config and drive its SEA getters and hooks directly: the
 trajectory log, the human-only tool answers, the destructive-command
 guard, the finish gate, the test-context notes of the Edit tool and the
@@ -30,7 +30,7 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     """Every LLM call is counted (no cap); the tool hook logs calls and answers human-only tools."""
     import docker
 
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     # The hook ends the trial when its container is gone, so the test needs a
     # live one; without a Docker daemon the liveness check is skipped.
@@ -97,7 +97,7 @@ def test_append_to_last_tool_result_handles_every_message_shape() -> None:
 
     It is never appended to prompts or assistant turns.
     """
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     anthropic: dict[str, Any] = {
         "role": "user",
@@ -135,7 +135,7 @@ def test_changed_definitions_and_test_paths() -> None:
     The test-path heuristic covers common layouts; Python, Go receiver methods
     and exported JS functions are recognised.
     """
-    from kiss.agents.seas import coding_test_context as test_context
+    from kiss.agents.seas.coding import coding_test_context as test_context
 
     changed = test_context.changed_definitions
     old = (
@@ -177,7 +177,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
     """Editing an existing source file appends the tests that mention the changed definitions."""
     import docker
 
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     try:
         client = docker.from_env()
@@ -280,7 +280,7 @@ def test_edit_tool_results_list_referencing_tests(tmp_path: Path) -> None:
 
 def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     """Destructive commands are blocked, install timeouts lifted, the gate answers one finish."""
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     def harness(**extra: object) -> coding_sea.ContainerHarness:
         config = tmp_path / f"config-{len(extra)}.json"
@@ -374,7 +374,7 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
 
 def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     """The generated ``sea.py`` imports this package and exposes the harness's getters and hooks."""
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     trial = {"container": "c", "workdir": "/app", "prompt": "p", "model": MODEL}
     sea_path = coding_sea.write_trial_sea(tmp_path / "sea-trial", trial)
@@ -420,7 +420,7 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
     the agent edits with Edit/Write are its own and are not reported; each
     changed file is reported once.
     """
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     live = _live_container(
         "python:3.11-slim",
@@ -543,7 +543,7 @@ def test_shell_notes_off_without_container_or_workdir(tmp_path: Path) -> None:
     """A dead container or the root workdir disables the notes without disturbing the run."""
     import docker
 
-    from kiss.agents.seas import coding_sea
+    from kiss.agents.seas.coding import coding_sea
 
     # Only a reachable daemon can report the container as gone; when the
     # daemon itself is down the liveness check treats that as a transient

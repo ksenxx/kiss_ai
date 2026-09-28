@@ -45,7 +45,7 @@ per call:
   about 1/200 of that LLM's cost and 1/15 of its latency.  It runs only
   when
   :func:`decisions_classification_enabled` says so: the
-  ``classify_with_decisions`` config key (default on) and an
+  ``classify_with_decisions`` config key (default off) and an
   ``OPENROUTER_API_KEY`` with the model in the catalog.  When it is off,
   unavailable, or its call fails, the LLM classifier below runs
   instead, so a missing key or an OpenRouter outage never changes the
@@ -397,7 +397,7 @@ def decisions_classification_enabled() -> bool:
 
     Returns:
         ``True`` when the ``classify_with_decisions`` config key (persisted
-        in ``~/.kiss/config.json``, default ``True``; the settings panel's
+        in ``~/.kiss/config.json``, default ``False``; the settings panel's
         "Classify with Jev" checkbox) is on AND the
         ``decide`` tool can work in this process — an ``OPENROUTER_API_KEY``
         is configured and :data:`DEFAULT_DECISIONS_MODEL` is in the catalog
@@ -409,10 +409,10 @@ def decisions_classification_enabled() -> bool:
     from kiss.core.vscode_config import load_config
 
     try:
-        return bool(load_config().get("classify_with_decisions", True))
+        return bool(load_config().get("classify_with_decisions", False))
     except Exception:  # pragma: no cover — unreadable config
         logger.debug("Could not read classify_with_decisions", exc_info=True)
-        return True
+        return False
 
 
 def _verdict_bool(value: Any) -> bool | None:

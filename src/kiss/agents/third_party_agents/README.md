@@ -1,19 +1,22 @@
 # Third-Party Agents
 
-This package contains KISS Sorcar's **channel agents**: 45 `*_sea.py` modules plus the
-`govee.py` smart-light helper. All but one wrap an external service — a messaging
-platform (Slack, Telegram, WhatsApp, ...), a service API (GitHub, Notion, PostgreSQL,
-...), or a piece of agent infrastructure (A2A, OpenAI-compatible server) — and expose
-it as a set of authenticated LLM tools; the exception is `ask_sea.py`, the `/ask`
-command that answers questions about a running task from its own event log.
+This package contains KISS Sorcar's **channel agents**: 44 SEA folders, each
+`<name>/<name>_sea.py` (`slack/slack_sea.py`, `gmail/gmail_sea.py`, ...) with its
+helper modules and data files, plus the `govee.py` smart-light helper. Every one wraps
+an external service — a messaging platform (Slack, Telegram, WhatsApp, ...), a service
+API (GitHub, Notion, PostgreSQL, ...), or a piece of agent infrastructure (A2A,
+OpenAI-compatible server) — and exposes it as a set of authenticated LLM tools. (The
+`/ask` command that answers questions about a running task from its own event log wraps
+no service; it lives with the Sorcar-extending SEAs in `src/kiss/agents/seas/ask/`, see
+[Task Q&A](#task-qa-the-ask-command).)
 
 For ordinary service actions you do not run these agents directly. You **prompt KISS
 Sorcar in plain language** on any of its UI surfaces, name the service you want acted
-on, and Sorcar dispatches the work to the right channel agent. Every module except
-`ask_sea.py` also has a console entry point (`kiss-slack`, `kiss-gmail`, ...; see
-`pyproject.toml` `[project.scripts]`), used for one-off shell runs, gateway poll ticks,
-and infrastructure setup. This document explains what prompts you can send, on
-which surfaces, and what each channel can do.
+on, and Sorcar dispatches the work to the right channel agent. Every module also has a
+console entry point (`kiss-slack`, `kiss-gmail`, ...; see `pyproject.toml`
+`[project.scripts]`), used for one-off shell runs, gateway poll ticks, and
+infrastructure setup. This document explains what prompts you can send, on which
+surfaces, and what each channel can do.
 
 - [The surfaces: where prompts go](#the-surfaces-where-prompts-go)
 - [How a prompt reaches a channel](#how-a-prompt-reaches-a-channel)
@@ -66,7 +69,7 @@ Name the service in your prompt and Sorcar routes it. Internally the session cal
 `run_agent` tool with the channel name and your request; the dispatched sub-session
 already carries that channel's authenticated tools and is instructed to use them
 directly, without exploring source code. The `agent` argument is optional: omitting it
-(or passing it blank) runs the bundled `src/kiss/agents/seas/dummy_sea.py`, a plain
+(or passing it blank) runs the bundled `src/kiss/agents/seas/dummy/dummy_sea.py`, a plain
 Sorcar sub-session with the standard toolset, on the task in the caller's work directory.
 
 > Send "dinner at 7" to Telegram chat 123456789.
@@ -80,10 +83,8 @@ ignored, so "Home Assistant", "home-assistant", and "HOMEASSISTANT" all resolve 
 `homeassistant` channel. For multi-account
 channels, name the workspace in the prompt ("using the acme Slack workspace, ...") and
 Sorcar passes it through; you can likewise ask for a specific model or budget for the
-sub-task. Three modules are hidden from this channel dispatch: the two infrastructure
-modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on, and
-`ask_sea.py` is reached only through its `/ask` slash command (see
-[Task Q&A](#task-qa-the-ask-command)).
+sub-task. Two modules are hidden from this channel dispatch: the infrastructure
+modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
@@ -93,9 +94,11 @@ tool restriction), so let the session you are chatting with do the coordination 
 it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
-slash command: `/slack post "deploy done" to #eng`. Every `xxx_sea.py` in this
-package is registered as `/xxx`, the chat box autocompletes the names, and the daemon
-turns the prompt into a direct `run_agent` call on that file. Folders of your own SEAs
+slash command: `/slack post "deploy done" to #eng`. Every SEA folder `xxx/xxx_sea.py`
+in this package is registered as `/xxx` (the command is the folder name), the chat box
+autocompletes the names, and the daemon turns the prompt into a direct `run_agent` call
+on that file. `/xxx help` runs nothing and prints the module's `description()`, one
+sentence saying what the agent does and how to use it. Folders of your own SEAs
 listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
 dispatch flow are in
 [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
@@ -107,11 +110,8 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Each service module defines a `tools()` function (`ask_sea.py`, which wraps no
-  service, returns its three trajectory tools `task_overview`, `task_transcript`, and
-  `task_step` from `tools()` and defines the agent-script getters `system_prompt()`,
-  `append_to_system_prompt()`, `tool_profile()`, `is_parallel()`, `use_web_tools()`,
-  and `use_memory()`; see "Task Q&A" below). The daemon calls
+- Every module defines `description()`, the one-sentence summary `/xxx help` prints,
+  and a `tools()` function. The daemon calls
   `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
@@ -355,7 +355,7 @@ mode only) has none. GitHub's `read_only: "true"` config key blocks every mutati
 These two modules are hidden from prompt dispatch — they are not services you ask
 Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 
-- **OpenAI-compatible server** (`oai_sea.py`). Turns kiss-web into an
+- **OpenAI-compatible server** (`oai/oai_sea.py`). Turns kiss-web into an
   OpenAI-style backend: unauthenticated `GET /v1/models` and `POST
   /v1/chat/completions` (requires Bearer `api_key`). Point Open WebUI, LibreChat, or
   any `openai` SDK script at it and every user message typed there becomes a daemon
@@ -364,7 +364,7 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
   requests (`chat_map.json`). A one-time configure-and-serve setup from a terminal is
   required (see the module docstring); after that the connected client is just another
   chat surface.
-- **A2A (Agent-to-Agent protocol)** (`a2a_sea.py`). Inbound, it embeds an HTTP
+- **A2A (Agent-to-Agent protocol)** (`a2a/a2a_sea.py`). Inbound, it embeds an HTTP
   server publishing this agent's card at `/.well-known/agent-card.json` and queues
   peer messages as prompts for the channel runner; outbound, its tools
   (`a2a_discover`, `a2a_call`, `a2a_get_task`) let a session talk to a remote peer.
@@ -376,7 +376,9 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 
 ### Task Q&A: the `/ask` command
 
-`ask_sea.py` is the one module that wraps no external service. On an idle tab,
+`/ask` wraps no external service, so its SEA is not in this package: it is
+`src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
+described here because it is used from the same chat surfaces. On an idle tab,
 `/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
 plus an instruction naming the task you are asking about and telling the agent to call
 `task_overview` on it first. The script gives the answering session three read-only
@@ -386,7 +388,7 @@ sub-agents it dispatched, later user messages, progress summaries, and its last 
 transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
 page of the digested transcript, optionally filtered), and `task_step(task_id, index,
 max_chars)` (one entry in full). It swaps the system prompt
-for the compact SYSTEM_LITE prompt (the bundled `_ask_system_lite.md`, a copy of the
+for the compact SYSTEM_LITE prompt (the bundled `seas/ask/_ask_system_lite.md`, a copy of the
 ablation prompt with the brand identity as a `{{IDENTITY}}` placeholder) with a
 no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
 `review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and
@@ -697,7 +699,7 @@ HMAC-signed events and can push them straight through another channel's backend:
 > Add a webhook route named "gh-push" with the github signature scheme, secret
 > "rotate-me-7f3a", prompt template "Repo {repository.full_name}:
 > {head_commit.message}", and deliver_module
-> "kiss.agents.third_party_agents.ntfy_sea".
+> "kiss.agents.third_party_agents.ntfy.ntfy_sea".
 
 Include the (required, nonempty) secret in the prompt, then point GitHub's webhook at
 `http://<host>:<port>/hook/gh-push`. `deliver_module` must be the full module path;

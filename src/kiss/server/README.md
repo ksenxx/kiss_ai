@@ -9,6 +9,15 @@ without a getter keep whatever the caller passed (or the default).
 The getters execute **in the daemon process** and are re-imported from
 source on every run (no `__pycache__` is written).
 
+Each SEA lives in its own folder named after it, `<name>/<name>_sea.py`,
+together with the helper modules and data files it needs (the bundled
+`src/kiss/agents/seas/sh/sh_sea.py` and
+`src/kiss/agents/third_party_agents/slack/slack_sea.py` are laid out this
+way).  Besides the run-parameter getters, every SEA must define
+`description()`: a zero-argument function returning one sentence that
+says what the SEA does and how to use it.  It is what the chat command
+`/<name> help` prints (see the slash-command bullet under [Tips](#tips)).
+
 This tutorial covers every overridable parameter, the tools-file
 contract, error handling, and ends with a complete working example.
 
@@ -25,9 +34,19 @@ contract, error handling, and ends with a complete working example.
 ## Quick start
 
 ```python
-# weather_agent.py — a minimal SEA
+# weather/weather_sea.py — a minimal SEA
 
 import requests
+
+
+def description() -> str:
+    return (
+        "Reports the current weather in San Francisco from wttr.in; "
+        "pass its path as extension_agent_path or send `/weather now` "
+        "(any text after the command) once its parent folder is listed "
+        "in ~/.kiss/SEAS.md."
+    )
+
 
 def prompt() -> str:
     return "Look up the current weather in San Francisco and report it."
@@ -71,7 +90,7 @@ from kiss.server import sorcar
 
 result = sorcar.run(
     "placeholder",  # required non-blank; overridden by prompt()
-    extension_agent_path="weather_agent.py",
+    extension_agent_path="weather/weather_sea.py",
 )
 print(result.text, result.success, result.cost)
 ```
@@ -162,6 +181,87 @@ except `append_basic_tools`, whose getter is
 
 When a getter is absent, the caller's value is used (which is the
 `run()` default when the caller did not pass one).
+
+### `description()` — mandatory, not a run parameter
+
+| Function        | Return type         | Used by                                   |
+|-----------------|---------------------|-------------------------------------------|
+| `description()` | `str` (one sentence, non-empty) | `/<name> help` in the chat (`kiss.agents.sorcar.sea_commands`) |
+
+Every SEA must define `description()`, a zero-argument function that
+returns one sentence saying what the SEA does and how to use it.  It
+is not one of the 20 run-parameter getters: `apply_agent_overrides()`
+ignores it and it never reaches the command dict.  The slash-command
+registry calls it when the prompt is `/<name> help` (the bare word
+`help`, any letter case, nothing after it): the daemon does not run
+the SEA and calls no model, it imports the script, calls
+`description()` and posts the returned sentence as the task result.  A
+SEA without a callable `description()`, or whose `description()`
+raises or returns something other than a non-empty string, yields a
+diagnostic instead.
+
+### `dispatch_timeout()` — optional, for SEAs that run longer than five minutes
+
+| Function             | Return type              | Used by                                   |
+|----------------------|--------------------------|-------------------------------------------|
+| `dispatch_timeout()` | `int` or `float` seconds | the `/<name>` relay's `run_agent` call (`sea_commands.rewrite_prompt_if_command`) |
+
+The `/<name>` rewrite makes the tab's agent call `run_agent`, whose
+wait defaults to 300 s and stops the sub-task when it runs out.  An SEA
+whose runs take longer (`/write_paper` returns 6 h, `/review_paper`
+2 h, `/revise_and_review_paper` 24 h) defines `dispatch_timeout()`;
+the directive then carries `timeout = "<seconds>"`.  A missing getter,
+a value that is not a positive number, or a script that fails to
+import adds no line, so the relay behaves as before.  Not a run
+parameter: `apply_agent_overrides()` ignores it.
+
+### `add_to_system_prompt()`, `register_as_model()` and `on_picked_as_model()` — model routing SEAs
+
+| Function                 | Return type | Effect                                                     |
+|--------------------------|-------------|------------------------------------------------------------|
+| `add_to_system_prompt()` | `str`       | text **added** to `appendToSystemPrompt` after the value already there |
+| `register_as_model()`    | `bool`      | `True` lists the SEA in the model picker under its command name |
+| `on_picked_as_model(work_dir)` | any   | hook run once per run whose model is the SEA; its result is logged |
+
+`add_to_system_prompt()` carries a SEA's *model routing protocol*: the
+returned text is appended to the run's system prompt after whatever
+`appendToSystemPrompt` already holds (the caller's text, or the value
+an `append_to_system_prompt()` getter staged), separated by a blank
+line.  Unlike `append_to_system_prompt()` it never replaces the
+caller's value, so the protocol reaches every run of the SEA and the
+caller's own additions survive; `run_parallel` workers inherit it like
+any system-prompt suffix.  `register_as_model()` is a registry flag,
+not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
+lists every registered SEA whose `register_as_model()` returns `True`,
+the daemon offers them in the model picker (vendor `Router`, once at
+least one catalog model is runnable), and a task run with such a pick
+becomes an agent-script run of the SEA on the model its `model()`
+getter names (else the default model) — `/xxx` slash commands and runs
+that already carry an `agentPath` keep their agent and only take that
+model.  The bundled `autorouter` and `bestrouter` are such SEAs.
+
+`on_picked_as_model(work_dir)` is the picked SEA's chance to act on
+being chosen.  `kiss.agents.sorcar.sea_commands.run_picked_hook` runs it
+on a daemon thread at two moments: when the user picks the SEA in the
+model picker (`selectModel`, with the tab's pinned work directory,
+without waiting), and once per run whose model is the SEA (after the
+agent-script overrides, with the run's effective work directory,
+waiting at most `PICKED_HOOK_TIMEOUT_SECONDS`, 15 s, before the task
+starts).  It is not a run parameter: the return value is only logged,
+a hook that raises is logged as a warning, and one that blocks is
+abandoned on its thread; none of them fails the run.  It does not run
+for a `/xxx` command's agent or an explicit `agentPath`, only for the
+SEA the model pick names.  `autorouter` uses it to make sure an
+enabled weekly cron job that runs `/rsi7d autorouter` exists
+(`autorouter_sea.schedule_weekly_rsi7d`: an enabled job of that name is
+kept as is, a paused one is resumed, and when there is none one is
+created — a relay prompt job in the KISS checkout the work directory
+is in, with worktree and auto-commit, or a scratch-directory job that
+still refreshes `$KISS_HOME/AUTOROUTER.md` when there is no checkout;
+a linked task worktree resolves to its owning checkout).  Hooks from
+concurrent picks may overlap — a SEA file is executed afresh on every
+call and cannot hold a lock of its own — so the look-up-then-create is
+the cron store's atomic `cron_job("ensure")`, not the SEA's.
 
 The parameters without getters:
 
@@ -314,7 +414,7 @@ The parameters without getters:
   run-to-completion CLI model (`cc/*`, `codex/*`) executes its own
   tools on the host, so a non-empty `docker_image()` with such a
   model fails the task with a `KISSError` instead of silently
-  bypassing the container.  The bundled `coding_sea.py`'s
+  bypassing the container.  The bundled `seas/coding/coding_sea.py`'s
   `ContainerHarness` is the reference user of the attach form: its
   `docker_image()` returns `container:<id>` for the trial container
   it is given.
@@ -589,7 +689,7 @@ the caller's prompt reaches the LLM and the daemon's configured
 default model is used.
 
 ```python
-# task_manager_agent.py
+# task_manager/task_manager_sea.py
 """SEA for managing a SQLite task database.
 
 Gives the LLM three tools — add_task, list_tasks, complete_task — and
@@ -601,6 +701,16 @@ import json
 import os
 import sqlite3
 import threading
+
+
+def description() -> str:
+    """Return the one-sentence help text shown by ``/task_manager help``."""
+    return (
+        "Manages a personal SQLite task list (add, list, complete) through three "
+        "tools; use it as `/task_manager <request>` or pass its path as "
+        "extension_agent_path."
+    )
+
 
 # --- Database setup ---
 # Guarded with CREATE IF NOT EXISTS so the double-import of a
@@ -728,7 +838,7 @@ from kiss.server import sorcar
 # First run — add some tasks (the prompt reaches the LLM directly)
 result = sorcar.run(
     "Add three tasks: buy groceries, review PR #42, write tests",
-    extension_agent_path="task_manager_agent.py",
+    extension_agent_path="task_manager/task_manager_sea.py",
 )
 print(result.text)
 print(f"Cost: ${result.cost:.4f}, Steps: {result.steps}")
@@ -737,7 +847,7 @@ print(f"Cost: ${result.cost:.4f}, Steps: {result.steps}")
 result2 = sorcar.run(
     "Complete 'buy groceries' and show me remaining tasks",
     chat_id=result.chat_id,
-    extension_agent_path="task_manager_agent.py",
+    extension_agent_path="task_manager/task_manager_sea.py",
 )
 print(result2.text)
 ```
@@ -797,8 +907,8 @@ class TaskResult:
 | Aspect | SEA (`extension_agent_path`) | Tools file (`tools`) |
 |--------|------------------------------------------|----------------------|
 | **Purpose** | Override run parameters AND supply tools | Supply tools only |
-| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (20 total, plus 2 hooks) | `get_tools()` (or `tools()`) only |
-| **Required function** | None — define only the getters you need | Must define `get_tools()` (or `tools()`) |
+| **Getter functions** | `prompt()`, `model()`, `system_prompt()`, `tools()`, etc. (20 total, plus 2 hooks), and `description()` | `get_tools()` (or `tools()`) only |
+| **Required function** | `description()` — define only the run-parameter getters you need | Must define `get_tools()` (or `tools()`) |
 | **Can be combined** | Yes — `tools()` can point to a separate tools file | N/A |
 | **Can be self-contained** | Yes — return a list from `tools()` and the script becomes its own tools file | Always self-contained |
 
@@ -834,20 +944,29 @@ class TaskResult:
   environment.  A tool that runs on the task's worker thread can call
   `kiss.server.agent_state.current_agent()` to get the running agent
   (its `work_dir`, model and usage counters); it returns `None` on any
-  other thread.  The bundled `autoroute_sea.py` and `skillopt_sea.py`
-  use it.
-- Name the file `xxx_sea.py` and put its folder in `~/.kiss/SEAS.md`
-  (one folder per line; blank lines and `#` comments are ignored) to
-  expose it as the chat command `/xxx`; `/xxx some text` runs the SEA
-  on "some text" via `run_agent`.  Bundled
-  `src/kiss/agents/third_party_agents/*_sea.py` scripts take
+  other thread.  The bundled `seas/autorouter/autorouter_sea.py` and
+  `seas/skillopt/skillopt_sea.py` use it.
+- Put the SEA in a folder named after the command, `xxx/xxx_sea.py`,
+  and list that folder's parent in `~/.kiss/SEAS.md` (one folder per
+  line; blank lines and `#` comments are ignored) to expose it as the
+  chat command `/xxx`; `/xxx some text` runs the SEA on "some text" via
+  `run_agent`, and `/xxx help` prints its `description()` without
+  running it.  The command is the folder name, so it must match
+  `[A-Za-z0-9_-]+`; a loose `xxx_sea.py` placed directly in a listed
+  folder is not a command.  Bundled
+  `src/kiss/agents/third_party_agents/<name>/<name>_sea.py` scripts take
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 13 bundled `*_sea.py` files register
-  these commands: `/autoroute` (runs a task on the cheapest model tier
-  that will finish it), `/coding` (unattended coding in a Docker
-  container; the module defines no top-level getters, its
+  folder can shadow them.  The 16 bundled SEA folders register
+  these commands: `/ask` (answers a question about the current task
+  from a digest of its persisted events; typed into a running task's
+  tab it runs as a side channel that always dispatches the bundled
+  `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
+  command), `/autorouter` (runs a task on the cheapest model tier
+  that will finish it), `/bestrouter` (runs a task on
+  `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
+  container; the module defines no top-level run-parameter getters, its
   `ContainerHarness` getters are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`
   (removes a standing instruction from `~/.kiss/SORCAR.md`),
@@ -856,17 +975,26 @@ class TaskResult:
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
   `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
-  a venue), `/rsi7d` (7-day self-improvement of the indexed SEAs from
-  their recorded runs; needs task text, e.g. `/rsi7d all`), `/sh`
+  a venue), `/revise_and_review_paper` (writes a paper with
+  `/write_paper`, has `/review_paper` review it fresh, and repeats until
+  strong accept or no further improvement; task text carries `Writing:`
+  and `Review:` instructions), `/rsi7d` (7-day self-improvement of the
+  indexed SEAs from their recorded runs; the task text starts with the
+  scope: `/rsi7d all`, `/rsi7d <name> [<name> ...]` for those SEAs only,
+  or `/rsi7d --seas-dir <folder> [<name> ...]` for the SEAs of that
+  folder, which then are the ones it may edit), `/sh`
   (runs the command with the `bash` tool profile), `/skillopt`
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),
   `/write_paper` (writes or revises a research paper), and `/dummy`
-  (`dummy_sea.py`, an SEA with no getters, is what `run_agent` runs
-  when its `agent` argument is empty).  The other modules in that
-  folder (`coding_test_context.py`, `git_knowledge_index.py`,
-  `git_knowledge_store.py`, `sorcar_md.py`) are helpers, not
-  commands: only `*_sea.py` files are registered.  Syntax,
+  (`seas/dummy/dummy_sea.py`, an SEA whose only getter is
+  `description()`, is what `run_agent` runs when its `agent` argument
+  is empty).  The other modules in that package
+  (`coding/coding_test_context.py`,
+  `git_extract_knowledge/git_knowledge_index.py`,
+  `git_extract_knowledge/git_knowledge_store.py`, the shared
+  `sorcar_md.py`) are helpers, not commands: only
+  `<name>/<name>_sea.py` folders are registered.  Syntax,
   precedence and the dispatch flow are
   documented in
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)

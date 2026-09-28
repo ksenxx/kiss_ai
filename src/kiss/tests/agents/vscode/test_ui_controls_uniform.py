@@ -91,16 +91,20 @@ def test_remote_page_controls_share_typeface_scale_and_scheme(tmp_path: Path) ->
                 )
                 page.goto(f"https://127.0.0.1:{port}/", wait_until="load")
                 page.wait_for_selector("#output", state="attached")
-                dark = page.evaluate(_PROBE_JS)
-
-                page.evaluate("() => document.getElementById('theme-btn').click()")
+                # Light Modern is the default; the toggle switches to dark.
                 page.wait_for_function(
                     "() => document.body.classList.contains('light-theme')", timeout=10000
                 )
-                light_scheme = page.evaluate("() => getComputedStyle(document.body).colorScheme")
+                light = page.evaluate(_PROBE_JS)
+
                 page.evaluate("() => document.getElementById('theme-btn').click()")
                 page.wait_for_function(
                     "() => !document.body.classList.contains('light-theme')", timeout=10000
+                )
+                dark_scheme = page.evaluate("() => getComputedStyle(document.body).colorScheme")
+                page.evaluate("() => document.getElementById('theme-btn').click()")
+                page.wait_for_function(
+                    "() => document.body.classList.contains('light-theme')", timeout=10000
                 )
 
                 # main.css's own send button (the remote sheet restyles it):
@@ -118,17 +122,18 @@ def test_remote_page_controls_share_typeface_scale_and_scheme(tmp_path: Path) ->
         thread.join(timeout=30)
     assert not thread.is_alive(), "RemoteAccessServer failed to stop"
 
-    assert dark["searchFont"] == dark["bodyFont"], dark
-    assert dark["closeFont"] == dark["bodyFont"], dark
-    assert dark["budgetFont"] == dark["bodyFont"], dark
-    assert dark["budgetSize"] == dark["bodySize"], dark
-    assert dark["selectSize"] == dark["bodySize"], dark
-    assert dark["headerWeight"] == "400", dark
-    assert dark["filters"][0] == "uppercase", dark
-    assert dark["filters"] == dark["subpanel"], dark
-    assert dark["checkboxAccent"] == "rgb(77, 170, 252)", dark
-    assert dark["scheme"] == "dark", dark
-    assert light_scheme == "light"
+    assert light["searchFont"] == light["bodyFont"], light
+    assert light["closeFont"] == light["bodyFont"], light
+    assert light["budgetFont"] == light["bodyFont"], light
+    assert light["budgetSize"] == light["bodySize"], light
+    assert light["selectSize"] == light["bodySize"], light
+    assert light["headerWeight"] == "400", light
+    assert light["filters"][0] == "uppercase", light
+    assert light["filters"] == light["subpanel"], light
+    # Light Modern textLink.foreground #005fb8 drives the accent.
+    assert light["checkboxAccent"] == "rgb(0, 95, 184)", light
+    assert light["scheme"] == "light", light
+    assert dark_scheme == "dark"
     assert send_shadow == "none"
 
 

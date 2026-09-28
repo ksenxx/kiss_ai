@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar.task_metadata import classify_task_tags, upsert_chat_summary
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 
@@ -930,7 +931,7 @@ _HISTORY_SELECT = (
     "model, work_dir, version, tokens, cost, steps, "
     "is_parallel, is_worktree, auto_commit_mode, "
     "start_ts, end_ts, is_favorite, parent_task_id, max_budget, "
-    "is_side_channel "
+    "is_side_channel, tags, sea "
     "FROM task_history "
 )
 
@@ -1036,6 +1037,11 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
         payload["endTs"] = _safe_int(row["end_ts"], 0)
         payload["max_budget"] = _safe_float(row["max_budget"], 0.0)
         payload["is_favorite"] = bool(row["is_favorite"])
+        # Only when set, so a row without them reads exactly as before
+        # the columns existed.
+        for key in ("tags", "sea"):
+            if row[key]:
+                payload[key] = _safe_str(row[key])
         if row["parent_task_id"]:
             sub: dict[str, object] = {
                 "parent_task_id": _safe_str(row["parent_task_id"]),
@@ -1251,7 +1257,21 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             -- 1 for a side-channel sub-agent (the /ask answerer): its
             -- result lands in the parent's transcript, so replays close
             -- its nested tab instead of re-opening it.
-            is_side_channel INTEGER DEFAULT 0
+            is_side_channel INTEGER DEFAULT 0,
+            -- Comma-separated classification of the task ("work,coding");
+            -- written when the task finishes (task_metadata.classify_task_tags).
+            tags TEXT DEFAULT '',
+            -- File stem of the SEA (agent script) that ran the task
+            -- ("write_paper_sea", "cron_agent"); '' for a plain run.
+            sea TEXT DEFAULT ''
+        );
+        -- One row per chat: a 6-8 word summary of what the chat's tasks
+        -- did and the launch instant (epoch ms) of its latest task.
+        -- Maintained by _save_task_extra when a task finishes.
+        CREATE TABLE IF NOT EXISTS chat_summaries (
+            chat_id TEXT PRIMARY KEY,
+            summary TEXT DEFAULT '',
+            last_launched INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1326,6 +1346,8 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         ("owner", "TEXT DEFAULT ''"),
         ("max_budget", "REAL DEFAULT 0.0"),
         ("is_side_channel", "INTEGER DEFAULT 0"),
+        ("tags", "TEXT DEFAULT ''"),
+        ("sea", "TEXT DEFAULT ''"),
     )
     for name, column_ddl in added_columns:
         if name in cols:
@@ -1840,8 +1862,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
-            "parent_task_id, max_budget, owner, is_side_channel) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, max_budget, owner, is_side_channel, sea) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -1861,6 +1883,7 @@ def _add_task(
                 _safe_float(payload.get("max_budget"), 0.0),
                 _process_owner_token(),
                 is_side_channel,
+                _safe_str(payload.get("sea", "") or ""),
             ),
         )
     _invalidate_chat_context_cache(chat_id)
@@ -1911,13 +1934,36 @@ def _mark_legacy_side_channel_rows(task_template: str) -> int:
     return int(cursor.rowcount or 0)
 
 
-def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
+_TAG_FILTER_RE = re.compile(r"^[a-z]+$")
+
+
+def _tag_filter_sql(tag: str) -> tuple[str, tuple[str, ...]]:
+    """Build the ``AND`` clause that keeps only rows tagged ``tag``.
+
+    ``tags`` is a comma-joined string (``"work,coding,testing"``), so the
+    row matches when ``,tag,`` occurs in ``,tags,``.  A tag that is not a
+    plain lowercase word (the whole vocabulary is) cannot come from the
+    history panel's dropdown and is ignored: no clause, no filtering.
+
+    Args:
+        tag: The tag to keep, or ``""`` for no tag filter.
+
+    Returns:
+        The SQL fragment (empty or ``"AND ... "``) and its parameters.
+    """
+    if not _TAG_FILTER_RE.match(tag):
+        return "", ()
+    return "AND (',' || COALESCE(tags, '') || ',') LIKE ? ", (f"%,{tag},%",)
+
+
+def _load_history(limit: int = 0, offset: int = 0, tag: str = "") -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 
     Args:
         limit: Maximum number of entries to return.
             0 returns all entries (no cap).
         offset: Number of entries to skip before returning results.
+        tag: When set, only entries carrying this tag are returned.
 
     Returns:
         List of history entry dicts with ``id``, ``timestamp``,
@@ -1926,12 +1972,14 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
+        tag_sql, tag_params = _tag_filter_sql(tag)
         sql = (
             _HISTORY_SELECT
             + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + tag_sql
             + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?"
         )
-        rows = db.execute(sql, (effective_limit, offset)).fetchall()
+        rows = db.execute(sql, (*tag_params, effective_limit, offset)).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
 
@@ -2141,7 +2189,7 @@ def _record_steer_input(text: str) -> None:
 
 
 def _search_history(
-    query: str, limit: int = 50, offset: int = 0
+    query: str, limit: int = 50, offset: int = 0, tag: str = ""
 ) -> list[_HistoryEntry]:
     """Search history entries by substring match. Thread-safe.
 
@@ -2149,21 +2197,24 @@ def _search_history(
         query: Case-insensitive substring to match against task text.
         limit: Maximum number of matching entries to return.
         offset: Number of entries to skip before returning results.
+        tag: When set, only entries carrying this tag are returned.
 
     Returns:
         List of matching entries, most-recent-first.
     """
     if not query:
-        return _load_history(limit=limit, offset=offset)
+        return _load_history(limit=limit, offset=offset, tag=tag)
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        tag_sql, tag_params = _tag_filter_sql(tag)
         rows = db.execute(
             _HISTORY_SELECT
             + "WHERE task LIKE ? ESCAPE '\\' "
             + f"AND {_HISTORY_NOT_SUBAGENT} "
+            + tag_sql
             + "ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?",
-            (f"%{escaped}%", limit, offset),
+            (f"%{escaped}%", *tag_params, limit, offset),
         ).fetchall()
         return [_history_row_to_dict(r) for r in rows]
 
@@ -2414,6 +2465,11 @@ def _backfill_orphan_progress(
             ).fetchone()
             if row is None or not row["id"]:
                 continue
+            # The row's result was just rewritten to its terminal text:
+            # derive its tags (``failed`` included) and refresh its
+            # chat's summary row, as _save_task_extra does for a task
+            # that ends normally.
+            _finalize_task_metadata(db, str(row["id"]))
             progress = _recovered_progress_from_events(db, str(row["id"]))
             if not progress:
                 continue
@@ -2818,6 +2874,7 @@ _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "startTs": ("start_ts", int, 0),
     "endTs": ("end_ts", int, 0),
     "max_budget": ("max_budget", float, 0.0),
+    "sea": ("sea", str, ""),
 }
 
 
@@ -2890,6 +2947,66 @@ def _save_task_extra(
         db.execute(
             f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
         )
+        if _safe_int(extra.get("endTs"), 0) > 0:
+            _finalize_task_metadata(db, resolved)
+
+
+def _finalize_task_metadata(db: sqlite3.Connection, task_id: str) -> None:
+    """Derive the finished task's ``tags`` and refresh its chat's summary row.
+
+    Called inside :func:`_save_task_extra`'s transaction once the row
+    carries an ``endTs``: the result (``_save_task_result`` runs first)
+    decides the ``failed`` tag, and a listable (non-sub-agent) task
+    refreshes the ``chat_summaries`` row of its chat.
+
+    Args:
+        db: The connection holding the write transaction.
+        task_id: The finished row's id.
+    """
+    row = db.execute(
+        "SELECT task, result, chat_id, parent_task_id FROM task_history WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return
+    tags = classify_task_tags(
+        _safe_str(row["task"]),
+        is_subagent=bool(row["parent_task_id"]),
+        failed=_is_failed_result(_safe_str(row["result"])),
+    )
+    db.execute("UPDATE task_history SET tags = ? WHERE id = ?", (",".join(tags), task_id))
+    if not row["parent_task_id"] and row["chat_id"]:
+        upsert_chat_summary(db, _safe_str(row["chat_id"]))
+
+
+def _chat_summaries(chat_ids: list[str]) -> dict[str, dict[str, object]]:
+    """Return the ``chat_summaries`` rows of *chat_ids*. Thread-safe.
+
+    Args:
+        chat_ids: Chat session ids to look up; empty ids are skipped.
+
+    Returns:
+        Mapping of chat id to ``{"summary": str, "last_launched": int}``
+        (``last_launched`` in epoch ms).  Chats without a row are absent.
+    """
+    ids = sorted({c for c in chat_ids if c})
+    if not ids:
+        return {}
+    with _rw_lock.read_lock():
+        db = _get_db()
+        placeholders = ",".join("?" * len(ids))
+        rows = db.execute(
+            "SELECT chat_id, summary, last_launched FROM chat_summaries "
+            f"WHERE chat_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    return {
+        _safe_str(r["chat_id"]): {
+            "summary": _safe_str(r["summary"]),
+            "last_launched": _safe_int(r["last_launched"], 0),
+        }
+        for r in rows
+    }
 
 
 _event_queue: queue.Queue = queue.Queue()

@@ -168,11 +168,13 @@ def env(monkeypatch: pytest.MonkeyPatch) -> Iterator[IsolatedKissHome]:
     Yields the isolated home; ``KISS_DECISIONS_BASE_URL`` points at the
     replay server and ``OPENROUTER_API_KEY`` is a placeholder the replay
     ignores, so the decisions route is enabled whatever the developer's
-    real keys are.
+    real keys are.  ``classify_with_decisions`` is off by default, so the
+    isolated config turns it on.
     """
     saved = os.environ.get(_DISABLE_ENV)
     os.environ[_DISABLE_ENV] = "0"
     isolated = IsolatedKissHome("kiss-task-classifier-decisions-")
+    isolated.write_config(classify_with_decisions=True)
     clear_classification_cache()
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key")
     server = HTTPServer(("127.0.0.1", 0), _JevHandler)
@@ -479,6 +481,7 @@ def test_live_jev_classifies_arithmetic_as_simple(monkeypatch: pytest.MonkeyPatc
     os.environ[_DISABLE_ENV] = "0"
     monkeypatch.delenv(_BASE_URL_ENV, raising=False)
     isolated = IsolatedKissHome("kiss-task-classifier-decisions-live-")
+    isolated.write_config(classify_with_decisions=True)
     clear_classification_cache()
     try:
         outcome = classify_task(

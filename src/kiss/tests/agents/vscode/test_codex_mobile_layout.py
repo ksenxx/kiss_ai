@@ -116,6 +116,7 @@ CONTROL_IDS = [
     "hf-from-btn",
     "hf-to",
     "hf-to-btn",
+    "hf-tag",
     "history-list",
     "sidebar-overlay",
     "frequent-panel",

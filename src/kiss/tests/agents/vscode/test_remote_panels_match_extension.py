@@ -437,7 +437,6 @@ _PROBE_STYLES_JS = (
   return {
     styles,
     taskPanelCollapsedPadding: collapsedPadding,
-    taskPanelBorderColor: tpCs.borderTopColor,
     taskPanelMaxWidth: tpCs.maxWidth,
     taskPanelGapLeft: tpRect.left - appRect.left,
     taskPanelGapRight: appRect.right - tpRect.right,
@@ -645,7 +644,6 @@ def _assert_probe_parity(
 
     for scalar in (
         "taskPanelCollapsedPadding",
-        "taskPanelBorderColor",
         "taskPanelMaxWidth",
     ):
         assert rem_probes[scalar] == ext_probes[scalar], (
@@ -676,9 +674,10 @@ def test_live_remote_panels_match_extension(tmp_path: Path) -> None:
     Colors of the panel PALETTE (backgrounds, accents) are excluded
     from the probe comparison: the extension inherits them from the
     live VS Code theme's ``--vscode-*`` tokens while the remote page
-    ships a fixed dark palette, so they legitimately differ per theme.
-    The task panel's border color IS compared because main.css pins it
-    to a literal (theme-independent) yellow.
+    defaults to Light Modern, so they legitimately differ per theme.
+    That includes the task panel's border: main.css draws it with
+    ``--accent-line``, a mix of the theme's accent and border colours.
+    Its width and style are part of ``COMPARED_PROPS``.
     """
     shot_dir = Path(
         os.environ.get("KISS_PANEL_SHOT_DIR", str(tmp_path))

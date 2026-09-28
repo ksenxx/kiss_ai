@@ -63,7 +63,7 @@ _SKIPPED_EVENT_TYPES = frozenset({
     "system_prompt", "task_settings", "thinking_start", "thinking_end",
     "text_start", "text_end", "task_done", "new_tab", "tasks_updated",
     "subagentDone", "status", "model_pick", "agent_model_pick",
-    "followup_suggestion", "usage_info",
+    "followup_suggestion", "usage_info", "llm_call",
 })
 
 # Tool arguments the printer lifts to the top level of a ``tool_call``
