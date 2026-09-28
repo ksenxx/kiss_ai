@@ -33,13 +33,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.github_sea as gh_mod
+import kiss.agents.third_party_agents.github.github_sea as gh_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
 from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
-from kiss.agents.third_party_agents.github_sea import (
+from kiss.agents.third_party_agents.github.github_sea import (
     GitHubAgent,
     GitHubChannelBackend,
     _config,
@@ -1001,7 +1001,7 @@ def test_main_without_args_prints_usage() -> None:
     line shows as uncovered in the report despite being tested here.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "kiss.agents.third_party_agents.github_sea"],
+        [sys.executable, "-m", "kiss.agents.third_party_agents.github.github_sea"],
         capture_output=True,
         text=True,
         timeout=120,

@@ -55,9 +55,12 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
 
     def test_remote_html_uses_content_versioned_media_urls(self) -> None:
         html = web_server._build_html()
+        # The remote page defaults to Light Modern, so the linked
+        # highlight sheet is the light one; the dark sheet's URL only
+        # appears inside the theme JSON main.js swaps in at runtime.
         for name in (
             "main.css",
-            "highlight-vscode-dark.css",
+            "highlight-vscode-light.css",
             "highlight.min.js",
             "marked.min.js",
             "panelCopy.js",
@@ -65,6 +68,9 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
         ):
             urls = _asset_urls(html, name)
             self.assertEqual(urls, [f"/media/{name}?v={_asset_hash(name)}"])
+        # The runtime theme swap must fetch a versioned dark sheet too.
+        dark = "highlight-vscode-dark.css"
+        self.assertIn(f'"dark": "/media/{dark}?v={_asset_hash(dark)}"', html)
 
     def test_remote_server_serves_cache_busted_media_urls(self) -> None:
         server = RemoteAccessServer(host="127.0.0.1", port=0)

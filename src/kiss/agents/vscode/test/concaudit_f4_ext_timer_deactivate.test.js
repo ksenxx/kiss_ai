@@ -251,7 +251,6 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
   snoozeUpdateNotification: () => ({}),
 });
 stubModule(path.join(OUT_DIR, 'SorcarTab.js'), {
-  resetTipsOnExtensionUpdate: () => {},
   HISTORY_PANEL_TAB_ID: 'history-panel',
   historyPanelBodyAttrs: () => '',
   META_PANEL_TAB_ID: 'meta-panel',

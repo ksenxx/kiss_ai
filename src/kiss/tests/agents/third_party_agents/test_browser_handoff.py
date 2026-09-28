@@ -38,13 +38,13 @@ from kiss.agents.third_party_agents._device_auth import (
     consent_instructions,
     consent_required,
 )
-from kiss.agents.third_party_agents.brave_sea import BraveSearchAgent
-from kiss.agents.third_party_agents.discord_sea import DiscordAgent
-from kiss.agents.third_party_agents.gcal_sea import GoogleCalendarAgent
-from kiss.agents.third_party_agents.signal_sea import SignalAgent
-from kiss.agents.third_party_agents.slack_sea import SlackAgent
-from kiss.agents.third_party_agents.telegram_sea import TelegramAgent
-from kiss.agents.third_party_agents.whatsapp_sea import _qr_handoff
+from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchAgent
+from kiss.agents.third_party_agents.discord.discord_sea import DiscordAgent
+from kiss.agents.third_party_agents.gcal.gcal_sea import GoogleCalendarAgent
+from kiss.agents.third_party_agents.signal.signal_sea import SignalAgent
+from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
+from kiss.agents.third_party_agents.telegram.telegram_sea import TelegramAgent
+from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import _qr_handoff
 from kiss.core import browser_handoff as _browser_handoff
 from kiss.core.browser_handoff import (
     _launch_commands,
@@ -439,7 +439,7 @@ def test_device_flow_prerequisite_portals_open(
     isolated_kiss_home: Path, fake_browser: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without an OAuth app ID, the registration portal opens for the user."""
-    from kiss.agents.third_party_agents.twitch_sea import TwitchAgent
+    from kiss.agents.third_party_agents.twitch.twitch_sea import TwitchAgent
 
     twitch = _auth_tools(TwitchAgent())["authenticate_twitch"]("")
     assert twitch.startswith("client_id cannot be empty.")
@@ -455,7 +455,7 @@ def test_prompts_describe_the_default_browser_hand_off() -> None:
     discord_prompt = DiscordAgent.channel_system_prompt
     assert "Do not drive the portal" not in discord_prompt
     assert "authenticate_discord() with no arguments" in discord_prompt
-    from kiss.agents.third_party_agents.github_sea import GitHubAgent
+    from kiss.agents.third_party_agents.github.github_sea import GitHubAgent
 
     prompt = GitHubAgent.channel_system_prompt
     assert "tries by itself to open that URL in the user's default browser" in prompt

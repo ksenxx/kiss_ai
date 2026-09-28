@@ -52,7 +52,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.github_sea import GitHubChannelBackend
+from kiss.agents.third_party_agents.github.github_sea import GitHubChannelBackend
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth import client as muse_client
 from kiss.agents.third_party_agents.muse_auth._common import (
@@ -471,10 +471,10 @@ def test_export_cli_recovers_vault_credential(
 
 def test_bearer_connect_scrubs_plaintext_config(muse_env: Path) -> None:
     """notion/brave connects move the token to the vault and scrub the config."""
-    from kiss.agents.third_party_agents.brave_sea import BraveSearchChannelBackend
-    from kiss.agents.third_party_agents.brave_sea import _config as brave_config
-    from kiss.agents.third_party_agents.notion_sea import NotionChannelBackend
-    from kiss.agents.third_party_agents.notion_sea import _config as notion_config
+    from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchChannelBackend
+    from kiss.agents.third_party_agents.brave.brave_sea import _config as brave_config
+    from kiss.agents.third_party_agents.notion.notion_sea import NotionChannelBackend
+    from kiss.agents.third_party_agents.notion.notion_sea import _config as notion_config
 
     notion_config.save({"token": "ntn_scrub_me", "workspace_hint": "acme"})
     backend = NotionChannelBackend()
@@ -503,7 +503,7 @@ def test_channel_main_loads_api_keys_env_first(
     ``muse_auth_enabled()`` or migrate credentials.
     """
     from kiss.agents.third_party_agents._channel_agent_utils import channel_main
-    from kiss.agents.third_party_agents.notion_sea import NotionAgent
+    from kiss.agents.third_party_agents.notion.notion_sea import NotionAgent
 
     monkeypatch.delenv("KISS_MUSE_AUTH", raising=False)
     isolated_kiss_home.mkdir(parents=True, exist_ok=True)

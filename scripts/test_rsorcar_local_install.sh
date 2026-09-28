@@ -81,6 +81,9 @@ EOF
     printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/sync-memory-args.txt"\nexit 0\n' "$fix" \
         > "$dir/scripts/sync-memory.sh"
     printf '#!/bin/bash\nexit 0\n' > "$dir/scripts/install-api-keys.sh"
+    # The notes sync (step 4d, run locally with python3) records its target.
+    printf 'import sys\nopen("%s/sync-notes-args.txt", "a").write(" ".join(sys.argv[1:]) + "\\n")\n' \
+        "$fix" > "$dir/src/kiss/scripts/sync_kiss_notes.py"
     # Steps 1a, 1c and 4 feed these three to the remote's ``bash -s``; the ssh
     # stub runs what it is fed, so the real scripts run (against this machine,
     # which has every tool the first looks for and room for the second, and
@@ -251,6 +254,13 @@ INSTALL_LINE=$(echo "$OUT" | grep -n "Installing KISS Sorcar on user@fakehost" |
 [[ "$DB_SYNC_LINE" -lt "$MEM_SYNC_LINE" && "$MEM_SYNC_LINE" -lt "$INSTALL_LINE" ]] \
     || fail "the memory sync does not run after the task database sync and before the remote install (lines $DB_SYNC_LINE / $MEM_SYNC_LINE / $INSTALL_LINE)"
 pass "the agent's memory is synced with the remote, after the task database and before the remote install"
+
+grep -qx 'user@fakehost' "$WORK/ok/sync-notes-args.txt" 2>/dev/null \
+    || fail "src/kiss/scripts/sync_kiss_notes.py was not run with the target: $(cat "$WORK/ok/sync-notes-args.txt" 2>/dev/null)"
+NOTES_SYNC_LINE=$(echo "$OUT" | grep -n "Syncing the autorouter's notes with user@fakehost" | cut -d: -f1 | head -1)
+[[ -n "$NOTES_SYNC_LINE" && "$MEM_SYNC_LINE" -lt "$NOTES_SYNC_LINE" && "$NOTES_SYNC_LINE" -lt "$INSTALL_LINE" ]] \
+    || fail "the notes sync does not run after the memory sync and before the remote install (lines $MEM_SYNC_LINE / $NOTES_SYNC_LINE / $INSTALL_LINE)"
+pass "the autorouter's notes are synced with the remote, after the memory and before the remote install"
 
 URL_LINE=$(echo "$OUT" | grep -n "URL:.*$FAKE_URL" | cut -d: -f1 | head -1)
 STEP_LINE=$(echo "$OUT" | grep -n "Running install.sh on the local machine" | cut -d: -f1 | head -1)

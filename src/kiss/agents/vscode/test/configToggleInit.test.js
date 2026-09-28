@@ -207,10 +207,11 @@ function testMissingKeysDefaultToChecked() {
   win.document.getElementById('cfg-use-worktree').checked = false;
   win.document.getElementById('cfg-use-web-tools').checked = false;
   win.document.getElementById('cfg-classify-tasks').checked = false;
-  win.document.getElementById('cfg-classify-with-decisions').checked = false;
+  win.document.getElementById('cfg-classify-with-decisions').checked = true;
 
   // Older servers / partial configs omit the keys: default is true,
-  // matching vscode_config.DEFAULTS.
+  // matching vscode_config.DEFAULTS -- except classify_with_decisions,
+  // whose default is false.
   send(win, {type: 'configData', config: {}, apiKeys: {}});
 
   assert.strictEqual(
@@ -235,12 +236,12 @@ function testMissingKeysDefaultToChecked() {
   );
   assert.strictEqual(
     win.document.getElementById('cfg-classify-with-decisions').checked,
-    true,
+    false,
     'missing classify_with_decisions must default ' +
-      '#cfg-classify-with-decisions to checked',
+      '#cfg-classify-with-decisions to unchecked',
   );
   win.close();
-  console.log('  ok - missing config keys default the toggles to checked');
+  console.log('  ok - missing config keys default the toggles');
 }
 
 function testSubmitBeforeConfigDataOmitsWebTools() {

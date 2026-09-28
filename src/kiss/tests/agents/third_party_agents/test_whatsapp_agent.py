@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents.whatsapp_sea import (
+from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
     _bridge_log_path,

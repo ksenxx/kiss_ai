@@ -18,7 +18,7 @@
 - [Python API Reference](https://kisssorcar.github.io/docs/api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
 - [Supported Models](https://kisssorcar.github.io/docs/models.md) — 661-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
-- [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md) — Every `xxx_sea.py` is a chat command `/xxx`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
+- [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md) — Every SEA folder `xxx/xxx_sea.py` is a chat command `/xxx` and `/xxx help` prints its `description()`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](https://kisssorcar.github.io/docs/prompt-tricks.md) — Reusable prompt snippets that boost result quality
 - [Tips](https://kisssorcar.github.io/docs/tips.md) — Practical tips for getting the highest-quality work
@@ -238,7 +238,7 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
-The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a docked **Task Info sidebar** next to the chat — live token, cost, step, elapsed-time, machine, work-dir, and budget metrics for the visible tab's running task, plus a **Task update**: a short report, written by the bundled `task_update` agent (`src/kiss/agents/seas/task_update_sea.py`), of what that task has done so far and its partial results. The agent runs when the panel first shows the task, every 10 minutes after that, and whenever you press the refresh button at the top right of the report; it runs as a sub-agent in the task's own chat and its cost counts towards the task.
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a docked **Task Info sidebar** next to the chat — live token, cost, step, elapsed-time, machine, work-dir, and budget metrics for the visible tab's running task, plus a **Task update**: a short report, written by the bundled `task_update` agent (`src/kiss/agents/seas/task_update/task_update_sea.py`), of what that task has done so far and its partial results. The agent runs when the panel first shows the task, every 10 minutes after that, and whenever you press the refresh button at the top right of the report; it runs as a sub-agent in the task's own chat and its cost counts towards the task.
 
 ## Python Client API
 
@@ -286,7 +286,7 @@ The returned `TaskResult` carries `text`, `success`, `cost`, `tokens`, `steps`, 
 
 ## Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports the file on every run and calls its top-level `X()` functions — named after `run()`'s parameters — to compute the run's parameters; parameters without a getter keep whatever the caller passed. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent.
+A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as `extension_agent_path` to `sorcar.run()`. Each SEA lives in its own folder named after it, `<name>/<name>_sea.py`, next to the helper modules and data files it needs (`src/kiss/agents/seas/sh/sh_sea.py`, `src/kiss/agents/third_party_agents/slack/slack_sea.py`, ...). The daemon imports the file on every run and calls its top-level `X()` functions — named after `run()`'s parameters — to compute the run's parameters; parameters without a getter keep whatever the caller passed. Every SEA must also define `description()`, a zero-argument function returning one sentence that says what the SEA does and how to use it; it is not a run parameter, it is what `/<name> help` prints. One file can define the task prompt, system prompt, model, budget, tools, and safety hooks — a complete custom agent.
 
 - **Overridable parameters.** Every `sorcar.run()` parameter except `timeout`, `stop_on_timeout`, `sock_path`, `parent_task_id`, `parent_tab_id`, and `extension_agent_path` itself has a getter named after it: `prompt()`, `work_dir()`, `model()`, `chat_id()`, `system_prompt()`, `tools()`, `use_worktree()`, `auto_commit()`, `max_budget()`, `model_config()`, `if_append_basic_tools()` (overrides `append_basic_tools`), `append_to_system_prompt()`, `append_to_prompt()`, `scope_work_dir()`, `use_web_tools()`, `classify_tasks()`, `use_memory()`, `is_parallel()`, and `tool_profile()`. `use_web_tools()`, `classify_tasks()`, and `use_memory()` return a bool, or `None` to fall back to the daemon's default (the persisted setting — for `use_memory()` a non-empty `KISS_USE_MEMORY` environment variable on the daemon process wins over the stored value). `tool_profile()` returns the name of the tool profile the run's built-in toolset is cut down to — `"full"`, `"review"`, `"shell"`, or `"bash"` (Bash only; the bundled `/sh` agent uses it) — or `""` for the daemon's usual choice.
 - **Atomic, type-checked overrides.** Getters run in the daemon process and are re-imported from source on every run. Each return value is type-checked; overrides apply only after every getter succeeds, and a broken getter fails the task with a diagnostic in `TaskResult.text`.
@@ -306,7 +306,7 @@ def tool_call_hook():
 
 The full authoring guide is in [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
 
-**Slash commands.** A SEA named `xxx_sea.py` is also a chat command: `/xxx some text` makes the session run that file on "some text" through `run_agent`. Bundled channel agents are registered automatically (`/slack`, `/gmail`, ...); add your own SEA folders to `~/.kiss/SEAS.md`. See [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md).
+**Slash commands.** Every SEA folder `xxx/xxx_sea.py` in a scanned folder is also a chat command named after the folder: `/xxx some text` makes the session run that file on "some text" through `run_agent`, and `/xxx help` prints the SEA's `description()` without running it. A loose `xxx_sea.py` outside its own folder is not registered. Bundled channel agents are registered automatically (`/slack`, `/gmail`, ...); add the parent folders of your own SEAs to `~/.kiss/SEAS.md`. See [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md).
 
 ## Skills, MCP Servers, and Customization
 
@@ -607,7 +607,7 @@ See [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) for more r
 
 # Slash Commands for Sorcar Extension Agents
 
-> Every Sorcar Extension Agent (SEA) file named `xxx_sea.py` that the `kiss-web` daemon can see becomes a chat command `/xxx`. The bundled channel agents (`/slack`, `/gmail`, `/github`, ...) are registered automatically; you add your own by listing folders in `~/.kiss/SEAS.md`. This page describes the file format and what happens between typing `/xxx` and the SEA running, so you can plug in your own agents without reading the source.
+> Every Sorcar Extension Agent (SEA) is a folder `xxx/` that holds the script `xxx_sea.py` plus the helper modules and data files the agent needs. Every such folder the `kiss-web` daemon can see becomes a chat command `/xxx`, named after the folder. The bundled channel agents (`/slack`, `/gmail`, `/github`, ...) are registered automatically; you add your own by listing the parent folders in `~/.kiss/SEAS.md`. `/xxx help` prints the SEA's one-sentence `description()`. This page describes the layout and what happens between typing `/xxx` and the SEA running, so you can plug in your own agents without reading the source.
 
 ## What a slash command does
 
@@ -617,7 +617,7 @@ Typing this in the chat box of the VS Code extension or the web app:
 /slack tell #eng that the deploy is done
 ```
 
-is the same as asking Sorcar, in plain language, to run the `slack_sea.py` agent on the task "tell #eng that the deploy is done", except that the routing is fixed: the session must call its `run_agent` tool first, with the SEA's absolute path and your text, and cannot pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA.
+is the same as asking Sorcar, in plain language, to run the `slack/slack_sea.py` agent on the task "tell #eng that the deploy is done", except that the routing is fixed: the session must call its `run_agent` tool first, with the SEA's absolute path and your text, and cannot pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA.
 
 Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose top-level getters (`prompt()`, `model()`, `tools()`, `system_prompt()`, ...) configure the run. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](https://kisssorcar.github.io/docs/cli.md#sorcar-extension-agents-seas).
 
@@ -626,10 +626,10 @@ Any file that is a valid SEA works: a bundled channel agent, or a file of your o
 The daemon builds the command list from three sources:
 
 1. **Bundled channel agents** in `src/kiss/agents/third_party_agents/` of the installed package. These always win a name clash.
-2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules of `templates/write_paper_prompt.md`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and the reviewer model, and the agent gets `check_paper`, which runs the template's AI-slop and consistency gates on the prose, and `build_paper`, which runs pdflatex and bibtex and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path, the word limit and the cutoff date for related work, and the agent gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers). Any `SEAS.md` folder may shadow these.
+2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules of `templates/write_paper_prompt.md`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and the reviewer model, and the agent gets `check_paper`, which runs the template's AI-slop and consistency gates on the prose, and `build_paper`, which runs pdflatex and bibtex and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path, the word limit and the cutoff date for related work, and the agent gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers), and `/revise_and_review_paper` (`/revise_and_review_paper Writing: <...> Review: <...>` runs the two as a loop: the coordinator writes the paper with `/write_paper` from the writing instructions, stages a copy of the built PDF and has `/review_paper` review it as a fresh, memory-free session that sees no earlier review or notes and ends with a `Recommendation:` line, then revises against the review, running experiments, ablations or the AI-discovery loop on the benchmarks the writing instructions allow when the review asks for evidence; it stops at strong accept, at the round cap (default 6) or when two rounds in a row fail to raise the verdict, and keeps every review and a per-round log under `reports/`), and `/git_extract_knowledge` (`/git_extract_knowledge <repo>` builds the durable memory of a git repository given as a local path or a clone URL: `index_repo` indexes every tracked file, 80-line chunk, symbol definition, commit, per-file change with its patch, tag, branch, contributor and directory as full-text blocks in `~/.kiss/memories/<repo>/knowledge.sqlite3`, incrementally after the first run; the agent then writes curated pages — overview, domain glossary and concepts, architecture, conventions, history, one page per module, FAQ — into the repository's domain memory, where every Sorcar run inside that repository finds them with `memory_search`, plus a `knowledge-lookup` page with the shell command that queries the block store, `python -m kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea search <repo> "<query>"`; the first run schedules a cron job that runs `update <repo>` every morning (04:00 America/Los_Angeles when scheduled; the cron hour is fixed in the daemon's local time, so it moves by one hour across daylight-saving changes unless that clock is on Pacific time), and `ask <repo> <question>` answers from the memory), and `/remember` and `/forget` (`/remember <instruction>` appends the instruction as a bullet line to `~/.kiss/SORCAR.md`, the file appended to the system prompt of every task, so every later task follows it, creating the file on first use and leaving hand-written text alone; `/forget <instruction>` removes the stored line that matches ignoring case and spacing, or lists the stored instructions and removes the one you meant). Any `SEAS.md` folder may shadow these.
 3. **Your folders** listed in `~/.kiss/SEAS.md` (or `$KISS_HOME/SEAS.md` when `KISS_HOME` is set).
 
-The command name is the file name with `_sea.py` removed: `deploy_sea.py` is `/deploy`, `pr-review_sea.py` is `/pr-review`. A file is registered only when it is a regular file, ends in `_sea.py`, and the remaining stem uses ASCII letters, digits, `_`, or `-` only. `release.notes_sea.py` (a dot) or `my agent_sea.py` (a space) is skipped silently because the command could not be typed. A leading underscore is allowed: `_scratch_sea.py` is `/_scratch`.
+The command name is the SEA's folder name: `deploy/deploy_sea.py` is `/deploy`, `pr-review/pr-review_sea.py` is `/pr-review`. A folder is registered only when it directly contains a regular file named `<folder>_sea.py` and the folder name uses ASCII letters, digits, `_`, or `-` only. `release.notes/` (a dot) or `my agent/` (a space) is skipped silently because the command could not be typed, and so is a folder whose script has another name (`deploy/main_sea.py`). A leading underscore is allowed: `_scratch/_scratch_sea.py` is `/_scratch`. A loose `xxx_sea.py` placed directly in a listed folder is not a command: every SEA needs its own folder, which is also where its helper modules, prompts and data files live.
 
 ## SEAS.md syntax
 
@@ -659,11 +659,11 @@ $WORK/agents           # agents shared by the team
 
 ### Precedence when two folders define the same name
 
-Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge`, `/sh` and `/task_update`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge_sea.py`, `/merge` runs your copy instead of the bundled one.
+Later lines override earlier ones: the folder at the bottom of `SEAS.md` beats the folder at the top. The bundled `third_party_agents/` folder beats every `SEAS.md` folder, and every `SEAS.md` folder beats the bundled `seas/` folder (the Sorcar-extending agents such as `/merge`, `/sh` and `/task_update`). In the example above, if `~/my-seas` and `/opt/agents/experimental` both contain `deploy/deploy_sea.py`, `/deploy` runs the experimental one; if either contains `slack/slack_sea.py`, `/slack` still runs the bundled Slack agent; if either contains `merge/merge_sea.py`, `/merge` runs your copy instead of the bundled one.
 
 ### Changes take effect while the daemon runs
 
-The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a line, dropping a new `xxx_sea.py` into a listed folder, or deleting one updates the command list without a restart, and every open chat receives the new list, so the autocomplete popup updates too. A command that has just appeared is also resolved on first use even if the scan has not run yet.
+The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a line, dropping a new `xxx/xxx_sea.py` into a listed folder, or deleting one updates the command list without a restart, and every open chat receives the new list, so the autocomplete popup updates too. A command that has just appeared is also resolved on first use even if the scan has not run yet.
 
 ## The slash-command flow
 
@@ -683,11 +683,11 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
         v
     - rewrites the prompt into a directive:
         "Call run_agent IMMEDIATELY with
-           agent = /abs/path/to/deploy_sea.py
+           agent = /abs/path/to/deploy/deploy_sea.py
            task  = ship v2.3"
         |
         v
-  Sorcar session calls run_agent(agent="/abs/path/to/deploy_sea.py",
+  Sorcar session calls run_agent(agent="/abs/path/to/deploy/deploy_sea.py",
                                  task="ship v2.3")
         |
         v
@@ -703,16 +703,25 @@ Details worth knowing:
 - **Only at position 0.** The command must be the first character of the prompt with no leading whitespace or blank line. `/deploy` on a later line of a multi-line prompt is ordinary text.
 - **Exact word match.** `/deployx ship` looks up a command named `deployx`; it does not match `/deploy`.
 - **Text is required.** `/deploy` alone, or a `/name` that is not registered, is not rewritten: it is sent to the model as a normal prompt and answered like any other question.
+- **`/deploy help` shows the description.** The one reserved sub-task is `help` (any letter case, nothing after it): the daemon does not run the SEA or call a model; it imports `deploy_sea.py`, calls its `description()` and posts the returned sentence as the task result. A SEA without a callable `description()` returning a non-empty string gets a diagnostic instead.
 - **`<task>` blocks stay intact.** A prompt such as `/deploy <task>build</task><task>publish</task>` reaches the SEA as one sub-task with the tags in place; the daemon does not split it into two Sorcar tasks.
 - **History keeps what you typed.** The task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`, not the rewritten directive.
 - **Where the sub-task runs.** A path-named SEA runs in the calling chat's working directory through the standard task lifecycle (worktree, auto-commit), unless the SEA's own `work_dir()`, `use_worktree()`, or `auto_commit()` getters say otherwise.
+- **How long it may run.** `run_agent` waits 300 seconds by default and stops the sub-task when the wait runs out. An SEA that works longer defines `dispatch_timeout()` returning the seconds it needs (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h); the directive then adds `timeout = "<seconds>"`. A missing getter or a value that is not a positive number leaves the directive as before.
 
 ## Add your own command in three steps
 
-1. Create a folder and a SEA file. The smallest useful SEA pins a system prompt; everything else keeps the daemon's defaults:
+1. Create a parent folder, a folder named after the command, and the SEA file inside it. Every SEA must define `description()`, one sentence that says what it does and how to use it (this is what `/standup help` prints). The smallest useful SEA adds a system prompt; everything else keeps the daemon's defaults:
 
    ```python
-   # ~/my-seas/standup_sea.py
+   # ~/my-seas/standup/standup_sea.py
+   def description():
+       return (
+           "Turns your text into a three-bullet daily stand-up note "
+           "(done, next, blocked); use it as /standup <what happened>."
+       )
+
+
    def system_prompt():
        return (
            "You write terse daily stand-up notes from the user's text. "
@@ -720,7 +729,7 @@ Details worth knowing:
        )
    ```
 
-   For a SEA that carries its own tools, return a list of callables from `tools()`; the bundled channel agents are written this way and are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents)).
+   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. For a SEA that carries its own tools, return a list of callables from `tools()`; the bundled channel agents are written this way and are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
 
 2. Register the folder:
 
@@ -728,9 +737,9 @@ Details worth knowing:
    echo '~/my-seas' >> ~/.kiss/SEAS.md
    ```
 
-3. Within two seconds, type `/st` in the chat box: the popup offers `/standup`. Send `/standup finished the docs page, next is the release, blocked on review` and the note comes back in the chat.
+3. Within two seconds, type `/st` in the chat box: the popup offers `/standup`. Send `/standup help` to see the description you wrote, then `/standup finished the docs page, next is the release, blocked on review` and the note comes back in the chat.
 
-If the command does not appear, check that the file name ends in `_sea.py`, that the stem uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, getter raising, wrong return type) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
+If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, getter raising, wrong return type) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
 
 ---
 

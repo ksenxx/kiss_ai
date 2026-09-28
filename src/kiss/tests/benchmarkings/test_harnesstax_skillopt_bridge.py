@@ -32,7 +32,7 @@ import pytest
 
 from benchmarkings.harnesstax import skillopt_bridge, swebench_runner
 from benchmarkings.harnesstax.skillopt_bridge import SweBenchEnv, compact_trajectory, main
-from kiss.agents.seas.skillopt_sea import load_evals, make_env
+from kiss.agents.seas.skillopt.skillopt_sea import load_evals, make_env
 
 TRAILER = (
     "\n\nSteps: 3/10000, Context: 6,500/400,000 tokens, Total tokens: 12,642, "

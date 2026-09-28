@@ -117,7 +117,7 @@ from kiss.server.json_printer import (
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
-from kiss.server.tips import read_tips
+from kiss.server.tips import read_tips, tips_disabled
 from kiss.server.tricks import read_tricks_data
 from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
@@ -3769,8 +3769,14 @@ def _build_html() -> str:
     version = _read_version()
     tricks_data = read_tricks_data()
     tricks_json = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
+    # The server serves many devices and cannot tell which of them saw
+    # the tips, so unless the user opted out (a choice shared with the
+    # extension) it allows the auto-open and sends the running version:
+    # tips.js opens the window once per version per browser
+    # (localStorage), i.e. on first use and again after every update.
+    tips = read_tips()
     tips_json = json.dumps(
-        {"tips": read_tips(), "show": False},
+        {"tips": tips, "show": bool(tips) and not tips_disabled(), "version": version},
     ).replace("</", "<\\/")
     head_style = (
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
@@ -3817,9 +3823,13 @@ def _build_html() -> str:
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
         "WELCOME_LOGO_DARK_SRC": _media_url("welcome-logo-dark.png"),
-        "HLJS_CSS_HREF": _media_url("highlight-vscode-dark.css"),
+        # Light Modern is the remote page's default theme: the body is
+        # rendered with ``light-theme`` (and the light highlight sheet)
+        # so the first paint is already light; main.js drops the class
+        # again for a client whose saved choice is dark.
+        "HLJS_CSS_HREF": _media_url("highlight-vscode-light.css"),
         "HEAD_STYLE": head_style,
-        "BODY_CLASS_ATTR": ' class="remote-chat"',
+        "BODY_CLASS_ATTR": ' class="remote-chat light-theme"',
         "PRODUCT_NAME": html.escape(PRODUCT_NAME),
         "TAGLINE": html.escape(BRAND["tagline"]),
         "BRAND_JSON": json.dumps(
@@ -3868,7 +3878,7 @@ def _build_html() -> str:
         # are empty); the template writes them after a separating space
         # (``<body {{BODY_CLASS_ATTR}}>``) only so htmlhint can parse the
         # tag.  Drop that space so the page renders exactly
-        # ``<body class="remote-chat">`` / ``<script src=...>``.
+        # ``<body class="remote-chat light-theme">`` / ``<script src=...>``.
         if key in _ATTR_STRING_KEYS:
             return subs[key]
         return space + subs[key]
@@ -8050,7 +8060,7 @@ class RemoteAccessServer:
 
         Handles the ``getTaskUpdate`` command polled by ``media/main.js``
         for the info subpanel of the task-info panel: the subpanel shows
-        the report the :mod:`~kiss.agents.seas.task_update_sea` agent
+        the report the :mod:`~kiss.agents.seas.task_update.task_update_sea` agent
         wrote about the task RUNNING in the tab (:meth:`_tab_task_agent`),
         never a file the task left on disk.  :class:`TaskUpdateRunner`
         owns the reports: this poll makes it run the agent when the tab's

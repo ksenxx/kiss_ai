@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the SkillOpt agent (:mod:`kiss.agents.seas.skillopt_sea`).
+"""End-to-end tests of the SkillOpt agent (:mod:`kiss.agents.seas.skillopt.skillopt_sea`).
 
 The optimizer's rollouts run in-process with :class:`SorcarAgent`, so the
 whole loop is exercised against the scripted local model server: the
@@ -21,8 +21,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.seas import sh_sea, skillopt_sea
-from kiss.agents.seas.skillopt_sea import (
+from kiss.agents.seas.sh import sh_sea
+from kiss.agents.seas.skillopt import skillopt_sea
+from kiss.agents.seas.skillopt.skillopt_sea import (
     ConstantTarget,
     Env,
     EvalTask,
@@ -54,7 +55,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
 
 _SH_SEA = Path(sh_sea.__file__).resolve()
 _SKILLOPT_SEA = Path(skillopt_sea.__file__).resolve()
-_EVALS = _SKILLOPT_SEA.parent / "evals" / "sh_sea_evals.json"
+_EVALS = Path(sh_sea.__file__).resolve().parent / "evals" / "sh_sea_evals.json"
 
 
 def _rollout(command: str, output: str) -> list[bytes]:
@@ -368,7 +369,7 @@ def test_load_evals_imports_train_rollouts_and_env(tmp_path: Path) -> None:
             ],
             train_rollouts="rollouts.json",
             env={
-                "class": "kiss.agents.seas.skillopt_sea:InProcessEnv",
+                "class": "kiss.agents.seas.skillopt.skillopt_sea:InProcessEnv",
                 "defaults": {"max_steps": 2},
             },
         )
@@ -381,7 +382,8 @@ def test_load_evals_imports_train_rollouts_and_env(tmp_path: Path) -> None:
     assert isinstance(skillopt_sea.make_env(None, {"x": 1}), skillopt_sea.InProcessEnv)
     with pytest.raises(ValueError, match="not an Env"):
         skillopt_sea.make_env(
-            {"class": "kiss.agents.seas.skillopt_sea:EvalTask", "id": "a", "prompt": "p"}, {}
+            {"class": "kiss.agents.seas.skillopt.skillopt_sea:EvalTask", "id": "a", "prompt": "p"},
+            {},
         )
     with pytest.raises(ValueError, match="split 'train'"):
         load_evals(_evals(tmp_path, [{"id": "b", "prompt": "q"}], train_rollouts="rollouts.json"))
@@ -892,7 +894,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
 
 
 def test_cli_runs_the_optimizer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """``python -m kiss.agents.seas.skillopt_sea`` drives the same loop from the terminal."""
+    """``python -m kiss.agents.seas.skillopt.skillopt_sea`` drives the loop from the terminal."""
     sea = _copy_sh_sea(tmp_path)
     evals = _evals(tmp_path, [{"id": "a", "prompt": "echo alpha", "expect": ["alpha"]}])
     script = [*_rollout("echo alpha", "alpha"), _patches_body()]

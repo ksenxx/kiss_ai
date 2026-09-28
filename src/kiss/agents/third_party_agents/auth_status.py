@@ -79,7 +79,7 @@ def channel_label(name: str, agent_cls: type | None = None) -> str:
     falling back to the capitalized module name.
 
     Args:
-        name: The channel name (``<name>_sea.py``).
+        name: The channel name (``<name>/<name>_sea.py``).
         agent_cls: The channel's agent class, when it could be loaded.
 
     Returns:
@@ -129,7 +129,7 @@ def channel_status(name: str, enrolled: set[str] | None = None) -> dict[str, Any
     """
     agent_cls: type | None = None
     try:
-        module = importlib.import_module(f"kiss.agents.third_party_agents.{name}_sea")
+        module = importlib.import_module(f"kiss.agents.third_party_agents.{name}.{name}_sea")
         agent_cls = _agent_class(module)
         if agent_cls is None:
             raise RuntimeError("module defines no channel agent")

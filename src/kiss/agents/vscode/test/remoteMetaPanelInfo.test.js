@@ -6,7 +6,7 @@
 // End-to-end tests for the docked task-info panel's rows and its
 // "Task update" info subpanel (media/chat.html + media/main.js, remote
 // desktop mode). The subpanel shows the task-update agent's report
-// (src/kiss/agents/seas/task_update_sea.py) about the visible tab's
+// (src/kiss/agents/seas/task_update/task_update_sea.py) about the visible tab's
 // RUNNING task, fetched from the daemon through the getTaskUpdate /
 // taskUpdate protocol described in tmp/task-update-protocol.md:
 //

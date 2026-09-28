@@ -1009,10 +1009,11 @@ def test_live_task_panel_typography_and_history_rows(
     assert row["backgroundColor"] != accent, (
         f"row background must not be the per-chat pastel; row: {row}"
     )
-    # A flat row: no fill of its own; Dark Modern editor.foreground #cccccc.
+    # A flat row: no fill of its own; the page's editor.foreground (Light
+    # Modern #3b3b3b, the default theme) rather than a colour of its own.
     assert row["backgroundColor"] == "rgba(0, 0, 0, 0)", row
-    assert row["color"] == "rgb(204, 204, 204)", (
-        f"row text must be light (not the old #1a1a1a); row: {row}"
+    assert row["color"] == "rgb(59, 59, 59)", (
+        f"row text must be the editor foreground (not the old #1a1a1a); row: {row}"
     )
 
     assert probes["infoDisplay"] == "block", probes

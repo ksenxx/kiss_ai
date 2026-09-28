@@ -83,6 +83,7 @@ const FILTER_CONTROL_IDS = [
   'hf-from-btn',
   'hf-to',
   'hf-to-btn',
+  'hf-tag',
 ];
 
 const SESSIONS_FIXTURE = [

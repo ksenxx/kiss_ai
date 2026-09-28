@@ -446,6 +446,44 @@
   }
   // panelts-coverage:end
 
+  function formatCallCost(cost) {
+    const n = Number(cost);
+    if (!isFinite(n) || n < 0) return '';
+    if (n === 0) return '$0';
+    if (n < 0.0001) return '<$0.0001';
+    return '$' + n.toFixed(4);
+  }
+
+  /**
+   * Show the USD cost of the model call(s) a thoughts panel holds, right
+   * after the panel's time label (an ``llm_call`` event).  Idempotent:
+   * a later call for the same panel replaces the text.  *calls* (default
+   * 1) is how many model calls *cost* sums, for the tooltip.
+   */
+  function setPanelCost(panelEl, cost, model, calls) {
+    if (!panelEl) return null;
+    const label = formatCallCost(cost);
+    if (!label) return null;
+    const n = Number(calls) > 1 ? Number(calls) : 1;
+    const bar = ensurePanelFoot(panelEl);
+    const doc = panelEl.ownerDocument || document;
+    let span = bar.querySelector(':scope > .panel-cost');
+    if (!span) {
+      span = doc.createElement('span');
+      span.className = 'panel-cost';
+      const ts = bar.querySelector(':scope > .panel-ts');
+      if (ts && ts.nextSibling) bar.insertBefore(span, ts.nextSibling);
+      else if (ts) bar.appendChild(span);
+      else bar.insertBefore(span, bar.firstChild);
+    }
+    span.textContent = label;
+    span.title =
+      (n > 1
+        ? 'Cost of the ' + n + ' model calls in this panel'
+        : 'Cost of this model call') + (model ? ' (' + model + ')' : '');
+    return span;
+  }
+
   const api = {
     getRawText: getRawText,
     formattedTextFromNode: formattedTextFromNode,
@@ -455,6 +493,8 @@
     formatEventTs: formatEventTs,
     ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,
+    formatCallCost: formatCallCost,
+    setPanelCost: setPanelCost,
     PANEL_COPY_SVG: PANEL_COPY_SVG,
     PANEL_CHECK_SVG: PANEL_CHECK_SVG,
     PANEL_STOP_SVG: PANEL_STOP_SVG,

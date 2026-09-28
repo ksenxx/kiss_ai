@@ -18,9 +18,18 @@ export interface SessionInfo {
   has_events?: boolean;
   /**
    * The chat's FIRST task text (bounded by the daemon), naming the
-   * chat's collapsible panel in the history view.
+   * chat's collapsible panel in the history view while the chat has no
+   * `chat_summary` yet.
    */
   chat_first_task?: string;
+  /**
+   * The chat's 6–8 word summary from the daemon's `chat_summaries`
+   * table (written when a task finishes); '' until then. When present
+   * it names the chat's collapsible panel instead of `chat_first_task`.
+   */
+  chat_summary?: string;
+  /** Epoch ms when the chat's latest task was launched, 0 when unknown. */
+  chat_last_launched?: number;
 }
 
 /**
@@ -149,7 +158,13 @@ export type FromWebviewMessage =
   | {type: 'interruptTool'; tabId: string; toolName?: string; callId?: number}
   | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
-  | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
+  | {
+      type: 'getHistory';
+      query?: string;
+      tag?: string;
+      offset?: number;
+      generation?: number;
+    }
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
@@ -720,6 +735,19 @@ type ToWebviewMessageBody =
       cache_read?: number;
       model?: string;
     }
+  // One per model call: its own tokens, USD cost and duration
+  // (``KissAgent._print_llm_call``).
+  | {
+      type: 'llm_call';
+      model?: string;
+      step?: number;
+      duration_ms?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read?: number;
+      cache_write?: number;
+      cost?: number;
+    }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
   // The finished ``/ask`` side-channel answer, delivered into the
@@ -1155,6 +1183,7 @@ export interface AgentCommand {
   activeFile?: string;
   attachments?: Attachment[];
   query?: string;
+  tag?: string;
   offset?: number;
   generation?: number;
   limit?: number;

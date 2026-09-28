@@ -27,12 +27,12 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-import kiss.agents.third_party_agents.gsheets_sea as gsheets_mod
+import kiss.agents.third_party_agents.gsheets.gsheets_sea as gsheets_mod
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.gsheets_sea import (
+from kiss.agents.third_party_agents.gsheets.gsheets_sea import (
     _SERVICE,
     GoogleSheetsAgent,
     GoogleSheetsChannelBackend,
