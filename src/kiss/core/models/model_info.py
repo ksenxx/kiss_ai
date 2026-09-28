@@ -672,17 +672,35 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
     raise KISSError(f"Could not read the model catalog at {path}: {last}") from last
 
 
+# Catalog fields a generated ``-{level}`` thinking alias shares with its
+# base: an alias sends requests to the same provider model over the same
+# transport, so it is billed at the base's prices.
+_ALIAS_MIRRORED_FIELDS = (
+    "use_responses_api",
+    "input_price_per_1M",
+    "output_price_per_1M",
+    "cache_read_price_per_1M",
+    "cache_write_price_per_1M",
+    "cache_write_1h_price_per_1M",
+    "audio_input_price_per_1M",
+    "audio_output_price_per_1M",
+)
+
+
 def _sync_alias_transport_flags(
     raw: dict[str, Any], user_keys: set[str]
 ) -> None:
-    """Mirror a user-overridden base's ``use_responses_api`` onto its aliases.
+    """Mirror a user-overridden base's transport flag and prices onto its aliases.
 
     Generated ``-{level}`` thinking aliases ship with a copy of their
-    base's transport flag.  When ``MY_MODELS.json`` overrides only the
-    base entry, the bundled alias copies would otherwise keep the old
-    verdict and silently bypass the user's transport choice whenever an
-    alias name is selected.  Aliases the user overrode explicitly are
-    left untouched (explicit wins).
+    base's ``use_responses_api`` flag and prices.  When ``MY_MODELS.json``
+    overrides only the base entry, the bundled alias copies would
+    otherwise keep the old values and silently bypass the user's
+    transport choice and prices whenever an alias name is selected.
+    Each field in :data:`_ALIAS_MIRRORED_FIELDS` is copied from the base,
+    or removed from the alias when the base lacks it (so derived cache
+    prices are recomputed from the base's input price).  Aliases the user
+    overrode explicitly are left untouched (explicit wins).
 
     Args:
         raw: The merged catalog mapping, mutated in place.
@@ -697,11 +715,11 @@ def _sync_alias_transport_flags(
         base = raw.get(base_name)
         if not isinstance(base, dict):
             continue
-        flag = base.get("use_responses_api")
-        if flag is None:
-            entry.pop("use_responses_api", None)
-        else:
-            entry["use_responses_api"] = flag
+        for field in _ALIAS_MIRRORED_FIELDS:
+            if base.get(field) is None:
+                entry.pop(field, None)
+            else:
+                entry[field] = base[field]
 
 
 def _load_model_info() -> dict[str, ModelInfo]:
@@ -718,7 +736,7 @@ def _load_model_info() -> dict[str, ModelInfo]:
     merged on top: matching keys override the catalog entry, and
     brand-new keys are added.  Generated thinking aliases of a
     user-overridden base then re-mirror the base's ``use_responses_api``
-    flag (see :func:`_sync_alias_transport_flags`).
+    flag and prices (see :func:`_sync_alias_transport_flags`).
     """
     catalog_path = _select_catalog_path(
         os.environ.get("KISS_MODEL_INFO_PATH", "").strip(),
@@ -1783,6 +1801,7 @@ def calculate_cost(
     num_cache_write_1h_tokens: int = 0,
     num_audio_input_tokens: int = 0,
     num_audio_output_tokens: int = 0,
+    num_audio_cache_read_tokens: int = 0,
 ) -> float:
     """Calculates the cost in USD for the given token counts.
 
@@ -1803,6 +1822,12 @@ def calculate_cost(
             (``completion_tokens_details.audio_tokens``), billed at the
             model's audio output rate when registered, otherwise at the
             text output rate.
+        num_audio_cache_read_tokens: Number of AUDIO tokens read from
+            cache (Gemini's ``cache_tokens_details`` AUDIO share), billed
+            at the audio input rate discounted like text cache reads
+            (``audio_input * cache_read / input``), which is Google's
+            published cached-audio price on every Gemini model with an
+            audio premium.
 
     Returns:
         float: Cost in USD.
@@ -1819,6 +1844,7 @@ def calculate_cost(
         + num_cache_write_1h_tokens
         + num_audio_input_tokens
         + num_audio_output_tokens
+        + num_audio_cache_read_tokens
     )
     if info is None:
         if total_tokens > 0:
@@ -1863,6 +1889,9 @@ def calculate_cost(
         if info.audio_output_price_per_1M is not None
         else output_price
     )
+    audio_cr_price = (
+        audio_in_price * cr_price / input_price if input_price > 0 else cr_price
+    )
     input_cost = num_input_tokens * input_price
     output_cost = num_output_tokens * output_price
     cache_read_cost = num_cache_read_tokens * cr_price
@@ -1874,6 +1903,7 @@ def calculate_cost(
         + num_cache_write_1h_tokens * cw1h_price
         + num_audio_input_tokens * audio_in_price
         + num_audio_output_tokens * audio_out_price
+        + num_audio_cache_read_tokens * audio_cr_price
     ) / 1_000_000
 
 

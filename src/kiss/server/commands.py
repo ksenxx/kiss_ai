@@ -180,6 +180,8 @@ def _task_accepts_input(state: AgentState | None) -> bool:
 # /ask query.  Kept identical to the SEA registry stem so a
 # ``list_commands`` reader and the interceptor agree on the name.
 _ASK_COMMAND_PREFIX = "/ask"
+# Seconds an /ask answering session may run before it is stopped.
+_ASK_TIMEOUT_SECONDS = 600.0
 
 
 def _split_ask_command(prompt: str) -> str | None:
@@ -1339,7 +1341,13 @@ class _CommandsMixin:
         self.printer.broadcast(echo)
 
     def _dispatch_ask_side_channel(
-        self, *, tab_id: str, owner_task_id: str, chat_id: str, question: str,
+        self,
+        *,
+        tab_id: str,
+        owner_task_id: str,
+        owner_agent: Any,
+        chat_id: str,
+        question: str,
     ) -> None:
         """Fire a background ``ask_sea`` dispatch for a live ``/ask`` query.
 
@@ -1363,6 +1371,9 @@ class _CommandsMixin:
         event into the OWNER task's transcript via
         :meth:`_broadcast_ask_answer`, and the running task's tab
         renders it as a distinct "Answer" panel that survives replays.
+        The answering session's spend (including a timed-out, stopped
+        session's) is charged to the owner task with
+        :func:`~kiss.server.task_update.charge_side_channel_usage`.
 
         The ``<task_id>`` placeholder is substituted HERE so the
         answering session receives the OWNER's task id even when it
@@ -1380,6 +1391,9 @@ class _CommandsMixin:
                 ``_add_task``); the dispatch still fires but the
                 answering agent will see an empty task id and report
                 that no events exist.
+            owner_agent: The running task's live agent, which the
+                answering session's spend is charged to while the task
+                still runs.
             chat_id: The chat the running task belongs to; passed so
                 the answering sub-agent joins the same chat's
                 history.
@@ -1389,6 +1403,7 @@ class _CommandsMixin:
         from kiss.agents.seas.ask import ask_sea
         from kiss.agents.sorcar import daemon_client
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+        from kiss.server.task_update import charge_side_channel_usage
 
         # Always the bundled script: ``seas/`` has the lowest registry
         # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
@@ -1399,8 +1414,11 @@ class _CommandsMixin:
         append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
+        epoch_getter = getattr(owner_agent, "_usage_epoch", None)
+        epoch = epoch_getter() if callable(epoch_getter) else None
 
         def _run() -> None:
+            spent: daemon_client.TaskResult | None = None
             try:
                 result = daemon_client.run(
                     question,
@@ -1414,11 +1432,14 @@ class _CommandsMixin:
                     use_worktree=False,
                     auto_commit=False,
                     sock_path=sock_path,
-                    timeout=600.0,
+                    timeout=_ASK_TIMEOUT_SECONDS,
                     stop_on_timeout=True,
                 )
+                spent = result
                 text, success = result.text, result.success
             except Exception as exc:
+                if isinstance(exc, daemon_client.StoppedOnTimeoutError):
+                    spent = exc.result
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
                 # exception goes to the daemon log for triage, and
@@ -1428,6 +1449,16 @@ class _CommandsMixin:
                     "/ask side-channel dispatch failed for tab %s", tab_id,
                 )
                 text, success = f"The /ask agent failed: {exc}", False
+            if spent is not None:
+                charge_side_channel_usage(
+                    self.printer,
+                    owner_agent,
+                    owner_task_id,
+                    spent.cost,
+                    spent.tokens,
+                    spent.steps,
+                    epoch=epoch,
+                )
             self._broadcast_ask_answer(
                 tab_id=tab_id,
                 owner_task_id=owner_task_id,
@@ -1612,6 +1643,7 @@ class _CommandsMixin:
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,
+                owner_agent=owner.agent,
                 chat_id=owner_chat_id,
                 question=ask_question,
             )

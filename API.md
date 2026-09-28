@@ -440,6 +440,13 @@
 
 ##### `class StopUnconfirmedTimeoutError(TimeoutError)` — Timeout whose ``stop_on_timeout`` stop was sent but never confirmed.
 
+##### `class StoppedOnTimeoutError(TimeoutError)` — Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
+
+**Constructor:** `StoppedOnTimeoutError(message: str, result: 'TaskResult') -> None`
+
+- `message`: The timeout message.
+- `result`: The stopped task's :class:`TaskResult`.
+
 ##### `class TaskResult` — Final outcome of one synchronous daemon task run.
 
 **`resolve_tools_file`** — Validate a client-supplied tools path and resolve it absolutely. Client-side counterpart of the daemon's ``kiss.server.tools_file.load_tools_file`` (see :func:`_resolve_py_file` for the resolution rules).<br/>`def resolve_tools_file(tools: str | Path | None) -> str`

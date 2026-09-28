@@ -726,6 +726,7 @@
     "context_length": 500000,
     "input_price_per_1M": 0.3,
     "output_price_per_1M": 2.5,
+    "audio_input_price_per_1M": 1.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -742,6 +743,7 @@
     "context_length": 500000,
     "input_price_per_1M": 0.1,
     "output_price_per_1M": 0.4,
+    "audio_input_price_per_1M": 0.3,
     "fc": false,
     "emb": false,
     "gen": true
@@ -758,6 +760,7 @@
     "context_length": 500000,
     "input_price_per_1M": 0.5,
     "output_price_per_1M": 3.0,
+    "audio_input_price_per_1M": 1.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -782,6 +785,7 @@
     "context_length": 500000,
     "input_price_per_1M": 0.25,
     "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
     "gen": true
@@ -799,6 +803,7 @@
     "context_length": 500000,
     "input_price_per_1M": 0.25,
     "output_price_per_1M": 1.5,
+    "audio_input_price_per_1M": 0.5,
     "fc": true,
     "emb": false,
     "gen": true

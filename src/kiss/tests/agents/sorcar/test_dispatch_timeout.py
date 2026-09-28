@@ -217,11 +217,20 @@ class _StopConfirmingDaemon:
     """
 
     def __init__(
-        self, confirm_delay: float = 0.0, initial_running: bool = True,
+        self,
+        confirm_delay: float = 0.0,
+        initial_running: bool = True,
+        stopped_result: dict[str, Any] | None = None,
     ) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir."""
+        """Bind a UNIX-domain listener in a fresh temp dir.
+
+        *stopped_result*, when given, is sent as the stopped task's
+        ``result`` event just before the terminal status, like the
+        daemon's failure result that carries the spend so far.
+        """
         self.confirm_delay = confirm_delay
         self.initial_running = initial_running
+        self.stopped_result = stopped_result
         self.commands: list[dict[str, Any]] = []
         self.run_cmd: dict[str, Any] | None = None
         self._dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
@@ -270,6 +279,8 @@ class _StopConfirmingDaemon:
                 self.commands.append(cmd)
                 if cmd.get("type") == "stop":
                     time.sleep(self.confirm_delay)
+                    if self.stopped_result is not None:
+                        send({**self.stopped_result, "tabId": tab_id})
                     send({
                         "type": "status", "running": False, "tabId": tab_id,
                     })
@@ -449,6 +460,75 @@ def test_run_agent_tool_times_out_and_stops_the_task(
         assert daemon.wait_for_command("closeTab")
     finally:
         daemon.close()
+
+
+def test_run_agent_tool_timeout_charges_the_stopped_tasks_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped-on-timeout sub-task's spend is charged to the caller.
+
+    The daemon's failure result for the stopped task carries what it
+    spent before the stop; the dispatch must fold that into the calling
+    agent (as it does for a finished sub-task) and say so, instead of
+    dropping the spend with the timeout.
+    """
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+
+    daemon = _StopConfirmingDaemon(stopped_result={
+        "type": "result", "taskId": "task-stopped-1", "success": False,
+        "text": "Task stopped", "cost": "$1.0842", "total_tokens": 4321,
+        "step_count": 7,
+    })
+    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    script = tmp_path / "helper.py"
+    script.write_text("def model() -> str:\n    return 'm'\n")
+    parent = SorcarAgent("dispatch-timeout-parent")
+    try:
+        out = make_run_agent_tool(str(tmp_path), parent_agent=parent)(
+            "never finishes", str(script), timeout="0.5",
+        )
+    finally:
+        daemon.close()
+    assert "did not finish within 0.5s" in out
+    assert "was stopped" in out
+    assert "$1.0842 spend is counted" in out
+    assert parent.budget_used == pytest.approx(1.0842)
+    assert parent.total_tokens_used == 4321
+    assert parent.total_steps == 7
+
+
+def test_run_stop_on_timeout_error_carries_the_stopped_result() -> None:
+    """``StoppedOnTimeoutError.result`` parses the stopped task's result.
+
+    Without a ``result`` event before the terminal status the carried
+    result reports no spend.
+    """
+    with_result = _StopConfirmingDaemon(stopped_result={
+        "type": "result", "taskId": "task-stopped-2", "success": False,
+        "text": "Task stopped", "cost": "$0.2500", "total_tokens": 99,
+        "step_count": 2,
+    })
+    without_result = _StopConfirmingDaemon()
+    try:
+        with pytest.raises(daemon_client.StoppedOnTimeoutError) as err:
+            daemon_client.run(
+                "never finishes", timeout=0.3, stop_on_timeout=True,
+                sock_path=with_result.sock_path,
+            )
+        assert err.value.result.cost == pytest.approx(0.25)
+        assert err.value.result.tokens == 99
+        assert err.value.result.steps == 2
+        assert err.value.result.task_id == "task-stopped-2"
+        with pytest.raises(daemon_client.StoppedOnTimeoutError) as err2:
+            daemon_client.run(
+                "never finishes", timeout=0.3, stop_on_timeout=True,
+                sock_path=without_result.sock_path,
+            )
+        assert err2.value.result.cost == 0.0
+        assert err2.value.result.tokens == 0
+    finally:
+        with_result.close()
+        without_result.close()
 
 
 def test_run_agent_tool_reports_unconfirmed_stop(
