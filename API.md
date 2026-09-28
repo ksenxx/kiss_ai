@@ -442,7 +442,7 @@
 
 ##### `class StoppedOnTimeoutError(TimeoutError)` — Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
 
-**Constructor:** `StoppedOnTimeoutError(message: str, result: 'TaskResult') -> None`
+**Constructor:** `StoppedOnTimeoutError(message: str, result: TaskResult) -> None`
 
 - `message`: The timeout message.
 - `result`: The stopped task's :class:`TaskResult`.
