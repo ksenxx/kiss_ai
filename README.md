@@ -66,7 +66,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 689 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 690 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -305,7 +305,7 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **689 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend and every earlier session of a task that was continued after a crash. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **690 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend and every earlier session of a task that was continued after a crash. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -315,7 +315,7 @@ KISS Sorcar ships a catalog of **689 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 403 |
+| OpenRouter | 404 |
 | Claude Code CLI (`cc/*`) | 15 |
 | Codex CLI (`codex/*`) | 9 |
 
@@ -324,7 +324,7 @@ Current catalog capability totals:
 - **671** generation-capable models
 - **505** function-calling-capable models
 - **7** embedding models
-- **2** decision models
+- **3** decision models
 
 Full model list:
 
@@ -627,7 +627,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (403)</strong></summary>
+<summary><strong>OpenRouter (404)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -725,6 +725,7 @@ Full model list:
 - `openrouter/inclusionai/ling-3.0-flash-vl`
 - `openrouter/inference-net/schematron-v2-small`
 - `openrouter/inference-net/schematron-v2-turbo`
+- `openrouter/jaredpalmer/kev-4b`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
 - `openrouter/meituan/longcat-2.0`
