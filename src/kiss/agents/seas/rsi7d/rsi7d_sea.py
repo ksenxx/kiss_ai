@@ -1990,6 +1990,40 @@ def _patch_sorcar_md(path: Path, old: str, new: str) -> str:
     return " ".join(reports)
 
 
+def _task_in_clone(task: str, work_dir: str, repo: Path, tree: Path, sub: Path, clone: Path) -> str:
+    """Return *task* with every path it names inside the run's checkout moved to *clone*.
+
+    One pass, longest alternative first: any worktree of the repository
+    (the history strips worktree suffixes from work dirs, so the tree may
+    be the repository while the text names its worktree), the tree, the
+    repository, and the checkout as the run's *work_dir* names it. Git
+    reports real paths, so the last differs when the work dir goes through
+    a symlink (``/var`` -> ``/private/var`` on macOS): a work dir that
+    resolves to the tree is another name for it, a symlink into the tree
+    (``docs-link`` -> ``<tree>/docs``) names only its own directory of the
+    clone (``<clone>/docs``).
+    """
+    named = Path(work_dir)
+    for _ in sub.parts:
+        named = named.parent
+    aliases = {str(tree): clone, str(repo): clone}
+    if named.resolve() == tree.resolve():
+        aliases[str(named)] = clone
+    else:
+        aliases[str(Path(work_dir))] = clone / sub
+    tree_names = sorted((k for k, v in aliases.items() if v == clone), key=len, reverse=True)
+    worktrees = (
+        "(?:" + "|".join(map(re.escape, tree_names)) + ")"
+        r"[/\\]\.kiss-worktrees[/\\]kiss_wt-[^/\\\s'\"]+"
+    )
+    pattern = "|".join([worktrees, *map(re.escape, sorted(aliases, key=len, reverse=True))])
+
+    def to_clone(match: re.Match[str]) -> str:
+        return str(aliases.get(match.group(0), clone))
+
+    return re.sub(pattern, to_clone, task)
+
+
 def _sorcar_system_prompt() -> str:
     """Return the base system prompt a ``sorcar`` replay runs with: the checkout's SYSTEM.md."""
     return render_brand((_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]).read_text(encoding="utf-8"))
@@ -2050,16 +2084,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
         proc = _git(*args)
         if proc.returncode:
             return f"Error: git {label} failed: {proc.stderr.strip()}"
-    # One pass, longest alternative first: any worktree of the repository the task text
-    # may name (the history strips worktree suffixes from work_dir, so the tree may be
-    # the repository while the text names its worktree), the tree, the repository.
-    worktrees = re.escape(str(repo)) + r"[/\\]\.kiss-worktrees[/\\]kiss_wt-[^/\\\s'\"]+"
-    roots = sorted({str(tree), str(repo)}, key=len, reverse=True)
-    task = re.sub(
-        "|".join([worktrees, *map(re.escape, roots)]),
-        str(clone).replace("\\", "\\\\"),
-        str(row.get("task") or ""),
-    )
+    task = _task_in_clone(str(row.get("task") or ""), work_dir, repo, tree, sub, clone)
     return {
         "sea": sea,
         "sea_file": str(sea_file),

@@ -171,21 +171,24 @@ class TestTaskUpdateRunner(unittest.TestCase):
         sea = _ScriptedSea()
         runner = TaskUpdateRunner(run_sea=sea)
         parent = object()
+        runner.poll("task-c", parent)
+        sea.release(("r1", 0.0))
+        _wait_until(lambda: not runner.poll("task-c", parent).running)
+        # Shorten the interval only around the one poll that must be due:
+        # while the polling waits run, a poll landing 50 ms after a finish
+        # would otherwise start an unscripted extra run.
         saved = task_update.UPDATE_INTERVAL_S
         task_update.UPDATE_INTERVAL_S = 0.05
         self.addCleanup(setattr, task_update, "UPDATE_INTERVAL_S", saved)
         try:
-            runner.poll("task-c", parent)
-            sea.release(("r1", 0.0))
-            _wait_until(lambda: not runner.poll("task-c", parent).running)
             time.sleep(0.06)
             due = runner.poll("task-c", parent)
-            self.assertTrue(due.running)
-            self.assertEqual(len(sea.calls), 2)
-            sea.release(("r2", 0.0))
-            _wait_until(lambda: runner.poll("task-c", parent).text == "r2")
         finally:
             task_update.UPDATE_INTERVAL_S = saved
+        self.assertTrue(due.running)
+        self.assertEqual(len(sea.calls), 2)
+        sea.release(("r2", 0.0))
+        _wait_until(lambda: runner.poll("task-c", parent).text == "r2")
 
         # A report nobody polled for an hour is dropped on the next poll
         # of any task; a later poll of the pruned task starts afresh.
