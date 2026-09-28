@@ -56,9 +56,9 @@ def _reset_registry() -> Iterator[None]:
 
 
 def _seed_seas_md(folder: Path, name: str) -> Path:
-    """Create ``<folder>/<name>_sea.py`` and point ``SEAS.md`` at it."""
-    folder.mkdir(parents=True, exist_ok=True)
-    sea = folder / f"{name}_sea.py"
+    """Create ``<folder>/<name>/<name>_sea.py`` and point ``SEAS.md`` at it."""
+    sea = folder / name / f"{name}_sea.py"
+    sea.parent.mkdir(parents=True, exist_ok=True)
     sea.write_text("# stub\n", encoding="utf-8")
     home = kiss_home()
     home.mkdir(parents=True, exist_ok=True)

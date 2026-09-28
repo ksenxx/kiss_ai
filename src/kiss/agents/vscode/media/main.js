@@ -1608,9 +1608,10 @@
 
   // Light / dark theme toggle for the REMOTE webapp only.  The VS Code
   // webview always follows the editor theme, so none of this runs there
-  // (the toggle button is only created for body.remote-chat).  The dark
-  // palette is the default; "light" mimics VS Code's Light Modern theme
-  // (see remote-codex.css).  The choice is persisted in localStorage.
+  // (the toggle button is only created for body.remote-chat).  Light
+  // (VS Code's Light Modern palette) is the default and is what the
+  // server renders (body.light-theme); "dark" is Dark Modern (see
+  // remote-codex.css).  The choice is persisted in localStorage.
   const REMOTE_THEME_KEY = 'kissRemoteTheme';
 
   const THEME_SUN_SVG =
@@ -1621,11 +1622,11 @@
 
   function getSavedRemoteTheme() {
     try {
-      return localStorage.getItem(REMOTE_THEME_KEY) === 'light'
-        ? 'light'
-        : 'dark';
+      return localStorage.getItem(REMOTE_THEME_KEY) === 'dark'
+        ? 'dark'
+        : 'light';
     } catch (_e) {
-      return 'dark';
+      return 'light';
     }
   }
 
@@ -5226,7 +5227,7 @@
   // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
   // TASK UPDATE: what the task-update agent
-  // (src/kiss/agents/seas/task_update_sea.py) reports the task running
+  // (src/kiss/agents/seas/task_update/task_update_sea.py) reports the task running
   // in the visible tab has done so far and its partial results.  The
   // daemon owns the report (kiss.server.task_update): it runs the agent
   // when the tab's task has no report yet, again every 10 minutes while
@@ -5882,9 +5883,13 @@
 
   /**
    * Render the daemon's `cronJobs` reply into the Schedule subpanel.
-   * Each row shows the job's name, a running / paused badge, its
-   * schedule and its next (or, when paused, last) run; the tooltip
-   * holds the prompt or command and the last run's outcome.
+   * Each row shows the job's name, a running / paused badge, a button
+   * that copies the scheduled task (the job's prompt, or its shell
+   * command) to the clipboard, its schedule and its next (or, when
+   * paused, last) run; the row's tooltip (the custom `data-tooltip`
+   * one: the native title truncates long prompts and never opens for
+   * keyboard users) shows that same task verbatim and the last run's
+   * outcome.
    *
    * @param {{jobs: Array<Object>}} ev The reply.
    */
@@ -5900,6 +5905,8 @@
       const li = document.createElement('li');
       li.className = 'sidebar-panel-row sched-row';
       li.classList.toggle('paused', !job.enabled);
+      li.tabIndex = 0;
+      const task = String(job.what == null ? '' : job.what);
       const top = document.createElement('div');
       top.className = 'sidebar-panel-row-top';
       top.appendChild(sidebarPanelSpan('sidebar-panel-name', job.name));
@@ -5909,6 +5916,15 @@
         );
       else if (!job.enabled)
         top.appendChild(sidebarPanelSpan('sidebar-panel-badge', 'paused'));
+      const copyBtn = makeSidebarCopyButton(
+        task,
+        'Copy the scheduled ' +
+          (job.kind === 'command' ? 'command' : 'task') +
+          ' to clipboard',
+      );
+      copyBtn.dataset.tooltip =
+        'Copy the scheduled ' + (job.kind === 'command' ? 'command' : 'task');
+      top.appendChild(copyBtn);
       li.appendChild(top);
       const when = job.enabled
         ? job.nextRunAt && 'next ' + scheduleTimeText(job.nextRunAt)
@@ -5919,9 +5935,9 @@
           [job.schedule, when].filter(Boolean).join(' \u00b7 '),
         ),
       );
-      const tip = [(job.kind === 'command' ? '$ ' : '') + job.what];
+      const tip = [(job.kind === 'command' ? '$ ' : '') + task];
       if (job.lastStatus) tip.push('Last run: ' + job.lastStatus);
-      li.title = tip.join('\n');
+      li.dataset.tooltip = tip.join('\n\n');
       scheduleList.appendChild(li);
     }
     applyMetaSectionLayout();
@@ -10833,9 +10849,31 @@
       target.id === 'task-panel-text',
     );
     const rect = target.getBoundingClientRect();
-    tooltipEl.style.left = rect.left + 'px';
-    tooltipEl.style.top = rect.bottom + 4 + 'px';
+    // Measure at the origin first: a fixed box placed near the right
+    // edge shrinks to the room left of that edge (a right-sidebar
+    // tooltip came out one word wide), so its natural size is only
+    // known at left 0.
+    tooltipEl.style.left = '0px';
+    tooltipEl.style.top = '0px';
     tooltipEl.classList.add('visible');
+    const tip = tooltipEl.getBoundingClientRect();
+    // Below the target, left-aligned with it; kept on screen: a box
+    // past the right edge slides left, and a tall one (a scheduled
+    // job's whole prompt) below a row at the bottom of a sidebar goes
+    // above the row instead, or, when it fits on neither side, slides
+    // up to end at the bottom edge (the CSS caps its height at the
+    // viewport, so the top never goes negative).
+    let left = rect.left;
+    let top = rect.bottom + 4;
+    if (left + tip.width > window.innerWidth)
+      left = Math.max(0, window.innerWidth - tip.width - 8);
+    if (top + tip.height > window.innerHeight) {
+      const above = rect.top - 4 - tip.height;
+      top =
+        above >= 0 ? above : Math.max(0, window.innerHeight - tip.height - 8);
+    }
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
   }
   function hideTooltip() {
     clearTimeout(tooltipTimer);
@@ -13494,6 +13532,27 @@
       // again if nothing is ever said into it.
       streamOpenThoughts(ctx, ev.ts, true);
     }
+    if (t === 'llm_call' && ctx.llmPanel) {
+      // The call's own price lands under the thoughts panel that holds
+      // its words: the event follows the response's deltas and precedes
+      // the tool_call that seals the panel.  A response with no words
+      // (tool calls only) has a provisional panel that tool_call
+      // discards, cost and all.  A text-only reply is followed by a
+      // retry call whose words land in the SAME panel (no tool_call
+      // sealed it), so the panel's figure is the sum of its calls.
+      const panel = ctx.llmPanel;
+      const cost = Number(ev.cost);
+      if (isFinite(cost) && cost >= 0) {
+        panel._kissCallCost = (panel._kissCallCost || 0) + cost;
+        panel._kissCallCount = (panel._kissCallCount || 0) + 1;
+        window.PanelCopy.setPanelCost(
+          panel,
+          panel._kissCallCost,
+          ev.model,
+          panel._kissCallCount,
+        );
+      }
+    }
     if (t === 'usage_info' && ctx.stepCount > 0) {
       // The daemon's own count outranks the panel counting, which only
       // estimates the steps between two of its reports -- a run_parallel
@@ -14317,13 +14376,30 @@
     historyGeneration++;
   }
 
+  /** The tag chosen in the history panel's tag dropdown ('' = all). */
+  function historyTagFilter() {
+    const sel = document.getElementById('hf-tag');
+    return sel && sel.value ? sel.value : '';
+  }
+
+  /**
+   * Ask the daemon for one page of history under the current search
+   * text and tag filter.  `offset` 0 (the default) is the first page of
+   * a fresh view; callers reset pagination before requesting it.
+   */
+  function requestHistory(offset = 0) {
+    api.getHistory({
+      query: historySearch ? historySearch.value : '',
+      tag: historyTagFilter(),
+      offset,
+      generation: historyGeneration,
+    });
+  }
+
   function refreshHistory() {
     if (sidebar.classList.contains('open')) {
       resetHistoryPagination();
-      api.getHistory({
-        query: historySearch.value,
-        generation: historyGeneration,
-      });
+      requestHistory();
     }
     // Task news (a run started or finished, a commit landed) may have
     // changed the workspace: re-list the Explorer folders on screen /
@@ -14425,6 +14501,8 @@
     'prompt',
     'result',
     'usage_info',
+    // Per-call cost, stamped under the open thoughts panel (streamEnd).
+    'llm_call',
     'task_settings',
   ]);
 
@@ -18439,10 +18517,7 @@
           sidebarOverlay.classList.add('open');
         }
         resetHistoryPagination();
-        api.getHistory({
-          query: historySearch ? historySearch.value : '',
-          generation: historyGeneration,
-        });
+        requestHistory();
         // The drawer may have missed task news while closed.
         refreshSidebarDataViews(false);
       }
@@ -18457,10 +18532,7 @@
       // being hidden re-syncs whatever it missed.
       sidebar.classList.add('open');
       resetHistoryPagination();
-      api.getHistory({
-        query: historySearch ? historySearch.value : '',
-        generation: historyGeneration,
-      });
+      requestHistory();
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') refreshHistory();
       });
@@ -18589,10 +18661,7 @@
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
             resetHistoryPagination();
-            api.getHistory({
-              query: historySearch ? historySearch.value : '',
-              generation: historyGeneration,
-            });
+            requestHistory();
             refreshSidebarDataViews(false);
           }
           sidebarOverlay.classList.remove('open');
@@ -18935,10 +19004,7 @@
       // to the right default NOW (the refetch below may be answered by
       // the identical-refresh fast path, which rebuilds nothing).
       reapplyAllHistoryGroupCollapse(true);
-      api.getHistory({
-        query: historySearch.value,
-        generation: historyGeneration,
-      });
+      requestHistory();
       if (historySearchClear)
         historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
@@ -18948,7 +19014,7 @@
         if (historySearchClear) historySearchClear.style.display = 'none';
         resetHistoryPagination();
         reapplyAllHistoryGroupCollapse(true);
-        api.getHistory({query: '', generation: historyGeneration});
+        requestHistory();
         historySearch.focus();
       });
     }
@@ -18980,6 +19046,8 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
+      hfTag,
     } = getHistoryFilterEls();
     [
       hfRunning,
@@ -18989,9 +19057,21 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
+      hfTag,
     ].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    if (hfTag) {
+      // The tag is applied by the daemon's SQL query (rare tags live
+      // beyond the loaded page), so a change is a fresh view: refetch
+      // page one, like a changed search text.
+      hfTag.addEventListener('change', () => {
+        resetHistoryPagination();
+        reapplyAllHistoryGroupCollapse(true);
+        requestHistory();
+      });
+    }
     [hfFrom, hfTo].forEach(el => {
       if (el) {
         el.addEventListener('change', () => {
@@ -19067,11 +19147,7 @@
         loader.id = 'history-loader';
         loader.textContent = 'Loading...';
         historyList.appendChild(loader);
-        api.getHistory({
-          query: historySearch.value,
-          offset: historyOffset,
-          generation: historyGeneration,
-        });
+        requestHistory(historyOffset);
       }
     });
     document.addEventListener('click', e => {
@@ -19927,7 +20003,12 @@
       'div',
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
-    const price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+    // Entries that are not priced models (the ``autorouter`` / ``bestrouter`` SEAs)
+    // carry a ``cost_label`` string instead of per-1M prices.
+    const price =
+      typeof m.cost_label === 'string'
+        ? esc(m.cost_label)
+        : '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
     // The name span ellipsizes from the START (RTL line, like the
     // pill label) so the distinctive end of a long name stays visible
     // and the list never scrolls horizontally on narrow screens; the
@@ -20170,16 +20251,96 @@
     return ms;
   }
 
-  function makeLaunchedAgoLabel(session) {
-    const ms = taskLaunchMs(session);
+  /**
+   * A "launched 3 hours ago" label for the instant *ms*, refreshed by
+   * the 30 s sweep below; *prefix* replaces the leading word ("last
+   * launched" for a chat panel).  Null for an unusable instant.
+   */
+  function makeLaunchedAgoLabelFor(ms, prefix) {
     if (!isFinite(ms)) return null;
+    const lead = prefix || 'launched';
     const span = document.createElement('span');
     span.className = 'sidebar-item-launched';
     span.dataset.launchTs = String(ms);
-    span.textContent = 'launched ' + taskLaunchedAgoText(ms);
-    span.title = 'Launched ' + new Date(ms).toLocaleString();
+    span.dataset.launchPrefix = lead;
+    span.textContent = lead + ' ' + taskLaunchedAgoText(ms);
+    span.title =
+      lead.charAt(0).toUpperCase() +
+      lead.slice(1) +
+      ' ' +
+      new Date(ms).toLocaleString();
     scheduleLaunchedAgoRefresh();
     return span;
+  }
+
+  function makeLaunchedAgoLabel(session) {
+    return makeLaunchedAgoLabelFor(taskLaunchMs(session), 'launched');
+  }
+
+  /**
+   * The task's classification tags ("work · coding"), shown right
+   * before its "launched ..." label; null when the row has none (a
+   * task still running, or a daemon predating the `tags` column).
+   */
+  function makeTaskTagsLabel(session) {
+    const raw = typeof session.tags === 'string' ? session.tags : '';
+    const tags = raw
+      .split(',')
+      .map(t => t.trim())
+      .filter(Boolean);
+    if (tags.length === 0) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-tags';
+    span.textContent = tags.join(' · ');
+    span.title = 'Tags: ' + tags.join(', ');
+    return span;
+  }
+
+  /**
+   * The agent script (SEA) that ran the task, e.g. "write_paper_sea",
+   * shown with the tags; null for a plain run.
+   */
+  function makeTaskSeaLabel(session) {
+    const sea = typeof session.sea === 'string' ? session.sea.trim() : '';
+    if (!sea) return null;
+    const span = document.createElement('span');
+    span.className = 'sidebar-item-sea';
+    span.textContent = sea;
+    span.title = 'Agent script: ' + sea;
+    return span;
+  }
+
+  // The SEA <select>'s value for rows with no agent script.
+  const HF_SEA_NONE = '__none__';
+
+  /**
+   * Rebuild the SEA filter's options from the loaded history rows: All,
+   * None (plain runs) and every distinct agent script seen, sorted.
+   * The current selection survives even when no loaded row carries it
+   * any more (a later page or a refresh may bring it back).
+   */
+  function refreshHistorySeaOptions() {
+    const hfSea = document.getElementById('hf-sea');
+    if (!hfSea) return;
+    const selected = hfSea.value;
+    const names = new Set();
+    allHistSessions.forEach(s => {
+      if (typeof s.sea === 'string' && s.sea.trim()) names.add(s.sea.trim());
+    });
+    if (selected && selected !== HF_SEA_NONE) names.add(selected);
+    hfSea.innerHTML = '';
+    const addOption = (value, label) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      hfSea.appendChild(opt);
+    };
+    addOption('', 'All');
+    addOption(HF_SEA_NONE, 'None');
+    Array.from(names)
+      .sort()
+      .forEach(name => addOption(name, name));
+    hfSea.value = selected;
   }
 
   // Keep every on-screen "launched ... ago" label current: history
@@ -20203,7 +20364,8 @@
     labels.forEach(el => {
       const ms = Number(el.dataset.launchTs);
       if (!isFinite(ms) || ms < 0) return;
-      const text = 'launched ' + taskLaunchedAgoText(ms);
+      const lead = el.dataset.launchPrefix || 'launched';
+      const text = lead + ' ' + taskLaunchedAgoText(ms);
       if (el.textContent !== text) el.textContent = text;
     });
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
@@ -20466,9 +20628,16 @@
     }
   }
 
-  /** Whether a history search is being shown right now. */
+  /**
+   * Whether a history search is being shown right now: a search text
+   * or a tag filter, both of which narrow the list to matches that
+   * must not hide behind collapsed chat headers.
+   */
   function historySearchActive() {
-    return !!(historySearch && historySearch.value.trim());
+    return !!(
+      (historySearch && historySearch.value.trim()) ||
+      historyTagFilter()
+    );
   }
 
   /**
@@ -20499,22 +20668,28 @@
   }
 
   /**
-   * Keep *group*'s header naming the chat's FIRST task. The daemon
-   * stamps every row with `chat_first_task`; without it (an older
-   * daemon) the header follows the oldest row loaded so far — rows
-   * arrive newest first, so each of the chat's rows is older than the
-   * one before.
+   * Keep *group*'s header naming the chat. The daemon stamps every row
+   * with the chat's `chat_summary` (the 6–8 word summary written to
+   * `chat_summaries` when a task finishes) and its `chat_first_task`;
+   * the header shows the summary, or the first task while the chat has
+   * none yet. Without either (an older daemon) the header follows the
+   * oldest row loaded so far — rows arrive newest first, so each of the
+   * chat's rows is older than the one before.
    */
   function updateHistoryGroupHeader(group, session) {
+    updateHistoryGroupLaunched(group, session);
     const titleEl = group.querySelector(
       ':scope > .history-chat-header .history-chat-title',
     );
     if (!titleEl) return;
+    const summary =
+      typeof session.chat_summary === 'string' ? session.chat_summary : '';
     const first =
       typeof session.chat_first_task === 'string'
         ? session.chat_first_task
         : '';
-    if (first) {
+    const named = summary.trim() || first;
+    if (named) {
       group.dataset.firstFromServer = '1';
     } else if (group.dataset.firstFromServer === '1') {
       return;
@@ -20523,11 +20698,33 @@
     // anyway (white-space: nowrap), but the first line alone reads as
     // the title rather than a run-on of the whole prompt.
     const text =
-      (first || session.preview || session.title || 'Untitled')
+      (named || session.preview || session.title || 'Untitled')
         .split('\n')
         .map(l => l.trim())
         .filter(Boolean)[0] || 'Untitled';
     if (titleEl.textContent !== text) titleEl.textContent = text;
+  }
+
+  /**
+   * Keep *group*'s "last launched ... ago" line current. The daemon
+   * stamps every row with the chat's `chat_last_launched` (epoch ms,
+   * from `chat_summaries`); without it (an older daemon, or a chat not
+   * yet summarised) the line follows the newest row loaded so far.
+   */
+  function updateHistoryGroupLaunched(group, session) {
+    const line = group.querySelector(':scope > .history-chat-launched');
+    if (!line) return;
+    const stamped = Number(session.chat_last_launched || 0);
+    const rowMs = taskLaunchMs(session);
+    let ms = stamped > 0 && stamped <= MAX_LAUNCH_EPOCH_MS ? stamped : rowMs;
+    // Epoch zero is a real launch instant (taskLaunchMs), so "no label
+    // yet" is the absence of the attribute, not a zero.
+    const known =
+      line.dataset.launchTs === undefined ? NaN : Number(line.dataset.launchTs);
+    if (isFinite(known) && (!isFinite(ms) || known > ms)) ms = known;
+    if (!isFinite(ms) || ms === known) return;
+    line.dataset.launchTs = String(ms);
+    line.replaceChildren(makeLaunchedAgoLabelFor(ms, 'last launched'));
   }
 
   /** Build the collapsible chat panel's clickable header. */
@@ -20535,9 +20732,9 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'history-chat-header';
-    // No fixed aria-label: the first-task title span IS the button's
-    // accessible name, so screen readers can tell the chats apart
-    // (aria-expanded carries the toggle state).
+    // No fixed aria-label: the title span (chat summary or first task)
+    // IS the button's accessible name, so screen readers can tell the
+    // chats apart (aria-expanded carries the toggle state).
     btn.innerHTML =
       '<svg class="history-chat-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
     const titleEl = document.createElement('span');
@@ -20582,6 +20779,11 @@
     // The chat's latest task time decides its day bucket.
     group.dataset.ts = String(ts);
     group.appendChild(historyGroupHeader(group, chatId));
+    // The line under the header: when the chat's latest task was
+    // launched (filled by updateHistoryGroupLaunched).
+    const launched = document.createElement('div');
+    launched.className = 'history-chat-launched';
+    group.appendChild(launched);
     const body = document.createElement('div');
     body.className = 'history-chat-body';
     group.appendChild(body);
@@ -21121,6 +21323,7 @@
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
         historyHasMore = false;
+        refreshHistorySeaOptions();
         return;
       }
       historyList.innerHTML = '';
@@ -21157,6 +21360,8 @@
       div.dataset.timestamp = String(Number(s.timestamp || 0));
       div.dataset.favorite = s.is_favorite ? '1' : '0';
       div.dataset.workDir = s.work_dir || '';
+      div.dataset.sea = typeof s.sea === 'string' ? s.sea.trim() : '';
+      div.dataset.tags = typeof s.tags === 'string' ? s.tags : '';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
 
@@ -21241,6 +21446,10 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      const tagsLabel = makeTaskTagsLabel(s);
+      if (tagsLabel) actions.appendChild(tagsLabel);
+      const seaLabel = makeTaskSeaLabel(s);
+      if (seaLabel) actions.appendChild(seaLabel);
       const launchedAgo = makeLaunchedAgoLabel(s);
       if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
@@ -21393,6 +21602,7 @@
     if (sessions.length < 50) {
       historyHasMore = false;
     }
+    refreshHistorySeaOptions();
     applyHistoryFilterVisibility();
     syncHistoryActiveTask();
     if (focusKey) {
@@ -21668,6 +21878,8 @@
       hfFavorite: document.getElementById('hf-favorite'),
       hfFrom: document.getElementById('hf-from'),
       hfTo: document.getElementById('hf-to'),
+      hfSea: document.getElementById('hf-sea'),
+      hfTag: document.getElementById('hf-tag'),
     };
   }
 
@@ -21680,6 +21892,8 @@
       hfFavorite,
       hfFrom,
       hfTo,
+      hfSea,
+      hfTag,
     } = getHistoryFilterEls();
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
@@ -21687,6 +21901,14 @@
     const showCompleted = hfCompleted.checked;
     const onlyFavorite = hfFavorite && hfFavorite.checked;
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
+    // '' = every agent script, HF_SEA_NONE = plain runs only, otherwise
+    // the exact SEA name.
+    const seaFilter = hfSea ? hfSea.value : '';
+    // The daemon already filters each page by tag; checking the rows
+    // too hides the stale rows of the previous view the instant the
+    // dropdown changes, before the refetch lands.
+    const onlyTag = hfTag && hfTag.value ? hfTag.value : '';
+    if (hfTag) hfTag.parentElement.classList.toggle('active', !!onlyTag);
     const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
     // "/Users/me/proj" -> "/Users/me/proj/", but "/" stays "/", so that
     // subdirectory matching below never looks for a doubled separator.
@@ -21714,6 +21936,8 @@
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      const tagOk =
+        !onlyTag || (row.dataset.tags || '').split(',').includes(onlyTag);
       const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
       // A task that ran in a git worktree (".kiss-worktrees/kiss_wt-...")
       // or any other subdirectory still belongs to this workspace.
@@ -21724,7 +21948,11 @@
         normClientWorkDir === '' ||
         rowWorkDir === normClientWorkDir ||
         rowWorkDir.startsWith(clientWorkDirPrefix);
-      if (catOk && dateOk && favOk && wsOk) {
+      const rowSea = row.dataset.sea || '';
+      const seaOk =
+        seaFilter === '' ||
+        (seaFilter === HF_SEA_NONE ? rowSea === '' : rowSea === seaFilter);
+      if (catOk && dateOk && favOk && tagOk && wsOk && seaOk) {
         row.style.display = '';
         visible++;
       } else {
@@ -22899,9 +23127,10 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
+    // Off unless explicitly enabled: the default is the LLM classifier.
     setChecked(
       classifyWithDecisionsToggleBtn,
-      cfg.classify_with_decisions !== false,
+      cfg.classify_with_decisions === true,
     );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     // Recorded even while an edit is active (the boxes themselves are

@@ -821,3 +821,135 @@ def test_remote_round_trip(tmp_path: Path) -> None:
 
     assert task_ids(back) == ["r1", "r2"]
     assert event_keys(back) == [("r1", 1), ("r1", 2), ("r1", 3), ("r2", 1)]
+
+
+CHAT_DDL = """
+CREATE TABLE chat_summaries (
+    chat_id TEXT PRIMARY KEY,
+    summary TEXT DEFAULT '',
+    last_launched INTEGER DEFAULT 0
+);
+"""
+
+
+def add_chats(conn: sqlite3.Connection, *chats: tuple[str | None, str, object]) -> None:
+    """Create the ``chat_summaries`` table and insert ``(chat_id, summary, last_launched)`` rows."""
+    conn.executescript(CHAT_DDL)
+    conn.executemany("INSERT INTO chat_summaries VALUES (?, ?, ?)", chats)
+
+
+def chats(path: Path) -> list[tuple]:
+    """List every chat summary row of a database, ordered by chat id."""
+    return rows(path, "SELECT chat_id, summary, last_launched FROM chat_summaries ORDER BY chat_id")
+
+
+def test_chat_summaries_travel_when_missing_or_newer(tmp_path: Path) -> None:
+    """A chat the target lacks is added; a newer source row replaces an older one; the rest stays.
+
+    ``last_launched`` decides: the target's own newer row survives, a NULL
+    chat id never travels, and an unusable ``last_launched`` counts as 0.
+    A repeated sync changes nothing; a dry run reports and writes nothing.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=1)
+    add_chats(
+        src,
+        ("c1", "src one", 100),
+        ("c2", "src two", 200),
+        ("c3", "src three", 300),
+        (None, "no chat", 400),
+        ("c5", "src five", "garbage"),
+    )
+    src.close()
+    dst = make_db(target)
+    add_chats(dst, ("c1", "dst one", 150), ("c2", "dst two", 100), ("c4", "dst four", 50))
+    dst.close()
+
+    preview = sync(str(source), str(target), "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert "would add 1 task row(s) and 1 event row(s) and refresh 3 chat summary row(s)" in (
+        preview.stdout
+    )
+    assert chats(target) == [("c1", "dst one", 150), ("c2", "dst two", 100), ("c4", "dst four", 50)]
+
+    done = sync(str(source), str(target))
+    assert done.returncode == 0, done.stderr
+    assert "1 task row(s) added, 1 event row(s) added, 3 chat summary row(s) refreshed" in (
+        done.stdout
+    )
+    assert chats(target) == [
+        ("c1", "dst one", 150),
+        ("c2", "src two", 200),
+        ("c3", "src three", 300),
+        ("c4", "dst four", 50),
+        ("c5", "src five", "garbage"),
+    ]
+    assert chats(source) == [
+        (None, "no chat", 400),
+        ("c1", "src one", 100),
+        ("c2", "src two", 200),
+        ("c3", "src three", 300),
+        ("c5", "src five", "garbage"),
+    ]
+
+    again = sync(str(source), str(target))
+    assert again.returncode == 0 and "0 chat summary row(s) refreshed" in again.stdout
+    assert chats(target)[1:3] == [("c2", "src two", 200), ("c3", "src three", 300)]
+
+    # Stamps are read the way SQLite casts them: 'junk' is 0 (so the source's 200
+    # replaces it), '350garbage' is 350 (so the source's 300 does not).
+    dst = sqlite3.connect(target, isolation_level=None)
+    dst.execute("UPDATE chat_summaries SET last_launched = 'junk' WHERE chat_id = 'c2'")
+    dst.execute("UPDATE chat_summaries SET last_launched = '350garbage' WHERE chat_id = 'c3'")
+    dst.close()
+    again = sync(str(source), str(target))
+    assert again.returncode == 0 and "1 chat summary row(s) refreshed" in again.stdout
+    assert chats(target)[1:3] == [("c2", "src two", 200), ("c3", "src three", "350garbage")]
+
+
+def test_chat_summaries_need_the_table_on_both_sides(tmp_path: Path) -> None:
+    """Databases from before the table existed sync their tasks and skip the chat rows."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=1)
+    add_chats(src, ("c1", "src one", 100))
+    src.close()
+    make_db(target).close()
+    for extra in ((), ("--full",)):
+        done = sync(str(source), str(target), *extra)
+        assert done.returncode == 0, done.stderr
+        assert "0 chat summary row(s) refreshed" in done.stdout
+    assert rows(target, "SELECT name FROM sqlite_master WHERE name = 'chat_summaries'") == []
+    assert task_ids(target) == ["a"]
+
+    # The other way round: a source without the table leaves the target's rows alone.
+    older, newer = tmp_path / "older.db", tmp_path / "newer.db"
+    src = make_db(older)
+    add_task(src, "b", events=1)
+    src.close()
+    dst = make_db(newer)
+    add_chats(dst, ("c9", "kept", 9))
+    dst.close()
+    done = sync(str(older), str(newer))
+    assert done.returncode == 0, done.stderr
+    assert "1 task row(s) added" in done.stdout and "0 chat summary row(s)" in done.stdout
+    assert chats(newer) == [("c9", "kept", 9)]
+
+
+def test_chat_summaries_with_different_columns_are_refused(tmp_path: Path) -> None:
+    """A chat table whose columns differ between the two databases stops the sync."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=1)
+    add_chats(src, ("c1", "src one", 100))
+    src.close()
+    dst = make_db(target)
+    dst.executescript(
+        "CREATE TABLE chat_summaries (chat_id TEXT PRIMARY KEY, last_launched INTEGER)"
+    )
+    dst.close()
+    done = sync(str(source), str(target))
+    assert done.returncode == 1
+    assert "schemas for 'chat_summaries' differ" in done.stderr
+    assert task_ids(target) == []

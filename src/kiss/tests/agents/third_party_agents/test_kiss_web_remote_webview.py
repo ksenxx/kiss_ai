@@ -261,7 +261,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
     def test_launched_agent_open_and_interact_via_remote_webview(
         self,
     ) -> None:
-        from kiss.agents.third_party_agents.slack_sea import SlackAgent
+        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         release = threading.Event()
         started = threading.Event()

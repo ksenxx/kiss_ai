@@ -100,17 +100,20 @@ def test_seas_md_example_parses_as_documented(home: Path, monkeypatch: pytest.Mo
 def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     """Following the page's three steps yields ``/standup`` bound to the new file.
 
-    Step 1 writes the documented ``standup_sea.py`` (and the snippet
-    must be a working SEA: its ``system_prompt()`` returns text).  Step 2
+    Step 1 writes the documented ``standup/standup_sea.py`` (and the
+    snippet must be a working SEA: its ``system_prompt()`` returns text
+    and its ``description()`` is what ``/standup help`` shows).  Step 2
     appends ``~/my-seas`` to SEAS.md.  Step 3 relies on substring
-    autocomplete (``st`` matches ``standup``) and the ``/standup ...``
-    prompt being rewritten into a run_agent directive on that file.
+    autocomplete (``st`` matches ``standup``), ``/standup help``
+    returning the description, and the ``/standup ...`` prompt being
+    rewritten into a run_agent directive on that file.
     """
     doc = _DOC.read_text()
-    sea_src = _fenced_block(doc, "# ~/my-seas/standup_sea.py")
+    sea_src = _fenced_block(doc, "# ~/my-seas/standup/standup_sea.py")
     folder = home / "my-seas"
     folder.mkdir()
-    sea_file = folder / "standup_sea.py"
+    sea_file = folder / "standup" / "standup_sea.py"
+    sea_file.parent.mkdir()
     sea_file.write_text(sea_src, encoding="utf-8")
     namespace: dict[str, Any] = {}
     exec(compile(sea_src, str(sea_file), "exec"), namespace)  # noqa: S102
@@ -127,6 +130,8 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
     assert "standup" in commands
     assert [c for c in commands if "st" in c.lower()].count("standup") == 1
 
+    assert sea_commands.help_text_if_command("/standup help") == namespace["description"]()
+
     task = "finished the docs page, next is the release, blocked on review"
     hit = sea_commands.rewrite_prompt_if_command(f"/standup {task}")
     assert hit is not None
@@ -139,15 +144,21 @@ def test_three_step_walkthrough_registers_standup_command(home: Path) -> None:
 def test_documented_edge_cases_hold(home: Path) -> None:
     """The bullet list under "The slash-command flow" describes real parser behaviour.
 
-    Checks: dotted and spaced stems are skipped, a leading underscore is
-    kept, a bare ``/name`` is not rewritten, an unknown command is not
+    Checks: dotted and spaced folder names are skipped, a leading
+    underscore is kept, a folder whose script has another name and a
+    loose ``xxx_sea.py`` at the top of the listed folder are skipped, a
+    bare ``/name`` is not rewritten, an unknown command is not
     rewritten, a leading space disables the command, and ``/deployx``
     does not match ``/deploy``.
     """
     folder = home / "seas"
     folder.mkdir()
-    for stem in ("deploy", "_scratch", "release.notes", "my agent"):
-        (folder / f"{stem}_sea.py").write_text("# stub\n", encoding="utf-8")
+    for name in ("deploy", "_scratch", "release.notes", "my agent"):
+        (folder / name).mkdir()
+        (folder / name / f"{name}_sea.py").write_text("# stub\n", encoding="utf-8")
+    (folder / "wrongname").mkdir()
+    (folder / "wrongname" / "main_sea.py").write_text("# stub\n", encoding="utf-8")
+    (folder / "loose_sea.py").write_text("# stub\n", encoding="utf-8")
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text("seas\n", encoding="utf-8")
 
@@ -156,6 +167,9 @@ def test_documented_edge_cases_hold(home: Path) -> None:
     assert "_scratch" in commands
     assert "release.notes" not in commands
     assert "my agent" not in commands
+    assert "wrongname" not in commands
+    assert "main" not in commands
+    assert "loose" not in commands
 
     assert sea_commands.rewrite_prompt_if_command("/deploy") is None
     assert sea_commands.rewrite_prompt_if_command("/nosuch ship") is None

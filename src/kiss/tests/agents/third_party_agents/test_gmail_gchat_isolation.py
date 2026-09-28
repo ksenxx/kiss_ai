@@ -22,9 +22,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kiss.agents.third_party_agents import googlechat_sea
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner, write_private_file
 from kiss.agents.third_party_agents._composio_google import connected_account_id, service_dir
+from kiss.agents.third_party_agents.googlechat import googlechat_sea
 
 
 class _KissHomeSwap:

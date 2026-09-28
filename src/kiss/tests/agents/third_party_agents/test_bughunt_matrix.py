@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kiss.agents.third_party_agents.matrix_sea import MatrixChannelBackend
+from kiss.agents.third_party_agents.matrix.matrix_sea import MatrixChannelBackend
 
 
 class TestMatrixPersistentLoop:

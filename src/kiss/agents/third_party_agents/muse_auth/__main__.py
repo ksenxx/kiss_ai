@@ -80,7 +80,7 @@ def _import_hosts(service: str, cfg: dict) -> tuple[tuple[str, ...], tuple[str, 
         ``(hosts, insecure_hosts)`` tuples (possibly empty).
     """
     if service == "firecrawl":
-        from kiss.agents.third_party_agents import firecrawl_sea
+        from kiss.agents.third_party_agents.firecrawl import firecrawl_sea
 
         # Firecrawl is origin-bound with no built-in host, so a cloud
         # key (no base_url) must still enroll the cloud origin.
@@ -90,12 +90,12 @@ def _import_hosts(service: str, cfg: dict) -> tuple[tuple[str, ...], tuple[str, 
             firecrawl_sea._insecure_extra_hosts(base_url),
         )
     if service == "homeassistant" and cfg.get("base_url"):
-        from kiss.agents.third_party_agents import homeassistant_sea as ha
+        from kiss.agents.third_party_agents.homeassistant import homeassistant_sea as ha
 
         base_url = str(cfg["base_url"])
         return ha._extra_hosts(base_url), ha._insecure_extra_hosts(base_url)
     if service == "ntfy":
-        from kiss.agents.third_party_agents import ntfy_sea
+        from kiss.agents.third_party_agents.ntfy import ntfy_sea
 
         # ntfy is origin-bound with no built-in host, so a public-cloud
         # token (no server configured) must still enroll ntfy.sh — the
@@ -125,7 +125,7 @@ def _service_base_url(service: str, cfg: dict) -> str:
         The base URL string (may be empty or invalid; callers validate).
     """
     if service == "mattermost":
-        from kiss.agents.third_party_agents.mattermost_sea import _base_url_from_config
+        from kiss.agents.third_party_agents.mattermost.mattermost_sea import _base_url_from_config
 
         return _base_url_from_config(cfg)
     return str(cfg.get("server_url") or "")
@@ -220,7 +220,7 @@ def _cmd_import(service: str) -> int:
         Process exit code.
     """
     if service == "slack":
-        from kiss.agents.third_party_agents.slack_sea import (
+        from kiss.agents.third_party_agents.slack.slack_sea import (
             _legacy_vault_credential,
             _load_config,
             _token_path,
@@ -343,11 +343,11 @@ def _cmd_import_nextcloud() -> int:
     Returns:
         Process exit code.
     """
-    from kiss.agents.third_party_agents import nextcloud_sea as nc
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
     )
+    from kiss.agents.third_party_agents.nextcloud import nextcloud_sea as nc
 
     path = muse_auth_dir().parent / "third_party_agents" / "nextcloud" / "config.json"
     if not path.exists():
@@ -395,11 +395,11 @@ def _cmd_import_synology() -> int:
     Returns:
         Process exit code.
     """
-    from kiss.agents.third_party_agents import synology_sea as syno
     from kiss.agents.third_party_agents.muse_auth._common import (
         insecure_origin_hosts,
         origin_hosts,
     )
+    from kiss.agents.third_party_agents.synology import synology_sea as syno
 
     path = muse_auth_dir().parent / "third_party_agents" / "synology" / "config.json"
     if not path.exists():

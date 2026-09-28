@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.slack_sea as slack_agent_mod
+import kiss.agents.third_party_agents.slack.slack_sea as slack_agent_mod
 
 
 @pytest.fixture(autouse=True)

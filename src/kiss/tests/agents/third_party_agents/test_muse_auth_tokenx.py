@@ -92,9 +92,9 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
-from kiss.agents.third_party_agents.msteams_sea import _config as ms_config
-from kiss.agents.third_party_agents.msteams_sea import _make_backend as ms_make_backend
+from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
+from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
+from kiss.agents.third_party_agents.msteams.msteams_sea import _make_backend as ms_make_backend
 from kiss.agents.third_party_agents.muse_auth import __main__ as muse_cli
 from kiss.agents.third_party_agents.muse_auth._common import (
     muse_auth_dir,
@@ -113,9 +113,14 @@ from kiss.agents.third_party_agents.muse_auth.client import (
     store_credentials,
     vault_has_credentials,
 )
-from kiss.agents.third_party_agents.telegram_sea import TelegramAgent, TelegramChannelBackend
-from kiss.agents.third_party_agents.telegram_sea import _config as tg_config
-from kiss.agents.third_party_agents.telegram_sea import _make_backend as tg_make_backend
+from kiss.agents.third_party_agents.telegram.telegram_sea import (
+    TelegramAgent,
+    TelegramChannelBackend,
+)
+from kiss.agents.third_party_agents.telegram.telegram_sea import (
+    _config as tg_config,
+)
+from kiss.agents.third_party_agents.telegram.telegram_sea import _make_backend as tg_make_backend
 from kiss.tests.agents.third_party_agents.muse_test_utils import (
     auth_tools,
     setup_muse_env,
@@ -1056,7 +1061,7 @@ def test_telegram_adapter_and_scrub_edges(
     doc = json.loads(tg_config.path.read_text())  # config survives ops
     assert doc == {"note": "keep-me"}
     # The scrub itself tolerates odd configs.
-    from kiss.agents.third_party_agents.telegram_sea import _scrub_config_token
+    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
 
     tg_config.path.write_text("not json")
     _scrub_config_token()  # unreadable: a no-op
@@ -1765,7 +1770,7 @@ def test_compare_and_scrub_keeps_a_newer_config_value(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """The scrub removes only the migrated token, never a newer one."""
-    from kiss.agents.third_party_agents.telegram_sea import _scrub_config_token
+    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
 
     # A newer token was written to config after the migrated one; the
     # compare-and-scrub must leave it in place.
@@ -1898,7 +1903,7 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
         config_file_lock,
         write_private_file,
     )
-    from kiss.agents.third_party_agents.telegram_sea import _scrub_config_token
+    from kiss.agents.third_party_agents.telegram.telegram_sea import _scrub_config_token
 
     tg_config.save({"bot_token": _REAL_TG_TOKEN})
     scrubbed = threading.Event()

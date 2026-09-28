@@ -221,6 +221,12 @@ class KISSAgent(Base):
         self.tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
+        self.last_call_usage: dict[str, int | float] | None = None
+        """Tokens and USD cost of the latest model call
+        (``input_tokens``, ``output_tokens``, ``cache_read``,
+        ``cache_write``, ``cost``), as recorded by
+        :meth:`_update_tokens_and_budget_from_response`; reported by
+        the ``llm_call`` event.  ``None`` before the first call."""
         self.tool_calls_made = 0
         """Tool calls other than ``finish`` the model issued during the
         current run (blocked ones included: the model still acted).
@@ -270,6 +276,7 @@ class KISSAgent(Base):
         self.total_tokens_used = 0  # pyright: ignore[reportIncompatibleVariableOverride]
         self.context_tokens_used = 0
         self.last_cache_read_tokens = 0
+        self.last_call_usage = None
         self._next_compaction_at = DEFAULT_CONFIG.compaction_start_tokens
         self._prompt_cache_touched_at = 0.0
         self._llm_hook_conversation_index = 0
@@ -493,17 +500,21 @@ class KISSAgent(Base):
         start_timestamp = int(time.time())
         self.step_count += 1
 
+        call_started = time.time()
+        self.last_call_usage = None
         try:
             response_text, response = self.model.generate()
         except Exception as e:
             # A timed-out whole-task run must not erase its known spend.
             self._bill_partial_usage()
+            self._print_llm_call(call_started)
             if _is_context_overflow_error(e):
                 raise ContextWindowExceededError(
                     f"Agent {self.name} exceeded the model's context window: {e}"
                 ) from e
             raise
         self._update_tokens_and_budget_from_response(response)
+        self._print_llm_call(call_started)
         usage_info_str = self._get_usage_info_string()
         self._add_message(
             "model", response_text + "\n```text\n" + usage_info_str + "\n```\n", start_timestamp
@@ -776,6 +787,7 @@ class KISSAgent(Base):
         # already-hooked messages to the hook on the next attempt ...
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
+        call_started = time.time()
         try:
             function_calls, response_text, response = (
                 self.model.generate_and_process_with_tools(
@@ -785,14 +797,18 @@ class KISSAgent(Base):
         except Exception:
             # A truncated, incomplete or refused response raises but was
             # still billed; the retry/fallback loop must not drop it.
+            self.last_call_usage = None
             self._bill_partial_usage()
+            self._print_llm_call(call_started)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call.
         self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
+        self.last_call_usage = None
         self._update_tokens_and_budget_from_response(response)
+        self._print_llm_call(call_started)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
         if self.printer:
@@ -946,7 +962,11 @@ class KISSAgent(Base):
                 return self._execute_tool(function_call, blocked=None)
         finally:
             for ping in keep_alive.responses:
+                # A keep-alive ping is a billed model call too; its
+                # duration is not measured (0).
+                self.last_call_usage = None
                 self._update_tokens_and_budget_from_response(ping)
+                self._print_llm_call(time.time())
             if keep_alive.last_ping_at is not None:
                 self._prompt_cache_touched_at = keep_alive.last_ping_at
                 logger.info(
@@ -1276,6 +1296,13 @@ class KISSAgent(Base):
                     num_audio_input_tokens=audio_input,
                     num_audio_output_tokens=audio_output,
                 )
+            self.last_call_usage = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read": cache_read,
+                "cache_write": cache_write + cache_write_1h,
+                "cost": cost,
+            }
             # ONE store publishes tokens and cost together (see the
             # docstring): a stop injected anywhere in this method now
             # leaves either the previous complete triple (the response
@@ -1294,6 +1321,30 @@ class KISSAgent(Base):
             logger.error(
                 "Error updating tokens and budget from response: %s", e, exc_info=True
             )
+
+    def _print_llm_call(self, started: float) -> None:
+        """Emit an ``llm_call`` event for the model call that just returned.
+
+        One event per call, carrying the model, the call's own tokens and
+        USD cost (:attr:`last_call_usage`) and its wall-clock duration —
+        the per-call price record the autorouter's cost tools read back
+        from the events table.  Nothing is emitted when the call was not
+        billed (no usage in the response) or there is no printer.
+
+        Args:
+            started: ``time.time()`` taken right before the call.
+        """
+        usage = self.last_call_usage
+        if self.printer is None or usage is None:
+            return
+        self.printer.print(
+            "",
+            type="llm_call",
+            model=self.model.model_name,
+            step=self.step_count,
+            duration_ms=int((time.time() - started) * 1000),
+            **usage,
+        )
 
     def _get_usage_info_string(self) -> str:
         """Returns a compact single-line usage information string."""

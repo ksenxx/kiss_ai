@@ -199,8 +199,11 @@ def test_remote_page_inlines_vscode_fonts_and_both_palettes() -> None:
     assert page.count("--vscode-editor-background: #1f1f1f;") == 1
     assert page.count("--vscode-editor-background: #ffffff;") == 1
     assert "highlight-github" not in page
-    assert re.search(r'id="hljs-theme" href="/media/highlight-vscode-dark\.css\?v=', page)
-    assert '"light": "/media/highlight-vscode-light.css?v=' in page
+    # Light is the default theme, so the page ships light-themed markup
+    # and main.js only has to swap in the dark sheet for dark-savers.
+    assert '<body class="remote-chat light-theme">' in page
+    assert re.search(r'id="hljs-theme" href="/media/highlight-vscode-light\.css\?v=', page)
+    assert '"dark": "/media/highlight-vscode-dark.css?v=' in page
 
 
 def test_app_shell_precaches_both_highlight_sheets() -> None:
@@ -313,7 +316,7 @@ def _font_families(stack: str) -> list[str]:
 
 @pytest.mark.timeout(180)
 def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) -> None:
-    """Served page + real Chromium: Dark Modern by default, Light
+    """Served page + real Chromium: Light Modern by default, Dark
     Modern after the theme toggle, VS Code's font stacks throughout,
     and the code block restyled by the matching highlight sheet."""
     ready = threading.Event()
@@ -340,26 +343,26 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
                 page.evaluate(_INJECT_JS)
                 page.wait_for_function(
                     "() => getComputedStyle(document.getElementById('probe-code'))"
-                    ".backgroundColor === 'rgb(43, 43, 43)'",
-                    timeout=10000,
-                )
-                dark = page.evaluate(_PROBE_JS)
-                page.evaluate("() => document.getElementById('theme-btn').click()")
-                # The light sheet has to load and #send-btn's 0.2s
-                # colour transition (main.css) has to settle.
-                page.wait_for_function(
-                    "() => getComputedStyle(document.getElementById('probe-code'))"
-                    ".backgroundColor === 'rgb(248, 248, 248)' && "
-                    "getComputedStyle(document.getElementById('send-btn'))"
-                    ".backgroundColor === 'rgb(0, 95, 184)'",
+                    ".backgroundColor === 'rgb(248, 248, 248)'",
                     timeout=10000,
                 )
                 light = page.evaluate(_PROBE_JS)
                 page.evaluate("() => document.getElementById('theme-btn').click()")
+                # The dark sheet has to load and #send-btn's 0.2s
+                # colour transition (main.css) has to settle.
                 page.wait_for_function(
-                    "() => !document.body.classList.contains('light-theme') && "
+                    "() => getComputedStyle(document.getElementById('probe-code'))"
+                    ".backgroundColor === 'rgb(43, 43, 43)' && "
                     "getComputedStyle(document.getElementById('send-btn'))"
                     ".backgroundColor === 'rgb(0, 120, 212)'",
+                    timeout=10000,
+                )
+                dark = page.evaluate(_PROBE_JS)
+                page.evaluate("() => document.getElementById('theme-btn').click()")
+                page.wait_for_function(
+                    "() => document.body.classList.contains('light-theme') && "
+                    "getComputedStyle(document.getElementById('send-btn'))"
+                    ".backgroundColor === 'rgb(0, 95, 184)'",
                     timeout=10000,
                 )
                 back = page.evaluate(_PROBE_JS)
@@ -410,8 +413,8 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
         assert probe["fontSize"] == "14px", probe
         assert _font_families(probe["codeFont"]) == _font_families(VSCODE_EDITOR_FONT), probe
 
-    # Toggling back restores Dark Modern exactly.
-    assert back["light"] is False, back
-    assert back["bodyBg"] == dark["bodyBg"], back
-    assert back["send"] == dark["send"], back
-    assert back["hljsHref"] == dark["hljsHref"], back
+    # Toggling back restores Light Modern exactly.
+    assert back["light"] is True, back
+    assert back["bodyBg"] == light["bodyBg"], back
+    assert back["send"] == light["send"], back
+    assert back["hljsHref"] == light["hljsHref"], back

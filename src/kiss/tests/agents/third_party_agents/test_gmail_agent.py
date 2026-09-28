@@ -26,7 +26,7 @@ from kiss.agents.third_party_agents._backend_utils import (
     stop_http_server,
 )
 from kiss.agents.third_party_agents._composio_google import connected_account_id
-from kiss.agents.third_party_agents.gmail_sea import (
+from kiss.agents.third_party_agents.gmail.gmail_sea import (
     _SERVICE,
     GmailAgent,
     GmailChannelBackend,

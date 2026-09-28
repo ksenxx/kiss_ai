@@ -32,8 +32,8 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.gmail_sea import GmailChannelBackend
-from kiss.agents.third_party_agents.whatsapp_sea import WhatsAppChannelBackend
+from kiss.agents.third_party_agents.gmail.gmail_sea import GmailChannelBackend
+from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import WhatsAppChannelBackend
 
 
 class _BridgeHandler(BaseHTTPRequestHandler):

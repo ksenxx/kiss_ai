@@ -9,7 +9,7 @@
 system prompt of every Sorcar task, so a line written there is an
 instruction the agent follows in every later task.  This module is the
 storage layer shared by the ``/remember`` and ``/forget`` agents
-(:mod:`kiss.agents.seas.remember_sea`, :mod:`kiss.agents.seas.forget_sea`):
+(:mod:`kiss.agents.seas.remember.remember_sea`, :mod:`kiss.agents.seas.forget.forget_sea`):
 each instruction is one Markdown bullet line (``- <instruction>``), the
 file is created with a short heading on first use, and any other text
 the user wrote in the file by hand is left byte for byte as it was

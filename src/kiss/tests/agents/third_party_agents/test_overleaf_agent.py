@@ -37,10 +37,10 @@ from typing import Any
 
 import pytest
 
-import kiss.agents.third_party_agents.overleaf_sea as overleaf_mod
+import kiss.agents.third_party_agents.overleaf.overleaf_sea as overleaf_mod
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._overleaf_realtime import flatten_tree
-from kiss.agents.third_party_agents.overleaf_sea import (
+from kiss.agents.third_party_agents.overleaf.overleaf_sea import (
     OverleafAgent,
     OverleafChannelBackend,
     _config,

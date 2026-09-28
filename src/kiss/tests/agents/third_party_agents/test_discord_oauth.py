@@ -39,7 +39,7 @@ import requests
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT, LOOPBACK_REDIRECT_URI
-from kiss.agents.third_party_agents.discord_sea import (
+from kiss.agents.third_party_agents.discord.discord_sea import (
     DiscordAgent,
     _config,
     _make_backend,

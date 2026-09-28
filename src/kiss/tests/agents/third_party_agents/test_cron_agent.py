@@ -115,7 +115,7 @@ def test_gateway_command_tick_is_silent_when_idle(
     before ``connect()`` installs the test-injectable base URL — so that
     branch is reachable only with network access or a test double.
     """
-    from kiss.agents.third_party_agents import signal_sea
+    from kiss.agents.third_party_agents.signal import signal_sea
     from kiss.tests.conftest import install_cli_script
 
     bin_dir = tmp_path / "bin"

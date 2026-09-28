@@ -60,6 +60,18 @@ def _brave_config() -> Path:
     return kiss_home() / "third_party_agents" / "brave_search" / "config.json"
 
 
+def _expire_apps_cache() -> None:
+    """Forget the apps-status probe cache so the next call probes again.
+
+    Any earlier test in the process that opened a webapp sidebar may have
+    probed within the TTL; resetting only ``_apps_checked_at`` would then
+    serve that cached answer stamped ``checked_at == 0``.
+    """
+    sidebar_panels._apps_attempted_at = 0.0
+    sidebar_panels._apps_checked_at = 0.0
+    sidebar_panels._apps_cache = []
+
+
 class _StoreTestCase(unittest.TestCase):
     """Back up and restore the cron store and the Brave Search config."""
 
@@ -67,7 +79,7 @@ class _StoreTestCase(unittest.TestCase):
         self.saved_jobs = cron_agent.load_jobs()
         brave = _brave_config()
         self.saved_brave = brave.read_text() if brave.exists() else None
-        sidebar_panels._apps_checked_at = 0.0
+        _expire_apps_cache()
 
     def tearDown(self) -> None:
         cron_agent.save_jobs(self.saved_jobs)
@@ -76,7 +88,7 @@ class _StoreTestCase(unittest.TestCase):
             brave.unlink(missing_ok=True)
         else:
             brave.write_text(self.saved_brave)
-        sidebar_panels._apps_checked_at = 0.0
+        _expire_apps_cache()
 
     def write_brave_key(self) -> None:
         brave = _brave_config()
@@ -249,7 +261,9 @@ class TestAuthStatusProbe(_StoreTestCase):
         import kiss.agents.third_party_agents as pkg
 
         with tempfile.TemporaryDirectory() as extra:
-            Path(extra, "zz_empty_probe_sea.py").write_text(
+            Path(extra, "zz_empty_probe").mkdir()
+            Path(extra, "zz_empty_probe", "__init__.py").write_text("")
+            Path(extra, "zz_empty_probe", "zz_empty_probe_sea.py").write_text(
                 '"""A channel module that defines no agent."""\n'
             )
             pkg.__path__.append(extra)
