@@ -32,6 +32,7 @@ from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.remember import remember_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.utils import read_bytes_waiting_for_writer
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -228,7 +229,10 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path)
     The reader repeats the exact ``perform_task`` read while a writer
     adds and removes a transient rule 200 times; every snapshot must
     still contain the standing instruction (an in-place truncating write
-    would show empty snapshots).
+    would show empty snapshots).  On Windows this also exercises the
+    sharing-violation handling on both sides: the writer's replace must
+    wait out the reader's open handle and the reader's open must wait
+    out the in-flight rename.
     """
     path = _fresh_sorcar_md
     standing = "- Always preserve this standing instruction"
@@ -238,16 +242,18 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path)
 
     def write() -> None:
         start.wait()
-        for i in range(200):
-            sorcar_md.add_instruction(f"Transient {i}")
-            sorcar_md.remove_instruction(f"Transient {i}")
-        done.set()
+        try:
+            for i in range(200):
+                sorcar_md.add_instruction(f"Transient {i}")
+                sorcar_md.remove_instruction(f"Transient {i}")
+        finally:
+            done.set()  # a writer failure must not leave the reader spinning
 
     def read() -> list[str]:
         start.wait()
         snapshots = []
         while not done.is_set():
-            snapshots.append(path.read_text(encoding="utf-8", errors="replace"))
+            snapshots.append(read_bytes_waiting_for_writer(path).decode("utf-8", errors="replace"))
         return snapshots
 
     with ThreadPoolExecutor(max_workers=2) as pool:

@@ -128,6 +128,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.core.brand import render_brand
 from kiss.core.config import kiss_home
+from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
 from kiss.server.tools_file import execute_python_file
 
@@ -2075,7 +2076,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     if not commit:
         return f"Error: {repo} has no commit from before the task started"
     clone = _work_root() / REPLAY_DIR / f"{sea}-{task_id[:8]}"
-    shutil.rmtree(clone, ignore_errors=True)
+    rmtree_force(clone)  # a plain rmtree leaves git's read-only objects behind on Windows
     clone.parent.mkdir(parents=True, exist_ok=True)
     for label, args in (
         ("clone", ("clone", "--quiet", "--no-checkout", str(repo), str(clone))),

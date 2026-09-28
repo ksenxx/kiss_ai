@@ -51,7 +51,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
-from kiss.tests.conftest import hold_loopback_port
+from kiss.tests.conftest import IS_WINDOWS, hold_loopback_port
 
 _USER_TOKEN = "user-access-token"
 _BOT_TOKEN = "bot-secret-token"
@@ -227,7 +227,7 @@ def test_sign_in_stores_token_and_webhook(discord_server: _DiscordServer) -> Non
     assert stored["client_id"] == "kiss-discord-app" and float(stored["expires_at"]) > time.time()
     hook = json.loads(_webhook_config.path.read_text())
     assert hook["url"].endswith(_HOOK_PATH) and hook["channel_id"] == "555"
-    assert stat.S_IMODE(_webhook_config.path.stat().st_mode) == 0o600
+    assert IS_WINDOWS or stat.S_IMODE(_webhook_config.path.stat().st_mode) == 0o600
 
     check = json.loads(tools["check_discord_auth"]())
     assert check["auth"] == "user" and check["webhook_channel_id"] == "555"

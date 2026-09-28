@@ -150,6 +150,32 @@ def hold_loopback_port(port: int) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def occupy_loopback_port(port: int) -> Iterator[None]:
+    """Listen on loopback *port* so that the code under test cannot bind it.
+
+    ``SO_REUSEADDR`` on POSIX lets the blocker bind over TIME_WAIT leftovers
+    of earlier tests while still denying a second listener.  On Windows
+    that same flag *grants* the bind to any other ``SO_REUSEADDR`` socket
+    (which every ``HTTPServer`` is), so the blocker needs
+    ``SO_EXCLUSIVEADDRUSE`` there; Windows never refuses a TIME_WAIT port.
+
+    Args:
+        port: The loopback port to occupy.
+
+    Yields:
+        None while the port is held.
+    """
+    with socket.socket() as blocker:
+        if sys.platform == "win32":
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", port))
+        blocker.listen(1)
+        yield
+
+
+@contextlib.contextmanager
 def nproc_limit_lowered_to_one() -> Iterator[None]:
     """Lower the soft ``RLIMIT_NPROC`` to 1 for the block, then restore it.
 

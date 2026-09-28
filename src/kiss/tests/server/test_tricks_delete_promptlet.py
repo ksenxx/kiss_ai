@@ -186,7 +186,7 @@ class TestDeleteMyInjectionTrick(_TricksHome):
         self.assertIsNone(
             tricks.delete_my_injection_trick("First line\r\nSecond line\r\n")
         )
-        # The rewrite goes through text mode, so the file comes out LF.
+        # The rewrite writes LF on every platform (the CRLF input is normalized).
         self.assertEqual(self.user_file.read_bytes(), b"## Trick\n\nKeep.\n")
         self.assertEqual(tricks.read_tricks_data()["userCount"], 1)
 

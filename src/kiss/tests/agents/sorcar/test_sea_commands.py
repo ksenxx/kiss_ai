@@ -33,6 +33,7 @@ import pytest
 
 from kiss.agents.sorcar import sea_commands
 from kiss.core.config import kiss_home
+from kiss.tests.conftest import is_root, posix_only
 
 
 @pytest.fixture(autouse=True)
@@ -636,16 +637,19 @@ def _write_router(folder: Path, name: str, source: str) -> Path:
     """Create ``<folder>/<name>/<name>_sea.py`` with *source* and return it."""
     path = folder / name / f"{name}_sea.py"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
+    # Bytes, not text mode: the same-size tests compare st_size to
+    # len(source), which CRLF translation on Windows would break.
+    path.write_bytes(source.encode("utf-8"))
     return path
 
 
 def test_model_seas_rereads_an_edit_within_the_same_second(tmp_path: Path) -> None:
-    """A same-size edit whose mtime moves by one nanosecond is seen.
+    """A same-size edit whose mtime moves by one filesystem tick is seen.
 
     The bytecode cache keys staleness on whole-second mtime and size, so
     an import-based loader would re-run the stale ``.pyc``; the SEA loader
-    compiles the source directly.
+    compiles the source directly.  The tick is 100 ns, NTFS's resolution
+    (a 1 ns bump rounds back to the old stamp there).
     """
     folder = tmp_path / "seas"
     router = _write_router(folder, "flip", _ROUTER_TRUE)
@@ -653,8 +657,8 @@ def test_model_seas_rereads_an_edit_within_the_same_second(tmp_path: Path) -> No
     sea_commands.refresh_registry()
     assert sea_commands.model_sea("flip") == router
     stamp = router.stat().st_mtime_ns
-    router.write_text(_ROUTER_FALSE, encoding="utf-8")
-    os.utime(router, ns=(stamp + 1, stamp + 1))
+    router.write_bytes(_ROUTER_FALSE.encode("utf-8"))
+    os.utime(router, ns=(stamp + 100, stamp + 100))
     assert router.stat().st_size == len(_ROUTER_TRUE)
     assert sea_commands.model_sea("flip") is None
     assert "flip" not in sea_commands.model_seas()
@@ -669,7 +673,7 @@ def test_model_seas_rereads_an_atomic_replacement_with_the_same_mtime(tmp_path: 
     assert sea_commands.model_sea("swap") == router
     st = router.stat()
     replacement = router.with_name("swap_sea.py.new")
-    replacement.write_text(_ROUTER_FALSE, encoding="utf-8")
+    replacement.write_bytes(_ROUTER_FALSE.encode("utf-8"))
     os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
     os.replace(replacement, router)
     assert router.stat().st_mtime_ns == st.st_mtime_ns
@@ -677,7 +681,8 @@ def test_model_seas_rereads_an_atomic_replacement_with_the_same_mtime(tmp_path: 
     assert sea_commands.model_sea("swap") is None
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+@posix_only("chmod-based read denial")
+@pytest.mark.skipif(is_root(), reason="root reads unreadable files")
 def test_unreadable_sea_does_not_break_the_model_picker_registry(tmp_path: Path) -> None:
     """A SEA without read permission is skipped, not raised through ``model_seas()``."""
     folder = tmp_path / "seas"

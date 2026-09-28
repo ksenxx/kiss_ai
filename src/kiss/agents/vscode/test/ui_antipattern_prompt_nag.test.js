@@ -40,6 +40,11 @@ process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = kissHome;
 process.env.KISS_PROJECT_PATH = fakeProject;
 process.env.SHELL = '/bin/bash';
+// Where DependencyInstaller.getShellRcPath() saves keys for this HOME.
+const shellRcPath =
+  process.platform === 'win32'
+    ? path.join(tmpHome, 'Documents', 'PowerShell', 'Microsoft.PowerShell_profile.ps1')
+    : path.join(tmpHome, '.bashrc');
 // No `claude` CLI and no keys: the prompts must run.
 process.env.PATH = '/usr/bin:/bin';
 delete process.env.ANTHROPIC_API_KEY;
@@ -206,7 +211,7 @@ async function promptApiKeysNowTest() {
   assert.strictEqual(inputBoxCalls.length, 2, 'promptApiKeysNow asks again');
   assert.ok(!fs.existsSync(defaultDeclined), 'the skip is forgotten');
   assert.strictEqual(process.env.OPENAI_API_KEY, 'sk-openai-123');
-  const rc = fs.readFileSync(path.join(tmpHome, '.bashrc'), 'utf-8');
+  const rc = fs.readFileSync(shellRcPath, 'utf-8');
   assert.ok(rc.includes('OPENAI_API_KEY'), 'the key is saved to the shell rc');
   console.log('promptApiKeysNow tests passed');
 }

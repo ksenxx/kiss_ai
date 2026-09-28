@@ -64,7 +64,10 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as _persistence
+from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
+
+pytestmark = requires_unix_sockets
 
 _VSCODE_DIR = Path(__file__).resolve().parents[2] / "agents" / "vscode"
 _BRIDGE = _VSCODE_DIR / "test" / "multiSurfaceBridge.js"
