@@ -194,8 +194,10 @@ turns the automatic opening off.
 - **Composio sign-in** (Gmail, Google Calendar, Docs, Drive, Sheets and Chat).
   Google only lets verified OAuth apps request Workspace scopes, so KISS brokers
   Google through Composio. `authenticate_<service>` (pass `api_key=` once if no
-  `COMPOSIO_API_KEY` is configured; create one at https://dashboard.composio.dev)
-  returns a Composio Connect Link and opens it in your default browser when it can;
+  `COMPOSIO_API_KEY` is configured; create a *project* API key (`ak_...`) at
+  https://dashboard.composio.dev/~/project/settings/api-keys — the older `ck_...`
+  consumer keys are rejected; the key is saved once in `google/composio_api_key.json`
+  and shared by all six Google agents) returns a Composio Connect Link and opens it in your default browser when it can;
   you sign in to Google and click Allow there, and `finish_<service>_auth` records the
   connection (answering `pending` until you approve). Every API call then goes through
   Composio's proxy, which adds the Google token, so no Google token is stored locally.
