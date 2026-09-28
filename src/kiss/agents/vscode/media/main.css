@@ -2101,9 +2101,21 @@ body.meta-section-resizing {
   flex-direction: column;
   gap: 1px;
   padding: var(--space-1) var(--space-0-5);
+  border-radius: var(--radius-sm);
+}
+
+.sched-row:hover,
+.sched-row:focus-visible {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  outline: none;
 }
 
 .sched-row.paused { opacity: 0.6; }
+
+/* The copy button (the job's prompt or command) sits at the right edge
+   of the name line; it takes the line's own gap, not the task panels'
+   margin. */
+.sched-row .sidebar-item-copy { margin-left: 0; }
 
 .sidebar-panel-row-top,
 .app-row-main {
@@ -3796,6 +3808,31 @@ body.sidebar-chat-mode #meta-info-content {
   user-select: none;
 }
 
+/* Tag dropdown: the same pill as the date range, holding a bare
+   <select>; the pill takes the accent when a tag is active. */
+.history-filter-tag {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  white-space: nowrap; box-sizing: border-box;
+  padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.history-filter-tag.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.history-filter-tag-select {
+  background: transparent; border: none; outline: none;
+  color: var(--fg); font-size: var(--fs-sm); font-family: inherit;
+  padding: var(--space-0-5) 0; cursor: pointer; min-width: 0;
+}
+
+.history-filter-tag-select option {
+  background: var(--bg); color: var(--fg);
+}
+
 .hf-date-clear {
   flex: 0 0 auto;
   background: transparent; border: none; border-radius: var(--radius-round);
@@ -3808,6 +3845,31 @@ body.sidebar-chat-mode #meta-info-content {
 .hf-date-clear:hover {
   background: color-mix(in srgb, var(--fg) 12%, transparent);
   color: var(--fg);
+}
+
+/* The agent-script (SEA) filter: a pill like the date range holding
+   one <select> whose options are the SEAs of the loaded rows. */
+.history-filter-sea {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  flex-wrap: nowrap; white-space: nowrap;
+  max-width: 100%; box-sizing: border-box;
+  padding: var(--space-0-5) var(--space-1-5); border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.history-filter-sea-select {
+  flex: 1 1 auto; min-width: 0; max-width: 14em;
+  background: transparent;
+  border: none; border-bottom: 1px solid transparent;
+  color: var(--fg); font-size: var(--fs-sm);
+  padding: var(--space-0-5) 0; outline: none; box-sizing: border-box;
+  font-family: inherit; cursor: pointer;
+}
+.history-filter-sea-select:focus { border-bottom-color: var(--accent); }
+
+.history-filter-sea-select option {
+  background: var(--bg); color: var(--fg);
 }
 
 .history-filter-date-group {
@@ -4013,6 +4075,20 @@ body.sidebar-chat-mode #meta-info-content {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The line under the chat header: when the chat's latest task was
+   launched, in the task panels' "launched ... ago" style. Indented to
+   the header's title column; empty until the daemon's stamp arrives. */
+.history-chat-launched {
+  display: flex;
+  min-width: 0;
+  padding: 0 var(--space-2-5) var(--space-1) calc(var(--space-2) + 12px + var(--space-1-5));
+  line-height: 1.35;
+}
+
+.history-chat-launched:empty { display: none; }
+
+.history-chat-launched > .sidebar-item-launched { margin-left: 0; }
 
 /* The chat's task rows, indented under the header behind a hairline
    guide so the nesting reads without a tinted band. */
@@ -4224,6 +4300,29 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
+/* The task's tags ("work · coding"), right before its "launched ..."
+   label and in the same muted style, so the two read as one line of
+   metadata. */
+.sidebar-item-tags,
+.sidebar-item-sea {
+  flex-shrink: 1;
+  min-width: 0;
+  margin-left: var(--space-0-5);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-item-tags + .sidebar-item-sea::before,
+.sidebar-item-tags + .sidebar-item-launched::before,
+.sidebar-item-sea + .sidebar-item-launched::before {
+  content: '•';
+  margin-right: var(--space-0-5);
+}
+
 .sidebar-item-copy.copied { opacity: 0.9; color: var(--status-ok); }
 
 .sidebar-item-favorite.favorited { color: var(--favorite); opacity: 1; }
@@ -4403,6 +4502,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   font-size: var(--fs-sm); line-height: 1.4; white-space: pre-wrap;
   word-break: break-word; max-width: min(350px, calc(100vw - 20px)); pointer-events: none;
   opacity: 0; transition: opacity var(--dur-base); box-shadow: var(--shadow-sm);
+
+  /* Never taller than the viewport (main.js slides it to fit): a text
+     longer than a screen, such as a scheduled job's prompt, is cut at
+     the bottom edge; its copy button gives the whole of it. */
+  max-height: calc(100vh - 16px); overflow: hidden; box-sizing: border-box;
 }
 #custom-tooltip.visible { opacity: 1; }
 
@@ -4652,6 +4756,12 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 .panel-ts {
+  white-space: nowrap;
+}
+
+/* The USD cost of the model call a thoughts panel holds, next to its
+   time label (from the llm_call event). */
+.panel-cost {
   white-space: nowrap;
 }
 

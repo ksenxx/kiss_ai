@@ -39,13 +39,14 @@ assert.ok(
   `compiled extension missing: ${sourcePath} — run \`tsc -p .\` first`,
 );
 delete require.cache[require.resolve(sourcePath)];
-const {getTips, consumeTipsFirstRun, buildChatHtml} = require(sourcePath);
+const {getTips, getVersion, claimTipsPopup, buildChatHtml} =
+  require(sourcePath);
 
 assert.strictEqual(typeof getTips, 'function', 'getTips must be exported');
 assert.strictEqual(
-  typeof consumeTipsFirstRun,
+  typeof claimTipsPopup,
   'function',
-  'consumeTipsFirstRun must be exported',
+  'claimTipsPopup must be exported',
 );
 
 let passed = 0;
@@ -173,24 +174,34 @@ test('the bundled src/kiss/TIPS.md yields at least one non-empty tip', () => {
   }
 });
 
-test('consumeTipsFirstRun is true exactly once per installation', () => {
+/** The `TIPS_SHOWN*` markers of a $KISS_HOME, sorted. */
+function tipsMarkers(kissHome) {
+  return fs
+    .readdirSync(kissHome)
+    .filter(n => n.startsWith('TIPS_SHOWN'))
+    .sort();
+}
+
+test('claimTipsPopup is true exactly once per installation and version', () => {
   withSandbox(({kissHome}) => {
-    assert.strictEqual(consumeTipsFirstRun(), true);
-    assert.ok(
-      fs.existsSync(path.join(kissHome, 'TIPS_SHOWN')),
-      'first call must create the TIPS_SHOWN marker',
+    assert.strictEqual(claimTipsPopup(), true);
+    const safe = (getVersion() || 'unknown').replace(/[^A-Za-z0-9.]/g, '_');
+    assert.deepStrictEqual(
+      tipsMarkers(kissHome),
+      ['TIPS_SHOWN-' + safe],
+      'first call must create the per-version TIPS_SHOWN marker',
     );
-    assert.strictEqual(consumeTipsFirstRun(), false);
-    assert.strictEqual(consumeTipsFirstRun(), false);
+    assert.strictEqual(claimTipsPopup(), false);
+    assert.strictEqual(claimTipsPopup(), false);
   });
 });
 
-test('consumeTipsFirstRun is false when the marker cannot be written', () => {
+test('claimTipsPopup is false when the marker cannot be written', () => {
   withSandbox(() => {
     const blocker = path.join(mkTmp('kiss-tips-blocked-'), 'file');
     fs.writeFileSync(blocker, 'not a directory');
     process.env.KISS_HOME = path.join(blocker, 'kiss');
-    assert.strictEqual(consumeTipsFirstRun(), false);
+    assert.strictEqual(claimTipsPopup(), false);
   });
 });
 
@@ -218,7 +229,11 @@ test('buildChatHtml injects window.__TIPS__ with show:true on fresh install', ()
     const m = html.match(/window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/);
     assert.ok(m, 'window.__TIPS__ must be assigned a JSON object literal');
     const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {tips: ['Hello **tips**.'], show: true});
+    assert.deepStrictEqual(cfg, {
+      tips: ['Hello **tips**.'],
+      show: true,
+      version: getVersion(),
+    });
     assert.ok(
       /src="[^"]*\/media\/tips\.js\?v=[0-9a-f]{16}"/.test(html),
       'tips.js must be loaded with a content-hash cache-buster',
@@ -236,21 +251,25 @@ test('buildChatHtml injects show:false after the first render', () => {
     );
     assert.ok(m, 'window.__TIPS__ must be assigned on every render');
     const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {tips: ['Hello.'], show: false});
+    assert.deepStrictEqual(cfg, {
+      tips: ['Hello.'],
+      show: false,
+      version: getVersion(),
+    });
   });
 });
 
-test('buildChatHtml does not consume first-run marker when no tips exist', () => {
+test('buildChatHtml does not claim the popup when no tips exist', () => {
   withSandbox(({kissHome}) => {
     const html = renderChatHtml();
     const m = html.match(/window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/);
     assert.ok(m, 'window.__TIPS__ must be assigned even with no tips');
     const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {tips: [], show: false});
-    assert.strictEqual(
-      fs.existsSync(path.join(kissHome, 'TIPS_SHOWN')),
-      false,
-      'empty or missing tips should not consume the fresh-install marker',
+    assert.deepStrictEqual(cfg, {tips: [], show: false, version: getVersion()});
+    assert.deepStrictEqual(
+      tipsMarkers(kissHome),
+      [],
+      'empty or missing tips should not claim the popup for this version',
     );
   });
 });
@@ -442,22 +461,146 @@ test('tips body scrolls when the content overflows the fixed panel', () => {
   assert.strictEqual(body.className, 'tips-body');
 });
 
-test('tips panel uses the Rosé Pine Moon palette', () => {
+test('tips panel is styled from the shared design tokens, never a fixed palette', () => {
   const win = loadTipsDom({tips: THREE_TIPS, show: true});
   const {root} = panelParts(win);
   const css = root.querySelector('style').textContent;
-  const palette = [
-    '#232136',
-    '#e0def4',
-    '#c4a7e7',
-    '#9ccfd8',
-    '#f6c177',
-    '#ea9a97',
-    '#3e8fb0',
-  ];
-  for (const color of palette) {
-    assert.ok(css.includes(color), `palette color ${color} must be used`);
+  // The tokens main.css defines on :root (and remote-codex.css
+  // re-derives for the remote light theme) inherit into the shadow
+  // root, so the panel follows every VS Code theme and both remote
+  // themes.  Each of these must be read through var().
+  for (const token of [
+    '--bg2',
+    '--fg',
+    '--dim',
+    '--border',
+    '--panel-line',
+    '--accent',
+    '--scrim',
+    '--radius-xl',
+    '--shadow-lg',
+    '--z-dialog',
+    '--dur-slow',
+    '--vscode-button-background',
+    '--vscode-button-foreground',
+    '--vscode-button-secondaryBackground',
+    '--vscode-textCodeBlock-background',
+    '--vscode-focusBorder',
+    '--vscode-editor-font-family',
+  ]) {
+    assert.ok(css.includes('var(' + token), `token ${token} must be read`);
   }
+  // Every literal colour is a fallback inside var(...).  A colour that
+  // stands alone would bypass the theme.
+  const stripped = css.replace(/var\([^()]*(?:\([^()]*\)[^()]*)*\)/g, '');
+  const literalColors = stripped.match(/#[0-9a-fA-F]{3,8}\b|rgba?\(/g) || [];
+  assert.deepStrictEqual(
+    literalColors,
+    [],
+    `colours outside var() fallbacks: ${literalColors.join(', ')}`,
+  );
+  // No trace of the former hard-coded Rosé Pine palette.
+  for (const color of ['#232136', '#e0def4', '#c4a7e7', '#3e8fb0']) {
+    assert.ok(!css.includes(color), `${color} must not be hard-coded`);
+  }
+  // The dialog layer sits above the settings drawer (z-drawer) that
+  // opens it and below toasts.
+  assert.ok(css.includes('z-index: var(--z-dialog, 300)'));
+});
+
+test('header shows the lightbulb icon and the reading progress grows per tip', () => {
+  const win = loadTipsDom({tips: THREE_TIPS, show: true});
+  const {root, next} = panelParts(win);
+  assert.ok(root.querySelector('.tips-icon svg'), 'header icon is inline SVG');
+  const bar = root.querySelector('.tips-progress-bar');
+  assert.ok(bar, 'a progress bar under the header');
+  const pct = () => Math.round(parseFloat(bar.style.width));
+  assert.strictEqual(pct(), 33);
+  next.click();
+  assert.strictEqual(pct(), 67);
+  next.click();
+  assert.strictEqual(pct(), 100);
+});
+
+test('Left/Right arrow keys page through the tips', () => {
+  const win = loadTipsDom({tips: THREE_TIPS, show: true});
+  const {counter} = panelParts(win);
+  const key = k =>
+    win.document.dispatchEvent(
+      new win.KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true}),
+    );
+  key('ArrowRight');
+  assert.strictEqual(counter.textContent, '2 / 3');
+  key('ArrowRight');
+  key('ArrowRight');
+  assert.strictEqual(counter.textContent, '3 / 3', 'clamped at the last tip');
+  key('ArrowLeft');
+  assert.strictEqual(counter.textContent, '2 / 3');
+  key('ArrowLeft');
+  key('ArrowLeft');
+  assert.strictEqual(counter.textContent, '1 / 3', 'clamped at the first tip');
+});
+
+/** loadTipsDom on an http origin so localStorage works. */
+function loadTipsDomWithStorage(cfg, seenVersion) {
+  const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+    runScripts: 'outside-only',
+    url: 'http://localhost/',
+  });
+  if (seenVersion !== undefined) {
+    dom.window.localStorage.setItem('kissTipsSeenVersion', seenVersion);
+  }
+  const run = file =>
+    dom.window.eval(
+      fs.readFileSync(path.join(projectRoot, 'media', file), 'utf-8'),
+    );
+  run('marked.min.js');
+  dom.window.eval(`window.__TIPS__ = ${JSON.stringify(cfg)};`);
+  run('tips.js');
+  run('panelCopy.js');
+  return dom.window;
+}
+
+test('with a version, the tips auto-open once per version per browser', () => {
+  const cfg = {tips: THREE_TIPS, show: true, version: '2026.10.1'};
+  // Fresh browser: opens and remembers the version.
+  const first = loadTipsDomWithStorage(cfg);
+  assert.ok(first.document.querySelector('kiss-tips-panel'), 'opens once');
+  assert.strictEqual(
+    first.localStorage.getItem('kissTipsSeenVersion'),
+    '2026.10.1',
+  );
+  // Same version already seen here: stays closed.
+  const again = loadTipsDomWithStorage(cfg, '2026.10.1');
+  assert.strictEqual(again.document.querySelector('kiss-tips-panel'), null);
+  // An update: the new version opens the tips again.
+  const updated = loadTipsDomWithStorage(
+    {tips: THREE_TIPS, show: true, version: '2026.11.1'},
+    '2026.10.1',
+  );
+  assert.ok(updated.document.querySelector('kiss-tips-panel'), 'reopens');
+  assert.strictEqual(
+    updated.localStorage.getItem('kissTipsSeenVersion'),
+    '2026.11.1',
+  );
+  // The host's verdict and the opt-out still win.
+  const closed = loadTipsDomWithStorage(
+    {tips: THREE_TIPS, show: false, version: '2026.12.1'},
+    '2026.10.1',
+  );
+  assert.strictEqual(closed.document.querySelector('kiss-tips-panel'), null);
+  assert.strictEqual(
+    closed.localStorage.getItem('kissTipsSeenVersion'),
+    '2026.10.1',
+    'a closed window does not mark the version as seen',
+  );
+});
+
+test('without localStorage the version gate degrades to the host verdict', () => {
+  // loadTipsDom runs on an opaque origin where localStorage throws.
+  const win = loadTipsDom({tips: THREE_TIPS, show: true, version: '1.2.3'});
+  assert.throws(() => win.localStorage, 'precondition: no storage here');
+  assert.ok(win.document.querySelector('kiss-tips-panel'), 'still opens');
 });
 
 test('each fenced code block gets a copy button', () => {

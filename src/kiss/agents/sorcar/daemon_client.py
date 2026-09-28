@@ -534,6 +534,22 @@ def run(
             apply to the task's own agent, not to sub-agents it spawns
             via ``run_parallel``.
 
+            Two more getters make a SEA a *model routing* entry::
+
+                def add_to_system_prompt() -> str: ...   # the routing protocol
+                def register_as_model() -> bool: ...
+
+            ``add_to_system_prompt()`` returns text that is ADDED to
+            the run's system prompt after the *append_to_system_prompt*
+            value (the caller's or an ``append_to_system_prompt()``
+            getter's), never replacing it.  A SEA whose
+            ``register_as_model()`` returns ``True`` is listed in the
+            model picker under its command name (the bundled
+            ``autorouter`` and ``bestrouter``); picking it runs every
+            task of the tab through the SEA on the model its ``model()``
+            getter names (else the default model), with the protocol
+            added to the system prompt.
+
             The ``X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
             tools file's ``get_tools()``.  ``tools()`` here returns

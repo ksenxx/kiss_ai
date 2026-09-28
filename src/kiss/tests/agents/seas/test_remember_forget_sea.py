@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests of the bundled ``/remember`` and ``/forget`` agents
-(:mod:`kiss.agents.seas.remember_sea`, :mod:`kiss.agents.seas.forget_sea`)
+(:mod:`kiss.agents.seas.remember.remember_sea`, :mod:`kiss.agents.seas.forget.forget_sea`)
 and their storage layer (:mod:`kiss.agents.seas.sorcar_md`).
 
 The tools write the real ``$KISS_HOME/SORCAR.md`` of the test session
@@ -27,7 +27,9 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import forget_sea, remember_sea, sorcar_md
+from kiss.agents.seas import sorcar_md
+from kiss.agents.seas.forget import forget_sea
+from kiss.agents.seas.remember import remember_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.tests.agents.sorcar.local_model_server import (

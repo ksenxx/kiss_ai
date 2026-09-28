@@ -30,6 +30,10 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
 )
+from kiss.agents.sorcar.sea_commands import SeaScriptError, run_picked_hook
+from kiss.agents.sorcar.sea_commands import (
+    help_text_if_command as sea_help_text,
+)
 from kiss.agents.sorcar.sea_commands import (
     list_commands as list_sea_commands,
 )
@@ -361,6 +365,7 @@ class _CommandsMixin:
             offset: int = 0,
             generation: int = 0,
             conn_id: str = "",
+            tag: str = "",
         ) -> None: ...
         def _get_frequent_tasks(
             self, limit: int = 50, conn_id: str = "",
@@ -902,7 +907,9 @@ class _CommandsMixin:
 
         An empty ``tabId`` (malformed payload) updates only the
         daemon-wide default model (when a model was actually
-        supplied).
+        supplied).  Picking a model-routing SEA (``autorouter``) also
+        fires its ``on_picked_as_model(work_dir)`` hook with the tab's
+        work directory, without waiting for it.
         """
         tab_id = cmd.get("tabId", "")
         model = cmd.get("model", "")
@@ -917,6 +924,17 @@ class _CommandsMixin:
                 return
             self._default_model = model
             _record_model_usage(model)
+        # A real model name runs no hook; the registry look-up that tells
+        # happens on the hook's thread, so a changed SEA's re-import never
+        # stalls the command loop.
+        run_picked_hook(model, self._tab_work_dir(tab_id), wait=False)
+
+    def _tab_work_dir(self, tab_id: str) -> str:
+        """Return the tab's pinned work directory, else the daemon's."""
+        for entry in self.tab_registry.snapshot():
+            if entry["tabId"] == tab_id:
+                return entry["workDir"] or self.work_dir
+        return self.work_dir
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
@@ -925,11 +943,13 @@ class _CommandsMixin:
             query = None
         offset = _parse_int(cmd.get("offset", 0))
         generation = _parse_int(cmd.get("generation", 0))
+        tag = cmd.get("tag", "")
         self._get_history(
             query,
             0 if offset is None else offset,
             0 if generation is None else generation,
             cmd.get("connId", ""),
+            tag if isinstance(tag, str) else "",
         )
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
@@ -1366,17 +1386,16 @@ class _CommandsMixin:
             question: The user's question, already stripped of the
                 ``/ask`` prefix and surrounding whitespace.
         """
-        from kiss.agents.sorcar import daemon_client, sea_commands
+        from kiss.agents.seas.ask import ask_sea
+        from kiss.agents.sorcar import daemon_client
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
-        from kiss.agents.third_party_agents import ask_sea
 
-        sea_path = sea_commands.get_command("ask")
-        if sea_path is None:
-            logger.warning(
-                "/ask received on tab %s but ask_sea is not registered",
-                tab_id,
-            )
-            return
+        # Always the bundled script: ``seas/`` has the lowest registry
+        # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
+        # chat command, but the side channel reads ``APPEND_TO_PROMPT``
+        # and ``append_to_system_prompt()`` from this module and must
+        # dispatch the file those texts belong to.
+        sea_path = Path(ask_sea.__file__)
         append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
@@ -1574,6 +1593,22 @@ class _CommandsMixin:
             # in the running task's history stream, right where the
             # answer will land.
             self._echo_injected_prompt(tab_id, prompt, owner_task)
+            if ask_question.lower() == "help":
+                # ``/ask help`` is the SEA's ``description()``, like
+                # every ``/xxx help`` — answered here, no dispatch.
+                try:
+                    help_text, help_ok = sea_help_text(prompt), True
+                except SeaScriptError as exc:
+                    help_text, help_ok = str(exc), False
+                if help_text is not None:
+                    self._broadcast_ask_answer(
+                        tab_id=tab_id,
+                        owner_task_id=owner_task,
+                        question=ask_question,
+                        text=help_text,
+                        success=help_ok,
+                    )
+                    return
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,

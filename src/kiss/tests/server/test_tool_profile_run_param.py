@@ -36,7 +36,7 @@ from typing import Any, cast
 
 import yaml
 
-from kiss.agents.seas import sh_sea
+from kiss.agents.seas.sh import sh_sea
 from kiss.agents.sorcar import cron_agent, sea_commands
 from kiss.agents.sorcar.agent_dispatch import _run_agent, make_run_agent_tool
 from kiss.core.config import kiss_home
@@ -154,8 +154,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         failed task with the diagnostic rather than "stopped by user".
         """
         folder = Path(self.tmpdir) / "user-seas"
-        folder.mkdir()
-        (folder / "boom_sea.py").write_text(
+        (folder / "boom").mkdir(parents=True)
+        (folder / "boom" / "boom_sea.py").write_text(
             'raise KeyboardInterrupt("boom at import")\n', encoding="utf-8",
         )
         home = kiss_home()

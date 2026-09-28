@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from kiss.agents.third_party_agents.slack_sea import _advance_cursor, _call_with_retry
+from kiss.agents.third_party_agents.slack.slack_sea import _advance_cursor, _call_with_retry
 
 
 class FlakyCall:

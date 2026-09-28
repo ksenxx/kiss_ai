@@ -35,10 +35,20 @@ from kiss.agents.sorcar.git_worktree import (
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
+    _add_task,
     _append_chat_event,
     _load_last_model,
     _save_task_extra,
     _save_task_result,
+)
+from kiss.agents.sorcar.sea_commands import (
+    SeaScriptError,
+    model_sea,
+    run_picked_hook,
+    sea_getter_value,
+)
+from kiss.agents.sorcar.sea_commands import (
+    help_text_if_command as _sea_help_text,
 )
 from kiss.agents.sorcar.sea_commands import (
     rewrite_prompt_if_command as _rewrite_sea_command_prompt,
@@ -53,7 +63,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
 )
 from kiss.core import tool_interrupt
 from kiss.core.models.model import Attachment
-from kiss.core.models.model_info import get_available_models
+from kiss.core.models.model_info import get_available_models, get_default_model
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
@@ -733,6 +743,62 @@ class _TaskRunnerMixin:
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
+    def _resolve_sea_model(self, cmd: dict[str, Any]) -> str | None:
+        """Turn a run whose model is a model-picker SEA into a run of that SEA.
+
+        A SEA whose ``register_as_model()`` returns ``True`` (``autorouter``,
+        ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_seas`)
+        is offered in the model picker under its command name.  When the
+        run's model — the wire field ``model``, else the tab's pick (the
+        same lookup ``_run_task_inner`` makes) — is such an entry, the
+        command is rewritten in place:
+
+        * ``model`` becomes the model the SEA's ``model()`` getter names,
+          else the default model, so the run, its history row and its
+          sub-agents all name a real model;
+        * ``agentPath`` becomes the SEA file when the caller supplied
+          none, unless the prompt is a ``/xxx`` slash command.  A
+          supplied ``agentPath`` (a ``run_agent`` child, the ``/ask``
+          side channel) or a slash command names its own agent, and the
+          picked entry then only supplies the model it runs on; a
+          malformed supplied value is left for ``apply_agent_overrides``
+          to reject as it always did.
+
+        Every other run is left untouched.  Called twice per run: before
+        ``apply_agent_overrides`` (which must see the SEA as this run's
+        ``agentPath`` and adds the SEA's ``add_to_system_prompt()`` protocol
+        to the system prompt) and again in ``_run_task_inner`` before the
+        model is read, because an agent script's ``model()`` getter may
+        override ``model`` with ``""`` — "the tab's pick" — which would
+        otherwise resolve back to the entry itself.
+
+        Args:
+            cmd: The ``run`` command, mutated in place.
+
+        Returns:
+            The picked SEA's name (the model the run was submitted with),
+            or ``None`` when the run's model is a real model.
+
+        Raises:
+            AgentFileError: When the SEA's ``model()`` getter raises.
+        """
+        model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
+        sea_path = model_sea(model) if isinstance(model, str) and model else None
+        if sea_path is None:
+            return None
+        prompt = cmd.get("prompt", "")
+        is_slash_command = (
+            isinstance(prompt, str) and _rewrite_sea_command_prompt(prompt) is not None
+        )
+        if cmd.get("agentPath") in (None, "") and not is_slash_command:
+            cmd["agentPath"] = str(sea_path)
+        try:
+            picked = sea_getter_value(sea_path, "model")
+        except SeaScriptError as exc:
+            raise AgentFileError(str(exc)) from exc
+        cmd["model"] = picked if isinstance(picked, str) and picked else get_default_model()
+        return model
+
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
 
@@ -775,7 +841,19 @@ class _TaskRunnerMixin:
             agent_file_error: AgentFileError | None = None
             overridden_fields: set[str] = set()
             try:
+                # A model-picker SEA (``autorouter``, ``bestrouter``) names
+                # an agent script, not a model: resolve it before the
+                # overrides run so they see the SEA as this run's
+                # ``agentPath``.
+                picked_sea = self._resolve_sea_model(cmd)
                 overridden_fields = apply_agent_overrides(cmd)
+                # Once per run whose model is a picker SEA, with the
+                # effective work dir (a ``work_dir()`` override included):
+                # the hook's side effects (autorouter's weekly cron job)
+                # get up to PICKED_HOOK_TIMEOUT_SECONDS to land before the
+                # task starts.
+                if picked_sea is not None:
+                    run_picked_hook(picked_sea, str(cmd.get("workDir") or self.work_dir))
             except AgentFileError as exc:
                 agent_file_error = exc
             client_task_id = _client_task_id_of(cmd)
@@ -1437,6 +1515,9 @@ class _TaskRunnerMixin:
 
         tab_id = cmd.get("tabId", "")
         state = self._resolve_run_state(cmd)
+        # Second pass: an agent script's ``model()`` getter may have
+        # blanked ``model`` back to "the tab's pick" (see the method).
+        self._resolve_sea_model(cmd)
         model = cmd.get("model") or self._tab_model(tab_id)
 
         with self._state_lock:
@@ -1471,6 +1552,10 @@ class _TaskRunnerMixin:
         _raw_agent_path = cmd.get("agentPath")
         _agent_script_run = bool(
             _raw_agent_path.strip() if isinstance(_raw_agent_path, str) else "",
+        )
+        # Recorded in the row's ``sea`` column (see ChatSorcarAgent.sea_name).
+        agent.sea_name = (
+            Path(str(_raw_agent_path).strip()).stem if _agent_script_run else ""
         )
         _open_bare_path = not _agent_script_run and not parent_task_id
         _raw_parent_tab_id = cmd.get("parentTabId")
@@ -1510,6 +1595,30 @@ class _TaskRunnerMixin:
         if state.chat_id:
             agent._chat_id = state.chat_id
         state.chat_id = getattr(agent, "chat_id", "") or state.chat_id
+
+        # ``/xxx help`` never runs the SEA (and needs no model): the
+        # task's result is the SEA's ``description()`` text, or the
+        # diagnostic when the script is broken or lacks the getter.
+        # Returning here is safe — ``_run_task``'s ``finally`` still
+        # broadcasts ``status running:False``.
+        if isinstance(prompt, str) and prompt:
+            try:
+                help_text = _sea_help_text(prompt)
+                help_ok = True
+            except SeaScriptError as exc:
+                help_text, help_ok = str(exc), False
+            if help_text is not None:
+                self._finish_sea_help_task(
+                    state,
+                    prompt=prompt,
+                    text=help_text,
+                    success=help_ok,
+                    tab_id=tab_id,
+                    model=str(model or ""),
+                    work_dir=str(work_dir or ""),
+                    start_ms=start_ms or int(time.time() * 1000),
+                )
+                return
 
         available = get_available_models()
         if not available or (model and model not in available):
@@ -2641,6 +2750,78 @@ class _TaskRunnerMixin:
             # subtask's id, so this one's retired recording would leak.
             if cleanup and task_id is not None:
                 self.printer.cleanup_task(task_id)
+
+    def _finish_sea_help_task(
+        self,
+        state: AgentState,
+        *,
+        prompt: str,
+        text: str,
+        success: bool,
+        tab_id: str,
+        model: str,
+        work_dir: str,
+        start_ms: int,
+    ) -> None:
+        """Record and answer a ``/xxx help`` prompt without running an agent.
+
+        The exchange gets a real ``task_history`` row in the tab's chat
+        (prompt, ``result`` and ``task_done`` chat events plus the usual
+        ``extra`` payload with zero usage) so it survives a reload and
+        shows up in the history sidebar like any other task, and the
+        launcher tab receives the terminal ``result`` event addressed
+        by task id — the printer records and persists it under that
+        row (see :meth:`JsonPrinter._keep_tab_stamped_task_event`).
+
+        Args:
+            state: The launching tab's agent state; its ``chat_id`` is
+                continued (or created) by the new row.
+            prompt: The raw ``/xxx help`` prompt.
+            text: The SEA's ``description()`` text, or the diagnostic.
+            success: ``False`` when *text* is a ``SeaScriptError`` message.
+            tab_id: The launcher tab id.
+            model: The model the run would have used (for the row's extra).
+            work_dir: The run's working directory (for the row's extra).
+            start_ms: The run's start timestamp (ms since epoch).
+        """
+        from kiss.core._version import __version__
+
+        end_ms = int(time.time() * 1000)
+        extra = build_task_extra_payload(
+            model=model,
+            work_dir=work_dir,
+            version=__version__,
+            tokens=0,
+            cost=0.0,
+            steps=0,
+            is_parallel=state.use_parallel,
+            is_worktree=False,
+            auto_commit_mode=state.auto_commit_mode,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        task_id, state.chat_id = _add_task(prompt, chat_id=state.chat_id, extra=extra)
+        agent = state.agent
+        if agent is not None:
+            agent._chat_id = state.chat_id
+        _append_chat_event({"type": "prompt", "text": prompt}, task_id=task_id)
+        result: dict[str, Any] = {
+            "type": "result",
+            "text": text,
+            "success": success,
+            "total_tokens": 0,
+            "cost": "$0.0000",
+            "step_count": 0,
+            "taskId": str(task_id),
+            "tabId": tab_id,
+        }
+        self.printer.broadcast(result)
+        _append_chat_event(
+            {"type": "task_done"} if success else {"type": "task_error"},
+            task_id=task_id,
+        )
+        _save_task_result(result=text, task_id=task_id, task=prompt)
+        self.printer.cleanup_task(str(task_id))
 
     def _broadcast_failure_result(
         self,

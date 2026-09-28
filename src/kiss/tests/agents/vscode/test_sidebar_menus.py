@@ -998,10 +998,22 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
     chat_c = _add("gamma one", "", today - day)
     _add("beta zero", chat_b, today - day - 60)
     chat_d = _add("delta one", "", today - 3 * day)
+    # Chat B has been summarised (as `upsert_chat_summary` does when a
+    # task finishes); its panel header shows the summary, not "beta zero".
+    with th._rw_lock.write_lock():
+        th._get_db().execute(
+            "INSERT INTO chat_summaries (chat_id, summary, last_launched) VALUES (?, ?, ?)",
+            (chat_b, "Beta rollout and follow-up", int((today - 300) * 1000)),
+        )
     context, page, frames = _open_page(browser, harness)
     try:
         page.click("#activity-tasks")
         page.wait_for_selector("#history-list .history-chat-group", timeout=15000)
+        assert (
+            page.locator(f".history-chat-group[data-chat-id='{chat_b}'] .history-chat-title")
+            .inner_text()
+            == "Beta rollout and follow-up"
+        )
         shape = page.evaluate(
             """() => Array.from(document.getElementById('history-list').children)
                  .filter(el => el.style.display !== 'none')
@@ -1048,7 +1060,8 @@ def test_history_groups_tasks_by_chat_with_day_separators(browser, harness, work
             ".map(t => t.dataset.tabId)"
         )
         # Chat panels are collapsed by default (nothing is running):
-        # the header shows the chat's FIRST task and opens the panel.
+        # the header of a chat not yet summarised shows the chat's FIRST
+        # task and opens the panel.
         group_a = page.locator(f".history-chat-group[data-chat-id='{chat_a}']")
         assert "collapsed" in (group_a.get_attribute("class") or "")
         header_a = group_a.locator(".history-chat-header")

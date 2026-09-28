@@ -1,0 +1,391 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""Nostr Agent — channel agent with Nostr protocol tools.
+
+Provides access to the Nostr decentralized protocol via pynostr.
+Stores config in ``~/.kiss/third_party_agents/nostr/config.json``.
+
+Usage::
+
+    agent = NostrAgent()
+    agent.run(prompt_template="Post a note saying hello")
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+from kiss.agents.third_party_agents._channel_agent_utils import (
+    BaseChannelAgent,
+    ChannelConfig,
+    ToolMethodBackend,
+    channel_main,
+)
+
+_NOSTR_DIR = Path.home() / ".kiss" / "third_party_agents" / "nostr"
+_config = ChannelConfig(_NOSTR_DIR, ("private_key",))
+
+
+def description() -> str:
+    """Return the one-sentence help text shown by ``/nostr help``."""
+    return (
+        "Publishes notes and replies, sends encrypted DMs, reads and sets profiles and "
+        "manages relays on the Nostr decentralized protocol via pynostr; use it as "
+        '`run_agent(agent="nostr", task="Post a note saying hello")` or through the '
+        "`kiss-nostr` CLI."
+    )
+
+
+class NostrChannelBackend(ToolMethodBackend):
+    """Channel backend for Nostr protocol via pynostr."""
+
+    def __init__(self) -> None:
+        self._private_key: Any = None
+        self._public_key: str = ""
+        self._relays: list[str] = []
+        self._connection_info: str = ""
+
+    def connect(self) -> bool:
+        """Load Nostr keys from stored config."""
+        cfg = _config.load()
+        if not cfg:  # pragma: no branch
+            self._connection_info = "No Nostr config found."
+            return False
+        try:
+            from pynostr.key import PrivateKey
+
+            pk_str = cfg["private_key"]
+            if pk_str.startswith("nsec"):  # pragma: no branch
+                self._private_key = PrivateKey.from_nsec(pk_str)
+            else:
+                self._private_key = PrivateKey.from_hex(pk_str)
+            self._public_key = self._private_key.public_key.hex()
+            relays_str = cfg.get("relays", "wss://relay.damus.io")
+            self._relays = [r.strip() for r in relays_str.split(",") if r.strip()]
+            self._connection_info = f"Nostr key loaded, pubkey: {self._public_key[:16]}..."
+            return True
+        except Exception as e:
+            self._connection_info = f"Nostr key load failed: {e}"
+            return False
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll Nostr relays for new events (basic implementation)."""
+        return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Publish a Nostr note."""
+        self.publish_note(text)
+
+    def is_from_bot(self, msg: dict[str, Any]) -> bool:
+        """Check if event is from this key."""
+        sender = msg.get("user") or msg.get("pubkey", "")
+        return bool(self._public_key and sender == self._public_key)
+
+    def _publish_signed_event(self, event: Any) -> None:
+        """Publish an already-signed event to all configured relays (pynostr flow)."""
+        from pynostr.relay_manager import RelayManager
+
+        manager = RelayManager(timeout=6)
+        for relay_url in self._relays:  # pragma: no branch
+            manager.add_relay(relay_url)
+        manager.publish_event(event)
+        manager.run_sync()
+        time.sleep(1.0)
+        manager.close_all_relay_connections()
+
+    def _publish_event(self, kind: int, content: str, tags: list | None = None) -> dict[str, Any]:
+        """Publish a Nostr event to all configured relays."""
+        from pynostr.event import Event
+
+        event = Event(kind=kind, content=content, tags=tags or [])
+        event.sign(self._private_key.hex())
+        self._publish_signed_event(event)
+        return {"event_id": event.id}
+
+    def publish_note(self, content: str) -> str:
+        """Publish a text note (kind 1) to Nostr.
+
+        Args:
+            content: Note content text.
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:  # pragma: no branch
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            result = self._publish_event(1, content)
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def publish_reply(self, content: str, reply_to_event_id: str) -> str:
+        """Publish a reply to an existing Nostr event.
+
+        Args:
+            content: Reply content.
+            reply_to_event_id: Event ID to reply to.
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:  # pragma: no branch
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            tags = [["e", reply_to_event_id, "", "reply"]]
+            result = self._publish_event(1, content, tags)
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def send_dm(self, recipient_pubkey: str, content: str) -> str:
+        """Send an encrypted direct message (NIP-04).
+
+        Args:
+            recipient_pubkey: Recipient's public key (hex).
+            content: Message content (will be encrypted).
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:  # pragma: no branch
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            from pynostr.encrypted_dm import EncryptedDirectMessage
+
+            dm = EncryptedDirectMessage(
+                recipient_pubkey=recipient_pubkey,
+            )
+            dm.encrypt(self._private_key.hex(), cleartext_content=content)
+            event = dm.to_event()
+            event.sign(self._private_key.hex())
+            self._publish_signed_event(event)
+            return json.dumps({"ok": True, "event_id": event.id})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_profile(self) -> str:
+        """Get the current user's Nostr profile.
+
+        Returns:
+            JSON string with public key info.
+        """
+        if not self._private_key:  # pragma: no branch
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            pub = self._private_key.public_key
+            return json.dumps(
+                {
+                    "ok": True,
+                    "pubkey_hex": pub.hex(),
+                    "pubkey_npub": pub.bech32(),
+                }
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def set_profile(
+        self,
+        name: str = "",
+        about: str = "",
+        picture: str = "",
+        nip05: str = "",
+    ) -> str:
+        """Set the Nostr user profile (kind 0).
+
+        Args:
+            name: Display name.
+            about: Bio/about text.
+            picture: Profile picture URL.
+            nip05: NIP-05 identifier (user@domain.com).
+
+        Returns:
+            JSON string with ok status and event id.
+        """
+        if not self._private_key:  # pragma: no branch
+            return json.dumps({"ok": False, "error": "Not authenticated"})
+        try:
+            profile: dict[str, str] = {}
+            if name:  # pragma: no branch
+                profile["name"] = name
+            if about:  # pragma: no branch
+                profile["about"] = about
+            if picture:  # pragma: no branch
+                profile["picture"] = picture
+            if nip05:  # pragma: no branch
+                profile["nip05"] = nip05
+            result = self._publish_event(0, json.dumps(profile))
+            return json.dumps({"ok": True, "event_id": result.get("event_id", "")})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def list_relays(self) -> str:
+        """List configured Nostr relays.
+
+        Returns:
+            JSON string with relay list.
+        """
+        return json.dumps({"ok": True, "relays": self._relays})
+
+    def add_relay(self, relay_url: str) -> str:
+        """Add a Nostr relay to the configuration.
+
+        Args:
+            relay_url: WebSocket URL of the relay (wss://...).
+
+        Returns:
+            JSON string with ok status.
+        """
+        if relay_url not in self._relays:  # pragma: no branch
+            self._relays.append(relay_url)
+        cfg = _config.load()
+        if cfg:  # pragma: no branch
+            cfg["relays"] = ",".join(self._relays)
+            _config.save({"private_key": cfg["private_key"], "relays": cfg["relays"]})
+        return json.dumps({"ok": True, "relays": self._relays})
+
+    def remove_relay(self, relay_url: str) -> str:
+        """Remove a Nostr relay from the configuration.
+
+        Args:
+            relay_url: Relay URL to remove.
+
+        Returns:
+            JSON string with ok status.
+        """
+        self._relays = [r for r in self._relays if r != relay_url]
+        cfg = _config.load()
+        if cfg:  # pragma: no branch
+            cfg["relays"] = ",".join(self._relays)
+            _config.save({"private_key": cfg["private_key"], "relays": cfg["relays"]})
+        return json.dumps({"ok": True, "relays": self._relays})
+
+
+class NostrAgent(BaseChannelAgent):
+    """Channel agent with Nostr protocol tools."""
+
+    def __init__(self) -> None:
+        super().__init__("Nostr Agent")
+        self._backend = NostrChannelBackend()
+        cfg = _config.load()
+        if cfg:  # pragma: no branch
+            try:
+                from pynostr.key import PrivateKey
+
+                pk_str = cfg["private_key"]
+                if pk_str.startswith("nsec"):  # pragma: no branch
+                    self._backend._private_key = PrivateKey.from_nsec(pk_str)
+                else:
+                    self._backend._private_key = PrivateKey.from_hex(pk_str)
+                self._backend._public_key = self._backend._private_key.public_key.hex()
+                relays_str = cfg.get("relays", "wss://relay.damus.io")
+                self._backend._relays = [r.strip() for r in relays_str.split(",") if r.strip()]
+            except Exception:
+                pass
+
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return self._backend._private_key is not None
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
+        agent = self
+
+        def check_nostr_auth() -> str:
+            """Check if Nostr key is configured.
+
+            Returns:
+                Key status or instructions.
+            """
+            if agent._backend._private_key is None:  # pragma: no branch
+                return (
+                    "Not configured for Nostr. Use authenticate_nostr(private_key=...) "
+                    "to configure. Provide an nsec... key or hex private key."
+                )
+            try:
+                result = json.loads(agent._backend.get_profile())
+                if result.get("ok"):  # pragma: no branch
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "pubkey": agent._backend._public_key[:16] + "...",
+                            "relays": agent._backend._relays,
+                        }
+                    )
+                return json.dumps({"ok": False, "error": result.get("error", "Unknown error")})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def authenticate_nostr(private_key: str, relays: str = "wss://relay.damus.io") -> str:
+            """Configure Nostr with a private key.
+
+            Args:
+                private_key: nsec bech32 or hex private key.
+                relays: Comma-separated relay WebSocket URLs.
+
+            Returns:
+                Configuration result or error message.
+            """
+            if not private_key.strip():  # pragma: no branch
+                return "private_key cannot be empty."
+            try:
+                from pynostr.key import PrivateKey
+
+                pk_str = private_key.strip()
+                if pk_str.startswith("nsec"):  # pragma: no branch
+                    pk = PrivateKey.from_nsec(pk_str)
+                else:
+                    pk = PrivateKey.from_hex(pk_str)
+                agent._backend._private_key = pk
+                agent._backend._public_key = pk.public_key.hex()
+                agent._backend._relays = [r.strip() for r in relays.split(",") if r.strip()]
+                _config.save({"private_key": pk_str.strip(), "relays": relays.strip()})
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "message": "Nostr key configured.",
+                        "pubkey": pk.public_key.hex()[:16] + "...",
+                    }
+                )
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_nostr_auth() -> str:
+            """Clear the stored Nostr configuration.
+
+            Returns:
+                Status message.
+            """
+            _config.clear()
+            agent._backend._private_key = None
+            agent._backend._public_key = ""
+            return "Nostr configuration cleared."
+
+        return [check_nostr_auth, authenticate_nostr, clear_nostr_auth]
+
+
+def main() -> None:
+    """Run the NostrAgent from the command line with chat persistence."""
+    channel_main(NostrAgent, "kiss-nostr")
+
+
+def tools() -> list:
+    """Return the Nostr channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return NostrAgent()._get_tools()
+
+
+if __name__ == "__main__":
+    main()

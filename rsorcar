@@ -108,6 +108,14 @@
 #      the wrong way round.  The vector index next to the pages is a cache
 #      and does not travel; the next agent to open the memory rebuilds it
 #      from the pages.
+#   4d. Sync the autorouter's notes both ways: ~/.kiss/AUTOROUTER.md (the
+#      observed model evidence /rsi7d writes and the autorouter SEA splices
+#      into its prompt) and ~/.kiss/MODEL_DECISIONS.md (the routing ledger).
+#      src/kiss/scripts/sync_kiss_notes.py merges them by meaning -- the
+#      evidence with the later "refreshed" date wins, two copies of the same
+#      date unite their table rows and bullets, and the ledger becomes the
+#      union of both machines' rows in time order -- and writes the result on
+#      both machines.
 #   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
 #      build).  A ``code`` CLI is required by install.sh, so code-server is
 #      installed (standalone, no sudo) when the host has no editor CLI.
@@ -219,6 +227,7 @@ for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh 
               scripts/wait-for-public-url.sh scripts/count-api-keys.sh \
               scripts/install-api-keys.sh scripts/sync-task-db.sh \
               scripts/sync-memory.sh src/kiss/scripts/merge_memory_pages.py \
+              src/kiss/scripts/sync_kiss_notes.py \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
               src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
@@ -592,6 +601,23 @@ bash "$SCRIPT_DIR/scripts/sync-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" 
 step "Syncing the agent's memory with $TARGET (both ways) ..."
 bash "$SCRIPT_DIR/scripts/sync-memory.sh" "$TARGET" \
     || warn "The memories are not in sync (see above); continuing the deploy."
+
+# ---------------------------------------------------------------------------
+# 4d. Sync the autorouter's notes both ways: ~/.kiss/AUTOROUTER.md (the
+#     observed model evidence /rsi7d measures from the task history and the
+#     autorouter SEA splices into its prompt) and ~/.kiss/MODEL_DECISIONS.md
+#     (the routing ledger every autorouter task appends to).  A copy would
+#     clobber what the other machine wrote, so src/kiss/scripts/sync_kiss_notes.py
+#     merges by meaning: the evidence with the later "refreshed" date wins
+#     (same date: the tables' rows are united by model, the bullets united),
+#     and the ledger becomes the union of both machines' rows in time order.
+#     The remote's copy comes here first and the merged result goes back,
+#     merged once more there into whatever a task appended meanwhile.  Like
+#     the two syncs above, a failure is a warning, not a failed deploy.
+# ---------------------------------------------------------------------------
+step "Syncing the autorouter's notes with $TARGET (both ways) ..."
+python3 "$SCRIPT_DIR/src/kiss/scripts/sync_kiss_notes.py" "$TARGET" \
+    || warn "The autorouter's notes are not in sync (see above); continuing the deploy."
 
 # ---------------------------------------------------------------------------
 # 5-7. Remote bootstrap: install.sh, uv sync, kiss-web service, public URL.

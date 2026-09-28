@@ -829,14 +829,19 @@ class TestTipsOptOut(_LiveServer):
     # ``$KISS_HOME`` is the session-wide temporary directory the test
     # conftest installs (config.json lives there too, so it cannot be
     # swapped per test without breaking the server's password check).
+    # The conftest also writes this very marker so the Tips window
+    # stays out of the browser suites: it is put back after each test.
     _marker = kiss_home() / TIPS_OPT_OUT_MARKER
 
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
+        self._session_opt_out = self._marker.is_file()
         self._marker.unlink(missing_ok=True)
 
     async def asyncTearDown(self) -> None:
         self._marker.unlink(missing_ok=True)
+        if self._session_opt_out:
+            self._marker.write_text("test session opt-out\n")
         await super().asyncTearDown()
 
     async def _send_and_settle(self, ws: Any, cmd: dict[str, Any]) -> None:

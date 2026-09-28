@@ -2,7 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the bundled ``/write_paper`` agent (:mod:`kiss.agents.seas.write_paper_sea`).
+"""End-to-end tests of the bundled ``/write_paper`` agent.
+
+Module under test: :mod:`kiss.agents.seas.write_paper.write_paper_sea`.
 
 The gate tests run :func:`check_paper` on real ``.tex``/``.bib`` files
 written to ``tmp_path``.  The build tests run :func:`build_paper`
@@ -26,7 +28,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import write_paper_sea
+from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.tests.agents.sorcar.local_model_server import (

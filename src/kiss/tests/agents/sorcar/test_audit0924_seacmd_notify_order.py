@@ -39,9 +39,9 @@ def _reset_sea_commands() -> Iterator[None]:
 
 
 def _touch_sea(folder: Path, name: str) -> Path:
-    """Create an empty ``<name>_sea.py`` file in *folder* and return it."""
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{name}_sea.py"
+    """Create a stub SEA ``<name>/<name>_sea.py`` under *folder* and return it."""
+    path = folder / name / f"{name}_sea.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("# stub SEA for tests\n", encoding="utf-8")
     return path
 
@@ -60,10 +60,10 @@ def test_concurrent_refreshes_notify_subscribers_in_publish_order(
 
     Interleaving forced by the test:
 
-    1. Thread 1 rescans with only ``alpha_sea.py`` present and publishes
+    1. Thread 1 rescans with only ``alpha/alpha_sea.py`` present and publishes
        snapshot A.  The subscriber records A's delivery has started and
        then blocks on ``release_first``.
-    2. The test adds ``beta_sea.py`` and starts thread 2, which
+    2. The test adds ``beta/beta_sea.py`` and starts thread 2, which
        publishes snapshot B (A + beta).  On the unfixed code thread 2
        delivers B immediately and returns; on the fixed code it waits
        for A's delivery to finish first.

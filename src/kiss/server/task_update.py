@@ -6,7 +6,7 @@
 
 While a chat webview shows a running task, its task-info panel asks the
 daemon (``getTaskUpdate``) for a progress report written by the
-:mod:`~kiss.agents.seas.task_update_sea` agent.  :class:`TaskUpdateRunner`
+:mod:`~kiss.agents.seas.task_update.task_update_sea` agent.  :class:`TaskUpdateRunner`
 keeps one report per task and runs the agent when the report is missing,
 older than :data:`UPDATE_INTERVAL_S`, or explicitly refreshed — never
 more than one run per task at a time, and never for a task nobody is
@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kiss.agents.seas import task_update_sea
+from kiss.agents.seas.task_update import task_update_sea
 
 log = logging.getLogger(__name__)
 

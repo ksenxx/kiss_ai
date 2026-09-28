@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of the bundled ``/sh`` agent (:mod:`kiss.agents.seas.sh_sea`).
+"""End-to-end tests of the bundled ``/sh`` agent (:mod:`kiss.agents.seas.sh.sh_sea`).
 
 The agent-level tests run a real :class:`ChatSorcarAgent` ReAct loop
 against the scripted local chat-completions server
@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.seas import sh_sea
+from kiss.agents.seas.sh import sh_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES

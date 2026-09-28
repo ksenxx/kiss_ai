@@ -26,16 +26,16 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.third_party_agents.zalo_sea as zalo_sea
+import kiss.agents.third_party_agents.zalo.zalo_sea as zalo_sea
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
 )
-from kiss.agents.third_party_agents.feishu_sea import FeishuChannelBackend
-from kiss.agents.third_party_agents.irc_sea import IRCChannelBackend
-from kiss.agents.third_party_agents.irc_sea import _config as _irc_config
-from kiss.agents.third_party_agents.line_sea import LineChannelBackend
-from kiss.agents.third_party_agents.zalo_sea import ZaloChannelBackend
+from kiss.agents.third_party_agents.feishu.feishu_sea import FeishuChannelBackend
+from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
+from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
+from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
+from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
 
 
 def _backup_config(path: Path) -> str | None:
@@ -215,7 +215,7 @@ class TestIRCFreshDaemonTools:
 
     def test_tools_post_message_connects_on_demand(self) -> None:
         """tools()' fresh backend lazily connects and really sends."""
-        from kiss.agents.third_party_agents import irc_sea
+        from kiss.agents.third_party_agents.irc import irc_sea
 
         _irc_config.save(
             {

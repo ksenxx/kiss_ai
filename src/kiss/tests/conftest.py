@@ -83,6 +83,12 @@ os.environ["KISS_MUSE_AUTH"] = "0"
 
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 os.environ["KISS_HOME"] = _test_kiss_home
+# The chat page auto-opens the Tips window once per version in every
+# fresh browser context (web_server._build_html sends ``show: true``).
+# The modal would intercept the clicks of the Playwright suites, so the
+# session opts out the way a user does; the tips tests that need the
+# auto-open point KISS_HOME at a home of their own.
+Path(_test_kiss_home, "TIPS_DISABLED").write_text("test session opt-out\n")
 _th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
 _th._DB_PATH = _th._KISS_DIR / "sorcar.db"

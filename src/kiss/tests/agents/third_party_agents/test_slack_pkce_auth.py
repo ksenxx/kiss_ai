@@ -26,7 +26,7 @@ import requests
 from kiss.agents.third_party_agents import _oauth_apps
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.agents.third_party_agents._oauth_apps import LOOPBACK_PORT, LOOPBACK_REDIRECT_URI
-from kiss.agents.third_party_agents.slack_sea import (
+from kiss.agents.third_party_agents.slack.slack_sea import (
     _USER_SCOPES,
     SlackAgent,
     _legacy_client,

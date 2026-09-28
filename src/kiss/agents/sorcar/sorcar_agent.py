@@ -32,6 +32,7 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
+from kiss.agents.sorcar.sea_commands import model_sea
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -2392,13 +2393,25 @@ class SorcarAgent(RelentlessAgent):
         history row and ``task_settings`` event) persist the resolved
         value instead of a blank.
 
+        The picker persists a model-picker SEA (``autorouter``,
+        ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_sea`)
+        like any pick, but it is not a model: the daemon resolves it into
+        an agent-script run before any agent sees it, and a run launched
+        without the daemon cannot route, so here it counts as no pick at
+        all.
+
         Args:
             model_name: The caller-supplied model name, possibly None.
 
         Returns:
             The resolved model name.
         """
-        return model_name or _load_last_model() or get_default_model()
+        if model_name:
+            return model_name
+        last_model = _load_last_model()
+        if last_model and model_sea(last_model) is not None:
+            last_model = ""
+        return last_model or get_default_model()
 
     def _system_prompt_task_settings(self) -> dict[str, str]:
         """Extend the base settings with this agent's parallel mode.

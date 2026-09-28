@@ -195,6 +195,49 @@
             <span class="history-filter-date-group"><label for="hf-to" class="history-filter-date-lbl">To</label><input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date"><button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.75" y="2.75" width="12.5" height="11.5" rx="1.5"/><path d="M1.75 6.25h12.5M5 1v3M11 1v3"/></svg></button></span>
             <button type="button" id="hf-date-clear" class="hf-date-clear" title="Clear date range" aria-label="Clear date range" style="display:none;">&times;</button>
           </div>
+          <!-- Agent-script (SEA) filter: the options are rebuilt from the
+               loaded rows on every history render (see
+               refreshHistorySeaOptions in main.js). -->
+          <div class="history-filter-sea" role="group" aria-label="Filter tasks by agent script">
+            <label for="hf-sea" class="history-filter-date-lbl">SEA</label>
+            <select id="hf-sea" class="history-filter-sea-select" title="Show only tasks run by this agent script (SEA)" aria-label="Agent script">
+              <option value="">All</option>
+              <option value="__none__">None</option>
+            </select>
+          </div>
+          <!-- Tag filter: one of the classification tags the daemon
+               stamps on every finished task (task_metadata.ALL_TAGS,
+               minus "subagent": sub-agent runs are never listed here,
+               they live inside their parent's transcript).  The daemon
+               applies it in SQL, so a rare tag is found on every page,
+               not only among the rows already loaded. -->
+          <div class="history-filter-tag">
+            <label for="hf-tag" class="history-filter-date-lbl">Tag</label>
+            <select id="hf-tag" class="history-filter-tag-select" title="Show only tasks carrying this tag" aria-label="Filter tasks by tag">
+              <option value="" selected>All tags</option>
+              <option value="work">work</option>
+              <option value="personal">personal</option>
+              <option value="secret">secret</option>
+              <option value="chore">chore</option>
+              <option value="question">question</option>
+              <option value="coding">coding</option>
+              <option value="testing">testing</option>
+              <option value="debugging">debugging</option>
+              <option value="review">review</option>
+              <option value="research">research</option>
+              <option value="paper">paper</option>
+              <option value="writing">writing</option>
+              <option value="docs">docs</option>
+              <option value="data">data</option>
+              <option value="devops">devops</option>
+              <option value="messaging">messaging</option>
+              <option value="browsing">browsing</option>
+              <option value="shopping">shopping</option>
+              <option value="finance">finance</option>
+              <option value="scheduling">scheduling</option>
+              <option value="failed">failed</option>
+            </select>
+          </div>
         </div>
           </div>
         </div>
@@ -281,7 +324,7 @@
       <div class="meta-section-resizer" role="separator" aria-orientation="horizontal" aria-label="Resize the Task Info section" aria-controls="meta-list" tabindex="0"></div>
       <!-- Task update section: the RUNNING task's task update — the
            report of the task-update agent
-           (src/kiss/agents/seas/task_update_sea.py) on what the task
+           (src/kiss/agents/seas/task_update/task_update_sea.py) on what the task
            has done so far and its partial results.  main.js polls
            getTaskUpdate while the task runs; the daemon runs the agent
            on the first poll, every 10 minutes after that, and when the
@@ -435,10 +478,11 @@
           </label>
           <!-- classify_with_decisions: the classifier asks OpenRouter's
                ~typesafe/jev-latest decisions model first and falls back
-               to the run's own LLM; unchecked pins the LLM classifier.
-               Only consulted while "Classify tasks before running" is on. -->
+               to the run's own LLM; unchecked (the default) pins the LLM
+               classifier.  Only consulted while "Classify tasks before
+               running" is on. -->
           <label class="config-label config-checkbox" title="Ask the ~typesafe/jev-latest decisions model first (needs an OpenRouter API key); unchecked pins the LLM classifier, which runs on the run's own model and is skipped for cc/* and codex/* models">
-            <input type="checkbox" id="cfg-classify-with-decisions" checked>
+            <input type="checkbox" id="cfg-classify-with-decisions">
             Classify with Jev
           </label>
           <label class="config-label config-checkbox">

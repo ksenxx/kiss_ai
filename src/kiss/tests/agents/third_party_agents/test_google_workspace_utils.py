@@ -23,7 +23,7 @@ from kiss.agents.third_party_agents._google_workspace_utils import (
     google_auth_prompt,
     make_google_auth_tools,
 )
-from kiss.agents.third_party_agents.gcal_sea import _SERVICE, GoogleCalendarAgent
+from kiss.agents.third_party_agents.gcal.gcal_sea import _SERVICE, GoogleCalendarAgent
 from kiss.tests.agents.third_party_agents.composio_test_utils import (
     API_KEY,
     connect,

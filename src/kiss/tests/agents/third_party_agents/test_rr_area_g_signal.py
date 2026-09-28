@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.third_party_agents.signal_sea import SignalChannelBackend
+from kiss.agents.third_party_agents.signal.signal_sea import SignalChannelBackend
 from kiss.tests.conftest import install_cli_script
 
 # A Python program (not a shell script) so the same stand-in runs on

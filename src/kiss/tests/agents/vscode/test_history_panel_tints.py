@@ -122,6 +122,8 @@ _HEADER_INSET_JS = r"""(expand) => {
   const gr = g.getBoundingClientRect();
   const hr = h.getBoundingClientRect();
   const hcs = getComputedStyle(h);
+  const launched = g.querySelector(':scope > .history-chat-launched');
+  const lr = launched.getBoundingClientRect();
   const row = g.querySelector('.history-chat-body > .sidebar-item');
   const rr = row ? row.getBoundingClientRect() : null;
   return {
@@ -129,11 +131,14 @@ _HEADER_INSET_JS = r"""(expand) => {
     top: hr.top - (gr.top + g.clientTop),
     left: hr.left - (gr.left + g.clientLeft),
     right: gr.left + g.clientLeft + g.clientWidth - hr.right,
-    bottom: gr.top + g.clientTop + g.clientHeight - hr.bottom,
+    launchedText: launched.textContent,
+    launchedHeight: lr.height,
+    launchedGapBelowHeader: lr.top - hr.bottom,
+    bottom: gr.top + g.clientTop + g.clientHeight - lr.bottom,
     radii: [hcs.borderTopLeftRadius, hcs.borderTopRightRadius,
             hcs.borderBottomRightRadius, hcs.borderBottomLeftRadius],
     rowLeft: rr ? rr.left - (gr.left + g.clientLeft) : null,
-    rowGapBelowHeader: rr ? rr.top - hr.bottom : null,
+    rowGapBelowLaunched: rr ? rr.top - lr.bottom : null,
   };
 }"""
 
@@ -142,8 +147,8 @@ _HEADER_INSET_JS = r"""(expand) => {
 def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> None:
     """The header row spans the panel on every side it borders (no strip
     of bare sidebar between them), its corners follow the square panel
-    (no rounding), and the task rows are indented behind the nesting
-    guide."""
+    (no rounding), the chat's "last launched" line sits directly under
+    the header, and the task rows are indented behind the nesting guide."""
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
@@ -153,11 +158,14 @@ def test_chat_panel_header_meets_the_panel_border(_browser, expand: bool) -> Non
         assert probe["left"] == pytest.approx(0, abs=0.5), probe
         assert probe["right"] == pytest.approx(0, abs=0.5), probe
         assert probe["radii"] == ["0px"] * 4, probe
+        assert "last launched" in probe["launchedText"], probe
+        assert probe["launchedHeight"] > 0, probe
+        assert probe["launchedGapBelowHeader"] == pytest.approx(0, abs=0.5), probe
         if expand:
             # .history-chat-body: a 12px margin, the 1px guide line and
             # an 8px padding (--space-3 + 1px + --space-2).
             assert probe["rowLeft"] == pytest.approx(21, abs=0.5), probe
-            assert probe["rowGapBelowHeader"] == pytest.approx(0, abs=0.5), probe
+            assert probe["rowGapBelowLaunched"] == pytest.approx(0, abs=0.5), probe
         else:
             assert probe["bottom"] == pytest.approx(0, abs=0.5), probe
     finally:

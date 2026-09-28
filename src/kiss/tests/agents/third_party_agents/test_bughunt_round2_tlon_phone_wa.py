@@ -30,10 +30,10 @@ from urllib.parse import urlparse
 
 import pytest
 
-from kiss.agents.third_party_agents.phone_sea import PhoneControlChannelBackend
-from kiss.agents.third_party_agents.phone_sea import _config as _phone_config
-from kiss.agents.third_party_agents.tlon_sea import TlonChannelBackend
-from kiss.agents.third_party_agents.tlon_sea import _config as _tlon_config
+from kiss.agents.third_party_agents.phone.phone_sea import PhoneControlChannelBackend
+from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
+from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
+from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):

@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
-from kiss.agents.third_party_agents.googlechat_sea import (
+from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
     _SERVICE,
     GoogleChatAgent,
     _load_service,

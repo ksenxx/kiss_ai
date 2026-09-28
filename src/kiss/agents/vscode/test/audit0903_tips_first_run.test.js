@@ -3,12 +3,12 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Audit 2026-09-03 (vscode-main partition): consumeTipsFirstRun TOCTOU.
+// Audit 2026-09-03 (vscode-main partition): claimTipsPopup TOCTOU.
 //
-// The first-run tips marker was claimed with `existsSync` followed by
+// The tips marker was claimed with `existsSync` followed by
 // `writeFileSync`: two VS Code windows activating at the same time (two
 // extension-host processes) could both pass the existence check before
-// either wrote, so BOTH returned true and the one-time tips popup opened
+// either wrote, so BOTH returned true and the tips popup opened
 // in both windows.  The fix claims the marker atomically with the 'wx'
 // open flag: exactly one writer wins, the loser gets EEXIST.
 //
@@ -40,7 +40,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-audit-tips-'));
 
 // The child: hooks the vscode stub, requires the compiled SorcarTab,
 // signals readiness, busy-waits for the shared go-file, then races
-// consumeTipsFirstRun and reports the result on stdout.
+// claimTipsPopup and reports the result on stdout.
 const childScript = path.join(tmpRoot, 'race-child.js');
 fs.writeFileSync(
   childScript,
@@ -62,7 +62,7 @@ Module._resolveFilename = function (request, ...rest) {
   )};
   return realResolve.call(this, request, ...rest);
 };
-const {consumeTipsFirstRun} = require(${JSON.stringify(OUT_SORCAR_TAB)});
+const {claimTipsPopup} = require(${JSON.stringify(OUT_SORCAR_TAB)});
 const [readyFile, goFile] = process.argv.slice(2);
 fs.writeFileSync(readyFile, 'ready');
 // Busy-wait (no sleep): both children see the go-file within
@@ -70,10 +70,10 @@ fs.writeFileSync(readyFile, 'ready');
 for (;;) {
   if (fs.existsSync(goFile)) break;
 }
-const won = consumeTipsFirstRun();
+const won = claimTipsPopup();
 // A second call in the same process must always lose: the marker is
 // there now (whoever wrote it).
-const second = consumeTipsFirstRun();
+const second = claimTipsPopup();
 process.stdout.write(JSON.stringify({won, second}));
 `,
 );
@@ -136,14 +136,13 @@ async function runRound(round) {
   return {r1, r2};
 }
 
-// ─── Extension updates never re-arm the popup ───
+// ─── An update re-arms the popup exactly once ───
 //
-// The former "what's new" reset (every update cleared TIPS_SHOWN so the
-// popup came back) was a UI anti-pattern and is gone
-// (ui_antipattern_tips_reset.test.js): a home that already showed the
-// tips keeps them closed across an `.extension-updated` marker, in
-// every window.  Two REAL sequential extension-host processes against
-// one updated home: neither may claim the popup.
+// The claim is per version (`TIPS_SHOWN-<version>`,
+// tipsClaimPerVersion.test.js): a home that showed the tips for an
+// earlier version shows them again once for the running one.  Two REAL
+// sequential extension-host processes against one updated home: the
+// first claims the popup, the second must not.
 
 const updateChildScript = path.join(tmpRoot, 'update-child.js');
 fs.writeFileSync(
@@ -166,10 +165,8 @@ Module._resolveFilename = function (request, ...rest) {
   return realResolve.call(this, request, ...rest);
 };
 const tab = require(${JSON.stringify(OUT_SORCAR_TAB)});
-const won = tab.consumeTipsFirstRun();
-process.stdout.write(
-  JSON.stringify({won, hasReset: typeof tab.resetTipsOnExtensionUpdate}),
-);
+const won = tab.claimTipsPopup();
+process.stdout.write(JSON.stringify({won, version: tab.getVersion()}));
 `,
 );
 
@@ -193,23 +190,27 @@ function runUpdateChild(kissHome) {
 async function updateScenario() {
   const home = path.join(tmpRoot, 'updated-home');
   fs.mkdirSync(home, {recursive: true});
-  // A previous run already showed the tips once...
-  fs.writeFileSync(path.join(home, 'TIPS_SHOWN'), 'old-claim\n');
-  // ...and then the installer wrote the update marker.
-  fs.writeFileSync(path.join(home, '.extension-updated'), '2026-09-03T10:00:00Z\n');
+  // A previous version already showed the tips once (the marker of a
+  // version that is not the running one, plus the legacy unversioned
+  // marker of pre-2026.10 installs)...
+  fs.writeFileSync(path.join(home, 'TIPS_SHOWN-0.0.1'), 'old-claim\n');
+  fs.writeFileSync(path.join(home, 'TIPS_SHOWN'), 'legacy-claim\n');
+  // ...and the running version is new: the first window after the
+  // update opens the tips, the second stays quiet.
   const a = await runUpdateChild(home);
   const b = await runUpdateChild(home);
-  assert.strictEqual(a.hasReset, 'undefined', 'no update-reset entry point');
   assert.deepStrictEqual(
     [a.won, b.won],
-    [false, false],
-    `post-update: the tips popup must stay closed: ${JSON.stringify({a, b})}`,
+    [true, false],
+    `post-update: exactly the first window opens the tips: ${JSON.stringify({a, b})}`,
   );
-  assert.ok(
-    fs.existsSync(path.join(home, 'TIPS_SHOWN')),
-    'the first-run claim survives the update',
+  const safe = (a.version || 'unknown').replace(/[^A-Za-z0-9.]/g, '_');
+  assert.deepStrictEqual(
+    fs.readdirSync(home).filter(n => n.startsWith('TIPS_SHOWN')).sort(),
+    ['TIPS_SHOWN-0.0.1', 'TIPS_SHOWN-' + safe],
+    'the legacy marker is retired; versioned claims are kept',
   );
-  console.log('  ✓ an extension update never reopens the tips popup');
+  console.log('  ✓ an update reopens the tips popup exactly once per home');
 }
 
 async function main() {
@@ -221,7 +222,7 @@ async function main() {
       assert.strictEqual(
         winners,
         1,
-        `round ${round}: ${winners} windows claimed the first-run tips ` +
+        `round ${round}: ${winners} windows claimed the tips ` +
           `popup (want exactly 1): ${JSON.stringify({r1, r2})}`,
       );
       assert.strictEqual(

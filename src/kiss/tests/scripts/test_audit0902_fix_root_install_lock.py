@@ -43,11 +43,13 @@ these stubs:
   the network, a package manager or the extension build.
 
 The launch-line test instead runs the whole script to completion against a
-throwaway ``PROJECT_DIR`` with stub ``node``/``npm``/``npx``/``code``
-binaries (``uname`` reports Linux so no macOS ``open -a`` path is taken):
-``npm ci``, ``code --install-extension`` and the final VS Code launch each
-leave a background ``sleep`` behind, standing in for the processes a real
-install leaves running.
+throwaway ``PROJECT_DIR`` with stub ``node``/``npm``/``npx``/``code``/
+``kiss-web``/``xdg-open`` binaries (``uname`` reports Linux so no macOS
+``open -a`` path is taken) and a ready-made ``remote-url.json`` so the
+closing webapp step does not wait for a daemon: ``npm ci``,
+``code --install-extension``, the final VS Code launch and the browser
+opened on the webapp each leave a background ``sleep`` behind, standing in
+for the processes a real install leaves running.
 
 So no test can install anything, modify this repository or touch the real
 ``~/.kiss``.
@@ -167,6 +169,18 @@ case "$1" in
     -m) echo "x86_64" ;;
     *) echo "Linux" ;;
 esac
+"""
+
+# The webapp step at the end of the script: ``kiss-web --trust-ca`` runs
+# in the foreground; the browser (``xdg-open`` via nohup) is the fourth
+# process a real install leaves running.
+STUB_KISS_WEB = """#!/bin/bash
+exit 0
+"""
+
+STUB_XDG_OPEN = """#!/bin/bash
+echo "$$" >> "$KISS_TEST_MARK_DIR/daemon"
+exec sleep 60
 """
 
 REFUSED = "another KISS update is already running (pid "
@@ -579,15 +593,18 @@ class RootInstallLockTest(unittest.TestCase):
         self.assertTrue(_lock_is_free(self.lock_file))
 
     def test_launched_background_children_do_not_keep_the_lock(self) -> None:
-        # A complete run: npm ci, code --install-extension and the final
-        # VS Code launch each leave a process behind.  None of them may
-        # inherit fd 9, or the lock would stay held until they exit.
+        # A complete run: npm ci, code --install-extension, the final
+        # VS Code launch and the browser opened on the webapp each leave
+        # a process behind.  None of them may inherit fd 9, or the lock
+        # would stay held until they exit.
         for name, body in (
             ("node", STUB_NODE),
             ("npm", STUB_NPM),
             ("npx", STUB_NODE),
             ("code", STUB_CODE),
             ("uname", STUB_UNAME),
+            ("kiss-web", STUB_KISS_WEB),
+            ("xdg-open", STUB_XDG_OPEN),
         ):
             self._write_stub(name, body)
         project = self.tmp / "project"
@@ -598,8 +615,16 @@ class RootInstallLockTest(unittest.TestCase):
             real = shutil.which(name)
             assert real is not None
             os.symlink(real, tools / name)
+        # The daemon the extension would start: its URL file is already
+        # there, so the webapp step does not wait.  DISPLAY makes this a
+        # local desktop, the branch that launches the browser.
+        (self.home / ".kiss").mkdir()
+        (self.home / ".kiss" / "remote-url.json").write_text(
+            '{\n  "loopback": "https://127.0.0.1:8443",\n'
+            '  "tunnel": "https://example.trycloudflare.com"\n}\n'
+        )
 
-        first = self._start(script=project / "install.sh")
+        first = self._start({"DISPLAY": ":0"}, script=project / "install.sh")
         self._wait_for(lambda: self._count("started") == 1, "first installer")
         self.assertFalse(_lock_is_free(self.lock_file), "lock not held while installing")
         self.release.write_text("")
@@ -607,9 +632,12 @@ class RootInstallLockTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, out)
         self.assertIn("=== Source bootstrap complete ===", out)
         self.assertIn("Launched VS Code from", out)
+        self.assertIn("Opening the webapp at https://127.0.0.1:8443", out)
 
+        # xdg-open is detached (nohup, in a subshell), so its pid can
+        # land in the mark just after the installer has exited.
+        self._wait_for(lambda: self._count("daemon") == 4, "the browser stub")
         daemons = [int(pid) for pid in (self.marks / "daemon").read_text().split()]
-        self.assertEqual(len(daemons), 3, out)
         for pid in daemons:
             self.assertTrue(_alive(pid), f"leftover {pid} should still be running")
         self.assertTrue(
