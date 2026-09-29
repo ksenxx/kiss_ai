@@ -2472,6 +2472,7 @@ class VSCodeServer(
         parent_tab_id: str,
         conn_id: str = "",
         live_only: bool = False,
+        ancestors: frozenset[str] = frozenset(),
     ) -> None:
         """Replay child tabs, including live descendants of completed parents.
 
@@ -2506,11 +2507,17 @@ class VSCodeServer(
                 keep fanning out to every viewer as before.
             live_only: Omit completed descendants when walking through a
                 finished ancestor; their live children must still be reachable.
+            ancestors: Task ids already on the replay path.  A child that
+                is also its own ancestor (a ``parent_task_id`` cycle in the
+                history table) is skipped, or the descent would never end.
         """
         scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
+        ancestors = ancestors | {parent_task_id}
         sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
         for idx, row in enumerate(sub_rows):
             sub_task_id = row["task_id"]
+            if str(sub_task_id) in ancestors:
+                continue
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
@@ -2520,6 +2527,7 @@ class VSCodeServer(
                     parent_tab_id=sub_tab_id,
                     conn_id=conn_id,
                     live_only=True,
+                    ancestors=ancestors,
                 )
                 if live_only:
                     # Not reopened as history, but a client that missed
@@ -2615,6 +2623,7 @@ class VSCodeServer(
                 parent_tab_id=sub_tab_id,
                 conn_id=conn_id,
                 live_only=is_done,
+                ancestors=ancestors,
             )
 
     def _live_task_start_ms(

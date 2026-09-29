@@ -944,7 +944,68 @@ function testRetagReReportsTheChatTabBehindAContentTab(makeClient, label) {
   console.log('  ok - [' + label + '] a retag re-reports the chat tab');
 }
 
+// Sub-agent broadcasts (new_tab with taskId '', openSubagentTab) reach
+// every connected client.  A client that does not own the announced
+// parent tab (another chat, another window) must neither open a tab for
+// the child nor resume its session, or every window shows the phantoms
+// of every other window's fan-outs.
+function testUnknownParentSpawnsNoPhantomTab(makeClient, label) {
+  const scenario = bootFanOut(makeClient, 1);
+  const {win} = scenario;
+  const all = scenario.all;
+  const foreignParent = 'tab-of-another-chat';
+  assert.ok(
+    !win.document.querySelector(
+      `#tab-list .chat-tab[data-tab-id="${foreignParent}"]`,
+    ),
+    'sanity: the foreign parent is not a tab of this client',
+  );
+  const tabsBefore = win.document.querySelectorAll(
+    '#tab-list .chat-tab',
+  ).length;
+  const before = all().length;
+
+  send(win, {
+    type: 'new_tab',
+    task_id: 'foreign-task',
+    parent_tab_id: foreignParent,
+    taskId: '',
+  });
+  assert.ok(
+    !all()
+      .slice(before)
+      .some(m => m.type === 'resumeSession' && m.taskId === 'foreign-task'),
+    'PHANTOM RESUME (' +
+      label +
+      '): new_tab for a parent this client does not own must not resume ' +
+      'the foreign sub-agent',
+  );
+  for (const isDone of [false, true]) {
+    send(win, {
+      type: 'openSubagentTab',
+      tab_id: foreignParent + '__sub_foreign-task',
+      parent_tab_id: foreignParent,
+      description: 'foreign sub',
+      task_id: 'foreign-task',
+      taskIndex: 0,
+      isSubagentTab: true,
+      isDone,
+    });
+  }
+  assert.strictEqual(
+    win.document.querySelectorAll('#tab-list .chat-tab').length,
+    tabsBefore,
+    'PHANTOM TAB (' +
+      label +
+      '): a sub-agent of a parent this client does not own must not get ' +
+      'a tab here',
+  );
+  win.close();
+  console.log('  ok - [' + label + '] an unknown parent spawns no phantom tab');
+}
+
 const SCENARIOS = [
+  testUnknownParentSpawnsNoPhantomTab,
   testPersistedReplayIdsDoNotDuplicate,
   testReplayAfterExpandDoesNotDuplicate,
   testRepeatedNewTabDoesNotDuplicate,
