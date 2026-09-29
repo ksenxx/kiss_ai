@@ -3616,12 +3616,91 @@ body.sidebar-chat-mode #meta-info-content {
   overflow: auto;
 }
 
-.content-pdf-frame {
+/* The pdf.js viewer (pdfView.js): a toolbar over a scrolling box of
+   page canvases.  The box is the only scroller, and touch-action leaves
+   one-finger panning to the browser while the viewer's own touch
+   handlers take the two-finger pinch. */
+.pdf-viewer {
   flex: 1 1 auto;
-  width: 100%;
   min-height: 0;
-  border: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pdf-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.pdf-toolbar button {
+  min-width: var(--space-8);
+  height: var(--space-6);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.pdf-toolbar button:hover { background: var(--surface2); }
+
+.pdf-status {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: var(--fs-xs);
+}
+
+.pdf-scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg2);
+}
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+}
+
+.pdf-page {
+  flex: 0 0 auto;
+  box-shadow: var(--shadow-sm);
+  background: white;
+}
+
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The VS Code PDF preview panel (src/pdfPreview.ts): the viewer is the
+   whole page, without the webview's default body padding. */
+body.pdf-preview-body {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
 }
 
 .content-image {

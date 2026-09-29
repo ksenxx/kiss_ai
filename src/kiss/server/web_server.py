@@ -3848,6 +3848,7 @@ def _build_html() -> str:
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
+        "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "

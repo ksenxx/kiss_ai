@@ -2392,6 +2392,10 @@
       tab.browserView.dispose();
       tab.browserView = null;
     }
+    if (tab.pdfViewer) {
+      tab.pdfViewer.dispose();
+      tab.pdfViewer = null;
+    }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
     }
@@ -3669,10 +3673,8 @@
       return;
     }
     // pdfview-coverage:start
-    // A PDF or an image the daemon served as bytes: the browser's own
-    // viewer shows the PDF (a blob: URL in an UNsandboxed frame -- a
-    // sandboxed one has an opaque origin Chromium refuses to navigate
-    // to a blob of), an <img> the picture.
+    // A PDF or an image the daemon served as bytes: pdfView.js draws
+    // the PDF's pages, an <img> shows the picture.
     if (ev.binary) {
       renderBinaryContent(tab, view, ev);
       return;
@@ -3752,8 +3754,8 @@
   // pdfview-coverage:start
   /**
    * Show a binary file's bytes (base64 in *ev*) in *view*: a PDF in the
-   * browser's PDF viewer, an image as a picture, anything else as a
-   * download link.  The blob: URL is released when the tab is disposed.
+   * pdf.js viewer (pdfView.js), an image as a picture, anything else as
+   * a download link.  The blob: URL is released when the tab is disposed.
    */
   function renderBinaryContent(tab, view, ev) {
     const mime = String(ev.mime || 'application/octet-stream');
@@ -3778,11 +3780,16 @@
       return;
     }
     if (mime === 'application/pdf') {
-      const frame = document.createElement('iframe');
-      frame.className = 'content-pdf-frame';
-      frame.title = ev.name || 'PDF';
-      frame.src = url;
-      holder.appendChild(frame);
+      // pdfView.js draws the pages itself (see its header for why the
+      // browser's PDF plugin is not used); pdf.js takes the byte buffer
+      // over, so decode the bytes again rather than share the blob's.
+      const raw = window.atob(String(ev.base64 || ''));
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      tab.pdfViewer = window.mountPdfViewer(holder, bytes, {
+        name: ev.name || 'PDF',
+        downloadUrl: url,
+      });
       return;
     }
     if (mime.indexOf('image/') === 0) {

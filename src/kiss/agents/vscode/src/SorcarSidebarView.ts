@@ -193,6 +193,7 @@ import {
   resolveDefaultModel,
 } from './DependencyInstaller';
 import {buildChatHtml, clearTipsOptOut, recordTipsOptOut} from './SorcarTab';
+import {buildPdfPreviewHtml} from './pdfPreview';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
@@ -566,8 +567,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
   private _workspaceFoldersSub: vscode.Disposable | undefined;
-  // One rendered-HTML tab per file path, mirroring the remote web app's
-  // content tabs: a second click on the same link reveals (and
+  // One rendered-HTML or PDF tab per file path, mirroring the remote web
+  // app's content tabs: a second click on the same link reveals (and
   // refreshes) the existing tab instead of stacking duplicates.
   private _htmlPreviewPanels: Map<string, vscode.WebviewPanel> = new Map();
 
@@ -2522,9 +2523,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /**
    * Open an already-resolved, existing file the way a clicked file link
    * opens it: .html/.htm rendered in a webview tab, .md/.markdown
-   * converted to HTML and rendered in a markdown-preview tab, text-like
-   * files in the text editor (optionally revealing 1-indexed *line*),
-   * and everything else (images, pdf, ...) in VS Code's native viewer.
+   * converted to HTML and rendered in a markdown-preview tab, .pdf drawn
+   * in a pdf.js webview tab, text-like files in the text editor
+   * (optionally revealing 1-indexed *line*), and everything else
+   * (images, archives, ...) in VS Code's native viewer.
    * Both the 'openFile' message (a clicked link) and the path-only
    * 'submit' shortcut route through here so the two behave identically.
    */
@@ -2552,6 +2554,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // Render the page in a webview tab — like the remote web app
       // does — instead of showing its source in the editor.
       this._openHtmlPreviewTab(filePath);
+      return;
+    }
+    if (path.extname(filePath).toLowerCase() === '.pdf') {
+      // VS Code has no PDF editor (vscode.open shows a "binary file"
+      // notice): draw the pages in a webview tab, like the remote web
+      // app's content tab does.
+      this._openPdfPreviewTab(filePath);
       return;
     }
     if (isRenderableMarkdownExtension(filePath)) {
@@ -2636,6 +2645,44 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     const dirUri = panel.webview.asWebviewUri(vscode.Uri.file(dir));
     panel.webview.html = injectHtmlBase(html, dirUri.toString());
+  }
+
+  /**
+   * Open *filePath* (a resolved, existing .pdf file) in a webview editor
+   * tab that draws its pages with pdf.js (see buildPdfPreviewHtml).  One
+   * tab is kept per path: a second click reveals the existing tab and
+   * reloads the file.  The page fetches the PDF through the webview
+   * resource scheme, so the file's directory is a local resource root
+   * next to the extension's media directory (pdfView.js, main.css).
+   */
+  private _openPdfPreviewTab(filePath: string): void {
+    let panel = this._htmlPreviewPanels.get(filePath);
+    if (!panel) {
+      panel = vscode.window.createWebviewPanel(
+        'kissSorcarPdfPreview',
+        path.basename(filePath),
+        vscode.ViewColumn.One,
+        {
+          enableScripts: true,
+          retainContextWhenHidden: true,
+          localResourceRoots: [
+            vscode.Uri.file(path.dirname(filePath)),
+            vscode.Uri.joinPath(this._extensionUri, 'media'),
+          ],
+        },
+      );
+      this._htmlPreviewPanels.set(filePath, panel);
+      panel.onDidDispose(() => {
+        this._htmlPreviewPanels.delete(filePath);
+      });
+    } else {
+      panel.reveal(vscode.ViewColumn.One);
+    }
+    panel.webview.html = buildPdfPreviewHtml(
+      panel.webview,
+      this._extensionUri,
+      filePath,
+    );
   }
 
   public dispose(): void {

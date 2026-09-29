@@ -51,6 +51,7 @@ const executedCommands = [];
 const positionCalls = [];
 const selectionAssignments = [];
 const revealCalls = [];
+const createdPanels = [];
 
 class StubPosition {
   constructor(line, character) {
@@ -138,6 +139,28 @@ const vscodeStub = {
     },
     activeTextEditor: undefined,
     tabGroups: {all: []},
+    createWebviewPanel: (viewType, title, _column, options) => {
+      const panel = {
+        viewType,
+        title,
+        options,
+        revealed: 0,
+        webview: {
+          html: '',
+          cspSource: 'vscode-resource:',
+          asWebviewUri: uri => ({
+            toString: () => 'vscode-resource:' + uri.fsPath,
+          }),
+        },
+        reveal: () => {
+          panel.revealed++;
+        },
+        dispose: () => {},
+        onDidDispose: () => ({dispose: () => {}}),
+      };
+      createdPanels.push(panel);
+      return panel;
+    },
   },
   commands: {
     executeCommand: (cmd, ...args) => {
@@ -324,23 +347,53 @@ async function runTests() {
 
   clear();
   wv.fireMessage({type: 'openFile', path: 'docs/spec.pdf'});
-  await waitFor(
-    () =>
-      executedCommands.some(
-        c =>
-          c.cmd === 'vscode.open' &&
-          c.args.length >= 1 &&
-          c.args[0] &&
-          c.args[0].fsPath === pdfFile,
-      ),
-    'pdf file: vscode.open command must be invoked',
+  const pdfPanel = await waitFor(
+    () => createdPanels.find(p => p.viewType === 'kissSorcarPdfPreview'),
+    'pdf file: a PDF preview webview panel must be created',
+  );
+  assert.strictEqual(pdfPanel.title, 'spec.pdf');
+  assert.strictEqual(pdfPanel.options.enableScripts, true);
+  assert.ok(
+    pdfPanel.options.localResourceRoots.some(
+      u => u.fsPath === path.dirname(pdfFile),
+    ),
+    "pdf file: the file's directory must be a local resource root",
+  );
+  const pdfHtml = pdfPanel.webview.html;
+  assert.ok(
+    pdfHtml.includes('vscode-resource:' + pdfFile),
+    'pdf panel: the page must fetch the PDF through its webview URI',
+  );
+  assert.ok(
+    /pdfView\.js\?v=[0-9a-f]{16}/.test(pdfHtml),
+    'pdf panel: the page must load the content-versioned pdfView.js',
+  );
+  assert.ok(
+    /Content-Security-Policy[^>]*worker-src blob:/.test(pdfHtml),
+    'pdf panel: CSP must allow the blob: pdf.js worker',
+  );
+  assert.ok(
+    !executedCommands.some(c => c.cmd === 'vscode.open'),
+    'pdf file: vscode.open must NOT be invoked',
   );
   assert.deepStrictEqual(
     openedTextDocs,
     [],
     'pdf file: openTextDocument must NOT be called',
   );
-  console.log('  ok - pdf file opens via native viewer (vscode.open)');
+  // A second click reveals the same panel (and reloads the file)
+  // instead of stacking a duplicate.
+  wv.fireMessage({type: 'openFile', path: 'docs/spec.pdf'});
+  await waitFor(
+    () => pdfPanel.revealed === 1,
+    'pdf file: second click must reveal the existing panel',
+  );
+  assert.strictEqual(
+    createdPanels.filter(p => p.viewType === 'kissSorcarPdfPreview').length,
+    1,
+    'pdf file: one panel per path',
+  );
+  console.log('  ok - pdf file opens in the pdf.js preview panel');
 
   clear();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-'));

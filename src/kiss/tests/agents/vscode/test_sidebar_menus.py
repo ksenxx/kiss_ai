@@ -806,40 +806,331 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         context.close()
 
 
+_PDF_VIEWER = ".content-tab-view .pdf-viewer"
+_PDF_PAGE = _PDF_VIEWER + " .pdf-page"
+
+# Geometry of the viewer: [scroller client width, first page box width,
+# page count, zoom label, scroller scrollHeight, scroller clientHeight].
+_PDF_GEOMETRY_JS = """() => {
+  const scroller = document.querySelector('.content-tab-view .pdf-scroller');
+  const pages = document.querySelectorAll('.content-tab-view .pdf-page');
+  const box = pages[0].getBoundingClientRect();
+  const styles = getComputedStyle(scroller.querySelector('.pdf-pages'));
+  const padding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+  return {
+    avail: scroller.clientWidth - padding,
+    pageWidth: box.width,
+    pageCount: pages.length,
+    zoom: document.querySelector('.content-tab-view .pdf-zoom-level').textContent,
+    scrollHeight: scroller.scrollHeight,
+    clientHeight: scroller.clientHeight,
+    touchAction: getComputedStyle(scroller).touchAction,
+  };
+}"""
+
+
+_PDFJS_MODULE = (
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/legacy/build/pdf.min.mjs"
+)
+
+
+def _wait_pdf_rendered(page) -> None:
+    """Wait for the pdf.js viewer to draw the first page.  A viewer error
+    fails the test unless the pdf.js CDN really is unreachable from the
+    browser (then there is no viewer to test and the test skips)."""
+    page.wait_for_function(
+        """() => document.querySelector('.content-tab-view .pdf-page canvas')
+             || document.querySelector('.content-tab-view .pdf-scroller .content-binary-note')""",
+        timeout=60000,
+    )
+    if page.locator(_PDF_PAGE + " canvas").count() > 0:
+        return
+    note = page.locator(".content-tab-view .content-binary-note").first.inner_text()
+    cdn_ok = page.evaluate(
+        "url => fetch(url, {method: 'HEAD'}).then(r => r.ok).catch(() => false)",
+        _PDFJS_MODULE,
+    )
+    if cdn_ok:
+        pytest.fail("pdf.js viewer failed with the CDN reachable: " + note)
+    pytest.skip("pdf.js CDN unreachable: " + note)
+
+
+def _inject_file_link(page, path: str, link_id: str) -> None:
+    """Append a ``span.kiss-filelink[data-path]`` for *path* to the chat
+    output, the link a linkified tool output would carry."""
+    page.evaluate(
+        """([path, linkId]) => {
+          const span = document.createElement('span');
+          span.className = 'kiss-filelink';
+          span.id = linkId;
+          span.dataset.path = path;
+          span.textContent = path;
+          document.getElementById('output').appendChild(span);
+        }""",
+        [path, link_id],
+    )
+
+
+def _pdf_bytes(pages: int) -> bytes:
+    """A minimal *pages*-page PDF of 200x100pt pages (no xref table;
+    pdf.js rebuilds it, like it does for damaged files)."""
+    kids = " ".join(f"{3 + i} 0 R" for i in range(pages))
+    body = (
+        b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        + f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} >> endobj\n".encode()
+    )
+    for i in range(pages):
+        body += (
+            f"{3 + i} 0 obj << /Type /Page /Parent 2 0 R"
+            " /MediaBox [0 0 200 100] >> endobj\n"
+        ).encode()
+    return body + b"trailer << /Root 1 0 R >>\n%%EOF\n"
+
+
+def _pinch(page, factor: float) -> None:
+    """Dispatch a two-finger pinch on the viewer's scroller that spreads
+    the fingers by *factor* (synthetic TouchEvents: Playwright drives one
+    pointer at a time)."""
+    page.evaluate(
+        """factor => {
+          const scroller = document.querySelector('.content-tab-view .pdf-scroller');
+          const rect = scroller.getBoundingClientRect();
+          const cx = rect.left + 100, cy = rect.top + 100;
+          const mk = (id, x, y) =>
+            new Touch({identifier: id, target: scroller, clientX: x, clientY: y});
+          const fire = (type, touches) => scroller.dispatchEvent(new TouchEvent(type, {
+            touches, targetTouches: touches, changedTouches: touches,
+            bubbles: true, cancelable: true,
+          }));
+          fire('touchstart', [mk(1, cx - 50, cy), mk(2, cx + 50, cy)]);
+          fire('touchmove', [mk(1, cx - 50 * factor, cy), mk(2, cx + 50 * factor, cy)]);
+          fire('touchend', []);
+        }""",
+        factor,
+    )
+
+
 def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
+    """A PDF opens in the in-app pdf.js viewer: its single page is drawn
+    on a canvas at fit-width scale, the toolbar zooms in and out and
+    back to fit width, and the viewer goes with its tab."""
     context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         tabs_before = page.locator(".chat-tab").count()
         _explorer_row(page, "report.pdf").click()
         _wait_tab_count(page, tabs_before + 1)
-        frame = page.locator(".content-tab-view iframe.content-pdf-frame")
-        frame.wait_for(timeout=15000)
-        src = frame.get_attribute("src") or ""
-        assert src.startswith("blob:")
-        assert frame.get_attribute("sandbox") is None
-        assert frame.get_attribute("title") == "report.pdf"
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        assert page.locator(".content-tab-view iframe").count() == 0
+        _wait_pdf_rendered(page)
         # No error toast: the reply carried the bytes, not an error.
-        assert "Cannot display binary file" not in page.locator("body").inner_text()
-        # The bytes the frame shows are the file's.
-        size = page.evaluate(
-            "src => fetch(src).then(r => r.blob()).then(b => [b.size, b.type])", src,
+        assert "Cannot display" not in page.locator("body").inner_text()
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        assert geo["pageCount"] == 1
+        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "1 page"
+        # Fit width: the 200pt-wide page fills the box (within a pixel of
+        # rounding), and the label shows that scale.
+        assert abs(geo["pageWidth"] - geo["avail"]) <= 1.5
+        fit_width = geo["pageWidth"]
+        assert geo["zoom"] == f"{round(fit_width / 200 * 100)}%"
+        # Zoom in: a quarter larger, re-drawn at the new size.
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width * 1.25}) <= 1.5",
+            timeout=10000,
         )
-        assert size == [len((harness.work_dir / "report.pdf").read_bytes()), "application/pdf"]
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
+            timeout=15000,
+        )
+        # Zoom out twice: a quarter smaller than fit width.
+        page.click(_PDF_VIEWER + " .pdf-zoom-out")
+        page.click(_PDF_VIEWER + " .pdf-zoom-out")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width / 1.25}) <= 1.5",
+            timeout=10000,
+        )
+        # The percentage button returns to fit width.
+        page.click(_PDF_VIEWER + " .pdf-zoom-level")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width}) <= 1.5",
+            timeout=10000,
+        )
+        # Ctrl + wheel zooms too (a trackpad pinch on a desktop).
+        page.hover(_PDF_PAGE)
+        page.keyboard.down("Control")
+        page.mouse.wheel(0, -100)
+        page.keyboard.up("Control")
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" > {fit_width * 1.5}",
+            timeout=10000,
+        )
+        # Clicking the open PDF again reloads it in the same tab: the old
+        # viewer (and its worker) go, a fresh one draws the page.
+        _explorer_row(page, "report.pdf").click()
+        page.wait_for_function(
+            f"""() => {{
+              const p = document.querySelector('{_PDF_PAGE}');
+              return document.querySelectorAll('.pdf-viewer').length === 1 && !!p
+                && Math.abs(p.getBoundingClientRect().width - {fit_width}) <= 1.5
+                && !!p.querySelector('canvas');
+            }}""",
+            timeout=15000,
+        )
+        _wait_tab_count(page, tabs_before + 1)
         # An image opens as a picture.
         _explorer_row(page, "dot.png").click()
         _wait_tab_count(page, tabs_before + 2)
         img = page.locator(".content-tab-view img.content-image")
         img.wait_for(timeout=15000)
         assert (img.get_attribute("src") or "").startswith("blob:")
-        # Closing the PDF tab releases its blob URL.
+        # A second PDF has its own pdf.js worker: closing the first tab
+        # (which frees that document) leaves the second one drawing.
+        second = harness.work_dir / "report2.pdf"
+        second.write_bytes((harness.work_dir / "report.pdf").read_bytes())
+        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        page.wait_for_selector("#output", state="visible", timeout=15000)
+        _inject_file_link(page, str(second), "lnk-pdf2")
+        page.click("#lnk-pdf2")
+        _wait_tab_count(page, tabs_before + 3)
+        _wait_pdf_rendered(page)
         page.locator(".chat-tab", has_text="report.pdf").first.click()
         page.locator(".chat-tab.active .chat-tab-close").click()
-        _wait_tab_count(page, tabs_before + 1)
-        revoked = page.evaluate(
-            "src => fetch(src).then(() => false).catch(() => true)", src,
+        _wait_tab_count(page, tabs_before + 2)
+        page.locator(".chat-tab", has_text="report2.pdf").first.click()
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
+            timeout=15000,
         )
-        assert revoked is True
+        # Closing a PDF tab removes its viewer.
+        page.locator(".chat-tab.active .chat-tab-close").click()
+        _wait_tab_count(page, tabs_before + 1)
+        assert page.locator(".pdf-viewer").count() == 0
+    finally:
+        context.close()
+
+
+def test_pdf_scrolls_and_pinch_zooms_on_a_phone(browser, harness, worktree):
+    """In mobile mode the PDF fits the screen width, the page list is a
+    real scroller (one finger pans it, the browser is told so through
+    touch-action) and a two-finger pinch zooms it."""
+    context = browser.new_context(
+        ignore_https_errors=True,
+        viewport={"width": 390, "height": 740},
+        is_mobile=True,
+        has_touch=True,
+    )
+    page = context.new_page()
+    try:
+        goto_retrying_network_change(page, harness.base_url + "/")
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        page.wait_for_selector(".chat-tab", timeout=30000)
+        assert page.locator("body.remote-desktop").count() == 0
+        _inject_file_link(page, str(harness.work_dir / "report.pdf"), "lnk-pdf")
+        page.click("#lnk-pdf")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        # Fit to the phone's width: no horizontal overflow.
+        assert abs(geo["pageWidth"] - geo["avail"]) <= 1.5
+        assert geo["pageWidth"] <= 390
+        assert geo["touchAction"] == "pan-x pan-y"
+        fit_width = geo["pageWidth"]
+        # Pinch out: the page quadruples (the 2:1 test page is then
+        # taller than the phone too), overflows the phone in both
+        # directions and the scroller (not the document) carries it.
+        _pinch(page, 4.0)
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width * 4}) <= 3",
+            timeout=10000,
+        )
+        scrolled = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              s.scrollLeft = 10000; s.scrollTop = 10000;
+              return {left: s.scrollLeft, top: s.scrollTop,
+                      overflowX: s.scrollWidth - s.clientWidth,
+                      overflowY: s.scrollHeight - s.clientHeight,
+                      pageScrolled: document.scrollingElement.scrollTop};
+            }""",
+        )
+        assert scrolled["overflowX"] > fit_width * 0.9
+        assert scrolled["overflowY"] > 0
+        assert scrolled["left"] == scrolled["overflowX"]
+        assert scrolled["top"] == scrolled["overflowY"]
+        assert scrolled["pageScrolled"] == 0
+        # Pinch in from 4x: a fifth of that is below fit width.
+        _pinch(page, 0.2)
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" < {fit_width}",
+            timeout=10000,
+        )
+    finally:
+        context.close()
+
+
+def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
+    """Zooming a multi-page PDF anchors the document point at the centre
+    of the view (the gaps between pages do not scale, so page 5 must be
+    anchored on page 5, not on a scaled scroll offset), and pages that
+    scroll a screen away give their canvas back."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        assert page.locator(_PDF_PAGE).count() == 8
+        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "8 pages"
+        # Scroll so that page 5 sits 40px below the top of the view.
+        page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              s.scrollTop = p.getBoundingClientRect().top - s.getBoundingClientRect().top
+                            + s.scrollTop - 40;
+            }""",
+        )
+        # Pages 1-2 are more than a screen above: no canvas any more,
+        # while page 5 is drawn.
+        page.wait_for_function(
+            """() => {
+              const pages = document.querySelectorAll('.content-tab-view .pdf-page');
+              return !pages[0].querySelector('canvas') && !!pages[4].querySelector('canvas');
+            }""",
+            timeout=15000,
+        )
+        before = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              const r = p.getBoundingClientRect(), b = s.getBoundingClientRect();
+              return {cy: s.clientHeight / 2, top: r.top - b.top, width: r.width};
+            }""",
+        )
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        after = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              const r = p.getBoundingClientRect(), b = s.getBoundingClientRect();
+              return {cy: s.clientHeight / 2, top: r.top - b.top, width: r.width};
+            }""",
+        )
+        ratio = after["width"] / before["width"]
+        assert abs(ratio - 1.25) < 0.02
+        # The point of page 5 at the view's centre is still at the centre.
+        assert abs((after["cy"] - after["top"]) - (before["cy"] - before["top"]) * ratio) <= 2
     finally:
         context.close()
 
