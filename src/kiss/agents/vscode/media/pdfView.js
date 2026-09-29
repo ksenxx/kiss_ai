@@ -29,10 +29,15 @@
 // When the host provides a way to save the file there is a Download
 // link as well.
 //
+// Keyboard, while the viewer is on screen and no field has the keys:
+// PageDown / ArrowRight and PageUp / ArrowLeft move to the next and
+// previous page, Home / End to the first and last, Ctrl/Cmd+0 fits the
+// width and Ctrl/Cmd with + or - zooms.
+//
 // mountPdfViewer(holder, bytes, opts) is the only entry point; it returns
 // {dispose} so the host can stop pending renders and free the document.
 
-/* global Worker */
+/* global Worker, Element */
 
 (function () {
   'use strict';
@@ -95,6 +100,14 @@
     return Math.hypot(dx, dy);
   }
 
+  /** Whether a key pressed on *target* is being typed into a field. */
+  function isEditable(target) {
+    if (!(target instanceof Element)) return false;
+    return (
+      target.isContentEditable || target.matches('input, textarea, select')
+    );
+  }
+
   /**
    * Mount a viewer for the PDF *bytes* (a Uint8Array; pdf.js takes the
    * buffer over, so pass a copy if the bytes are needed afterwards) into
@@ -113,13 +126,13 @@
     const toolbar = el('div', 'pdf-toolbar');
     const zoomOut = el('button', 'pdf-zoom-out', '\u2212');
     zoomOut.type = 'button';
-    zoomOut.title = 'Zoom out';
+    zoomOut.title = 'Zoom out (Ctrl/Cmd -)';
     const zoomLevel = el('button', 'pdf-zoom-level', '');
     zoomLevel.type = 'button';
-    zoomLevel.title = 'Fit width';
+    zoomLevel.title = 'Fit width (Ctrl/Cmd 0)';
     const zoomIn = el('button', 'pdf-zoom-in', '+');
     zoomIn.type = 'button';
-    zoomIn.title = 'Zoom in';
+    zoomIn.title = 'Zoom in (Ctrl/Cmd +)';
     // "Loading…", then "Page [N] of M": N is the page under the view's
     // middle, in a field that jumps to the page typed into it on Enter.
     const status = el('span', 'pdf-status', 'Loading\u2026');
@@ -187,25 +200,43 @@
     }
 
     /**
-     * The 1-based number of the page under the vertical middle of the
-     * view: the first page whose bottom edge lies below it (the next
-     * page when the middle falls in a gap; the last page past the end).
-     * A binary search over the page boxes keeps a long document cheap.
+     * The 1-based number of the page at content offset *y* (scroller
+     * pixels from the top of the document): the first page whose bottom
+     * edge lies below it (the next page when y falls in a gap; the last
+     * page past the end).  A binary search over the page boxes keeps a
+     * long document cheap.
      */
-    function currentPage() {
-      const middle = scroller.scrollTop + scroller.clientHeight / 2;
+    function pageAt(y) {
       let lo = 0;
       let hi = state.pages.length - 1;
       while (lo < hi) {
         const mid = (lo + hi) >> 1;
         const entry = state.pages[mid];
-        if (boxOffset(entry).top + entry.box.offsetHeight <= middle) {
+        if (boxOffset(entry).top + entry.box.offsetHeight <= y) {
           lo = mid + 1;
         } else {
           hi = mid;
         }
       }
       return lo + 1;
+    }
+
+    /** The page under the vertical middle of the view. */
+    function currentPage() {
+      return pageAt(scroller.scrollTop + scroller.clientHeight / 2);
+    }
+
+    /**
+     * The page at the top edge of the view, under the margin goToPage
+     * leaves above a page (one pixel of tolerance, since the browser
+     * may round the scroll offset goToPage sets).
+     */
+    function topPage() {
+      return pageAt(scroller.scrollTop + pagesPaddingTop() + 1);
+    }
+
+    function pagesPaddingTop() {
+      return parseFloat(window.getComputedStyle(pagesBox).paddingTop);
     }
 
     /**
@@ -233,8 +264,47 @@
      */
     function goToPage(number) {
       const entry = state.pages[clamp(number, 1, state.pages.length) - 1];
-      const padding = parseFloat(window.getComputedStyle(pagesBox).paddingTop);
-      scroller.scrollTop = boxOffset(entry).top - padding;
+      scroller.scrollTop = boxOffset(entry).top - pagesPaddingTop();
+    }
+
+    /**
+     * Keyboard shortcuts.  The listener is on the document so the keys
+     * work as soon as the viewer is on screen, without a click into
+     * it; it stands aside while the viewer is hidden (another tab is
+     * shown), while the key is typed into a field (the page field, a
+     * search box), and for combinations it does not define, so the
+     * browser and the host app keep those.  PageDown / ArrowRight and
+     * PageUp / ArrowLeft go one page forward and back from the page at
+     * the top of the view; the arrows are left to the browser while
+     * the pages are wider than the view, where they pan instead.
+     * Home / End go to the first / last page.  Ctrl/Cmd+0 fits the
+     * width, Ctrl/Cmd with + (or =, its unshifted key) or - zooms.
+     */
+    function onKeyDown(ev) {
+      if (!state.pages.length || ev.defaultPrevented) return;
+      if (!root.isConnected || root.getClientRects().length === 0) return;
+      if (isEditable(ev.target)) return;
+      if (ev.altKey) return;
+      if (ev.ctrlKey || ev.metaKey) {
+        if (ev.key === '0') onFitWidth();
+        else if (ev.key === '+' || ev.key === '=') onZoomIn();
+        else if (ev.key === '-') onZoomOut();
+        else return;
+      } else if (ev.shiftKey) {
+        return;
+      } else if (ev.key === 'Home') {
+        goToPage(1);
+      } else if (ev.key === 'End') {
+        goToPage(state.pages.length);
+      } else if (ev.key === 'PageDown' || ev.key === 'PageUp') {
+        goToPage(topPage() + (ev.key === 'PageDown' ? 1 : -1));
+      } else if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        if (scroller.scrollWidth > scroller.clientWidth) return;
+        goToPage(topPage() + (ev.key === 'ArrowRight' ? 1 : -1));
+      } else {
+        return;
+      }
+      ev.preventDefault();
     }
 
     /** Select the whole number on focus so typing replaces it. */
@@ -465,6 +535,11 @@
     }
 
     function onResize() {
+      // A viewer whose tab was swapped out (display: none) has no size
+      // to fit: it keeps its scale and scroll offset for its return
+      // (fitting a zero width would reset the scale, and the fit on
+      // re-show would then re-anchor the view around the wrong page).
+      if (!scroller.clientWidth) return;
       if (state.fitWidth && state.pages.length) onFitWidth();
       // Otherwise the pages stay put, but the view's middle moved with
       // its height (no scroll event for that).
@@ -539,6 +614,7 @@
     scroller.addEventListener('touchmove', onTouchMove, {passive: false});
     scroller.addEventListener('touchend', onTouchEnd);
     scroller.addEventListener('touchcancel', onTouchEnd);
+    document.addEventListener('keydown', onKeyDown);
 
     loadPdfJs()
       .then(show)
@@ -549,6 +625,7 @@
     function dispose() {
       if (state.disposed) return;
       state.disposed = true;
+      document.removeEventListener('keydown', onKeyDown);
       clearTimeout(state.wheelTimer);
       cancelAnimationFrame(state.scrollFrame);
       if (state.observer) state.observer.disconnect();

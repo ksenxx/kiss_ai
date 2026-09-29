@@ -1337,6 +1337,171 @@ def test_pdf_page_field_jumps_to_the_typed_page(browser, harness, worktree):
         context.close()
 
 
+def _pdf_scroll_top(page) -> float:
+    return float(page.evaluate(_PDF_PAGE_TOP_JS, 1)["scrollTop"])
+
+
+def _assert_pdf_page_at_top(page, n: int) -> None:
+    """Page *n* starts at the top of the view, under the margin the
+    first page has at scroll offset 0."""
+    geo = page.evaluate(_PDF_PAGE_TOP_JS, n)
+    assert abs(geo["top"] - geo["padding"]) <= 1.5, geo
+
+
+def _scroll_pdf_into_page(page, n: int, offset: int) -> None:
+    """Scroll so that page *n* starts *offset* pixels above the view's top."""
+    page.evaluate(
+        """([n, offset]) => {
+          const s = document.querySelector('.content-tab-view .pdf-scroller');
+          const p = document.querySelectorAll('.content-tab-view .pdf-page')[n - 1];
+          s.scrollTop = p.getBoundingClientRect().top - s.getBoundingClientRect().top
+                        + s.scrollTop + offset;
+        }""",
+        [n, offset],
+    )
+
+
+def _wait_pdf_page_width(page, width: float) -> None:
+    page.wait_for_function(
+        f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+        f" - {width}) <= 1.5",
+        timeout=10000,
+    )
+
+
+def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
+    """With the viewer on screen and nothing focused, PageDown / ArrowRight
+    and PageUp / ArrowLeft move one page forward and back, Home / End go
+    to the first / last page, Ctrl/Cmd+0 fits the width and Ctrl/Cmd
+    with + / - zooms.  The keys are left alone while typed into the page
+    field, with Shift or Alt held, while the viewer's tab is hidden, and
+    the arrows pan instead once the pages are wider than the view."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    errors: list[str] = []
+    page.on("pageerror", lambda err: errors.append(str(err)))
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        assert _pdf_status(page) == "Page 1 of 8"
+        # No click into the viewer first: the keys work as soon as the
+        # viewer is shown.
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        page.keyboard.press("ArrowRight")
+        _assert_pdf_page_at_top(page, 3)
+        page.keyboard.press("PageUp")
+        _assert_pdf_page_at_top(page, 2)
+        page.keyboard.press("ArrowLeft")
+        assert _pdf_scroll_top(page) == 0
+        # Before the first page there is nothing to go to.
+        page.keyboard.press("ArrowLeft")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("End")
+        _wait_pdf_status(page, "Page 8 of 8")
+        at_bottom = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              return s.scrollTop + s.clientHeight === s.scrollHeight;
+            }"""
+        )
+        assert at_bottom
+        bottom = _pdf_scroll_top(page)
+        page.keyboard.press("PageDown")
+        assert _pdf_scroll_top(page) == bottom
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        _wait_pdf_status(page, "Page 1 of 8")
+        # From inside page 3 (its top 40px above the view), forward goes
+        # to the top of page 4 and back to the top of page 2.
+        _scroll_pdf_into_page(page, 3, 40)
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 4)
+        _scroll_pdf_into_page(page, 3, 40)
+        page.keyboard.press("PageUp")
+        _assert_pdf_page_at_top(page, 2)
+        # Zoom: Ctrl+= a quarter larger, Ctrl+- back, Ctrl+Shift+= (the
+        # + key) in again, Cmd+0 back to fit width.
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        fit_width = geo["pageWidth"]
+        assert abs(fit_width - geo["avail"]) <= 1.5
+        page.keyboard.press("Control+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Control+Minus")
+        _wait_pdf_page_width(page, fit_width)
+        page.keyboard.press("Control+Shift+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Meta+0")
+        _wait_pdf_page_width(page, fit_width)
+        # Zoomed in past the view's width the arrows are the browser's
+        # (they pan); PageDown still turns the page.
+        page.keyboard.press("Home")
+        page.keyboard.press("Control+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("ArrowRight")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        # Ctrl+0 restores fit-width mode, so the pages follow a resize.
+        page.keyboard.press("Control+0")
+        _wait_pdf_page_width(page, fit_width)
+        size = page.viewport_size
+        page.set_viewport_size({"width": size["width"] - 200, "height": size["height"]})
+        page.wait_for_function(
+            "() => { const g = (" + _PDF_GEOMETRY_JS + ")();"
+            " return Math.abs(g.pageWidth - g.avail) <= 1.5 && g.pageWidth < "
+            + str(fit_width - 100)
+            + "; }",
+            timeout=10000,
+        )
+        page.set_viewport_size(size)
+        _wait_pdf_page_width(page, fit_width)
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        # Keys typed into the page field are the field's.
+        page.locator(_PDF_VIEWER + " .pdf-page-input").click()
+        page.keyboard.press("PageDown")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("Escape")
+        # Shift or Alt combinations are not the viewer's.
+        page.keyboard.press("Shift+PageDown")
+        page.keyboard.press("Alt+ArrowRight")
+        assert _pdf_scroll_top(page) == 0
+        # A hidden viewer (another tab is shown) leaves the keys alone,
+        # and comes back at the same place (its zero-size box while
+        # hidden must not re-fit the width).
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        page_two = _pdf_scroll_top(page)
+        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        page.wait_for_selector("#output", state="visible", timeout=15000)
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        page.locator(".chat-tab", has_text="pages8.pdf").first.click()
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        assert _pdf_scroll_top(page) == page_two
+        _assert_pdf_page_at_top(page, 2)
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 3)
+        # Closing the tab takes the listener with it: the key is nobody's.
+        page.locator(".chat-tab.active .chat-tab-close").click()
+        page.wait_for_function(
+            "() => document.querySelectorAll('.pdf-viewer').length === 0", timeout=15000
+        )
+        page.keyboard.press("PageDown")
+        page.keyboard.press("Control+0")
+        assert errors == []
+    finally:
+        context.close()
+
+
 def _root_paths(page) -> list[str]:
     return [
         str(p)
