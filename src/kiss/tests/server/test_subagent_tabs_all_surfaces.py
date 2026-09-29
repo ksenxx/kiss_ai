@@ -362,16 +362,14 @@ class SubagentTabsAllSurfacesTest(DaemonUdsHarness):
                     ):
                         assert ev["parent_tab_id"] == nesting_tab, (name, ev)
 
-            # 2b. The surfaces never disagree: a sub-agent tab the user
-            #     closes by hand on one surface closes on every other
-            #     (daemon ``closeSubagentTab`` mirror), while the other
-            #     running sub-agents' tabs stay everywhere.
+            # 2b. A close request cannot hide a still-running child on
+            #     this surface or any other surface.
             closed = self.bridge.call("closeTab", name="remote", tabId=plain_tab)
             assert closed["found"], closed
             for name in ("sidebar", "remote", "remote2", "editor"):
                 self._wait_sub_tabs(
-                    name, {nesting_tab, grand_tab},
-                    "hand-closed sub-agent tab mirrored to every surface",
+                    name, running,
+                    "running sub-agent tab preserved on every surface",
                 )
         finally:
             leaf_release.set()

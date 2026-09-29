@@ -25,7 +25,22 @@
 //   in : {op:'submit', name, text}             -> out {op:'submitted', name}
 //   in : {op:'closeTab', name, tabId}          -> out {op:'tabClosed', name}
 //   in : {op:'events', name}                   -> out {op:'events', name, events}
+//   in : {op:'activateTab', name, tabId}       -> out {op:'tabActivated', name, found}
+//   in : {op:'click', name, selector}          -> out {op:'clicked', name, found}
+//   in : {op:'hold', name}                     -> out {op:'held', name}
+//   in : {op:'release', name}                  -> out {op:'released', name, delivered}
+//   in : {op:'ask', name}                      -> out {op:'ask', name, activeTabId,
+//                                                     answering, question, attention}
+//   in : {op:'answer', name, text}             -> out {op:'answered', name, answering}
 //   in : {op:'quit'}
+//
+// `ask` reports the ask_user_question state as the user sees it: whether
+// the composer of the ACTIVE tab is the answer box (body.ask-answering),
+// the text of that tab's pending question panel, and the ids of the
+// background tabs flagged "Waiting for your answer" (.chat-tab-attention).
+// `answer` types into the composer and presses Send — the same path a
+// user's answer takes — and reports whether the composer was the answer
+// box at that moment.
 //
 // `tabs` describes the rendered tab bar (#tab-list, the user-visible
 // truth) joined with the webview's own tab records (parent, task id,
@@ -50,6 +65,8 @@ const DETAILED_EVENTS = new Set([
   'openSubagentTab',
   'subagentDone',
   'closeSubagentTab',
+  'askUser',
+  'askUserDone',
   'error',
 ]);
 
@@ -91,7 +108,12 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
   };
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  // The sourceURL names the script in V8 coverage output
+  // (NODE_V8_COVERAGE) so a driver can measure main.js branches.
+  win.eval(
+    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+      '\n//# sourceURL=multiSurfaceBridge-main.js',
+  );
   return {win, getState: () => state};
 }
 
@@ -112,6 +134,7 @@ function openSurface(cmd) {
     else pending.push(line);
   }
   const view = makeWebview(cmd.bodyAttrs, cmd.state, post, errors);
+  const surface = {view, socket, errors, events, held: null};
   const rl = readline.createInterface({input: socket});
   rl.on('line', line => {
     if (!line.trim()) return;
@@ -121,19 +144,32 @@ function openSurface(cmd) {
     } catch (_e) {
       return;
     }
-    // Tab-lifecycle events are kept whole (the driver asserts on their
-    // fields); everything else only by type.
-    events.push(DETAILED_EVENTS.has(ev.type) ? ev : ev.type);
-    try {
-      view.win.dispatchEvent(
-        new view.win.MessageEvent('message', {data: ev}),
-      );
-    } catch (e) {
-      errors.push('dispatch ' + ev.type + ': ' + String((e && e.stack) || e));
-    }
+    // A held surface (a slow client: a phone tab in the background)
+    // keeps the daemon's lines until `release` delivers them in order.
+    if (surface.held) surface.held.push(ev);
+    else deliver(surface, ev);
   });
   socket.on('error', e => errors.push('socket: ' + String(e)));
-  surfaces.set(cmd.name, {view, socket, errors, events});
+  surfaces.set(cmd.name, surface);
+}
+
+function deliver(surface, ev) {
+  // Tab-lifecycle events are kept whole (the driver asserts on their
+  // fields); everything else only by type and routing keys.
+  surface.events.push(
+    DETAILED_EVENTS.has(ev.type)
+      ? ev
+      : {type: ev.type, tabId: ev.tabId, taskId: ev.taskId},
+  );
+  try {
+    surface.view.win.dispatchEvent(
+      new surface.view.win.MessageEvent('message', {data: ev}),
+    );
+  } catch (e) {
+    surface.errors.push(
+      'dispatch ' + ev.type + ': ' + String((e && e.stack) || e),
+    );
+  }
 }
 
 // The rendered tab bar is the user-visible truth: one entry per
@@ -155,6 +191,20 @@ function describeTabs(surface) {
       running: !!el.querySelector('.status-spinner'),
     };
   });
+}
+
+function describeAsk(surface) {
+  const doc = surface.view.win.document;
+  const active = doc.querySelector('#tab-list [data-tab-id].active');
+  const panel = doc.querySelector('#output .tc-question.tc-question-pending');
+  return {
+    activeTabId: active ? active.dataset.tabId : '',
+    answering: doc.body.classList.contains('ask-answering'),
+    question: panel ? panel.textContent : '',
+    attention: Array.from(
+      doc.querySelectorAll('#tab-list [data-tab-id] .chat-tab-attention'),
+    ).map(el => el.closest('[data-tab-id]').dataset.tabId),
+  };
 }
 
 function handle(cmd) {
@@ -203,6 +253,39 @@ function handle(cmd) {
     case 'events':
       out({op: 'events', name: cmd.name, events: surface.events});
       break;
+    case 'activateTab': {
+      const el = doc.querySelector(`#tab-list [data-tab-id="${cmd.tabId}"]`);
+      if (el) el.click();
+      out({op: 'tabActivated', name: cmd.name, found: !!el});
+      break;
+    }
+    case 'click': {
+      const el = doc.querySelector(cmd.selector);
+      if (el) el.click();
+      out({op: 'clicked', name: cmd.name, found: !!el});
+      break;
+    }
+    case 'hold':
+      if (!surface.held) surface.held = [];
+      out({op: 'held', name: cmd.name});
+      break;
+    case 'release': {
+      const queued = surface.held || [];
+      surface.held = null;
+      queued.forEach(ev => deliver(surface, ev));
+      out({op: 'released', name: cmd.name, delivered: queued.length});
+      break;
+    }
+    case 'ask':
+      out({op: 'ask', name: cmd.name, ...describeAsk(surface)});
+      break;
+    case 'answer': {
+      const answering = doc.body.classList.contains('ask-answering');
+      doc.getElementById('task-input').value = cmd.text;
+      doc.getElementById('send-btn').click();
+      out({op: 'answered', name: cmd.name, answering});
+      break;
+    }
     default:
       out({op: 'error', name: cmd.name, error: 'unknown op ' + cmd.op});
   }

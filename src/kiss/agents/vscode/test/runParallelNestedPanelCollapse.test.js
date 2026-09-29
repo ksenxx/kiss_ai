@@ -6,8 +6,8 @@
 // Invariant under test (chat webview, media/main.js -- shared verbatim by
 // the VS Code extension webview and the remote webapp):
 //
-//   While the run_parallel tool event panel is COLLAPSED, every tab of
-//   the sub-agents that tool created MUST be closed.
+//   Collapsing a panel closes finished-history tabs, but running child
+//   tabs stay visible until their own completion notification.
 //
 // runParallelPanelTabsSync.test.js covers the panel's OWN chevron. This
 // suite covers the panels that collapse a run_parallel panel by
@@ -15,9 +15,8 @@
 // precede it into a `.summary-sub` child and collapses itself, and
 // `.tc.collapsed > :not(.tc-h, .panel-copy-btn) {display:none}`
 // (media/main.css) then hides the adopted run_parallel panel. The
-// sub-agent tabs of a run_parallel panel the user can no longer see --
-// let alone reach the chevron of -- must be closed just like those of a
-// panel collapsed by hand.
+// finished-history tabs follow that collapse. Running tasks must keep
+// their tabs even when the panel's chevron is no longer visible.
 //
 // Every test runs twice: once against the VS Code extension host
 // (`acquireVsCodeApi` stub) and once against the remote webapp (the real
@@ -212,9 +211,10 @@ function togglePanel(win, panel, drain) {
  * @param {string} mode 'extension' or 'webapp'.
  * @param {number} n How many sub-agents to spawn.
  * @param {boolean} [quiet] Swallow deliberate page errors.
+ * @param {boolean} [done=true] Resume completed history, or live children.
  * @returns {object} Boot state for the assertions.
  */
-function bootParallelRun(mode, n, quiet) {
+function bootParallelRun(mode, n, quiet, done = true) {
   const {win, posted, deliver} = makeWebview(mode, quiet);
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
@@ -257,6 +257,7 @@ function bootParallelRun(mode, n, quiet) {
       description: 'sub ' + (i + 1),
       task_id: taskId,
       taskIndex: i,
+      isDone: done,
     });
   }
   assert.strictEqual(
@@ -311,33 +312,17 @@ function openNewChat(st) {
   );
 }
 
-// A run_parallel panel swallowed by a collapsed summary panel is off
-// screen: its sub-agent tabs must go with it.
-function testSummaryAdoptionClosesSubagentTabs(mode) {
-  const st = bootParallelRun(mode, 2);
+// Folding an ancestor transcript panel cannot hide a running child.
+function testSummaryAdoptionPreservesRunningTabs(mode) {
+  const st = bootParallelRun(mode, 2, false, false);
   sendSummary(st);
-
-  assert.strictEqual(
-    subagentTabEls(st.win).length,
-    0,
-    'INVARIANT VIOLATED (' +
-      mode +
-      '): the summary panel collapsed the run_parallel panel into its ' +
-      'hidden .summary-sub, but the fan-out sub-agent tabs are still open',
-  );
-  assert.ok(
-    st.panel.classList.contains('collapsed'),
-    'a run_parallel panel hidden inside a collapsed panel must itself ' +
-      'be marked collapsed, so its chevron can reopen the fan-out',
-  );
-  for (const id of st.subTabIds) {
-    assert.ok(
-      st.posted.some(m => m.type === 'closeTab' && m.tabId === id),
-      'the backend must be told to close sub-agent tab ' + id,
-    );
-  }
+  assert.strictEqual(subagentTabEls(st.win).length, 2, 'running tabs stay open');
+  assert.ok(st.panel.classList.contains('collapsed'), 'transcript panel collapsed');
+  assert.ok(!st.posted.some(m => m.type === 'closeTab'), 'no running tab is closed');
+  for (const id of st.subTabIds) st.deliver({type: 'subagentDone', tab_id: id});
+  assert.strictEqual(subagentTabEls(st.win).length, 0, 'completion closes tabs');
   st.win.close();
-  console.log('  ok [' + mode + '] summary adoption closes sub-agent tabs');
+  console.log('  ok [' + mode + '] summary adoption preserves running tabs');
 }
 
 // Reopening the fan-out from inside an expanded summary must work, and
@@ -392,9 +377,8 @@ function testReCollapsingSummaryClosesReopenedTabs(mode) {
   console.log('  ok [' + mode + '] re-collapsing the summary closes sub tabs');
 }
 
-// A sub-agent that the daemon announces after the summary swallowed its
-// fan-out panel must not open a tab.
-function testSpawnAfterAdoptionOpensNoTab(mode) {
+// A running child announced under a folded summary must open immediately.
+function testSpawnAfterAdoptionOpensLiveTab(mode) {
   const st = bootParallelRun(mode, 2);
   sendSummary(st);
 
@@ -414,16 +398,12 @@ function testSpawnAfterAdoptionOpensNoTab(mode) {
     taskIndex: 2,
   });
   assert.strictEqual(
-    subagentTabEls(st.win).length,
-    0,
-    'INVARIANT VIOLATED (' +
-      mode +
-      '): a sub-agent spawned after the summary hid its run_parallel ' +
-      'panel opened a tab',
+    subagentTabEls(st.win).length, 1,
+    'the newly running child must open even under a folded summary',
   );
   assert.ok(
-    !st.posted.slice(before).some(m => m.type === 'resumeSession'),
-    'no resumeSession may be posted while the fan-out panel is hidden',
+    st.posted.slice(before).some(m => m.type === 'resumeSession' && m.taskId === 'sub-task-3'),
+    'the running child must subscribe immediately',
   );
 
   const beforeExpand = st.posted.length;
@@ -435,13 +415,13 @@ function testSpawnAfterAdoptionOpensNoTab(mode) {
     'expanding the nested run_parallel panel must open the deferred tab too',
   );
   assert.ok(
-    st.posted
+    !st.posted
       .slice(beforeExpand)
       .some(m => m.type === 'resumeSession' && m.taskId === 'sub-task-3'),
-    'the deferred sub-agent must be resumed when the panel is expanded',
+    'expanding must not resubscribe the already-open live child',
   );
   st.win.close();
-  console.log('  ok [' + mode + '] spawn after adoption opens no tab');
+  console.log('  ok [' + mode + '] spawn after adoption opens its live tab');
 }
 
 // The daemon re-sends a whole transcript (task_events) whenever it
@@ -519,6 +499,10 @@ function testCollapseForgetsGrandchildSubagentTabs(mode) {
     .find(m => m.type === 'resumeSession' && m.taskId === 'deep-task');
   assert.ok(deepResume, "the sub-agent's own fan-out must open a tab");
   const grandchildId = deepResume.tabId;
+  st.deliver({
+    type: 'openSubagentTab', tab_id: grandchildId, parent_tab_id: childId,
+    task_id: 'deep-task', isDone: true,
+  });
   assert.strictEqual(
     subagentTabEls(st.win).length,
     2,
@@ -562,6 +546,7 @@ function testCollapseForgetsGrandchildSubagentTabs(mode) {
     description: 'deep',
     task_id: 'deep-task',
     taskIndex: 0,
+    isDone: true,
   });
   const after = subagentTabEls(st.win).map(el => el.dataset.tabId);
   assert.deepStrictEqual(
@@ -830,9 +815,9 @@ function testAdjacentTaskSummaryLeavesLiveFanOutAlone(mode) {
 
 async function main() {
   const tests = [
-    testSummaryAdoptionClosesSubagentTabs,
+    testSummaryAdoptionPreservesRunningTabs,
     testReCollapsingSummaryClosesReopenedTabs,
-    testSpawnAfterAdoptionOpensNoTab,
+    testSpawnAfterAdoptionOpensLiveTab,
     testBackgroundReplayCollapseClosesSubagentTabs,
     testCollapseForgetsGrandchildSubagentTabs,
     testTranscriptWipeClosesSubagentTabs,

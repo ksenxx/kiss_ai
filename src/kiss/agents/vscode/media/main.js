@@ -2098,22 +2098,6 @@
       closeContentTab(tabId);
       return;
     }
-    if (
-      EDITOR_TAB_MODE &&
-      !tabs[origIdx].isSubagentTab &&
-      !tabs[origIdx].isContentTab
-    ) {
-      // Closing the ROOT chat closes the whole editor tab: the host
-      // disposes the panel and — unless the close came FROM the daemon
-      // — retires the chat from the registry through its long-lived
-      // client (this webview's own connection dies with the panel
-      // before a queued closeTab could flush). The sub-agent tabs die
-      // with the panel. Without this, the root close reached
-      // createNewTab's openChatPanel post, which OPENED a fresh panel
-      // while this one lingered rootless.
-      postToHost({type: 'closePanel', retire: !fromServer});
-      return;
-    }
     const toClose = new Set([tabId]);
     let grew = true;
     while (grew) {
@@ -2124,6 +2108,33 @@
           grew = true;
         }
       }
+    }
+    // A live child's tab is its question/answer surface. User/panel closes
+    // cannot remove it. On completion, remove the finished ancestor but
+    // keep any still-running descendants under their nearest surviving parent.
+    const liveChildren = tabs.filter(
+      t => toClose.has(t.id) && t.isSubagentTab && t.isRunning,
+    );
+    if (liveChildren.length) {
+      if (
+        !agentInitiated ||
+        !tabs[origIdx].isSubagentTab ||
+        !tabs[origIdx].isDone
+      )
+        return;
+      for (const child of liveChildren) toClose.delete(child.id);
+      for (const child of liveChildren) {
+        if (!toClose.has(child.parentTabId)) continue;
+        while (toClose.has(child.parentTabId))
+          child.parentTabId = getTab(child.parentTabId).parentTabId;
+        _rpTabPanel.delete(child.id);
+      }
+    }
+    if (EDITOR_TAB_MODE && !tabs[origIdx].isSubagentTab) {
+      // Retire the root through the host's long-lived connection before
+      // disposing this editor panel and its own daemon connection.
+      postToHost({type: 'closePanel', retire: !fromServer});
+      return;
     }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
@@ -4140,6 +4151,23 @@
    */
   function subagentTabIdFor(parentTabId, taskId) {
     return (parentTabId || 'task') + '__sub_' + String(taskId);
+  }
+
+  /**
+   * Nearest open ancestor of a sub-agent tab id, walking its
+   * `__sub_` chain: a live helper announced after its parent finished
+   * hangs off the parent's own parent instead of being dropped.
+   *
+   * @param {string} tabId The announced parent tab id.
+   * @returns {string} An open tab id, or '' when none is open.
+   */
+  function nearestOpenAncestorTab(tabId) {
+    let id = tabId || '';
+    while (id && !getTab(id)) {
+      const at = id.lastIndexOf('__sub_');
+      id = at > 0 ? id.slice(0, at) : '';
+    }
+    return id;
   }
 
   /**
@@ -13016,6 +13044,12 @@
           }
           qd.dataset.rawText = rawQ;
           c.appendChild(qd);
+          // Replay rebuilds the panel without clearing the pending question.
+          // Duplicate askUser events preserve drafts and do not re-mark it.
+          // An earlier answered call is cleared by its replayed tool_result.
+          const qTab = getTab(evOwnerTab);
+          if (qTab && qTab.askPendingQuestion === rawQ)
+            setQuestionPanelPending(c, true);
         } else if (isSummary) {
           const sd = mkEl('div', 'tc-summary-desc');
           const rawDesc = ev.description || '';
@@ -16117,8 +16151,8 @@
         break;
       }
       case 'new_tab': {
-        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
-          break;
+        const spawnParent = nearestOpenAncestorTab(ev.parent_tab_id);
+        if (ev.parent_tab_id && !spawnParent) break;
         // Editor-tabs mode: a parentless spawn (e.g. a run_agent
         // sub-task) belongs to no particular panel, and EVERY panel
         // receives the broadcast — each adopting it would open the
@@ -16126,7 +16160,7 @@
         // editor tab. Only spawns owned by this panel's chats join it.
         if (EDITOR_TAB_MODE && !ev.parent_tab_id) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
-        const parentTabBeforeNew = ev.parent_tab_id || '';
+        const parentTabBeforeNew = spawnParent;
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
         // that already has a tab must not open a second one.
         const spawned = openSubagentTabForTask(ev.task_id, '');
@@ -16144,26 +16178,17 @@
         }
         let subAgentTabId;
         if (parentTabBeforeNew) {
-          // Attribute the spawn to the fan-out that owns it, not to the
-          // newest panel: with several run_parallel calls in one task a
-          // late spawn belongs to an earlier call, whose collapsed state
-          // decides whether it may have a tab.
+          // A late spawn belongs to its original dispatch panel, not
+          // necessarily the newest call in the parent's transcript.
           const rpPanel = rpPanelForNewSubagent(
             parentTabBeforeNew,
             ev.task_id,
             {live: true},
           );
-          if (
-            rpPanel &&
-            (rpPanel.classList.contains('collapsed') ||
-              rpSubagentHandClosed(rpPanel, ev.task_id))
-          ) {
-            rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
-            break;
-          }
+          // A live spawn must open even when its transcript panel is folded.
           const subTab = createBackgroundSubagentTab(
             parentTabBeforeNew,
-            subagentTabIdFor(parentTabBeforeNew, ev.task_id),
+            subagentTabIdFor(ev.parent_tab_id, ev.task_id),
           );
           subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
@@ -16181,19 +16206,26 @@
             subagentTabIdFor('', ev.task_id),
           ).id;
         }
+        setTabRunning(getTab(subAgentTabId), true);
         api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
       }
       case 'openSubagentTab': {
-        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
-          break;
+        // Finished history needs its own parent open; a live task takes
+        // the nearest open ancestor.
+        const announcedParent = ev.isDone
+          ? getTab(ev.parent_tab_id)
+            ? ev.parent_tab_id
+            : ''
+          : nearestOpenAncestorTab(ev.parent_tab_id);
+        if (ev.parent_tab_id && !announcedParent) break;
         if (!ev.parent_tab_id && !getTab(ev.tab_id)) break;
         const subDesc = (ev.description || 'Sub-agent').trim();
         const subIdx =
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
-        const parentId = ev.parent_tab_id || ev.tabId || '';
+        const parentId = announcedParent || ev.tabId || '';
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
@@ -16203,14 +16235,13 @@
           });
         }
         let subTab = getTab(ev.tab_id);
-        // A sub-agent the user closed by hand stays closed until its
-        // run_parallel panel is collapsed and expanded again -- also
-        // when the daemon re-announces it under a different tab id.
-        if (!subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
+        // Closed history tabs stay closed; an active task must always
+        // have a tab, regardless of this surface's prior panel state.
+        if (ev.isDone && !subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
           _rpClosedSubagentTabs.add(ev.tab_id);
           break;
         }
-        if (!subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
+        if (ev.isDone && !subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
           break;
         }
@@ -16225,7 +16256,13 @@
             subTab = openForTask;
           }
         }
-        if (rpPanel && rpPanel.classList.contains('collapsed')) {
+        // The daemon's terminal state wins over a tab that missed its
+        // subagentDone, or the panel sync below could not close it.
+        if (subTab && ev.isDone) {
+          subTab.isDone = true;
+          setTabRunning(subTab, false);
+        }
+        if (ev.isDone && rpPanel && rpPanel.classList.contains('collapsed')) {
           rpRegisterSubagent(
             rpPanel,
             parentId,
@@ -16280,7 +16317,16 @@
         // Another client closed this sub-agent tab; mirror the close.
         // Applied without echoing `closeTab` back to the daemon (the
         // origin client already sent it) — see closeTab(fromServer).
-        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
+        const mirrored = getTab(ev.tab_id);
+        if (mirrored) {
+          // The daemon only mirrors closes of finished tabs; a copy that
+          // missed the completion must not refuse the close as "live".
+          if (mirrored.isSubagentTab) {
+            mirrored.isDone = true;
+            setTabRunning(mirrored, false);
+          }
+          closeTab(ev.tab_id, true, true);
+        }
         break;
       }
       case 'openTabRejected': {
