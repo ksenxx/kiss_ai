@@ -1917,7 +1917,9 @@
       if (tab.isContentTab) {
         const fileIcon = document.createElement('span');
         fileIcon.className = 'content-tab-icon';
-        fileIcon.textContent = '\uD83D\uDCC4';
+        fileIcon.textContent = tab.isBrowserTab
+          ? '\uD83C\uDF10'
+          : '\uD83D\uDCC4';
         fileIcon.title = tab.contentPath || '';
         el.appendChild(fileIcon);
       } else if (tab.isSubagentTab) {
@@ -2095,7 +2097,7 @@
     });
     if (origIdx < 0) return;
     if (tabs[origIdx].isContentTab) {
-      closeContentTab(tabId);
+      closeContentTab(tabId, false, fromServer);
       return;
     }
     const toClose = new Set([tabId]);
@@ -2213,6 +2215,7 @@
         tab.contentEditor.layout();
       } catch (_e) {}
     }
+    syncBrowserTabVisibility(tab);
     // A path:NN link opened in the background rendered its editor at
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
@@ -2234,7 +2237,101 @@
     closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
     setChatSurfaceVisible(true);
+    syncBrowserTabVisibility(null);
   }
+
+  // browser-tab-coverage:start
+  // ---- The daemon machine's browser, streamed as a tab ---------------
+  //
+  // kiss/server/browser_tab.py announces every page of the browser it
+  // runs (on the machine hosting the daemon, reachable over ssh alone)
+  // as openBrowserTab on EVERY surface, streams browserFrame JPEGs to
+  // the surfaces showing it and closes it everywhere with
+  // closeBrowserTab.  The view itself lives in browserTab.js; this
+  // block is the tab plumbing.  Only the surface showing the tab
+  // receives frames: showContentTab / hideContentArea report the
+  // visible size through browserViewport.
+
+  function syncBrowserTabVisibility(shownTab) {
+    tabs.forEach(t => {
+      if (t.browserView) t.browserView.setVisible(t === shownTab);
+    });
+  }
+
+  function browserTabTitle(ev) {
+    const title = (ev.title || '').trim();
+    if (title) return title.substring(0, 40);
+    const url = (ev.url || '').trim();
+    if (!url || url === 'about:blank') return 'Browser';
+    return url.replace(/^https?:\/\//, '').substring(0, 40);
+  }
+
+  function openBrowserTab(ev) {
+    if (!ev.tab_id || !window.BrowserTabView) return;
+    let tab = getTab(ev.tab_id);
+    if (tab && tab.browserView) {
+      // Re-announced (a `ready` after a reconnect): this webview kept
+      // the tab, but the daemon forgot which connection was watching
+      // it, so a shown tab asks for its frames again.
+      tab.browserView.resubscribe();
+    }
+    if (!tab) {
+      tab = makeTab(browserTabTitle(ev));
+      tab.id = ev.tab_id;
+      tab.isContentTab = true;
+      tab.isBrowserTab = true;
+      tab.contentPath = ev.url || '';
+      tabs.push(tab);
+      const area = ensureContentArea();
+      const holder = document.createElement('div');
+      holder.className = 'content-tab-view browser-tab-view';
+      holder.dataset.tabId = tab.id;
+      holder.style.display = 'none';
+      area.appendChild(holder);
+      tab.contentViewEl = holder;
+      tab.browserView = window.BrowserTabView.create(tab.id, {
+        send: msg => api.send(msg),
+      });
+      holder.appendChild(tab.browserView.el);
+    }
+    tab.browserView.setBadge(ev.browser, ev.isDefaultBrowser, ev.note);
+    // The announcement carries the page's current address, title and
+    // history state (a re-announce after a reconnect may well describe
+    // a page that moved on while this surface was away).
+    if (ev.url) applyBrowserState(ev);
+    // The surface that asked for the tab switches to it.  A popup the
+    // page opened itself only follows on a surface that is showing a
+    // browser tab: it never yanks a surface out of its chat.
+    const active = getTab(activeTabId);
+    if (ev.focus && (!ev.popup || (active && active.isBrowserTab))) {
+      switchToTab(tab.id);
+    }
+    renderTabBar();
+  }
+
+  // The daemon's snapshot of live browser pages, sent on every `ready`:
+  // tabs it no longer lists were closed while this surface was away
+  // (or the daemon restarted), so they close here too.
+  function reconcileBrowserTabs(ev) {
+    const live = new Set((ev.tabs || []).map(t => t.tab_id));
+    tabs
+      .filter(t => t.isBrowserTab && !live.has(t.id))
+      .forEach(t => closeTab(t.id, false, true));
+    (ev.tabs || []).forEach(openBrowserTab);
+  }
+
+  function applyBrowserState(ev) {
+    const tab = getTab(ev.tab_id);
+    if (!tab || !tab.browserView) return;
+    tab.browserView.state(ev);
+    tab.contentPath = ev.url || '';
+    const title = browserTabTitle(ev);
+    if (title !== tab.title) {
+      tab.title = title;
+      renderTabBar();
+    }
+  }
+  // browser-tab-coverage:end
 
   function activateAdjacentTab(newTab) {
     if (newTab.isContentTab) {
@@ -2290,6 +2387,10 @@
         tab.contentEditor.dispose();
       } catch (_e) {}
       tab.contentEditor = null;
+    }
+    if (tab.browserView) {
+      tab.browserView.dispose();
+      tab.browserView = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
@@ -2361,7 +2462,7 @@
    * `discardEdits` skips the question (the user already chose "Don't
    * save", or the save that precedes the close just succeeded).
    */
-  function closeContentTab(tabId, discardEdits) {
+  function closeContentTab(tabId, discardEdits, fromServer) {
     const idx = tabs.findIndex(t => {
       return t.id === tabId;
     });
@@ -2371,6 +2472,9 @@
       askToSaveBeforeClose(tab);
       return;
     }
+    // A browser tab closed by hand closes the page on the daemon's
+    // machine, which then drops the tab from every other surface too.
+    if (tab.isBrowserTab && !fromServer) api.browserClose({tab_id: tabId});
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
@@ -14821,6 +14925,37 @@
       }
     }
     switch (t) {
+      // browser-tab-coverage:start
+      case 'openBrowserTab':
+        openBrowserTab(ev);
+        break;
+      case 'browserTabs':
+        reconcileBrowserTabs(ev);
+        break;
+      case 'browserFrame': {
+        const bt = getTab(ev.tab_id);
+        if (bt && bt.browserView) bt.browserView.frame(ev);
+        break;
+      }
+      case 'browserState':
+        applyBrowserState(ev);
+        break;
+      case 'closeBrowserTab':
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, false, true);
+        break;
+      case 'browserError': {
+        const bt = getTab(ev.tab_id);
+        if (bt && bt.browserView) bt.browserView.error(ev.text || '');
+        else {
+          showNotification({
+            id: 'browser-open-error',
+            severity: 'error',
+            message: ev.text || 'The browser could not be opened.',
+          });
+        }
+        break;
+      }
+      // browser-tab-coverage:end
       case 'daemonStatus':
         // `reconnecting` is set by the remote webapp's shim when the
         // socket dropped after this page was authenticated: the app
@@ -18627,6 +18762,12 @@
     function closeMoreMenu() {
       if (moreMenu) moreMenu.classList.remove('open');
       if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+    }
+    const browserBtn = document.getElementById('browser-btn');
+    if (browserBtn) {
+      browserBtn.addEventListener('click', () => {
+        api.browserOpen({url: ''});
+      });
     }
     if (moreBtn && moreMenu) {
       moreBtn.addEventListener('click', e => {

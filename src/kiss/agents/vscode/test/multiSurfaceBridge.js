@@ -26,12 +26,18 @@
 //   in : {op:'closeTab', name, tabId}          -> out {op:'tabClosed', name}
 //   in : {op:'events', name}                   -> out {op:'events', name, events}
 //   in : {op:'activateTab', name, tabId}       -> out {op:'tabActivated', name, found}
+//   in : {op:'post', name, msg}                -> out {op:'posted', name}
 //   in : {op:'click', name, selector}          -> out {op:'clicked', name, found}
 //   in : {op:'hold', name}                     -> out {op:'held', name}
 //   in : {op:'release', name}                  -> out {op:'released', name, delivered}
 //   in : {op:'ask', name}                      -> out {op:'ask', name, activeTabId,
 //                                                     answering, question, attention}
 //   in : {op:'answer', name, text}             -> out {op:'answered', name, answering}
+//   in : {op:'browser', name, tabId}           -> out {op:'browser', name, info}
+//   in : {op:'browserKeys', name, keys}        -> out {op:'browserKeys', name, found}
+//   in : {op:'browserClick', name, x, y}       -> out {op:'browserClick', name, found}
+//   in : {op:'disconnect', name}               -> out {op:'disconnected', name}
+//   in : {op:'reconnect', name}                -> out {op:'reconnected', name}
 //   in : {op:'quit'}
 //
 // `ask` reports the ask_user_question state as the user sees it: whether
@@ -67,8 +73,17 @@ const DETAILED_EVENTS = new Set([
   'closeSubagentTab',
   'askUser',
   'askUserDone',
+  'openBrowserTab',
+  'browserTabs',
+  'browserState',
+  'closeBrowserTab',
+  'browserError',
   'error',
 ]);
+
+// jsdom lays nothing out, so a streamed browser surface would report a
+// 0x0 viewport and never ask for frames: give .browser-screen a size.
+const BROWSER_SCREEN = {width: 640, height: 480};
 
 function out(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
@@ -95,6 +110,20 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
+  Object.defineProperty(win.HTMLElement.prototype, 'clientWidth', {
+    get() {
+      return this.classList.contains('browser-screen')
+        ? BROWSER_SCREEN.width
+        : 0;
+    },
+  });
+  Object.defineProperty(win.HTMLElement.prototype, 'clientHeight', {
+    get() {
+      return this.classList.contains('browser-screen')
+        ? BROWSER_SCREEN.height
+        : 0;
+    },
+  });
 
   let state = initialState || null;
   win.acquireVsCodeApi = function () {
@@ -108,6 +137,7 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
   };
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(fs.readFileSync(path.join(MEDIA, 'browserTab.js'), 'utf8'));
   // The sourceURL names the script in V8 coverage output
   // (NODE_V8_COVERAGE) so a driver can measure main.js branches.
   win.eval(
@@ -117,24 +147,26 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
   return {win, getState: () => state};
 }
 
-function openSurface(cmd) {
-  const errors = [];
-  const events = [];
+// One daemon connection for `surface`: the webview's posts go out as
+// JSON lines, the daemon's event lines come back as `message` events.
+function connectSocket(surface, onConnect) {
   const socket = net.createConnection(SOCK_PATH);
   const pending = [];
   let connected = false;
   socket.on('connect', () => {
     connected = true;
     pending.splice(0).forEach(line => socket.write(line));
-    out({op: 'opened', name: cmd.name});
+    onConnect();
   });
-  function post(msg) {
+  surface.socket = socket;
+  surface.post = msg => {
     const line = JSON.stringify(msg) + '\n';
     if (connected) socket.write(line);
     else pending.push(line);
-  }
-  const view = makeWebview(cmd.bodyAttrs, cmd.state, post, errors);
-  const surface = {view, socket, errors, events, held: null};
+  };
+  // What the webview posted before this socket existed (main.js sends
+  // `ready` while it is still being evaluated).
+  surface.queued.splice(0).forEach(surface.post);
   const rl = readline.createInterface({input: socket});
   rl.on('line', line => {
     if (!line.trim()) return;
@@ -149,11 +181,11 @@ function openSurface(cmd) {
     if (surface.held) surface.held.push(ev);
     else deliver(surface, ev);
   });
-  socket.on('error', e => errors.push('socket: ' + String(e)));
-  surfaces.set(cmd.name, surface);
+  socket.on('error', e => surface.errors.push('socket: ' + String(e)));
 }
 
 function deliver(surface, ev) {
+  if (ev.type === 'browserFrame') surface.frameCount += 1;
   // Tab-lifecycle events are kept whole (the driver asserts on their
   // fields); everything else only by type and routing keys.
   surface.events.push(
@@ -161,6 +193,10 @@ function deliver(surface, ev) {
       ? ev
       : {type: ev.type, tabId: ev.tabId, taskId: ev.taskId},
   );
+  dispatchToWebview(surface, ev);
+}
+
+function dispatchToWebview(surface, ev) {
   try {
     surface.view.win.dispatchEvent(
       new surface.view.win.MessageEvent('message', {data: ev}),
@@ -170,6 +206,91 @@ function deliver(surface, ev) {
       'dispatch ' + ev.type + ': ' + String((e && e.stack) || e),
     );
   }
+}
+
+function openSurface(cmd) {
+  const surface = {
+    view: null,
+    socket: null,
+    queued: [],
+    post: msg => surface.queued.push(msg),
+    errors: [],
+    events: [],
+    held: null,
+    frameCount: 0,
+    frames: () => surface.frameCount,
+  };
+  surface.view = makeWebview(
+    cmd.bodyAttrs,
+    cmd.state,
+    msg => surface.post(msg),
+    surface.errors,
+  );
+  surfaces.set(cmd.name, surface);
+  connectSocket(surface, () => out({op: 'opened', name: cmd.name}));
+}
+
+// The remote webapp's shim keeps the page up while its WebSocket is
+// down (daemonStatus connected:false, reconnecting:true), then
+// re-authenticates a fresh socket and tells the app it is back, upon
+// which main.js re-sends `ready`.  Mirror the two halves so a driver
+// can act on other surfaces while this one is away.
+function disconnectSurface(cmd, surface) {
+  surface.socket.destroy();
+  surface.post = () => {}; // dropped, as on a dead WebSocket
+  dispatchToWebview(surface, {
+    type: 'daemonStatus',
+    connected: false,
+    reconnecting: true,
+  });
+  out({op: 'disconnected', name: cmd.name});
+}
+
+function reconnectSurface(cmd, surface) {
+  connectSocket(surface, () => {
+    dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
+    out({op: 'reconnected', name: cmd.name});
+  });
+}
+
+// The streamed browser tab `tabId` as the webview shows it: tab-strip
+// entry, address bar, badge, whether a frame has been painted, and how
+// many frames this surface received in total.
+function describeBrowser(surface, tabId) {
+  const {win} = surface.view;
+  const strip = win.document.querySelector(
+    `#tab-list [data-tab-id="${tabId}"]`,
+  );
+  const holder = win.document.querySelector(
+    `#content-tab-area .browser-tab-view[data-tab-id="${tabId}"]`,
+  );
+  const img = holder && holder.querySelector('.browser-frame');
+  return {
+    inTabBar: !!strip,
+    isBrowserTab: !!(
+      strip &&
+      strip.querySelector('.content-tab-icon') &&
+      strip.querySelector('.content-tab-icon').textContent === '\uD83C\uDF10'
+    ),
+    title: strip
+      ? (strip.querySelector('.chat-tab-label') || {}).textContent || ''
+      : '',
+    url: holder ? holder.querySelector('.browser-url').value : null,
+    badge: holder ? holder.querySelector('.browser-badge').textContent : null,
+    hasFrame: !!(img && img.src && img.src.indexOf('data:image/jpeg') === 0),
+    visible: !!(holder && holder.style.display !== 'none'),
+    frames: surface.frames(),
+  };
+}
+
+function shownBrowserScreen(surface) {
+  const holders = Array.from(
+    surface.view.win.document.querySelectorAll(
+      '#content-tab-area .browser-tab-view',
+    ),
+  );
+  const shown = holders.find(h => h.style.display !== 'none');
+  return shown ? shown.querySelector('.browser-screen') : null;
 }
 
 // The rendered tab bar is the user-visible truth: one entry per
@@ -259,6 +380,16 @@ function handle(cmd) {
       out({op: 'tabActivated', name: cmd.name, found: !!el});
       break;
     }
+    case 'disconnect':
+      disconnectSurface(cmd, surface);
+      break;
+    case 'reconnect':
+      reconnectSurface(cmd, surface);
+      break;
+    case 'post':
+      surface.post(cmd.msg);
+      out({op: 'posted', name: cmd.name});
+      break;
     case 'click': {
       const el = doc.querySelector(cmd.selector);
       if (el) el.click();
@@ -284,6 +415,50 @@ function handle(cmd) {
       doc.getElementById('task-input').value = cmd.text;
       doc.getElementById('send-btn').click();
       out({op: 'answered', name: cmd.name, answering});
+      break;
+    }
+    case 'browser':
+      out({
+        op: 'browser',
+        name: cmd.name,
+        info: describeBrowser(surface, cmd.tabId),
+      });
+      break;
+    case 'browserKeys': {
+      // Type into the SHOWN browser surface the way a user would: one
+      // keydown/keyup pair per key (single characters, 'Enter', ...).
+      const screen = shownBrowserScreen(surface);
+      if (screen) {
+        const {win} = surface.view;
+        cmd.keys.forEach(k => {
+          const init = {
+            key: k,
+            code: k.length === 1 ? 'Key' + k.toUpperCase() : k,
+            keyCode: k === 'Enter' ? 13 : k.toUpperCase().charCodeAt(0),
+            bubbles: true,
+          };
+          screen.dispatchEvent(new win.KeyboardEvent('keydown', init));
+          screen.dispatchEvent(new win.KeyboardEvent('keyup', init));
+        });
+      }
+      out({op: 'browserKeys', name: cmd.name, found: !!screen});
+      break;
+    }
+    case 'browserClick': {
+      // A left click at page coordinates (x, y): jsdom has no layout, so
+      // browserTab.js maps client coordinates 1:1 onto the page.
+      const screen = shownBrowserScreen(surface);
+      if (screen) {
+        const {win} = surface.view;
+        const init = {clientX: cmd.x, clientY: cmd.y, button: 0, bubbles: true};
+        screen.dispatchEvent(
+          new win.MouseEvent('pointerdown', {...init, buttons: 1}),
+        );
+        screen.dispatchEvent(
+          new win.MouseEvent('pointerup', {...init, buttons: 0}),
+        );
+      }
+      out({op: 'browserClick', name: cmd.name, found: !!screen});
       break;
     }
     default:

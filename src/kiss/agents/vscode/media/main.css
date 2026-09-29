@@ -4868,6 +4868,124 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   flex-direction: column;
 }
 
+/* The daemon machine's browser streamed as a tab (browserTab.js): an
+   address bar over the frame surface.  The surface is the element the
+   daemon sizes the page to, so it must fill the tab exactly. */
+#content-tab-area .browser-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+#content-tab-area .browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+}
+
+#content-tab-area .browser-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+#content-tab-area .browser-nav-btn:hover:not(:disabled) {
+  background: var(--panel-tint);
+}
+
+#content-tab-area .browser-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+#content-tab-area .browser-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-md);
+}
+
+#content-tab-area .browser-url:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#content-tab-area .browser-badge {
+  flex: 0 0 auto;
+  max-width: 9em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-sm);
+  opacity: 0.7;
+  cursor: help;
+}
+
+#content-tab-area .browser-error {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  color: var(--error);
+  font-size: var(--fs-md);
+  border-bottom: 1px solid var(--border);
+}
+
+#content-tab-area .browser-screen {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--paper);
+  cursor: default;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+}
+
+#content-tab-area .browser-screen:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+#content-tab-area .browser-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  pointer-events: none;
+}
+
+#content-tab-area .browser-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  opacity: 0.6;
+  font-size: var(--fs-md);
+  pointer-events: none;
+}
+
 #content-tab-area .content-html-frame {
   width: 100%;
   flex: 1 1 auto;

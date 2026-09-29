@@ -67,6 +67,7 @@ from kiss.server.autocomplete import (
     _AutocompleteMixin,
     ranked_function_calling_models,
 )
+from kiss.server.browser_tab import BrowserTabService
 from kiss.server.commands import _CommandsMixin
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.helpers import (
@@ -461,6 +462,11 @@ class VSCodeServer(
         # redirectable KISS dir so tests point it at a scratch home.
         self.tab_registry = TabRegistry(
             Path(_persistence._KISS_DIR) / "tabs.json",
+        )
+        # The machine's browser streamed as a tab on every surface; idle
+        # (no thread, no browser) until the first ``browserOpen``.
+        self.browser_tabs = BrowserTabService(
+            self.printer, Path(_persistence._KISS_DIR) / "browser-tab-profile",
         )
         # The printer's local-UDS talk bookkeeping only knows which
         # connection addressed which tab and whether a chat webview is

@@ -49,6 +49,7 @@ from kiss.server.task_runner import (
 )
 
 if TYPE_CHECKING:
+    from kiss.server.browser_tab import BrowserTabService
     from kiss.server.file_index import FileIndexRegistry
     from kiss.server.json_printer import JsonPrinter
     from kiss.server.tab_registry import TabRegistry
@@ -347,6 +348,7 @@ class _CommandsMixin:
         _commit_msg_tabs: set[str]
         _autocommit_tabs: set[str]
         tab_registry: TabRegistry
+        browser_tabs: BrowserTabService
 
         def _broadcast_tabs_state(self) -> None: ...
 
@@ -1739,6 +1741,42 @@ class _CommandsMixin:
         if tab_id:
             self._close_tab(tab_id)
 
+    # -- Browser tab: the daemon machine's browser streamed to every surface.
+    # Browser page ids travel as ``tab_id`` (never ``tabId``, which names
+    # chat tabs and is canonicalised by the API layer).
+
+    def _cmd_browser_open(self, cmd: dict[str, Any]) -> None:
+        """Open a page in the machine's browser and announce it on every surface."""
+        self.browser_tabs.open(str(cmd.get("url") or ""), cmd.get("connId", ""))
+
+    def _cmd_browser_close(self, cmd: dict[str, Any]) -> None:
+        """Close a browser page; every surface drops its tab."""
+        self.browser_tabs.close(str(cmd.get("tab_id") or ""))
+
+    def _cmd_browser_navigate(self, cmd: dict[str, Any]) -> None:
+        """Address-bar action on a browser page: ``go``, ``back``, ``forward``, ``reload``."""
+        self.browser_tabs.navigate(
+            str(cmd.get("tab_id") or ""),
+            str(cmd.get("action") or "go"),
+            str(cmd.get("url") or ""),
+        )
+
+    def _cmd_browser_input(self, cmd: dict[str, Any]) -> None:
+        """Replay a client's mouse, wheel, key or pasted-text event on a browser page."""
+        event = cmd.get("event")
+        if isinstance(event, dict):
+            self.browser_tabs.input(str(cmd.get("tab_id") or ""), event)
+
+    def _cmd_browser_viewport(self, cmd: dict[str, Any]) -> None:
+        """A client shows (or hid) a browser tab at the given CSS-pixel size."""
+        self.browser_tabs.viewport(
+            str(cmd.get("tab_id") or ""),
+            cmd.get("connId", ""),
+            _as_int(cmd.get("width")),
+            _as_int(cmd.get("height")),
+            bool(cmd.get("visible", True)),
+        )
+
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
         self._new_chat(cmd.get("tabId", ""))
@@ -2507,4 +2545,16 @@ class _CommandsMixin:
         "addTrick": _cmd_add_trick,
         "deleteTrick": _cmd_delete_trick,
         "editTrick": _cmd_edit_trick,
+        "browserOpen": _cmd_browser_open,
+        "browserClose": _cmd_browser_close,
+        "browserNavigate": _cmd_browser_navigate,
+        "browserInput": _cmd_browser_input,
+        "browserViewport": _cmd_browser_viewport,
     }
+
+
+def _as_int(value: object) -> int:
+    """Coerce an untrusted JSON number to a non-negative ``int`` (``0`` otherwise)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))
