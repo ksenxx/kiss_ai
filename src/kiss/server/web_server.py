@@ -3847,6 +3847,7 @@ def _build_html() -> str:
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
+        "BROWSER_TAB_SRC": _media_url("browserTab.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
@@ -5824,6 +5825,7 @@ class RemoteAccessServer:
             logger.debug("WS handler error", exc_info=True)
         finally:
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
+            self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
 
@@ -5902,6 +5904,7 @@ class RemoteAccessServer:
                 local_tabs if isinstance(local_tabs, set) else set(),
             )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
+            self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
             try:
@@ -8426,6 +8429,11 @@ class RemoteAccessServer:
             )
         except Exception:
             logger.debug("ready tasks_updated nudge failed", exc_info=True)
+        # A browser tab is open on every surface while its page lives
+        # and on none once it closes: the snapshot lets this
+        # (re)connecting client add the live ones and drop any it kept
+        # from before a disconnect or a daemon restart.
+        self._broadcast_to_conn(self._vscode_server.browser_tabs.snapshot_event(), conn_id)
         await self._send_welcome_info()
         try:
             await self._endpoint_send(
@@ -10676,6 +10684,9 @@ class RemoteAccessServer:
             # connections are gone (or going), and a leaked child
             # would keep the microphone open past shutdown.
             await self._voice_wake.stop_all()
+            # The streamed browser (if one was opened) is a child of this
+            # daemon: close it so no orphan browser survives shutdown.
+            await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is
             # torn down, or the repository keeps being rewritten after

@@ -132,7 +132,9 @@ class TestAgentEmitsLlmCall:
         agent = _agent(_ScriptedModel((10, 5, 0, 0, 0, 7, 3)), None)
         agent._execute_step()
         assert agent.last_call_usage is not None
-        assert agent.last_call_usage["input_tokens"] == 10
+        # Per-call counts include the audio subsets (billed separately).
+        assert agent.last_call_usage["input_tokens"] == 17
+        assert agent.last_call_usage["output_tokens"] == 8
         assert agent.budget_used == pytest.approx(
             calculate_cost(
                 "gpt-4o-mini", 10, 5, 0, 0, 0, num_audio_input_tokens=7, num_audio_output_tokens=3

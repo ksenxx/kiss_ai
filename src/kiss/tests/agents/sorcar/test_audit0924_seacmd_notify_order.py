@@ -32,10 +32,15 @@ from kiss.core.config import kiss_home
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
-    """Drop the module's in-memory state before and after each test."""
+    """Drop the module's in-memory state before and after each test.
+
+    Also removes the ``SEAS.md`` written into the session-wide
+    ``$KISS_HOME`` so it cannot shadow bundled commands for later tests.
+    """
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 def _touch_sea(folder: Path, name: str) -> Path:

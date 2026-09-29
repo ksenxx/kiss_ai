@@ -302,16 +302,16 @@ function testBgEventTabSwapKeepsRestoredStatusRow() {
     assert.strictEqual(subRow.budget, 'Cost: $5.55');
     assert.strictEqual(subRow.steps, 'Steps: 5');
 
-    // The hidden parent finishes its fan-out and calls `summary`: the
-    // summary panel adopts the run_parallel panel, collapses it, and
-    // the collapse closes tab S — the tab on screen — mid-event.
+    // The sub-agent finishes while its tab S is on screen: the daemon's
+    // subagentDone closes S mid-event (a collapse alone no longer closes
+    // a running sub-agent's tab).
     send(win, {type: 'tool_result', content: 'sub done', tabId: tabP, ts: TS});
-    send(win, {type: 'tool_call', name: 'summary', tabId: tabP, ts: TS});
+    send(win, {type: 'subagentDone', tab_id: tabS});
 
     assert.strictEqual(
       win._testApi.getActiveTabId(),
       tabP,
-      'the collapsed fan-out must have closed sub-agent tab S and put ' +
+      'subagentDone must have closed sub-agent tab S and put ' +
         'parent tab P on screen (scenario precondition)',
     );
     const after = statusRow(win);

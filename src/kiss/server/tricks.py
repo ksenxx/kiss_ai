@@ -237,7 +237,7 @@ def delete_my_injection_trick(text: str) -> str | None:
         # one newline keeps add/delete cycles from growing the file.
         rest = "".join(kept)
         rest = rest.rstrip("\n") + "\n" if rest.strip() else ""
-        user_path.write_text(rest, encoding="utf-8")
+        user_path.write_text(rest, encoding="utf-8", newline="\n")  # LF on every platform
     return None
 
 
@@ -325,7 +325,7 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
         trailing = "\n" * max(1, old[len(old.rstrip("\r\n")) :].count("\n"))
         escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", new_body)
         sections[index] = "## Trick\n\n" + escaped + trailing
-        user_path.write_text(preamble + "".join(sections), encoding="utf-8")
+        user_path.write_text(preamble + "".join(sections), encoding="utf-8", newline="\n")
     return None
 
 

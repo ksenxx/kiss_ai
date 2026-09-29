@@ -47,6 +47,7 @@ Module-level getters (``append_to_system_prompt()``, ``tools()``,
 from __future__ import annotations
 
 import glob
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -300,7 +301,7 @@ def reviewer_task(
     Returns:
         The task text to pass verbatim to ``run_agent`` on the ``/review_paper`` SEA.
     """
-    round_dir = str(Path(paper_path).parent)
+    round_dir = os.path.dirname(paper_path)  # keeps the caller's separators, unlike Path
     choices = " | ".join(VERDICTS)
     return f"""\
 You ARE the paper review agent. Review the paper at {paper_path} under the instructions \

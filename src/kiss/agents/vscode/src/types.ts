@@ -362,6 +362,18 @@ export type FromWebviewMessage =
   | {type: 'serverReset'}
   // tips.js "Don't show tips again" checkbox: optOut false re-enables the tips.
   | {type: 'tipsOptOut'; optOut?: boolean}
+  // The daemon machine's browser streamed as a tab (browserTab.js).
+  | {type: 'browserOpen'; url?: string}
+  | {type: 'browserClose'; tab_id: string}
+  | {type: 'browserNavigate'; tab_id: string; action: string; url?: string}
+  | {type: 'browserInput'; tab_id: string; event: Record<string, unknown>}
+  | {
+      type: 'browserViewport';
+      tab_id: string;
+      width: number;
+      height: number;
+      visible: boolean;
+    }
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   // In-page (browser-mic) capture fallback: the webview recorded the

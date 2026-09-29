@@ -162,7 +162,7 @@ def test_listing_and_run_log_show_pacific_times() -> None:
     listed = yaml.safe_load(cron_job("list"))
     assert listed["jobs"] == [created]
     cron_job("run_now", job_id=created["id"])
-    log = (cron_agent._output_dir() / f"{created['id']}.md").read_text()
+    log = (cron_agent._output_dir() / f"{created['id']}.md").read_text(encoding="utf-8")
     assert log.startswith("## ") and log.split(" — ")[0].endswith((" PDT", " PST"))
 
 
@@ -409,7 +409,7 @@ def test_tick_runs_due_command_job(tmp_path: Path) -> None:
     assert stored["last_summary"] == "hello from cron"
     assert stored["last_run_at"] == now
     assert stored["next_run_at"] == now + 60
-    log = (tmp_path / "cron" / "output" / f"{job['id']}.md").read_text()
+    log = (tmp_path / "cron" / "output" / f"{job['id']}.md").read_text(encoding="utf-8")
     assert "hello from cron" in log and "greeter" in log
 
 
@@ -434,7 +434,7 @@ def test_tick_one_shot_disables_job(tmp_path: Path) -> None:
     assert stored["next_run_at"] is None
     assert "one shot ran" in (
         tmp_path / "cron" / "output" / f"{job['id']}.md"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
 
 def test_silent_command_delivers_nothing(tmp_path: Path) -> None:
@@ -459,7 +459,7 @@ def test_failing_command_reports_error(tmp_path: Path) -> None:
     assert "exited 3" in stored["last_summary"]
     assert "boom" in stored["last_summary"]
     # Errors are still delivered (locally) so the user learns about them.
-    log = (tmp_path / "cron" / "output" / f"{job['id']}.md").read_text()
+    log = (tmp_path / "cron" / "output" / f"{job['id']}.md").read_text(encoding="utf-8")
     assert "exited 3" in log
 
 

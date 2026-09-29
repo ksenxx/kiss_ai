@@ -84,9 +84,12 @@ def make_google_auth_tools(
         if agent._is_authenticated():
             return json.dumps({"ok": True, "message": f"{label} is connected."})
         missing_key = "" if composio_api_key() else (
-            " No Composio API key is configured: ask the user for one "
-            "(https://dashboard.composio.dev, Settings > API Keys) and pass it "
-            f"as authenticate_{service}(api_key='...')."
+            " No Composio API key is configured: ask the user for a project "
+            "API key (ak_...) from "
+            "https://dashboard.composio.dev/~/project/settings/api-keys "
+            "(Settings → Project Settings → API Keys) and pass it "
+            f"as authenticate_{service}(api_key='...'). Note: old consumer "
+            "keys (ck_...) no longer work."
         )
         return (
             f"Not authenticated with {label}. Call authenticate_{service}() to get "
@@ -128,8 +131,9 @@ def make_google_auth_tools(
         "The user opens the returned link in their own browser, signs in to\n"
         f"Google and clicks Allow; then call finish_{service}_auth().\n\n"
         "Args:\n"
-        "    api_key: Composio API key to save first. Optional; only needed\n"
-        "        when none is configured.\n\n"
+        "    api_key: Composio project API key (ak_...) to save first, shared\n"
+        "        by all Google agents. Optional; only needed when none is\n"
+        "        configured.\n\n"
         "Returns:\n"
         "    JSON with status 'consent_required', the verification_uri and\n"
         "    instructions, or {\"ok\": false, \"error\": ...}."

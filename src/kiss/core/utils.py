@@ -5,11 +5,13 @@
 
 """Utility functions for the KISS core module."""
 
+import functools
 import html as html_module
 import logging
 import os
 import posixpath
 import re
+import shutil
 import stat
 import string
 import tempfile
@@ -236,6 +238,73 @@ def read_bytes_waiting_for_writer(path: Path) -> bytes:
             if not _sharing_violation_may_clear(path, deadline):
                 raise
             time.sleep(_SHARING_RETRY_INTERVAL)
+
+
+def read_text_waiting_for_writer(path: Path, errors: str = "strict") -> str:
+    """``Path.read_text`` (UTF-8, universal newlines) that waits out an in-flight replace.
+
+    See :func:`read_bytes_waiting_for_writer` for the Windows race this
+    covers; the result matches ``path.read_text(encoding="utf-8")``,
+    including ``\\r\\n`` and ``\\r`` translated to ``\\n``.
+
+    Args:
+        path: The file to read.
+        errors: The decoding error handler.
+
+    Returns:
+        The file's text.
+    """
+    text = read_bytes_waiting_for_writer(path).decode("utf-8", errors=errors)
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _make_writable_and_retry(
+    root: str, attempted: set[str], func: Any, path: str, exc: BaseException
+) -> None:
+    """``shutil.rmtree`` ``onexc`` hook: grant the missing write bit and retry once.
+
+    Windows refuses to unlink a read-only file (the bit is on the file);
+    POSIX refuses to unlink or rmdir inside a directory without the write
+    bit (the bit is on the parent), so both get ``u+rwx`` -- the parent
+    only below *root*, so nothing outside the tree changes.  An unlink or
+    rmdir is then retried; a directory that could not be opened or listed
+    is removed as a tree of its own.  Each path gets one retry
+    (*attempted*); a file that is already gone is fine (another remover
+    got there first); any other failure raises the original *exc*.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return
+    if path in attempted:
+        raise exc
+    attempted.add(path)
+    try:
+        if path != root:
+            os.chmod(os.path.dirname(path), stat.S_IRWXU)
+        os.chmod(path, stat.S_IRWXU)
+        if func in (os.unlink, os.rmdir):
+            func(path)
+        else:
+            shutil.rmtree(path, onexc=functools.partial(_make_writable_and_retry, root, attempted))
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise exc from None
+
+
+def rmtree_force(path: str | Path) -> None:
+    """Remove the directory tree *path*, including read-only parts; absent is fine.
+
+    ``shutil.rmtree`` stops at the first read-only file on Windows, and
+    every ``.git/objects`` file git writes is read-only -- so a git clone
+    or checkout cannot be deleted with plain ``rmtree`` there; on POSIX
+    it stops at a directory without the write bit.  Failures other than
+    missing write bits propagate.
+
+    Args:
+        path: The directory to remove.
+    """
+    root = str(path)
+    shutil.rmtree(root, onexc=functools.partial(_make_writable_and_retry, root, set()))
 
 
 def _open_staging_file(target: Path, create_mode: int) -> tuple[int, str]:

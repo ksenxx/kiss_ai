@@ -26,7 +26,8 @@ LLM/coding-assistant indexing") and verified live:
   `src/kiss/INJECTIONS.md`, and `src/kiss/TIPS.md`; `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
   bundled `/merge`, `/sh`, `/task_update`, `/write_paper`, `/review_paper`,
-  `/git_extract_knowledge`, `/remember`, and `/forget` commands).
+  `/revise_and_review_paper`, `/git_extract_knowledge`, `/remember`, and
+  `/forget` commands).
 - `index.html.md` — plain-Markdown twin of the homepage.
 - `privacy.html` — standalone privacy policy written for Google OAuth
   verification of the Gmail and Google Workspace connectors. It names the
@@ -98,14 +99,16 @@ per entry from:
   `Task` badge), and
 - `./src/kiss/INJECTIONS.md` — **8 promptlet tricks** (rendered with a
   `Trick` badge). The deck is static, written from an earlier revision of
-  the file, and is not regenerated when the file changes. Four panels
-  still match a current trick verbatim (invariant reproduction, Claude
-  Fable 5 + GPT-5.6 Sol review, Kimi K3 + GPT-5.6 Sol review,
-  self-improving routing); "Run a task from an instructions file" and
-  "Resolve a merge conflict" come from tricks since removed, and the
-  authentication and GPT-6 Astra panels carry older wording than the
-  file. The file's `git pull`/merge/push trick and its `claude-fable-5-1`
-  + `gpt-6-sol` pair-programming variant have no panel.
+  the file, and is not regenerated when the file changes; the file now
+  holds six tricks. Two panels still match a current trick verbatim
+  (invariant reproduction, Claude Fable 5 + GPT-5.6 Sol review); "Run a
+  task from an instructions file", "Resolve a merge conflict", "Kimi K3 +
+  GPT-5.6 Sol review", and "Self-improving model routing" come from tricks
+  since removed or rewritten (the file's Kimi K3 trick now reviews with
+  `gpt-6-astra`), and the authentication and GPT-6 Astra panels carry
+  older wording than the file. The file's `git pull`/merge/push trick and
+  its `claude-fable-5-1` + `gpt-6-astra` pair-programming variant have no
+  panel.
 
 Each panel has:
 

@@ -175,3 +175,32 @@ class TestResolveParentTabIdForSub:
             sub_tab_id="task-9__sub_0",
         )
         assert out == "parent-tab"
+
+    def test_live_sub_skips_finished_ancestors(self) -> None:
+        """A running sub-agent whose parent (a sub-agent itself) already
+        finished attaches to the nearest LIVE ancestor: a completion
+        helper announced after its parent's tab closed must still get a
+        tab under the surviving grandparent."""
+        server = VSCodeServer()
+        _register("t-root", "root-tab", chat_id="c6")
+        st = _register("t-helper", "root-tab__sub_t-mid__sub_t-helper", is_subagent=True)
+        st.is_task_active = True
+        # "t-mid" has no live state: it finished.
+        out = server._resolve_parent_tab_id_for_sub(
+            parent_task_id="t-mid", chat_id="c6",
+            sub_tab_id="root-tab__sub_t-mid__sub_t-helper",
+            sub_task_id="t-helper",
+        )
+        assert out == "root-tab"
+
+    def test_finished_sub_keeps_finished_parent(self) -> None:
+        """Finished history keeps its real parent (also finished) so a
+        hand-close of that parent's reopened tab still cascades."""
+        server = VSCodeServer()
+        _register("t-root", "root-tab", chat_id="c7")
+        out = server._resolve_parent_tab_id_for_sub(
+            parent_task_id="t-mid", chat_id="c7",
+            sub_tab_id="root-tab__sub_t-mid__sub_t-leaf",
+            sub_task_id="t-leaf",
+        )
+        assert out == "root-tab__sub_t-mid"

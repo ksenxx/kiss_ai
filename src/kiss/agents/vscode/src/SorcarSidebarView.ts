@@ -402,6 +402,15 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // `voiceSpeech` that the client-listener relay above passes straight
   // back to the webview.
   voiceTranscribe: ['audio', 'wakePrefixed', 'wakeSamples'],
+  // The daemon machine's browser streamed as a tab (browserTab.js):
+  // opening a page, closing it, address-bar actions, replayed input and
+  // the size of the surface showing it.  `tab_id` is the browser page,
+  // never a chat tab.
+  browserOpen: ['url'],
+  browserClose: ['tab_id'],
+  browserNavigate: ['tab_id', 'action', 'url'],
+  browserInput: ['tab_id', 'event'],
+  browserViewport: ['tab_id', 'width', 'height', 'visible'],
 };
 
 /**
