@@ -62,33 +62,14 @@ paper that reads as if a human wrote it.
 ## The task text
 
 The task supplies the venue, the output path (`<dir>/paper.tex`), the topic, the sources
-of truth (code, raw results, notes, development history), the page limit (counted up to
-the references) and the style file, the anonymity mode (double-blind: anonymous authors,
-repository link withheld, our own prior work cited in the third person; or a single-author
-preprint with the acknowledgments copied from the house-style paper the task names), the
-house style to copy (existing papers in the repository), the cutoff date for recent related
-work, the writer and reviewer models, and options such as a section on how the artifact
-was developed. If the output path or the topic is missing for a new paper, ask the user
-before writing anything. Follow the venue's submission guidelines strictly, including its
-checklist when it has one.
+of truth (code, raw results, notes, development history). If the output path or the topic 
+is missing for a new paper, ask the user before writing anything. Follow the venue's 
+submission guidelines strictly, including its checklist when it has one.
 
 A task that names an existing paper and asks for a review, a check, or a change is a
 revision round: do only what it asks, keep every rule below, and rebuild the PDF after any
 edit. A review-only task ("do not edit") reports findings with line numbers and changes
 nothing.
-
-Models: you write the paper unless the task names a writer model other than your own; in
-that case run the writing as a `run_parallel` sub-agent on that model instead of switching
-your own model, because switching resets your context. The reviewer model named in the
-task (default `{REVIEWER_MODEL}`) reviews read-only through `run_parallel(tasks,
-model_name=<reviewer>, tool_profile="review")`. Spend at most 50% of the task budget on the
-review. Use model names literally; never invent one.
-
-## Sources of truth
-
-Read the code and the raw results before writing anything. Do not write a number from
-memory. When the task names `~/.kiss/sorcar.db` or the git log as the development history,
-read them for the development section only.
 
 ## What the paper contains, in this order
 
@@ -103,9 +84,6 @@ read them for the development section only.
    the system got better over time.
 5. Evaluation: setup, baselines with exact versions and where their numbers come from,
    metrics, results tables, negative results, threats to validity.
-6. Only when the task asks for it: one section on how the artifact was developed with
-   KISS Sorcar. Quote the user's prompts verbatim, typos included, in a promptbox.
-   Improvement steps, rejected ideas and reviewer findings live only in this section.
 7. Related work: the well known work plus the closest recent work (after the cutoff date
    the task names). Read each paper before citing it. Say in a sentence or two how each
    relates to ours; do not list.
@@ -131,6 +109,8 @@ read them for the development section only.
 
 ## Citations
 
+- Do extensive internet search and thoroughly read all related work with high citations 
+  in the last 2-3 years and compare against the closely related work.
 - Verify each bib entry at a primary source (DBLP bibtex page, ACM DL, USENIX page,
   arXiv abstract page) before adding it: title, every author with the correct first
   name, venue, year, pages or DOI. Do not invent a venue for an arXiv-only paper. Do not
@@ -260,7 +240,8 @@ into the margin.
 1. Read the sources. Write `./tmp/PLAN.md`: the section outline and the list of numbers
    to compute, each with the command that computes it.
 2. Search the internet extensively for the state of the art and the related work. Visit
-   at least 20 distinct sources and log them in `./tmp/information-<paper>.md`.
+   at least 20 distinct sources and log them throughly in `./tmp/information-<paper>.md` 
+   a summary which is related to the topic of the paper.
 3. Write the paper.
 4. Build with the `build_paper` tool: zero errors, zero undefined references or
    citations, no overfull box over 10 pt. Render the pages to PNG (`pdftoppm -png -r 60`)
