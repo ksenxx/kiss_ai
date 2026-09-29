@@ -38,6 +38,7 @@ Key facts for assistants and coding agents:
 
 ## Blog
 
+- [The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html): 75.6% of Terminal-Bench 2.0 attempts solved vs Pi 70.0 / Codex CLI 65.7 / Claude Code 65.1 on the HarnessTax study's 7 models; paired +11.1 points over Pi
 - [Making LZ4's Multithreaded File Compression Scale](https://kisssorcar.github.io/blog/lz4-optimization-blog.html): 1.88–2.57× stock lz4 file-mode throughput with byte-identical output
 - [Optimizing DuckDB Against Its Official and Academic Benchmarks](https://kisssorcar.github.io/blog/duckdb-optimization-blog.html): Verified 1.152–1.237× geomean speedups on TPC-H, TPC-DS, IMDB/JOB, h2oai, ClickBench
 - [Reaching 99+ on Biomni × TusoAI-Style Biology Benchmarks with AI Discovery](https://kisssorcar.github.io/blog/tuso-evolved-blog.html): AI-discovery loop evolving one method to ≥99/100 on all tasks

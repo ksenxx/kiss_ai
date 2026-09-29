@@ -2512,6 +2512,14 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     <div class="section-body">
       <div class="papers-grid">
         <div class="inner-card paper-card" style="--i:0">
+          <div class="k">29 Sep 2026 &middot; Benchmarks</div>
+          <h3>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0</h3>
+          <p>Runs KISS Sorcar on the 30 Terminal-Bench 2.0 tasks and seven models of the HarnessTax study (Pi, Codex CLI, Claude Code). It solves 75.6% of attempts against 70.0%, 65.7% and 65.1%, with the best point estimate on all seven models; a paired rerun of Pi on Claude Fable 5 gives an 11.1-point gap (95% interval +3.3 to +20.0) at five cents more per attempt, and the 59 unsampled tasks score 79.1%.</p>
+          <div class="paper-actions">
+            <a class="paper-pill primary" href="blog/harness-tax-terminal-bench-blog.html">Read post</a>
+          </div>
+        </div>
+        <div class="inner-card paper-card" style="--i:1">
           <div class="k">10 Aug 2026 &middot; Systems</div>
           <h3>Making LZ4&rsquo;s Multithreaded File Compression Scale</h3>
           <p>Rewires the multithreaded file-mode pipeline of lz4 v1.10.0 to reach 1.88&ndash;2.57&times; the throughput of the stock CLI at level -1 (3,810 vs 1,519 MB/s at 32 threads), with compressed output byte-identical to upstream at every tested level. Includes head-to-head runs against pigz, pzstd, and zstd -T. Done in about 7&frac12; hours of agent wall-clock time.</p>
@@ -2519,7 +2527,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <a class="paper-pill primary" href="blog/lz4-optimization-blog.html">Read post</a>
           </div>
         </div>
-        <div class="inner-card paper-card" style="--i:1">
+        <div class="inner-card paper-card" style="--i:2">
           <div class="k">10 Aug 2026 &middot; Systems</div>
           <h3>Optimizing DuckDB Against Its Official and Academic Benchmarks</h3>
           <p>Makes an upstream DuckDB development tree faster on five suites &mdash; TPC-H sf1, TPC-DS sf1, IMDB/JOB, h2oai group/join, and ClickBench &mdash; with verified geometric-mean speedups of 1.152&ndash;1.237&times; per suite over the stock release build and a largest single-query win of ~1.73&times;. Three of the five suites were held out from all profile training.</p>
@@ -2527,7 +2535,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <a class="paper-pill primary" href="blog/duckdb-optimization-blog.html">Read post</a>
           </div>
         </div>
-        <div class="inner-card paper-card" style="--i:2">
+        <div class="inner-card paper-card" style="--i:3">
           <div class="k">9 Aug 2026 &middot; AI Discovery</div>
           <h3>Reaching 99+ on Biomni &times; TusoAI-Style Biology Benchmarks with AI Discovery</h3>
           <p>Reconstructs the two benchmark families from Phylo&rsquo;s Biomni &times; TusoAI blog &mdash; perturbation-response prediction (Replogle, Adamson, Norman) and pgBoost-style enhancer&ndash;gene linking &mdash; then runs an AI-discovery loop until one evolved method scores at least 99/100 on every task. Code and full protocol at github.com/ksenxx/biomni_tuso.</p>
@@ -2535,7 +2543,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <a class="paper-pill primary" href="blog/tuso-evolved-blog.html">Read post</a>
           </div>
         </div>
-        <div class="inner-card paper-card" style="--i:3">
+        <div class="inner-card paper-card" style="--i:4">
           <div class="k">8 Aug 2026 &middot; Systems</div>
           <h3>Optimizing SQLite Against Its Official and Academic Benchmarks</h3>
           <p>Speeds up the SQLite 3.54.0 development trunk on speedtest1, kvtest, TATP (OLTP), and the Star Schema Benchmark (OLAP), reaching a verified geometric-mean speedup of 1.59&times;. Full source published at github.com/ksenxx/sqlite-optimized.</p>
@@ -2543,7 +2551,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <a class="paper-pill primary" href="blog/sqlite-optimization-blog.html">Read post</a>
           </div>
         </div>
-        <div class="inner-card paper-card" style="--i:4">
+        <div class="inner-card paper-card" style="--i:5">
           <div class="k">8 Aug 2026 &middot; Audit</div>
           <h3>Verification of the sqlite-optimized Repository</h3>
           <p>An independent rebuild-and-reproduce audit of the sqlite-optimized repository: builds cleanly from scratch, no code or wiring missing, and the claimed benchmark results reproduce. A companion piece to the SQLite optimization post.</p>

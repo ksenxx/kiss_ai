@@ -52,6 +52,7 @@ Then open the KISS Sorcar sidebar in VS Code, or the remote web app URL from the
 
 ## Blog
 
+- **[The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0](blog/harness-tax-terminal-bench-blog.html)** (29 Sep 2026). KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved vs Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%; paired rerun of Pi on Claude Fable 5 gives +11.1 points [+3.3, +20.0]; 79.1% on the 59 unsampled tasks.
 - **[Making LZ4's Multithreaded File Compression Scale](blog/lz4-optimization-blog.html)** (10 Aug 2026). Rewires lz4 v1.10.0's multithreaded file-mode pipeline to 1.88–2.57× stock throughput at level -1, byte-identical output, head-to-head vs pigz/pzstd/zstd -T.
 - **[Optimizing DuckDB Against Its Official and Academic Benchmarks](blog/duckdb-optimization-blog.html)** (10 Aug 2026). Verified 1.152–1.237× geometric-mean speedups per suite on TPC-H, TPC-DS, IMDB/JOB, h2oai, and ClickBench.
 - **[Reaching 99+ on Biomni × TusoAI-Style Biology Benchmarks with AI Discovery](blog/tuso-evolved-blog.html)** (9 Aug 2026). An AI-discovery loop evolves one method scoring ≥99/100 on perturbation-response and enhancer–gene-linking benchmarks.

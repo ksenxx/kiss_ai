@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
+<meta name="description" content="KISS Sorcar run on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, the best point estimate on all seven models, and an 11-point paired gap over Pi rerun on the same model.">
+<link rel="canonical" href="https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html">
+<style>
+  :root{
+    --ink:#1e2430; --muted:#5b6572; --line:#d8dde4; --bg:#f7f8fa;
+    --card:#ffffff; --accent:#2456a6; --good:#1e7a46; --warn:#a05a1c;
+    --bad:#a03030; --code:#eef1f5;
+  }
+  *{box-sizing:border-box}
+  html{font-size:18px}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:1rem/1.6 Georgia,'Times New Roman',serif}
+  header{background:#22314a;color:#f2f4f8;padding:2.4rem 1rem 2rem}
+  header .wrap,main{max-width:920px;margin:0 auto;padding:0 1rem}
+  header h1{font-size:1.7rem;margin:0 0 .4rem;line-height:1.3}
+  header p{margin:.2rem 0;color:#c3cddd;font-size:.98rem}
+  header a{color:#9fc0ee}
+  h2{font-size:1.25rem;margin:2.4rem 0 .7rem;border-bottom:2px solid var(--line);
+     padding-bottom:.3rem}
+  h3{font-size:1.05rem;margin:1.5rem 0 .5rem}
+  table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.9rem;
+        background:var(--card)}
+  th,td{border:1px solid var(--line);padding:.42rem .55rem;text-align:left}
+  th{background:#eceff4}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  td.best{font-weight:bold;color:var(--accent)}
+  .good{color:var(--good);font-weight:bold}
+  .warn{color:var(--warn)}
+  .bad{color:var(--bad);font-weight:bold}
+  code,pre{font-family:Menlo,Consolas,monospace;font-size:.86em}
+  code{background:var(--code);padding:.08em .3em;border-radius:3px}
+  pre{background:var(--code);padding:.8rem 1rem;overflow-x:auto;
+      border:1px solid var(--line);border-radius:4px;line-height:1.45}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:6px;
+        padding:1rem 1.2rem;margin:1rem 0}
+  .tldr{border-left:5px solid var(--accent)}
+  .caveat{border-left:5px solid var(--warn)}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+         gap:.8rem;margin:1.2rem 0}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:6px;
+        padding:.8rem 1rem}
+  .stat b{display:block;font-size:1.55rem;color:var(--accent);line-height:1.2}
+  .stat span{font-size:.85rem;color:var(--muted)}
+  figure{margin:1.4rem 0;background:var(--card);border:1px solid var(--line);
+         border-radius:6px;padding:1rem}
+  figcaption{font-size:.85rem;color:var(--muted);margin-top:.4rem}
+  ul,ol{padding-left:1.3rem}
+  .small{font-size:.88rem;color:var(--muted)}
+  blockquote{margin:1rem 0;padding:.2rem 1rem;border-left:4px solid var(--line);
+             color:var(--muted)}
+  footer{margin:3rem 0 2rem;color:var(--muted);font-size:.85rem;
+         text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench&nbsp;2.0</h1>
+    <p>We ran KISS Sorcar on the exact 30 tasks and seven models of the
+       <a href="https://harnesstax.github.io/">HarnessTax</a> study. Its success
+       rate tops Pi, Codex CLI and Claude Code on every model, and a paired rerun
+       against Pi on the same model puts the gap at 11 points.</p>
+    <p>29 September 2026 &middot; Benchmarks &middot; Full method and intervals in
+       Section&nbsp;5 of the <a href="../assets/kiss_sorcar.pdf">KISS Sorcar paper</a></p>
+    <p>Code, prompt, and per-attempt records at
+       <a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a></p>
+  </div>
+</header>
+<main>
+
+<div class="card tldr">
+<p><strong>In short.</strong> The HarnessTax study from UC Berkeley and Arena
+Intelligence held the model fixed, swapped the harness among Claude Code, Codex
+CLI and Pi, and concluded that the harness moves <em>cost</em> far more than it
+moves <em>success</em>. We added a fourth harness to their Terminal-Bench 2.0
+table: KISS Sorcar, an open-source agent whose benchmark configuration is a
+plain ReAct loop, six coding tools, a 727-word system prompt of engineering
+rules, and two small pieces of harness code. Pooled over the seven models it
+solves <strong>75.6%</strong> of attempts against 70.0% for Pi, 65.7% for
+Codex CLI and 65.1% for Claude Code. With 30 tasks that pooled gap is within
+sampling error, so we also reran Pi ourselves on Claude Fable 5 under one
+protocol and one price list: KISS Sorcar solved <strong>80.0%</strong> to
+Pi&rsquo;s 68.9%, a paired gap of <strong>+11.1 points</strong> (95% interval
++3.3 to +20.0, sign test <em>p</em>&nbsp;=&nbsp;0.016) at a cost difference of
+five cents per attempt. On the 59 Terminal-Bench 2.0 tasks the study did not
+sample, the same agent solved 79.1% of attempts, counting one attempt we
+stopped as a failure.</p>
+</div>
+
+<div class="stats">
+  <div class="stat"><b>75.6%</b><span>attempts solved, mean over 7 models (Pi 70.0, Codex CLI 65.7, Claude Code 65.1)</span></div>
+  <div class="stat"><b>7 of 7</b><span>models on which KISS Sorcar has the best point estimate of the four harnesses</span></div>
+  <div class="stat"><b>+11.1 pts</b><span>paired gap over Pi on Claude Fable 5, same tasks, same protocol, same price list</span></div>
+  <div class="stat"><b>79.1%</b><span>on the 59 tasks the study left out; 79.4% over all 89 tasks</span></div>
+</div>
+
+<h2>What HarnessTax measured</h2>
+<p>A coding agent is a model plus a <em>harness</em>: the loop that calls the
+model, the tools it can use, the instructions it is sent, and the bookkeeping
+around all three. Melissa Pan, Shuo Yang, Negar Arabzadeh, Wei-Lin Chiang, Ion
+Stoica and Matei Zaharia asked a question most leaderboards skip: with the model
+held fixed, how much does the harness matter? Their
+<a href="https://harnesstax.github.io/">HarnessTax</a> post runs seven models
+(Claude Fable 5, Opus 4.8, Sonnet 4.6, Haiku 4.5, GPT-5.6 Sol, GPT-5.6 Luna
+and Kimi K3) under three harnesses (Claude Code, Codex CLI and Pi) on 30 tasks
+sampled from SWE-bench Lite and 30 from Terminal-Bench 2.0, three attempts per
+task, scored by each benchmark&rsquo;s official verifier. The 100-turn cap and
+the &ldquo;high&rdquo; reasoning effort are the same for every pair.</p>
+<p>Three findings come out of that grid, and they are worth quoting because our
+result speaks to each of them:</p>
+<ol>
+<li><strong>The harness affects cost more than correctness.</strong> On
+Terminal-Bench 2.0 the average harness effect on success stays within about
+&plusmn;5 points, while Claude Code costs about 1.5&times; as much as Pi.</li>
+<li><strong>A simple harness can be competitive.</strong> Pi gives the model
+four tools (read, write, edit, bash) and very little else, and it sits on the
+cost-success frontier of both benchmarks.</li>
+<li><strong>Models can do better outside their vendor&rsquo;s harness.</strong>
+In nine of twelve model-benchmark comparisons for the Anthropic and OpenAI
+models, an alternative harness had the highest observed success.</li>
+</ol>
+<p>The name is the point: the study&rsquo;s authors call the extra spend for the
+same success a <em>harness tax</em>, and say you are probably paying it if you
+accept a coding agent&rsquo;s default harness without comparing alternatives.
+We agree with the second and third findings without reservation. The first one
+we wanted to test, because our harness was built on a different bet: that a
+prompt stating engineering rules, backed by a little harness code, changes what
+the model gets right and not only what it costs.</p>
+
+<h2>Why we ran a fourth harness</h2>
+<p><a href="https://github.com/ksenxx/kiss_ai">KISS Sorcar</a> is an open-source
+general-purpose agent and IDE assistant that we have used for six months to
+develop itself. Its behavior is set by five small Python agent classes and a
+system prompt that states rules about how to work: read a file before you edit
+it, reproduce a bug before you fix it, verify every requirement from a fresh
+shell before you claim success. The full paper reports a task-database study,
+a controlled ablation of that prompt, a cross-vendor reviewer experiment and two
+multi-day case studies. What it lacked was a controlled comparison with other
+harnesses on the same tasks. HarnessTax publishes its task list, per-model
+numbers and protocol, so it hands us exactly that.</p>
+<p>We chose Terminal-Bench 2.0 over SWE-bench Lite because its tasks exercise
+what our rules are about: long shell sessions, background processes, and
+container state that the verifier inspects after the agent is gone. The
+benchmark agent is KISS Sorcar with the general-purpose instructions stripped
+out of its system prompt and the coding instructions kept:
+<strong>727 words</strong> in place of the 3,851-word <code>SYSTEM.md</code>.
+The prompt leaves out the AI-discovery and adversarial-testing procedures that
+the paper&rsquo;s case studies rely on, so this benchmark tests the loop, the
+tools and the coding rules alone.</p>
+
+<figure>
+<svg viewBox="0 0 900 250" width="100%" role="img" aria-label="Diagram of the benchmark harness: Harbor hands a container to the KISS Sorcar loop, whose six tools run inside the container; shell results carry harness notes and a guard refuses destructive commands" font-family="Georgia,serif">
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5b6572"/></marker></defs>
+  <rect x="10" y="80" width="150" height="90" rx="6" fill="#eceff4" stroke="#d8dde4"/>
+  <text x="85" y="115" font-size="14" text-anchor="middle" fill="#1e2430">Harbor 0.20.0</text>
+  <text x="85" y="135" font-size="12" text-anchor="middle" fill="#5b6572">one task, one container,</text>
+  <text x="85" y="151" font-size="12" text-anchor="middle" fill="#5b6572">official verifier</text>
+  <line x1="160" y1="125" x2="215" y2="125" stroke="#5b6572" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="220" y="20" width="300" height="210" rx="6" fill="#ffffff" stroke="#2456a6" stroke-width="1.5"/>
+  <text x="370" y="45" font-size="14" font-weight="bold" text-anchor="middle" fill="#2456a6">KISS Sorcar benchmark agent</text>
+  <rect x="235" y="60" width="270" height="44" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
+  <text x="370" y="79" font-size="12.5" text-anchor="middle" fill="#1e2430">ReAct loop, no turn cap, no wall clock</text>
+  <text x="370" y="96" font-size="12" text-anchor="middle" fill="#5b6572">ends on finish() or at $50 spent</text>
+  <rect x="235" y="112" width="270" height="44" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
+  <text x="370" y="131" font-size="12.5" text-anchor="middle" fill="#1e2430">727-word prompt: six rules of work</text>
+  <text x="370" y="148" font-size="12" text-anchor="middle" fill="#5b6572">list what "done" means; never edit inputs; re-verify</text>
+  <rect x="235" y="164" width="270" height="52" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
+  <text x="370" y="183" font-size="12.5" text-anchor="middle" fill="#1e2430">Bash, run_commands_parallel, Read, Edit, Write, finish</text>
+  <text x="370" y="201" font-size="12" text-anchor="middle" fill="#5b6572">browser, memory, worktree, sub-agents off</text>
+  <line x1="520" y1="125" x2="575" y2="125" stroke="#5b6572" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="580" y="30" width="310" height="190" rx="6" fill="#ffffff" stroke="#1e7a46" stroke-width="1.5"/>
+  <text x="735" y="55" font-size="14" font-weight="bold" text-anchor="middle" fill="#1e7a46">two mechanisms in code</text>
+  <text x="595" y="85" font-size="12.5" fill="#1e2430">Harness notes appended to a shell result when</text>
+  <text x="595" y="103" font-size="12.5" fill="#1e2430">a process it started is still running, or when</text>
+  <text x="595" y="121" font-size="12.5" fill="#1e2430">a pre-existing file under the workdir changed.</text>
+  <text x="595" y="148" font-size="12.5" fill="#1e2430">A guard refuses a command that would kill every</text>
+  <text x="595" y="166" font-size="12.5" fill="#1e2430">process in the container or delete the workspace.</text>
+  <text x="595" y="200" font-size="12" fill="#5b6572">250 of 630 attempts got a note (901 in all); 15 calls refused</text>
+</svg>
+<figcaption>The benchmark configuration. Harbor hands each attempt&rsquo;s
+container to the framework; the tools run inside it. The prompt names the tools
+and states six rules of the kind the full system prompt states; two harness
+mechanisms back the rules in code.</figcaption>
+</figure>
+
+<p>Two design choices differ from the study&rsquo;s harnesses and matter for
+reading the numbers. First, we set <strong>no turn cap and no wall-clock
+limit</strong>: an attempt ends when the agent calls <code>finish</code> or has
+spent $50. Second, we sent the providers&rsquo; <strong>default</strong> request
+parameters, where the study ran at high effort. Everything else follows the
+study: the same 30 tasks, three attempts each, scored by the Terminal-Bench 2.0
+verifier, a task&rsquo;s attempts averaged first and then the 30 tasks, pooled
+figures averaging the seven per-model results, and percentile bootstraps over
+10,000 resamples of the tasks for the intervals. We ran all 630 attempts on
+25&nbsp;September 2026 and every one of them counts.</p>
+
+<h2>The result</h2>
+<p>Table 1 puts the four harnesses side by side. The three right-hand pairs of
+columns are the study&rsquo;s published numbers; the left pair is ours.</p>
+
+<table>
+<caption class="small">Table 1. Terminal-Bench 2.0, the study&rsquo;s 30-task sample, three attempts per task: percentage of attempts solved and cost per attempt in USD. KISS Sorcar: 630 attempts, no turn cap, $50 budget. The other three: as published, 100-turn cap, high effort. Bold marks the best point estimate per row.</caption>
+<thead>
+<tr><th rowspan="2">Model</th><th colspan="2">KISS Sorcar</th><th colspan="2">Pi</th><th colspan="2">Codex CLI</th><th colspan="2">Claude Code</th></tr>
+<tr><th class="num">solved</th><th class="num">$/att.</th><th class="num">solved</th><th class="num">$/att.</th><th class="num">solved</th><th class="num">$/att.</th><th class="num">solved</th><th class="num">$/att.</th></tr>
+</thead>
+<tbody>
+<tr><td>Claude Fable 5</td><td class="num best">80.0</td><td class="num">1.50</td><td class="num">71.1</td><td class="num">1.08</td><td class="num">72.2</td><td class="num">0.98</td><td class="num">75.6</td><td class="num">1.55</td></tr>
+<tr><td>Claude Opus 4.8</td><td class="num best">74.4</td><td class="num">1.21</td><td class="num">72.2</td><td class="num">0.76</td><td class="num">72.2</td><td class="num">0.85</td><td class="num">68.9</td><td class="num">0.90</td></tr>
+<tr><td>Claude Sonnet 4.6</td><td class="num best">76.7</td><td class="num">2.23</td><td class="num">65.6</td><td class="num">0.61</td><td class="num">63.3</td><td class="num">0.55</td><td class="num">62.2</td><td class="num">0.67</td></tr>
+<tr><td>Claude Haiku 4.5</td><td class="num best">51.1</td><td class="num">0.39</td><td class="num">47.8</td><td class="num">0.25</td><td class="num">31.1</td><td class="num">0.21</td><td class="num">41.1</td><td class="num">0.26</td></tr>
+<tr><td>GPT-5.6 Sol</td><td class="num best">85.6</td><td class="num">0.69</td><td class="num">83.3</td><td class="num">0.42</td><td class="num">78.9</td><td class="num">0.76</td><td class="num">71.1</td><td class="num">1.35</td></tr>
+<tr><td>GPT-5.6 Luna</td><td class="num best">78.9</td><td class="num">0.05</td><td class="num">76.7</td><td class="num">0.04</td><td class="num">72.2</td><td class="num">0.06</td><td class="num">70.0</td><td class="num">0.10</td></tr>
+<tr><td>Kimi K3</td><td class="num best">82.2</td><td class="num">1.14</td><td class="num">73.3</td><td class="num">0.38</td><td class="num">70.0</td><td class="num">0.45</td><td class="num">66.7</td><td class="num">0.52</td></tr>
+<tr><th>Mean of 7 models</th><th class="num" style="color:var(--accent)">75.6</th><th class="num">1.03</th><th class="num">70.0</th><th class="num">0.51</th><th class="num">65.7</th><th class="num">0.55</th><th class="num">65.1</th><th class="num">0.77</th></tr>
+</tbody>
+</table>
+
+<figure>
+<svg viewBox='0 0 970 350' width='100%' role='img' aria-label='Percentage of attempts solved per model under four harnesses' font-family='Georgia,serif'>
+<line x1='70' y1='280.0' x2='950' y2='280.0' stroke='#d8dde4'/>
+<text x='62' y='284.0' font-size='12' text-anchor='end' fill='#5b6572'>0%</text>
+<line x1='70' y1='228.0' x2='950' y2='228.0' stroke='#d8dde4'/>
+<text x='62' y='232.0' font-size='12' text-anchor='end' fill='#5b6572'>20%</text>
+<line x1='70' y1='176.0' x2='950' y2='176.0' stroke='#d8dde4'/>
+<text x='62' y='180.0' font-size='12' text-anchor='end' fill='#5b6572'>40%</text>
+<line x1='70' y1='124.0' x2='950' y2='124.0' stroke='#d8dde4'/>
+<text x='62' y='128.0' font-size='12' text-anchor='end' fill='#5b6572'>60%</text>
+<line x1='70' y1='72.0' x2='950' y2='72.0' stroke='#d8dde4'/>
+<text x='62' y='76.0' font-size='12' text-anchor='end' fill='#5b6572'>80%</text>
+<line x1='70' y1='20.0' x2='950' y2='20.0' stroke='#d8dde4'/>
+<text x='62' y='24.0' font-size='12' text-anchor='end' fill='#5b6572'>100%</text>
+<rect x='77.0' y='72.0' width='20' height='208.0' fill='#2456a6' opacity='1'/>
+<text x='87.0' y='69.0' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>80</text>
+<rect x='100.0' y='95.1' width='20' height='184.9' fill='#1e7a46' opacity='0.8'/>
+<text x='110.0' y='92.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>71</text>
+<rect x='123.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+<text x='133.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+<rect x='146.0' y='83.4' width='20' height='196.6' fill='#7a3b8f' opacity='0.8'/>
+<text x='156.0' y='80.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>76</text>
+<text x='121.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Fable 5</text>
+<rect x='187.0' y='86.6' width='20' height='193.4' fill='#2456a6' opacity='1'/>
+<text x='197.0' y='83.6' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>74</text>
+<rect x='210.0' y='92.3' width='20' height='187.7' fill='#1e7a46' opacity='0.8'/>
+<text x='220.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+<rect x='233.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+<text x='243.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+<rect x='256.0' y='100.9' width='20' height='179.1' fill='#7a3b8f' opacity='0.8'/>
+<text x='266.0' y='97.9' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>69</text>
+<text x='231.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Opus 4.8</text>
+<rect x='297.0' y='80.6' width='20' height='199.4' fill='#2456a6' opacity='1'/>
+<text x='307.0' y='77.6' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>77</text>
+<rect x='320.0' y='109.4' width='20' height='170.6' fill='#1e7a46' opacity='0.8'/>
+<text x='330.0' y='106.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>66</text>
+<rect x='343.0' y='115.4' width='20' height='164.6' fill='#a05a1c' opacity='0.8'/>
+<text x='353.0' y='112.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>63</text>
+<rect x='366.0' y='118.3' width='20' height='161.7' fill='#7a3b8f' opacity='0.8'/>
+<text x='376.0' y='115.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>62</text>
+<text x='341.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Sonnet 4.6</text>
+<rect x='407.0' y='147.1' width='20' height='132.9' fill='#2456a6' opacity='1'/>
+<text x='417.0' y='144.1' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>51</text>
+<rect x='430.0' y='155.7' width='20' height='124.3' fill='#1e7a46' opacity='0.8'/>
+<text x='440.0' y='152.7' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>48</text>
+<rect x='453.0' y='199.1' width='20' height='80.9' fill='#a05a1c' opacity='0.8'/>
+<text x='463.0' y='196.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>31</text>
+<rect x='476.0' y='173.1' width='20' height='106.9' fill='#7a3b8f' opacity='0.8'/>
+<text x='486.0' y='170.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>41</text>
+<text x='451.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Haiku 4.5</text>
+<rect x='517.0' y='57.4' width='20' height='222.6' fill='#2456a6' opacity='1'/>
+<text x='527.0' y='54.4' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>86</text>
+<rect x='540.0' y='63.4' width='20' height='216.6' fill='#1e7a46' opacity='0.8'/>
+<text x='550.0' y='60.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>83</text>
+<rect x='563.0' y='74.9' width='20' height='205.1' fill='#a05a1c' opacity='0.8'/>
+<text x='573.0' y='71.9' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>79</text>
+<rect x='586.0' y='95.1' width='20' height='184.9' fill='#7a3b8f' opacity='0.8'/>
+<text x='596.0' y='92.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>71</text>
+<text x='561.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>GPT-5.6 Sol</text>
+<rect x='627.0' y='74.9' width='20' height='205.1' fill='#2456a6' opacity='1'/>
+<text x='637.0' y='71.9' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>79</text>
+<rect x='650.0' y='80.6' width='20' height='199.4' fill='#1e7a46' opacity='0.8'/>
+<text x='660.0' y='77.6' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>77</text>
+<rect x='673.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+<text x='683.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+<rect x='696.0' y='98.0' width='20' height='182.0' fill='#7a3b8f' opacity='0.8'/>
+<text x='706.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+<text x='671.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>GPT-5.6 Luna</text>
+<rect x='737.0' y='66.3' width='20' height='213.7' fill='#2456a6' opacity='1'/>
+<text x='747.0' y='63.3' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>82</text>
+<rect x='760.0' y='89.4' width='20' height='190.6' fill='#1e7a46' opacity='0.8'/>
+<text x='770.0' y='86.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>73</text>
+<rect x='783.0' y='98.0' width='20' height='182.0' fill='#a05a1c' opacity='0.8'/>
+<text x='793.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+<rect x='806.0' y='106.6' width='20' height='173.4' fill='#7a3b8f' opacity='0.8'/>
+<text x='816.0' y='103.6' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>67</text>
+<text x='781.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Kimi K3</text>
+<rect x='847.0' y='83.4' width='20' height='196.6' fill='#2456a6' opacity='1'/>
+<text x='857.0' y='80.4' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>76</text>
+<rect x='870.0' y='98.0' width='20' height='182.0' fill='#1e7a46' opacity='0.8'/>
+<text x='880.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+<rect x='893.0' y='109.2' width='20' height='170.8' fill='#a05a1c' opacity='0.8'/>
+<text x='903.0' y='106.2' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>66</text>
+<rect x='916.0' y='110.7' width='20' height='169.3' fill='#7a3b8f' opacity='0.8'/>
+<text x='926.0' y='107.7' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>65</text>
+<text x='891.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Mean of 7</text>
+<rect x='70' y='318' width='14' height='14' fill='#2456a6'/>
+<text x='89' y='330' font-size='12' fill='#1e2430'>KISS Sorcar</text>
+<rect x='188' y='318' width='14' height='14' fill='#1e7a46'/>
+<text x='207' y='330' font-size='12' fill='#1e2430'>Pi</text>
+<rect x='234' y='318' width='14' height='14' fill='#a05a1c'/>
+<text x='253' y='330' font-size='12' fill='#1e2430'>Codex CLI</text>
+<rect x='336' y='318' width='14' height='14' fill='#7a3b8f'/>
+<text x='355' y='330' font-size='12' fill='#1e2430'>Claude Code</text>
+</svg>
+<figcaption>Figure 1. The success column of Table 1 as bars. KISS Sorcar (blue)
+has the highest point estimate on each of the seven models. The gap is largest
+on Sonnet 4.6 (+11.1 over Pi) and Kimi K3 (+8.9) and smallest on Sol (+2.3)
+and Luna (+2.2).</figcaption>
+</figure>
+
+<p>Pooled over the seven models, KISS Sorcar solves 75.6% of attempts, with a
+95% interval over tasks of [63.8, 85.9]. The gap over Pi is 5.6 points and
+over Claude Code 10.5. Its point estimate is the best of the four harnesses on
+all seven models. Counting the solves that took more than the study&rsquo;s
+100 turns as failures, to approximate its cap, the pooled rate is 74.1%, still
+above all three.</p>
+
+<div class="card caveat">
+<p><strong>Read the intervals before the ranking.</strong> With 30 tasks, a
+per-model interval spans 27 points on average, so no single row of Table 1
+settles its own gap, and the pooled interval [63.8, 85.9] covers all three
+published means. The success comparison against the published table also
+differs from the study in date, reasoning effort, price list, turn cap and
+prompt at once. And the two cost columns rest on different price lists (the
+study&rsquo;s September&nbsp;1 list against our framework&rsquo;s price table,
+with two providers for Kimi K3), so we draw <em>no cost ratio</em> from
+Table&nbsp;1. What Table&nbsp;1 supports is a statement about success: seven
+models, seven best point estimates, one harness.</p>
+</div>
+
+<figure>
+<svg viewBox='0 0 720 420' width='100%' role='img' aria-label='Cost per attempt against success rate for every model and harness' font-family='Georgia,serif'>
+<line x1='60' y1='333.8' x2='700' y2='333.8' stroke='#e3e7ec'/>
+<text x='52' y='337.8' font-size='12' text-anchor='end' fill='#5b6572'>30%</text>
+<line x1='60' y1='281.5' x2='700' y2='281.5' stroke='#e3e7ec'/>
+<text x='52' y='285.5' font-size='12' text-anchor='end' fill='#5b6572'>40%</text>
+<line x1='60' y1='229.2' x2='700' y2='229.2' stroke='#e3e7ec'/>
+<text x='52' y='233.2' font-size='12' text-anchor='end' fill='#5b6572'>50%</text>
+<line x1='60' y1='176.9' x2='700' y2='176.9' stroke='#e3e7ec'/>
+<text x='52' y='180.9' font-size='12' text-anchor='end' fill='#5b6572'>60%</text>
+<line x1='60' y1='124.6' x2='700' y2='124.6' stroke='#e3e7ec'/>
+<text x='52' y='128.6' font-size='12' text-anchor='end' fill='#5b6572'>70%</text>
+<line x1='60' y1='72.3' x2='700' y2='72.3' stroke='#e3e7ec'/>
+<text x='52' y='76.3' font-size='12' text-anchor='end' fill='#5b6572'>80%</text>
+<line x1='60' y1='20.0' x2='700' y2='20.0' stroke='#e3e7ec'/>
+<text x='52' y='24.0' font-size='12' text-anchor='end' fill='#5b6572'>90%</text>
+<line x1='131.0' y1='20' x2='131.0' y2='360' stroke='#e3e7ec'/>
+<text x='131.0' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$0.05</text>
+<line x1='227.3' y1='20' x2='227.3' y2='360' stroke='#e3e7ec'/>
+<text x='227.3' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$0.1</text>
+<line x1='323.7' y1='20' x2='323.7' y2='360' stroke='#e3e7ec'/>
+<text x='323.7' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$0.2</text>
+<line x1='451.0' y1='20' x2='451.0' y2='360' stroke='#e3e7ec'/>
+<text x='451.0' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$0.5</text>
+<line x1='547.3' y1='20' x2='547.3' y2='360' stroke='#e3e7ec'/>
+<text x='547.3' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$1</text>
+<line x1='643.7' y1='20' x2='643.7' y2='360' stroke='#e3e7ec'/>
+<text x='643.7' y='378' font-size='12' text-anchor='middle' fill='#5b6572'>$2</text>
+<text x='380.0' y='400' font-size='13' text-anchor='middle' fill='#1e2430'>cost per attempt (USD, log scale)</text>
+<line x1='603.7' y1='72.3' x2='558.0' y2='118.9' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='603.7' y1='72.3' x2='544.5' y2='113.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='603.7' y1='72.3' x2='608.2' y2='95.3' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='603.670401387526,65.30769230769232 610.670401387526,72.30769230769232 603.670401387526,79.30769230769232 596.670401387526,72.30769230769232' fill='#2456a6'/>
+<circle cx='558.0' cy='118.9' r='5' fill='#1e7a46'/>
+<rect x='539.5' y='108.1' width='10' height='10' fill='#a05a1c'/>
+<polygon points='608.2273419042014,89.323076923077 614.2273419042014,100.323076923077 602.2273419042014,100.323076923077' fill='#7a3b8f'/>
+<text x='612.7' y='66.3' font-size='11.5' text-anchor='start' fill='#1e2430'>Fable 5</text>
+<line x1='573.8' y1='101.6' x2='509.2' y2='113.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='573.8' y1='101.6' x2='524.7' y2='113.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='573.8' y1='101.6' x2='532.7' y2='130.4' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='573.8125169909721,94.59999999999997 580.8125169909721,101.59999999999997 573.8125169909721,108.59999999999997 566.8125169909721,101.59999999999997' fill='#2456a6'/>
+<circle cx='509.2' cy='113.1' r='5' fill='#1e7a46'/>
+<rect x='519.7' y='108.1' width='10' height='10' fill='#a05a1c'/>
+<polygon points='532.678801510292,124.36923076923074 538.678801510292,135.36923076923074 526.678801510292,135.36923076923074' fill='#7a3b8f'/>
+<text x='582.8' y='95.6' font-size='11.5' text-anchor='start' fill='#1e2430'>Opus 4.8</text>
+<line x1='658.8' y1='89.6' x2='478.6' y2='147.6' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='658.8' y1='89.6' x2='464.2' y2='159.7' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='658.8' y1='89.6' x2='491.7' y2='165.4' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='658.7787546651194,82.56923076923078 665.7787546651194,89.56923076923078 658.7787546651194,96.56923076923078 651.7787546651194,89.56923076923078' fill='#2456a6'/>
+<circle cx='478.6' cy='147.6' r='5' fill='#1e7a46'/>
+<rect x='459.2' y='154.7' width='10' height='10' fill='#a05a1c'/>
+<polygon points='491.6651353539725,159.4153846153846 497.6651353539725,170.4153846153846 485.6651353539725,170.4153846153846' fill='#7a3b8f'/>
+<text x='667.8' y='83.6' font-size='11.5' text-anchor='start' fill='#1e2430'>Sonnet 4.6</text>
+<line x1='416.5' y1='223.5' x2='354.7' y2='240.7' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='416.5' y1='223.5' x2='330.4' y2='328.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='416.5' y1='223.5' x2='360.1' y2='275.8' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='416.4618727381878,216.47692307692307 423.4618727381878,223.47692307692307 416.4618727381878,230.47692307692307 409.4618727381878,223.47692307692307' fill='#2456a6'/>
+<circle cx='354.7' cy='240.7' r='5' fill='#1e7a46'/>
+<rect x='325.4' y='323.1' width='10' height='10' fill='#a05a1c'/>
+<polygon points='360.1126698403698,269.78461538461534 366.1126698403698,280.78461538461534 354.1126698403698,280.78461538461534' fill='#7a3b8f'/>
+<text x='407.5' y='217.5' font-size='11.5' text-anchor='end' fill='#1e2430'>Haiku 4.5</text>
+<line x1='495.8' y1='43.0' x2='426.8' y2='55.0' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='495.8' y1='43.0' x2='509.2' y2='78.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='495.8' y1='43.0' x2='589.0' y2='118.9' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='495.7529075256297,36.015384615384676 502.7529075256297,43.015384615384676 495.7529075256297,50.015384615384676 488.7529075256297,43.015384615384676' fill='#2456a6'/>
+<circle cx='426.8' cy='55.0' r='5' fill='#1e7a46'/>
+<rect x='504.2' y='73.1' width='10' height='10' fill='#a05a1c'/>
+<polygon points='589.02800440811,112.86153846153849 595.02800440811,123.86153846153849 583.02800440811,123.86153846153849' fill='#7a3b8f'/>
+<text x='504.8' y='37.0' font-size='11.5' text-anchor='start' fill='#1e2430'>GPT-5.6 Sol</text>
+<line x1='131.0' y1='78.1' x2='100.0' y2='89.6' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='131.0' y1='78.1' x2='156.3' y2='113.1' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='131.0' y1='78.1' x2='227.3' y2='124.6' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='130.99159987723402,71.06153846153842 137.99159987723402,78.06153846153842 130.99159987723402,85.06153846153842 123.99159987723402,78.06153846153842' fill='#2456a6'/>
+<circle cx='100.0' cy='89.6' r='5' fill='#1e7a46'/>
+<rect x='151.3' y='108.1' width='10' height='10' fill='#a05a1c'/>
+<polygon points='227.32119848970802,118.61538461538461 233.32119848970802,129.6153846153846 221.32119848970802,129.6153846153846' fill='#7a3b8f'/>
+<text x='140.0' y='72.1' font-size='11.5' text-anchor='start' fill='#1e2430'>GPT-5.6 Luna</text>
+<line x1='565.5' y1='60.8' x2='412.9' y2='107.4' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='565.5' y1='60.8' x2='436.3' y2='124.6' stroke='#9aa3ad' stroke-width='1.2'/>
+<line x1='565.5' y1='60.8' x2='456.4' y2='141.9' stroke='#9aa3ad' stroke-width='1.2'/>
+<polygon points='565.5307509173792,53.80000000000001 572.5307509173792,60.80000000000001 565.5307509173792,67.80000000000001 558.5307509173792,60.80000000000001' fill='#2456a6'/>
+<circle cx='412.9' cy='107.4' r='5' fill='#1e7a46'/>
+<rect x='431.3' y='119.6' width='10' height='10' fill='#a05a1c'/>
+<polygon points='456.4422684528438,135.87692307692305 462.4422684528438,146.87692307692305 450.4422684528438,146.87692307692305' fill='#7a3b8f'/>
+<text x='574.5' y='54.8' font-size='11.5' text-anchor='start' fill='#1e2430'>Kimi K3</text>
+<polygon points='67,407 74,414 67,421 60,414' fill='#2456a6'/>
+<text x='79' y='418' font-size='12' fill='#1e2430'>KISS Sorcar</text>
+<circle cx='185.0' cy='414.0' r='5' fill='#1e7a46'/>
+<text x='197' y='418' font-size='12' fill='#1e2430'>Pi</text>
+<rect x='226.0' y='409.0' width='10' height='10' fill='#a05a1c'/>
+<text x='243' y='418' font-size='12' fill='#1e2430'>Codex CLI</text>
+<polygon points='333,408 339,419 327,419' fill='#7a3b8f'/>
+<text x='345' y='418' font-size='12' fill='#1e2430'>Claude Code</text>
+</svg>
+<figcaption>Figure 2. Table 1 as a cost-success plot on a log cost axis. One
+diamond per model for KISS Sorcar; the gray lines join it to the same model
+under Pi, Codex CLI and Claude Code. Every diamond sits above its model&rsquo;s
+other three points and, on the published price lists, to the right of Pi.</figcaption>
+</figure>
+
+<h2>Pi, rerun on the same model, paired</h2>
+<p>The honest way to remove the date, price list and cap from one row is to
+rerun the competitor yourself. We ran Harbor&rsquo;s Pi agent (Pi 0.87.1) on
+Claude Fable 5 on 26&nbsp;September 2026: the same 30 tasks, three attempts
+each, at the study&rsquo;s high-effort setting, under our protocol (no turn
+cap, no wall clock; Pi has no budget cap, so an attempt ends when the model
+stops), with its token counts priced by the same table as ours. All 90
+attempts count. One was stopped by us after two hours while Pi waited on a
+training command it had started, and is counted as failed with its spend.</p>
+<p>Pi solved 62 attempts, <strong>68.9%</strong> ([52.2, 84.4]) at $1.45 and
+14.5 turns per attempt. KISS Sorcar on the same model solved
+<strong>80.0%</strong> at $1.50 and 15.3 turns. Because both harnesses
+attempted every task, the test is paired: resampling the tasks once for both
+harnesses gives a success gap of <strong>+11.1 points</strong> with a 95%
+interval of [+3.3, +20.0], and a cost difference of +$0.05 per attempt with an
+interval of [&minus;0.71, +0.70] that includes zero.</p>
+
+<figure>
+<svg viewBox='0 0 700 170' width='100%' role='img' aria-label='Paired gap of KISS Sorcar over Pi on Claude Fable 5' font-family='Georgia,serif'>
+<line x1='60.0' y1='47' x2='60.0' y2='63' stroke='#9aa3ad'/>
+<text x='60.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>-5</text>
+<line x1='163.3' y1='47' x2='163.3' y2='63' stroke='#9aa3ad'/>
+<text x='163.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+0</text>
+<line x1='266.7' y1='47' x2='266.7' y2='63' stroke='#9aa3ad'/>
+<text x='266.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+5</text>
+<line x1='370.0' y1='47' x2='370.0' y2='63' stroke='#9aa3ad'/>
+<text x='370.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+10</text>
+<line x1='473.3' y1='47' x2='473.3' y2='63' stroke='#9aa3ad'/>
+<text x='473.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+15</text>
+<line x1='576.7' y1='47' x2='576.7' y2='63' stroke='#9aa3ad'/>
+<text x='576.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+20</text>
+<line x1='680.0' y1='47' x2='680.0' y2='63' stroke='#9aa3ad'/>
+<text x='680.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+25</text>
+<line x1='60.0' y1='55' x2='680.0' y2='55' stroke='#9aa3ad'/>
+<line x1='163.3' y1='33' x2='163.3' y2='67' stroke='#a03030' stroke-dasharray='4 3'/>
+<text x='163.3' y='28' font-size='11' text-anchor='middle' fill='#a03030'>no difference</text>
+<line x1='231.5' y1='55' x2='576.7' y2='55' stroke='#2456a6' stroke-width='6'/>
+<polygon points='392.73333333333335,48 399.73333333333335,55 392.73333333333335,62 385.73333333333335,55' fill='#2456a6'/>
+<text x='392.7' y='41' font-size='13' font-weight='bold' text-anchor='middle' fill='#2456a6'>+11.1 points  [+3.3, +20.0]</text>
+<text x='60' y='103' font-size='13' fill='#1e2430'>Success gap, KISS Sorcar minus Pi, on the 30 tasks (percentage points; 95% paired bootstrap)</text>
+<rect x='60.0' y='130' width='144.7' height='22' fill='#2456a6'/>
+<text x='132.3' y='146' font-size='12' text-anchor='middle' fill='white'>KISS Sorcar higher: 7</text>
+<rect x='204.7' y='130' width='475.3' height='22' fill='#9aa3ad'/>
+<text x='442.3' y='146' font-size='12' text-anchor='middle' fill='white'>tie: 23</text>
+<text x='680' y='146' font-size='12' text-anchor='start' fill='#1e7a46'> Pi higher: 0</text>
+<text x='60' y='122' font-size='13' fill='#1e2430'>Per-task tally over the 30 tasks (exact sign test p = 0.016)</text>
+</svg>
+<figcaption>Figure 3. The paired comparison on Claude Fable 5. Top: the success
+gap and its bootstrap interval, which excludes zero. Bottom: KISS Sorcar has the
+higher task mean on 7 tasks, Pi on none, and 23 are ties, 20 of them solved by
+both on every attempt.</figcaption>
+</figure>
+
+<p>One task deserves a footnote. Pi&rsquo;s three attempts on
+<code>feal-linear-cryptanalysis</code> all ended in an API error (two in a Pi
+client bug on a mid-output model fallback, one in a content filter) with no
+answer submitted. Leaving that task out, the gap is +8.0 points (6 tasks to 0,
+<em>p</em>&nbsp;=&nbsp;0.031). Codex CLI and Claude Code were not rerun, so the
+paired statement is about Pi on one model.</p>
+
+<h2>Did the 30 tasks flatter us?</h2>
+<p>A harness tuned on a public sample can look good on the sample and nowhere
+else. So we ran the same agent and prompt on Claude Fable 5 on the
+<strong>59 Terminal-Bench 2.0 tasks the study did not sample</strong>, three
+attempts each, under the same protocol. One attempt, on
+<code>extract-moves-from-video</code>, was stopped by us before it finished
+and left no result; as with Pi&rsquo;s stopped attempt we count it as failed.
+The agent then solves <strong>79.1%</strong> of attempts on the unsampled
+tasks and 79.4% over all 89 tasks. The intervals use the 176 attempts that
+ran to completion: 79.7% ([70.1, 88.1]) on the unsampled tasks against 80.0%
+on the study&rsquo;s 30, a difference of +0.3 points with an interval of
+[&minus;15.8, +15.4], and 79.8% ([71.9, 86.9]) over all 89 tasks. The prompt
+was fixed before the run and was not changed between the two sets.</p>
+<p>The unsampled tasks cost $1.60 per attempt against $1.50. Their attempts
+were longer (17.2 turns against 15.3) but cheaper per turn ($0.089 against
+$0.098); the rest of the gap is task weighting, since the two counted attempts
+of <code>extract-moves-from-video</code> ($13.27 each) carry a full task&rsquo;s
+weight.</p>
+
+<h2>Where the success comes from</h2>
+<p>The trajectories say more than the totals. The mean attempt took
+<strong>27.9 turns</strong> (the longest 276) and 17.2 minutes. Twenty-eight
+attempts went past the study&rsquo;s 100-turn cap, and <strong>9 of those were
+solved</strong>: a cap costs solves, which is why we report the 74.1% figure
+above alongside the 75.6%. Three attempts cost more than $15 (the most,
+$33.64), and two of them were solved.</p>
+<p>The harness notes earned their place. <strong>250 of the 630 attempts</strong>
+received at least one note about a still-running process or a changed input
+file, 901 notes in all. Terminal-Bench tasks routinely start a server, a build
+or a training job that is still running when the agent looks at the next
+result, and the verifier inspects files the agent may have touched by accident;
+a one-line note makes both facts visible to a model that otherwise has to guess.
+The harness refused 15 tool calls in 15 attempts: 14 were
+<code>run_agent</code> calls, which have no channel agent to reach inside a
+container, and one was a shell command the destructive-command guard
+misread.</p>
+<p>The prompt itself is short enough to read in full (it is archived verbatim
+with the records at <code>papers/kisssorcar/evidence/tb2_prompt.txt</code>).
+Its six rules are the sort of thing a careful engineer would tell a new hire:</p>
+<ol>
+<li>Understand the task before acting: list what &ldquo;done&rdquo; means for every item it names.</li>
+<li>Look before you change; never modify the task&rsquo;s input files, experiment on copies.</li>
+<li>Work in small verified steps; reproduce a bug before fixing it; never replace something that works with something unverified.</li>
+<li>Verify before you finish, from a fresh shell, requirement by requirement; never weaken a test or threshold to pass a check.</li>
+<li>Leave the environment as the task expects to find it.</li>
+<li>Be honest at the end: <code>success=True</code> only when every requirement is met and checked.</li>
+</ol>
+<p>The cost, meanwhile, comes from the number of turns, the prompt and tool
+schemas sent with every call, and the notes. The one cost comparison we can
+make on a single price list and protocol, Claude Fable 5 paired against Pi,
+puts the difference at five cents per attempt with an interval that includes
+zero.</p>
+
+<h2>What this says about the harness tax</h2>
+<p>HarnessTax&rsquo;s central claim is that on these benchmarks the harness
+moves cost more than success, and its figure for Terminal-Bench 2.0 is a
+harness effect within about &plusmn;5 points. Our pooled gap over Pi is 5.6
+points, at the edge of that band, and our paired gap on one model is 11 points
+with an interval that excludes zero. We read this as a refinement, not a
+refutation. The study characterizes its three harnesses largely by <em>how
+much</em> they send the model: Pi sends four tools and little else, and on
+SWE-bench Lite Claude Code&rsquo;s first call carries over ten times
+Pi&rsquo;s context. Our benchmark configuration differs in kind rather than
+amount: a short statement of how to work, and a note about what the model
+cannot see in a shell result (a process it started is still running; a file
+the verifier will inspect has changed). Whether those two things are what
+moved the numbers, we have not isolated. The all-model comparison also changes
+effort, cap and date, and the paired run leaves effort and prompt confounded.
+What the data support is narrower: this configuration produced the higher
+point estimate on all seven models and a paired 11-point gap over Pi on one
+model.</p>
+<p>That fits the study&rsquo;s own closing note better than it might seem. The
+authors write that for day-to-day tasks a coding agent is essentially an
+interface to model intelligence, and that harder problems &ldquo;may still
+benefit from harnesses that provide structured guidance.&rdquo; Terminal-Bench
+2.0 is where those two regimes meet: the tasks are single-session, but they
+involve background processes and container state that a model with four tools
+and no notes has to infer. A 727-word statement of engineering discipline and
+a one-line note in the tool results are a small amount of structured
+guidance. Our results are consistent with that small amount being worth
+having on this benchmark; an ablation of the benchmark prompt is what would
+settle it.</p>
+<p>We also confirm the study&rsquo;s second and third findings from a fourth
+angle. A simple harness <em>is</em> competitive: ours is a loop, six tools and
+a prompt. And models do well outside their vendor&rsquo;s harness: every
+Anthropic and OpenAI model in Table 1 has its best point estimate under a
+harness neither vendor wrote.</p>
+
+<h2>What we did not show</h2>
+<ul>
+<li>The comparison with the published table differs from the study&rsquo;s
+protocol in date, effort, price list, cap and prompt at once. The paired run
+removes all but effort and prompt, for Pi only, on one model.</li>
+<li>Thirty tasks give wide intervals; the pooled interval covers all three
+published means. The paired interval and the sign test are the statements that
+stand on their own.</li>
+<li>Cost is not compared across price lists. The only cost statement we make is
+the paired one: +$0.05 per attempt, interval including zero.</li>
+<li>The benchmark tests the loop, the tools and the coding rules. It does not
+test the discovery and adversarial-testing procedures, the memory, the reviewer,
+or the IDE features that the rest of the paper is about.</li>
+<li>We do not know which of the three ingredients (rules, notes, guard) carries
+the gain. An ablation of the benchmark prompt is the next experiment.</li>
+</ul>
+
+<h2>Reproduce it</h2>
+<p>Everything the numbers rest on is in the repository: the Terminal-Bench 2.0
+benchmark agent, the archived text of its prompt, and the per-attempt records
+of all three runs (<code>papers/kisssorcar/evidence/tb2_trials.json</code>),
+with <code>ks_tb2.py</code> recomputing every figure in this post and drawing
+the paper&rsquo;s frontier plot. Every number in the paper is a macro whose
+comment names the script or JSON key it is read from. Rerunning needs Anthropic,
+OpenAI and OpenRouter keys and Harbor 0.20.0; the 30-task run cost $649, the
+59-task run $270, and the Pi run $130.</p>
+<pre><code>git clone https://github.com/ksenxx/kiss_ai
+cd kiss_ai
+cat papers/kisssorcar/evidence/tb2_prompt.txt            # the 727-word prompt
+uv run --with matplotlib python papers/kisssorcar/ks_tb2.py   # recompute the table</code></pre>
+
+<h2>Credit and citation</h2>
+<p>The comparison exists because the HarnessTax authors published their task
+sample, per-model tables and protocol. If you use their study, cite it as they
+ask:</p>
+<pre><code>@misc{pan2026harnesstax,
+  title  = {{HarnessTax: How Much Does Harness Matter for Coding Agents?}},
+  author = {Pan, Melissa Z. and Yang, Shuo and Arabzadeh, Negar and
+            Chiang, Wei-Lin and Stoica, Ion and Zaharia, Matei},
+  year   = {2026},
+  url    = {https://harnesstax.github.io/},
+}</code></pre>
+<p>The full method, the intervals, and the rest of the evidence for KISS Sorcar
+are in <a href="../assets/kiss_sorcar.pdf"><em>KISS Sorcar: A Stupidly-Simple
+General-Purpose and Software Engineering AI Assistant</em></a>, Section 5.
+Terminal-Bench 2.0 is by Merrill et al.,
+<a href="https://arxiv.org/abs/2601.11868">arXiv:2601.11868</a>. Pi is the
+open-source coding agent at
+<a href="https://github.com/earendil-works/pi">github.com/earendil-works/pi</a>.</p>
+
+<p class="small">The benchmark agent, the scripts that compute these numbers,
+and the first draft of this post were produced by KISS Sorcar from the
+authors&rsquo; outlines and edits; a second model reviewed the post read-only,
+as it reviews the code. We take responsibility for all content.</p>
+
+</main>
+<footer>
+  <a href="https://kisssorcar.github.io/">KISS Sorcar</a> &middot;
+  <a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a> &middot;
+  29 September 2026
+</footer>
+</body>
+</html>
