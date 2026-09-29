@@ -49,6 +49,8 @@ import pytest
 from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from kiss.tests.conftest import goto_retrying_network_change
+
 MEDIA_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 MAIN_CSS = MEDIA_DIR / "main.css"
@@ -656,7 +658,8 @@ def test_live_task_panel_typography_and_history_rows(
                     ignore_https_errors=True,
                     viewport={"width": 1400, "height": 900},
                 )
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{port}/",
                     wait_until="domcontentloaded",
                 )
@@ -1202,7 +1205,8 @@ def test_live_history_action_buttons_own_a_compact_line(
                     ignore_https_errors=True,
                     viewport={"width": 1400, "height": 900},
                 )
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{port}/",
                     wait_until="domcontentloaded",
                 )

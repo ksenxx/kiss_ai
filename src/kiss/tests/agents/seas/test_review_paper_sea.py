@@ -137,9 +137,9 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert prompt == review_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
     assert review_paper_sea.SECOND_OPINION_MODEL in prompt
-    assert f"(default {review_paper_sea.DEFAULT_WORD_LIMIT}\nwords)" in prompt
+    assert "Run the `check_review` tool with the word limit" in prompt
     assert "`read_paper`" in prompt and "`check_review`" in prompt
-    assert "Judge the novelty" in prompt and "at least 10 distinct sources" in prompt
+    assert "Judge the novelty" in prompt and "at least 20 distinct sources" in prompt
     assert "Em dashes: zero" in prompt
     assert [t.__name__ for t in review_paper_sea.tools()] == ["read_paper", "check_review"]
     assert review_paper_sea.use_web_tools() is True

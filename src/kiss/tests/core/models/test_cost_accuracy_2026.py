@@ -299,13 +299,14 @@ class TestDirectMoonshotCachePricing:
         # input, $0.30 cache read = 0.29x).  The updater prices each
         # OpenRouter row independently, so the alias is not tied to the
         # kimi-k3 entry either.  What must hold is that the explicit
-        # OpenRouter cache price was kept: a positive discount on the input
-        # price that is not the 0.25x direct-Moonshot default.
+        # OpenRouter cache price was kept: a positive price no higher than
+        # the input price (2026-09-29: $0.40 input, $0.40 cache read, i.e. no
+        # discount published) that is not the 0.25x direct-Moonshot default.
         latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
         assert latest.input_price_per_1M > 0
         cache_read = latest.cache_read_price_per_1M
         assert cache_read is not None
-        assert 0 < cache_read < latest.input_price_per_1M
+        assert 0 < cache_read <= latest.input_price_per_1M
         assert cache_read != pytest.approx(latest.input_price_per_1M * 0.25)
 
 

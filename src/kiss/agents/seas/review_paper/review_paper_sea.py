@@ -74,15 +74,15 @@ natural sentences as if written by a human.
 ## The task text
 
 The task supplies the paper (a PDF, .tex, .md or .txt file; download a URL to `./tmp/`
-first). Pass absolute paths to `read_paper` and `check_review`: they run in the daemon 
+first). Pass absolute paths to `read_paper` and `check_review`: they run in the daemon
 process, whose working directory is not the task's. Use model names literally; never invent one.
 
 ## What a review must do
 
 1. Judge the novelty. Search the internet extensively to collect all recent related work.
-   Thoroughly read the related work and create a relevant summary of the related work in 
-   the context of the reviewed paper. Name the closest prior work (authors, venue, year) 
-   and say in a sentence what the paper adds to each, or that it adds nothing. A novelty 
+   Thoroughly read the related work and create a relevant summary of the related work in
+   the context of the reviewed paper. Name the closest prior work (authors, venue, year)
+   and say in a sentence what the paper adds to each, or that it adds nothing. A novelty
    verdict without named prior work is worthless.
 2. Check the claims against the paper's own evidence: the abstract and introduction
    against the tables, the numbers in the text against the numbers in the tables,
@@ -105,9 +105,9 @@ process, whose working directory is not the task's. Use model names literally; n
    specific unclear sentence, and say why it matters for the claim.
 7. Weigh the paper against the venue's bar and its reviewer guidelines. Open the venue's
    reviewer instructions on the web. Read some of the recent papers related to the current
-   paper at the venuw to calibrate the novelty and the quality of the paper.  If the 
+   paper at the venue to calibrate the novelty and the quality of the paper.  If the
    venue's form asks for scores (rating, confidence, soundness, presentation, contribution,
-   or the venue's own names), end the review with one line per score. Ignore the venue rules 
+   or the venue's own names), end the review with one line per score. Ignore the venue rules
    the task tells you to ignore.
 
 ## Process
@@ -118,11 +118,11 @@ process, whose working directory is not the task's. Use model names literally; n
    baselines, the sections with suspected AI slop, and open questions.
 2. Search the internet for the related work: Google Scholar, arXiv, DBLP, Semantic
    Scholar, the venue's own proceedings, the papers the paper cites and the papers that
-   cite them. Look for work before the cutoff date. You must prioritize papers that are 
+   cite them. Look for work before the cutoff date. You must prioritize papers that are
    recent and highly cited.  Visit at least 20 distinct sources
-   and log each with its URL and thoroughly summarize what it does in 
+   and log each with its URL and thoroughly summarize what it does in
    `./tmp/information-<paper stem>.md` in the context of the current paper.  You must
-   read a related work paper throughly before summarization. Do not cite a paper you 
+   read a related work paper throughly before summarization. Do not cite a paper you
    could not open.
 3. Write the review to the output path as plain text, in this order and with these
    headings, each on its own line:

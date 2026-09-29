@@ -32,11 +32,20 @@ from kiss.core.models.model import merge_system_texts
 def _anthropic_system(
     conversation: list[dict[str, Any]], system_instruction: str | None
 ) -> str | None:
-    """Return the ``system`` param AnthropicModel would send for *conversation*."""
+    """Return the merged system text AnthropicModel would send for *conversation*.
+
+    With prompt caching on (the default) the adapter sends ``system`` as a
+    list of text blocks carrying ``cache_control`` breakpoints; the blocks
+    are concatenated here because these tests pin the merged text, not the
+    block layout (covered by ``test_system_prompt_cache_break.py``).
+    """
     config = {"system_instruction": system_instruction} if system_instruction else {}
     m = AnthropicModel("claude-sonnet-5", api_key="test-key", model_config=config)
     m.conversation = list(conversation)
-    return m._build_create_kwargs().get("system")
+    system = m._build_create_kwargs().get("system")
+    if isinstance(system, list):
+        return "".join(block["text"] for block in system)
+    return system
 
 
 def _gemini_system(
