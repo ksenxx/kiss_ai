@@ -75,9 +75,9 @@ _MUSE_REQUIRED = (
 )
 _NOT_AUTHENTICATED = (
     "Not authenticated with MS Teams. Call authenticate_msteams() to sign in the "
-    "way the Muse app connects: it returns https://microsoft.com/devicelogin plus "
-    "a short code for the user to enter in their OWN browser after signing in "
-    "with their work or school account and clicking Accept; then call "
+    "way the Muse app connects: it opens https://microsoft.com/devicelogin for the "
+    "user (follow its 'instructions') with a short code they enter after signing "
+    "in with their work or school account and clicking Accept; then call "
     "finish_msteams_auth(). Never ask for the user's Microsoft password or 2FA code."
 )
 
@@ -711,9 +711,9 @@ class MSTeamsAgent(BaseChannelAgent):
             Starts the Microsoft identity platform device code flow with
             the KISS-owned multi-tenant app ($KISS_MSTEAMS_CLIENT_ID
             overrides its client ID) and returns a ``consent_required``
-            answer: give the user the verification URL and code
-            (ask_user_question) to complete in their OWN browser, then
-            call finish_msteams_auth().  The resulting delegated Graph
+            answer whose ``instructions`` say how to hand the page and
+            code to the user (ask_user_question); the USER completes it,
+            then call finish_msteams_auth().  The resulting delegated Graph
             token acts as the signed-in user.
 
             Args:

@@ -208,6 +208,33 @@ class BrowserTabService:
         except Exception as exc:
             raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
 
+    def open_for_user(self, url: str) -> bool:
+        """Open *url* in a new tab that every surface switches to, for the user to complete.
+
+        The hand-off behind :func:`kiss.core.browser_handoff.open_for_user`:
+        a sign-in page, consent screen or developer portal the agent may
+        not drive itself.  Blocks until the page has started loading
+        (launching the browser first when needed), so the caller knows
+        the user is looking at it.
+
+        Args:
+            url: The page to load, as given (no address-bar normalisation).
+
+        Returns:
+            ``True`` once the tab is announced and the navigation
+            committed; ``False`` when the service is shut down, the
+            browser cannot be launched or *url* cannot be loaded (the
+            blank tab is closed again).
+        """
+        try:
+            loop = self._ensure_loop()
+            future = asyncio.run_coroutine_threadsafe(self._open_for_user(url), loop)
+            future.result(_OPEN_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — the caller falls back to another browser
+            logger.warning("browser tab: cannot open %s for the user: %s", url, exc)
+            return False
+        return True
+
     def tab_for_target(self, target_id: str) -> str | None:
         """The tab id of the attached page whose Chromium target id is *target_id*, if any."""
         with self._lock:
@@ -421,6 +448,18 @@ class BrowserTabService:
         # The agent wants the user's attention: every surface switches to the tab.
         self._emit(self._open_event(rec, focus=True))
         return AgentTab(rec.tab_id, rec.target_id, self._cdp_url())
+
+    async def _open_for_user(self, url: str) -> None:
+        rec = await self._new_tab()
+        # The user has to act on this page: every surface switches to the tab.
+        self._emit(self._open_event(rec, focus=True))
+        try:
+            await rec.page.goto(url, wait_until="commit")
+        except Exception:
+            # A page that cannot load is no hand-off: drop the blank tab
+            # so the caller can fall back to another browser.
+            await rec.page.close()
+            raise
 
     async def _new_tab(self) -> _PageRecord:
         """Launch the browser if needed, create a page and announce it unfocused."""
