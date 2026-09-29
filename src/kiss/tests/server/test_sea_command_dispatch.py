@@ -49,10 +49,16 @@ def _make_server() -> tuple[VSCodeServer, _CapturePrinter]:
 
 @pytest.fixture(autouse=True)
 def _reset_registry() -> Iterator[None]:
-    """Isolate the SEA command registry between tests."""
+    """Isolate the SEA command registry between tests.
+
+    Also removes the ``SEAS.md`` :func:`_seed_seas_md` wrote into the
+    session-wide ``$KISS_HOME`` so it cannot shadow bundled commands
+    for later tests in the same process.
+    """
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 def _seed_seas_md(folder: Path, name: str) -> Path:

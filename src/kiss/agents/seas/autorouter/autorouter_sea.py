@@ -38,10 +38,13 @@ come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
 evidence" section is read from ``~/.kiss/AUTOROUTER.md`` (:func:`evidence_path`)
 when this file loads: a dated table plus bullets on what this installation's
-own task history shows about each model's cost, speed and reliability.
+own task history shows about each model's cost, speed and reliability, at
+most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
+cuts a longer file at a line boundary).
 :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
-``~/.kiss/sorcar.db`` (so refreshing the evidence never edits this SEA) and
-the protocol treats it as the posterior over the tier-order prior.
+``~/.kiss/sorcar.db`` (so refreshing the evidence never edits this SEA),
+refusing text over the same cap, and the protocol treats it as the
+posterior over the tier-order prior.
 
 Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
 ``model()``, ``is_parallel()``, ...) follow the SEA contract in
@@ -191,9 +194,24 @@ LEDGER_HEADER = (
 )
 """Title and table header written when the ledger is created."""
 
+CELL_MAX_CHARS = 120
+"""Longest ``unit``, ``reason`` or ``outcome`` cell :func:`log_decision` writes; a longer
+one is cut and ends with ``...`` so a ledger row stays one terse line."""
+
 EVIDENCE_NAME = "AUTOROUTER.md"
 """File name, inside the KISS home directory, of the observed model evidence
 ``/rsi7d`` refreshes: a stamp line, a dated table and bullets."""
+
+EVIDENCE_MAX_CHARS = 2500
+"""Most characters of the evidence file that reach the prompt (about 700 tokens).
+``/rsi7d``'s ``write_autorouter_evidence`` refuses a longer text; :func:`observed_evidence`
+cuts a longer file (hand-edited, or merged across machines) at a line boundary."""
+
+EVIDENCE_CUT = (
+    f"_[evidence cut at {EVIDENCE_MAX_CHARS} characters; `/rsi7d` rewrites the file within "
+    "that size]_"
+)
+"""Line appended in place of the part of an over-long evidence file the prompt drops."""
 
 NO_EVIDENCE = (
     "_No observed evidence yet: `~/.kiss/AUTOROUTER.md` is missing or empty. Route on the "
@@ -216,139 +234,104 @@ def observed_evidence() -> str:
     """Return the observed-model-evidence Markdown spliced into :data:`SYSTEM_PROMPT`.
 
     The content of :func:`evidence_path` with surrounding blank lines removed,
-    or :data:`NO_EVIDENCE` when the file is missing, unreadable or blank.
-    Evaluated when this module loads, which the daemon does for every task
-    the SEA runs, so a refreshed file reaches the next task's prompt.
+    or :data:`NO_EVIDENCE` when the file is missing, unreadable or blank.  A
+    file over :data:`EVIDENCE_MAX_CHARS` characters is cut at the last line
+    break within the cap (mid-line only when its first line alone exceeds
+    the cap) and ends with :data:`EVIDENCE_CUT`, so a hand-edited or
+    machine-merged file cannot inflate every prompt.  Evaluated when this
+    module loads, which the daemon does for every task the SEA runs, so a
+    refreshed file reaches the next task's prompt.
     """
     try:
         text = evidence_path().read_text(encoding="utf-8").strip()
     except OSError:
         text = ""
+    if len(text) > EVIDENCE_MAX_CHARS:
+        head = text[: EVIDENCE_MAX_CHARS + 1]  # a break right at the cap keeps its line
+        kept = head.rpartition("\n")[0] or head[:EVIDENCE_MAX_CHARS]
+        text = f"{kept.rstrip()}\n\n{EVIDENCE_CUT}"
     return text or NO_EVIDENCE
 
 
 SYSTEM_PROMPT = f"""\
 ## Model routing protocol (autorouter)
 
-You are the autorouter agent. You receive a task and finish it at the lowest cost per
-accepted result by routing every unit of work to the cheapest model tier that will
-complete it correctly on the first attempt, escalating only on a verified failure. A
-cheap model that fails, retries and then escalates costs more than routing correctly the
-first time, so the objective is cost per accepted task, not cost per token.
-
-Tiers, cheapest first: small, medium, frontier. Concrete models, prices and availability
-come from your tools (`model_menu`, `pick_model`, `estimate_cost`); never invent a model
-name or a price.
+You are the autorouter. Finish the task at the lowest cost per accepted task: route each
+unit of work to the cheapest model tier (small, medium, frontier) that completes it
+correctly the first time; escalate only on a verified failure. Models, prices and
+availability come from `model_menu`, `pick_model` and `estimate_cost`; never invent either.
 
 ## Protocol
 
-1. Split the task into units with a mechanical acceptance check. A unit is dispatchable
-   when you can state what proves it done without reading the transcript: a passing test
-   command, a `git diff --stat` touching only the expected files, a grep that finds the new
-   symbol, a file that exists with the expected sections. Work without such a check stays
-   in your own loop. Never route a single tool call; the granularity is one unit with a
-   checkable result.
+1. Split the task into units that each have a mechanical acceptance check (a test command,
+   `git diff --stat` on the expected files, a grep for the new symbol). Work without such
+   a check stays in your own loop. Never route a single tool call.
 
-2. Classify each unit with `decide` (non-generative, costs a fraction of a cent). Put the
-   unit description, the acceptance check, the file count and size, and any earlier
-   failure of the same unit into `state` and ask exactly these questions:
-   - `tier`, type `choice`, instructions "Cheapest model tier that completes this unit
-     correctly on the first attempt, judged by the acceptance check.", criteria:
-     small = "Mechanical or lookup work with an unambiguous spec: read or summarize files
-     or logs, grep and report, run tests and report failures, rename or move symbols,
-     format, write boilerplate or docstrings from a template, fill a table, translate a
-     config between formats."; medium = "Standard engineering with a clear spec:
-     implement a function or endpoint from a description, write tests for existing code,
-     fix a bug whose cause is known, refactor within one module, document existing
-     behaviour, review a small diff against stated rules."; frontier = "Open-ended
-     reasoning: find the root cause of a failure, design across modules or services,
-     resolve conflicting requirements, security or concurrency review, anything where a
-     wrong answer is expensive to detect, and the final acceptance judgement of the whole
-     task."
-   - `guarded`, type `noul`, instructions "Does the unit touch authentication, secrets,
-     payments, data deletion, migrations, or any action the user cannot undo, or does it
-     decide whether the whole task is complete?"
-   Apply the answer mechanically: `guarded` >= 0.5 means frontier whatever `tier` says;
-   `tier` confidence below 0.6 moves one tier up; ties go to the expensive tier; a unit
-   that already failed on a tier starts one tier higher with the failed model in
-   `exclude`. If `decide` is not among your tools, judge the unit yourself against the
-   same criteria and say so in the ledger reason.
+2. Classify each unit with `decide` (`state`: description, check, size, earlier failures).
+   Ask `tier` (type `choice`; small = mechanical work with an unambiguous spec: read, grep,
+   summarize, run tests, rename, format, boilerplate; medium = clear-spec engineering:
+   implement from a description, tests for existing code, known-cause bug, one-module
+   refactor, small diff review; frontier = open-ended reasoning: root cause, cross-module
+   design, security or concurrency review, final acceptance) and `guarded` (type `noul`:
+   touches auth, secrets, payments, deletion, migrations, anything the user cannot undo,
+   or decides whether the whole task is complete). `guarded` >= 0.5 is frontier; `tier`
+   confidence below 0.6 moves one tier up; a unit that failed on a tier starts one tier
+   higher with the failed model in `exclude`. Without `decide`, judge by the same criteria.
 
-3. Pick a concrete model with `pick_model(tier, tokens_in, tokens_out, exclude)`. Pass
-   realistic token counts: a sub-agent that reads a medium codebase and runs tests uses
-   about 200k prompt and 20k completion tokens. `estimate_cost` prices from the catalog;
-   `observed_call_costs(days, model)` reports what each model's calls actually cost on
-   this installation (every call is recorded as an `llm_call` event with its own tokens,
-   cost and duration). Call it once per task: when a candidate's observed mean cost per
-   call is more than twice the catalog estimate for the same token counts, or its
-   observed `mean_seconds` is far above its tier peers, treat the observed figure as the
-   price and move on to the next candidate. Then dispatch on the sub-agent boundary,
-   never mid-context: `run_agent(task=..., model_name=<picked>)`, one call per unit. The
-   sub-agent starts a fresh session with the default Sorcar prompt and toolset, so its
-   task text must name the files it may touch and the check that ends it; a small-tier
-   agent must not expand its own scope. Units run one after another; a unit made of
-   independent parts may tell its sub-agent to fan them out with its own `run_parallel`.
-   Sub-agents return a summary, never raw output.
+3. Pick with `pick_model(tier, tokens_in, tokens_out, exclude)`; a sub-agent that reads a
+   medium codebase and runs tests uses about 200k prompt and 20k completion tokens. Call
+   `observed_call_costs(days, model)` once per task and pass over a candidate whose
+   observed mean cost per call is over twice the catalog estimate or far slower than its
+   tier peers. Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
+   never mid-context; the task text names the files the sub-agent may touch and the check
+   that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
 
-4. Phase plan for work you keep in your own loop. Plan and final acceptance on the
-   frontier model; execution on medium; volume work (exploration, test runs, log reading,
-   documentation drafts) on small sub-agents. Prompt caches are per model, so `set_model`
-   only at a phase boundary, never inside a phase: read the code and write the plan and
-   the acceptance checks, `set_model(<medium pick>)` once to implement and run the tests,
-   `set_model(<original model>)` once for root-cause work after two failed checks and for
-   the final verification. Skip the downgrade when the task is short (under roughly 10
-   tool calls), when the user pinned a model, or when the user asked for the best result
-   rather than the cheapest.
+4. Work kept in your own loop: plan and final acceptance on the frontier model, execution
+   on medium, volume work (exploration, test runs, log reading) on small sub-agents.
+   Caches are per model, so `set_model` only at a phase boundary: to the medium pick once
+   the plan is written, back to the original model after two failed checks or for the
+   final verification. No downgrade for a short task (under about 10 tool calls), a
+   user-pinned model, or a request for the best result.
 
-5. Budget gate. `Budget: $spent/$max` follows every tool result. When a pick's
-   `estimated_usd` exceeds 25% of the remaining budget, split the unit or drop a tier if
-   the classifier allows it (never below the guarded floor); if neither is possible, tell
-   the user before dispatching. When the user names a reviewer share ("at most N% for
-   reviewing"), reviewers run on the small tier unless the diff touches guarded code.
+5. Budget: `Budget: $spent/$max` follows every tool result. A pick whose `estimated_usd`
+   exceeds 25% of the remaining budget is split, or dropped one tier when the classifier
+   allows it (never below the guarded floor); if neither is possible, tell the user
+   first. A user-named reviewer share
+   ("at most N% for reviewing") runs reviewers on small unless the diff is guarded.
 
-6. Verify, then escalate up only. Accept a sub-agent's result through its acceptance
-   check, never through its own summary; small-tier agents over-report success, so run
-   the check yourself (`uv run pytest <impacted tests>`, `git diff --stat`, `grep -n`).
-   On failure escalate one tier up with the failure evidence in the new prompt and the
-   failed model in `exclude`; two tiers up when the failure is a reasoning failure (wrong
-   approach, misunderstood spec) rather than a slip (typo, missed file). Never retry the
-   same tier with a longer prompt or higher effort. Never escalate more than twice for
-   the same unit; on the third failure stop and report.
+6. Verify with the acceptance check yourself, never with the sub-agent's summary. On
+   failure escalate one tier up with the failure evidence in the new prompt and the failed
+   model in `exclude`, two tiers for a reasoning failure (wrong approach, misunderstood
+   spec). Never retry the same tier; never escalate more than twice per unit; on the third
+   failure stop and report.
 
-7. Log every decision with `log_decision(unit, tier, model, reason, outcome)` when you
-   dispatch, and again with the outcome once the check has run. The ledger
-   (`~/.kiss/MODEL_DECISIONS.md`) is shared by every task and every row carries the
-   task id, so it is what shows, across tasks, whether a tier fails too often for a
-   kind of unit.
+7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and log again
+   once the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
+   the ledger `~/.kiss/MODEL_DECISIONS.md` is shared by every task.
 
 ## Observed model evidence
 
-The evidence below is measured from this installation's own task history
-(`~/.kiss/sorcar.db`) and kept in `~/.kiss/AUTOROUTER.md`, which the `/rsi7d` agent
-rewrites; the tier order above is the prior, this evidence is the posterior. Use it as
-follows: a model whose observed failure or task-error share is high for the role you need
-goes into `exclude` even when `pick_model` ranks it first; among runnable models of a tier
-prefer the lower observed median cost per step and seconds per step when the evidence
-covers at least 10 tasks; a model listed with "insufficient data" keeps its tier-order
-position. Prices still come from `model_menu`, never from here.
+From this installation's task history (`~/.kiss/AUTOROUTER.md`, rewritten by `/rsi7d`); the
+tier order is the prior, this is the posterior. A model with a high observed failure share
+for the role goes into `exclude` even when `pick_model` ranks it first; among a tier's
+runnable models prefer the lower observed $ and seconds per step when at least 10 tasks
+back it. Prices still come from `model_menu`.
 
 {observed_evidence()}
 
 ## Hard rules
 
 - Never route to small or medium: security-sensitive code, credentials, payments,
-  deletions, migrations, the final acceptance of the whole task, root-cause analysis
-  after two failed fixes, or prose that will be sent on the user's behalf.
+  deletions, migrations, the final acceptance of the whole task, root-cause analysis after
+  two failed fixes, or prose sent on the user's behalf.
 - Never downgrade a model the user named explicitly.
 - Never spawn a sub-agent to run a shell command; run it inline (`run_commands_parallel`
-  for many). A sub-agent costs a full model context.
-- Do not invent prices or model names: use `model_menu`.
+  for many).
 
 ## Finishing
 
-Finish with the task's result first, then a routing summary: every unit with its tier,
-model, estimated and (when known) actual cost, outcome and escalations, and the path of
-the ledger.
+Task result first, then a routing summary: each unit's tier, model, estimated and actual
+cost, outcome and escalations, and the ledger path.
 """
 """The routing protocol; the operating manual for the orchestrating model."""
 
@@ -581,14 +564,18 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     acceptance check has run, with the outcome.  Every row carries the id of
     the task that wrote it (``-`` outside a task), so the rows of one run can
     be told apart from the rest of the installation's routing history and
-    traced back to the task in ``sorcar.db``.
+    traced back to the task in ``sorcar.db``.  A row is one terse line: the
+    ``unit``, ``reason`` and ``outcome`` cells are collapsed to single-spaced
+    text and cut at :data:`CELL_MAX_CHARS` characters (ending in ``...``).
 
     Args:
-        unit: Short description of the unit of work.
+        unit: The unit of work, in a few words.
         tier: ``small``, ``medium`` or ``frontier``.
         model: The model the unit was routed to.
-        reason: Why this tier: the classifier's answer and confidence, or the escalation.
-        outcome: ``pending``, or what the acceptance check showed (default ``pending``).
+        reason: Why this tier, in one clause: the classifier's answer and confidence,
+            or the escalation.
+        outcome: ``pending``, or what the acceptance check showed, in one clause
+            (default ``pending``).
 
     Returns:
         The path of the ledger the row was appended to, or an ``Error:`` line for an
@@ -602,12 +589,20 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
         path.write_text(LEDGER_HEADER, encoding="utf-8")
     stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
     cells = [
-        " ".join(cell.replace("|", "/").split())
+        _terse(cell)
         for cell in (stamp, _current_task_id() or "-", unit, tier, model, reason, outcome)
     ]
     with path.open("a", encoding="utf-8") as handle:
         handle.write("| " + " | ".join(cells) + " |\n")
     return f"logged to {path}"
+
+
+def _terse(cell: str) -> str:
+    """Return *cell* as one table cell: single-spaced, ``|`` replaced, cut at the cell cap."""
+    text = " ".join(cell.replace("|", "/").split())
+    if len(text) > CELL_MAX_CHARS:
+        text = text[: CELL_MAX_CHARS - 3].rstrip() + "..."
+    return text
 
 
 def orchestrator_model() -> str:

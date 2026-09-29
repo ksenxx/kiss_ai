@@ -50,6 +50,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     serve,
     tool_call_body,
 )
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 _SEA_PATH = Path(sea.__file__).resolve()
 _TESTS = Path(__file__).parent
@@ -234,7 +235,8 @@ def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> N
     memory_dir = _memory_dir(repo)
     assert memory_dir == kiss_home() / "memories" / "ledger"
     lookup = MemoryDir(memory_dir).read(sea.LOOKUP_PAGE)
-    assert f"{shlex.quote(sys.executable)} -m {sea.MODULE} search {repo}" in lookup.body
+    command = f"{shlex.quote(sys.executable)} -m {sea.MODULE} search {shlex.quote(str(repo))}"
+    assert command in lookup.body
     assert str(store.path) in lookup.body and head[:12] in lookup.body
     assert "04:00 America/Los_Angeles" in lookup.body
     # The lookup page itself is mirrored as a note block.
@@ -313,6 +315,7 @@ def test_incremental_index_tracks_changes_and_dropped_commits(repo: Path) -> Non
     assert store.counts()["file"] == 7  # re-indexed, not duplicated
 
 
+@posix_only("tab and control bytes in file names")
 def test_every_ref_merge_and_odd_name_is_indexed(tmp_path: Path) -> None:
     """Branch-only commits, merge resolutions, spaces, non-ASCII, tabs and control bytes."""
     shutil.rmtree(kiss_home() / "memories" / "odd", ignore_errors=True)
@@ -512,9 +515,8 @@ def test_lookups_beyond_the_budget_are_drained_by_the_next_runs(
     _git(repo, "commit", "-q", "-m", "three files")
     store = _store(repo)
     index.index_repo(repo, store)
-    for i in range(3):
-        (repo / f"f{i}.txt").chmod(0o755)  # mode-only: blobs unchanged, all three touched
-    _git(repo, "add", "-A")
+    for i in range(3):  # mode-only: blobs unchanged, all three touched (NTFS has no x bit)
+        _git(repo, "update-index", "--chmod=+x", f"f{i}.txt")
     _git(repo, "commit", "-q", "-m", "executable")
     executable = _git(repo, "rev-parse", "HEAD")
     monkeypatch.setattr(index, "MAX_LAST_TOUCH_LOOKUPS", 2)
@@ -1096,6 +1098,7 @@ def test_store_batches_large_writes_and_dedupes_query_tokens(tmp_path: Path) -> 
     assert len(store.search("common", k=100)) == 100
 
 
+@posix_only("a colon in a file name")
 def test_sha256_repo_odd_config_and_hostile_names(tmp_path: Path) -> None:
     """SHA-256 object names, diff.noprefix/log.showRoot config, mode-only renames of quoted
     names, a file literally named ``f:2``, non-UTF-8 names, control bytes in a tag message
@@ -1230,12 +1233,14 @@ def test_first_build_attributes_files_to_head_history_only(tmp_path: Path) -> No
     rules = store.get("file:rules.txt")
     assert rules is not None and "MAINFACT" in rules.text
     assert f"last commit: {main_commit[:12]}" in rules.text
-    # Staged names with glob or magic characters are looked up literally.
-    (repo / "[x].txt").write_text("bracket\n")
-    (repo / ":(bogus)name.txt").write_text("magic\n")
-    _git(repo, "--literal-pathspecs", "add", "[x].txt", ":(bogus)name.txt")
+    # Staged names with glob or magic characters are looked up literally
+    # (NTFS refuses the colon of pathspec magic, so only the glob there).
+    odd_names = ["[x].txt"] if IS_WINDOWS else [":(bogus)name.txt", "[x].txt"]
+    for name in odd_names:
+        (repo / name).write_text("odd\n")
+    _git(repo, "--literal-pathspecs", "add", *odd_names)
     report = index.index_repo(repo, store)
-    assert report.changed_paths == [":(bogus)name.txt", "[x].txt"]
+    assert report.changed_paths == odd_names
     for path in report.changed_paths:
         block = store.get(f"file:{path}")
         assert block is not None and "last commit" not in block.text, path

@@ -29,6 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.seas.task_update import task_update_sea
+from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,99 @@ def mark_legacy_updates_as_side_channels() -> int:
     return _mark_legacy_side_channel_rows(task_update_sea.PROMPT_TEMPLATE)
 
 
+# Serializes charge_side_channel_usage: each charge's row update and the
+# usage_info snapshots it publishes happen together, so a concurrent
+# charge's older, smaller snapshot can never be shown (or replayed) after
+# a newer one.
+_LATE_USAGE_LOCK = threading.Lock()
+
+
+def charge_side_channel_usage(
+    printer: Any,
+    task_agent: Any,
+    task_id: str,
+    budget: float,
+    tokens: int,
+    steps: int,
+    epoch: Any = None,
+) -> None:
+    """Charge a side channel's spend to the task it worked for.
+
+    A side channel (a task-update run, an ``/ask`` answerer) may end
+    before or after its task.  While the task runs, the spend is banked
+    on *task_agent*'s live counters (bound to *epoch*), so the task's
+    final save and, for a sub-agent task, its parent's fold include
+    it.  Once the task has finished, the spend is added to its row and
+    to each finished ancestor's row
+    (:func:`~kiss.agents.sorcar.persistence._add_late_task_usage`),
+    every updated task's tabs get its new totals as a persisted
+    ``usage_info``, and a still-running ancestor, when there is one,
+    banks the spend on its live agent.  A task that finishes in the
+    moment between the row check and the bank, after its final save
+    read its counters, loses the spend (the same narrow window every
+    live-agent bank has).
+
+    Args:
+        printer: The printer that shows the task's tabs, or ``None``.
+        task_agent: The live agent of the task *task_id*.
+        task_id: The task's persisted ``task_history`` row id.
+        budget: USD spent.
+        tokens: Tokens spent.
+        steps: Steps taken.
+        epoch: *task_agent*'s usage epoch captured when the side channel
+            started (see ``RelentlessAgent._attribute_usage``), or
+            ``None`` for its current one.
+    """
+    from kiss.agents.sorcar.persistence import (
+        _add_late_task_usage,
+        _append_chat_event,
+    )
+    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+    from kiss.server import agent_state
+
+    if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
+        return
+    with _LATE_USAGE_LOCK:
+        try:
+            updated, running = _add_late_task_usage(task_id, tokens, budget, steps)
+        except Exception:
+            log.warning(
+                "could not add side-channel spend to task %s", task_id,
+                exc_info=True,
+            )
+            return
+        if running:
+            # Banked first: the task can finish (saving its counters) at
+            # any moment after the transaction above released it.
+            if running == task_id:
+                agent = task_agent
+            else:
+                state = agent_state.get(running)
+                agent = state.agent if state is not None else None
+                epoch = None
+            if agent is None:
+                log.warning(
+                    "side-channel spend of task %s not charged to running "
+                    "task %s: no live agent", task_id, running,
+                )
+            else:
+                _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
+        for row_id, row_tokens, row_cost, row_steps in updated:
+            event: dict[str, Any] = {
+                "type": "usage_info",
+                "text": "",
+                "total_tokens": row_tokens,
+                "cost": f"${row_cost:.4f}",
+                "total_steps": row_steps,
+            }
+            stamp_event_ts(event)
+            if printer is not None:
+                printer.broadcast_transient(event, task_id=row_id)
+            _append_chat_event(dict(event), task_id=row_id)
+        if updated and printer is not None:
+            printer.broadcast({"type": "tasks_updated"})
+
+
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     """Run the task-update agent in-process for *task_id*.
 
@@ -116,8 +210,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     since reset for its next task discards it instead of billing that
     task); the task's final save then writes those totals to its row.
     When the task finished while the update ran (its row already holds
-    the final totals) the spend is added to the row instead
-    (:func:`~kiss.agents.sorcar.persistence._add_task_usage`), so it is
+    the final totals) the spend is added to the row and its finished
+    ancestors instead (see :func:`charge_side_channel_usage`), so it is
     never counted twice.  Only an update that ends in the few
     milliseconds between the final save reading the counters and
     writing the row can lose its spend.
@@ -138,9 +232,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         ChatSorcarAgent,
         _extract_result_summary,
     )
-    from kiss.agents.sorcar.persistence import _add_task_usage, _task_is_finished
     from kiss.agents.sorcar.sorcar_agent import (
-        _attribute_sub_usage,
         _live_agent_usage,
         _notify_subagent_done,
         _persisted_task_id,
@@ -194,16 +286,9 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
-        if _task_is_finished(task_id):
-            try:
-                _add_task_usage(task_id, tokens, budget, steps)
-            except Exception:
-                log.warning(
-                    "could not add task-update spend to task %s", task_id,
-                    exc_info=True,
-                )
-        else:
-            _attribute_sub_usage(parent_agent, budget, tokens, steps, epoch=epoch)
+        charge_side_channel_usage(
+            printer, parent_agent, task_id, budget, tokens, steps, epoch=epoch,
+        )
         if printer is not None:
             _notify_subagent_done(
                 printer, _persisted_task_id(agent), sub_tab_id, model_name,

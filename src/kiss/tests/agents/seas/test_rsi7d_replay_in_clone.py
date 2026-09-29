@@ -77,7 +77,9 @@ class ReplayInCloneTest(DaemonUdsHarness):
             encoding="utf-8",
         )
         # A fake KISS checkout with an editable demo SEA; rsi7d resolves it through the cwd.
-        self.checkout = Path(self.tmpdir) / "checkout"
+        # Resolved because the SEA reports paths under os.getcwd(), which is the real path
+        # (/private/var/... on macOS, where tempdirs live behind the /var symlink).
+        self.checkout = (Path(self.tmpdir) / "checkout").resolve()
         seas = self.checkout / "src" / "kiss" / "agents" / "seas"
         (seas / "rsi7d").mkdir(parents=True)
         (seas / "demo").mkdir()

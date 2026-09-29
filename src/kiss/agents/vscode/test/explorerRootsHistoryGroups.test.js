@@ -1035,6 +1035,15 @@ async function main() {
     return win.document.querySelector('#history-list .sidebar-item');
   }
 
+  // The touch grace timer (300 ms) and the macrotask hop behind it fire
+  // late on a loaded machine, so wait for the rebuild instead of sleeping
+  // a fixed margin past it.
+  async function firstRowReplaced(win, row) {
+    const deadline = Date.now() + 3000;
+    while (firstRow(win) === row && Date.now() < deadline) await sleep(20);
+    return firstRow(win) !== row;
+  }
+
   await test('History: an identical refresh keeps the same DOM rows (no lost click, no lost focus)', async () => {
     const {win, posted} = makeWebview();
     const page1 = () => [
@@ -1297,10 +1306,8 @@ async function main() {
       tabsBefore + 1,
       'the tap still opens the pressed task',
     );
-    await sleep(400);
-    assert.notStrictEqual(
-      firstRow(win),
-      rowBefore,
+    assert.ok(
+      await firstRowReplaced(win, rowBefore),
       'the deferred rebuild lands after the grace period',
     );
     win.close();
@@ -1341,10 +1348,8 @@ async function main() {
     );
     // Touch 2 lifts; its own grace period ends; the parked page lands.
     rowBefore.dispatchEvent(pev('pointerup', 7));
-    await sleep(400);
-    assert.notStrictEqual(
-      firstRow(win),
-      rowBefore,
+    assert.ok(
+      await firstRowReplaced(win, rowBefore),
       'the parked page lands after the second touch releases',
     );
     win.close();

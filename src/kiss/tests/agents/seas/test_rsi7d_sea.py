@@ -41,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.utils import rmtree_force
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -48,6 +49,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     serve,
     tool_call_body,
 )
+from kiss.tests.conftest import is_root, posix_only
 from kiss.tests.server.parallel_agent_harness import init_repo, run_git
 
 _SEA_PATH = Path(sea.__file__).resolve()
@@ -682,9 +684,11 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
     report = sea.write_autorouter_evidence(table)
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
-    assert report == f"Wrote {home / 'AUTOROUTER.md'} (5 lines, refreshed {stamp})"
     written = (home / "AUTOROUTER.md").read_text(encoding="utf-8")
     assert written == f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{table}\n"
+    assert report == (
+        f"Wrote {home / 'AUTOROUTER.md'} (5 lines, {len(written)} chars, refreshed {stamp})"
+    )
     assert path.read_text(encoding="utf-8") == source
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert written.strip() in prompt and autorouter_sea.NO_EVIDENCE not in prompt
@@ -709,6 +713,30 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     assert sea.write_autorouter_evidence("  \n") == "Error: the evidence text is empty"
     assert "word word" in sea._execute_sea(path)["add_to_system_prompt"]()
     assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md"]
+    # The file goes into every autorouter prompt, so the stamped text is
+    # capped at the size the autorouter cuts at; a text that would exceed
+    # it is refused and the file kept.  A file over the cap written by
+    # other means (a hand edit, a cross-machine merge) reaches the prompt
+    # cut at a line boundary with the cut marker, never whole.
+    assert sea.EVIDENCE_MAX_CHARS == autorouter_sea.EVIDENCE_MAX_CHARS == 2500
+    rows = "\n".join(f"| model-{i:03d} | {i} |" for i in range(200))
+    refused = sea.write_autorouter_evidence(f"| model | tasks |\n|---|---|\n{rows}")
+    assert refused.startswith("Error: the evidence is ") and "at most 2500" in refused
+    assert "word word" in (home / "AUTOROUTER.md").read_text(encoding="utf-8")
+    stamped = f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{rows}\n"
+    assert len(stamped) > sea.EVIDENCE_MAX_CHARS
+    (home / "AUTOROUTER.md").write_text(stamped, encoding="utf-8")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    spliced = prompt[prompt.index(sea.STAMP_PREFIX) : prompt.index("\n## Hard rules")].strip()
+    kept, _blank, marker = spliced.rsplit("\n", 2)
+    assert marker == autorouter_sea.EVIDENCE_CUT and _blank == ""
+    assert stamped.startswith(kept + "\n") and len(kept) <= sea.EVIDENCE_MAX_CHARS
+    assert kept.endswith(" |") and "| model-199 |" not in prompt
+    # A file exactly at the cap is spliced whole.
+    exact = stamped[: sea.EVIDENCE_MAX_CHARS]
+    (home / "AUTOROUTER.md").write_text(exact, encoding="utf-8")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    assert exact.strip() in prompt and autorouter_sea.EVIDENCE_CUT not in prompt
     # Blank file: the SEA falls back to the sentence.  No autorouter SEA in
     # the editable folders: the tool refuses.
     (home / "AUTOROUTER.md").write_text("\n", encoding="utf-8")
@@ -781,7 +809,7 @@ def test_seas_dir_falls_back_to_the_bundled_directory(
     assert sea._checkout_seas_dir() == old_layout.resolve()
     monkeypatch.chdir(tmp_path)
     shutil.rmtree(tmp_path / "src")
-    shutil.rmtree(tmp_path / ".git")
+    rmtree_force(tmp_path / ".git")  # git's objects are read-only on Windows
     signatures = sea._signatures()
     assert signatures["sh"] == ast.literal_eval(repr(signatures["sh"]))  # plain text
     assert len(signatures["sh"]) == sea.SIGNATURE_CHARS and "review_paper" in signatures
@@ -823,9 +851,16 @@ def test_parse_scope_reads_leading_names_and_the_seas_dir_option(
     for text in ("--seas-dir", "alpha --seas-dir", "--seas-dir=", "--seas-dir\nalpha"):
         assert sea.parse_scope(text) == sea.Scope(error="--seas-dir needs a folder"), text
     unusable = sea.parse_scope("--seas-dir ~no_such_user_rsi7d/seas alpha")
-    assert unusable.error.startswith("--seas-dir '~no_such_user_rsi7d/seas': ")
-    assert unusable.names == () and unusable.seas_dir is None
-    assert sea.parse_scope("--seas-dir /bad\x00dir").error.startswith("--seas-dir '/bad\\x00dir': ")
+    nul = sea.parse_scope("--seas-dir /bad\x00dir")
+    if os.name == "nt":
+        # ntpath invents a home for any user name and resolves a NUL byte
+        # without complaint; both end up as missing directories.
+        assert unusable.error.endswith("no_such_user_rsi7d\\seas is not a directory")
+        assert nul.error.endswith("bad\x00dir is not a directory")
+    else:
+        assert unusable.error.startswith("--seas-dir '~no_such_user_rsi7d/seas': ")
+        assert unusable.names == () and unusable.seas_dir is None
+        assert nul.error.startswith("--seas-dir '/bad\\x00dir': ")
     assert sea.parse_scope("demo").as_dict() == {"seas_dir": "", "names": ["demo"]}
 
 
@@ -1123,6 +1158,39 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
         f"Edit {prepared['clone']}/docs/paper.tex and {prepared['clone']}/notes.md"
     )
 
+    # A work dir reached through a symlink (macOS tempdirs live under /var ->
+    # /private/var): git reports the real tree, the task text names the link.
+    (repo / "docs").mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(repo, target_is_directory=True)
+    linked = _persist(
+        f"Edit {link}/docs/paper.tex, {link}/notes.md and "
+        f"{link}/.kiss-worktrees/kiss_wt-old/notes.md",
+        [], work_dir=str(link / "docs"), sea="demo_sea", startTs=future,
+    )
+    prepared = sea.prepare_replay_clone(linked)
+    assert isinstance(prepared, dict), prepared
+    assert prepared["task"] == (
+        f"Edit {prepared['clone']}/docs/paper.tex, {prepared['clone']}/notes.md and "
+        f"{prepared['clone']}/notes.md"
+    )
+    clone_docs = str(Path(prepared["clone"]) / "docs")  # native separator on Windows
+    assert prepared["work_dir"] == clone_docs
+
+    # A symlink INTO the tree names only its own directory of the clone; the
+    # link's parent is not part of the checkout and stays as it is.
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(repo / "docs", target_is_directory=True)
+    into = _persist(
+        f"Edit {docs_link}/paper.tex; see {tmp_path}/reference.md",
+        [], work_dir=str(docs_link), sea="demo_sea", startTs=future,
+    )
+    prepared = sea.prepare_replay_clone(into)
+    assert isinstance(prepared, dict), prepared
+    clone_docs = str(Path(prepared["clone"]) / "docs")
+    assert prepared["task"] == f"Edit {clone_docs}/paper.tex; see {tmp_path}/reference.md"
+    assert prepared["work_dir"] == clone_docs
+
     rooted = tmp_path / "rooted"
     rooted.mkdir()
     run_git(rooted, "init", "-q")
@@ -1159,7 +1227,8 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     assert sea.replay_in_clone("nope", max_budget=1.0) == "Error: unknown task id 'nope'"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@posix_only("chmod-based directory write denial")
+@pytest.mark.skipif(is_root(), reason="root ignores directory permissions")
 def test_prepare_replay_clone_reports_a_failed_git_command(
     checkout: Path, tmp_path: Path
 ) -> None:

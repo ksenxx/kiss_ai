@@ -37,6 +37,7 @@ from kiss.tests.agents.vscode.test_activity_bar import (
     _explorer_row_sel,
     _sent,
 )
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_scm_worktrees_and_actions import (
     harness,  # noqa: F401  (module fixture used by param name)
     worktree,  # noqa: F401
@@ -84,7 +85,7 @@ def _open_page(browser, harness):
         ws.on("framesent", _on_sent)
 
     page.on("websocket", _on_ws)
-    page.goto(harness.base_url + "/")
+    goto_retrying_network_change(page, harness.base_url + "/")
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.wait_for_function(

@@ -82,7 +82,7 @@ from kiss.agents.sorcar.mcp_servers import (
     load_mcp_servers,
     user_mcp_config_path,
 )
-from kiss.tests.conftest import hold_loopback_port
+from kiss.tests.conftest import hold_loopback_port, occupy_loopback_port
 
 # ---------------------------------------------------------------------------
 # A real OAuth-protected MCP server
@@ -714,12 +714,7 @@ def test_auth_tools_errors(home: Path, work_dir: str) -> None:
     assert answer["ok"] is False
     assert answer["error"].startswith("Unknown MCP server 'nope'")
 
-    with socket.socket() as holder:
-        # SO_REUSEADDR tolerates TIME_WAIT leftovers of earlier tests; a
-        # LISTENing holder still makes the redirect server's bind fail.
-        holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        holder.bind(("127.0.0.1", MCP_REDIRECT_PORT))
-        holder.listen(1)
+    with occupy_loopback_port(MCP_REDIRECT_PORT):
         answer = json.loads(connect("busy", "https://mcp.example.test/mcp"))
     assert answer["ok"] is False
     assert answer["error"].startswith("cannot bind the redirect port:")

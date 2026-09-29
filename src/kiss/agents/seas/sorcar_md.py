@@ -22,12 +22,12 @@ task reading the file for its system prompt never sees it half-written.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.core.utils import read_bytes_waiting_for_writer, replace_waiting_for_readers
 
 HEADER = ["# User instructions", ""]
 """The lines written above the first bullet when ``/remember`` creates the file."""
@@ -72,7 +72,7 @@ def _read_lines(path: Path) -> list[str]:
     """
     if not path.is_file():
         return []
-    text = path.read_text(encoding="utf-8", errors="surrogateescape", newline="")
+    text = read_bytes_waiting_for_writer(path).decode("utf-8", errors="surrogateescape")
     return text.splitlines(keepends=True)
 
 
@@ -96,12 +96,14 @@ def _write_lines(path: Path, lines: list[str]) -> None:
     real one, so a task reading ``SORCAR.md`` for its system prompt at
     the same moment sees either the old or the new content, never a
     truncated file.  Callers hold the ``SORCAR.md.lock`` lock, so the
-    temporary file's fixed name is never contended.
+    temporary file's fixed name is never contended.  On Windows the move
+    waits out a reader that has the file open at that instant, which
+    would otherwise fail the whole ``/remember`` with a sharing violation.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     staging = path.with_name(path.name + ".tmp")
     staging.write_text("".join(lines), encoding="utf-8", errors="surrogateescape", newline="")
-    os.replace(staging, path)
+    replace_waiting_for_readers(staging, path)
 
 
 def _bullet_text(line: str) -> str | None:

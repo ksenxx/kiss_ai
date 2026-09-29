@@ -122,19 +122,26 @@ class _Registered:
 
 def test_plain_top_level_runs_are_mined_as_the_sorcar_pseudo_sea(checkout: Path) -> None:
     """Runs without a SEA and a parent are KISS Sorcar's own; children and SEA runs are not."""
-    plain = _persist("Refactor the parser")
+
+    # The task DB is shared by the whole pytest session, so earlier tests'
+    # plain runs are KISS Sorcar's own as well: assert relative to them
+    # (the stats count every run; the listing is capped and newest first, so
+    # this test's run starts later than any row another test may have left).
+    entry = json.loads(sea.sea_runs(name=sea.SORCAR))["seas"].get(sea.SORCAR)
+    runs_before = entry["stats"]["runs"] if entry else 0
+    plain = _persist("Refactor the parser", startTs=int(time.time() * 1000) + 3_600_000)
     sea_run = _persist("Review this paper", sea="demo_sea")
     child = _persist("Reviewer sub-task", parent_task_id=plain)
-    data = json.loads(sea.sea_runs(name=sea.SORCAR))
-    runs = data["seas"][sea.SORCAR]
-    assert [r["task_id"] for r in runs["runs"]] == [plain]
+    runs = json.loads(sea.sea_runs(name=sea.SORCAR))["seas"][sea.SORCAR]
+    mine = [r for r in runs["runs"] if r["task_id"] == plain]
+    assert len(mine) == 1 and mine[0]["children"] == 1, runs["runs"]
     assert runs["agents"] == [sea.SORCAR_AGENT_LABEL]
-    assert runs["stats"]["runs"] == 1 and runs["runs"][0]["children"] == 1
+    assert runs["stats"]["runs"] == runs_before + 1
     everything = json.loads(sea.sea_runs())["seas"]
     listed = {tid for entry in everything.values() for r in entry["runs"] for tid in [r["task_id"]]}
     assert plain in listed and sea_run not in listed and child not in listed
-    findings = json.loads(sea.sea_findings(sea.SORCAR))
-    assert findings["sea"] == sea.SORCAR and findings["runs_scanned"] == [plain]
+    scanned = json.loads(sea.sea_findings(sea.SORCAR, runs=1000))["runs_scanned"]
+    assert plain in scanned and sea_run not in scanned and child not in scanned
 
 
 def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Path) -> None:

@@ -284,7 +284,9 @@ def stat_key(st: os.stat_result, scan_ns: int, digest: bytes) -> str:
     if changed_ns >= scan_ns - RACY_WINDOW_NS:
         return ""
     if os.name == "nt":
-        return f"{st.st_size}:{st.st_mtime_ns}:{st.st_ino}#{digest.hex()}"
+        # No inode: ``os.scandir`` entries report 0 while ``os.stat`` reports
+        # the real file index, so the same file would get two keys.
+        return f"{st.st_size}:{st.st_mtime_ns}#{digest.hex()}"
     return f"{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_ino}#{digest.hex()}"
 
 

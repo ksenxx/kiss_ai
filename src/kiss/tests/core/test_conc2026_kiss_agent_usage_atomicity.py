@@ -116,18 +116,22 @@ def _swept_run(
 
     def tracer(frame: Any, event: str, arg: Any) -> Any:
         nonlocal seen, acted
-        if frame.f_code in _UPDATE_CODES:
-            frame.f_trace_opcodes = True
-            if event == "opcode" and not acted:
-                if seen == boundary:
-                    acted = True
-                    if on_boundary == "inject":
-                        raise KeyboardInterrupt("injected stop")
-                    assert paused is not None and resume is not None
-                    paused.set()
-                    assert resume.wait(timeout=_WAIT)
-                else:
-                    seen += 1
+        if frame.f_code not in _UPDATE_CODES:
+            # No local tracing outside the accounting path: line events for
+            # the rest of the run (yaml dumps, HTTP) only slow the sweep,
+            # which then times out on a loaded machine.
+            return None
+        frame.f_trace_opcodes = True
+        if event == "opcode" and not acted:
+            if seen == boundary:
+                acted = True
+                if on_boundary == "inject":
+                    raise KeyboardInterrupt("injected stop")
+                assert paused is not None and resume is not None
+                paused.set()
+                assert resume.wait(timeout=_WAIT)
+            else:
+                seen += 1
         return tracer
 
     interrupted = False

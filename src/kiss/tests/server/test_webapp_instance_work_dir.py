@@ -112,8 +112,9 @@ def _run_shim_harness(scenario_js: str) -> dict[str, Any]:
     script = (
         _SHIM_PRELUDE + web_server._WS_SHIM_JS + scenario_js + _SHIM_EPILOGUE
     )
-    result = subprocess.run(
-        ["node", "-e", script],
+    result = subprocess.run(  # the script exceeds Windows' command-line limit: use stdin
+        ["node", "-"],
+        input=script,
         capture_output=True,
         text=True,
         timeout=60,

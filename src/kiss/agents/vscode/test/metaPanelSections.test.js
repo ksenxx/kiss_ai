@@ -17,8 +17,8 @@
 //   fresh page restores;
 // * the layout rule: by default every expanded body takes an equal
 //   share (flex-grow 1, basis 0); a dragged body has a fixed pixel
-//   basis, except the last expanded one, which always fills and keeps
-//   a minimum share while a body above it is dragged; a drag pins the
+//   basis, except the last expanded one, which always fills (every
+//   body keeps the minimum height main.css sets); a drag pins the
 //   expanded bodies above the boundary it moves; the resizer after a
 //   section is hidden while nothing shown follows it, `static` unless
 //   both sides are expanded, and a real handle otherwise;
@@ -104,6 +104,18 @@ function makeWebview(bodyAttrs, opts) {
     return 0;
   };
   win.cancelAnimationFrame = function () {};
+  // jsdom has no ResizeObserver: record the observers so a test can
+  // fire a panel resize by hand.
+  const observers = [];
+  win.ResizeObserver = class {
+    constructor(fn) {
+      this.fn = fn;
+      observers.push(this);
+    }
+    observe(target) {
+      this.target = target;
+    }
+  };
   const posted = [];
   win.acquireVsCodeApi = function () {
     let state;
@@ -132,7 +144,7 @@ function makeWebview(bodyAttrs, opts) {
     fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=metasections-main.js',
   );
-  return {win, posted};
+  return {win, posted, observers};
 }
 
 const REMOTE = ' class="remote-chat"';
@@ -184,14 +196,12 @@ function assertExpanded(section, expanded) {
 
 /**
  * A body's layout from its inline flex: 'equal' (an equal share,
- * flex-grow 1, basis 0), 'fill' (the same, plus the minimum share the
- * last expanded body keeps while a body above it has a dragged height)
- * or '<px>' (a dragged height).
+ * flex-grow 1, basis 0) or '<px>' (a dragged height).
  */
 function bodyLayout(body) {
   if (body.style.flexGrow === '1') {
     assert.strictEqual(body.style.flexBasis, '0px');
-    return body.classList.contains('meta-section-fill') ? 'fill' : 'equal';
+    return 'equal';
   }
   assert.strictEqual(body.style.flexGrow, '0');
   return body.style.flexBasis;
@@ -361,7 +371,7 @@ async function main() {
       // Spend follow), so its stored height applies.
       assert.strictEqual(bodyLayout(el(win, 'meta-list')), '123px');
       assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
-      assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'fill');
+      assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
       // The collapsed Task update section, shown and expanded, keeps
       // an equal share ('junk' is no stored height).
       update.classList.add('visible');
@@ -448,8 +458,8 @@ async function main() {
     key(win, r, 'ArrowDown');
     assert.strictEqual(win.localStorage.getItem(HK), '0');
     assert.strictEqual(bodyLayout(list), '0px');
-    // The last expanded body below a dragged one keeps its minimum share.
-    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'fill');
+    // The last expanded body below a dragged one still fills.
+    assert.strictEqual(bodyLayout(el(win, 'meta-info-content')), 'equal');
     assert.strictEqual(r.getAttribute('aria-valuenow'), '0');
     assert.strictEqual(r.getAttribute('aria-valuemax'), '0');
     key(win, r, 'ArrowUp');
@@ -546,7 +556,7 @@ async function main() {
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
     assert.strictEqual(bodyLayout(el(win, 'meta-schedule-list')), '0px');
     assert.strictEqual(bodyLayout(el(win, 'meta-apps-list')), 'equal');
-    assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
     // Double-click returns Schedule to an equal share; the pinned Task
     // Info keeps its height.
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
@@ -571,7 +581,7 @@ async function main() {
     key(win, resizerAfter(schedule), 'ArrowDown');
     assert.strictEqual(win.localStorage.getItem(HK + 'meta-section-info'), null);
     assert.strictEqual(win.localStorage.getItem(HK + 'meta-schedule'), '0');
-    assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'fill');
+    assert.strictEqual(bodyLayout(el(win, 'meta-spend-body')), 'equal');
     // Collapsing the dragged body leaves nothing dragged above the last:
     // it returns to a plain share.
     click(win, toggleOf(schedule));
@@ -602,6 +612,25 @@ async function main() {
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), '0px');
     r.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
     assert.strictEqual(bodyLayout(el(win, 'meta-list')), 'equal');
+  });
+
+  await test('the equal share is published as --meta-body-share and re-measured when the panel resizes', () => {
+    const wv = makeWebview(REMOTE);
+    const win = wv.win;
+    const panel = el(win, 'meta-panel');
+    // jsdom has no layout: every body measures 0, so the share is 0px
+    // (and every minimum with it); a real browser measures the free
+    // height (test_meta_panel_sections.py checks the numbers).
+    assert.strictEqual(panel.style.getPropertyValue('--meta-body-share'), '0.00px');
+    const observer = wv.observers.find(o => o.target === panel);
+    assert.ok(observer, 'setupMetaSections observes #meta-panel');
+    panel.style.setProperty('--meta-body-share', '99px');
+    observer.fn([]);
+    assert.strictEqual(panel.style.getPropertyValue('--meta-body-share'), '0.00px');
+    // Layout changes re-measure too.
+    panel.style.setProperty('--meta-body-share', '99px');
+    click(win, toggleOf(sections(win)[0]));
+    assert.strictEqual(panel.style.getPropertyValue('--meta-body-share'), '0.00px');
   });
 
   if (failures) {

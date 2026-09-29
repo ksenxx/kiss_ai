@@ -1917,7 +1917,9 @@
       if (tab.isContentTab) {
         const fileIcon = document.createElement('span');
         fileIcon.className = 'content-tab-icon';
-        fileIcon.textContent = '\uD83D\uDCC4';
+        fileIcon.textContent = tab.isBrowserTab
+          ? '\uD83C\uDF10'
+          : '\uD83D\uDCC4';
         fileIcon.title = tab.contentPath || '';
         el.appendChild(fileIcon);
       } else if (tab.isSubagentTab) {
@@ -2095,23 +2097,7 @@
     });
     if (origIdx < 0) return;
     if (tabs[origIdx].isContentTab) {
-      closeContentTab(tabId);
-      return;
-    }
-    if (
-      EDITOR_TAB_MODE &&
-      !tabs[origIdx].isSubagentTab &&
-      !tabs[origIdx].isContentTab
-    ) {
-      // Closing the ROOT chat closes the whole editor tab: the host
-      // disposes the panel and — unless the close came FROM the daemon
-      // — retires the chat from the registry through its long-lived
-      // client (this webview's own connection dies with the panel
-      // before a queued closeTab could flush). The sub-agent tabs die
-      // with the panel. Without this, the root close reached
-      // createNewTab's openChatPanel post, which OPENED a fresh panel
-      // while this one lingered rootless.
-      postToHost({type: 'closePanel', retire: !fromServer});
+      closeContentTab(tabId, false, fromServer);
       return;
     }
     const toClose = new Set([tabId]);
@@ -2124,6 +2110,33 @@
           grew = true;
         }
       }
+    }
+    // A live child's tab is its question/answer surface. User/panel closes
+    // cannot remove it. On completion, remove the finished ancestor but
+    // keep any still-running descendants under their nearest surviving parent.
+    const liveChildren = tabs.filter(
+      t => toClose.has(t.id) && t.isSubagentTab && t.isRunning,
+    );
+    if (liveChildren.length) {
+      if (
+        !agentInitiated ||
+        !tabs[origIdx].isSubagentTab ||
+        !tabs[origIdx].isDone
+      )
+        return;
+      for (const child of liveChildren) toClose.delete(child.id);
+      for (const child of liveChildren) {
+        if (!toClose.has(child.parentTabId)) continue;
+        while (toClose.has(child.parentTabId))
+          child.parentTabId = getTab(child.parentTabId).parentTabId;
+        _rpTabPanel.delete(child.id);
+      }
+    }
+    if (EDITOR_TAB_MODE && !tabs[origIdx].isSubagentTab) {
+      // Retire the root through the host's long-lived connection before
+      // disposing this editor panel and its own daemon connection.
+      postToHost({type: 'closePanel', retire: !fromServer});
+      return;
     }
     const activeWasClosed = toClose.has(activeTabId);
     const closed = tabs[origIdx];
@@ -2202,6 +2215,7 @@
         tab.contentEditor.layout();
       } catch (_e) {}
     }
+    syncBrowserTabVisibility(tab);
     // A path:NN link opened in the background rendered its editor at
     // height 0, where a reveal cannot scroll; retry now that the tab
     // is visible and laid out.
@@ -2223,7 +2237,101 @@
     closeContentMenu();
     if (contentArea) contentArea.style.display = 'none';
     setChatSurfaceVisible(true);
+    syncBrowserTabVisibility(null);
   }
+
+  // browser-tab-coverage:start
+  // ---- The daemon machine's browser, streamed as a tab ---------------
+  //
+  // kiss/server/browser_tab.py announces every page of the browser it
+  // runs (on the machine hosting the daemon, reachable over ssh alone)
+  // as openBrowserTab on EVERY surface, streams browserFrame JPEGs to
+  // the surfaces showing it and closes it everywhere with
+  // closeBrowserTab.  The view itself lives in browserTab.js; this
+  // block is the tab plumbing.  Only the surface showing the tab
+  // receives frames: showContentTab / hideContentArea report the
+  // visible size through browserViewport.
+
+  function syncBrowserTabVisibility(shownTab) {
+    tabs.forEach(t => {
+      if (t.browserView) t.browserView.setVisible(t === shownTab);
+    });
+  }
+
+  function browserTabTitle(ev) {
+    const title = (ev.title || '').trim();
+    if (title) return title.substring(0, 40);
+    const url = (ev.url || '').trim();
+    if (!url || url === 'about:blank') return 'Browser';
+    return url.replace(/^https?:\/\//, '').substring(0, 40);
+  }
+
+  function openBrowserTab(ev) {
+    if (!ev.tab_id || !window.BrowserTabView) return;
+    let tab = getTab(ev.tab_id);
+    if (tab && tab.browserView) {
+      // Re-announced (a `ready` after a reconnect): this webview kept
+      // the tab, but the daemon forgot which connection was watching
+      // it, so a shown tab asks for its frames again.
+      tab.browserView.resubscribe();
+    }
+    if (!tab) {
+      tab = makeTab(browserTabTitle(ev));
+      tab.id = ev.tab_id;
+      tab.isContentTab = true;
+      tab.isBrowserTab = true;
+      tab.contentPath = ev.url || '';
+      tabs.push(tab);
+      const area = ensureContentArea();
+      const holder = document.createElement('div');
+      holder.className = 'content-tab-view browser-tab-view';
+      holder.dataset.tabId = tab.id;
+      holder.style.display = 'none';
+      area.appendChild(holder);
+      tab.contentViewEl = holder;
+      tab.browserView = window.BrowserTabView.create(tab.id, {
+        send: msg => api.send(msg),
+      });
+      holder.appendChild(tab.browserView.el);
+    }
+    tab.browserView.setBadge(ev.browser, ev.isDefaultBrowser, ev.note);
+    // The announcement carries the page's current address, title and
+    // history state (a re-announce after a reconnect may well describe
+    // a page that moved on while this surface was away).
+    if (ev.url) applyBrowserState(ev);
+    // The surface that asked for the tab switches to it.  A popup the
+    // page opened itself only follows on a surface that is showing a
+    // browser tab: it never yanks a surface out of its chat.
+    const active = getTab(activeTabId);
+    if (ev.focus && (!ev.popup || (active && active.isBrowserTab))) {
+      switchToTab(tab.id);
+    }
+    renderTabBar();
+  }
+
+  // The daemon's snapshot of live browser pages, sent on every `ready`:
+  // tabs it no longer lists were closed while this surface was away
+  // (or the daemon restarted), so they close here too.
+  function reconcileBrowserTabs(ev) {
+    const live = new Set((ev.tabs || []).map(t => t.tab_id));
+    tabs
+      .filter(t => t.isBrowserTab && !live.has(t.id))
+      .forEach(t => closeTab(t.id, false, true));
+    (ev.tabs || []).forEach(openBrowserTab);
+  }
+
+  function applyBrowserState(ev) {
+    const tab = getTab(ev.tab_id);
+    if (!tab || !tab.browserView) return;
+    tab.browserView.state(ev);
+    tab.contentPath = ev.url || '';
+    const title = browserTabTitle(ev);
+    if (title !== tab.title) {
+      tab.title = title;
+      renderTabBar();
+    }
+  }
+  // browser-tab-coverage:end
 
   function activateAdjacentTab(newTab) {
     if (newTab.isContentTab) {
@@ -2279,6 +2387,10 @@
         tab.contentEditor.dispose();
       } catch (_e) {}
       tab.contentEditor = null;
+    }
+    if (tab.browserView) {
+      tab.browserView.dispose();
+      tab.browserView = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
@@ -2350,7 +2462,7 @@
    * `discardEdits` skips the question (the user already chose "Don't
    * save", or the save that precedes the close just succeeded).
    */
-  function closeContentTab(tabId, discardEdits) {
+  function closeContentTab(tabId, discardEdits, fromServer) {
     const idx = tabs.findIndex(t => {
       return t.id === tabId;
     });
@@ -2360,6 +2472,9 @@
       askToSaveBeforeClose(tab);
       return;
     }
+    // A browser tab closed by hand closes the page on the daemon's
+    // machine, which then drops the tab from every other surface too.
+    if (tab.isBrowserTab && !fromServer) api.browserClose({tab_id: tabId});
     tabs.splice(idx, 1);
     disposeTabContentView(tab);
     if (activeTabId === tabId) {
@@ -4143,6 +4258,23 @@
   }
 
   /**
+   * Nearest open ancestor of a sub-agent tab id, walking its
+   * `__sub_` chain: a live helper announced after its parent finished
+   * hangs off the parent's own parent instead of being dropped.
+   *
+   * @param {string} tabId The announced parent tab id.
+   * @returns {string} An open tab id, or '' when none is open.
+   */
+  function nearestOpenAncestorTab(tabId) {
+    let id = tabId || '';
+    while (id && !getTab(id)) {
+      const at = id.lastIndexOf('__sub_');
+      id = at > 0 ? id.slice(0, at) : '';
+    }
+    return id;
+  }
+
+  /**
    * Open a background (non-activated) tab for a freshly spawned
    * sub-agent.
    *
@@ -4963,7 +5095,11 @@
   // boundary: the body above takes a fixed height (flex: 0 1 <px>), the
   // expanded bodies above it keep the heights they had when the drag
   // started, and the bodies below share the rest.  The LAST expanded
-  // section's body always fills the leftover height.  Collapse state
+  // section's body always fills the leftover height.  Every expanded
+  // body keeps a minimum height (main.css: half an equal share, at
+  // most 4rem) so a dragged body never leaves the sections below it
+  // as headers over 0px bodies; applyMetaSectionLayout publishes the
+  // equal share as --meta-body-share on the panel.  Collapse state
   // and dragged heights persist in localStorage; every section starts
   // expanded.  Adding a panel is one more <section> plus its resizer in
   // chat.html: nothing here names a particular section.
@@ -5014,20 +5150,12 @@
     const sections = metaSections();
     const expanded = sections.filter(metaSectionExpanded);
     const last = expanded[expanded.length - 1];
-    const dragged = expanded.some(
-      section =>
-        section !== last && metaSectionHeights[section.id] !== undefined,
-    );
     for (const section of sections) {
       const body = metaSectionBody(section);
       if (body) {
         const h = metaSectionHeights[section.id];
         body.style.flex =
           section === last || h === undefined ? '1 1 0px' : '0 1 ' + h + 'px';
-        // Once a body above has a dragged height, the filling body keeps
-        // a minimum share (main.css), or the dragged bodies could squeeze
-        // it to nothing.  Without one every share is equal.
-        body.classList.toggle('meta-section-fill', dragged && section === last);
       }
       const resizer = metaSectionResizer(section);
       if (!resizer) continue;
@@ -5042,6 +5170,33 @@
       resizer.setAttribute('aria-disabled', draggable ? 'false' : 'true');
       resizer.tabIndex = draggable ? 0 : -1;
     }
+    publishMetaSectionShare(expanded);
+  }
+
+  /**
+   * Set --meta-body-share on #meta-panel to the height one expanded
+   * body gets when all of them share the panel equally; main.css derives
+   * every body's minimum height from it.  Measured, not computed: the
+   * bodies fill exactly what the headers, status lines, separators,
+   * margins and padding leave, whatever the surface's CSS, so their
+   * heights add up to that free space.  The one exception is minimums
+   * left over from a taller panel, which overflow it; that excess is
+   * the panel's overflow and comes off again.  Nothing is touched to
+   * measure, so scroll positions stay.  0px without layout (jsdom, a
+   * display:none panel).
+   */
+  function publishMetaSectionShare(expanded) {
+    const panel = document.getElementById('meta-panel');
+    if (!panel) return;
+    let bodies = 0;
+    for (const section of expanded) {
+      const body = metaSectionBody(section);
+      if (body) bodies += body.getBoundingClientRect().height;
+    }
+    const overflow = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    const free = Math.max(0, bodies - overflow);
+    const share = expanded.length ? free / expanded.length : 0;
+    panel.style.setProperty('--meta-body-share', share.toFixed(2) + 'px');
   }
 
   /**
@@ -5089,9 +5244,9 @@
   /**
    * Wire the separator after a section: a pointer drag or the Up/Down
    * arrow keys move the boundary between that section's body and the
-   * expanded bodies below it (which can shrink to nothing: their
-   * headers stay); a double-click returns the section to its equal
-   * share.
+   * expanded bodies below it (each keeps the minimum height main.css
+   * gives .meta-section-body); a double-click returns the section to
+   * its equal share.
    */
   function setupMetaSectionResizer(resizer) {
     const section = resizer.previousElementSibling;
@@ -5136,13 +5291,14 @@
     function resizeTo(height) {
       const requested = Math.round(Math.max(0, Math.min(maxH, height)));
       setMetaSectionHeight(section, requested);
-      // When the panel is too short for everything, the body renders
-      // shorter than asked: keep the height that actually shows, so the
-      // stored value, aria-valuenow and the next drag all agree.
-      const h = Math.min(
-        requested,
-        Math.round(body.getBoundingClientRect().height),
-      );
+      // The body renders shorter than asked once the bodies below are
+      // at their minimum height (or the panel is too short): the drag
+      // can go no further.  It renders taller than asked at its own
+      // minimum.  Either way keep the height that actually shows, so
+      // the stored value, aria-valuenow, aria-valuemax and the next
+      // move all agree.
+      const h = Math.round(body.getBoundingClientRect().height);
+      if (h < requested) maxH = h;
       if (h !== requested) setMetaSectionHeight(section, h);
       resizer.setAttribute('aria-valuenow', String(h));
       resizer.setAttribute('aria-valuemax', String(Math.round(maxH)));
@@ -5220,6 +5376,11 @@
       setupMetaSectionResizer(resizer);
     }
     applyMetaSectionLayout();
+    // The equal share changes with the panel's height (a window resize,
+    // the drawer opening): re-measure it then.
+    const panel = document.getElementById('meta-panel');
+    if (panel && typeof ResizeObserver === 'function')
+      new ResizeObserver(applyMetaSectionLayout).observe(panel);
   }
   setupMetaSections();
   // metasections-coverage:end
@@ -5317,15 +5478,8 @@
       }
       return;
     }
-    if (content.trim()) {
-      setMetaInfoHTML(taskUpdateBodyHTML(content));
-    } else {
-      setMetaInfoHTML(
-        '<p class="meta-info-pending">' +
-          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
-          '</p>',
-      );
-    }
+    // The status line's height counts in the section layout that
+    // setMetaInfoHTML applies, so it is set first.
     if (metaInfoStatus) {
       let status = '';
       if (running) {
@@ -5342,6 +5496,15 @@
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
       }
       metaInfoStatus.textContent = status;
+    }
+    if (content.trim()) {
+      setMetaInfoHTML(taskUpdateBodyHTML(content));
+    } else {
+      setMetaInfoHTML(
+        '<p class="meta-info-pending">' +
+          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
+          '</p>',
+      );
     }
     if (metaInfoRefreshBtn) {
       metaInfoRefreshBtn.disabled = running;
@@ -12985,6 +13148,12 @@
           }
           qd.dataset.rawText = rawQ;
           c.appendChild(qd);
+          // Replay rebuilds the panel without clearing the pending question.
+          // Duplicate askUser events preserve drafts and do not re-mark it.
+          // An earlier answered call is cleared by its replayed tool_result.
+          const qTab = getTab(evOwnerTab);
+          if (qTab && qTab.askPendingQuestion === rawQ)
+            setQuestionPanelPending(c, true);
         } else if (isSummary) {
           const sd = mkEl('div', 'tc-summary-desc');
           const rawDesc = ev.description || '';
@@ -14756,6 +14925,37 @@
       }
     }
     switch (t) {
+      // browser-tab-coverage:start
+      case 'openBrowserTab':
+        openBrowserTab(ev);
+        break;
+      case 'browserTabs':
+        reconcileBrowserTabs(ev);
+        break;
+      case 'browserFrame': {
+        const bt = getTab(ev.tab_id);
+        if (bt && bt.browserView) bt.browserView.frame(ev);
+        break;
+      }
+      case 'browserState':
+        applyBrowserState(ev);
+        break;
+      case 'closeBrowserTab':
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, false, true);
+        break;
+      case 'browserError': {
+        const bt = getTab(ev.tab_id);
+        if (bt && bt.browserView) bt.browserView.error(ev.text || '');
+        else {
+          showNotification({
+            id: 'browser-open-error',
+            severity: 'error',
+            message: ev.text || 'The browser could not be opened.',
+          });
+        }
+        break;
+      }
+      // browser-tab-coverage:end
       case 'daemonStatus':
         // `reconnecting` is set by the remote webapp's shim when the
         // socket dropped after this page was authenticated: the app
@@ -16086,8 +16286,8 @@
         break;
       }
       case 'new_tab': {
-        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
-          break;
+        const spawnParent = nearestOpenAncestorTab(ev.parent_tab_id);
+        if (ev.parent_tab_id && !spawnParent) break;
         // Editor-tabs mode: a parentless spawn (e.g. a run_agent
         // sub-task) belongs to no particular panel, and EVERY panel
         // receives the broadcast — each adopting it would open the
@@ -16095,7 +16295,7 @@
         // editor tab. Only spawns owned by this panel's chats join it.
         if (EDITOR_TAB_MODE && !ev.parent_tab_id) break;
         if (ev.task_id === undefined || ev.task_id === null) break;
-        const parentTabBeforeNew = ev.parent_tab_id || '';
+        const parentTabBeforeNew = spawnParent;
         // One sub-agent, one tab: a re-delivered spawn for a sub-agent
         // that already has a tab must not open a second one.
         const spawned = openSubagentTabForTask(ev.task_id, '');
@@ -16113,26 +16313,17 @@
         }
         let subAgentTabId;
         if (parentTabBeforeNew) {
-          // Attribute the spawn to the fan-out that owns it, not to the
-          // newest panel: with several run_parallel calls in one task a
-          // late spawn belongs to an earlier call, whose collapsed state
-          // decides whether it may have a tab.
+          // A late spawn belongs to its original dispatch panel, not
+          // necessarily the newest call in the parent's transcript.
           const rpPanel = rpPanelForNewSubagent(
             parentTabBeforeNew,
             ev.task_id,
             {live: true},
           );
-          if (
-            rpPanel &&
-            (rpPanel.classList.contains('collapsed') ||
-              rpSubagentHandClosed(rpPanel, ev.task_id))
-          ) {
-            rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
-            break;
-          }
+          // A live spawn must open even when its transcript panel is folded.
           const subTab = createBackgroundSubagentTab(
             parentTabBeforeNew,
-            subagentTabIdFor(parentTabBeforeNew, ev.task_id),
+            subagentTabIdFor(ev.parent_tab_id, ev.task_id),
           );
           subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
@@ -16150,19 +16341,26 @@
             subagentTabIdFor('', ev.task_id),
           ).id;
         }
+        setTabRunning(getTab(subAgentTabId), true);
         api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
       }
       case 'openSubagentTab': {
-        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
-          break;
+        // Finished history needs its own parent open; a live task takes
+        // the nearest open ancestor.
+        const announcedParent = ev.isDone
+          ? getTab(ev.parent_tab_id)
+            ? ev.parent_tab_id
+            : ''
+          : nearestOpenAncestorTab(ev.parent_tab_id);
+        if (ev.parent_tab_id && !announcedParent) break;
         if (!ev.parent_tab_id && !getTab(ev.tab_id)) break;
         const subDesc = (ev.description || 'Sub-agent').trim();
         const subIdx =
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
-        const parentId = ev.parent_tab_id || ev.tabId || '';
+        const parentId = announcedParent || ev.tabId || '';
         const subTaskId =
           ev.task_id === undefined || ev.task_id === null ? '' : ev.task_id;
         let rpPanel = _rpTabPanel.get(ev.tab_id) || null;
@@ -16172,14 +16370,13 @@
           });
         }
         let subTab = getTab(ev.tab_id);
-        // A sub-agent the user closed by hand stays closed until its
-        // run_parallel panel is collapsed and expanded again -- also
-        // when the daemon re-announces it under a different tab id.
-        if (!subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
+        // Closed history tabs stay closed; an active task must always
+        // have a tab, regardless of this surface's prior panel state.
+        if (ev.isDone && !subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
           _rpClosedSubagentTabs.add(ev.tab_id);
           break;
         }
-        if (!subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
+        if (ev.isDone && !subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
           break;
         }
@@ -16194,7 +16391,13 @@
             subTab = openForTask;
           }
         }
-        if (rpPanel && rpPanel.classList.contains('collapsed')) {
+        // The daemon's terminal state wins over a tab that missed its
+        // subagentDone, or the panel sync below could not close it.
+        if (subTab && ev.isDone) {
+          subTab.isDone = true;
+          setTabRunning(subTab, false);
+        }
+        if (ev.isDone && rpPanel && rpPanel.classList.contains('collapsed')) {
           rpRegisterSubagent(
             rpPanel,
             parentId,
@@ -16249,7 +16452,16 @@
         // Another client closed this sub-agent tab; mirror the close.
         // Applied without echoing `closeTab` back to the daemon (the
         // origin client already sent it) — see closeTab(fromServer).
-        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
+        const mirrored = getTab(ev.tab_id);
+        if (mirrored) {
+          // The daemon only mirrors closes of finished tabs; a copy that
+          // missed the completion must not refuse the close as "live".
+          if (mirrored.isSubagentTab) {
+            mirrored.isDone = true;
+            setTabRunning(mirrored, false);
+          }
+          closeTab(ev.tab_id, true, true);
+        }
         break;
       }
       case 'openTabRejected': {
@@ -18550,6 +18762,12 @@
     function closeMoreMenu() {
       if (moreMenu) moreMenu.classList.remove('open');
       if (moreBtn) moreBtn.setAttribute('aria-expanded', 'false');
+    }
+    const browserBtn = document.getElementById('browser-btn');
+    if (browserBtn) {
+      browserBtn.addEventListener('click', () => {
+        api.browserOpen({url: ''});
+      });
     }
     if (moreBtn && moreMenu) {
       moreBtn.addEventListener('click', e => {

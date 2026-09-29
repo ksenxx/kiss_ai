@@ -34,7 +34,7 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
-from kiss.core.utils import finish, substitute_prompt_args
+from kiss.core.utils import finish, read_text_waiting_for_writer, substitute_prompt_args
 
 logger = logging.getLogger(__name__)
 
@@ -1187,8 +1187,10 @@ class RelentlessAgent(Base):
             # User-authored: a cp1252 byte from a Windows editor must
             # not abort every task before its first model call (the
             # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
-            important_instructions += "\n" + sorcar_md.read_text(
-                encoding="utf-8", errors="replace",
+            # A ``/remember`` replacing the file at this instant must not
+            # abort the task either (Windows denies the open mid-rename).
+            important_instructions += "\n" + read_text_waiting_for_writer(
+                sorcar_md, errors="replace",
             )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):

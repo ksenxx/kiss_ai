@@ -203,6 +203,7 @@ def test_ask_message_bypasses_pending_queue_and_dispatches() -> None:
     assert calls == [{
         "tab_id": "tab-1",
         "owner_task_id": "task-abc",
+        "owner_agent": st.agent,
         "chat_id": "chat-1",
         "question": "why did the last step fail?",
     }]
@@ -439,6 +440,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     server._dispatch_ask_side_channel(
         tab_id="tab-1",
         owner_task_id="task-abc",
+        owner_agent=None,
         chat_id="chat-xyz",
         question="why did the last step fail?",
     )
@@ -492,7 +494,7 @@ def test_side_channel_ask_sea_path_resolves_to_bundled_seas_file(
         calls = _install_daemon_run_capture(monkeypatch)
 
         server._dispatch_ask_side_channel(
-            tab_id="tab-1", owner_task_id="task-1",
+            tab_id="tab-1", owner_task_id="task-1", owner_agent=None,
             chat_id="chat-1", question="q",
         )
         _wait_for(lambda: len(calls) == 1)
@@ -523,7 +525,7 @@ def test_side_channel_survives_daemon_run_exception(
     # runner if it did.  Instead the user gets a FAILED answer panel
     # naming the error, so they are not left waiting.
     server._dispatch_ask_side_channel(
-        tab_id="tab-1", owner_task_id="task-1",
+        tab_id="tab-1", owner_task_id="task-1", owner_agent=None,
         chat_id="chat-1", question="q",
     )
     _wait_for(lambda: any(e["type"] == "ask_answer" for e in events))
@@ -560,6 +562,7 @@ def test_side_channel_broadcasts_answer_into_owner_task(
     server._dispatch_ask_side_channel(
         tab_id="tab-1",
         owner_task_id="task-abc",
+        owner_agent=None,
         chat_id="chat-xyz",
         question="why did step 3 fail?",
     )

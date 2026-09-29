@@ -2049,15 +2049,81 @@ def _history_date_range() -> tuple[float | None, float | None]:
     return (float(row["mn"]), float(row["mx"]))
 
 
+def _split_tree_spend(
+    root: sqlite3.Row,
+    children: dict[str, list[sqlite3.Row]],
+    field: str,
+) -> dict[str, float]:
+    """Split a top-level task's *field* (``cost`` or ``tokens``) by model.
+
+    A task's persisted total already includes the spend of the
+    sub-agents folded into it, which may run on other models.  Each
+    task on the tree is credited with its own share, its total minus
+    its sub-agents' totals, under its own model, so the shares add up
+    to the top-level task's total exactly.  When a task's sub-agents
+    add up to more than the task itself (spend that was never folded
+    into it, e.g. rows written before a fold was added), they are
+    scaled down to fit and the task's own share is 0.
+
+    Args:
+        root: The top-level ``task_history`` row (``id``, ``m``, *field*).
+        children: Sub-agent rows keyed by their ``parent_task_id``.
+        field: The column to split, ``"cost"`` or ``"tokens"``.
+
+    Returns:
+        Model name to its share of *root*'s *field*.
+    """
+    shares: dict[str, float] = {}
+    stack = [(root, 1.0)]
+    seen: set[str] = set()
+    while stack:
+        row, scale = stack.pop()
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        total = max(float(row[field] or 0), 0.0)
+        kids = children.get(row["id"], [])
+        kids_total = sum(max(float(k[field] or 0), 0.0) for k in kids)
+        kid_scale = scale
+        if kids_total > total:
+            kid_scale = scale * total / kids_total
+        own = max(total - kids_total, 0.0) * scale
+        shares[row["m"]] = shares.get(row["m"], 0.0) + own
+        stack.extend((k, kid_scale) for k in kids)
+    return shares
+
+
+def _round_shares(shares: dict[str, float], total: int) -> dict[str, int]:
+    """Round *shares* to integers that add up to *total* (largest remainder).
+
+    Args:
+        shares: Non-negative fractional shares summing to *total*.
+        total: The integer the rounded shares must add up to.
+
+    Returns:
+        The same keys with integer shares; ties go to the key that sorts
+        first, so the result is deterministic.
+    """
+    rounded = {key: math.floor(value) for key, value in shares.items()}
+    by_remainder = sorted(shares, key=lambda key: (rounded[key] - shares[key], key))
+    for key in by_remainder[: max(total - sum(rounded.values()), 0)]:
+        rounded[key] += 1
+    return rounded
+
+
 def _spend_by_day_and_model() -> list[dict[str, object]]:
     """Aggregate cost, tokens and task count per local calendar day and model.
 
-    Groups the same row set the History sidebar lists (i.e. excluding
-    sub-agent rows, whose usage is already folded into their parent's
-    totals) by the daemon's local date and the task's ``model`` column
-    over the whole history, so the sidebar's Spend subpanel can draw
-    its daily heatmap and cost-by-model bars.  An empty or NULL model
-    is reported as ``"unknown"``.  Thread-safe.
+    Covers the same top-level tasks the History sidebar lists, on the
+    daemon's local date each task started, over the whole history, so
+    the sidebar's Spend subpanel can draw its daily heatmap and
+    cost-by-model bars.  A top-level task's cost and tokens (which
+    include its sub-agents') are split among the models its task tree
+    ran on (see :func:`_split_tree_spend`), so sub-agents on another
+    model are not filed under the top-level task's model while the
+    per-day sums still equal the listed tasks' totals.  ``tasks``
+    counts top-level tasks under the model they were started with.  An
+    empty or NULL model is reported as ``"unknown"``.  Thread-safe.
 
     Returns:
         ``{"date": "YYYY-MM-DD", "model": str, "cost": float,
@@ -2067,24 +2133,43 @@ def _spend_by_day_and_model() -> list[dict[str, object]]:
     with _rw_lock.read_lock():
         db = _get_db()
         rows = db.execute(
-            "SELECT date(timestamp, 'unixepoch', 'localtime') AS d, "
+            "SELECT id, COALESCE(parent_task_id, '') AS p, "
+            "date(timestamp, 'unixepoch', 'localtime') AS d, "
             "COALESCE(NULLIF(model, ''), 'unknown') AS m, "
-            "COALESCE(SUM(cost), 0) AS c, "
-            "COALESCE(SUM(tokens), 0) AS t, COUNT(*) AS n "
-            f"FROM task_history WHERE {_HISTORY_NOT_SUBAGENT} "
-            "GROUP BY d, m ORDER BY d ASC, c DESC"
+            "COALESCE(cost, 0) AS cost, COALESCE(tokens, 0) AS tokens "
+            "FROM task_history"
         ).fetchall()
-    return [
+    children: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        if row["p"]:
+            children.setdefault(row["p"], []).append(row)
+    sums: dict[tuple[str, str], list[float]] = {}  # [cost, tokens, tasks]
+    for root in rows:
+        if root["p"] or not root["d"]:
+            continue
+        day = str(root["d"])
+        costs = _split_tree_spend(root, children, "cost")
+        tokens = _round_shares(
+            _split_tree_spend(root, children, "tokens"),
+            max(int(root["tokens"] or 0), 0),
+        )
+        for model in costs.keys() | tokens.keys() | {root["m"]}:
+            acc = sums.setdefault((day, model), [0.0, 0.0, 0])
+            acc[0] += costs.get(model, 0.0)
+            acc[1] += tokens.get(model, 0)
+        sums[(day, root["m"])][2] += 1
+    result: list[dict[str, object]] = [
         {
-            "date": str(row["d"]),
-            "model": str(row["m"]),
-            "cost": float(row["c"] or 0.0),
-            "tokens": int(row["t"] or 0),
-            "tasks": int(row["n"] or 0),
+            "date": day,
+            "model": model,
+            "cost": acc[0],
+            "tokens": int(acc[1]),
+            "tasks": int(acc[2]),
         }
-        for row in rows
-        if row["d"]
+        for (day, model), acc in sums.items()
     ]
+    result.sort(key=lambda r: (r["date"], -float(r["cost"]), r["model"]))  # type: ignore[arg-type]
+    return result
 
 
 def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
@@ -2839,26 +2924,70 @@ def _add_task_usage(
     return (_safe_int(row[0]), _safe_float(row[1]), _safe_int(row[2]))
 
 
-def _task_is_finished(task_id: str) -> bool:
-    """Return whether *task_id*'s row carries its end timestamp.
+def _add_late_task_usage(
+    task_id: str, tokens: int, cost: float, steps: int,
+) -> tuple[list[tuple[str, int, float, int]], str]:
+    """Charge side-channel spend to *task_id* and its finished ancestors.
 
-    The end timestamp is written by the run's final save
-    (:meth:`ChatSorcarAgent.run`), so a true result means the row's
-    ``tokens`` / ``cost`` / ``steps`` are final and later spend on the
-    task's behalf must be added with :func:`_add_task_usage` rather
-    than banked on the live agent.
+    A side channel (an ``/ask`` answerer, a task-update run) can end
+    after the task it works for has finished, when that task's
+    ``tokens`` / ``cost`` / ``steps`` are final and folded, where it
+    has one, into its parent's.  The spend is therefore added to the
+    row itself and to every finished ancestor up the
+    ``parent_task_id`` chain, stopping at the first unfinished row (no
+    ``end_ts``): that task is still running, so the caller banks the
+    spend on its live agent instead, from which it reaches the rows
+    above through the normal sub-agent fold.  The walk and the updates
+    are one transaction, so a row cannot finish between the check and
+    the add.
 
     Args:
-        task_id: Primary key of the ``task_history`` row.
+        task_id: Primary key of the ``task_history`` row the spend is for.
+        tokens: Tokens to add.
+        cost: USD to add.
+        steps: Steps to add.
 
     Returns:
-        True when the row exists and its ``end_ts`` is set.
+        ``(updated, running)``: the finished rows updated, as ``(id,
+        tokens, cost, steps)`` with their new totals, bottom-up; and the
+        id of the first unfinished row on the chain (*task_id* itself
+        when it is still running), or ``""`` when every row on the
+        chain is finished or the chain reaches a missing row.
     """
-    with _rw_lock.read_lock():
-        row = _get_db().execute(
-            "SELECT end_ts FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-    return bool(row and _safe_int(row["end_ts"], 0))
+    _flush_chat_events(task_id)
+    db = _get_db()
+    updated: list[tuple[str, int, float, int]] = []
+    seen: set[str] = set()
+    current = task_id
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        while current and current not in seen:
+            seen.add(current)
+            row = db.execute(
+                "SELECT end_ts, parent_task_id FROM task_history WHERE id = ?",
+                (current,),
+            ).fetchone()
+            if row is None:
+                return updated, ""
+            if not _safe_int(row["end_ts"], 0):
+                return updated, current
+            db.execute(
+                "UPDATE task_history SET tokens = COALESCE(tokens, 0) + ?, "
+                "cost = COALESCE(cost, 0.0) + ?, steps = COALESCE(steps, 0) + ? "
+                "WHERE id = ?",
+                (int(tokens), float(cost), int(steps), current),
+            )
+            totals = db.execute(
+                "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
+                (current,),
+            ).fetchone()
+            updated.append((
+                current,
+                _safe_int(totals[0]),
+                _safe_float(totals[1]),
+                _safe_int(totals[2]),
+            ))
+            current = _safe_str(row["parent_task_id"])
+    return updated, ""
 
 
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {

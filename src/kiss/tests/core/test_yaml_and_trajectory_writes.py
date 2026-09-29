@@ -22,6 +22,7 @@ mocks, patches, fakes or test doubles, and no LLM calls.
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -41,8 +42,9 @@ from kiss.core.utils import (
     atomic_write_text,
     finish,
     read_bytes_waiting_for_writer,
+    rmtree_force,
 )
-from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, posix_only
+from kiss.tests.conftest import HOT_READER_PAUSE, IS_WINDOWS, is_root, posix_only
 
 # The alphabetically last top-level key of a trajectory document: a
 # reader that cannot see it is looking at a truncated file.
@@ -331,3 +333,41 @@ def test_concurrent_saves_leave_one_complete_trajectory(artifact_dir: Path) -> N
         loaded = yaml.safe_load(agent.get_trajectory_path().read_text(encoding="utf-8"))
         assert loaded["model"] == f"model-{agent.id}"
         assert len(loaded["messages"]) == 300
+
+
+def test_rmtree_force_removes_read_only_trees_and_tolerates_absence(tmp_path: Path) -> None:
+    """A git-style tree (read-only objects, and on POSIX a read-only directory) goes away.
+
+    Plain ``shutil.rmtree`` stops at a read-only file on Windows and at a
+    directory without the write bit on POSIX; removing a missing tree is
+    not an error.
+    """
+    tree = tmp_path / "clone"
+    objects = tree / ".git" / "objects"
+    objects.mkdir(parents=True)
+    blob = objects / "ab"
+    blob.write_text("x")
+    blob.chmod(stat.S_IREAD)
+    locked = tree / "locked"
+    locked.mkdir()
+    (locked / "inner").write_text("y")
+    if not IS_WINDOWS and not is_root():
+        objects.chmod(stat.S_IREAD | stat.S_IEXEC)  # no write bit: unlink of ``ab`` is denied
+        locked.chmod(0)  # cannot even be opened: removed as a tree of its own after chmod
+        with pytest.raises(PermissionError):
+            shutil.rmtree(tree)
+    rmtree_force(tree)
+    assert not tree.exists()
+    rmtree_force(tree)  # already gone
+    # The "one retry per path" guard needs a directory that stays unopenable
+    # after ``chmod u+rwx`` (an immutable flag, another owner): not
+    # reproducible as this user without a test double, so it is not covered.
+
+
+def test_rmtree_force_reports_other_failures(tmp_path: Path) -> None:
+    """A path that is a plain file is not a tree: the error propagates unchanged."""
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x")
+    with pytest.raises(NotADirectoryError):
+        rmtree_force(plain)
+    assert plain.exists()

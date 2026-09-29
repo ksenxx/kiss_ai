@@ -279,6 +279,96 @@ def test_check_paper_catches_the_forms_the_rules_name(tmp_path: Path) -> None:
     assert "    ghost\n" in report
 
 
+_TELLS_TEX = (
+    "\\documentclass{article}\\begin{document}\n"
+    "In today's rapidly evolving world, agents have garnered significant attention.\n"
+    "Agent memory has emerged as a promising direction. It is not just a cache.\n"
+    "The cache holds 3 GB, highlighting its value, reflecting broader trends, ensuring "
+    "speed, and contributing to adoption. This marks a pivotal shift.\n"
+    "Let us dive into the design. Importantly, the index is small. The result? Speed.\n"
+    "Studies show that caches help. It is widely believed that caching is free.\n"
+    "Despite these challenges, the approach remains promising. It opens new avenues and "
+    "holds great promise.\n"
+    "The index is truly robust. As an AI language model, I hope this helps.\n"
+    "See https://example.com/?utm_source=chatgpt.com for the cache \u2192 disk path.\n"
+    "\\bibliography{refs}\\end{document}\n"
+)
+
+_TELLS_BIB = """
+@article{fake1, author={John Doe and Jane Smith}, title={Webvoyager}, journal={arXiv
+preprint arXiv:2305.XXXX}, year={2024}}
+@inproceedings{fake2, author={A. Sahoo and et al.}, title={Inatk}, pages={1234-1243},
+note={URL or arXiv ID to be updated}, year={2024}}
+@misc{real, author={Sheehy, Justin}, title={Bitcask}, year={2010}}
+"""
+
+
+def test_check_paper_flags_the_researched_slop_tells(tmp_path: Path) -> None:
+    """Each gate added from the 2024-2026 AI-writing studies fires on its own examples."""
+    path = _write(tmp_path, _TELLS_TEX, _TELLS_BIB)
+    report = write_paper_sea.check_paper(str(path))
+    assert _gate(report, "scope-inflation openers") == (
+        "scope-inflation openers: 4 (limit 0) FAIL; open on the problem and a number"
+    )
+    assert "In today's rapidly evolving world" in report
+    assert _gate(report, "antithesis").startswith("antithesis: 1 (limit 5) PASS")
+    # Three comma-led participle clauses (", and contributing" is not one) and
+    # "marks a pivotal shift": four, over the limit of 3.
+    puffery = _gate(report, "significance puffery")
+    assert puffery.startswith("significance puffery: 4 (limit 3) FAIL")
+    assert _gate(report, "slop vocabulary") == "slop vocabulary: 2 (limit 0) FAIL"
+    assert _gate(report, "signposting and throat-clearing").startswith(
+        "signposting and throat-clearing: 3 (limit 0) FAIL"
+    )
+    assert _gate(report, "vague attribution").startswith("vague attribution: 2 (list only) CHECK")
+    assert _gate(report, "motivational closers").startswith(
+        "motivational closers: 3 (limit 0) FAIL"
+    )
+    assert _gate(report, "intensifiers and marketing").startswith(
+        "intensifiers and marketing: 2 (list only) CHECK"
+    )
+    assert _gate(report, "leaked LLM output").startswith("leaked LLM output: 3 (limit 0) FAIL")
+    assert _gate(report, "markdown artifacts") == "markdown artifacts: 1 (limit 0) FAIL"
+    # Placeholder authors, an XXXX arXiv id, "et al." in an author field, pages
+    # 1234, "to be updated"; the real entry is not flagged.
+    assert _gate(report, "fabricated-reference signatures").startswith(
+        "fabricated-reference signatures: 6 (limit 0) FAIL"
+    )
+    assert "    refs.bib L2: ...@article{fake1, author={John Doe and Jane Smith}" in report
+    assert "Sheehy" not in report
+
+    # The same facts written plainly pass every one of these gates, and so do
+    # technical uses of the same words: a workload that changes rapidly, a caveat
+    # that is not waved away, a non-chatbot tracking tag, a real page range and
+    # "et al." in a title.
+    plain = (
+        "\\documentclass{article}\\begin{document}\n"
+        "Agents forget earlier steps once the context fills. The cache holds 3 GB, so reads "
+        "are fast. We ensure the index fits in memory. The work has one limitation: it "
+        "costs 2 GB of RAM. Smith et al. show that caches help.\n"
+        "The index tracks keys in rapidly changing graphs. Despite these limitations, the "
+        "bound holds for finite graphs. Links carry \\texttt{utm_source=email}.\n"
+        "\\bibliography{refs}\\end{document}\n"
+    )
+    bib = (
+        "@misc{real, author={Sheehy, Justin}, year={2010}}\n"
+        "@article{reply, author={Brown, Alice}, title={A reply to Jones et al.},\n"
+        "pages={1234--1249}, url={https://example.com/?utm_source=email}}\n"
+    )
+    path = _write(tmp_path, plain, bib)
+    report = write_paper_sea.check_paper(str(path))
+    for name in (
+        "scope-inflation openers",
+        "significance puffery",
+        "signposting and throat-clearing",
+        "motivational closers",
+        "vague attribution",
+        "leaked LLM output",
+        "fabricated-reference signatures",
+    ):
+        assert _gate(report, name).startswith(f"{name}: 0 "), _gate(report, name)
+
+
 def test_section_truncates_long_hit_lists() -> None:
     """A gate lists at most 25 hits and says how many more there are."""
     lines = write_paper_sea._section("em dashes", [f"L{i}: x" for i in range(30)], 0)

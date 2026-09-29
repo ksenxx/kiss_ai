@@ -31,6 +31,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _composio_google as cg
+from kiss.tests.conftest import IS_WINDOWS
 
 _API = "/api/v3.1"
 
@@ -174,7 +175,7 @@ def test_api_key_env_then_saved_file(
     assert cg.composio_api_key() == "saved-key"
     key_file = isolated_kiss_home / "third_party_agents" / "google" / "composio_api_key.json"
     assert json.loads(key_file.read_text()) == {"api_key": "saved-key"}
-    assert key_file.stat().st_mode & 0o777 == 0o600
+    assert IS_WINDOWS or key_file.stat().st_mode & 0o777 == 0o600  # NTFS has no mode bits
     monkeypatch.setenv("COMPOSIO_API_KEY", " env-key ")
     assert cg.composio_api_key() == "env-key"
 

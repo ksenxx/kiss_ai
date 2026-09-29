@@ -128,6 +128,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.core.brand import render_brand
 from kiss.core.config import kiss_home
+from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
 from kiss.server.tools_file import execute_python_file
 
@@ -144,6 +145,10 @@ EVIDENCE_NAME = "AUTOROUTER.md"
 """File in the KISS home the autorouter SEA splices into its prompt (its ``EVIDENCE_NAME``;
 named here rather than imported so this SEA loads under an installed package older than
 that one)."""
+EVIDENCE_MAX_CHARS = 2500
+"""Most characters ``write_autorouter_evidence`` writes, stamp line included: the autorouter
+SEA's ``EVIDENCE_MAX_CHARS`` (its ``observed_evidence()`` cuts a longer file at that size), kept
+equal to it by ``test_rsi7d_sea.py``."""
 REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
 SEAS_DIR_OPTION = "--seas-dir"
@@ -338,14 +343,15 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    replay-verified" in the report.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block for the router with `write_autorouter_evidence(text)`, which rewrites
-   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into its prompt; its
-   `autorouter_sea.py` is not edited for this): a Markdown table (model, tasks, role mix,
+   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt; its
+   `autorouter_sea.py` is not edited for this). The tool refuses more than 2,500 characters
+   including its stamp line, so: one line naming the window (`window_start`) and the task
+   count; a Markdown table of the models with at least 10 tasks (model, tasks, roles,
    failed/unsuccessful, median $ per step, median s per step, tool-error rate; keep every
    row under 92 characters by abbreviating headers or dropping a column, the tool rejects
-   longer rows) followed by at most 8 bullets naming what each model is observed to be good
-   or bad at, with the counts that support the claim. Only claim what at least 10 tasks
-   support; say "insufficient data" otherwise. Include the window (`window_start`) so a
-   reader can tell how fresh the evidence is.
+   longer rows), the rest folded into one "others: insufficient data" row; then at most 5
+   one-sentence bullets naming what a model is observed to be good or bad at, each with
+   the counts that support the claim. Only claim what at least 10 tasks support.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: baseline table, per SEA the findings,
    the added or changed bullets, the evaluation result (replay ids and metrics, or why not
    replayed), the autorouter evidence update, recommendations for non-editable SEAs, the
@@ -1621,10 +1627,12 @@ def write_autorouter_evidence(text: str) -> str:
     task history shows about each model's cost, speed and reliability.
     It is stamped with the current UTC date and its prose wrapped at 92
     columns like a prompt edit (a table row that does not fit is refused),
-    then written in one atomic rename.  The autorouter SEA splices the
-    file into its prompt when it loads, so refreshing the evidence never
-    edits a SEA file; the tool still refuses when ``autorouter`` is not
-    an editable SEA in the run's scope.  Returns a one-line description.
+    then written in one atomic rename.  The file goes into every prompt of
+    the autorouter SEA, so the stamped text is refused when it exceeds
+    :data:`EVIDENCE_MAX_CHARS` characters.  Splicing the file means
+    refreshing the evidence never edits a SEA file; the tool still refuses
+    when ``autorouter`` is not an editable SEA in the run's scope.  Returns
+    a one-line description.
     """
     if _editable_path("autorouter") is None:
         return _not_editable("autorouter")
@@ -1640,12 +1648,21 @@ def write_autorouter_evidence(text: str) -> str:
     if not body:
         return "Error: the evidence text is empty"
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    content = f"{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{body}\n"
+    if len(content) > EVIDENCE_MAX_CHARS:
+        return (
+            f"Error: the evidence is {len(content)} characters with its stamp line; the "
+            f"autorouter prompt takes at most {EVIDENCE_MAX_CHARS}. Drop the rows of models "
+            "with fewer than 10 tasks, keep at most 5 bullets, and shorten the prose."
+        )
     path = kiss_home() / EVIDENCE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".tmp")
-    partial.write_text(f"{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{body}\n", "utf-8")
+    partial.write_text(content, "utf-8")
     partial.replace(path)
-    return f"Wrote {path} ({len(body.splitlines())} lines, refreshed {stamp})"
+    return (
+        f"Wrote {path} ({len(body.splitlines())} lines, {len(content)} chars, refreshed {stamp})"
+    )
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -1990,6 +2007,40 @@ def _patch_sorcar_md(path: Path, old: str, new: str) -> str:
     return " ".join(reports)
 
 
+def _task_in_clone(task: str, work_dir: str, repo: Path, tree: Path, sub: Path, clone: Path) -> str:
+    """Return *task* with every path it names inside the run's checkout moved to *clone*.
+
+    One pass, longest alternative first: any worktree of the repository
+    (the history strips worktree suffixes from work dirs, so the tree may
+    be the repository while the text names its worktree), the tree, the
+    repository, and the checkout as the run's *work_dir* names it. Git
+    reports real paths, so the last differs when the work dir goes through
+    a symlink (``/var`` -> ``/private/var`` on macOS): a work dir that
+    resolves to the tree is another name for it, a symlink into the tree
+    (``docs-link`` -> ``<tree>/docs``) names only its own directory of the
+    clone (``<clone>/docs``).
+    """
+    named = Path(work_dir)
+    for _ in sub.parts:
+        named = named.parent
+    aliases = {str(tree): clone, str(repo): clone}
+    if named.resolve() == tree.resolve():
+        aliases[str(named)] = clone
+    else:
+        aliases[str(Path(work_dir))] = clone / sub
+    tree_names = sorted((k for k, v in aliases.items() if v == clone), key=len, reverse=True)
+    worktrees = (
+        "(?:" + "|".join(map(re.escape, tree_names)) + ")"
+        r"[/\\]\.kiss-worktrees[/\\]kiss_wt-[^/\\\s'\"]+"
+    )
+    pattern = "|".join([worktrees, *map(re.escape, sorted(aliases, key=len, reverse=True))])
+
+    def to_clone(match: re.Match[str]) -> str:
+        return str(aliases.get(match.group(0), clone))
+
+    return re.sub(pattern, to_clone, task)
+
+
 def _sorcar_system_prompt() -> str:
     """Return the base system prompt a ``sorcar`` replay runs with: the checkout's SYSTEM.md."""
     return render_brand((_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]).read_text(encoding="utf-8"))
@@ -2041,7 +2092,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     if not commit:
         return f"Error: {repo} has no commit from before the task started"
     clone = _work_root() / REPLAY_DIR / f"{sea}-{task_id[:8]}"
-    shutil.rmtree(clone, ignore_errors=True)
+    rmtree_force(clone)  # a plain rmtree leaves git's read-only objects behind on Windows
     clone.parent.mkdir(parents=True, exist_ok=True)
     for label, args in (
         ("clone", ("clone", "--quiet", "--no-checkout", str(repo), str(clone))),
@@ -2050,16 +2101,7 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
         proc = _git(*args)
         if proc.returncode:
             return f"Error: git {label} failed: {proc.stderr.strip()}"
-    # One pass, longest alternative first: any worktree of the repository the task text
-    # may name (the history strips worktree suffixes from work_dir, so the tree may be
-    # the repository while the text names its worktree), the tree, the repository.
-    worktrees = re.escape(str(repo)) + r"[/\\]\.kiss-worktrees[/\\]kiss_wt-[^/\\\s'\"]+"
-    roots = sorted({str(tree), str(repo)}, key=len, reverse=True)
-    task = re.sub(
-        "|".join([worktrees, *map(re.escape, roots)]),
-        str(clone).replace("\\", "\\\\"),
-        str(row.get("task") or ""),
-    )
+    task = _task_in_clone(str(row.get("task") or ""), work_dir, repo, tree, sub, clone)
     return {
         "sea": sea,
         "sea_file": str(sea_file),

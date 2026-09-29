@@ -198,7 +198,8 @@ class TestContentTabMenuBar:
             _choose(page, "Selection", "Select All")
             _choose(page, "Edit", "Copy")
             clip = page.evaluate("() => navigator.clipboard.readText()")
-            assert clip == "alpha = 1\nbeta = 2\n"
+            # Monaco joins copied lines with the platform EOL (CRLF on Windows).
+            assert clip.replace("\r\n", "\n") == "alpha = 1\nbeta = 2\n"
             # Monaco binds "go to end of document" per platform: Ctrl+End
             # on Linux/Windows, Cmd+Down on macOS (Ctrl+End is unbound
             # there, so the Select All selection would stay and Paste
