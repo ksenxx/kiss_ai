@@ -51,6 +51,7 @@ import sys
 import sysconfig
 import tempfile
 import threading
+import time
 import unittest
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
@@ -364,6 +365,33 @@ def install_fake_cloudflared(directory: Path, body: str) -> Path:
         _FAKE_CLOUDFLARED_WRAPPER.format(body_path=str(body_path)), encoding="utf-8",
     )
     return fake
+
+
+def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
+    """Navigate the Playwright *page* to *url*, retrying ``ERR_NETWORK_CHANGED``.
+
+    Chromium aborts every in-flight request with ``net::ERR_NETWORK_CHANGED``
+    when a host interface appears or disappears mid-request; on this box
+    other jobs' Docker containers add and remove veth links all the time,
+    so under full-suite load a first navigation sporadically dies that way.
+    The navigation is retried up to three times for that error only; any
+    other error, or a third failure, propagates unchanged.
+
+    Args:
+        page: A ``playwright.sync_api.Page``.
+        url: The address to open.
+        **goto_kwargs: Passed through to ``page.goto`` (``wait_until`` ...).
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    for attempt in range(3):
+        try:
+            page.goto(url, **goto_kwargs)
+            return
+        except PlaywrightError as exc:
+            if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
+                raise
+            time.sleep(1.0)
 
 
 def pytest_addoption(parser):

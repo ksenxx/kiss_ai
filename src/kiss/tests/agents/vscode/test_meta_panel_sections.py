@@ -55,6 +55,7 @@ import pytest
 from playwright.sync_api import Browser, Locator, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
+from kiss.tests.conftest import goto_retrying_network_change
 
 # main.js only reveals #app once the websocket handshake succeeds,
 # which never happens against a static server; an !important rule
@@ -254,7 +255,7 @@ def _open_page(
             f"for (const [k, v] of Object.entries({json.dumps(storage)})) "
             "localStorage.setItem(k, v);"
         )
-    page.goto(url)
+    goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
     if not global_sections:
