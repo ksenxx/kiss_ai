@@ -24,8 +24,10 @@
 // two-finger pinch and Ctrl/Cmd + wheel zoom around the gesture's point.
 //
 // The toolbar also shows "Page N of M" for the page under the middle of
-// the view (kept current while scrolling and zooming) and, when the host
-// provides a way to save the file, a Download link.
+// the view (kept current while scrolling and zooming); N is a field, and
+// typing a page number into it and pressing Enter jumps to that page.
+// When the host provides a way to save the file there is a Download
+// link as well.
 //
 // mountPdfViewer(holder, bytes, opts) is the only entry point; it returns
 // {dispose} so the host can stop pending renders and free the document.
@@ -118,8 +120,16 @@
     const zoomIn = el('button', 'pdf-zoom-in', '+');
     zoomIn.type = 'button';
     zoomIn.title = 'Zoom in';
-    // "Loading…", then "Page N of M" for the page under the view's middle.
+    // "Loading…", then "Page [N] of M": N is the page under the view's
+    // middle, in a field that jumps to the page typed into it on Enter.
     const status = el('span', 'pdf-status', 'Loading\u2026');
+    const pageInput = el('input', 'pdf-page-input');
+    pageInput.type = 'text';
+    pageInput.inputMode = 'numeric';
+    pageInput.enterKeyHint = 'go';
+    pageInput.autocomplete = 'off';
+    pageInput.title = 'Type a page number and press Enter';
+    pageInput.setAttribute('aria-label', 'Page number');
     toolbar.append(zoomOut, zoomLevel, zoomIn, status);
     if (opts.downloadUrl || opts.onDownload) {
       const download = el('a', 'pdf-download', 'Download');
@@ -198,17 +208,53 @@
       return lo + 1;
     }
 
+    /**
+     * Show the page under the middle of the view in the page field,
+     * unless the user is in the field (a number being typed must not be
+     * overwritten by a scroll; the field catches up when it is left).
+     */
     function updatePageIndicator() {
       state.scrollFrame = 0;
       if (state.disposed || !state.pages.length) return;
-      status.textContent =
-        'Page ' + currentPage() + ' of ' + state.pages.length;
+      if (document.activeElement === pageInput) return;
+      pageInput.value = String(currentPage());
     }
 
     /** Refresh the indicator once per frame however often it scrolls. */
     function onScroll() {
       if (state.scrollFrame) return;
       state.scrollFrame = requestAnimationFrame(updatePageIndicator);
+    }
+
+    /**
+     * Scroll so that page *number* (1-based; out-of-range numbers go to
+     * the first or last page) starts at the top of the view, with the
+     * same margin above it as the first page has at scroll offset 0.
+     */
+    function goToPage(number) {
+      const entry = state.pages[clamp(number, 1, state.pages.length) - 1];
+      const padding = parseFloat(window.getComputedStyle(pagesBox).paddingTop);
+      scroller.scrollTop = boxOffset(entry).top - padding;
+    }
+
+    /** Select the whole number on focus so typing replaces it. */
+    function onPageInputFocus() {
+      pageInput.select();
+    }
+
+    /**
+     * Enter jumps to the typed page (a non-number is ignored), Escape
+     * abandons the edit; either leaves the field, which puts the page
+     * under the middle of the view back into it.
+     */
+    function onPageInputKey(ev) {
+      if (ev.key !== 'Enter' && ev.key !== 'Escape') return;
+      ev.preventDefault();
+      const number = parseInt(pageInput.value, 10);
+      if (ev.key === 'Enter' && state.pages.length && !Number.isNaN(number)) {
+        goToPage(number);
+      }
+      pageInput.blur();
     }
 
     /** The scale at which the first page's width fills the scroller. */
@@ -472,6 +518,9 @@
           });
           state.scale = fitWidthScale();
           layout();
+          // Room for the largest page number plus the field's padding.
+          pageInput.style.width = String(pages.length).length + 2 + 'ch';
+          status.replaceChildren('Page ', pageInput, ' of ' + pages.length);
           updatePageIndicator();
           state.resizeObserver = new ResizeObserver(onResize);
           state.resizeObserver.observe(scroller);
@@ -481,6 +530,9 @@
     zoomOut.addEventListener('click', onZoomOut);
     zoomIn.addEventListener('click', onZoomIn);
     zoomLevel.addEventListener('click', onFitWidth);
+    pageInput.addEventListener('focus', onPageInputFocus);
+    pageInput.addEventListener('keydown', onPageInputKey);
+    pageInput.addEventListener('blur', updatePageIndicator);
     scroller.addEventListener('scroll', onScroll, {passive: true});
     scroller.addEventListener('wheel', onWheel, {passive: false});
     scroller.addEventListener('touchstart', onTouchStart, {passive: true});

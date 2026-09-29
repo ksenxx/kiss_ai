@@ -828,6 +828,36 @@ _PDF_GEOMETRY_JS = """() => {
   };
 }"""
 
+# The toolbar's page indicator as the user reads it: "Page N of M" with N
+# taken from the page field ("Loading…" before the document is open).
+_PDF_STATUS_JS = """() => {
+  const status = document.querySelector('.content-tab-view .pdf-status');
+  const input = status.querySelector('.pdf-page-input');
+  return [...status.childNodes]
+    .map(node => (node === input ? input.value : node.textContent))
+    .join('');
+}"""
+
+# The 1-based page under the vertical middle of the view (the next page
+# when the middle falls in a gap; the last page past the end).
+_PDF_MIDDLE_PAGE_JS = """() => {
+  const s = document.querySelector('.content-tab-view .pdf-scroller');
+  const middle = s.getBoundingClientRect().top + s.clientHeight / 2;
+  const pages = [...document.querySelectorAll('.content-tab-view .pdf-page')];
+  const i = pages.findIndex(p => p.getBoundingClientRect().bottom > middle);
+  return (i < 0 ? pages.length : i + 1);
+}"""
+
+
+def _pdf_status(page) -> str:
+    return str(page.evaluate(_PDF_STATUS_JS))
+
+
+def _wait_pdf_status(page, text: str) -> None:
+    page.wait_for_function(
+        "text => (" + _PDF_STATUS_JS + ")() === text", arg=text, timeout=10000
+    )
+
 
 _PDFJS_MODULE = (
     "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/legacy/build/pdf.min.mjs"
@@ -927,7 +957,7 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         assert "Cannot display" not in page.locator("body").inner_text()
         geo = page.evaluate(_PDF_GEOMETRY_JS)
         assert geo["pageCount"] == 1
-        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "Page 1 of 1"
+        assert _pdf_status(page) == "Page 1 of 1"
         # The toolbar's Download link saves the file's own bytes under its name.
         download_link = page.locator(_PDF_VIEWER + " .pdf-download")
         assert download_link.inner_text() == "Download"
@@ -1127,17 +1157,12 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         _wait_pdf_rendered(page)
         assert page.locator(_PDF_PAGE).count() == 8
-        indicator = page.locator(_PDF_VIEWER + " .pdf-status")
-        assert indicator.inner_text() == "Page 1 of 8"
+        assert _pdf_status(page) == "Page 1 of 8"
         # Scrolling to the end puts the last page under the middle.
         page.evaluate(
             "document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 1e6"
         )
-        page.wait_for_function(
-            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
-            " === 'Page 8 of 8'",
-            timeout=10000,
-        )
+        _wait_pdf_status(page, "Page 8 of 8")
         # Scroll so that page 5 sits 40px below the top of the view.
         page.evaluate(
             """() => {
@@ -1149,22 +1174,9 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
         )
         # The indicator names the page under the middle of the view (page
         # 5 when it is taller than half the view, otherwise a later one).
-        expected_page = page.evaluate(
-            """() => {
-              const s = document.querySelector('.content-tab-view .pdf-scroller');
-              const middle = s.getBoundingClientRect().top + s.clientHeight / 2;
-              const pages = [...document.querySelectorAll('.content-tab-view .pdf-page')];
-              const i = pages.findIndex(p => p.getBoundingClientRect().bottom > middle);
-              return (i < 0 ? pages.length : i + 1);
-            }""",
-        )
+        expected_page = page.evaluate(_PDF_MIDDLE_PAGE_JS)
         assert expected_page >= 5
-        page.wait_for_function(
-            "n => document.querySelector('.content-tab-view .pdf-status').textContent"
-            " === 'Page ' + n + ' of 8'",
-            arg=expected_page,
-            timeout=10000,
-        )
+        _wait_pdf_status(page, f"Page {expected_page} of 8")
         # Pages 1-2 are more than a screen above: no canvas any more,
         # while page 5 is drawn.
         page.wait_for_function(
@@ -1196,7 +1208,7 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
         # The point of page 5 at the view's centre is still at the centre.
         assert abs((after["cy"] - after["top"]) - (before["cy"] - before["top"]) * ratio) <= 2
         # The zoom kept the same page under the middle.
-        assert indicator.inner_text() == f"Page {expected_page} of 8"
+        assert _pdf_status(page) == f"Page {expected_page} of 8"
         # Growing the view (the zoom is manual now, so the pages stay put)
         # moves its middle down without a scroll event: put the middle
         # 40px above page 4's bottom, then add 200px of height and the
@@ -1209,27 +1221,118 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
                             + s.scrollTop - 40 - s.clientHeight / 2;
             }""",
         )
-        page.wait_for_function(
-            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
-            " === 'Page 4 of 8'",
-            timeout=10000,
-        )
+        _wait_pdf_status(page, "Page 4 of 8")
         size = page.viewport_size
         scroll_top = page.evaluate(
             "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
         )
         page.set_viewport_size({"width": size["width"], "height": size["height"] + 200})
-        page.wait_for_function(
-            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
-            " === 'Page 5 of 8'",
-            timeout=10000,
-        )
+        _wait_pdf_status(page, "Page 5 of 8")
         assert (
             page.evaluate(
                 "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
             )
             == scroll_top
         )
+    finally:
+        context.close()
+
+
+# Where page *n* (1-based) starts relative to the top of the view, the
+# view's scroll offset, and the margin above the first page at offset 0.
+_PDF_PAGE_TOP_JS = """n => {
+  const s = document.querySelector('.content-tab-view .pdf-scroller');
+  const p = document.querySelectorAll('.content-tab-view .pdf-page')[n - 1];
+  return {
+    top: p.getBoundingClientRect().top - s.getBoundingClientRect().top,
+    scrollTop: s.scrollTop,
+    padding: parseFloat(getComputedStyle(s.querySelector('.pdf-pages')).paddingTop),
+    focused: document.activeElement === document.querySelector('.pdf-page-input'),
+  };
+}"""
+
+
+def test_pdf_page_field_jumps_to_the_typed_page(browser, harness, worktree):
+    """The page number in the toolbar is a field: a number typed into it
+    and Enter scrolls that page to the top of the view (out-of-range
+    numbers go to the first or last page, a non-number goes nowhere),
+    scrolling leaves a number being typed alone, and Escape abandons
+    the edit."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        field = page.locator(_PDF_VIEWER + " .pdf-page-input")
+        assert _pdf_status(page) == "Page 1 of 8"
+        assert field.get_attribute("inputmode") == "numeric"
+        assert field.get_attribute("enterkeyhint") == "go"
+        # Focusing the field selects the number, so typing replaces it.
+        field.click()
+        assert page.evaluate(
+            """() => {
+              const f = document.activeElement;
+              return f.className === 'pdf-page-input'
+                && f.selectionStart === 0 && f.selectionEnd === f.value.length;
+            }"""
+        )
+        page.keyboard.type("5")
+        page.keyboard.press("Enter")
+        # Page 5 starts at the top of the view, under the same margin as
+        # the first page at offset 0; the field is left, showing the
+        # page under the middle again (page 5 or, if the pages are
+        # shorter than half the view, a later one).
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 5)
+        assert abs(geo["top"] - geo["padding"]) <= 1.5
+        assert geo["focused"] is False
+        middle_page = page.evaluate(_PDF_MIDDLE_PAGE_JS)
+        assert middle_page >= 5
+        _wait_pdf_status(page, f"Page {middle_page} of 8")
+        # A number past the end goes to the last page (the view cannot
+        # scroll that far, so it ends at the bottom).
+        field.fill("99")
+        page.keyboard.press("Enter")
+        _wait_pdf_status(page, "Page 8 of 8")
+        assert page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              return s.scrollTop + s.clientHeight === s.scrollHeight;
+            }"""
+        )
+        # Zero goes to the first page: back at the very top.
+        field.fill("0")
+        page.keyboard.press("Enter")
+        _wait_pdf_status(page, "Page 1 of 8")
+        assert page.evaluate(_PDF_PAGE_TOP_JS, 1)["scrollTop"] == 0
+        # A non-number goes nowhere; the field shows the real page again.
+        field.fill("abc")
+        page.keyboard.press("Enter")
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 1)
+        assert geo["scrollTop"] == 0
+        assert geo["focused"] is False
+        assert _pdf_status(page) == "Page 1 of 8"
+        # A number being typed survives a scroll (the field only catches
+        # up once it is left), and Escape abandons it without scrolling.
+        field.click()
+        page.keyboard.type("3")
+        page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 1e6"
+        )
+        # Two frames: the indicator refresh runs on the next one.
+        page.evaluate(
+            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        )
+        assert field.input_value() == "3"
+        assert page.evaluate(_PDF_PAGE_TOP_JS, 8)["focused"] is True
+        scroll_top = page.evaluate(_PDF_PAGE_TOP_JS, 8)["scrollTop"]
+        page.keyboard.press("Escape")
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 8)
+        assert geo["focused"] is False
+        assert geo["scrollTop"] == scroll_top
+        assert _pdf_status(page) == "Page 8 of 8"
     finally:
         context.close()
 

@@ -3667,13 +3667,29 @@ body.sidebar-chat-mode #meta-info-content {
   white-space: nowrap;
 }
 
-/* "Page N of M": pushed to the right, before the Download link. */
+/* "Page [N] of M": pushed to the right, before the Download link. */
 .pdf-status {
   margin-left: auto;
   color: var(--dim);
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* The page number is a field (its width is set per document, from the
+   number of digits in the page count); Enter jumps to the typed page. */
+.pdf-page-input {
+  box-sizing: border-box;
+  height: var(--space-6);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 .pdf-scroller {
