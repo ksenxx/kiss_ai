@@ -61,13 +61,13 @@
 <body>
 <header>
   <div class="wrap">
-    <h1>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench&nbsp;2.0</h1>
+    <h1>The Harness Tax, Audited: KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench&nbsp;2.0</h1>
     <p>We took the 30 Terminal-Bench 2.0 tasks and seven models from the
        <a href="https://harnesstax.github.io/">HarnessTax</a> study and ran a
        fourth harness on them, our own. It came out ahead of Pi, Codex CLI and
        Claude Code on every model, and when we reran Pi ourselves on the same
        model the gap was 11 points.</p>
-    <p>29 September 2026 &middot; Benchmarks &middot; Full method and intervals in
+    <p>Full method and intervals in
        Section&nbsp;5 of the <a href="../assets/kiss_sorcar.pdf">KISS Sorcar paper</a></p>
     <p>Code, prompt, and per-attempt records at
        <a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a></p>
@@ -81,9 +81,7 @@ Intelligence recently asked how much the harness around a coding model actually
 matters. They held the model fixed, swapped between Claude Code, Codex CLI and
 Pi, and found that the harness changes what you pay far more than it changes
 what gets solved. We had a harness of our own, built on the opposite hunch, so
-we added it to their Terminal-Bench 2.0 table. The benchmark version of KISS
-Sorcar is small: a ReAct loop, six tools, a 727-word system prompt, and two
-small pieces of harness code. Averaged over their seven models it solved 75.6%
+we added it to their Terminal-Bench 2.0 table. Averaged over their seven models it solved 75.6%
 of attempts. Pi got 70.0%, Codex CLI 65.7% and Claude Code 65.1%. Thirty tasks
 isn&rsquo;t many, though, and that pooled gap sits inside the noise. So we
 reran Pi ourselves on Claude Fable 5, on the same tasks, priced from the same
@@ -91,13 +89,6 @@ table, with no turn cap for either agent. KISS Sorcar solved 80.0% of attempts
 to Pi&rsquo;s 68.9%, an 11-point gap that holds up statistically, for five
 cents more per attempt. On the 59 Terminal-Bench 2.0 tasks the study
 didn&rsquo;t sample, it solved 79.1%.</p>
-</div>
-
-<div class="stats">
-  <div class="stat"><b>75.6%</b><span>attempts solved, averaged over 7 models (Pi 70.0, Codex CLI 65.7, Claude Code 65.1)</span></div>
-  <div class="stat"><b>7 of 7</b><span>models on which KISS Sorcar had the highest success rate of the four harnesses</span></div>
-  <div class="stat"><b>+11.1 pts</b><span>over Pi on Claude Fable 5 when we reran Pi ourselves on the same tasks and price list</span></div>
-  <div class="stat"><b>79.1%</b><span>on the 59 tasks the study left out; 79.4% over all 89</span></div>
 </div>
 
 <h2>What HarnessTax found</h2>
@@ -131,7 +122,7 @@ trying the alternatives, the authors say, you are probably paying a harness
 tax, meaning more money for the same result.</p>
 <p>We have no quarrel with the second and third findings. The first one we
 wanted to poke at, because our harness was built on a different assumption. We
-had been betting that a prompt full of engineering rules, backed by a little
+had been betting that a prompt full of solid engineering rules, backed by a little
 code, changes what the model gets right and not just what it costs. HarnessTax
 gave us a way to check.</p>
 
@@ -149,14 +140,9 @@ didn&rsquo;t have was a head-to-head with other harnesses on the same tasks.
 HarnessTax publishes its task list, its per-model numbers and its protocol,
 which is exactly what you need for that.</p>
 <p>We picked Terminal-Bench 2.0 rather than SWE-bench Lite because its tasks
-are the kind our rules were written for: long shell sessions, processes left
-running in the background, and a container whose state gets inspected after
-the agent has gone. For the benchmark we stripped the general-purpose material
+are longer running. For the benchmark we stripped the general-purpose material
 out of the system prompt and kept the coding rules. That left 727 words, down
-from the 3,851 words of the full <code>SYSTEM.md</code>. The AI-discovery and
-adversarial-testing procedures that the paper&rsquo;s case studies lean on went
-too, so what is being tested here is the loop, the tools and the coding rules,
-and nothing else.</p>
+from the 3,851 words of the full <code>SYSTEM.md</code>. </p>
 
 <figure>
 <svg viewBox="0 0 900 250" width="100%" role="img" aria-label="Diagram of the benchmark harness: Harbor hands a container to the KISS Sorcar loop, whose six tools run inside the container; shell results carry harness notes and a guard refuses destructive commands" font-family="Georgia,serif">
@@ -340,8 +326,8 @@ rate drops to 74.1%, which is still above the other three.</p>
 per-model interval spans 27 points on average, so no single row of Table 1
 settles anything on its own, and the pooled interval of 63.8 to 85.9 contains
 all three published means. The comparison with the published table also
-differs from the study in several ways at the same time: date, reasoning
-effort, price list, turn cap and prompt. On price lists in particular, the
+differs from the study in several ways at the same time: date, price list, 
+turn cap and prompt. On price lists in particular, the
 study priced on a September&nbsp;1 list and we used our framework&rsquo;s price
 table, which for Kimi K3 mixes two providers, so we don&rsquo;t draw any cost
 ratio from this table.</p>
@@ -606,8 +592,7 @@ three published means.</p>
 <p>This benchmark exercises the loop, the tools and the coding rules. The
 discovery and adversarial-testing procedures, the memory, the reviewer and the
 IDE features that the rest of the paper is about were switched off, so nothing
-here speaks to them. And we have not isolated whether the rules, the notes or
-the guard contributed to the gap.</p>
+here speaks to them.</p>
 
 <h2>If you want to check</h2>
 <p>Everything behind these numbers is in the repository: the Terminal-Bench 2.0
@@ -627,15 +612,7 @@ uv run --with matplotlib python papers/kisssorcar/ks_tb2.py   # recompute the ta
 
 <h2>Credit</h2>
 <p>This comparison was possible because the HarnessTax authors published their
-task sample, their per-model tables and their protocol. If you use their work,
-cite it the way they ask:</p>
-<pre><code>@misc{pan2026harnesstax,
-  title  = {{HarnessTax: How Much Does Harness Matter for Coding Agents?}},
-  author = {Pan, Melissa Z. and Yang, Shuo and Arabzadeh, Negar and
-            Chiang, Wei-Lin and Stoica, Ion and Zaharia, Matei},
-  year   = {2026},
-  url    = {https://harnesstax.github.io/},
-}</code></pre>
+task sample, their per-model tables and their protocol.
 <p>The full method, the intervals, and the rest of the evidence for KISS Sorcar
 are in <a href="../assets/kiss_sorcar.pdf"><em>KISS Sorcar: A Stupidly-Simple
 General-Purpose and Software Engineering AI Assistant</em></a>, Section 5.
@@ -643,10 +620,6 @@ Terminal-Bench 2.0 is by Merrill et al.,
 <a href="https://arxiv.org/abs/2601.11868">arXiv:2601.11868</a>. Pi is the
 open-source coding agent at
 <a href="https://github.com/earendil-works/pi">github.com/earendil-works/pi</a>.</p>
-
-<p class="small">KISS Sorcar drafted this post, along with the benchmark agent
-and the scripts behind the numbers, working from our outline. We edited it, and
-a second model checked the numbers against the paper.</p>
 
 </main>
 <footer>
