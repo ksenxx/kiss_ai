@@ -14,7 +14,6 @@ API.  Muse-auth mode is covered in ``test_muse_auth_channels.py``.
 from __future__ import annotations
 
 import json
-import socket
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -41,7 +40,7 @@ from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     sign_in,
     start_sign_in,
 )
-from kiss.tests.conftest import hold_loopback_port
+from kiss.tests.conftest import hold_loopback_port, occupy_loopback_port
 
 
 @pytest.fixture()
@@ -244,14 +243,7 @@ def test_busy_redirect_port_is_reported(
     slack: tuple[SlackOAuthState, SlackApiServer],
 ) -> None:
     """Another program holding the redirect port makes the start fail cleanly."""
-    blocker = socket.socket()
-    # Earlier callbacks leave TIME_WAIT entries on the port.
-    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        blocker.bind(("127.0.0.1", LOOPBACK_PORT))
-        blocker.listen(1)
+    with occupy_loopback_port(LOOPBACK_PORT):
         result = json.loads(_tools(SlackAgent())["authenticate_slack"]())
-    finally:
-        blocker.close()
     assert result["ok"] is False
     assert "Could not start the Slack sign-in" in result["error"]

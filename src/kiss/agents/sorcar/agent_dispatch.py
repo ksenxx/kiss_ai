@@ -137,7 +137,8 @@ workspace is released the moment the dispatch returns, so a surviving
 sub-task could bind another account's credentials when its channel
 tools load — and a surviving path/cron sub-task would keep spending
 invisibly.  Work the sub-task completed before the stop (side
-effects, spend) is not reported back to the calling task.
+effects) is not reported back to the calling task; its spend, carried
+by the stopped task's final result, is charged to the calling task.
 """
 
 
@@ -714,11 +715,17 @@ def dispatch_result(
         )
     except daemon_client.StopUnconfirmedTimeoutError:
         return stop_unconfirmed_error(name, timeout)
-    except TimeoutError:
+    except TimeoutError as e:
+        # A confirmed stop carries the stopped task's spend, which still
+        # counts towards the caller.
+        spend = ""
+        if isinstance(e, daemon_client.StoppedOnTimeoutError):
+            _attribute_dispatch_usage(parent_agent, e.result)
+            spend = f", though its ${e.result.cost:.4f} spend is counted in this task's cost"
         return (
             f"Error: the {name} agent task did not finish within "
             f"{timeout:g}s and was stopped; work it completed before "
-            f"the stop (side effects, spend) is not reported here. "
+            f"the stop (side effects) is not reported here{spend}. "
             f"Check what it already did before retrying with a larger "
             f"`timeout` argument."
         )
@@ -1106,9 +1113,10 @@ def make_run_agent_tool(
                 returns an error string (which says the task may
                 still be running in the rare case the daemon never
                 confirms the stop); work the task completed before
-                the stop (side effects, spend) is not reported back
-                here, so check what it already did before retrying
-                with a larger timeout.
+                the stop (side effects) is not reported back here,
+                so check what it already did before retrying with a
+                larger timeout.  Its spend is still charged to the
+                calling task.
             chat_id: Existing chat session id to continue; empty starts a new chat.
                 Pass the chat id a previous run belonged to and the sub-task sees
                 that chat's earlier tasks and results as context.

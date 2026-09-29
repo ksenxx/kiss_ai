@@ -117,17 +117,21 @@ const overlapFile = path.join(tmpHome, 'overlap.txt');
 const pidFile = path.join(tmpHome, 'pids.txt');
 const argsFile = path.join(tmpHome, 'args.txt');
 
+// The TERM trap is installed BEFORE the lock is taken: the tests start
+// stopping as soon as the pid/lock appear, and a SIGTERM landing between
+// mkdir and trap would kill the shell with the default disposition,
+// leaving the lock behind for the next listener to trip over.
 fs.writeFileSync(
   uvPath,
   '#!/bin/sh\n' +
+    `on_term() { sleep 0.3; rmdir "${lockDir}" 2>/dev/null; exit 0; }\n` +
+    'trap on_term TERM\n' +
     `if ! mkdir "${lockDir}" 2>/dev/null; then\n` +
     `  echo overlap >> "${overlapFile}"\n` +
     '  exit 1\n' +
     'fi\n' +
     `echo "$$" >> "${pidFile}"\n` +
     `echo "$@" >> "${argsFile}"\n` +
-    `on_term() { sleep 0.3; rmdir "${lockDir}" 2>/dev/null; exit 0; }\n` +
-    'trap on_term TERM\n' +
     'echo READY\n' +
     'while :; do sleep 0.1; done\n',
   {mode: 0o755},

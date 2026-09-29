@@ -196,12 +196,19 @@ they are the tells.
 8. Rule-of-three lists, bold-label lists, a parallel cadence in every bullet.
 9. Slop vocabulary: delve, leverage, pivotal, crucial, testament, landscape, tapestry,
    showcase, underscore, intricate, meticulous, seamless, vibrant, realm, myriad, foster,
-   comprehensive, notably, moreover, furthermore, "it is worth noting", "serves as",
-   "plays a crucial role", "aligns with"; "precisely", "exactly", "genuine" as
-   intensifiers.
+   comprehensive, notably, moreover, furthermore, additionally, garner, bolster,
+   interplay, multifaceted, holistic, nuanced, groundbreaking, cutting-edge,
+   transformative, invaluable, commendable, noteworthy, paramount, "shed light on",
+   "valuable insights", "it is worth noting", "it is important to note", "serves as",
+   "stands as", "plays a crucial role", "aligns with"; "precisely", "exactly", "genuine"
+   as intensifiers. Commendable, meticulous and intricate are the measured tells of
+   LLM-written peer reviews (Liang et al., ICML 2024).
 10. Markdown and Unicode artifacts in a plain-text review: `**bold**`, `##` headings,
-    curly quotes, the Unicode ellipsis.
+    curly quotes, the Unicode ellipsis, Unicode arrows.
 11. Duplicated sentences.
+12. Puffery and filler: a trailing ", highlighting ..." or ", reflecting ..." clause,
+    "Let us dive into", "Importantly,", "Interestingly,", "opens new avenues", "holds
+    great promise", "Despite these limitations", "studies show" without naming the study.
 
 ## Report back
 

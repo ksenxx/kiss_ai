@@ -255,8 +255,11 @@ function testSubagentTabs() {
   rootClose.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),
   );
+  assert.strictEqual(byType(posted, 'closePanel').length, 0, 'running child keeps its panel open');
+  send(win, {type: 'subagentDone', tab_id: 'sub-2'});
+  win.document.querySelector('#tab-list .chat-tab .chat-tab-close').click();
   const closes = byType(posted, 'closePanel');
-  assert.strictEqual(closes.length, 1, 'root close asks the host to close');
+  assert.strictEqual(closes.length, 1, 'after child completion, root close asks the host to close');
   assert.strictEqual(closes[0].retire, true, 'user close retires the chat');
   assert.strictEqual(
     byType(posted, 'openChatPanel').length,
@@ -264,7 +267,7 @@ function testSubagentTabs() {
     'root close must NOT open a replacement panel',
   );
   assert.strictEqual(
-    byType(posted, 'closeTab').length,
+    byType(posted, 'closeTab').filter(m => m.tabId === ROOT).length,
     0,
     'the retire travels via closePanel, not a doomed queued closeTab',
   );

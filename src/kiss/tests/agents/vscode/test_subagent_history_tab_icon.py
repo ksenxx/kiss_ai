@@ -54,24 +54,26 @@ class TestFrontendHandlerHonorsIsDone:
         self,
     ) -> None:
         body = self._handler_source()
-        m_done = re.search(
-            r"subTab\.isDone\s*=\s*([^;]+);", body,
-        )
+        # Besides the general assignment from ``ev.isDone``, the handler
+        # has an earlier ``subTab.isDone = true`` for a tab that missed
+        # its ``subagentDone`` (the daemon's terminal state wins), so
+        # look at every assignment, not only the first one.
+        done_exprs = [
+            m.strip() for m in re.findall(r"subTab\.isDone\s*=\s*([^;]+);", body)
+        ]
         # The handler sets the running state through setTabRunning(),
         # which also drops any pending-stop state along with it
         # (reports/stop_button_delay_2026-08-05.html).
-        m_running = re.search(
-            r"setTabRunning\(subTab,\s*([^)]+)\)", body,
-        )
-        assert m_done is not None, body
-        assert m_running is not None, body
-        done_expr = m_done.group(1).strip()
-        running_expr = m_running.group(1).strip()
-        assert "subDone" in done_expr or "ev.isDone" in done_expr
-        assert running_expr.startswith("!"), running_expr
-        assert (
-            "subDone" in running_expr or "ev.isDone" in running_expr
-        )
+        running_exprs = [
+            m.strip() for m in re.findall(r"setTabRunning\(subTab,\s*([^)]+)\)", body)
+        ]
+        assert any(
+            "subDone" in e or "ev.isDone" in e for e in done_exprs
+        ), done_exprs
+        assert any(
+            e.startswith("!") and ("subDone" in e or "ev.isDone" in e)
+            for e in running_exprs
+        ), running_exprs
 
     def test_handler_default_is_running_when_is_done_missing(self) -> None:
         body = self._handler_source()

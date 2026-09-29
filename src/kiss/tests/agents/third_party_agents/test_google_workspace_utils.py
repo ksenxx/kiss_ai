@@ -30,6 +30,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.conftest import IS_WINDOWS
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +118,7 @@ def test_authenticate_saves_api_key_then_links(composio, monkeypatch) -> None:
     assert result["verification_uri"].startswith("https://connect.composio.dev/link/")
     assert composio_google.composio_api_key() == API_KEY
     mode = composio_google._api_key_path().stat().st_mode
-    assert stat.S_IMODE(mode) == 0o600
+    assert IS_WINDOWS or stat.S_IMODE(mode) == 0o600  # NTFS has no mode bits
 
 
 def test_finish_connects_and_calls_on_connected(composio) -> None:

@@ -78,8 +78,10 @@ def test_stat_key_is_empty_inside_racy_window(tmp_path: Path) -> None:
     assert stat_key(st, time.time_ns(), digest) == ""
     later = max(st.st_mtime_ns, st.st_ctime_ns) + RACY_WINDOW_NS + 1
     key = stat_key(st, later, digest)
-    assert key.startswith(f"{st.st_size}:{st.st_mtime_ns}:")
-    assert key.endswith(f":{st.st_ino}#{digest.hex()}")
+    if os.name == "nt":  # no ctime and no inode: scandir reports st_ino as 0 there
+        assert key == f"{st.st_size}:{st.st_mtime_ns}#{digest.hex()}"
+    else:
+        assert key == f"{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_ino}#{digest.hex()}"
 
 
 def test_sync_trusts_stat_keys_and_verify_rehashes(tmp_path: Path) -> None:

@@ -49,6 +49,7 @@ from kiss.server.task_runner import (
 )
 
 if TYPE_CHECKING:
+    from kiss.server.browser_tab import BrowserTabService
     from kiss.server.file_index import FileIndexRegistry
     from kiss.server.json_printer import JsonPrinter
     from kiss.server.tab_registry import TabRegistry
@@ -180,6 +181,8 @@ def _task_accepts_input(state: AgentState | None) -> bool:
 # /ask query.  Kept identical to the SEA registry stem so a
 # ``list_commands`` reader and the interceptor agree on the name.
 _ASK_COMMAND_PREFIX = "/ask"
+# Seconds an /ask answering session may run before it is stopped.
+_ASK_TIMEOUT_SECONDS = 600.0
 
 
 def _split_ask_command(prompt: str) -> str | None:
@@ -345,6 +348,7 @@ class _CommandsMixin:
         _commit_msg_tabs: set[str]
         _autocommit_tabs: set[str]
         tab_registry: TabRegistry
+        browser_tabs: BrowserTabService
 
         def _broadcast_tabs_state(self) -> None: ...
 
@@ -1339,7 +1343,13 @@ class _CommandsMixin:
         self.printer.broadcast(echo)
 
     def _dispatch_ask_side_channel(
-        self, *, tab_id: str, owner_task_id: str, chat_id: str, question: str,
+        self,
+        *,
+        tab_id: str,
+        owner_task_id: str,
+        owner_agent: Any,
+        chat_id: str,
+        question: str,
     ) -> None:
         """Fire a background ``ask_sea`` dispatch for a live ``/ask`` query.
 
@@ -1363,6 +1373,9 @@ class _CommandsMixin:
         event into the OWNER task's transcript via
         :meth:`_broadcast_ask_answer`, and the running task's tab
         renders it as a distinct "Answer" panel that survives replays.
+        The answering session's spend (including a timed-out, stopped
+        session's) is charged to the owner task with
+        :func:`~kiss.server.task_update.charge_side_channel_usage`.
 
         The ``<task_id>`` placeholder is substituted HERE so the
         answering session receives the OWNER's task id even when it
@@ -1380,6 +1393,9 @@ class _CommandsMixin:
                 ``_add_task``); the dispatch still fires but the
                 answering agent will see an empty task id and report
                 that no events exist.
+            owner_agent: The running task's live agent, which the
+                answering session's spend is charged to while the task
+                still runs.
             chat_id: The chat the running task belongs to; passed so
                 the answering sub-agent joins the same chat's
                 history.
@@ -1389,6 +1405,7 @@ class _CommandsMixin:
         from kiss.agents.seas.ask import ask_sea
         from kiss.agents.sorcar import daemon_client
         from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+        from kiss.server.task_update import charge_side_channel_usage
 
         # Always the bundled script: ``seas/`` has the lowest registry
         # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
@@ -1399,8 +1416,11 @@ class _CommandsMixin:
         append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
         sock_path = _daemon_sock_path()
+        epoch_getter = getattr(owner_agent, "_usage_epoch", None)
+        epoch = epoch_getter() if callable(epoch_getter) else None
 
         def _run() -> None:
+            spent: daemon_client.TaskResult | None = None
             try:
                 result = daemon_client.run(
                     question,
@@ -1414,11 +1434,14 @@ class _CommandsMixin:
                     use_worktree=False,
                     auto_commit=False,
                     sock_path=sock_path,
-                    timeout=600.0,
+                    timeout=_ASK_TIMEOUT_SECONDS,
                     stop_on_timeout=True,
                 )
+                spent = result
                 text, success = result.text, result.success
             except Exception as exc:
+                if isinstance(exc, daemon_client.StoppedOnTimeoutError):
+                    spent = exc.result
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
                 # exception goes to the daemon log for triage, and
@@ -1428,6 +1451,16 @@ class _CommandsMixin:
                     "/ask side-channel dispatch failed for tab %s", tab_id,
                 )
                 text, success = f"The /ask agent failed: {exc}", False
+            if spent is not None:
+                charge_side_channel_usage(
+                    self.printer,
+                    owner_agent,
+                    owner_task_id,
+                    spent.cost,
+                    spent.tokens,
+                    spent.steps,
+                    epoch=epoch,
+                )
             self._broadcast_ask_answer(
                 tab_id=tab_id,
                 owner_task_id=owner_task_id,
@@ -1612,6 +1645,7 @@ class _CommandsMixin:
             self._dispatch_ask_side_channel(
                 tab_id=tab_id,
                 owner_task_id=owner_task,
+                owner_agent=owner.agent,
                 chat_id=owner_chat_id,
                 question=ask_question,
             )
@@ -1706,6 +1740,42 @@ class _CommandsMixin:
         tab_id = cmd.get("tabId", "")
         if tab_id:
             self._close_tab(tab_id)
+
+    # -- Browser tab: the daemon machine's browser streamed to every surface.
+    # Browser page ids travel as ``tab_id`` (never ``tabId``, which names
+    # chat tabs and is canonicalised by the API layer).
+
+    def _cmd_browser_open(self, cmd: dict[str, Any]) -> None:
+        """Open a page in the machine's browser and announce it on every surface."""
+        self.browser_tabs.open(str(cmd.get("url") or ""), cmd.get("connId", ""))
+
+    def _cmd_browser_close(self, cmd: dict[str, Any]) -> None:
+        """Close a browser page; every surface drops its tab."""
+        self.browser_tabs.close(str(cmd.get("tab_id") or ""))
+
+    def _cmd_browser_navigate(self, cmd: dict[str, Any]) -> None:
+        """Address-bar action on a browser page: ``go``, ``back``, ``forward``, ``reload``."""
+        self.browser_tabs.navigate(
+            str(cmd.get("tab_id") or ""),
+            str(cmd.get("action") or "go"),
+            str(cmd.get("url") or ""),
+        )
+
+    def _cmd_browser_input(self, cmd: dict[str, Any]) -> None:
+        """Replay a client's mouse, wheel, key or pasted-text event on a browser page."""
+        event = cmd.get("event")
+        if isinstance(event, dict):
+            self.browser_tabs.input(str(cmd.get("tab_id") or ""), event)
+
+    def _cmd_browser_viewport(self, cmd: dict[str, Any]) -> None:
+        """A client shows (or hid) a browser tab at the given CSS-pixel size."""
+        self.browser_tabs.viewport(
+            str(cmd.get("tab_id") or ""),
+            cmd.get("connId", ""),
+            _as_int(cmd.get("width")),
+            _as_int(cmd.get("height")),
+            bool(cmd.get("visible", True)),
+        )
 
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
@@ -2475,4 +2545,16 @@ class _CommandsMixin:
         "addTrick": _cmd_add_trick,
         "deleteTrick": _cmd_delete_trick,
         "editTrick": _cmd_edit_trick,
+        "browserOpen": _cmd_browser_open,
+        "browserClose": _cmd_browser_close,
+        "browserNavigate": _cmd_browser_navigate,
+        "browserInput": _cmd_browser_input,
+        "browserViewport": _cmd_browser_viewport,
     }
+
+
+def _as_int(value: object) -> int:
+    """Coerce an untrusted JSON number to a non-negative ``int`` (``0`` otherwise)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))

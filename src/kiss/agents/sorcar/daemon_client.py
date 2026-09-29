@@ -81,6 +81,33 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     ``run_agent`` dispatch — must not claim the task was stopped.
     """
 
+class StoppedOnTimeoutError(TimeoutError):
+    """Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
+
+    Raised by :func:`run` when the timed-out task was stopped and its
+    terminal ``status running=false`` arrived.  :attr:`result` is the
+    stopped task's final ``result`` event parsed into a
+    :class:`TaskResult` (the daemon's failure result still carries the
+    ``cost`` / ``tokens`` / ``steps`` spent before the stop), so callers
+    can charge that spend to whoever dispatched the task.  It is a
+    plain :class:`TimeoutError` to every ``except TimeoutError``.
+
+    Attributes:
+        result: The stopped task's :class:`TaskResult`; all-zero spend
+            when no ``result`` event arrived before the terminal status.
+    """
+
+    def __init__(self, message: str, result: TaskResult) -> None:
+        """Build the error.
+
+        Args:
+            message: The timeout message.
+            result: The stopped task's :class:`TaskResult`.
+        """
+        super().__init__(message)
+        self.result = result
+
+
 _TOOL_CALL_WAKE_SECONDS = 0.5
 """Socket read wake-up interval while :func:`run` serves a tool call.
 
@@ -749,6 +776,9 @@ def run(
             the task may still be running.  A subclass of
             ``TimeoutError``, so a plain ``except TimeoutError`` still
             catches it.
+        StoppedOnTimeoutError: When *stop_on_timeout* is true and the
+            daemon confirmed the stop; its ``result`` carries the
+            stopped task's spend.  A subclass of ``TimeoutError``.
 
     Every other abort of the wait — most importantly the
     ``KeyboardInterrupt`` injected when the CALLING task is stopped
@@ -999,8 +1029,12 @@ def run(
                     # daemon's ``finally`` still broadcasts the
                     # terminal ``running=false`` (see
                     # ``task_runner._run_task``) — that is a confirmed
-                    # stop, not an unconfirmed one.
-                    raise TimeoutError(timeout_msg)
+                    # stop, not an unconfirmed one.  The stopped task's
+                    # failure result still reports its spend.
+                    raise StoppedOnTimeoutError(
+                        timeout_msg,
+                        _to_task_result(result_event, chat_id, task_id),
+                    )
                 elif started:
                     return _to_task_result(result_event, chat_id, task_id)
     except BaseException as exc:

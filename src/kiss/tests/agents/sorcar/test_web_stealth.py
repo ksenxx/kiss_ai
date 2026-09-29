@@ -222,9 +222,19 @@ def test_patchright_drives_the_browser_headed_on_a_virtual_display(tool, server)
     assert tool._headless is True, "still 'no window' from the caller's view"
     assert tool._chromium_headless is False, "but Chromium itself runs headed"
     assert tool._context_args() == {"no_viewport": True}
-    # The browser really is on that display: its process environment says so.
-    environ = open(f"/proc/{tool._browser_pid}/environ", "rb").read().split(b"\0")
-    assert f"DISPLAY={display}".encode() in environ
+    # The browser really is on that display.  (Chromium >= 153 zeroes its
+    # own /proc/<pid>/environ block, so the DISPLAY variable cannot be
+    # read back from the process.)  A headed window reports the X screen
+    # it sits on, and Xvfb was started with ``-screen 0 1920x1080x24``.
+    assert tool._page.evaluate("[screen.width, screen.height, screen.colorDepth]") == [
+        1920, 1080, 24,
+    ]
+    if shutil.which("xlsclients"):
+        clients = subprocess.run(
+            ["xlsclients", "-display", display, "-l"],
+            capture_output=True, text=True, timeout=30, check=True,
+        ).stdout
+        assert "Command:  chrome" in clients, clients
 
 
 def test_fingerprint_has_no_automation_tells(tool, server):

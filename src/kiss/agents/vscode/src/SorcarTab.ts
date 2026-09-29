@@ -425,6 +425,7 @@ export function buildChatHtml(
     PANEL_COPY_SRC: u('panelCopy.js'),
     CTX_MENU_SRC: u('contentContextMenu.js'),
     TREE_MENU_SRC: u('treeContextMenu.js'),
+    BROWSER_TAB_SRC: u('browserTab.js'),
     MAIN_SRC: u('main.js'),
     SHIM_SCRIPT:
       `<script nonce="${nonce}">window.__HLJS_THEME_CSS__ = ` +

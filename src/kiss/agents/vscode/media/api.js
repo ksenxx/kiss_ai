@@ -78,6 +78,11 @@
     'sizeReport',
     'resolveDroppedPaths',
     'tipsOptOut',
+    'browserOpen',
+    'browserClose',
+    'browserNavigate',
+    'browserInput',
+    'browserViewport',
   ];
 
   function createSorcarApi(post) {

@@ -183,20 +183,22 @@ class TestSpendReport(_SpendDbTestCase):
             "daysByModel": {},
         })
 
-    def test_sums_per_local_day_and_model_without_subagent_rows(self) -> None:
+    def test_sums_per_local_day_and_model_splitting_subagent_spend(self) -> None:
         old_key, old_noon = _noon(40)
         new_key, new_noon = _noon(1)
         parent = _spent("claude-fable-5-1", 1.5, 1000, old_noon)
         _spent("gpt-6-astra", 0.5, 200, old_noon + 3600)
         _spent("claude-fable-5-1", 2.0, 3000, new_noon)
-        # An empty model is reported as "unknown"; a sub-agent's usage
-        # is already in its parent's totals and is not counted again.
+        # An empty model is reported as "unknown".  A sub-agent's usage
+        # is already in its parent's totals: it is not counted again,
+        # but is filed under the sub-agent's own model, on the day of
+        # the top-level task.
         _spent("", 0.25, 10, new_noon + 60)
-        _spent("gpt-6-astra", 100.0, 999999, new_noon + 120, parent=parent)
+        _spent("gpt-6-astra", 0.5, 400, new_noon + 120, parent=parent)
 
         self.assertEqual(th._spend_by_day_and_model(), [
-            {"date": old_key, "model": "claude-fable-5-1", "cost": 1.5, "tokens": 1000, "tasks": 1},
-            {"date": old_key, "model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+            {"date": old_key, "model": "claude-fable-5-1", "cost": 1.0, "tokens": 600, "tasks": 1},
+            {"date": old_key, "model": "gpt-6-astra", "cost": 1.0, "tokens": 600, "tasks": 1},
             {"date": new_key, "model": "claude-fable-5-1", "cost": 2.0, "tokens": 3000, "tasks": 1},
             {"date": new_key, "model": "unknown", "cost": 0.25, "tokens": 10, "tasks": 1},
         ])
@@ -207,14 +209,14 @@ class TestSpendReport(_SpendDbTestCase):
             {"date": new_key, "cost": 2.25, "tokens": 3010, "tasks": 2},
         ])
         self.assertEqual(report["totalByModel"], [
-            {"model": "claude-fable-5-1", "cost": 3.5, "tokens": 4000, "tasks": 2},
-            {"model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+            {"model": "claude-fable-5-1", "cost": 3.0, "tokens": 3600, "tasks": 2},
+            {"model": "gpt-6-astra", "cost": 1.0, "tokens": 600, "tasks": 1},
             {"model": "unknown", "cost": 0.25, "tokens": 10, "tasks": 1},
         ])
         self.assertEqual(report["daysByModel"], {
             old_key: [
-                {"model": "claude-fable-5-1", "cost": 1.5, "tokens": 1000, "tasks": 1},
-                {"model": "gpt-6-astra", "cost": 0.5, "tokens": 200, "tasks": 1},
+                {"model": "claude-fable-5-1", "cost": 1.0, "tokens": 600, "tasks": 1},
+                {"model": "gpt-6-astra", "cost": 1.0, "tokens": 600, "tasks": 1},
             ],
             new_key: [
                 {"model": "claude-fable-5-1", "cost": 2.0, "tokens": 3000, "tasks": 1},
@@ -223,6 +225,30 @@ class TestSpendReport(_SpendDbTestCase):
         })
         # The reply is JSON-serialisable as the daemon sends it.
         json.dumps(report)
+
+    def test_nested_and_unfolded_subagents_keep_the_top_level_total(self) -> None:
+        """Grandchildren are split recursively; unfolded children are scaled.
+
+        A task whose sub-agents add up to more than itself (their spend
+        was never folded in) keeps its listed total: the sub-agents'
+        shares are scaled down to fit and the task's own share is 0.
+        """
+        key, noon = _noon(2)
+        root = _spent("claude-opus-5-5", 10.0, 1000, noon)
+        child = _spent("gpt-6-astra", 4.0, 400, noon + 1, parent=root)
+        _spent("claude-fable-5-1", 1.0, 100, noon + 2, parent=child)
+        unfolded = _spent("claude-opus-5-5", 1.0, 100, noon + 3)
+        _spent("gpt-6-astra", 3.0, 300, noon + 4, parent=unfolded)
+        _spent("claude-fable-5-1", 1.0, 100, noon + 5, parent=unfolded)
+        self.assertEqual(th._spend_by_day_and_model(), [
+            {"date": key, "model": "claude-opus-5-5", "cost": 6.0, "tokens": 600, "tasks": 2},
+            {"date": key, "model": "gpt-6-astra", "cost": 3.75, "tokens": 375, "tasks": 0},
+            {"date": key, "model": "claude-fable-5-1", "cost": 1.25, "tokens": 125, "tasks": 0},
+        ])
+        self.assertEqual(
+            sidebar_panels.spend_report()["total"],
+            {"cost": 11.0, "tokens": 1100, "tasks": 2},
+        )
 
     def test_a_day_boundary_is_the_local_one(self) -> None:
         """A task at 23:30 and one at 00:30 the next day are two days."""

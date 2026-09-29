@@ -67,6 +67,7 @@ from kiss.server.autocomplete import (
     _AutocompleteMixin,
     ranked_function_calling_models,
 )
+from kiss.server.browser_tab import BrowserTabService
 from kiss.server.commands import _CommandsMixin
 from kiss.server.file_index import FileIndexRegistry
 from kiss.server.helpers import (
@@ -461,6 +462,11 @@ class VSCodeServer(
         # redirectable KISS dir so tests point it at a scratch home.
         self.tab_registry = TabRegistry(
             Path(_persistence._KISS_DIR) / "tabs.json",
+        )
+        # The machine's browser streamed as a tab on every surface; idle
+        # (no thread, no browser) until the first ``browserOpen``.
+        self.browser_tabs = BrowserTabService(
+            self.printer, Path(_persistence._KISS_DIR) / "browser-tab-profile",
         )
         # The printer's local-UDS talk bookkeeping only knows which
         # connection addressed which tab and whether a chat webview is
@@ -2302,11 +2308,15 @@ class VSCodeServer(
         self._emit_pending_ask(tab_id)
         self._emit_pending_worktree(tab_id)
 
-        if subagent_info is None and isinstance(rebound_task_id, str) and rebound_task_id:
+        # A resumed sub-agent may itself have fanned out: its running
+        # descendants' tabs must reach this client too (its finished
+        # ones stay history, reopened from its own fan-out panel).
+        if isinstance(rebound_task_id, str) and rebound_task_id:
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
                 conn_id=conn_id,
+                live_only=subagent_info is not None,
             )
 
     def _emit_pending_ask(self, tab_id: str) -> None:
@@ -2408,6 +2418,16 @@ class VSCodeServer(
         suffix = f"__sub_{sub_task_id}" if sub_task_id else ""
         if suffix and sub_tab_id.endswith(suffix):
             prefix = sub_tab_id[: -len(suffix)]
+            # A live helper can outlive its parent. Keep its stable tab id,
+            # but attach the visible tab to the nearest live ancestor.
+            # Finished history keeps its real parent so a hand-close of
+            # that parent still cascades.
+            if not _subagent_is_done(sub_task_id):
+                while "__sub_" in prefix:
+                    ancestor, ancestor_task_id = prefix.rsplit("__sub_", 1)
+                    if not _subagent_is_done(ancestor_task_id):
+                        break
+                    prefix = ancestor
             if prefix and prefix != "task":
                 return prefix
         with self._state_lock:
@@ -2451,10 +2471,13 @@ class VSCodeServer(
         parent_task_id: str,
         parent_tab_id: str,
         conn_id: str = "",
+        live_only: bool = False,
+        ancestors: frozenset[str] = frozenset(),
     ) -> None:
-        """Broadcast ``openSubagentTab`` + ``task_events`` for every
-        persisted sub-agent row whose parent is *parent_task_id*, and
-        recursively for the children of every sub-agent still running.
+        """Replay child tabs, including live descendants of completed parents.
+
+        Finished direct children retain normal history behavior. Below a
+        completed child, replay only live tasks, attached to a surviving ancestor.
 
         The sub-tab ids are deterministic
         (``f"{parent_tab_id}__sub_{sub_task_id}"``) so that clicking
@@ -2482,14 +2505,40 @@ class VSCodeServer(
                 would also re-open a sub-tab a user closed by hand.
                 A reattached still-running sub-agent's live events
                 keep fanning out to every viewer as before.
+            live_only: Omit completed descendants when walking through a
+                finished ancestor; their live children must still be reachable.
+            ancestors: Task ids already on the replay path.  A child that
+                is also its own ancestor (a ``parent_task_id`` cycle in the
+                history table) is skipped, or the descent would never end.
         """
         scope: dict[str, Any] = {"connId": conn_id} if conn_id else {}
+        ancestors = ancestors | {parent_task_id}
         sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
         for idx, row in enumerate(sub_rows):
             sub_task_id = row["task_id"]
+            if str(sub_task_id) in ancestors:
+                continue
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
+            if is_done:
+                self._open_persisted_subagent_tabs(
+                    parent_task_id=str(sub_task_id),
+                    parent_tab_id=sub_tab_id,
+                    conn_id=conn_id,
+                    live_only=True,
+                    ancestors=ancestors,
+                )
+                if live_only:
+                    # Not reopened as history, but a client that missed
+                    # this completion still needs to close its copy.
+                    self.printer.broadcast({
+                        "type": "subagentDone",
+                        "tab_id": sub_tab_id,
+                        "tabId": "",
+                        **scope,
+                    })
+                    continue
             if is_done and _is_side_channel_row(row):
                 # A finished side channel (the /ask answerer) delivered
                 # its answer into the parent's transcript; unlike a
@@ -2513,7 +2562,12 @@ class VSCodeServer(
                 {
                     "type": "openSubagentTab",
                     "tab_id": sub_tab_id,
-                    "parent_tab_id": parent_tab_id,
+                    "parent_tab_id": self._resolve_parent_tab_id_for_sub(
+                        parent_task_id=parent_task_id,
+                        chat_id=str(row.get("chat_id", "") or ""),
+                        sub_tab_id=sub_tab_id,
+                        sub_task_id=str(sub_task_id),
+                    ),
                     "description": description,
                     "task_id": sub_task_id,
                     "taskIndex": idx,
@@ -2552,7 +2606,8 @@ class VSCodeServer(
             self._emit_pending_ask(sub_tab_id)
             if is_done:
                 continue
-            if _subagent_is_done(sub_task_id):
+            is_done = _subagent_is_done(sub_task_id)
+            if is_done:
                 self.printer.broadcast(
                     {
                         "type": "subagentDone",
@@ -2561,16 +2616,14 @@ class VSCodeServer(
                         **scope,
                     }
                 )
-                continue
-            # A running sub-agent may be fanning out itself: its own
-            # children's tabs hang off the tab just announced, so this
-            # client gets them too (a running sub-agent's tab must be
-            # open on every surface, at any depth).  Their ids chain
-            # the same way (``{sub_tab_id}__sub_{grandchild_task_id}``).
+            # Preserve the original ID chain even when a completed ancestor
+            # no longer has a visible tab. Completion can race with replay.
             self._open_persisted_subagent_tabs(
                 parent_task_id=str(sub_task_id),
                 parent_tab_id=sub_tab_id,
                 conn_id=conn_id,
+                live_only=is_done,
+                ancestors=ancestors,
             )
 
     def _live_task_start_ms(
