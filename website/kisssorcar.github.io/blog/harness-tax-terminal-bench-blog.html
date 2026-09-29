@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
+<title>The Harness Tax, Audited: KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
 <meta name="description" content="KISS Sorcar run on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, the best point estimate on all seven models, and an 11-point paired gap over Pi rerun on the same model.">
 <link rel="canonical" href="https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html">
 <style>
@@ -60,23 +60,14 @@
 </head>
 <body>
 <header>
-  <div class="wrap">
     <h1>The Harness Tax, Audited: KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench&nbsp;2.0</h1>
-    <p>We took the 30 Terminal-Bench 2.0 tasks and seven models from the
-       <a href="https://harnesstax.github.io/">HarnessTax</a> study and ran a
-       fourth harness on them, our own. It came out ahead of Pi, Codex CLI and
-       Claude Code on every model, and when we reran Pi ourselves on the same
-       model the gap was 11 points.</p>
-    <p>Full method and intervals in
-       Section&nbsp;5 of the <a href="../assets/kiss_sorcar.pdf">KISS Sorcar paper</a></p>
-    <p>Code, prompt, and per-attempt records at
-       <a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a></p>
-  </div>
+    <h2>Koushik Sen, UC Berkeley</h2>
 </header>
 <main>
 
-<div class="card tldr">
-<p><strong>The short version.</strong> A group at UC Berkeley and Arena
+<h2>The short version.</h2> 
+<p>
+A group at UC Berkeley and Arena
 Intelligence recently asked how much the harness around a coding model actually
 matters. They held the model fixed, swapped between Claude Code, Codex CLI and
 Pi, and found that the harness changes what you pay far more than it changes
@@ -89,7 +80,6 @@ table, with no turn cap for either agent. KISS Sorcar solved 80.0% of attempts
 to Pi&rsquo;s 68.9%, an 11-point gap that holds up statistically, for five
 cents more per attempt. On the 59 Terminal-Bench 2.0 tasks the study
 didn&rsquo;t sample, it solved 79.1%.</p>
-</div>
 
 <h2>What HarnessTax found</h2>
 <p>Every coding agent is really two things: a model, and the harness wrapped
@@ -143,40 +133,6 @@ which is exactly what you need for that.</p>
 are longer running. For the benchmark we stripped the general-purpose material
 out of the system prompt and kept the coding rules. That left 727 words, down
 from the 3,851 words of the full <code>SYSTEM.md</code>. </p>
-
-<figure>
-<svg viewBox="0 0 900 250" width="100%" role="img" aria-label="Diagram of the benchmark harness: Harbor hands a container to the KISS Sorcar loop, whose six tools run inside the container; shell results carry harness notes and a guard refuses destructive commands" font-family="Georgia,serif">
-  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#5b6572"/></marker></defs>
-  <rect x="10" y="80" width="150" height="90" rx="6" fill="#eceff4" stroke="#d8dde4"/>
-  <text x="85" y="115" font-size="14" text-anchor="middle" fill="#1e2430">Harbor 0.20.0</text>
-  <text x="85" y="135" font-size="12" text-anchor="middle" fill="#5b6572">one task, one container,</text>
-  <text x="85" y="151" font-size="12" text-anchor="middle" fill="#5b6572">official verifier</text>
-  <line x1="160" y1="125" x2="215" y2="125" stroke="#5b6572" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="220" y="20" width="300" height="210" rx="6" fill="#ffffff" stroke="#2456a6" stroke-width="1.5"/>
-  <text x="370" y="45" font-size="14" font-weight="bold" text-anchor="middle" fill="#2456a6">KISS Sorcar benchmark agent</text>
-  <rect x="235" y="60" width="270" height="44" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
-  <text x="370" y="79" font-size="12.5" text-anchor="middle" fill="#1e2430">ReAct loop, no turn cap, no wall clock</text>
-  <text x="370" y="96" font-size="12" text-anchor="middle" fill="#5b6572">ends on finish() or at $50 spent</text>
-  <rect x="235" y="112" width="270" height="44" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
-  <text x="370" y="131" font-size="12.5" text-anchor="middle" fill="#1e2430">727-word prompt: six rules of work</text>
-  <text x="370" y="148" font-size="12" text-anchor="middle" fill="#5b6572">list what "done" means; never edit inputs; re-verify</text>
-  <rect x="235" y="164" width="270" height="52" rx="4" fill="#eef1f5" stroke="#d8dde4"/>
-  <text x="370" y="183" font-size="12.5" text-anchor="middle" fill="#1e2430">Bash, run_commands_parallel, Read, Edit, Write, finish</text>
-  <text x="370" y="201" font-size="12" text-anchor="middle" fill="#5b6572">browser, memory, worktree, sub-agents off</text>
-  <line x1="520" y1="125" x2="575" y2="125" stroke="#5b6572" stroke-width="1.5" marker-end="url(#arr)"/>
-  <rect x="580" y="30" width="310" height="190" rx="6" fill="#ffffff" stroke="#1e7a46" stroke-width="1.5"/>
-  <text x="735" y="55" font-size="14" font-weight="bold" text-anchor="middle" fill="#1e7a46">two mechanisms in code</text>
-  <text x="595" y="85" font-size="12.5" fill="#1e2430">Harness notes appended to a shell result when</text>
-  <text x="595" y="103" font-size="12.5" fill="#1e2430">a process it started is still running, or when</text>
-  <text x="595" y="121" font-size="12.5" fill="#1e2430">a pre-existing file under the workdir changed.</text>
-  <text x="595" y="148" font-size="12.5" fill="#1e2430">A guard refuses a command that would kill every</text>
-  <text x="595" y="166" font-size="12.5" fill="#1e2430">process in the container or delete the workspace.</text>
-  <text x="595" y="200" font-size="12" fill="#5b6572">250 of 630 attempts got a note (901 in all); 15 calls refused</text>
-</svg>
-<figcaption>The benchmark setup. Harbor hands each attempt&rsquo;s container to
-the framework and the tools run inside it. The prompt names the tools and lays
-out six rules of work; two mechanisms in the harness code back them up.</figcaption>
-</figure>
 
 <p>Two of our choices differ from the study&rsquo;s harnesses, and you should
 keep them in mind when you read the table. We set no turn cap and no wall-clock
@@ -593,22 +549,6 @@ three published means.</p>
 discovery and adversarial-testing procedures, the memory, the reviewer and the
 IDE features that the rest of the paper is about were switched off, so nothing
 here speaks to them.</p>
-
-<h2>If you want to check</h2>
-<p>Everything behind these numbers is in the repository: the Terminal-Bench 2.0
-benchmark agent, the archived prompt, and the per-attempt records of all three
-runs in <code>papers/kisssorcar/evidence/tb2_trials.json</code>.
-<code>ks_tb2.py</code> recomputes the benchmark statistics from those records
-and generates the paper&rsquo;s table and frontier plot, and each result macro
-in the paper carries a comment naming the script or JSON key it came from. If
-you would rather rerun
-than recompute, you will need Anthropic, OpenAI and OpenRouter keys and
-Harbor 0.20.0. For budgeting, the 30-task run cost us $649, the 59-task run
-$270 and the Pi run $130.</p>
-<pre><code>git clone https://github.com/ksenxx/kiss_ai
-cd kiss_ai
-cat papers/kisssorcar/evidence/tb2_prompt.txt            # the 727-word prompt
-uv run --with matplotlib python papers/kisssorcar/ks_tb2.py   # recompute the table</code></pre>
 
 <h2>Credit</h2>
 <p>This comparison was possible because the HarnessTax authors published their
