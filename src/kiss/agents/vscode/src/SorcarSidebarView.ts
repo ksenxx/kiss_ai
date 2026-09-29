@@ -193,7 +193,7 @@ import {
   resolveDefaultModel,
 } from './DependencyInstaller';
 import {buildChatHtml, clearTipsOptOut, recordTipsOptOut} from './SorcarTab';
-import {buildPdfPreviewHtml} from './pdfPreview';
+import {PDF_DOWNLOAD_MESSAGE, buildPdfPreviewHtml} from './pdfPreview';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
@@ -2675,6 +2675,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       panel.onDidDispose(() => {
         this._htmlPreviewPanels.delete(filePath);
       });
+      panel.webview.onDidReceiveMessage((msg: {type?: string}) => {
+        if (msg && msg.type === PDF_DOWNLOAD_MESSAGE) {
+          void this._savePdfCopy(filePath);
+        }
+      });
     } else {
       panel.reveal(vscode.ViewColumn.One);
     }
@@ -2683,6 +2688,29 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._extensionUri,
       filePath,
     );
+  }
+
+  /**
+   * The PDF preview's Download link: a webview cannot save a file, so
+   * ask where to put a copy of *filePath* (the home directory and the
+   * file's own name by default) and copy it there.
+   */
+  private async _savePdfCopy(filePath: string): Promise<void> {
+    const target = await vscode.window.showSaveDialog({
+      title: 'Download PDF',
+      defaultUri: vscode.Uri.file(
+        path.join(os.homedir(), path.basename(filePath)),
+      ),
+      filters: {PDF: ['pdf']},
+    });
+    if (!target) return;
+    try {
+      await vscode.workspace.fs.copy(vscode.Uri.file(filePath), target, {
+        overwrite: true,
+      });
+    } catch (err) {
+      showErrorNotification(`Failed to save ${target.fsPath}: ${String(err)}`);
+    }
   }
 
   public dispose(): void {

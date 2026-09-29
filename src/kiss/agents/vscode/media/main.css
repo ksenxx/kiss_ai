@@ -3640,7 +3640,9 @@ body.sidebar-chat-mode #meta-info-content {
   font-size: var(--fs-sm);
 }
 
-.pdf-toolbar button {
+.pdf-toolbar button,
+.pdf-toolbar .pdf-download {
+  box-sizing: border-box;
   min-width: var(--space-8);
   height: var(--space-6);
   padding: 0 var(--space-2);
@@ -3653,12 +3655,25 @@ body.sidebar-chat-mode #meta-info-content {
   cursor: pointer;
 }
 
-.pdf-toolbar button:hover { background: var(--surface2); }
+.pdf-toolbar button:hover,
+.pdf-toolbar .pdf-download:hover { background: var(--surface2); }
 
+/* The Download link looks like the buttons; it is an <a> so the browser
+   saves the blob: URL itself (in VS Code it calls the extension). */
+.pdf-toolbar .pdf-download {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* "Page N of M": pushed to the right, before the Download link. */
 .pdf-status {
   margin-left: auto;
   color: var(--dim);
   font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .pdf-scroller {

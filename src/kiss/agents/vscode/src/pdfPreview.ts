@@ -15,6 +15,14 @@ import {getNonce, mediaAssetVersion} from './SorcarTab';
 export const PDFJS_CDN_ORIGIN = 'https://cdn.jsdelivr.net';
 
 /**
+ * The message a PDF preview panel posts when its Download link is
+ * clicked: a webview cannot save files itself, so the extension host
+ * (SorcarSidebarView._openPdfPreviewTab) offers a save dialog and copies
+ * the file there.
+ */
+export const PDF_DOWNLOAD_MESSAGE = 'download';
+
+/**
  * The HTML of a PDF preview panel for *filePath*, rendered by *webview*:
  * VS Code has no PDF editor of its own (a `vscode.open` on a PDF shows a
  * "binary file" notice), so the panel draws the pages with the same
@@ -41,7 +49,11 @@ export function buildPdfPreviewHtml(
     ` script-src 'nonce-${nonce}' 'wasm-unsafe-eval' ${PDFJS_CDN_ORIGIN};` +
     ` worker-src blob:; connect-src ${webview.cspSource} ${PDFJS_CDN_ORIGIN};` +
     ` img-src ${webview.cspSource} blob: data:; font-src ${webview.cspSource};`;
-  const config = JSON.stringify({pdfUri, name}).replace(/</g, '\\u003c');
+  const config = JSON.stringify({
+    pdfUri,
+    name,
+    downloadMessage: PDF_DOWNLOAD_MESSAGE,
+  }).replace(/</g, '\\u003c');
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -58,6 +70,7 @@ export function buildPdfPreviewHtml(
   <script nonce="${nonce}">
     (function () {
       const config = ${config};
+      const vscodeApi = acquireVsCodeApi();
       const holder = document.getElementById('pdf-holder');
       fetch(config.pdfUri)
         .then(res => {
@@ -65,7 +78,10 @@ export function buildPdfPreviewHtml(
           return res.arrayBuffer();
         })
         .then(buf => {
-          window.mountPdfViewer(holder, new Uint8Array(buf), {name: config.name});
+          window.mountPdfViewer(holder, new Uint8Array(buf), {
+            name: config.name,
+            onDownload: () => vscodeApi.postMessage({type: config.downloadMessage}),
+          });
         })
         .catch(err => {
           const note = document.createElement('div');

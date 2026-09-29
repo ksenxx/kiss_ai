@@ -927,7 +927,42 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         assert "Cannot display" not in page.locator("body").inner_text()
         geo = page.evaluate(_PDF_GEOMETRY_JS)
         assert geo["pageCount"] == 1
-        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "1 page"
+        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "Page 1 of 1"
+        # The toolbar's Download link saves the file's own bytes under its name.
+        download_link = page.locator(_PDF_VIEWER + " .pdf-download")
+        assert download_link.inner_text() == "Download"
+        assert (download_link.get_attribute("href") or "").startswith("blob:")
+        with page.expect_download() as download_info:
+            download_link.click()
+        download = download_info.value
+        assert download.suggested_filename == "report.pdf"
+        saved = harness.work_dir / "downloaded-copy.pdf"
+        download.save_as(str(saved))
+        assert saved.read_bytes() == (harness.work_dir / "report.pdf").read_bytes()
+        # A host without a URL (the VS Code panel) passes onDownload
+        # instead: the link then calls it and does not navigate.
+        callback_calls = page.evaluate(
+            """async () => {
+              const href = document.querySelector('.content-tab-view .pdf-download').href;
+              const buf = await fetch(href).then(r => r.arrayBuffer());
+              const holder = document.createElement('div');
+              document.body.appendChild(holder);
+              let calls = 0;
+              const viewer = window.mountPdfViewer(holder, new Uint8Array(buf), {
+                name: 'callback.pdf',
+                onDownload: () => { calls++; },
+              });
+              const link = holder.querySelector('.pdf-download');
+              const before = location.href;
+              link.click();
+              const result = {calls, navigated: location.href !== before,
+                              title: link.title};
+              viewer.dispose();
+              holder.remove();
+              return result;
+            }""",
+        )
+        assert callback_calls == {"calls": 1, "navigated": False, "title": "Download callback.pdf"}
         # Fit width: the 200pt-wide page fills the box (within a pixel of
         # rounding), and the label shows that scale.
         assert abs(geo["pageWidth"] - geo["avail"]) <= 1.5
@@ -1080,8 +1115,9 @@ def test_pdf_scrolls_and_pinch_zooms_on_a_phone(browser, harness, worktree):
 def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
     """Zooming a multi-page PDF anchors the document point at the centre
     of the view (the gaps between pages do not scale, so page 5 must be
-    anchored on page 5, not on a scaled scroll offset), and pages that
-    scroll a screen away give their canvas back."""
+    anchored on page 5, not on a scaled scroll offset), pages that
+    scroll a screen away give their canvas back, and the toolbar's page
+    indicator follows the page under the middle of the view."""
     pdf = harness.work_dir / "pages8.pdf"
     pdf.write_bytes(_pdf_bytes(8))
     context, page, frames = _open_page(browser, harness)
@@ -1091,7 +1127,17 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
         page.locator(_PDF_VIEWER).wait_for(timeout=15000)
         _wait_pdf_rendered(page)
         assert page.locator(_PDF_PAGE).count() == 8
-        assert page.locator(_PDF_VIEWER + " .pdf-status").inner_text() == "8 pages"
+        indicator = page.locator(_PDF_VIEWER + " .pdf-status")
+        assert indicator.inner_text() == "Page 1 of 8"
+        # Scrolling to the end puts the last page under the middle.
+        page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 1e6"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
+            " === 'Page 8 of 8'",
+            timeout=10000,
+        )
         # Scroll so that page 5 sits 40px below the top of the view.
         page.evaluate(
             """() => {
@@ -1100,6 +1146,24 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
               s.scrollTop = p.getBoundingClientRect().top - s.getBoundingClientRect().top
                             + s.scrollTop - 40;
             }""",
+        )
+        # The indicator names the page under the middle of the view (page
+        # 5 when it is taller than half the view, otherwise a later one).
+        expected_page = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const middle = s.getBoundingClientRect().top + s.clientHeight / 2;
+              const pages = [...document.querySelectorAll('.content-tab-view .pdf-page')];
+              const i = pages.findIndex(p => p.getBoundingClientRect().bottom > middle);
+              return (i < 0 ? pages.length : i + 1);
+            }""",
+        )
+        assert expected_page >= 5
+        page.wait_for_function(
+            "n => document.querySelector('.content-tab-view .pdf-status').textContent"
+            " === 'Page ' + n + ' of 8'",
+            arg=expected_page,
+            timeout=10000,
         )
         # Pages 1-2 are more than a screen above: no canvas any more,
         # while page 5 is drawn.
@@ -1131,6 +1195,41 @@ def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
         assert abs(ratio - 1.25) < 0.02
         # The point of page 5 at the view's centre is still at the centre.
         assert abs((after["cy"] - after["top"]) - (before["cy"] - before["top"]) * ratio) <= 2
+        # The zoom kept the same page under the middle.
+        assert indicator.inner_text() == f"Page {expected_page} of 8"
+        # Growing the view (the zoom is manual now, so the pages stay put)
+        # moves its middle down without a scroll event: put the middle
+        # 40px above page 4's bottom, then add 200px of height and the
+        # middle lands on page 5.
+        page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[3];
+              s.scrollTop = p.getBoundingClientRect().bottom - s.getBoundingClientRect().top
+                            + s.scrollTop - 40 - s.clientHeight / 2;
+            }""",
+        )
+        page.wait_for_function(
+            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
+            " === 'Page 4 of 8'",
+            timeout=10000,
+        )
+        size = page.viewport_size
+        scroll_top = page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
+        )
+        page.set_viewport_size({"width": size["width"], "height": size["height"] + 200})
+        page.wait_for_function(
+            "() => document.querySelector('.content-tab-view .pdf-status').textContent"
+            " === 'Page 5 of 8'",
+            timeout=10000,
+        )
+        assert (
+            page.evaluate(
+                "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
+            )
+            == scroll_top
+        )
     finally:
         context.close()
 

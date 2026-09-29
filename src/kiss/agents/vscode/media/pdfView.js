@@ -23,6 +23,10 @@
 // step by a quarter, the percentage button returns to fit width; a
 // two-finger pinch and Ctrl/Cmd + wheel zoom around the gesture's point.
 //
+// The toolbar also shows "Page N of M" for the page under the middle of
+// the view (kept current while scrolling and zooming) and, when the host
+// provides a way to save the file, a Download link.
+//
 // mountPdfViewer(holder, bytes, opts) is the only entry point; it returns
 // {dispose} so the host can stop pending renders and free the document.
 
@@ -92,13 +96,17 @@
   /**
    * Mount a viewer for the PDF *bytes* (a Uint8Array; pdf.js takes the
    * buffer over, so pass a copy if the bytes are needed afterwards) into
-   * *holder*.  opts.name labels the document; opts.downloadUrl, when
-   * given, is offered as a download link if the PDF cannot be shown.
+   * *holder*.  opts.name labels the document.  The toolbar offers a
+   * Download link when opts.downloadUrl (a URL of the same bytes, saved
+   * under opts.name) or opts.onDownload (a callback: a VS Code webview
+   * cannot download, so the panel asks the extension host to save a
+   * copy) is given; the URL is also offered if the PDF cannot be shown.
    * Returns {dispose} which cancels pending renders and frees the
    * document; disposing twice is harmless.
    */
   function mountPdfViewer(holder, bytes, opts) {
     opts = opts || {};
+    const name = opts.name || 'file.pdf';
     const root = el('div', 'pdf-viewer');
     const toolbar = el('div', 'pdf-toolbar');
     const zoomOut = el('button', 'pdf-zoom-out', '\u2212');
@@ -110,8 +118,24 @@
     const zoomIn = el('button', 'pdf-zoom-in', '+');
     zoomIn.type = 'button';
     zoomIn.title = 'Zoom in';
+    // "Loading…", then "Page N of M" for the page under the view's middle.
     const status = el('span', 'pdf-status', 'Loading\u2026');
     toolbar.append(zoomOut, zoomLevel, zoomIn, status);
+    if (opts.downloadUrl || opts.onDownload) {
+      const download = el('a', 'pdf-download', 'Download');
+      download.title = 'Download ' + name;
+      if (opts.downloadUrl) {
+        download.href = opts.downloadUrl;
+        download.download = name;
+      } else {
+        download.href = '#';
+        download.addEventListener('click', ev => {
+          ev.preventDefault();
+          opts.onDownload();
+        });
+      }
+      toolbar.appendChild(download);
+    }
     const scroller = el('div', 'pdf-scroller');
     const pagesBox = el('div', 'pdf-pages');
     scroller.appendChild(pagesBox);
@@ -133,6 +157,7 @@
       resizeObserver: null,
       pinch: null, // {startDistance, startScale, focusX, focusY}
       wheelTimer: 0,
+      scrollFrame: 0, // requestAnimationFrame id of a pending indicator update
     };
 
     function fail(err) {
@@ -140,15 +165,50 @@
       const note = el(
         'div',
         'content-binary-note',
-        'Cannot display ' + (opts.name || 'this PDF') + ': ' + String(err),
+        'Cannot display ' + name + ': ' + String(err),
       );
       scroller.replaceChildren(note);
       if (opts.downloadUrl) {
-        const link = el('a', 'content-binary-note', 'Download ' + opts.name);
+        const link = el('a', 'content-binary-note', 'Download ' + name);
         link.href = opts.downloadUrl;
-        link.download = opts.name || 'file.pdf';
+        link.download = name;
         scroller.appendChild(link);
       }
+    }
+
+    /**
+     * The 1-based number of the page under the vertical middle of the
+     * view: the first page whose bottom edge lies below it (the next
+     * page when the middle falls in a gap; the last page past the end).
+     * A binary search over the page boxes keeps a long document cheap.
+     */
+    function currentPage() {
+      const middle = scroller.scrollTop + scroller.clientHeight / 2;
+      let lo = 0;
+      let hi = state.pages.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const entry = state.pages[mid];
+        if (boxOffset(entry).top + entry.box.offsetHeight <= middle) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo + 1;
+    }
+
+    function updatePageIndicator() {
+      state.scrollFrame = 0;
+      if (state.disposed || !state.pages.length) return;
+      status.textContent =
+        'Page ' + currentPage() + ' of ' + state.pages.length;
+    }
+
+    /** Refresh the indicator once per frame however often it scrolls. */
+    function onScroll() {
+      if (state.scrollFrame) return;
+      state.scrollFrame = requestAnimationFrame(updatePageIndicator);
     }
 
     /** The scale at which the first page's width fills the scroller. */
@@ -283,6 +343,9 @@
         scroller.scrollTop = offset.top + anchor.dy * scale - fy;
       }
       if (draw !== false) renderVisible();
+      // The page under the middle can change without a scroll event
+      // (the boxes grew or shrank around a clamped scroll offset).
+      updatePageIndicator();
     }
 
     function onZoomOut() {
@@ -357,6 +420,9 @@
 
     function onResize() {
       if (state.fitWidth && state.pages.length) onFitWidth();
+      // Otherwise the pages stay put, but the view's middle moved with
+      // its height (no scroll event for that).
+      else updatePageIndicator();
     }
 
     function show(pdfjs) {
@@ -384,8 +450,6 @@
         })
         .then(pages => {
           if (!pages || state.disposed) return;
-          status.textContent =
-            pages.length + (pages.length === 1 ? ' page' : ' pages');
           state.observer = new IntersectionObserver(onIntersect, {
             root: scroller,
             rootMargin: '100% 0px',
@@ -408,6 +472,7 @@
           });
           state.scale = fitWidthScale();
           layout();
+          updatePageIndicator();
           state.resizeObserver = new ResizeObserver(onResize);
           state.resizeObserver.observe(scroller);
         });
@@ -416,6 +481,7 @@
     zoomOut.addEventListener('click', onZoomOut);
     zoomIn.addEventListener('click', onZoomIn);
     zoomLevel.addEventListener('click', onFitWidth);
+    scroller.addEventListener('scroll', onScroll, {passive: true});
     scroller.addEventListener('wheel', onWheel, {passive: false});
     scroller.addEventListener('touchstart', onTouchStart, {passive: true});
     scroller.addEventListener('touchmove', onTouchMove, {passive: false});
@@ -432,6 +498,7 @@
       if (state.disposed) return;
       state.disposed = true;
       clearTimeout(state.wheelTimer);
+      cancelAnimationFrame(state.scrollFrame);
       if (state.observer) state.observer.disconnect();
       if (state.resizeObserver) state.resizeObserver.disconnect();
       for (const entry of state.pages) cancelRender(entry);
