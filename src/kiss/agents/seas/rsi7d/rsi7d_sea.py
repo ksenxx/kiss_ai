@@ -145,6 +145,10 @@ EVIDENCE_NAME = "AUTOROUTER.md"
 """File in the KISS home the autorouter SEA splices into its prompt (its ``EVIDENCE_NAME``;
 named here rather than imported so this SEA loads under an installed package older than
 that one)."""
+EVIDENCE_MAX_CHARS = 2500
+"""Most characters ``write_autorouter_evidence`` writes, stamp line included: the autorouter
+SEA's ``EVIDENCE_MAX_CHARS`` (its ``observed_evidence()`` cuts a longer file at that size), kept
+equal to it by ``test_rsi7d_sea.py``."""
 REPLAY_DIR = Path("tmp") / "rsi7d" / "replays"
 """Clones made by ``replay_in_clone`` live here under the task's work dir (gitignored)."""
 SEAS_DIR_OPTION = "--seas-dir"
@@ -339,14 +343,15 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    replay-verified" in the report.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block for the router with `write_autorouter_evidence(text)`, which rewrites
-   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into its prompt; its
-   `autorouter_sea.py` is not edited for this): a Markdown table (model, tasks, role mix,
+   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt; its
+   `autorouter_sea.py` is not edited for this). The tool refuses more than 2,500 characters
+   including its stamp line, so: one line naming the window (`window_start`) and the task
+   count; a Markdown table of the models with at least 10 tasks (model, tasks, roles,
    failed/unsuccessful, median $ per step, median s per step, tool-error rate; keep every
    row under 92 characters by abbreviating headers or dropping a column, the tool rejects
-   longer rows) followed by at most 8 bullets naming what each model is observed to be good
-   or bad at, with the counts that support the claim. Only claim what at least 10 tasks
-   support; say "insufficient data" otherwise. Include the window (`window_start`) so a
-   reader can tell how fresh the evidence is.
+   longer rows), the rest folded into one "others: insufficient data" row; then at most 5
+   one-sentence bullets naming what a model is observed to be good or bad at, each with
+   the counts that support the claim. Only claim what at least 10 tasks support.
 7. Report. Write `./reports/rsi7d-<YYYY-MM-DD>.md`: baseline table, per SEA the findings,
    the added or changed bullets, the evaluation result (replay ids and metrics, or why not
    replayed), the autorouter evidence update, recommendations for non-editable SEAs, the
@@ -1622,10 +1627,12 @@ def write_autorouter_evidence(text: str) -> str:
     task history shows about each model's cost, speed and reliability.
     It is stamped with the current UTC date and its prose wrapped at 92
     columns like a prompt edit (a table row that does not fit is refused),
-    then written in one atomic rename.  The autorouter SEA splices the
-    file into its prompt when it loads, so refreshing the evidence never
-    edits a SEA file; the tool still refuses when ``autorouter`` is not
-    an editable SEA in the run's scope.  Returns a one-line description.
+    then written in one atomic rename.  The file goes into every prompt of
+    the autorouter SEA, so the stamped text is refused when it exceeds
+    :data:`EVIDENCE_MAX_CHARS` characters.  Splicing the file means
+    refreshing the evidence never edits a SEA file; the tool still refuses
+    when ``autorouter`` is not an editable SEA in the run's scope.  Returns
+    a one-line description.
     """
     if _editable_path("autorouter") is None:
         return _not_editable("autorouter")
@@ -1641,12 +1648,21 @@ def write_autorouter_evidence(text: str) -> str:
     if not body:
         return "Error: the evidence text is empty"
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    content = f"{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{body}\n"
+    if len(content) > EVIDENCE_MAX_CHARS:
+        return (
+            f"Error: the evidence is {len(content)} characters with its stamp line; the "
+            f"autorouter prompt takes at most {EVIDENCE_MAX_CHARS}. Drop the rows of models "
+            "with fewer than 10 tasks, keep at most 5 bullets, and shorten the prose."
+        )
     path = kiss_home() / EVIDENCE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".tmp")
-    partial.write_text(f"{STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{body}\n", "utf-8")
+    partial.write_text(content, "utf-8")
     partial.replace(path)
-    return f"Wrote {path} ({len(body.splitlines())} lines, refreshed {stamp})"
+    return (
+        f"Wrote {path} ({len(body.splitlines())} lines, {len(content)} chars, refreshed {stamp})"
+    )
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

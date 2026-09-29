@@ -684,9 +684,11 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
     report = sea.write_autorouter_evidence(table)
     stamp = time.strftime("%Y-%m-%d", time.gmtime())
-    assert report == f"Wrote {home / 'AUTOROUTER.md'} (5 lines, refreshed {stamp})"
     written = (home / "AUTOROUTER.md").read_text(encoding="utf-8")
     assert written == f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{table}\n"
+    assert report == (
+        f"Wrote {home / 'AUTOROUTER.md'} (5 lines, {len(written)} chars, refreshed {stamp})"
+    )
     assert path.read_text(encoding="utf-8") == source
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert written.strip() in prompt and autorouter_sea.NO_EVIDENCE not in prompt
@@ -711,6 +713,30 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     assert sea.write_autorouter_evidence("  \n") == "Error: the evidence text is empty"
     assert "word word" in sea._execute_sea(path)["add_to_system_prompt"]()
     assert sorted(p.name for p in home.iterdir()) == ["AUTOROUTER.md"]
+    # The file goes into every autorouter prompt, so the stamped text is
+    # capped at the size the autorouter cuts at; a text that would exceed
+    # it is refused and the file kept.  A file over the cap written by
+    # other means (a hand edit, a cross-machine merge) reaches the prompt
+    # cut at a line boundary with the cut marker, never whole.
+    assert sea.EVIDENCE_MAX_CHARS == autorouter_sea.EVIDENCE_MAX_CHARS == 2500
+    rows = "\n".join(f"| model-{i:03d} | {i} |" for i in range(200))
+    refused = sea.write_autorouter_evidence(f"| model | tasks |\n|---|---|\n{rows}")
+    assert refused.startswith("Error: the evidence is ") and "at most 2500" in refused
+    assert "word word" in (home / "AUTOROUTER.md").read_text(encoding="utf-8")
+    stamped = f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{rows}\n"
+    assert len(stamped) > sea.EVIDENCE_MAX_CHARS
+    (home / "AUTOROUTER.md").write_text(stamped, encoding="utf-8")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    spliced = prompt[prompt.index(sea.STAMP_PREFIX) : prompt.index("\n## Hard rules")].strip()
+    kept, _blank, marker = spliced.rsplit("\n", 2)
+    assert marker == autorouter_sea.EVIDENCE_CUT and _blank == ""
+    assert stamped.startswith(kept + "\n") and len(kept) <= sea.EVIDENCE_MAX_CHARS
+    assert kept.endswith(" |") and "| model-199 |" not in prompt
+    # A file exactly at the cap is spliced whole.
+    exact = stamped[: sea.EVIDENCE_MAX_CHARS]
+    (home / "AUTOROUTER.md").write_text(exact, encoding="utf-8")
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
+    assert exact.strip() in prompt and autorouter_sea.EVIDENCE_CUT not in prompt
     # Blank file: the SEA falls back to the sentence.  No autorouter SEA in
     # the editable folders: the tool refuses.
     (home / "AUTOROUTER.md").write_text("\n", encoding="utf-8")
