@@ -544,6 +544,14 @@ type ToWebviewMessageBody =
       workDir?: string;
     }
   | {
+      // A path-only `submit` (a prompt that is just the path of an
+      // existing file) opened that file instead of starting a task; sent
+      // by the extension host (SorcarSidebarView `submit`) and by the
+      // daemon (web_server.py _handle_submit) so the webview lifts the
+      // task claim it stamped on the submitting tab.
+      type: 'promptOpened';
+    }
+  | {
       // Reply to `openFile` (web_server.py _handle_open_file), sent only
       // to the requesting connection: `content` on success, `error`
       // otherwise; `tabId` echoes the request's (possibly '').

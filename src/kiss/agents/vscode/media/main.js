@@ -14931,6 +14931,22 @@
         echoed.unackedAttachments = [];
       }
     }
+    // A prompt that was just the path of an existing file opened that
+    // file instead of starting a task (the extension host's and the
+    // daemon's `submit` shortcut): acknowledged, and there is no task
+    // for the tab to own, so the claim sendMessage() stamped is lifted
+    // — left in place it would let the tab adopt the next bare task id
+    // off the wire (mayAdoptTaskId) and a reload would put the path
+    // back into the composer as an unsent draft.
+    if (t === 'promptOpened') {
+      const opened = getTab(ev.tabId || activeTabId);
+      if (opened) {
+        opened.unackedPrompt = '';
+        opened.unackedAttachments = [];
+        if (!opened.currentTaskId) opened.pendingTaskId = null;
+      }
+      return;
+    }
     switch (t) {
       // browser-tab-coverage:start
       case 'openBrowserTab':

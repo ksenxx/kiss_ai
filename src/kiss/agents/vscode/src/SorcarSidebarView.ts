@@ -1555,6 +1555,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           );
           if (resolved) {
             await this._openResolvedFile(resolved);
+            // No task started: let the webview drop the prompt and the
+            // task claim it stamped on the tab when it submitted.
+            this._sendToWebview({type: 'promptOpened', tabId});
             return;
           }
         }

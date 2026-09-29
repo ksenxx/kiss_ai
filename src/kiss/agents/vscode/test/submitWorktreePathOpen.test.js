@@ -263,6 +263,15 @@ async function runTests() {
     0,
     'a path-only submit that resolves must not start an agent task',
   );
+  await waitFor(
+    () => wv.posted.find(m => m.type === 'promptOpened'),
+    'the webview must be told the prompt opened a file, not a task',
+  );
+  assert.strictEqual(
+    wv.posted.find(m => m.type === 'promptOpened').tabId,
+    'tab1',
+    'promptOpened must address the submitting tab',
+  );
   console.log('  ok - path-only submit opens the worktree copy, no run');
 
   // 1b. A workspace DIRECTORY must not shadow a pending-worktree FILE

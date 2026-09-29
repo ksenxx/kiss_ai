@@ -289,9 +289,9 @@
   - `cmd`: The ``ready`` command.
   - `ctx`: The transport context of the current call.
 
-- **submit** — Start a task from a webview ``submit``. The backend translates the webview ``submit`` into a ``run`` (path resolution, running-tab tracking) exactly as the VS Code TypeScript extension would.<br/>`async submit(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **submit** — Start a task from a webview ``submit``. The backend translates the webview ``submit`` into a ``run`` (path resolution, running-tab tracking) exactly as the VS Code TypeScript extension would, including its path-only shortcut: a prompt that is just the path of an existing file is answered with that file's ``fileContent`` on the submitting connection and starts no task.<br/>`async submit(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``submit`` command.
-  - `ctx`: The transport context of the current call (unused).
+  - `ctx`: The transport context of the current call; its endpoint receives a path-only prompt's ``fileContent``.
 
 - **open_file** — Serve a file's content to a remote-web client. A remote-web (WSS) client clicked a file or directory link in a chat webview.  The browser has no editor to open the path in, so the daemon reads the file (or builds a plain-text directory listing) and replies with its content for an in-page content tab.  UDS clients (VS Code windows) never take this path: their webview's ``openFile`` is consumed by the extension host, which opens the file in a real editor tab — so a UDS-delivered ``openFile`` is dropped as a defensive no-op.<br/>`async open_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
   - `cmd`: The ``openFile`` command.

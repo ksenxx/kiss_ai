@@ -6851,7 +6851,11 @@ class RemoteAccessServer:
         )
 
     def _resolve_tab_file(
-        self, raw_path: str, work_dir: str, tab_id: str,
+        self,
+        raw_path: str,
+        work_dir: str,
+        tab_id: str,
+        file_only: bool = False,
     ) -> Path | None:
         """Resolve *raw_path* for a tab, trying its pending worktree too.
 
@@ -6868,10 +6872,14 @@ class RemoteAccessServer:
                 relative, absolute, or ``~``-prefixed).
             work_dir: The tab's working directory.
             tab_id: The requesting client's tab id (may be ``""``).
+            file_only: Accept regular files only.  A directory
+                candidate is skipped rather than returned, so it can
+                neither satisfy the lookup nor shadow a pending-worktree
+                file at the same relative path.
 
         Returns:
             The resolved path when it names an existing regular file
-            or directory, otherwise ``None``.
+            (or, unless *file_only*, a directory), otherwise ``None``.
         """
         try:
             path = Path(os.path.expanduser(raw_path))
@@ -6888,7 +6896,9 @@ class RemoteAccessServer:
                     candidates.append(Path(wt_dir) / path)
             for candidate in candidates:
                 resolved = candidate.resolve()
-                if resolved.is_file() or resolved.is_dir():
+                if resolved.is_file() or (
+                    not file_only and resolved.is_dir()
+                ):
                     return resolved
         except (OSError, ValueError):
             # ValueError: a path with an embedded NUL byte.
@@ -8471,17 +8481,90 @@ class RemoteAccessServer:
                 resume["taskId"] = rt_task
             await self._run_cmd(resume)
 
-    async def _handle_submit(self, cmd: dict[str, Any]) -> None:
+    async def _open_path_only_prompt(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> bool:
+        """Open the file a path-only ``submit`` names; ``True`` when it did.
+
+        The extension host's shortcut (``SorcarSidebarView`` ``case
+        'submit'``) for the daemon: a single-line prompt that is nothing
+        but the path of an existing regular file, typed into a tab that
+        is not running a task, is a request to open that file.  The
+        submitting connection gets ``promptOpened`` (the webview drops
+        the prompt and the task claim it stamped on the tab, see
+        ``main.js`` ``handleEvent``) and then the file's ``fileContent``
+        (:meth:`_handle_open_file`); no task starts.
+
+        A tab whose task is running, or that views a task blocked in
+        ``ask_user_question``, is skipped: there the prompt is a
+        follow-up or an answer that ``_cmd_run`` routes to the worker —
+        the same precedence the extension host gives its running tabs.
+        Directories are skipped too, so a one-word prompt that happens
+        to name a folder (``src``, ``tmp``) is still a task.
+
+        Args:
+            cmd: The ``submit`` message from the browser.
+            endpoint: The submitting connection.
+
+        Returns:
+            ``True`` when the prompt was answered with the file and the
+            caller must not start a run, ``False`` to run as usual.
+        """
+        prompt = cmd.get("prompt", "")
+        if not isinstance(prompt, str):
+            return False
+        trimmed = prompt.strip()
+        if not trimmed or "\n" in trimmed:
+            return False
+        tab_id = self._cmd_str(cmd, "tabId")
+        with agent_state.STATE_LOCK:
+            prev = agent_state.find_by_tab(tab_id)
+            if prev is not None and prev.task_thread is not None:
+                return False
+            if self._vscode_server._viewer_awaiting_answer(tab_id) is not None:
+                return False
+        work_dir = self._cmd_work_dir(cmd)
+        path = self._resolve_tab_file(
+            trimmed, work_dir, tab_id, file_only=True,
+        )
+        if path is None:
+            return False
+        await self._reply_direct(
+            endpoint, {"type": "promptOpened", "tabId": tab_id}, "submit",
+        )
+        await self._handle_open_file(
+            {"path": str(path), "workDir": work_dir, "tabId": tab_id},
+            endpoint,
+        )
+        return True
+
+    async def _handle_submit(
+        self, cmd: dict[str, Any], endpoint: Any = None,
+    ) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
 
         The VS Code TypeScript extension transforms ``submit`` into a
         ``run`` command after resolving paths and tracking running tabs.
-        The web server performs the same translation.
+        The web server performs the same translation, including the
+        extension host's path-only shortcut: a single-line prompt that
+        is nothing but the path of an existing regular file (relative
+        to the tab's work dir or its pending worktree) is a request to
+        open that file, so it is answered with the file's
+        ``fileContent`` (:meth:`_handle_open_file`) and no task starts.
+        Only regular files qualify: a one-word prompt that happens to
+        name a directory (``src``, ``tmp``) is still a task.
 
         Args:
             cmd: The ``submit`` message from the browser.
+            endpoint: The submitting connection, which receives the
+                ``fileContent`` reply of a path-only prompt; ``None``
+                disables the shortcut.
         """
         tab_id = cmd.get("tabId", "")
+        if endpoint is not None and await self._open_path_only_prompt(
+            cmd, endpoint,
+        ):
+            return
         if self._shutdown_initiated:
             # Shutdown admission gate (F4-06): a task submitted after
             # the shutdown sweep snapshotted the active workers would
