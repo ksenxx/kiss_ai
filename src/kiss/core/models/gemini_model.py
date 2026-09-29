@@ -638,7 +638,7 @@ class GeminiModel(Model):
             str | None: The merged system instruction, or ``None``.
         """
         return merge_system_texts(
-            self.model_config.get("system_instruction"),
+            self.system_instruction_text(),
             chat_messages if chat_messages is not None else self._chat_messages(),
         )
 

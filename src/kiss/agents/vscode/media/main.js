@@ -15189,6 +15189,17 @@
       }
       case 'status': {
         const evTab = findTabByEvt(ev);
+        if (!ev.running) {
+          // A task that failed before its agent started never cleared
+          // its launch-phase line; the end of the task does.  An
+          // addressed event whose tab is gone (closed while its task
+          // ran) belongs to nobody on screen and clears nothing.
+          let phaseHome = null;
+          if (evTab)
+            phaseHome = evTab.id === activeTabId ? O : evTab.outputFragment;
+          else if (!isAddressed(ev)) phaseHome = O;
+          if (phaseHome) setLaunchPhase(phaseHome, '');
+        }
         if (evTab) {
           setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
@@ -15524,6 +15535,24 @@
         addNotice(ev.text);
         if (!isAddressed(ev)) relayUpdateStatus(ev.text, false);
         break;
+      case 'launch_phase': {
+        // What the daemon is doing between the prompt echo and the
+        // agent's first output ("Classifying task…", "Preparing
+        // worktree…"): one line at the end of the transcript, replaced
+        // by each later phase and removed by an empty text.  A
+        // background tab's line lives in its parked output fragment,
+        // so it travels with the transcript on a tab switch.
+        let phaseContainer = O;
+        if (isAddressed(ev) && !isForActiveTab(ev)) {
+          const phaseTab = findTabByEvt(ev);
+          if (!phaseTab) break;
+          if (!phaseTab.outputFragment)
+            phaseTab.outputFragment = document.createDocumentFragment();
+          phaseContainer = phaseTab.outputFragment;
+        }
+        setLaunchPhase(phaseContainer, ev.text || '');
+        break;
+      }
       case 'warning': {
         // tableak-coverage:start
         if (isAddressed(ev) && !isForActiveTab(ev)) {
@@ -16825,6 +16854,30 @@
 
   function addNotice(text) {
     return addBanner('note', 'Note:', text);
+  }
+
+  /**
+   * Show `text` as the transcript's launch-phase line (see the
+   * `launch_phase` event), keeping it the last child of `container`
+   * — the live output or a background tab's parked fragment; an empty
+   * `text` removes the line.
+   */
+  function setLaunchPhase(container, text) {
+    let line = container.querySelector('.launch-phase');
+    if (!text) {
+      if (line) line.remove();
+      return;
+    }
+    if (!line) {
+      line = mkEl('div', 'ev launch-phase');
+      const ring = document.createElement('span');
+      ring.className = 'status-spinner';
+      line.appendChild(ring);
+      line.appendChild(document.createElement('span'));
+    }
+    line.lastChild.textContent = text;
+    container.appendChild(line);
+    if (container === O) autoScrollLatestEventPanel(line);
   }
 
   function addWarning(text) {

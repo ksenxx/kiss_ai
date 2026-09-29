@@ -980,6 +980,10 @@ type ToWebviewMessageBody =
   // Daemon: a plain informational line for one connection (e.g. "an
   // update is already running").
   | {type: 'notice'; text: string}
+  // Daemon (transient, per tab): what a launch is doing before the
+  // agent's first output ("Classifying task…", "Preparing worktree…");
+  // an empty text removes the line.
+  | {type: 'launch_phase'; text: string; tabId: string}
   // Host (editor-tabs mode): open the webview's settings panel — the
   // editor-title gear button's action.
   | {type: 'openSettings'}

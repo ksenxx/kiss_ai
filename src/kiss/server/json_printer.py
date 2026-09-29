@@ -982,6 +982,25 @@ class JsonPrinter(Printer):
         for target in targets or [tab_id]:
             self.broadcast({**event, "tabId": target})
 
+    def broadcast_launch_phase(self, text: str, tab_id: str = "") -> None:
+        """Show what the daemon is doing before the agent's first output.
+
+        Between the prompt echo and the first model token a task spends
+        seconds classifying, retiring the previous worktree and checking
+        out a new one, with nothing on screen.  ``launch_phase`` is a
+        transient event (see :meth:`broadcast_transient`) the chat
+        webview renders as a single status line at the end of the
+        transcript, replaced by each later phase and removed by an
+        empty *text* — or by the agent's first event, whichever comes
+        first.
+
+        Args:
+            text: The phase label, e.g. ``"Classifying task…"``;
+                ``""`` clears the line.
+            tab_id: Extra tab id to include; see :meth:`broadcast_transient`.
+        """
+        self.broadcast_transient({"type": "launch_phase", "text": text}, tab_id=tab_id)
+
     def broadcast_model_pick(
         self,
         model: str,

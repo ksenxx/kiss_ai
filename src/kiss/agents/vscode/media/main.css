@@ -1219,6 +1219,15 @@ body.ask-answering #input-container {
 .tr.warn { background: color-mix(in srgb, var(--warning) 4%, transparent); border-color: color-mix(in srgb, var(--warning) 20%, transparent); }
 .tr.warn strong { color: var(--warning); }
 
+/* The launch-phase line ("Classifying task…", "Preparing worktree…"):
+   a dim, spinner-led status line at the end of the transcript while the
+   daemon works before the agent's first output. */
+.launch-phase {
+  display: flex; align-items: center; gap: var(--space-1-5);
+  padding: var(--space-1) var(--space-2-5); color: var(--dim);
+  font-size: var(--fs-md); font-style: italic;
+}
+
 .tr .rl {
   font-size: var(--fs-sm); font-weight: 400; text-transform: uppercase;
   letter-spacing: .04em; margin-bottom: var(--space-1);

@@ -306,6 +306,74 @@ class TestWorktreePool:
         assert (wt_dir / "mystery.txt").exists()
         GitWorktreeOps.cleanup_partial(self.repo, spare_branch, wt_dir)
 
+    def test_crash_before_checkout_never_merges_deletions(self) -> None:
+        # ``_register_spare`` adds the worktree with ``--no-checkout``:
+        # its index is empty, so every tracked file reads as a staged
+        # deletion.  Should the daemon die right after registration,
+        # the reclaim pass must not treat that worktree as task work
+        # and squash the deletions into the user's branch.
+        (self.repo / "keep.txt").write_text("must survive\n")
+        _run_git(self.repo, "add", ".")
+        _run_git(self.repo, "commit", "-m", "second")
+        # A ``reference-transaction`` hook fires while ``git worktree add
+        # -b`` creates the spare's branch, i.e. inside the crash window:
+        # it records whether the spare marker already exists at that
+        # instant, so the marker-before-worktree ordering is observed
+        # rather than inferred from the final state.
+        seen = self.repo / ".git" / "marker-at-branch-creation"
+        hook = self.repo / ".git" / "hooks" / "reference-transaction"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(
+            "#!/bin/sh\n"
+            '[ "$1" = committed ] || exit 0\n'
+            "while read old new ref; do\n"
+            '  case "$ref" in refs/heads/kiss/wt-*)\n'
+            '    b=${ref#refs/heads/}\n'
+            '    if git config --get "branch.$b.kiss-spare" >/dev/null; then\n'
+            f'      echo "marked $b" >> "{seen}"\n'
+            "    else\n"
+            f'      echo "unmarked $b" >> "{seen}"\n'
+            "    fi;;\n"
+            "  esac\n"
+            "done\n"
+        )
+        hook.chmod(0o755)
+        registered = worktree_pool._register_spare(self.repo, None)
+        assert registered is not None
+        branch, wt_dir = registered
+        assert seen.read_text().splitlines() == [f"marked {branch}"]
+        assert not (wt_dir / "keep.txt").exists()
+        # Crash: in-memory pool state (incl. the in-flight record) is lost.
+        with worktree_pool._pool_lock:
+            worktree_pool._building.clear()
+        head_before = _run_git(self.repo, "rev-parse", "HEAD")
+        GitWorktreeOps.reclaim_orphaned_worktrees(self.repo)
+        assert _run_git(self.repo, "rev-parse", "HEAD") == head_before
+        assert (self.repo / "keep.txt").read_text() == "must survive\n"
+        assert _run_git(self.repo, "status", "--porcelain") == ""
+        if GitWorktreeOps.branch_exists(self.repo, branch):
+            GitWorktreeOps.cleanup_partial(self.repo, branch, wt_dir)
+
+    def test_spare_has_content_ignores_show_untracked_files_config(self) -> None:
+        # ``status.showUntrackedFiles=no`` silences untracked AND
+        # ignored paths in ``git status``; the content probe must
+        # override it or a written-to spare looks empty and gets
+        # destroyed.
+        _run_git(self.repo, "config", "status.showUntrackedFiles", "no")
+        assert worktree_pool.prewarm(self.repo)
+        with worktree_pool._pool_lock:
+            branch, wt_dir = worktree_pool._spares[
+                worktree_pool._repo_key(self.repo)
+            ]
+        assert not GitWorktreeOps.spare_has_content(self.repo, branch, wt_dir)
+        (wt_dir / "mystery.txt").write_text("untracked\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, branch, wt_dir)
+        (wt_dir / "mystery.txt").unlink()
+        with (self.repo / ".git" / "info" / "exclude").open("a") as fh:
+            fh.write("*.log\n")
+        (wt_dir / "build.log").write_text("ignored\n")
+        assert GitWorktreeOps.spare_has_content(self.repo, branch, wt_dir)
+
 
 def _wait_for_refill(timeout: float = 60.0) -> None:
     """Wait until no pool refill thread is running."""
@@ -347,11 +415,10 @@ class TestAcquireTaskWorktree:
         assert agent._wt is not None
         assert agent._wt.branch == pooled_branch
         assert agent._wt.original_branch == "main"
-        # The spare was consumed; a refill was scheduled for the next
-        # task and mints a DIFFERENT branch.
+        # The spare was consumed and nothing refills the pool while the
+        # task starts: the refill is scheduled when the run ends.
         _wait_for_refill()
-        refilled = worktree_pool.spare_branches()
-        assert refilled and pooled_branch not in refilled
+        assert worktree_pool.spare_branches() == set()
         agent.discard()
 
     def test_setup_inline_fallback_on_empty_pool(self) -> None:
@@ -360,8 +427,9 @@ class TestAcquireTaskWorktree:
         assert wt_work is not None
         assert agent._wt is not None
         assert GitWorktreeOps.branch_exists(self.repo, agent._wt.branch)
+        # Setup never refills the pool; the run's end does.
         _wait_for_refill()
-        assert worktree_pool.spare_branches()
+        assert worktree_pool.spare_branches() == set()
         agent.discard()
 
     def test_setup_falls_back_when_spare_reset_fails(self) -> None:
