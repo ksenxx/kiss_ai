@@ -66,7 +66,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 688 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 695 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -307,24 +307,24 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **688 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend and every earlier session of a task that was continued after a crash. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **695 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend and every earlier session of a task that was continued after a crash. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 106 |
-| Anthropic | 15 |
+| Anthropic | 16 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 402 |
-| Claude Code CLI (`cc/*`) | 15 |
+| OpenRouter | 407 |
+| Claude Code CLI (`cc/*`) | 16 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **669** generation-capable models
-- **503** function-calling-capable models
+- **676** generation-capable models
+- **509** function-calling-capable models
 - **7** embedding models
 - **4** decision models
 
@@ -443,7 +443,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (15)</strong></summary>
+<summary><strong>Anthropic (16)</strong></summary>
 
 - `claude-fable-5`
 - `claude-fable-5-1`
@@ -460,6 +460,7 @@ Full model list:
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
 - `claude-sonnet-5`
+- `claude-sonnet-5-5`
 
 </details>
 
@@ -629,7 +630,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (402)</strong></summary>
+<summary><strong>OpenRouter (407)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -658,6 +659,7 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
+- `openrouter/anthropic/claude-sonnet-5.5`
 - `openrouter/arcee-ai/trinity-large-thinking`
 - `openrouter/baidu/ernie-4.5-vl-424b-a47b`
 - `openrouter/bytedance-seed/seed-1.6`
@@ -678,7 +680,9 @@ Full model list:
 - `openrouter/deepseek/deepseek-chat-v3.1`
 - `openrouter/deepseek/deepseek-r1`
 - `openrouter/deepseek/deepseek-r1-0528`
+- `openrouter/deepseek/deepseek-v3.1-terminus`
 - `openrouter/deepseek/deepseek-v3.2`
+- `openrouter/deepseek/deepseek-v3.2-exp`
 - `openrouter/deepseek/deepseek-v4-flash`
 - `openrouter/deepseek/deepseek-v4-flash-0731`
 - `openrouter/deepseek/deepseek-v4-flash-vision-exp`
@@ -772,6 +776,8 @@ Full model list:
 - `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
+- `openrouter/nex-agi/nex-n2.5-mini`
+- `openrouter/nex-agi/nex-n2.5-pro`
 - `openrouter/nousresearch/hermes-3-llama-3.1-405b`
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
@@ -1037,7 +1043,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (15)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (16)</strong></summary>
 
 - `cc/claude-fable-5`
 - `cc/claude-fable-5-1`
@@ -1051,6 +1057,7 @@ Full model list:
 - `cc/claude-sonnet-4-5-20250929`
 - `cc/claude-sonnet-4-6`
 - `cc/claude-sonnet-5`
+- `cc/claude-sonnet-5-5`
 - `cc/haiku`
 - `cc/opus`
 - `cc/sonnet`
