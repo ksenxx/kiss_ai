@@ -58,8 +58,8 @@ pytestmark = requires_unix_sockets
 
 AUTOROUTER = "autorouter"
 BESTROUTER = "bestrouter"
-AUTOROUTER_MARKER = "You are the autorouter agent."
-"""First sentence of ``autorouter_sea.SYSTEM_PROMPT`` after its heading."""
+AUTOROUTER_MARKER = "## Model routing protocol (autorouter)"
+"""Heading of ``autorouter_sea.SYSTEM_PROMPT``."""
 BESTROUTER_MARKER = "## Model routing protocol (bestrouter)"
 """Heading of ``bestrouter_sea.SYSTEM_PROMPT``."""
 

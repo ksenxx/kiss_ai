@@ -42,6 +42,7 @@ from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
 from kiss.core.brand import BRAND, render_brand
+from kiss.core.config import kiss_home
 
 # The literal placeholder the /ask flow substitutes at dispatch time.
 _PLACEHOLDER = "<task_id>"
@@ -65,10 +66,15 @@ _EXPECTED_SUFFIX_START = (
 
 @pytest.fixture(autouse=True)
 def _reset_registry() -> Iterator[None]:
-    """Reset the SEA registry between tests so refresh_registry is honest."""
+    """Reset the SEA registry between tests so refresh_registry is honest.
+
+    Also removes any ``SEAS.md`` a test wrote into the session-wide
+    ``$KISS_HOME`` so it cannot shadow bundled commands for later tests.
+    """
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +216,6 @@ def test_rewriter_leaves_unrelated_slash_commands_alone(
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "notify").mkdir()
     (folder / "notify" / "notify_sea.py").write_text("# stub\n", encoding="utf-8")
-    from kiss.core.config import kiss_home
-
     kiss_home().mkdir(parents=True, exist_ok=True)
     (kiss_home() / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
@@ -237,19 +241,11 @@ def test_rewriter_uses_generic_directive_for_user_sea_shadowing_ask(
     shadow = tmp_path / "user-seas" / "ask"
     shadow.mkdir(parents=True)
     (shadow / "ask_sea.py").write_text("# stub\n", encoding="utf-8")
-    from kiss.core.config import kiss_home
-
     kiss_home().mkdir(parents=True, exist_ok=True)
-    seas_md = kiss_home() / "SEAS.md"
-    seas_md.write_text(str(shadow.parent) + "\n", encoding="utf-8")
-    try:
-        sea_commands.refresh_registry()
-        assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
-        hit = sea_commands.rewrite_prompt_if_command("/ask what happened?")
-    finally:
-        # A leftover shadow of ``ask`` would leak into every later test
-        # that expects the bundled ``/ask``.
-        seas_md.unlink()
+    (kiss_home() / "SEAS.md").write_text(str(shadow.parent) + "\n", encoding="utf-8")
+    sea_commands.refresh_registry()
+    assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
+    hit = sea_commands.rewrite_prompt_if_command("/ask what happened?")
     assert hit is not None
     rewritten, sea_path = hit
     assert sea_path == shadow / "ask_sea.py"

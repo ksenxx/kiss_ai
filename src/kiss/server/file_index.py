@@ -40,6 +40,7 @@ import logging
 import os
 import posixpath
 import queue
+import sys
 import tempfile
 import threading
 import time
@@ -47,8 +48,6 @@ from array import array
 from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable
-from itertools import compress
-from operator import not_
 from pathlib import Path
 from typing import NamedTuple
 
@@ -68,6 +67,9 @@ _SCAN_FILES_CAP = 1_000_000
 # Directory names that never hold anything worth mentioning to an agent,
 # whether or not a ``.gitignore`` says so.
 JUNK_DIR_NAMES = frozenset({"node_modules", "__pycache__", "venv", "site-packages"})
+
+# ``stat.FILE_ATTRIBUTE_HIDDEN``: Windows' counterpart of a dot-directory.
+_FILE_ATTRIBUTE_HIDDEN = 0x2
 
 # Suffixes of machine-generated data: run results, logs, traces, dumps,
 # serialized tensors.  Data files rank after everything else and a
@@ -183,22 +185,58 @@ def _parse_gitignore(text: str) -> tuple[set[str], set[str], set[str]]:
     return names, dir_names, anchored
 
 
+def _is_hidden_dir(entry: os.DirEntry[str]) -> bool:
+    """Whether directory *entry* carries the Windows ``hidden`` attribute.
+
+    Windows marks ``AppData`` (caches, program state: most of a home
+    directory's files) and similar folders hidden the way POSIX tools
+    dot-prefix them.  ``entry.stat(follow_symlinks=False)`` is answered
+    from the listing on Windows, so this costs no system call; on other
+    platforms the answer is always ``False``.
+    """
+    if sys.platform != "win32":
+        return False
+    return bool(entry.stat(follow_symlinks=False).st_file_attributes & _FILE_ATTRIBUTE_HIDDEN)
+
+
+def _hidden_dir_on_path(base: str, parts: list[str]) -> bool:
+    """Whether a directory from *base* down through *parts* is Windows-hidden."""
+    if sys.platform != "win32":
+        return False
+    path = base
+    for part in parts:
+        path = path + os.sep + part
+        try:
+            if os.stat(path).st_file_attributes & _FILE_ATTRIBUTE_HIDDEN:
+                return True
+        except (OSError, ValueError):  # unreadable, or a NUL byte in the name
+            return False
+    return False
+
+
 def _list_dir(abs_dir: str) -> tuple[list[str], list[str]]:
     """List *abs_dir* as ``(sorted file names, sorted subdirectory names)``.
 
-    Symbolic links count as files (they are listed but never followed);
-    an unreadable directory lists as empty.  ``is_dir`` reads the type
-    the kernel returned with the entry, so no per-entry ``stat`` happens.
+    Symbolic links and Windows junctions count as files (they are listed
+    but never followed: ``Application Data`` -> ``AppData\\Local`` would
+    otherwise recurse to :data:`MAX_DEPTH`); Windows-hidden directories
+    are dropped like dot-directories; an unreadable directory lists as
+    empty.  ``is_dir`` reads the type the kernel returned with the entry,
+    so no per-entry ``stat`` system call happens.
     """
+    files: list[str] = []
+    dirs: list[str] = []
     try:
         with os.scandir(abs_dir) as it:
-            entries = list(it)
-        names = [e.name for e in entries]
-        is_dir = [e.is_dir(follow_symlinks=False) for e in entries]
+            for entry in it:
+                if not entry.is_dir(follow_symlinks=False) or entry.is_junction():
+                    files.append(entry.name)
+                elif not _is_hidden_dir(entry):
+                    dirs.append(entry.name)
     except OSError:
         logger.debug("cannot list %s", abs_dir, exc_info=True)
         return [], []
-    return sorted(compress(names, map(not_, is_dir))), sorted(compress(names, is_dir))
+    return sorted(files), sorted(dirs)
 
 
 # Extensions (without the dot, lower- and upper-case) of ``_DATA_SUFFIXES``,
@@ -734,11 +772,11 @@ class FileIndexRegistry:
         A work dir at or below :attr:`home` maps to the home index with
         ``sub_dir`` its home-relative path plus ``/`` (``""`` for home
         itself), unless a path component is one the scan skips
-        (dot-directory, :data:`JUNK_DIR_NAMES`) or — once the home index
-        exists — the directory is not among its :attr:`FileIndex.dirs`
-        (gitignored, collapsed or too deep).  Everything else, and a
-        filesystem root (which is never scanned), maps to a root of its
-        own: ``(work_dir, "")``.
+        (dot-directory, Windows-hidden directory, :data:`JUNK_DIR_NAMES`)
+        or — once the home index exists — the directory is not among its
+        :attr:`FileIndex.dirs` (gitignored, collapsed or too deep).
+        Everything else, and a filesystem root (which is never scanned),
+        maps to a root of its own: ``(work_dir, "")``.
         """
         wd = self.home if is_root_dir(work_dir) else os.path.abspath(work_dir)
         if is_root_dir(wd):
@@ -749,7 +787,8 @@ class FileIndexRegistry:
             rel = wd[len(self.home) + 1:].replace(os.sep, "/")
             parts = rel.split("/")
             skipped = any(p.startswith(".") or p in JUNK_DIR_NAMES for p in parts)
-            if len(parts) <= MAX_DEPTH and not skipped:
+            hidden = _hidden_dir_on_path(self.home, parts)
+            if len(parts) <= MAX_DEPTH and not skipped and not hidden:
                 with self._lock:
                     home_index = self._indexes.get(self.home)
                 if home_index is None or rel in home_index.dirs:

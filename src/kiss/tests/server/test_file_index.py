@@ -17,6 +17,7 @@ import errno
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections.abc import Callable
@@ -36,6 +37,7 @@ from kiss.server.file_index import (
     FileView,
 )
 from kiss.server.server import VSCodeServer
+from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 
 def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
@@ -97,6 +99,31 @@ class TestScan:
             ".hidden", "run.log", "src/y.json",
         ]
         assert index.dirs == frozenset({"", "src", "src/deep"})
+
+    @pytest.mark.skipif(not IS_WINDOWS, reason="Windows hidden attribute and junctions")
+    def test_windows_hidden_dirs_are_skipped_and_junctions_not_followed(
+        self, tmp_path: Path,
+    ) -> None:
+        """``AppData`` and its ``Application Data`` junction must not be indexed.
+
+        A user's home is the index root of every project below it; the
+        hidden ``AppData`` holds most of a Windows home's files and its
+        junctions point back into it, so following them recursed to
+        ``MAX_DEPTH`` and a home scan took a minute.
+        """
+        _touch(tmp_path, "a.py", "AppData/Local/cache.bin", "src/b.py")
+        subprocess.run(["attrib", "+h", str(tmp_path / "AppData")], check=True)
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(tmp_path / "Application Data"),
+             str(tmp_path / "AppData" / "Local")],
+            check=True, capture_output=True,
+        )
+        index = FileIndex.scan(str(tmp_path))
+        assert set(index.paths) == {"a.py", "Application Data", "src/", "src/b.py"}
+        reg = FileIndexRegistry(home=str(tmp_path), cache_dir=tmp_path / "cache")
+        below_hidden = str(tmp_path / "AppData" / "Local")
+        assert reg.root_for(below_hidden) == (below_hidden, "")
+        assert reg.root_for(str(tmp_path / "src")) == (str(tmp_path), "src/")
 
     def test_nested_gitignores_apply_to_dirs_and_files_below_them(self, tmp_path: Path) -> None:
         (tmp_path / ".gitignore").write_text("build/\n/top-only\nsecret.txt\n!keep\n*.log\n")
@@ -282,6 +309,7 @@ class TestSearch:
         assert _texts(view.search("RÉSUMÉ", {})) == ["docs/résumé.md"]
         assert _texts(index.view("docs/").search("", {})) == ["résumé.md"]
 
+    @posix_only("non-UTF-8 file names (NTFS names are UTF-16)")
     def test_undecodable_names_are_searchable(self, tmp_path: Path) -> None:
         _touch(tmp_path, "plain.py")
         raw = os.path.join(os.fsencode(tmp_path), b"bad_\xff.py")

@@ -20,6 +20,13 @@
 // heartbeat records the longest event-loop stall.  A regressed build
 // stalls for hundreds of milliseconds; the fixed build only ever pauses
 // for the few milliseconds a synchronous file read takes.
+//
+// The heartbeat measures wall-clock time, so a child starved of CPU by
+// other test suites running alongside (a 262ms gap was seen with eleven
+// suites sharing ten cores) looks like a stall too.  A regressed build
+// stalls for >= 400ms on EVERY run, while starvation is transient, so
+// the measurement is repeated up to MAX_RUNS times and the test fails
+// only when no run stays under the threshold.
 
 const assert = require('assert');
 const {spawn} = require('child_process');
@@ -34,11 +41,18 @@ if (!fs.existsSync(OUT)) {
 }
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-cfgread-'));
-const tmpHome = path.join(tmpRoot, 'home');
-const kissDir = path.join(tmpHome, '.kiss');
-fs.mkdirSync(kissDir, {recursive: true});
-// An empty config.json: the "torn write" case the retry loop exists for.
-fs.writeFileSync(path.join(kissDir, 'config.json'), '');
+
+// Each run gets its own HOME: ensureRemotePassword() records a
+// "prompt declined" marker under ~/.kiss, so a second child in the same
+// HOME would skip the prompt instead of re-reading the config.
+function makeHome(run) {
+  const tmpHome = path.join(tmpRoot, `home${run}`);
+  const kissDir = path.join(tmpHome, '.kiss');
+  fs.mkdirSync(kissDir, {recursive: true});
+  // An empty config.json: the "torn write" case the retry loop exists for.
+  fs.writeFileSync(path.join(kissDir, 'config.json'), '');
+  return {tmpHome, kissDir};
+}
 
 const CHILD = `
 'use strict';
@@ -92,7 +106,12 @@ function cleanup() {
   } catch {}
 }
 
-async function main() {
+const STALL_LIMIT_MS = 250;
+const MAX_RUNS = 3;
+
+// Runs the child once and returns the longest event-loop stall it saw.
+async function measureStall(run) {
+  const {tmpHome, kissDir} = makeHome(run);
   const out = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['-e', CHILD], {
       stdio: ['ignore', 'pipe', 'inherit'],
@@ -129,13 +148,31 @@ async function main() {
 
   const m = /MAXSTALL=(\d+)/.exec(out);
   assert.ok(m, `child did not report its heartbeat: ${out}`);
-  const maxStallMs = parseInt(m[1], 10);
-  assert.ok(
-    maxStallMs < 250,
-    `event loop stalled for ${maxStallMs}ms while re-reading config.json ` +
-      '— the retry backoff is blocking the extension host again',
+  return parseInt(m[1], 10);
+}
+
+async function main() {
+  const stalls = [];
+  for (let run = 0; run < MAX_RUNS; run++) {
+    const maxStallMs = await measureStall(run);
+    stalls.push(maxStallMs);
+    if (maxStallMs < STALL_LIMIT_MS) {
+      const starved = stalls.slice(0, -1).join(', ');
+      console.log(
+        `  ok - longest event-loop stall while reading config: ${maxStallMs}ms` +
+          (run > 0 ? ` (after ${run} CPU-starved run(s): ${starved}ms)` : ''),
+      );
+      return;
+    }
+    console.log(
+      `  warn - run ${run + 1} stalled for ${maxStallMs}ms` +
+        (run + 1 < MAX_RUNS ? ', retrying' : ''),
+    );
+  }
+  assert.fail(
+    `event loop stalled for ${stalls.join(', ')}ms in ${MAX_RUNS} runs while ` +
+      're-reading config.json — the retry backoff is blocking the extension host again',
   );
-  console.log(`  ok - longest event-loop stall while reading config: ${maxStallMs}ms`);
 }
 
 main()

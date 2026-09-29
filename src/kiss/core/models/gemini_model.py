@@ -274,6 +274,21 @@ def _tool_result_response_dict(content: Any) -> dict[str, Any]:
     return {"result": content}
 
 
+def _audio_token_count(details: Any) -> int:
+    """Return the AUDIO ``token_count`` in a Gemini per-modality token list.
+
+    Args:
+        details: ``usage_metadata.prompt_tokens_details`` or
+            ``cache_tokens_details``: a list of ``ModalityTokenCount``,
+            or ``None`` when the response omits it.
+    """
+    return sum(
+        d.token_count or 0
+        for d in details or ()
+        if d.modality == types.MediaModality.AUDIO
+    )
+
+
 class GeminiModel(Model):
     """A model that uses Google's GenAI API (Gemini)."""
 
@@ -864,11 +879,24 @@ class GeminiModel(Model):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int, int, int]:
         """Extracts token counts from a Gemini API response.
 
+        Gemini prices audio input above text on several models (e.g.
+        gemini-2.5-flash: $1.00 audio vs $0.30 text per 1M, cached
+        $0.10 vs $0.03), so the AUDIO shares of the prompt
+        (``prompt_tokens_details``) and of its cached part
+        (``cache_tokens_details``) are split out for
+        :func:`~kiss.core.models.model_info.calculate_cost` to bill at
+        the model's audio rates.
+
         Returns:
-            (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
+            ``(input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens)`` with text counts only, or, when the
+            prompt holds audio, the 8-tuple that adds
+            ``cache_write_1h_tokens`` (0), ``audio_input_tokens``
+            (uncached), ``audio_output_tokens`` (0) and
+            ``audio_cache_read_tokens``.
         """
         if hasattr(response, "usage_metadata") and response.usage_metadata:
             um = response.usage_metadata
@@ -878,7 +906,24 @@ class GeminiModel(Model):
             output_tokens += thoughts_tokens
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
             tool_use_tokens = getattr(um, "tool_use_prompt_token_count", 0) or 0
-            input_tokens = max(prompt_tokens - cached_tokens, 0) + tool_use_tokens
+            cached_audio = min(
+                _audio_token_count(getattr(um, "cache_tokens_details", None)),
+                cached_tokens,
+            )
+            audio_tokens = max(
+                _audio_token_count(getattr(um, "prompt_tokens_details", None))
+                - cached_audio,
+                0,
+            )
+            input_tokens = (
+                max(prompt_tokens - cached_tokens - audio_tokens, 0) + tool_use_tokens
+            )
+            text_cached = cached_tokens - cached_audio
+            if audio_tokens or cached_audio:
+                return (
+                    input_tokens, output_tokens, text_cached, 0, 0,
+                    audio_tokens, 0, cached_audio,
+                )
             return input_tokens, output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 

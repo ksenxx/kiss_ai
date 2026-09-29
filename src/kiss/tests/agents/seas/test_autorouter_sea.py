@@ -65,9 +65,17 @@ def test_sea_getters_follow_the_contract() -> None:
         "`set_model` only at a phase boundary",
         "`log_decision(unit, tier, model, reason, outcome)`",
         "`observed_call_costs(days, model)`",
+        "One short clause per cell (cut at 120 characters)",
         "Never downgrade a model the user named explicitly.",
     ):
         assert phrase in flat, phrase
+    # The protocol goes into every request of every routed task: about 1,000
+    # tokens of protocol text plus at most EVIDENCE_MAX_CHARS of evidence.
+    protocol = prompt.replace(autorouter_sea.observed_evidence(), "")
+    assert len(protocol) <= 5_000, len(protocol)
+    assert len(prompt) <= 5_000 + autorouter_sea.EVIDENCE_MAX_CHARS + len(
+        autorouter_sea.EVIDENCE_CUT
+    )
     assert {tool.__name__ for tool in autorouter_sea.tools()} == _TOOL_NAMES
     # run_parallel workers inherit the parent's custom system prompt, which
     # would make every routed unit a router; dispatch goes through run_agent.
@@ -209,6 +217,33 @@ def test_estimate_cost_uses_catalog_prices_and_rejects_unknown_models() -> None:
     )
 
 
+def test_observed_evidence_cuts_an_over_long_file_at_a_line_break(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file over the cap is cut at the last line break within the cap, plus the marker.
+
+    A line break right at the cap keeps the line it ends (the cap counts the
+    text, not the break); a first line longer than the cap is cut mid-line,
+    the only case with no break to cut at; a file at the cap is kept whole.
+    """
+    monkeypatch.setenv("KISS_HOME", str(tmp_path))
+    cap, cut = autorouter_sea.EVIDENCE_MAX_CHARS, autorouter_sea.EVIDENCE_CUT
+    evidence = tmp_path / "AUTOROUTER.md"
+    lines = ["x" * 49] * 49 + ["Y" * 50]  # 49 * 50 + 50 = 2,500 chars, break at index 2,500
+    evidence.write_text("\n".join(lines) + "\nTAIL\n", encoding="utf-8")
+    assert autorouter_sea.observed_evidence() == "\n".join(lines) + f"\n\n{cut}"
+    evidence.write_text("\n".join(lines) + "Z\nTAIL\n", encoding="utf-8")  # last line 51 wide
+    assert autorouter_sea.observed_evidence() == "\n".join(lines[:-1]) + f"\n\n{cut}"
+    evidence.write_text("X" * (cap + 1) + "\nTAIL\n", encoding="utf-8")
+    assert autorouter_sea.observed_evidence() == "X" * cap + f"\n\n{cut}"
+    evidence.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert autorouter_sea.observed_evidence() == "\n".join(lines)
+    evidence.write_text(" \n", encoding="utf-8")
+    assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
+    evidence.unlink()
+    assert autorouter_sea.observed_evidence() == autorouter_sea.NO_EVIDENCE
+
+
 def test_log_decision_writes_a_table_in_the_kiss_home_with_a_dash_task_id_outside_a_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -253,6 +288,16 @@ def test_log_decision_writes_a_table_in_the_kiss_home_with_a_dash_task_id_outsid
         "Error: unknown tier 'huge'; use one of small, medium, frontier."
     )
     assert len(ledger.read_text(encoding="utf-8").splitlines()) == 6
+    # A paragraph in a cell is cut at the cell cap so the row stays terse.
+    words = " ".join(f"w{i}" for i in range(60))  # 229 chars
+    assert autorouter_sea.log_decision(words, "frontier", "m", words, words).startswith("logged")
+    row = ledger.read_text(encoding="utf-8").splitlines()[-1]
+    cells = row.strip("| ").split(" | ")
+    cut = words[:117].rstrip() + "..."
+    assert cells[2:] == [cut, "frontier", "m", cut, cut] and len(cut) <= 120
+    exact = "x" * autorouter_sea.CELL_MAX_CHARS
+    autorouter_sea.log_decision(exact, "small", "m", "r")
+    assert f"| {exact} | small |" in ledger.read_text(encoding="utf-8").splitlines()[-1]
 
 
 def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(

@@ -79,8 +79,10 @@ function snapshotEntry(tabId, title, chatId, workDir) {
   };
 }
 
-// Give a webview a mirrored parent tab plus one live sub-agent tab.
-function seedSubagent(win) {
+// Give a webview a mirrored parent tab plus one sub-agent tab: live by
+// default, finished history with `done` (only such a tab may be
+// hand-closed; a running sub-agent's tab stays open on every surface).
+function seedSubagent(win, done) {
   send(win, {type: 'tabs_state', tabs: [snapshotEntry('parent', 'Parent')]});
   send(win, {
     type: 'openSubagentTab',
@@ -88,6 +90,7 @@ function seedSubagent(win) {
     parent_tab_id: 'parent',
     description: 'Sub one',
     task_id: '42',
+    isDone: !!done,
   });
   assert.ok(
     tabBarIds(win).includes('parent__sub_1'),
@@ -136,7 +139,7 @@ function testManualSubagentCloseStillAnnouncedToDaemon() {
   // The origin side of the mirror: a hand-closed sub-agent tab must
   // still send `closeTab` so the daemon can broadcast the close.
   const {win, posted} = makeWebview(undefined);
-  seedSubagent(win);
+  seedSubagent(win, true);
   const closeBtn = win.document.querySelector(
     '.chat-tab[data-tab-id="parent__sub_1"] .chat-tab-close',
   );

@@ -1419,6 +1419,10 @@ class SorcarAgent(RelentlessAgent):
         # the run — forwards the same override to every sub-agent.
         self._use_memory_override: bool | None = None
         self._use_web_tools: bool = True
+        # The daemon's BrowserTabService (kiss.server.browser_tab) when
+        # running under kiss-web: show_browser() then puts the page in
+        # the Browser tab on every surface instead of a local window.
+        self._live_browser: Any = None
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
         # Background jobs started by ``Bash(background=True)``, kept on
@@ -1727,6 +1731,7 @@ class SorcarAgent(RelentlessAgent):
                 ),
                 web_tools=self._use_web_tools,
                 use_memory=self._use_memory_override,
+                live_browser=self._live_browser,
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1986,6 +1991,7 @@ class SorcarAgent(RelentlessAgent):
             self.web_use_tool = WebUseTool(
                 work_dir=self.work_dir,
                 ephemeral=getattr(self, "_subagent_info", None) is not None,
+                live_browser=self._live_browser,
             )
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
@@ -2639,6 +2645,7 @@ class SorcarAgent(RelentlessAgent):
         tool_call_hook: Callable[[str, dict[str, Any]], str] | None = None,
         use_memory: bool | None = None,
         tool_profile: str = "",
+        live_browser: Any = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2659,6 +2666,10 @@ class SorcarAgent(RelentlessAgent):
             max_sub_sessions: Maximum continuation sub-sessions. Defaults to config value.
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
+            live_browser: The daemon's ``BrowserTabService``; when given,
+                ``show_browser()`` opens the page in the Browser tab on
+                every surface (forwarded to every sub-agent).  None (no
+                daemon) shows a local window instead.
                 Set to False for terminal-only environments.
             is_parallel: Whether to include the run_parallel tool. Defaults to True.
                 When True, the agent can spawn parallel sub-agents for independent tasks.
@@ -2740,6 +2751,7 @@ class SorcarAgent(RelentlessAgent):
         self._tool_profile_name = tool_profile
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
+        self._live_browser = live_browser
         self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
@@ -2994,6 +3006,7 @@ def run_tasks_parallel(
     web_tools: bool = True,
     use_memory: bool | None = None,
     tool_profile: str = "",
+    live_browser: Any = None,
     docker_image: str | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
@@ -3101,6 +3114,9 @@ def run_tasks_parallel(
             parent's live container as ``container:<id>``, so the
             children's tools act inside the same container); ``None``
             runs the children's tools on the host.
+        live_browser: The daemon's ``BrowserTabService`` for every child
+            (see :meth:`SorcarAgent.run`), so a child's ``show_browser()``
+            also reaches the user's Browser tab.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -3219,6 +3235,7 @@ def run_tasks_parallel(
                 use_memory=use_memory,
                 tool_profile=child_profile,
                 docker_image=docker_image,
+                live_browser=live_browser,
             )
             return result
         except KeyboardInterrupt:

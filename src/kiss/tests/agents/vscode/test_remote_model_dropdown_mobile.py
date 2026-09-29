@@ -36,6 +36,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
+from kiss.tests.conftest import goto_retrying_network_change
+
 # The served page boots with #app hidden until the daemon connection
 # reveals it, and — with no daemon behind this harness — pops the
 # remote-password modal, which intercepts pointer events. Neither is
@@ -241,7 +243,9 @@ def _open_page(browser, port: int, width: int, height: int):
         viewport={"width": width, "height": height},
     )
     page.add_init_script(_DROP_DAEMON_MODELS_JS)
-    page.goto(f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
+    goto_retrying_network_change(
+        page, f"https://127.0.0.1:{port}/", wait_until="domcontentloaded"
+    )
     return page
 
 

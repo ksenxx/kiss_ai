@@ -68,6 +68,7 @@ from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
+from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.tools_file import load_tools_file
 
@@ -665,6 +666,7 @@ class _TaskRunnerMixin:
 
     if TYPE_CHECKING:
         printer: JsonPrinter
+        browser_tabs: BrowserTabService
         work_dir: str
         _state_lock: threading.RLock
         _default_model: str
@@ -2100,6 +2102,7 @@ class _TaskRunnerMixin:
                         auto_commit=state.auto_commit_mode,
                         max_budget=(_agent_budget if _agent_budget is not None else _cfg_budget),
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
+                        live_browser=self.browser_tabs,
                         use_memory=_agent_memory,
                         model_config=(
                             _agent_model_config

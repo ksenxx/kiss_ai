@@ -758,12 +758,18 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
+            # ``remote_url`` comes last in the ready burst, after the
+            # per-connection snapshots (models, config, browser tabs, ...),
+            # whose number grows with every new surface; read until it
+            # arrives rather than counting them.
             events: list[dict[str, Any]] = []
-            for _ in range(8):
+            for _ in range(40):
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                    events.append(json.loads(raw))
                 except TimeoutError:
+                    break
+                events.append(json.loads(raw))
+                if events[-1]["type"] == "remote_url":
                     break
             types = [e["type"] for e in events]
             self.assertIn("remote_url", types)

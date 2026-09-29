@@ -77,6 +77,14 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
         self._orig_update_tab = self.server._registry_update_tab
 
         def slow_registry_update_tab(*args: Any, **kwargs: Any) -> Any:
+            # ``_cmd_run`` also pins the registry on the dispatching
+            # (test) thread before it starts the worker; only the worker's
+            # call marks the region, otherwise the event fires early and
+            # the KI lands wherever the worker happens to be (e.g. on a
+            # ``with STATE_LOCK`` boundary, leaking the lock and hanging
+            # the test on the next ``find_by_tab``).
+            if threading.current_thread() is threading.main_thread():
+                return self._orig_update_tab(*args, **kwargs)
             self.in_setup_region.set()
             for _ in range(100):
                 time.sleep(0.05)

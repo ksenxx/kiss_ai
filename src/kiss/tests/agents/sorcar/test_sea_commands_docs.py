@@ -34,10 +34,16 @@ _DOC = _SITE / "docs" / "sea-commands.md"
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
-    """Drop the module's in-memory state before and after each test."""
+    """Drop the module's in-memory state before and after each test.
+
+    The ``home`` fixture below redirects ``HOME`` only; ``SEAS.md`` still
+    lands in the session-wide ``$KISS_HOME``, so remove it here or it
+    shadows bundled commands for later tests in the same process.
+    """
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 @pytest.fixture

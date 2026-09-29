@@ -31,12 +31,11 @@ These tests drive a REAL browser (Playwright Chromium) against a REAL
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
-from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
@@ -71,17 +70,7 @@ def _open_page(browser, harness):
         ws.on("framesent", _on_sent)
 
     page.on("websocket", _on_ws)
-    # Chromium sporadically aborts the first navigation with
-    # net::ERR_NETWORK_CHANGED on busy hosts (an interface change
-    # mid-request); retry the goto for that transient error only.
-    for attempt in range(3):
-        try:
-            page.goto(harness.base_url + "/")
-            break
-        except PlaywrightError as exc:
-            if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
-                raise
-            time.sleep(1.0)
+    goto_retrying_network_change(page, harness.base_url + "/")
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_selector(".chat-tab", timeout=30000)
     return context, page, sent_frames

@@ -60,6 +60,30 @@ def _case_block(case_label: str, next_case_label: str) -> str:
     return js[case_start:case_end]
 
 
+def _consults_local_tabs(block: str) -> bool:
+    """Whether ``block`` looks the parent up in this webview's ``tabs[]``.
+
+    The handlers resolve the parent through ``getTab()`` (``tabs.find``
+    by id) or ``nearestOpenAncestorTab()`` (``getTab`` up the
+    ``__sub_`` chain), so either helper counts as consulting ``tabs[]``.
+    """
+    return any(
+        marker in block
+        for marker in ("tabs.find", "getTab(", "nearestOpenAncestorTab(")
+    )
+
+
+def test_tab_lookup_helpers_read_local_tabs() -> None:
+    """The helpers the guards rely on are backed by the local ``tabs[]``."""
+    js = MAIN_JS.read_text()
+    get_tab = js[js.index("function getTab(id) {"):]
+    get_tab = get_tab[: get_tab.index("\n  }")]
+    assert "tabs.find" in get_tab, get_tab
+    ancestor = js[js.index("function nearestOpenAncestorTab(tabId) {"):]
+    ancestor = ancestor[: ancestor.index("\n  }")]
+    assert "getTab(" in ancestor, ancestor
+
+
 class TestOpenSubagentTabGuardsOnParentTabId:
     """The ``openSubagentTab`` handler must skip the event when its
     ``parent_tab_id`` does not correspond to a tab in the receiving
@@ -73,7 +97,7 @@ class TestOpenSubagentTabGuardsOnParentTabId:
             "case 'openSubagentTab':", "case 'subagentDone':",
         )
         assert "ev.parent_tab_id" in block
-        assert "tabs.find" in block, (
+        assert _consults_local_tabs(block), (
             "openSubagentTab handler must consult local tabs[] to "
             "filter phantom sub-tab broadcasts from other webviews / "
             "chats.  Block was:\n" + block
@@ -85,7 +109,7 @@ class TestOpenSubagentTabGuardsOnParentTabId:
             "no phantom sub-tab is created."
         )
         early = block[:make_tab_idx]
-        assert "tabs.find" in early and (
+        assert _consults_local_tabs(early) and (
             "break" in early or "return" in early
         ), (
             "Early-guard must short-circuit with break/return when "
@@ -108,7 +132,7 @@ class TestNewTabHandlerGuardsOnParentTabId:
             "out cross-chat sub-agent new_tab broadcasts.  Block was:\n"
             + block
         )
-        assert "tabs.find" in block
+        assert _consults_local_tabs(block), block
         guard_idx = block.find("ev.parent_tab_id")
         create_idx = block.find("createBackgroundSubagentTab(")
         assert 0 < guard_idx < create_idx, (

@@ -169,8 +169,9 @@ they are the tells.
 
 1. Em dashes: zero in prose (`---` or the Unicode dash). Use commas, parentheses, a
    colon, or a new sentence.
-2. Antithesis: "not X but Y", "X, not Y", "rather than", "instead of". At most 5 in the
-   whole paper, only where the contrast is technical.
+2. Antithesis: "not X but Y", "X, not Y", "rather than", "instead of", "not only X but
+   also Y", "X doesn't just Y, it Z", "Not X. Not Y. Just Z.". At most 5 in the whole
+   paper, only where the contrast is technical.
 3. Performative honesty: "we state it plainly", "honest", "honestly", "we say so", "worth
    stating", "to be clear", "we do not claim", "we name them rather than claim their
    absence". State the caveat and drop the commentary about stating it.
@@ -188,9 +189,17 @@ they are the tells.
 9. Slop vocabulary: delve, leverage, pivotal, crucial, testament, landscape, tapestry,
    showcase, underscore, intricate, meticulous, seamless, vibrant, realm, myriad, foster,
    comprehensive, ever-evolving, fast-paced, game-changer, harness (as a verb), notably,
-   moreover, furthermore, "it is worth noting", "in conclusion", "serves as", "plays a
-   crucial role", "aligns with", "aims to explore"; "precisely", "exactly", "genuine" as
-   intensifiers.
+   moreover, furthermore, additionally, garner, bolster, boasts, enduring, interplay,
+   intricacies, multifaceted, holistic, nuanced, groundbreaking, cutting-edge,
+   revolutionize, transformative, paradigm shift, synergy, invaluable, commendable,
+   noteworthy, paramount, indispensable, unparalleled, unwavering, embark, spearhead,
+   streamline, plethora, cornerstone, "a wide array of", "shed light on", "deep dive",
+   "navigate the complexities", "valuable insights", "it is worth noting", "it is
+   important to note", "in conclusion", "serves as", "stands as", "plays a crucial role",
+   "aligns with", "aims to explore"; "precisely", "exactly", "genuine" as intensifiers.
+   These words were measured, not guessed: their frequency jumped after 2022 in PubMed
+   abstracts (Kobak et al., Science Advances 2025; Juzek and Ward, COLING 2025) and in
+   peer reviews (Liang et al., ICML 2024).
 10. Anthropomorphized agent drama: "the agent declined", "said so with arithmetic",
     "waits politely", "the audit's verdict".
 11. Coined capitalized concept names used as if established. If you coin a term, define
@@ -198,7 +207,46 @@ they are the tells.
 12. A mega-abstract with per-run numbers; a paper with no figures; every paragraph the
     same dense rectangle; flawless prose with a rhythmic cadence.
 13. Duplicated sentences anywhere in the paper.
-14. Markdown or Unicode artifacts in LaTeX: curly quotes, Unicode ellipsis, `**bold**`.
+14. Markdown or Unicode artifacts in LaTeX: curly quotes, Unicode ellipsis, `**bold**`,
+    Unicode arrows, emoji.
+15. Significance puffery: a trailing participle clause that grades its own sentence
+    (", highlighting the importance of", ", reflecting broader trends", ", ensuring
+    robustness", ", contributing to"), "marks a shift", "a significant step forward",
+    "sets the stage", "paves the way", "at the forefront". End the sentence at the fact.
+16. Copula avoidance: "serves as", "stands as", "functions as", "represents", "boasts",
+    "features", "offers" where "is" or "has" is meant.
+17. Scope-inflation openers: "In today's rapidly evolving", "In the era of", "X has
+    garnered significant attention", "X has emerged as a promising", a dictionary
+    definition of the field as the first sentence. Open on the problem and a number.
+18. Signposting and throat-clearing: "In this section, we will explore", "Let us dive
+    into", "Let's break this down", "In summary", "To sum up", "Importantly,",
+    "Interestingly,", "It should be noted", "Here's the thing", "The result? ...",
+    "Think of it as", "Imagine a world where", a first sentence that restates the
+    heading, a closing paragraph that recaps the section it ends.
+19. Vague attribution: "studies show", "experts argue", "researchers have increasingly",
+    "it is widely believed", "a growing body of work" without a `\\cite` in the same
+    sentence; one citation inflated into "several works".
+20. Motivational and token-caveat closers: "opens new avenues", "holds great promise",
+    "exciting directions", "the possibilities are endless", "Despite these challenges,
+    X remains promising", "Future work will explore" followed by a list of everything.
+    A limitation is stated with its cost, not waved away.
+21. Magic adverbs: truly, deeply, quietly, arguably, effortlessly, incredibly, extremely,
+    seamlessly. Delete the adverb and see if the sentence changes.
+22. Synonym cycling: one referent called the system, the framework, the platform, the
+    pipeline and the tool in consecutive paragraphs. Pick one name and repeat it.
+    Invented labels ("the verification paradox", "the context trap") count under 11.
+23. Structure tells: Wh-question headings ("Why does this matter?"), a heading or
+    `\\paragraph` every few sentences, bold-first bullets, one-sentence paragraphs used
+    for drama, every section ending on a one-line takeaway, one point restated in
+    every section.
+24. Leaked LLM output and fabricated references: "As an AI language model", "as of my
+    last knowledge update", "I hope this helps", "Certainly!", `oaicite`,
+    `turn0search0`, `[cite: 1]`, `utm_source=chatgpt.com` in a URL. In the .bib:
+    placeholder authors (John Doe, Jane Smith, Firstname Lastname), "et al." inside an
+    author field, arXiv ids with XXXX, "to be updated", pages 1234-1243, a real title
+    with the wrong authors, venue or year. GPTZero found 100 such citations in 51
+    accepted NeurIPS 2025 papers; ICLR 2026 desk-rejects papers that contain them.
+    Open every reference you cite.
 
 ## Figures and tables
 
@@ -291,12 +339,16 @@ _NON_PROSE_ENVIRONMENTS = (
     "filecontents*",
 )
 
+_LLM_UTM = r"utm_source=(?:chatgpt|openai|perplexity|copilot|claude|gemini)"
+"""The tracking tag chatbots append to the URLs they cite."""
+
 # (name, regex over the prose, limit, note); a limit of -1 means "list only".
 _GATES: tuple[tuple[str, str, int, str], ...] = (
     ("em dashes", r"---|\u2014", 0, "use commas, parentheses, a colon or a new sentence"),
     (
         "antithesis",
-        r"\brather than\b|\binstead of\b|, not |\bnot (?:\w+ ){1,3}but\b",
+        r"\brather than\b|\binstead of\b|, not |\bnot (?:\w+ ){1,3}but\b|\bnot just\b"
+        r"|n't just\b",
         5,
         "only technical contrasts",
     ),
@@ -310,20 +362,85 @@ _GATES: tuple[tuple[str, str, int, str], ...] = (
     (
         "slop vocabulary",
         r"\b(?:delve|leverag|pivotal|crucial|testament|landscape|tapestry|showcas|underscor"
-        r"|intricate|meticulous|seamless|vibrant|realm|myriad|foster|comprehensive"
-        r"|ever-evolving|fast-paced|game-changer|notably|moreover|furthermore"
-        r"|worth noting|in conclusion|serves as|aligns with|aims to explore"
-        r"|(?:we|to|and|can|that) harness(?:es|ed)?\b)",
+        r"|intrica|meticulous|seamless|vibrant|realm|myriad|foster|comprehensive"
+        r"|ever-evolving|fast-paced|game-chang|notably|moreover|furthermore|additionally"
+        r"|garner|bolster|boast|enduring|interplay|multifaceted|holistic|nuanced"
+        r"|groundbreaking|cutting-edge|revolutioni[sz]|transformative|paradigm shift"
+        r"|synerg|invaluable|commendable|noteworthy|paramount|indispensable|unparalleled"
+        r"|unwavering|embark|spearhead|streamlin|plethora|cornerstone|wide array of"
+        r"|shed(?:s|ding)? light|deep dive|navigat\w* the complexit|valuable insights"
+        r"|worth noting|important to note|in conclusion|serves as|stands as|aligns with"
+        r"|aims to explore|(?:we|to|and|can|that) harness(?:es|ed)?\b)",
         0,
         "",
+    ),
+    (
+        "significance puffery",
+        r",\s+(?:highlighting|emphasizing|reflecting|ensuring|solidifying|cementing"
+        r"|marking|contributing to|signaling|demonstrating|illustrating)\b"
+        r"|\bmarks? an? (?:\w+ )?(?:shift|milestone|turning point)\b|\bsets? the stage\b"
+        r"|\bpav(?:e|es|ed|ing) the way\b|\bsignificant step (?:forward|toward)"
+        r"|\bat the forefront\b",
+        3,
+        "end the sentence at the fact; no clause that grades it",
+    ),
+    (
+        "scope-inflation openers",
+        r"\bin today's\b|\bin (?:the|an) (?:era|age) of\b"
+        r"|\brapidly (?:evolving|changing|advancing) (?:field|landscape|world|area|domain)\b"
+        r"|\bha(?:s|ve) (?:garnered|gained|attracted|received) (?:significant|considerable"
+        r"|increasing|growing|widespread) (?:attention|interest)"
+        r"|\bha(?:s|ve) emerged as (?:a|an) (?:promising|powerful|key|critical|essential)\b",
+        0,
+        "open on the problem and a number",
+    ),
+    (
+        "signposting and throat-clearing",
+        r"\blet(?:'s| us) (?:dive|explore|unpack|break)\b|\bin summary\b|\bto sum up\b"
+        r"|\bimportantly,|\binterestingly,|\bit should be noted\b|\bit bears mentioning\b"
+        r"|\bhere's (?:the|what|where|why|how)\b|\bhere is the (?:thing|kicker|catch)\b"
+        r"|\bthe (?:result|catch|answer|twist)\?|\bthink of it as\b|\bimagine a world\b",
+        0,
+        "delete the announcement and start with the content",
+    ),
+    (
+        "motivational closers",
+        r"\bopens? (?:up )?(?:new|exciting) (?:avenues|directions|possibilities|doors)\b"
+        r"|\bholds? (?:great|significant|immense|tremendous) promise\b"
+        r"|\bexciting (?:new )?(?:directions|avenues|opportunities|possibilities)\b"
+        r"|\bpossibilities are endless\b|\bthe future (?:is|looks) bright\b"
+        r"|\bdespite (?:these|its|their|the|such) (?:challenges|limitations|hurdles),"
+        r"[^.]*\b(?:promising|promise|potential|bright|exciting|thrive)",
+        0,
+        "state the limitation and its cost",
+    ),
+    (
+        "vague attribution",
+        r"\b(?:studies|experts|researchers|observers|critics|many works) (?:have )?"
+        r"(?:show|shown|suggest|suggested|argue|argued|agree|noted|increasingly)\b"
+        r"|\bit is (?:widely|generally|commonly) (?:believed|accepted|known|acknowledged"
+        r"|recognized)\b|\ba growing body of\b",
+        -1,
+        "name the source with a \\cite in the same sentence or drop the claim",
     ),
     (
         "intensifiers and marketing",
         r"\b(?:remarkably|dramatically|particularly|fundamentally|essentially|quite"
         r"|significantly|powerful|elegant|unique|novel|state-of-the-art|compares favorably"
-        r"|outperforms|to our knowledge)\b",
+        r"|outperforms|to our knowledge|truly|deeply|quietly|arguably|effortlessly"
+        r"|incredibly|extremely|robust|robustly)\b",
         -1,
         "review each; keep only with a number or a statistical test",
+    ),
+    (
+        "leaked LLM output",
+        r"oaicite|contentreference\[|\bturn\d+(?:search|view|news|file)\d+|"
+        + _LLM_UTM
+        + r"|\[cite(?:_start|:\s*\d+)\]|\bas an ai (?:language )?model\b"
+        r"|\bas of my (?:last )?(?:knowledge|training)\b|\bi hope this helps\b"
+        r"|\bcertainly!|\bgreat question\b",
+        0,
+        "chatbot residue; delete it and re-read the paragraph around it",
     ),
     (
         "draft and review talk",
@@ -331,8 +448,20 @@ _GATES: tuple[tuple[str, str, int, str], ...] = (
         -1,
         "zero unless the word is the paper's technical subject; the paper is standalone",
     ),
-    ("markdown artifacts", r"\*\*[^*\n]+\*\*|\u201c|\u201d|\u2018|\u2019|\u2026", 0, ""),
+    (
+        "markdown artifacts",
+        r"\*\*[^*\n]+\*\*|\u201c|\u201d|\u2018|\u2019|\u2026|[\u2190-\u21ff]",
+        0,
+        "",
+    ),
 )
+
+_BIB_SUSPECTS = (
+    r"\b(?:John|Jane) (?:Doe|Smith)\b|\bfirst ?name\b|\blast ?name\b"
+    r"|\bauthor\s*=\s*[{\"][^}\"]*\bet al\b|\d{4}\.X{4,5}\b|\bto be updated\b"
+    r"|\bpages\s*=\s*[{\"]?\s*1234\s*-+\s*1243\b|oaicite|" + _LLM_UTM
+)
+"""Signatures of fabricated references (GPTZero's NeurIPS 2025 and ICLR 2026 scans)."""
 
 _MIN_DUPLICATE_WORDS = 4
 """Shorter repeated sentences ("We measure.") are not flagged as duplicates."""
@@ -467,12 +596,19 @@ def _keys(source: str, pattern: str) -> set[str]:
     return keys
 
 
-def _bib_entries(tex_path: Path, source: str, bib_path: str) -> tuple[set[str], list[str]]:
-    """Return the entry keys of the paper's .bib files and the paths that were read."""
+def _bib_entries(
+    tex_path: Path, source: str, bib_path: str
+) -> tuple[set[str], list[str], list[str]]:
+    """Return the paper's .bib entry keys, the paths read, and the suspect bib lines.
+
+    A suspect line matches ``_BIB_SUSPECTS`` (placeholder authors, ``XXXX``
+    arXiv ids, ...) and is listed as ``<file> L<line>: ...<context>...``.
+    """
     names = [bib_path] if bib_path else []
     names += sorted(_keys(source, r"\\(?:bibliography|addbibresource)\{([^}]*)\}"))
     keys: set[str] = set()
     read: list[str] = []
+    suspects: list[str] = []
     for name in names:
         path = Path(name).expanduser()
         if not path.is_absolute():
@@ -483,7 +619,8 @@ def _bib_entries(tex_path: Path, source: str, bib_path: str) -> tuple[set[str], 
             text = path.read_text(encoding="utf-8")
             keys |= set(re.findall(r"@\w+\s*\{\s*([^,\s]+)\s*,", text))
             read.append(str(path))
-    return keys, read
+            suspects += [f"{path.name} {hit}" for hit in _hits(text, _BIB_SUSPECTS)]
+    return keys, read, suspects
 
 
 def check_paper(tex_path: str, bib_path: str = "") -> str:
@@ -502,8 +639,9 @@ def check_paper(tex_path: str, bib_path: str = "") -> str:
         One block per gate marked ``PASS``, ``FAIL`` or ``CHECK`` (list only):
         the word gates, the abstract word count, abstract numbers unused
         elsewhere, duplicated sentences, single-word ``\\emph``, non-ASCII
-        lines, dangling ``\\ref``, and the ``\\cite`` keys against the bib
-        entries; then the number of failed gates.
+        lines, dangling ``\\ref``, the ``\\cite`` keys against the bib
+        entries, and bib lines with fabricated-reference signatures; then
+        the number of failed gates.
     """
     path = Path(tex_path).expanduser()
     if not path.is_file():
@@ -542,11 +680,14 @@ def check_paper(tex_path: str, bib_path: str = "") -> str:
     labels = _keys(live, r"\\label\{([^}]*)\}") | _keys(live, r"\blabel=\{?([^\s,\]}]+)")
     lines += _section("\\ref without \\label", sorted(refs - labels), 0)
     cites = _keys(live, r"\\cite[A-Za-z]*\*?(?:\[[^\]]*\])*\{([^}]*)\}")
-    entries, read = _bib_entries(path, live, bib_path)
+    entries, read, suspects = _bib_entries(path, live, bib_path)
     if read:
         lines.append(f"bib files: {', '.join(read)}")
         lines += _section("\\cite without bib entry", sorted(cites - entries), 0)
         lines += _section("bib entries never cited", sorted(entries - cites), 0)
+        lines += _section(
+            "fabricated-reference signatures", suspects, 0, "open the source and fix the entry"
+        )
     else:
         lines.append("bib files: none found (pass bib_path to check the citations) CHECK")
     failed = sum(line.endswith(" FAIL") or " FAIL; " in line for line in lines)

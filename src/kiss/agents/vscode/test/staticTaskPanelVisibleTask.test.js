@@ -850,8 +850,20 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
     steps: 'Steps: 22',
   });
 
-  // The parent is hidden now; replaying its finished transcript collapses
-  // the run_parallel panel, which closes the sub-agent tab on screen.
+  // The parent is hidden now. Its child finishes (subagentDone closes
+  // the sub-agent tab on screen; a collapse alone never closes a running
+  // sub-agent's tab), then the parent's finished transcript replays.
+  send(win, {type: 'subagentDone', tab_id: subId});
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    parent,
+    'the child finishing must have closed its tab and shown the parent',
+  );
+  assert.deepStrictEqual(
+    metrics(win),
+    {tokens: 'Tokens: 111', budget: 'Cost: $1.11', steps: 'Steps: 11'},
+    'the swapped-in parent must show its own numbers, not the child\'s',
+  );
   send(win, {
     type: 'task_events',
     tabId: parent,
@@ -860,16 +872,13 @@ function testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers() {
     task: 'Parent task',
     events: [
       {type: 'task_start', task: 'Parent task'},
+      {type: 'usage_info', total_tokens: 111, cost: '1.11', total_steps: 11},
       {type: 'tool_call', name: 'run_parallel'},
       {type: 'tool_result', name: 'run_parallel', text: 'done'},
       {type: 'result', success: true},
     ],
   });
-  assert.strictEqual(
-    win._testApi.getActiveTabId(),
-    parent,
-    'the replay must have closed the sub-agent tab and shown the parent',
-  );
+  assert.strictEqual(win._testApi.getActiveTabId(), parent, 'replay keeps the parent on');
   assert.deepStrictEqual(
     metrics(win),
     {tokens: 'Tokens: 111', budget: 'Cost: $1.11', steps: 'Steps: 11'},

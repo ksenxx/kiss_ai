@@ -29,7 +29,7 @@ from kiss.server import tricks
 from kiss.server.commands import _CommandsMixin
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
 
 _BUNDLED = "## Trick\n\nBundled promptlet one.\n\n## Trick\n\nBundled two.\n"
 _USER = (
@@ -174,8 +174,7 @@ class TestEditMyInjectionTrick(_TricksHome):
         self.assertEqual(
             tricks.read_tricks_data()["tricks"][:2], ["New\nbody", "Other."]
         )
-        # The read-modify-write goes through text mode, so the whole
-        # file comes out with LF line endings (like a delete does).
+        # The rewrite writes LF on every platform (like a delete does).
         self.assertEqual(
             self.user_file.read_bytes(),
             b"## Trick\n\nNew\nbody\n\n## Trick\n\nOther.\n",
@@ -480,6 +479,7 @@ class TestEditTrickCommand(_TricksHome):
         self.assertEqual(resync["tricks"][0], "First mine.")
 
 
+@requires_unix_sockets
 class TestEditTrickOverUds(_TricksHome):
     """``editTrick`` travels the real transport: UDS → catalog → handler."""
 

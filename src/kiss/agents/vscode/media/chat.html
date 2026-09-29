@@ -101,6 +101,10 @@
                   <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg></span>
                   <span class="more-item-label">Git Commit</span>
                 </button>
+                <button id="browser-btn" class="more-menu-item" role="menuitem" data-tooltip="Open the browser of the machine running KISS Sorcar as a tab" aria-label="Open browser">
+                  <span class="more-item-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
+                  <span class="more-item-label">Browser</span>
+                </button>
                 <button id="theme-btn" class="more-menu-item" role="menuitem">
                   <span class="more-item-icon"></span>
                   <span class="more-item-label">Switch theme</span>
@@ -625,6 +629,7 @@
   <script {{NONCE_ATTR}} src="{{PANEL_COPY_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{CTX_MENU_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{TREE_MENU_SRC}}"></script>
+  <script {{NONCE_ATTR}} src="{{BROWSER_TAB_SRC}}"></script>
   <script {{NONCE_ATTR}} src="{{MAIN_SRC}}"></script>
   <script {{NONCE_ATTR}}>window.__VOICE__ = {{VOICE_CONFIG}};</script>
   <script {{NONCE_ATTR}} src="{{VOICE_SRC}}"></script>

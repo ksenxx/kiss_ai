@@ -36,6 +36,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -69,6 +70,10 @@ _HEADED_UA_TOKEN = "Chrome"
 # renderer that never answers after a timed-out ``goto``) must surface as
 # a tool error, never as a tool call that hangs the whole task.
 _PAGE_READ_TIMEOUT_MS = 10000
+
+# How long to wait for a tab the daemon opened in the Browser tab's
+# browser to show up in this tool's own CDP client.
+_LIVE_PAGE_TIMEOUT = 15.0
 
 # Deadline for raw input operations (keyboard.press/type, mouse.move/wheel)
 # that have no Playwright timeout parameter.  A page event handler that
@@ -287,6 +292,34 @@ class _TimerGuard:
         self._timer.cancel()
 
 
+@dataclass
+class _Session:
+    """What moves with the browsing session between two browsers."""
+
+    url: str
+    cookies: list[Any]
+    # The page's origin and the ``[key, value]`` pairs of its localStorage
+    # (empty origin: the storage could not be read).
+    origin: str = ""
+    local_storage: list[list[str]] = field(default_factory=list)
+
+
+# Writes *items* and drops *removed* in the page's localStorage, unless
+# the page landed on another origin (a redirect): a token must never be
+# handed to a site it was not set by.
+_RESTORE_STORAGE_JS = """([origin, items, removed]) => {
+  if (location.origin !== origin) return false;
+  for (const [k, v] of items) localStorage.setItem(k, v);
+  for (const k of removed) localStorage.removeItem(k);
+  return true;
+}"""
+
+
+def _cookie_key(cookie: dict[str, Any]) -> tuple[str, str, str]:
+    """The identity of a cookie: name, domain and path."""
+    return (cookie["name"], cookie["domain"], cookie["path"])
+
+
 def _rmtree_logged(path: str) -> None:
     """Remove *path* recursively, logging a WARNING if it survives.
 
@@ -424,8 +457,15 @@ class WebUseTool:
     out — survive across sessions.
 
     When a page needs a human — an interactive login, a CAPTCHA, a bot
-    check — :meth:`show_browser` reopens the same profile in a visible
-    window and re-navigates to the current page.
+    check, a live demo — :meth:`show_browser` moves the session to the
+    user's Browser tab: the daemon's browser (``live_browser``, a
+    :class:`kiss.server.browser_tab.BrowserTabService`) opens a tab that
+    every KISS surface streams, and this tool drives that page through a
+    second CDP client while the user watches and interacts.  That browser
+    keeps its own persistent profile across tasks and daemon restarts;
+    the cookies of the headless session are carried into it (and back).
+    Without a daemon, :meth:`show_browser` reopens the profile in a
+    visible window instead.
     """
 
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
@@ -437,8 +477,19 @@ class WebUseTool:
         headless: bool = True,
         work_dir: str | None = None,
         ephemeral: bool = False,
+        live_browser: Any = None,
         **_kwargs: Any,
     ) -> None:
+        self._live_browser = live_browser
+        # True while the session lives in the Browser tab (show_browser);
+        # _live_tab is the id of the tab this tool opened there.
+        self._live = False
+        self._live_tab: str | None = None
+        # What the last switch of browser carried in: cookies, and the
+        # localStorage keys of one origin.  Those that have died by the
+        # next switch are deleted on the other side too.
+        self._carried_cookies: list[Any] = []
+        self._carried_storage: tuple[str, set[str]] = ("", set())
         self._ephemeral_dir: str | None = None
         if ephemeral:
             self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
@@ -502,6 +553,17 @@ class WebUseTool:
         """Return True iff the current page/context survived (not crashed/closed)."""
         if self._playwright is None or self._context is None or self._page is None:
             return False
+        if self._live:
+            # In the Browser tab the user closes tabs and navigates too, and
+            # this client only hears of that while it talks to the browser:
+            # a round trip (browser-side, no renderer involved) first, so a
+            # closed tab, an exited browser and the page's current URL are
+            # all up to date when ``is_closed()``/``url`` are read next.
+            try:
+                self._context.new_cdp_session(self._page).detach()
+            except Exception:  # noqa: BLE001 - the tab or the browser is gone
+                logger.debug("Exception caught", exc_info=True)
+                return False
         try:
             return not self._page.is_closed()
         except Exception:  # pragma: no cover — Playwright internals rarely throw here
@@ -553,8 +615,122 @@ class WebUseTool:
         self._browser = None
         self._elements = []
 
-    def _close_browser_only(self) -> None:
+    def _attach_live(self) -> None:
+        """Open a tab in the Browser tab's browser and adopt its page over CDP.
+
+        The daemon's service creates the tab (so every surface shows it)
+        and returns the page's target id; this tool connects a second
+        Playwright client to the same browser and picks that page.  A tab
+        the user closed, or a browser that exited, is replaced by a fresh
+        tab on the next call.  A tab this client fails to pick up is
+        closed again so it does not linger blank in front of the user.
+        """
+        if self._playwright is None:
+            self._playwright = web_stealth.playwright_api().sync_playwright().start()
+        tab = self._live_browser.open_for_agent()
+        try:
+            if not self._live_connected():
+                self._browser = self._playwright.chromium.connect_over_cdp(tab.cdp_url)
+                self._browser.on("disconnected", self._on_browser_lost)
+            self._context = self._browser.contexts[0]
+            page = self._find_live_page(tab.target_id)
+        except Exception:
+            self._live_browser.close(tab.tab_id)
+            raise
+        self._live_tab = tab.tab_id
+        self._adopt_page(page)
+        self._elements = []
+        self._mouse_xy = None
+
+    def _live_connected(self) -> bool:
+        """Whether the CDP connection to the Browser tab's browser is still usable.
+
+        A round trip, not just ``is_connected()``: the sync client learns
+        of a dropped connection (and of pages closed meanwhile) only
+        while it talks to the browser.
+        """
+        if self._browser is None:
+            return False
+        try:
+            self._browser.new_browser_cdp_session().detach()
+        except Exception:  # noqa: BLE001 - the browser exited
+            logger.debug("Exception caught", exc_info=True)
+            return False
+        return bool(self._browser.is_connected())
+
+    def _target_id(self, page: Any) -> str:
+        """Chromium's target id of *page* (what the daemon's service knows it by)."""
+        session = self._context.new_cdp_session(page)
+        try:
+            return str(session.send("Target.getTargetInfo")["targetInfo"]["targetId"])
+        finally:
+            session.detach()
+
+    def _find_live_page(self, target_id: str) -> Any:
+        """Return the shared context's page whose Chromium target id is *target_id*.
+
+        The page was created by the daemon's client, so this client learns
+        about it through a ``page`` event; the scan repeats until it
+        arrives.  Pages that close mid-scan are skipped.
+        """
+        deadline = time.monotonic() + _LIVE_PAGE_TIMEOUT
+        while True:
+            for page in list(self._context.pages):
+                try:
+                    found = self._target_id(page) == target_id
+                except Exception:  # noqa: BLE001 - the page closed under us
+                    continue
+                if found:
+                    return page
+            if time.monotonic() > deadline:
+                raise RuntimeError("The Browser tab's page did not show up in this client.")
+            try:
+                self._context.wait_for_event("page", timeout=200)
+            except Exception:  # noqa: BLE001 - timed out: rescan
+                logger.debug("Exception caught", exc_info=True)
+
+    def _live_tab_id(self) -> str | None:
+        """The Browser-tab id of the current page, resolved lazily.
+
+        Following a popup (:meth:`_check_for_new_tab`) moves ``_page`` to
+        a page the daemon announced on its own; its tab id is looked up
+        from the page's target id when first needed (closing it, or
+        interrupting a hung script).
+        """
+        if self._live_tab is None and self._page is not None:
+            try:
+                self._live_tab = self._live_browser.tab_for_target(self._target_id(self._page))
+            except Exception:  # noqa: BLE001 - the page is gone
+                logger.debug("Exception caught", exc_info=True)
+        return self._live_tab
+
+    def _detach_live(self, close_tab: bool) -> None:
+        """Disconnect from the Browser tab's browser, which keeps running.
+
+        Args:
+            close_tab: Close this tool's page on every surface too.  False
+                leaves it in front of the user (end of a task).
+        """
+        if close_tab and self._is_alive():
+            try:
+                self._page.close()
+            except Exception:  # noqa: BLE001 - closed by the user meanwhile
+                logger.debug("Could not close the Browser tab's page", exc_info=True)
+        self._live_tab = None
+        browser, self._browser = self._browser, None
+        if browser is not None:
+            try:
+                browser.close()  # a connected browser only disconnects
+            except Exception:  # noqa: BLE001 - the browser may already be gone
+                logger.debug("Could not disconnect from the Browser tab", exc_info=True)
+        self._on_browser_lost()
+
+    def _close_browser_only(self, keep_live_tab: bool = False) -> None:
         """Close context/browser if present, leaving self._playwright running.
+
+        In the Browser tab (``_live``) only this client is detached; the
+        daemon's browser is the user's and stays up, its tab closed
+        unless *keep_live_tab*.
 
         A failed graceful close (wedged driver connection, cross-thread
         greenlet error) is logged at WARNING and followed by
@@ -564,6 +740,9 @@ class WebUseTool:
         HANGS (never returns) — after ``_CLOSE_WATCHDOG_SECS`` it kills
         the browser process directly, which also unwedges the hung call.
         """
+        if self._live:
+            self._detach_live(close_tab=not keep_live_tab)
+            return
         pid = self._browser_pid
         identity = self._browser_identity
         watchdog: threading.Timer | None = None
@@ -692,6 +871,10 @@ class WebUseTool:
         dead page that would otherwise fail every subsequent call.
         """
         if self._is_alive():
+            return
+        if self._live:
+            # The user closed the tab (or the browser exited): open a new one.
+            self._attach_live()
             return
         if self._page is not None and self._context is not None:
             try:
@@ -998,6 +1181,15 @@ class WebUseTool:
             A ``threading.Timer``-cancelling context manager guarding the
             ``with`` block.
         """
+        if self._live:
+            # The browser is the user's: the daemon's service stops the
+            # hung script (and closes only that tab if it stays wedged).
+            tab_id = self._live_tab_id()
+            if tab_id is None:
+                return nullcontext()
+            timer = threading.Timer(deadline_secs, self._live_browser.interrupt, args=(tab_id,))
+            timer.daemon = True
+            return _TimerGuard(timer)
         pid = self._browser_pid
         identity = self._browser_identity
         if not _killable_live_pid(pid):
@@ -1264,6 +1456,7 @@ class WebUseTool:
         pages = self._context.pages
         if len(pages) > 1 and pages[-1] != self._page:  # pragma: no branch
             self._adopt_page(pages[-1])
+            self._live_tab = None  # resolved from the page when needed
 
     def _resolve_locator(self, element_id: int) -> Any:
         element_id = int(element_id)
@@ -1564,9 +1757,12 @@ class WebUseTool:
     def close(self) -> str:
         """Close the browser and release resources. Call when done with the session or before exit.
 
+        A page shown in the Browser tab stays open there for the user;
+        only this tool's connection to it is dropped.
+
         Returns:
             "Browser closed." (always, even if nothing was open)."""
-        self._close_browser_only()
+        self._close_browser_only(keep_live_tab=True)
         if self._playwright:
             try:
                 self._playwright.stop()
@@ -1585,7 +1781,8 @@ class WebUseTool:
         over) so the browser does not stay running for the rest of a
         long task. Safe to call anytime: the next web tool call (e.g.
         go_to_url) automatically relaunches a fresh browser with the same
-        profile, so logins are preserved.
+        profile, so logins are preserved. While the page is shown in the
+        Browser tab this closes that tab on every surface.
 
         Returns:
             "Browser closed. It will relaunch automatically on the next web tool call."."""
@@ -1596,77 +1793,153 @@ class WebUseTool:
         )
 
     def show_browser(self, visible: bool = True) -> str:
-        """Show the Chromium window on screen. Browsing is headless by default.
+        """Show the page to the user, live, in a Browser tab on every KISS surface.
 
-        Call this when a page needs the human in front of the screen: an
-        interactive login or OAuth consent, a CAPTCHA, an "unusual traffic"
-        bot check, or when the user asks to watch what you are doing. The
-        same browser profile is reused, so cookies and logins carry over,
-        and the page you are on is reopened in the visible window. Pass
-        visible=False to go back to the headless window when the human
-        part is done.
+        Call this whenever the user should see or interact with a page:
+        an interactive login or OAuth consent, a CAPTCHA or "unusual
+        traffic" bot check, a demo or test of a web app the user wants to
+        watch, or any browsing the user asked to follow live. The page you
+        are on reopens as a Browser tab that every surface switches to;
+        the user can click and type in it while you keep driving the same
+        page with the other web tools (screenshot, click, type_text,
+        get_page_content, ...). That browser keeps its cookies and logins
+        across tasks and daemon restarts, and the cookies of the current
+        headless session are carried into it. Without a KISS daemon the
+        browser is shown as a window on the machine instead. Pass
+        visible=False when the human part is done: the tab closes and
+        browsing continues headless with the cookies carried back.
 
         Args:
-            visible: True to reopen the browser in a window the user can see
-                and interact with, False to return to headless browsing.
+            visible: True to show the page to the user, False to return to
+                headless browsing.
 
         Returns:
             The accessibility tree of the reopened page, or
-            "Browser is now visible."/"Browser is now headless." when no page
-            was open, or "Error <doing something>: <message>" on failure."""
+            "Browser is now visible in the Browser tab."/"Browser is now
+            headless." when no page was open, or
+            "Error <doing something>: <message>" on failure."""
         state = "visible" if visible else "headless"
-        if self._headless == (not visible) and self._is_alive():
+        if visible == (self._live or not self._headless) and self._is_alive():
             return f"Browser is already {state}."
-        url, cookies = self._capture_session()
+        session = self._capture_session()
         self._close_browser_only()
-        self._headless = not visible
+        self._live = visible and self._live_browser is not None
+        self._headless = not visible or self._live
         err = self._try_ensure_browser(f"making the browser {state}")
         if err is not None:
+            if self._live:
+                self._detach_live(close_tab=True)
+                self._live, self._headless = False, True
             return err
-        self._restore_cookies(cookies)
-        if url:
-            return self.go_to_url(url)
+        self._restore_session(session)
+        if session is not None and session.url:
+            return self.go_to_url(session.url)
+        if self._live:
+            return "Browser is now visible in the Browser tab."
         return f"Browser is now {state}."
 
-    def _capture_session(self) -> tuple[str, list[Any]]:
-        """Return the page to reopen and the cookies to carry across a relaunch.
+    def _capture_session(self) -> _Session | None:
+        """Return what to carry into the browser that takes over the session.
 
         Chromium cannot switch between headless and visible without being
-        restarted, and a restart drops every session-only cookie — exactly
-        the cookies a login or bot-check flow is in the middle of setting.
-        They are handed back to the new browser by
-        :meth:`_restore_cookies`.
+        restarted, and the Browser tab is a different browser altogether,
+        so the page's URL, the context's cookies (a login or bot-check
+        flow is usually mid-way through setting them) and the page
+        origin's ``localStorage`` (token-based logins) travel along; they
+        are handed to the new browser by :meth:`_restore_session`.
 
         Returns:
-            The URL to reopen (empty when nothing worth reopening is
-            loaded) and the cookies of the current context.
+            The session to restore (``url`` empty when nothing worth
+            reopening is loaded), or ``None`` when there is no live page
+            to capture from.
         """
         if not self._is_alive():
-            return "", []
+            return None
         # The user may have opened a tab themselves while the window was
-        # visible; that newest tab is the one worth carrying over.
-        self._check_for_new_tab()
+        # visible; that newest tab is the one worth carrying over.  In the
+        # Browser tab the newest page may be an unrelated tab of the user's.
+        if not self._live:
+            self._check_for_new_tab()
         url = self._page.url
         if url.startswith("about:"):
             url = ""
+        session = _Session(url, [])
         try:
-            return url, self._context.cookies()
+            session.cookies = self._context.cookies()
         except Exception:  # pragma: no cover — reading cookies rarely fails
             logger.debug("Could not read cookies before relaunch", exc_info=True)
-            return url, []
+        if url:
+            try:
+                session.origin, session.local_storage = self._page.wait_for_function(
+                    "() => [location.origin, Object.entries(localStorage)]",
+                    timeout=_PAGE_READ_TIMEOUT_MS,
+                    polling=100,
+                ).json_value()
+            except Exception:  # noqa: BLE001 - opaque origin (data:) or a stuck page
+                logger.debug("Could not read localStorage before relaunch", exc_info=True)
+        return session
 
-    def _restore_cookies(self, cookies: list[Any]) -> None:
-        """Add *cookies* to the freshly launched context.
+    def _restore_session(self, session: _Session | None) -> None:
+        """Move *session* into the freshly launched browser.
+
+        Cookies are added, and the cookies carried in at the previous
+        switch that have since died (logged out, expired) are deleted so
+        they do not come back to life; other cookies of the destination
+        are left alone.  The origin's ``localStorage`` is reconciled the
+        same way by opening the page once before the caller navigates to
+        it properly.  With nothing captured (the page was already closed)
+        nothing is deleted either: an empty capture is not a logout.
 
         Args:
-            cookies: Cookies captured by :meth:`_capture_session`.
+            session: What :meth:`_capture_session` returned.
         """
-        if not cookies:
+        if session is None:
+            self._carried_cookies, self._carried_storage = [], ("", set())
+            return
+        alive = {_cookie_key(c) for c in session.cookies}
+        for cookie in self._carried_cookies:
+            if _cookie_key(cookie) not in alive:
+                try:
+                    self._context.clear_cookies(
+                        name=cookie["name"], domain=cookie["domain"], path=cookie["path"]
+                    )
+                except Exception:  # pragma: no cover — clearing a cookie rarely fails
+                    logger.debug("Could not drop a dead cookie after relaunch", exc_info=True)
+        self._carried_cookies = session.cookies
+        if session.cookies:
+            try:
+                self._context.add_cookies(session.cookies)
+            except Exception:  # pragma: no cover — a malformed cookie is rare
+                logger.debug("Could not restore cookies after relaunch", exc_info=True)
+        self._restore_local_storage(session)
+
+    def _restore_local_storage(self, session: _Session) -> None:
+        """Write the captured origin's localStorage into the current browser.
+
+        Keys carried in at the previous switch for the same origin that
+        are gone now are removed.  The page is opened once for the write,
+        which is skipped if it lands on another origin.
+        """
+        keys = {key for key, _ in session.local_storage}
+        carried_origin, carried_keys = self._carried_storage
+        removed = sorted(carried_keys - keys) if carried_origin == session.origin else []
+        # Only keys actually written count as carried: a skipped write must
+        # not make their later absence look like a logout.
+        self._carried_storage = ("", set())
+        if not session.origin or not (session.local_storage or removed):
             return
         try:
-            self._context.add_cookies(cookies)
-        except Exception:  # pragma: no cover — a malformed cookie is rare
-            logger.debug("Could not restore cookies after relaunch", exc_info=True)
+            self._page.goto(session.url, wait_until="commit")
+            written = self._page.evaluate(
+                _RESTORE_STORAGE_JS, [session.origin, session.local_storage, removed]
+            )
+        except Exception:  # noqa: BLE001 - the origin is unreachable right now
+            logger.debug("Could not restore localStorage after relaunch", exc_info=True)
+            return
+        if written:
+            self._carried_storage = (session.origin, keys)
+        else:
+            logger.debug("localStorage not restored: %s moved to another origin", session.url)
 
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.

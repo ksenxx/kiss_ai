@@ -1921,7 +1921,9 @@ body.remote-chat #theme-btn { display: flex; }
    every expanded body takes an EQUAL share (`flex: 1 1 0`, below);
    main.js (metasections block) gives a dragged body `flex: 0 1 <px>`,
    except the last expanded section's body, which always fills the
-   leftover height.  A collapsed section shows its header only.  The resizer
+   leftover height.  Every expanded body keeps a minimum share, so a
+   dragged body cannot hide the ones below it.  A collapsed section
+   shows its header only.  The resizer
    after a section is the separator line between it and the next
    shown section; it drags the boundary while both sides are expanded
    (`static` otherwise: still a separator, no longer a handle). */
@@ -1980,18 +1982,18 @@ body.remote-chat #theme-btn { display: flex; }
    content (more content than fits scrolls).  With a zero basis these
    bodies are the first to give up space when the panel is too short:
    a dragged body (`flex: 0 1 <px>`, set by main.js) keeps the height
-   the user chose until nothing else can shrink. */
+   the user chose until nothing else can shrink.  The minimum height
+   is what every expanded body keeps against dragged bodies above it:
+   half of an equal share (--meta-body-share, measured by main.js's
+   applyMetaSectionLayout), at most 4rem (about a row or two).  Without
+   it a persisted drag left a section's header over an empty 0px body,
+   which read as "the Schedule shows no jobs".  Tied to the share, the
+   minimums never add up to more than the panel has. */
 .meta-section-body {
   flex: 1 1 0px;
-  min-height: 0;
+  min-height: min(4rem, calc(var(--meta-body-share, 0px) / 2));
   overflow-y: auto;
 }
-
-/* The body that fills the leftover height (the last expanded one, see
-   applyMetaSectionLayout) keeps a minimum share of the panel while a
-   body above it has a dragged height: the dragged bodies cannot
-   squeeze it to zero height. */
-.meta-section-body.meta-section-fill { min-height: min(8em, 30%); }
 
 /* The separator between two shown sections: a 1px line inside a 9px
    grab area.  main.js hides the one after the last shown section. */
@@ -4864,6 +4866,124 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* The daemon machine's browser streamed as a tab (browserTab.js): an
+   address bar over the frame surface.  The surface is the element the
+   daemon sizes the page to, so it must fill the tab exactly. */
+#content-tab-area .browser-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+#content-tab-area .browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+}
+
+#content-tab-area .browser-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+#content-tab-area .browser-nav-btn:hover:not(:disabled) {
+  background: var(--panel-tint);
+}
+
+#content-tab-area .browser-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+#content-tab-area .browser-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-md);
+}
+
+#content-tab-area .browser-url:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#content-tab-area .browser-badge {
+  flex: 0 0 auto;
+  max-width: 9em;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--fs-sm);
+  opacity: 0.7;
+  cursor: help;
+}
+
+#content-tab-area .browser-error {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  color: var(--error);
+  font-size: var(--fs-md);
+  border-bottom: 1px solid var(--border);
+}
+
+#content-tab-area .browser-screen {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--paper);
+  cursor: default;
+  outline: none;
+  touch-action: none;
+  user-select: none;
+}
+
+#content-tab-area .browser-screen:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+#content-tab-area .browser-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  pointer-events: none;
+}
+
+#content-tab-area .browser-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink);
+  opacity: 0.6;
+  font-size: var(--fs-md);
+  pointer-events: none;
 }
 
 #content-tab-area .content-html-frame {

@@ -13,7 +13,9 @@ Responses API) and everything else as the Chat Completions v1 adapter, with
 ``model_config["use_responses_api"]`` overriding in either direction.
 """
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -219,6 +221,59 @@ class TestMyModelsAliasSync:
         }
         _sync_alias_transport_flags(raw, {"gpt-7", "gpt-7-low"})
         assert raw["gpt-7-low"]["use_responses_api"] is True
+
+    def test_base_price_override_propagates_to_bundled_aliases(self) -> None:
+        """A base-only price override prices its aliases the same way.
+
+        Prices the base sets are copied; bundled alias prices the base
+        does not set are dropped, so derived cache prices follow the
+        overridden input price.
+        """
+        from kiss.core.models.model_info import _sync_alias_transport_flags
+
+        raw: dict[str, dict] = {
+            "gpt-7": {"input_price_per_1M": 100.0, "output_price_per_1M": 200.0},
+            "gpt-7-high": {
+                "alias_of": "gpt-7",
+                "input_price_per_1M": 2.0,
+                "output_price_per_1M": 10.0,
+                "cache_read_price_per_1M": 0.2,
+            },
+        }
+        _sync_alias_transport_flags(raw, {"gpt-7"})
+        assert raw["gpt-7-high"] == {
+            "alias_of": "gpt-7",
+            "input_price_per_1M": 100.0,
+            "output_price_per_1M": 200.0,
+        }
+
+    def test_my_models_base_price_override_bills_its_alias(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End to end: a MY_MODELS base override is what its alias costs."""
+        from kiss.core.models import model_info
+
+        bundled = json.loads(model_info.PACKAGE_MODEL_INFO_PATH.read_text())
+        base, alias = next(
+            (entry["alias_of"], name)
+            for name, entry in bundled.items()
+            if entry.get("alias_of") in bundled
+        )
+        override = dict(bundled[base])
+        override["input_price_per_1M"] = 123.0
+        override["output_price_per_1M"] = 456.0
+        for field in ("cache_read_price_per_1M", "cache_write_price_per_1M"):
+            override.pop(field, None)
+        my_models = tmp_path / "MY_MODELS.json"
+        my_models.write_text(json.dumps({base: override}))
+        monkeypatch.setattr(model_info, "USER_MY_MODELS_PATH", my_models)
+        table = model_info._load_catalog_file(model_info.PACKAGE_MODEL_INFO_PATH)
+        assert table[alias].input_price_per_1M == 123.0
+        assert table[alias].output_price_per_1M == 456.0
+        assert (
+            table[alias].cache_read_price_per_1M
+            == table[base].cache_read_price_per_1M
+        )
 
     def test_untouched_bases_leave_aliases_alone(self) -> None:
         """Without a user override the bundled alias copies are untouched."""
