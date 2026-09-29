@@ -4079,7 +4079,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The line under the chat header: when the chat's latest task was
-   launched, in the task panels' "launched ... ago" style. Indented to
+   launched, in the task panels' "... ago" age-label style. Indented to
    the header's title column; empty until the daemon's stamp arrives. */
 .history-chat-launched {
   display: flex;
@@ -4287,9 +4287,9 @@ body.remote-chat .running-item.history-active-task:hover {
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
 .running-item.collapsed > .running-item-info { display: none; }
 
-/* "launched 3 hours ago" — the task's age, next to the show-details
-   chevron of a history task panel. Muted and small so it reads as
-   metadata; it may shrink (with an ellipsis) but never wraps. */
+/* "3 hours ago" — the task's age, right after the show-details chevron
+   of a history task panel. Muted and small so it reads as metadata; it
+   may shrink (with an ellipsis) but never wraps. */
 .sidebar-item-launched {
   flex-shrink: 1;
   min-width: 0;
@@ -4302,9 +4302,9 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-/* The task's tags ("work · coding"), right before its "launched ..."
-   label and in the same muted style, so the two read as one line of
-   metadata. */
+/* The task's tags ("work · coding") and agent script, right after its
+   "3 hours ago" label and in the same muted style, so they read as one
+   line of metadata. */
 .sidebar-item-tags,
 .sidebar-item-sea {
   flex-shrink: 1;
@@ -4318,9 +4318,9 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-.sidebar-item-tags + .sidebar-item-sea::before,
-.sidebar-item-tags + .sidebar-item-launched::before,
-.sidebar-item-sea + .sidebar-item-launched::before {
+.sidebar-item-launched + .sidebar-item-tags::before,
+.sidebar-item-launched + .sidebar-item-sea::before,
+.sidebar-item-tags + .sidebar-item-sea::before {
   content: '•';
   margin-right: var(--space-0-5);
 }

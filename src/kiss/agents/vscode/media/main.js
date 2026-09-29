@@ -20424,10 +20424,10 @@
     return btn;
   }
 
-  // "launched 3 hours ago" label shown next to the show-details
+  // "3 hours ago" launch-age label shown right after the show-details
   // chevron of every task panel in the task-history panel. The unit
   // ladder is minutes -> hours -> days -> weeks -> months -> years;
-  // anything under a minute reads "launched just now".
+  // anything under a minute reads "just now".
 
   function launchedAgoUnit(count, unit) {
     return count + ' ' + unit + (count === 1 ? '' : 's') + ' ago';
@@ -20470,21 +20470,33 @@
   }
 
   /**
-   * A "launched 3 hours ago" label for the instant *ms*, refreshed by
-   * the 30 s sweep below; *prefix* replaces the leading word ("last
-   * launched" for a chat panel).  Null for an unusable instant.
+   * The text of a launched-ago label: "3 hours ago", led by *prefix*
+   * ("last launched") when one is given.
+   */
+  function launchedAgoLabelText(ms, prefix) {
+    const ago = taskLaunchedAgoText(ms);
+    return prefix ? prefix + ' ' + ago : ago;
+  }
+
+  /**
+   * A "3 hours ago" label for the instant *ms*, refreshed by the 30 s
+   * sweep below; *prefix* adds a leading phrase ("last launched" for a
+   * chat panel; a task panel shows the bare age).  The tooltip spells
+   * out "Launched <local date>" (or "<Prefix> <local date>").  Null for
+   * an unusable instant.
    */
   function makeLaunchedAgoLabelFor(ms, prefix) {
     if (!isFinite(ms)) return null;
-    const lead = prefix || 'launched';
+    const lead = prefix || '';
     const span = document.createElement('span');
     span.className = 'sidebar-item-launched';
     span.dataset.launchTs = String(ms);
     span.dataset.launchPrefix = lead;
-    span.textContent = lead + ' ' + taskLaunchedAgoText(ms);
+    span.textContent = launchedAgoLabelText(ms, lead);
+    const tip = lead || 'launched';
     span.title =
-      lead.charAt(0).toUpperCase() +
-      lead.slice(1) +
+      tip.charAt(0).toUpperCase() +
+      tip.slice(1) +
       ' ' +
       new Date(ms).toLocaleString();
     scheduleLaunchedAgoRefresh();
@@ -20492,12 +20504,12 @@
   }
 
   function makeLaunchedAgoLabel(session) {
-    return makeLaunchedAgoLabelFor(taskLaunchMs(session), 'launched');
+    return makeLaunchedAgoLabelFor(taskLaunchMs(session), '');
   }
 
   /**
    * The task's classification tags ("work · coding"), shown right
-   * before its "launched ..." label; null when the row has none (a
+   * after its "3 hours ago" label; null when the row has none (a
    * task still running, or a daemon predating the `tags` column).
    */
   function makeTaskTagsLabel(session) {
@@ -20561,7 +20573,7 @@
     hfSea.value = selected;
   }
 
-  // Keep every on-screen "launched ... ago" label current: history
+  // Keep every on-screen "... ago" launch-age label current: history
   // re-renders only happen on daemon broadcasts, so without this sweep
   // a quiet panel would keep saying "just now" forever. The sweep is a
   // 30 s timeout CHAIN, not a permanent interval: it is armed when a
@@ -20582,8 +20594,7 @@
     labels.forEach(el => {
       const ms = Number(el.dataset.launchTs);
       if (!isFinite(ms) || ms < 0) return;
-      const lead = el.dataset.launchPrefix || 'launched';
-      const text = lead + ' ' + taskLaunchedAgoText(ms);
+      const text = launchedAgoLabelText(ms, el.dataset.launchPrefix || '');
       if (el.textContent !== text) el.textContent = text;
     });
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
@@ -21664,12 +21675,13 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      // After the buttons: the task's age, then its tags and agent script.
+      const launchedAgo = makeLaunchedAgoLabel(s);
+      if (launchedAgo) actions.appendChild(launchedAgo);
       const tagsLabel = makeTaskTagsLabel(s);
       if (tagsLabel) actions.appendChild(tagsLabel);
       const seaLabel = makeTaskSeaLabel(s);
       if (seaLabel) actions.appendChild(seaLabel);
-      const launchedAgo = makeLaunchedAgoLabel(s);
-      if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
 
       const info = document.createElement('div');

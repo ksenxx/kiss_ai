@@ -27,7 +27,7 @@ import sqlite3
 from pathlib import Path
 
 #: Upper bound on the number of tags stored per task: the history panel
-#: shows them inline before the "launched ..." label.
+#: shows them inline after the "... ago" launch-age label.
 MAX_TAGS = 6
 
 _SUMMARY_MIN_WORDS = 6
