@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 661 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 661 models.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1952,7 +1952,7 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>661 models</strong> · 9 providers</span>
+      <span><strong>695 models</strong> · 9 providers</span>
       <span><strong>~3,000 lines</strong> of core agents code</span>
     </div>
   </div>
@@ -2083,7 +2083,7 @@
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">661 across 9 provider categories</td>
+              <td class="kiss">695 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2113,7 +2113,7 @@
             </tr>
             <tr>
               <th class="cap">Messaging and communication channels</th>
-              <td class="kiss"><span class="yes">✓</span> 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace</td>
+              <td class="kiss"><span class="yes">✓</span> 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace</td>
               <td><span class="warn">⚠</span> Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
               <td><span class="warn">⚠</span> Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel</td>
             </tr>
@@ -2125,7 +2125,7 @@
             </tr>
             <tr>
               <th class="cap">Wake word for voice interaction</th>
-              <td class="kiss">Sorcar</td>
+              <td class="kiss">"Hey Sorcar"</td>
               <td>N/A</td>
               <td>N/A</td>
             </tr>
@@ -2813,8 +2813,8 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 10 — Models Supported</span>
-    <h2>🤖 661 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>661 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight <code>openai/gpt-oss-*</code> and <code>google/gemma-*</code> models are served via Together AI.</p>
+    <h2>🤖 695 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>695 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight <code>openai/gpt-oss-*</code> and <code>google/gemma-*</code> models are served via Together AI.</p>
 
     <div class="section-body">
       <div class="grid-2">
@@ -3626,7 +3626,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "661 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "695 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {

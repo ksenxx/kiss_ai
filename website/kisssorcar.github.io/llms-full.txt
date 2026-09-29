@@ -16,7 +16,7 @@
 - [Installation](https://kisssorcar.github.io/docs/installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [Client Interfaces](https://kisssorcar.github.io/docs/cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](https://kisssorcar.github.io/docs/api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
-- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 661-model catalog across 9 provider categories
+- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 695-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md) — Every SEA folder `xxx/xxx_sea.py` is a chat command `/xxx` and `/xxx help` prints its `description()`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) — Ready-to-use example prompts
@@ -67,7 +67,7 @@ print(result.text)
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-- **Version:** 2026.9.14
+- **Version:** 2026.9.27
 - **License:** Apache-2.0
 - **Python:** 3.13+
 - **Website:** <https://kisssorcar.github.io/>
@@ -84,14 +84,14 @@ print(result.text)
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 661 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 695 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | Run on top of Claude Code / Codex CLI | Yes — `cc/*` and `codex/*` namespaces | N/A | No |
-| Messaging and communication channels | 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| Messaging and communication channels | 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
 | Scheduled automations | Natural-language cron agent | — | — |
-| Wake word for voice interaction | Sorcar | N/A | N/A |
+| Wake word for voice interaction | "Hey Sorcar" | N/A | N/A |
 
 ## Unique Features
 
@@ -100,7 +100,7 @@ print(result.text)
 - **Multi-model orchestration in one task.** Ask one model to implement and another to review — expressed entirely in the prompt, e.g. "Use claude-fable-5 for development and gpt-5.6-sol for review."
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
-- **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
+- **Voice interaction.** With the "Hey Sorcar" wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
 - **44 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
 - **Pre-run task classification.** Normally one fast non-agentic model call (structured output, with one plain-text retry if that fails) detects whether a task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - **Persistent agent memory.** On by default: standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks. Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index, and a run inside a git repository also gets that repository's own memory in `~/.kiss/memories/<repo>/`; toggle it in the Settings panel or set `KISS_USE_MEMORY=0`.
@@ -226,15 +226,16 @@ kiss-web --url
 
 Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and type or speak your task. The chat interface provides:
 
-- `@` file/folder mentions with ranked project-file completion.
+- `@` file/folder mentions with ranked file completion over the working directory (`./path` items) and the rest of your home directory (`~/path` items), served from a persistent file index that is refreshed in the background. In a tab that is neither running a task nor waiting for an answer, a one-line message that is just the path of an existing file opens that file in the editor or a content tab instead of starting a task.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
-- A pre-run **task classifier** that detects whether the task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Classify with Jev" (`classify_with_decisions`; unticked pins the LLM classifier).
+- A pre-run **task classifier** that detects whether the task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` and "Use Jev (decisions model)" ticked it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Use Jev (decisions model)" (`classify_with_decisions`, off by default). The Jev checkbox is the one switch for the decisions model: ticked, the classifier asks Jev first and every agent gets the `decide` tool; unticked, the LLM classifier answers and no task calls Jev.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
 - **Image and PDF attachments**: attach files to a task via the picker, paste, or drag-and-drop — images (HEIC/HEIF converted, oversized ones re-encoded) and PDFs are sent to the model along with the prompt.
 - **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel or set `KISS_USE_MEMORY=0`; a custom directory goes in the `memory_dir` key of `~/.kiss/config.json`. A run whose working directory is inside a git repository also gets that repository's own memory, the sub-directory `~/.kiss/memories/<repo>/` named after the repository directory (shared by a main checkout and its linked worktrees; independent clones share it only when their directory names match): its pages are addressed as `<repo>/<page>`, `memory_search` covers every memory unless narrowed with `memory=`, and the protocol tells the agent to keep repository knowledge there and cross-project lessons in the general memory.
-- Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
+- Wake-word voice chat ("Hey Sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run. Wrapping the message in `<task>…</task>` tags instead queues it as a follow-up task that runs sequentially after the current task finishes.
-- Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory, and sub-agents dispatched with `run_agent` open their own tab in the calling workspace.
+- Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory. A sub-agent dispatched with `run_agent` or `run_parallel` opens a nested tab of its own on every client viewing the parent task, which is closed everywhere when the sub-agent finishes; closing it by hand while the sub-agent runs closes it on every surface until you reopen it from its history row or by collapsing and expanding the fan-out panel.
+- In the remote web app, file links in a transcript open in **content tabs**: text files in a Monaco editor, Markdown and HTML with preview and source views, images in the browser's viewer, and PDFs in a bundled pdf.js viewer (fit-to-width pages, pinch or Ctrl/Cmd + wheel zoom, an editable "Page N of M" field, a Download link and keyboard paging) that the VS Code extension also uses for `.pdf` links.
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
@@ -365,7 +366,7 @@ Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
-- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight model call: a typed question to a decisions model when an OpenRouter key is configured and the `classify_with_decisions` setting — the settings panel's "Classify with Jev" checkbox — is on, else a non-agentic call on the run's own LLM) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
+- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight model call: a typed question to a decisions model when an OpenRouter key is configured and the `classify_with_decisions` setting — the settings panel's "Use Jev" checkbox — is on, else a non-agentic call on the run's own LLM) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
 - **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user), `base_system_prompt` (replaces the default system prompt for this agent and its `run_parallel` sub-agents), `append_basic_tools` (set False to run with only `finish` plus the caller's tools), `llm_call_hook`, `tool_call_hook` (forwarded to every sub-session's `KISSAgent`), `use_memory: bool | None = None` (per-run persistent-memory toggle: `True` gives the run the `memory_*` tools and the memory protocol prompt block, `False` withholds them, `None` follows the `KISS_USE_MEMORY` environment variable / stored setting; forwarded to every `run_parallel` sub-agent, and a boolean never bypasses the memory hard gates — stripped basic tools, Docker runs, `cc/*`/`codex/*` models, a caller-supplied `model_config["system_instruction"]`). Returns YAML with `success` and `summary`.
 
 ### Module helpers
@@ -429,7 +430,7 @@ SorcarAgent that isolates every task in a git worktree.
 
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
+> KISS Sorcar ships a catalog of **695 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
@@ -437,21 +438,22 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 102 |
-| Anthropic | 14 |
-| Gemini | 24 |
+| OpenAI | 106 |
+| Anthropic | 16 |
+| Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 378 |
-| Claude Code CLI (`cc/*`) | 14 |
-| Codex CLI (`codex/*`) | 8 |
+| OpenRouter | 407 |
+| Claude Code CLI (`cc/*`) | 16 |
+| Codex CLI (`codex/*`) | 9 |
 
 ## Capability Totals
 
-- **641** generation-capable models
-- **483** function-calling-capable models
-- **11** embedding models
+- **676** generation-capable models
+- **509** function-calling-capable models
+- **7** embedding models
+- **4** decision models
 
 ## Configuring Model Access
 
@@ -472,7 +474,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (378 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (407 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 
@@ -492,7 +494,7 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 661 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
+The full per-model list (all 695 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
 
 ---
 
@@ -626,7 +628,7 @@ Any file that is a valid SEA works: a bundled channel agent, or a file of your o
 The daemon builds the command list from three sources:
 
 1. **Bundled channel agents** in `src/kiss/agents/third_party_agents/` of the installed package. These always win a name clash.
-2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules of `templates/write_paper_prompt.md`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and the reviewer model, and the agent gets `check_paper`, which runs the template's AI-slop and consistency gates on the prose, and `build_paper`, which runs pdflatex and bibtex and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path, the word limit and the cutoff date for related work, and the agent gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers), and `/revise_and_review_paper` (`/revise_and_review_paper Writing: <...> Review: <...>` runs the two as a loop: the coordinator writes the paper with `/write_paper` from the writing instructions, stages a copy of the built PDF and has `/review_paper` review it as a fresh, memory-free session that sees no earlier review or notes and ends with a `Recommendation:` line, then revises against the review, running experiments, ablations or the AI-discovery loop on the benchmarks the writing instructions allow when the review asks for evidence; it stops at strong accept, at the round cap (default 6) or when two rounds in a row fail to raise the verdict, and keeps every review and a per-round log under `reports/`), and `/git_extract_knowledge` (`/git_extract_knowledge <repo>` builds the durable memory of a git repository given as a local path or a clone URL: `index_repo` indexes every tracked file, 80-line chunk, symbol definition, commit, per-file change with its patch, tag, branch, contributor and directory as full-text blocks in `~/.kiss/memories/<repo>/knowledge.sqlite3`, incrementally after the first run; the agent then writes curated pages — overview, domain glossary and concepts, architecture, conventions, history, one page per module, FAQ — into the repository's domain memory, where every Sorcar run inside that repository finds them with `memory_search`, plus a `knowledge-lookup` page with the shell command that queries the block store, `python -m kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea search <repo> "<query>"`; the first run schedules a cron job that runs `update <repo>` every morning (04:00 America/Los_Angeles when scheduled; the cron hour is fixed in the daemon's local time, so it moves by one hour across daylight-saving changes unless that clock is on Pacific time), and `ask <repo> <question>` answers from the memory), and `/remember` and `/forget` (`/remember <instruction>` appends the instruction as a bullet line to `~/.kiss/SORCAR.md`, the file appended to the system prompt of every task, so every later task follows it, creating the file on first use and leaving hand-written text alone; `/forget <instruction>` removes the stored line that matches ignoring case and spacing, or lists the stored instructions and removes the one you meant). Any `SEAS.md` folder may shadow these.
+2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules embedded in `write_paper_sea.py`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and optionally the writer and reviewer models, the agent reads the highly cited related work of the last two or three years before writing, and it gets `check_paper`, which runs the AI-slop and consistency gates on the prose and flags fabricated-looking references in the `.bib` file, and `build_paper`, which runs pdflatex and bibtex or biber and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path and the cutoff date for related work, and optionally the word limit (700 by default) and a second model that checks the review; the agent searches at least 20 related-work sources and judges the novelty against recent papers of the venue, and it gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers), and `/revise_and_review_paper` (`/revise_and_review_paper Writing: <...> Review: <...>` runs the two as a loop: the coordinator writes the paper with `/write_paper` from the writing instructions, stages a copy of the built PDF and has `/review_paper` review it as a fresh, memory-free session that sees no earlier review or notes and ends with a `Recommendation:` line, then revises against the review, running experiments, ablations or the AI-discovery loop on the benchmarks the writing instructions allow when the review asks for evidence; it stops at strong accept, at the round cap (default 6) or when two rounds in a row fail to raise the verdict, and keeps every review and a per-round log under `reports/`), and `/git_extract_knowledge` (`/git_extract_knowledge <repo>` builds the durable memory of a git repository given as a local path or a clone URL: `index_repo` indexes every tracked file, 80-line chunk, symbol definition, commit, per-file change with its patch, tag, branch, contributor and directory as full-text blocks in `~/.kiss/memories/<repo>/knowledge.sqlite3`, incrementally after the first run; the agent then writes curated pages — overview, domain glossary and concepts, architecture, conventions, history, one page per module, FAQ — into the repository's domain memory, where every Sorcar run inside that repository finds them with `memory_search`, plus a `knowledge-lookup` page with the shell command that queries the block store, `python -m kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea search <repo> "<query>"`; the first run schedules a cron job that runs `update <repo>` every morning (04:00 America/Los_Angeles when scheduled; the cron hour is fixed in the daemon's local time, so it moves by one hour across daylight-saving changes unless that clock is on Pacific time), and `ask <repo> <question>` answers from the memory), and `/remember` and `/forget` (`/remember <instruction>` appends the instruction as a bullet line to `~/.kiss/SORCAR.md`, the file appended to the system prompt of every task, so every later task follows it, creating the file on first use and leaving hand-written text alone; `/forget <instruction>` removes the stored line that matches ignoring case and spacing, or lists the stored instructions and removes the one you meant). Any `SEAS.md` folder may shadow these.
 3. **Your folders** listed in `~/.kiss/SEAS.md` (or `$KISS_HOME/SEAS.md` when `KISS_HOME` is set).
 
 The command name is the SEA's folder name: `deploy/deploy_sea.py` is `/deploy`, `pr-review/pr-review_sea.py` is `/pr-review`. A folder is registered only when it directly contains a regular file named `<folder>_sea.py` and the folder name uses ASCII letters, digits, `_`, or `-` only. `release.notes/` (a dot) or `my agent/` (a space) is skipped silently because the command could not be typed, and so is a folder whose script has another name (`deploy/main_sea.py`). A leading underscore is allowed: `_scratch/_scratch_sea.py` is `/_scratch`. A loose `xxx_sea.py` placed directly in a listed folder is not a command: every SEA needs its own folder, which is also where its helper modules, prompts and data files live.
@@ -981,7 +983,7 @@ In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the ch
 
 ## Task Classifier
 
-KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task); deselect "Classify with Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models).
+KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected, the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" (the default) to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
 
 ## Sorcar Extension Agents (SEAs)
 
