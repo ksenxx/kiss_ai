@@ -75,7 +75,7 @@ When doing Google Internet research:
   3. Do not proceed to synthesis until the counter reaches 10. Check the counter — if it says less than 10, keep visiting more sites.
   4. If results dry up, try different queries, synonyms, official docs, GitHub repos/issues, Stack Overflow, blogs, Reddit, papers, and API references.
   5. After reaching 10, review all findings and synthesize.
-- The browser is headless by default, so the user cannot see it. Call show_browser() first whenever a page needs the human — an interactive login, a CAPTCHA, or a bot check — then ask the user for help. Call show_browser(visible=False) once the human part is done.
+- The browser is headless by default, so the user cannot see it. Call show_browser() whenever the user should see or interact with a page: it opens the page you are on in a Browser tab on every KISS surface, where the user can watch, click and type while you keep driving the same page with the other web tools (go_to_url, click, type_text, screenshot, get_page_content). Use it first when a page needs the human — an interactive login, a CAPTCHA, or a bot check — then ask the user for help; use it to demo or test a web app live in front of the user; use it when the user asks to watch your browsing. That browser keeps its cookies and logins across tasks and restarts. Call show_browser(visible=False) once the human part is done; leave it visible when the user should keep looking at the page after the task.
 
 If Google search is blocked, open a keyword search for your current research topic in the Chromium browser, and ask the user to manually pass the bot check. If that fails, you can use other search engines.
 

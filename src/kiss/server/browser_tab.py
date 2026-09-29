@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -60,6 +61,9 @@ _JPEG_QUALITY = 60
 _MIN_FRAME_INTERVAL = 1 / 15
 _OPEN_TIMEOUT = 90.0
 _CALL_TIMEOUT = 30.0
+_HEADLESS_UA_TOKEN = "HeadlessChrome"
+# After terminating a hung script, how long the page gets to answer a probe.
+_INTERRUPT_PROBE_TIMEOUT = 3.0
 
 _MODIFIER_BITS = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}
 _KEY_TEXT = {"Enter": "\r"}
@@ -73,6 +77,8 @@ class _PageRecord:
     tab_id: str
     page: Page
     cdp: CDPSession | None = None
+    # Chromium's target id: how an agent's own CDP client names this page.
+    target_id: str = ""
     # Set once the CDP session is attached (or attaching failed): a
     # second registration of the same page waits for it.
     attached: asyncio.Event = field(default_factory=asyncio.Event)
@@ -86,6 +92,23 @@ class _PageRecord:
     title: str = ""
     can_go_back: bool = False
     can_go_forward: bool = False
+
+
+@dataclass(frozen=True)
+class AgentTab:
+    """A browser tab opened for an agent, which drives it through its own CDP client.
+
+    Attributes:
+        tab_id: The KISS tab id (``browser__N``) shown on every surface.
+        target_id: Chromium's target id of the page, so a second CDP
+            client can tell this page from the user's other tabs.
+        cdp_url: ``http://127.0.0.1:<port>`` of the browser's DevTools
+            endpoint (``connect_over_cdp`` accepts it).
+    """
+
+    tab_id: str
+    target_id: str
+    cdp_url: str
 
 
 def home_url() -> str:
@@ -162,6 +185,47 @@ class BrowserTabService:
             conn_id: Connection that asked.
         """
         self._submit(self._open_reporting(normalize_url(url), conn_id))
+
+    def open_for_agent(self) -> AgentTab:
+        """Open a blank tab for an agent and switch every surface to it.
+
+        Blocks until the tab is announced (launching the browser first
+        when needed).  The agent then attaches its own Playwright client
+        to :attr:`AgentTab.cdp_url` and drives the page whose target id
+        is :attr:`AgentTab.target_id`, live in front of the user.
+
+        Returns:
+            The new tab's ids and the browser's DevTools endpoint.
+
+        Raises:
+            RuntimeError: The service is shut down or the browser cannot
+                be launched.
+        """
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(self._open_for_agent(), loop)
+        try:
+            return future.result(_OPEN_TIMEOUT)
+        except Exception as exc:
+            raise RuntimeError(f"Cannot open a Browser tab: {exc}") from exc
+
+    def tab_for_target(self, target_id: str) -> str | None:
+        """The tab id of the attached page whose Chromium target id is *target_id*, if any."""
+        with self._lock:
+            for rec in self._pages.values():
+                if rec.target_id == target_id and rec.cdp is not None:
+                    return rec.tab_id
+        return None
+
+    def interrupt(self, tab_id: str) -> None:
+        """Unwedge a page whose script hangs: stop the script, or close the tab.
+
+        An agent's raw input call (a key press, a wheel event) blocks
+        forever while a page handler spins in ``while(true)``.  Killing
+        the browser is not an option here (it is the user's), so the
+        running script is terminated, and the page closed when it still
+        does not answer.  Fire and forget.
+        """
+        self._submit(self._interrupt(tab_id))
 
     def close(self, tab_id: str) -> None:
         """Close the browser page behind *tab_id* (every surface drops the tab)."""
@@ -287,6 +351,7 @@ class BrowserTabService:
             # A desktop session without a reachable window server (a Mac
             # reached over ssh, for instance): fall back to headless.
             context = await self._launch_context(True)
+        await self._mask_headless_user_agent(context)
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)
         return context
@@ -299,9 +364,39 @@ class BrowserTabService:
             executable_path=self._browser.executable,
             headless=headless,
             viewport={"width": width, "height": height},
-            args=["--no-first-run", "--no-default-browser-check"],
+            # The debugging port lets an agent attach a second CDP client
+            # (open_for_agent); 0 picks a free port, recorded in the
+            # profile's DevToolsActivePort file.
+            args=["--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"],
             ignore_default_args=["--enable-automation"],
         )
+
+    async def _mask_headless_user_agent(self, context: BrowserContext) -> None:
+        """Rewrite a headless browser's ``HeadlessChrome`` UA token to ``Chrome``.
+
+        Many sites answer that token with a bot challenge instead of
+        content, which would hit the user in every streamed tab.  Both
+        places a site reads it are patched: the ``User-Agent`` header
+        and ``navigator.userAgent``.  A headed browser has no such token.
+        """
+        try:
+            probe = context.pages[0] if context.pages else await context.new_page()
+            user_agent = await probe.evaluate("navigator.userAgent")
+            if _HEADLESS_UA_TOKEN not in user_agent:
+                return
+            headed = user_agent.replace(_HEADLESS_UA_TOKEN, "Chrome")
+            await context.set_extra_http_headers({"User-Agent": headed})
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'userAgent', "
+                f"{{get: () => {json.dumps(headed)}}});"
+            )
+        except Exception:  # pragma: no cover - a fresh page rarely refuses evaluate
+            logger.debug("browser tab: could not mask the headless user agent", exc_info=True)
+
+    def _cdp_url(self) -> str:
+        """The browser's DevTools HTTP endpoint, from the profile's ``DevToolsActivePort``."""
+        port = (self._profile_dir / "DevToolsActivePort").read_text().split()[0]
+        return f"http://127.0.0.1:{port}"
 
     async def _open_reporting(self, url: str, conn_id: str) -> None:
         try:
@@ -311,6 +406,24 @@ class BrowserTabService:
             self._emit({"type": "browserError", "tab_id": "", "text": str(exc)}, conn_id)
 
     async def _open(self, url: str, conn_id: str) -> str:
+        rec = await self._new_tab()
+        # Everyone gets the tab; only the surface that asked switches to it.
+        if conn_id:
+            self._emit(self._open_event(rec, focus=True), conn_id)
+        try:
+            await rec.page.goto(url, wait_until="commit")
+        except Exception as exc:  # noqa: BLE001 — a bad URL must not kill the tab
+            self._emit({"type": "browserError", "tab_id": rec.tab_id, "text": str(exc)})
+        return rec.tab_id
+
+    async def _open_for_agent(self) -> AgentTab:
+        rec = await self._new_tab()
+        # The agent wants the user's attention: every surface switches to the tab.
+        self._emit(self._open_event(rec, focus=True))
+        return AgentTab(rec.tab_id, rec.target_id, self._cdp_url())
+
+    async def _new_tab(self) -> _PageRecord:
+        """Launch the browser if needed, create a page and announce it unfocused."""
         context = await self._launch()
         self._creating += 1
         try:
@@ -320,14 +433,7 @@ class BrowserTabService:
         rec = await self._register(page, popup=False)
         if rec is None:
             raise RuntimeError("The browser closed the new page before it could be attached.")
-        # Everyone gets the tab; only the surface that asked switches to it.
-        if conn_id:
-            self._emit(self._open_event(rec, focus=True), conn_id)
-        try:
-            await page.goto(url, wait_until="commit")
-        except Exception as exc:  # noqa: BLE001 — a bad URL must not kill the tab
-            self._emit({"type": "browserError", "tab_id": rec.tab_id, "text": str(exc)})
-        return rec.tab_id
+        return rec
 
     async def _register(self, page: Page, popup: bool) -> _PageRecord | None:
         """Give *page* a tab id, wire its events and announce it (idempotent).
@@ -346,6 +452,7 @@ class BrowserTabService:
             cdp = await page.context.new_cdp_session(page)
             if page.is_closed():
                 raise RuntimeError("page closed while attaching")
+            rec.target_id = (await cdp.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
         except Exception as exc:  # noqa: BLE001 — a vanished popup is not an error
             logger.debug("browser tab: %s not attached: %s", rec.tab_id, exc)
             with self._lock:
@@ -457,6 +564,17 @@ class BrowserTabService:
     async def _close(self, tab_id: str) -> None:
         rec = self._record(tab_id)
         if rec is not None:
+            await rec.page.close()
+
+    async def _interrupt(self, tab_id: str) -> None:
+        rec = self._record(tab_id)
+        if rec is None or rec.cdp is None:
+            return
+        try:
+            await rec.cdp.send("Runtime.terminateExecution")
+            await asyncio.wait_for(rec.page.evaluate("1"), _INTERRUPT_PROBE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — still wedged: the tab is lost
+            logger.warning("browser tab: %s does not answer, closing it: %s", tab_id, exc)
             await rec.page.close()
 
     async def _navigate(self, tab_id: str, action: str, url: str) -> None:
