@@ -256,32 +256,33 @@ function testExpandReopensSubagentTabs() {
 function testManualSubTabCloseClosesOnlyThatTab() {
   const {win, posted, panel, subTabIds} = bootParallelRun(2);
 
+  // A running sub-agent's tab stays open unless the USER closes it: the
+  // hand close removes that tab alone and is echoed to the daemon, which
+  // mirrors it to every other surface.
   clickClose(win, subTabIds[0]);
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'closing a RUNNING sub-agent tab by hand must be refused: the tab ' +
-      'is the only place its questions can be answered',
-  );
   assert.ok(
-    !posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
-    'the backend must not be told to close the running tab',
+    posted.some(m => m.type === 'closeTab' && m.tabId === subTabIds[0]),
+    'the backend must be told about the hand close of the running tab',
   );
-
-  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
   const collapsed = panel.classList.contains('collapsed');
   const openIds = subagentTabEls(win).map(el => el.dataset.tabId);
   assert.ok(
     !collapsed && openIds.length === 1 && openIds[0] === subTabIds[1],
-    'one child finishing must close only its tab and leave the sibling ' +
+    'the hand close must close only its tab and leave the sibling ' +
       'open and the panel uncollapsed (collapsed=' +
       collapsed +
       ', open sub tabs=' +
       JSON.stringify(openIds) +
       ')',
   );
+  send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
+  assert.deepStrictEqual(
+    subagentTabEls(win).map(el => el.dataset.tabId),
+    [subTabIds[1]],
+    'the closed sub-agent finishing changes nothing',
+  );
   win.close();
-  console.log('  ok - hand-close of a running sub tab refused; done closes it');
+  console.log('  ok - hand-close of a running sub tab closes only that tab');
 }
 
 function testManualSubTabCloseKeepsSiblingsOpen() {
@@ -290,8 +291,8 @@ function testManualSubTabCloseKeepsSiblingsOpen() {
   clickClose(win, subTabIds[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
-    3,
-    'closing a running sub-agent tab by hand must be refused',
+    2,
+    'a hand close of a running sub-agent tab closes that tab',
   );
   send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
 
@@ -356,12 +357,12 @@ function testManualCloseOfAllSubTabsThenExpandReopensAll() {
   for (const id of subTabIds) clickClose(win, id);
   assert.strictEqual(
     subagentTabEls(win).length,
-    2,
-    'hand-closing running sub-agent tabs must be refused',
+    0,
+    'hand-closing running sub-agent tabs closes them',
   );
   assert.ok(
-    !panel.classList.contains('collapsed'),
-    'the panel of a running fan-out stays uncollapsed',
+    panel.classList.contains('collapsed'),
+    'a fan-out whose every child tab the user closed collapses',
   );
 
   finishFanOut(win, subTabIds);

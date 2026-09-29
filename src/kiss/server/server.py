@@ -479,6 +479,9 @@ class VSCodeServer(
         if install_visibility is not None:
             install_visibility(self._local_tab_shown)
         self._tab_chat_views: dict[str, str] = {}
+        # Running sub-agent tabs the user closed by hand; see
+        # ``_remember_closed_subagent_tab``.
+        self._closed_subagent_tabs: set[str] = set()
         # Rebind surviving chat views from the persisted registry so a
         # follow-up ``run`` after a daemon restart continues the tab's
         # chat instead of silently starting a fresh one.
@@ -1782,16 +1785,56 @@ class VSCodeServer(
                     # worktree so shutdown's ``_await_active_merges``
                     # waits for it (see ``_finalize_pending_worktree``).
                     state.merge_thread = threading.current_thread()
-        # Sub-agent tabs are not in the registry, so their close
-        # cannot mirror via ``tabs_state``: broadcast a canonical
-        # close event instead.  Every client removes the tab, so a
-        # torn-down shared per-tab printer subscription cannot starve
-        # a client that still shows the tab.
-        if is_subagent_tab:
-            self._broadcast_subagent_close(tab_id)
-        if busy:
-            return
+            # Sub-agent tabs are not in the registry, so their close
+            # cannot mirror via ``tabs_state``: broadcast a canonical
+            # close event instead.  Every client removes the tab, so
+            # a torn-down shared per-tab printer subscription cannot
+            # starve a client that still shows the tab.  Recorded and
+            # broadcast in the same locked step as
+            # ``_open_persisted_subagent_tabs`` checks the record and
+            # announces a live child, so the close is ordered wholly
+            # before that announcement (which then stands down) or
+            # wholly after it (and closes the tab it opened).
+            if is_subagent_tab:
+                self._broadcast_subagent_close(tab_id)
+                self._remember_closed_subagent_tab(tab_id)
+            if busy:
+                # The task keeps running with no tab showing it.  Drop
+                # the tab's printer subscriptions now (the task's
+                # recording is per task and survives): the viewer
+                # registry then lists only OPEN tabs, which is what
+                # ``SorcarAgent._subagent_parent_tab_id`` relies on to
+                # parent later spawns under the tab a history reopen
+                # gave the chat instead of this closed one.  Under the
+                # lock, after the reopen check above: a replay that
+                # republished this id either landed before (this close
+                # stood down) or commits after, re-subscribing the tab
+                # (``_commit_replay_publication``).
+                self._printer_cleanup_tab(tab_id)
+                return
         self._teardown_tab_resources(tab_id, state, removal_token=removal_token)
+
+    def _remember_closed_subagent_tab(self, tab_id: str) -> None:
+        """Record that the user closed the running sub-agent tab *tab_id*.
+
+        :meth:`_open_persisted_subagent_tabs` then leaves the tab closed
+        on a replay (a surface connecting mid-run) until the sub-agent
+        ends or a client reopens the tab explicitly (``resumeSession``,
+        see :meth:`_replay_session`).  Entries of finished sub-agents
+        are pruned here, so the set never outgrows the number of
+        running sub-agents.  Every access to the set happens under
+        ``_state_lock``.
+
+        Args:
+            tab_id: The shared sub-agent tab identifier
+                (``{parent_tab_id}__sub_{task_id}``).
+        """
+        with self._state_lock:
+            self._closed_subagent_tabs.add(tab_id)
+            self._closed_subagent_tabs.difference_update({
+                t for t in self._closed_subagent_tabs
+                if _subagent_is_done(t.rsplit("__sub_", 1)[-1])
+            })
 
     def _broadcast_subagent_close(self, tab_id: str) -> None:
         """Tell every client to close the sub-agent tab *tab_id*.
@@ -2216,6 +2259,10 @@ class VSCodeServer(
                 self._tab_chat_views.pop(tab_id, None)
 
         if subagent_info is not None:
+            # A client asked for this sub-agent's tab by name: a tab the
+            # user had closed while it ran is open again.
+            with self._state_lock:
+                self._closed_subagent_tabs.discard(tab_id)
             is_done = _subagent_is_done(result.get("task_id"))
             if is_done and subagent_info.get("side_channel"):
                 # A finished side channel (the /ask answerer) has
@@ -2465,6 +2512,51 @@ class VSCodeServer(
         )
         return ""
 
+    def _subagent_announcement(
+        self,
+        row: dict[str, Any],
+        idx: int,
+        parent_task_id: str,
+        sub_tab_id: str,
+        is_done: bool,
+        scope: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the ``openSubagentTab`` event replaying a persisted sub-agent.
+
+        Args:
+            row: The sub-agent's row from
+                :func:`_load_subagent_rows_by_parent_task_id`.
+            idx: The row's position among its parent's children
+                (numbers the tab title).
+            parent_task_id: ``task_history.id`` of the parent task.
+            sub_tab_id: The deterministic sub-agent tab id.
+            is_done: Whether the sub-agent has finished.
+            scope: ``{"connId": ...}`` to address one connection, else
+                empty.
+
+        Returns:
+            The event dict to broadcast.
+        """
+        return {
+            "type": "openSubagentTab",
+            "tab_id": sub_tab_id,
+            "parent_tab_id": self._resolve_parent_tab_id_for_sub(
+                parent_task_id=parent_task_id,
+                chat_id=str(row.get("chat_id", "") or ""),
+                sub_tab_id=sub_tab_id,
+                sub_task_id=str(row["task_id"]),
+            ),
+            "description": str(row.get("task", "") or ""),
+            "task_id": row["task_id"],
+            "taskIndex": idx,
+            "isSubagentTab": True,
+            "isDone": is_done,
+            # The frontend attributes the row to the fan-out call that
+            # was running when it started.
+            "startTs": _start_ts_from_extra(row.get("extra", "")),
+            **scope,
+        }
+
     def _open_persisted_subagent_tabs(
         self,
         *,
@@ -2478,6 +2570,9 @@ class VSCodeServer(
 
         Finished direct children retain normal history behavior. Below a
         completed child, replay only live tasks, attached to a surviving ancestor.
+        A running child whose tab the user closed
+        (:meth:`_remember_closed_subagent_tab`) is treated the same way:
+        not reopened, its live descendants still announced.
 
         The sub-tab ids are deterministic
         (``f"{parent_tab_id}__sub_{sub_task_id}"``) so that clicking
@@ -2521,7 +2616,30 @@ class VSCodeServer(
             sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
-            if is_done:
+            recording: list[dict[str, Any]] | None = None
+            with self._state_lock:
+                if is_done:
+                    self._closed_subagent_tabs.discard(sub_tab_id)
+                user_closed = sub_tab_id in self._closed_subagent_tabs
+                if not (is_done or user_closed):
+                    # Attached and announced in the same locked step as
+                    # the closed check: a user close (recorded and
+                    # broadcast under this lock, see ``_drop_tab_state``)
+                    # lands wholly before — this replay stands down —
+                    # or wholly after, closing the tab opened here.
+                    _, _, recording = self._attach_viewer_to_running_chat(
+                        str(row.get("chat_id", "") or ""),
+                        sub_tab_id,
+                        task_id=str(sub_task_id),
+                        is_subagent=True,
+                    )
+                    self.printer.broadcast(self._subagent_announcement(
+                        row, idx, parent_task_id, sub_tab_id, False, scope,
+                    ))
+            if is_done or user_closed:
+                # No tab of its own here, but its live descendants must
+                # still reach this client (under the nearest open
+                # ancestor, which the id chain names).
                 self._open_persisted_subagent_tabs(
                     parent_task_id=str(sub_task_id),
                     parent_tab_id=sub_tab_id,
@@ -2529,9 +2647,14 @@ class VSCodeServer(
                     live_only=True,
                     ancestors=ancestors,
                 )
-                if live_only:
-                    # Not reopened as history, but a client that missed
-                    # this completion still needs to close its copy.
+                if user_closed or live_only or _is_side_channel_row(row):
+                    # Stays closed: a running sub-agent whose tab the
+                    # user closed, finished history below a finished
+                    # ancestor, or a finished side channel (the /ask
+                    # answerer, whose answer sits in the parent's
+                    # transcript and which has no fan-out panel to
+                    # keep its tab closed).  A client that missed the
+                    # close or completion still closes its copy.
                     self.printer.broadcast({
                         "type": "subagentDone",
                         "tab_id": sub_tab_id,
@@ -2539,46 +2662,11 @@ class VSCodeServer(
                         **scope,
                     })
                     continue
-            if is_done and _is_side_channel_row(row):
-                # A finished side channel (the /ask answerer) delivered
-                # its answer into the parent's transcript; unlike a
-                # run_parallel child it has no fan-out panel that
-                # keeps its finished tab closed, so a re-announce
-                # would re-open it on every reconnect.  Close it.
-                self.printer.broadcast({
-                    "type": "subagentDone", "tab_id": sub_tab_id, "tabId": "",
-                    **scope,
-                })
-                continue
-            recording: list[dict[str, Any]] | None = None
-            if not is_done:
-                _, _, recording = self._attach_viewer_to_running_chat(
-                    str(row.get("chat_id", "") or ""),
-                    sub_tab_id,
-                    task_id=str(sub_task_id),
-                    is_subagent=True,
-                )
-            self.printer.broadcast(
-                {
-                    "type": "openSubagentTab",
-                    "tab_id": sub_tab_id,
-                    "parent_tab_id": self._resolve_parent_tab_id_for_sub(
-                        parent_task_id=parent_task_id,
-                        chat_id=str(row.get("chat_id", "") or ""),
-                        sub_tab_id=sub_tab_id,
-                        sub_task_id=str(sub_task_id),
-                    ),
-                    "description": description,
-                    "task_id": sub_task_id,
-                    "taskIndex": idx,
-                    "isSubagentTab": True,
-                    "isDone": is_done,
-                    # The frontend attributes the row to the fan-out
-                    # call that was running when it started.
-                    "startTs": _start_ts_from_extra(row.get("extra", "")),
-                    **scope,
-                }
-            )
+                # A finished direct child: history the client's fan-out
+                # panel keeps closed or reopens.
+                self.printer.broadcast(self._subagent_announcement(
+                    row, idx, parent_task_id, sub_tab_id, True, scope,
+                ))
             # A still-running sub-agent's events table lags behind the
             # live run (asynchronous writer); its in-memory recording
             # holds the full transcript so far.  Snapshotted after the

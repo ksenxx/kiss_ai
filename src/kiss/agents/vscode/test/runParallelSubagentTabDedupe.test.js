@@ -554,11 +554,11 @@ function testCollapsedStaysClosedAcrossIdSchemes(makeClient, label) {
   console.log('  ok - [' + label + '] collapsed panel ignores every id form');
 }
 
-// A running sub-agent's tab cannot be closed by hand. Once the fan-out
-// finished and its history tabs are reopened, closing one by hand keeps
-// the siblings open (lenient manual close), and the daemon re-announcing
-// the closed sub-agent under any id must not resurrect it or duplicate a
-// sibling.
+// A hand close of a running sub-agent's tab closes that tab alone. Once
+// the fan-out finished and its history tabs are reopened, closing one by
+// hand keeps the siblings open (lenient manual close), and the daemon
+// re-announcing the closed sub-agent under any id must not resurrect it
+// or duplicate a sibling.
 function testManualCloseThenReplayStaysClosed(makeClient, label) {
   const scenario = bootFanOut(makeClient, 3);
   const {win, panel, parentId, taskIds, liveTabIds} = scenario;
@@ -566,8 +566,8 @@ function testManualCloseThenReplayStaysClosed(makeClient, label) {
   clickClose(win, liveTabIds[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
-    3,
-    'closing a RUNNING sub-agent tab by hand must be refused',
+    2,
+    'closing a RUNNING sub-agent tab by hand closes that tab alone',
   );
 
   finishFanOut(win, liveTabIds);
@@ -672,8 +672,8 @@ function testNewTabDoesNotRevivHandClosedSubagent(makeClient, label) {
   clickClose(win, liveTabIds[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
-    2,
-    'closing a RUNNING sub-agent tab by hand must be refused',
+    1,
+    'closing a RUNNING sub-agent tab by hand closes that tab alone',
   );
   send(win, {
     type: 'new_tab',

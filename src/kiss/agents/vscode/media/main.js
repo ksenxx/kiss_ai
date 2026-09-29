@@ -2111,21 +2111,19 @@
         }
       }
     }
-    // A live child's tab is its question/answer surface. User/panel closes
-    // cannot remove it. On completion, remove the finished ancestor but
-    // keep any still-running descendants under their nearest surviving parent.
-    const liveChildren = tabs.filter(
-      t => toClose.has(t.id) && t.isSubagentTab && t.isRunning,
-    );
-    if (liveChildren.length) {
-      if (
-        !agentInitiated ||
-        !tabs[origIdx].isSubagentTab ||
-        !tabs[origIdx].isDone
-      )
-        return;
-      for (const child of liveChildren) toClose.delete(child.id);
-      for (const child of liveChildren) {
+    // A running sub-agent's tab stays open unless the USER closes it (a
+    // user's close takes every descendant along, running ones
+    // included, and the daemon mirrors each to every surface).  A close
+    // the agent performs by itself — a finished ancestor's subagentDone,
+    // a close mirrored from another surface — keeps the running
+    // descendants under their nearest surviving ancestor.
+    if (agentInitiated) {
+      const liveDescendants = tabs.filter(
+        t =>
+          toClose.has(t.id) && t.id !== tabId && t.isSubagentTab && t.isRunning,
+      );
+      for (const child of liveDescendants) toClose.delete(child.id);
+      for (const child of liveDescendants) {
         if (!toClose.has(child.parentTabId)) continue;
         while (toClose.has(child.parentTabId))
           child.parentTabId = getTab(child.parentTabId).parentTabId;
@@ -12170,11 +12168,13 @@
       for (const en of entries) {
         const openTab = en.tabId ? getTab(en.tabId) : null;
         if (collapsed && openTab) {
-          // The tab stays this panel's until the close actually lands:
+          // A collapse folds finished children away; a running one
+          // keeps its tab (only the user may close that).  The tab
+          // stays this panel's until the close actually lands:
           // rpAfterTabsClosed does the bookkeeping, and a tab whose
           // close is still queued must keep looking owned so another
           // panel's adoption pass cannot claim it as unowned.
-          rpCloseSubagentTab(en.tabId);
+          if (!openTab.isRunning) rpCloseSubagentTab(en.tabId);
         } else if (collapsed) {
           en.userClosed = false;
         } else if (!openTab && en.taskId !== '' && !en.userClosed) {
@@ -12226,8 +12226,9 @@
             en.tabId = '';
             // Only a close the user asked for keeps this sub-agent shut
             // while its panel stays expanded; collapsing the panel
-            // reopens every sub-agent when it is expanded again.
-            en.userClosed = !_rpSyncing;
+            // reopens every sub-agent when it is expanded again — so
+            // does a close made while the panel is already collapsed.
+            en.userClosed = !_rpSyncing && !p.classList.contains('collapsed');
           }
         }
         panels.add(p);
@@ -16475,16 +16476,7 @@
         // Another client closed this sub-agent tab; mirror the close.
         // Applied without echoing `closeTab` back to the daemon (the
         // origin client already sent it) — see closeTab(fromServer).
-        const mirrored = getTab(ev.tab_id);
-        if (mirrored) {
-          // The daemon only mirrors closes of finished tabs; a copy that
-          // missed the completion must not refuse the close as "live".
-          if (mirrored.isSubagentTab) {
-            mirrored.isDone = true;
-            setTabRunning(mirrored, false);
-          }
-          closeTab(ev.tab_id, true, true);
-        }
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
         break;
       }
       case 'openTabRejected': {
