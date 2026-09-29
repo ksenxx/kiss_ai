@@ -38,10 +38,16 @@ from kiss.tests.conftest import is_root, posix_only
 
 @pytest.fixture(autouse=True)
 def _reset_sea_commands() -> Iterator[None]:
-    """Drop the module's in-memory state before and after each test."""
+    """Drop the module's in-memory state before and after each test.
+
+    Also removes the ``SEAS.md`` a test wrote into the session-wide
+    ``$KISS_HOME``; a leftover file would redirect ``/merge`` (and any
+    other bundled command) for every later test in the same process.
+    """
     sea_commands._reset_for_tests()
     yield
     sea_commands._reset_for_tests()
+    (kiss_home() / "SEAS.md").unlink(missing_ok=True)
 
 
 def _touch_sea(folder: Path, name: str) -> Path:
