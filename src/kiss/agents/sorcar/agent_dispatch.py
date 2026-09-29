@@ -464,9 +464,10 @@ def _attribute_dispatch_usage(parent_agent: Any, result: Any) -> None:
         parent_agent: The agent that called ``run_agent``; ``None``
             (standalone tools-file use, where no calling agent
             exists) attributes nothing.
-        result: The dispatched sub-task's ``TaskResult``.
+        result: The dispatched sub-task's ``TaskResult``; ``None``
+            (an aborted wait that saw no spend) attributes nothing.
     """
-    if parent_agent is None:
+    if parent_agent is None or result is None:
         return
     try:
         from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
@@ -730,8 +731,15 @@ def dispatch_result(
             f"`timeout` argument."
         )
     except Exception as e:
+        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None))
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
+    except BaseException as e:
+        # The calling task was stopped (an injected KeyboardInterrupt)
+        # while waiting: the sub-task is stopped too, and what it spent
+        # so far still counts towards the caller's cost.
+        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None))
+        raise
     _attribute_dispatch_usage(parent_agent, result)
     return result
 

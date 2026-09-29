@@ -196,10 +196,45 @@ def _parse_cost(value: Any) -> float:
     return 0.0
 
 
+def _net_totals(event: dict[str, Any], charged: dict[str, Any]) -> dict[str, Any]:
+    """Return *event*'s task totals minus spend already charged elsewhere.
+
+    A side channel's spend that lands after the task's row was saved is
+    banked directly on the task's still-running ancestor — the task
+    that is waiting on this run — and the task's new totals are
+    broadcast with the banked delta in ``ancestor_charged`` (see
+    :func:`kiss.server.task_update.charge_side_channel_usage`).  The
+    waiting caller must not fold that delta a second time, in this
+    event or in any later one (a merge agent's totals include it too),
+    so each delta is added to *charged* and subtracted from every
+    totals event from then on.
+
+    Args:
+        event: A ``result`` or ``usage_info`` event carrying ``cost``.
+        charged: Running ``{"cost", "tokens", "steps"}`` sums of the
+            deltas already charged elsewhere; updated in place.
+
+    Returns:
+        A totals dict with ``cost`` / ``total_tokens`` / ``step_count``.
+    """
+    delta = event.get("ancestor_charged")
+    if isinstance(delta, dict):
+        charged["cost"] += _parse_cost(delta.get("cost"))
+        charged["tokens"] += int(delta.get("tokens", 0) or 0)
+        charged["steps"] += int(delta.get("steps", 0) or 0)
+    steps = event.get("step_count", event.get("total_steps", 0))
+    return {
+        "cost": _parse_cost(event.get("cost")) - charged["cost"],
+        "total_tokens": int(event.get("total_tokens", 0) or 0) - charged["tokens"],
+        "step_count": int(steps or 0) - charged["steps"],
+    }
+
+
 def _to_task_result(
     event: dict[str, Any] | None,
     chat_id: str = "",
     task_id: str = "",
+    totals: dict[str, Any] | None = None,
 ) -> TaskResult:
     """Convert the final daemon ``result`` event into a :class:`TaskResult`.
 
@@ -210,6 +245,13 @@ def _to_task_result(
             ``clear`` event (``""`` when none was seen).
         task_id: The persisted ``task_history`` row id observed on the
             run's event stream (``""`` when none was seen).
+        totals: The latest task totals (see :func:`_net_totals`)
+            received for the task's tab; defaults to *event*'s.
+            The spend comes from here because the task's totals can
+            grow after its ``result``: the pre-run
+            classifier's spend is folded in only after the agent
+            emitted its result, and announced by a later
+            ``usage_info``.
 
     Returns:
         The parsed :class:`TaskResult`.  The daemon enriches ``result``
@@ -217,18 +259,14 @@ def _to_task_result(
         agent's YAML result; ``summary`` is preferred over the raw
         ``text`` when present.
     """
-    if event is None:
-        return TaskResult(
-            text="", success=False, cost=0.0, tokens=0, steps=0,
-            chat_id=chat_id, task_id=task_id,
-        )
-    text = str(event.get("summary") or event.get("text") or "")
+    spend = totals if totals is not None else event or {}
+    steps = spend.get("step_count", 0)
     return TaskResult(
-        text=text,
-        success=bool(event.get("success", False)),
-        cost=_parse_cost(event.get("cost")),
-        tokens=int(event.get("total_tokens", 0) or 0),
-        steps=int(event.get("step_count", 0) or 0),
+        text=str((event or {}).get("summary") or (event or {}).get("text") or ""),
+        success=bool((event or {}).get("success", False)),
+        cost=_parse_cost(spend.get("cost")),
+        tokens=int(spend.get("total_tokens", 0) or 0),
+        steps=int(steps or 0),
         chat_id=chat_id,
         task_id=task_id,
     )
@@ -791,7 +829,10 @@ def run(
     still running in this folder" with no visible task running.  A
     timeout intentionally does NOT stop the task (see above) unless
     *stop_on_timeout* is true: by default the caller chose to stop
-    waiting, not to cancel the work.
+    waiting, not to cancel the work.  Such an abort's exception gets a
+    ``task_result`` attribute: a :class:`TaskResult` with the spend the
+    dispatched task had reported so far, so the caller can still
+    charge it.
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
@@ -816,6 +857,10 @@ def run(
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     aborted: BaseException | None = None
     connected = False
+    result_event: dict[str, Any] | None = None
+    totals_event: dict[str, Any] | None = None  # latest spend totals
+    charged = {"cost": 0.0, "tokens": 0, "steps": 0}  # see _net_totals
+    task_id = ""
     try:
         sock.settimeout(10.0 if timeout is None else min(timeout, 10.0))
         try:
@@ -865,8 +910,6 @@ def run(
         # the event stream.  ``recv_buf`` survives the raise unharmed.
         recv_buf = bytearray()
         scanned = 0  # recv_buf[:scanned] is known newline-free
-        result_event: dict[str, Any] | None = None
-        task_id = ""
         started = False
         stopping = False  # stop-on-timeout sent; awaiting confirmation
         timeout_msg = f"Task did not finish within {timeout} seconds"
@@ -999,6 +1042,8 @@ def run(
                 chat_id = str(event.get("chat_id", "") or "") or chat_id
             elif etype != "status" and event.get("taskId"):
                 task_id = str(event["taskId"])
+            if etype in ("result", "usage_info") and "cost" in event:
+                totals_event = _net_totals(event, charged)
             if etype == "result":
                 result_event = event
             elif etype == "status":
@@ -1019,7 +1064,7 @@ def run(
                         # completion — return it instead of discarding
                         # the completed work behind a ``TimeoutError``
                         # that falsely claims the task "was stopped".
-                        return _to_task_result(result_event, chat_id, task_id)
+                        return _to_task_result(result_event, chat_id, task_id, totals_event)
                     # The terminal status confirms the
                     # stopped-on-timeout task is dead; the run still
                     # timed out.  ``started`` is deliberately not
@@ -1033,12 +1078,20 @@ def run(
                     # failure result still reports its spend.
                     raise StoppedOnTimeoutError(
                         timeout_msg,
-                        _to_task_result(result_event, chat_id, task_id),
+                        _to_task_result(result_event, chat_id, task_id, totals_event),
                     )
                 elif started:
-                    return _to_task_result(result_event, chat_id, task_id)
+                    return _to_task_result(result_event, chat_id, task_id, totals_event)
     except BaseException as exc:
         aborted = exc
+        if connected and not isinstance(exc, TimeoutError):
+            # The dispatched task is stopped below, but whatever it
+            # already spent stays spent: hand the caller the latest
+            # totals so it can still charge them (``run_agent`` folds
+            # them into the stopped calling task).
+            exc.task_result = _to_task_result(  # type: ignore[attr-defined]
+                result_event, chat_id, task_id, totals_event,
+            )
         raise
     finally:
         # Nothing to cascade or close when the connect itself failed:

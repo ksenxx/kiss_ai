@@ -1442,6 +1442,8 @@ class _CommandsMixin:
             except Exception as exc:
                 if isinstance(exc, daemon_client.StoppedOnTimeoutError):
                     spent = exc.result
+                else:
+                    spent = getattr(exc, "task_result", None)
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
                 # exception goes to the daemon log for triage, and
