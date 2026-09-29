@@ -2,23 +2,28 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Parity tests for the settings panel's "Classify with Jev" checkbox.
+"""Parity tests for the settings panel's "Use Jev (decisions model)" checkbox.
 
 The checkbox (``#cfg-classify-with-decisions`` in ``media/chat.html``)
 is bound by ``media/main.js`` to the ``classify_with_decisions`` config
-key, which :func:`kiss.agents.sorcar.task_classifier.decisions_classification_enabled`
+key, which :func:`kiss.agents.sorcar.decide_tool.decisions_tool_available`
 reads to decide whether the pre-run classifier asks OpenRouter's
 ``~typesafe/jev-latest`` decisions model first or goes straight to the
-LLM classifier.  These tests pin the whole loop the checkbox rides on,
-end to end and without test doubles:
+LLM classifier, and whether the agent is offered the ``decide`` tool.
+These tests pin the whole loop the checkbox rides on, end to end and
+without test doubles:
 
 * the exact ``saveConfig`` payload ``main.js`` posts when the box is
   unticked and the panel closes (``{"classify_with_decisions": false}``,
   a merge-style partial payload) travels over a real client connection
   to a real :class:`~kiss.server.web_server.RemoteAccessServer`, through
   the shared command dispatch into the isolated ``config.json``, and
-  flips ``decisions_classification_enabled()`` — the daemon-side effect
-  the user wants without editing ``config.json`` by hand;
+  flips ``decisions_tool_available()`` — the daemon-side effect the
+  user wants without editing ``config.json`` by hand;
+* the same save removes the ``decide`` tool from the tools an agent
+  built afterwards offers (the regression: the tool was offered on the
+  OpenRouter key alone, so an agent kept classifying with Jev after the
+  user had unticked the box);
 * ticking it back re-enables the decisions route;
 * the ``configData`` replies (to ``getConfig``, which initialises the
   checkbox, and to ``saveConfig``, which repaints it) carry the key,
@@ -45,10 +50,9 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-from kiss.agents.sorcar.task_classifier import (
-    clear_classification_cache,
-    decisions_classification_enabled,
-)
+from kiss.agents.sorcar.decide_tool import decisions_tool_available
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.core import config as config_module
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
 from kiss.tests.conftest import requires_unix_sockets
@@ -129,28 +133,50 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
     async def test_unticking_the_box_pins_the_llm_classifier(self) -> None:
         """The panel's partial saveConfig turns the decisions route off."""
         # Off by default; tick it first so the untick has an effect.
-        self.assertFalse(decisions_classification_enabled())
+        self.assertFalse(decisions_tool_available())
         await self._request(dict(_TICKED_SAVE))
-        self.assertTrue(decisions_classification_enabled())
+        self.assertTrue(decisions_tool_available())
 
         reply = await self._request(dict(_UNTICKED_SAVE))
 
         self.assertIs(self._stored()["classify_with_decisions"], False)
-        self.assertFalse(decisions_classification_enabled())
+        self.assertFalse(decisions_tool_available())
         # The reply echoes the saved config so the checkbox repaints
         # from the persisted state, not from its own click.
         self.assertIs(reply["config"]["classify_with_decisions"], False)
+
+    @staticmethod
+    def _agent_tool_names() -> list[str]:
+        agent = SorcarAgent("parity-decide-tool")
+        agent._use_web_tools = False
+        return [tool.__name__ for tool in agent._get_tools()]
+
+    @requires_unix_sockets
+    async def test_unticking_the_box_removes_the_decide_tool(self) -> None:
+        """The saved setting decides whether an agent gets the Jev ``decide`` tool.
+
+        The agent's tool list is built per run, so the save applies to
+        the next task without a daemon restart.
+        """
+        await self._request(dict(_TICKED_SAVE))
+        self.assertIn("decide", self._agent_tool_names())
+
+        await self._request(dict(_UNTICKED_SAVE))
+        self.assertNotIn("decide", self._agent_tool_names())
+
+        await self._request(dict(_TICKED_SAVE))
+        self.assertIn("decide", self._agent_tool_names())
 
     @requires_unix_sockets
     async def test_ticking_the_box_back_restores_the_decisions_route(self) -> None:
         """A ticked box saved after an unticked one re-enables Jev."""
         await self._request(dict(_UNTICKED_SAVE))
-        self.assertFalse(decisions_classification_enabled())
+        self.assertFalse(decisions_tool_available())
 
         reply = await self._request(dict(_TICKED_SAVE))
 
         self.assertIs(self._stored()["classify_with_decisions"], True)
-        self.assertTrue(decisions_classification_enabled())
+        self.assertTrue(decisions_tool_available())
         self.assertIs(reply["config"]["classify_with_decisions"], True)
 
     @requires_unix_sockets
@@ -186,7 +212,7 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         """A non-boolean payload value is coerced, never stored raw."""
         await self._request({"type": "saveConfig", "config": {"classify_with_decisions": 0}})
         self.assertIs(self._stored()["classify_with_decisions"], False)
-        self.assertFalse(decisions_classification_enabled())
+        self.assertFalse(decisions_tool_available())
 
     async def test_jsdom_toggle_test_passes(self) -> None:
         """The checkbox's init / poll / save behaviour holds in the real webview."""

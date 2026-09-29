@@ -112,6 +112,16 @@ memory writes, run_parallel, run_agent, ...) do not apply here: do not attempt
 them. Report everything in finish(summary_in_html=...).
 """
 
+WEB_TOOLS_OFF_NOTE = """
+
+# Web tools are off
+The user disabled web tools in the settings: there is no browser tool
+(go_to_url, click, type_text, screenshot, get_page_content, show_browser).
+The Web Research rules above do not apply: do not attempt Internet research
+through them or through curl/wget substitutes; answer from local files and
+your own knowledge, and say so when a fact could be outdated.
+"""
+
 
 def summary(description: str) -> str:
     """Every 10 steps: summarize your steps since the last `summary` call.
@@ -2284,11 +2294,12 @@ class SorcarAgent(RelentlessAgent):
         tools.append(talk)
         tools.append(set_model)
         # Typed classification / routing / scoring through OpenRouter's
-        # decisions endpoint (Jev).  Offered only when it can actually
-        # run: an OpenRouter key is configured and the catalog has the
-        # model, otherwise every call would fail and the tool would
-        # only cost prompt tokens.  Its spend folds into this task's
-        # accounting like ``talk``'s synthesis.
+        # decisions endpoint (Jev).  Offered only when the settings
+        # panel's "Use Jev" checkbox (``classify_with_decisions``) is on
+        # and it can actually run: an OpenRouter key is configured and
+        # the catalog has the model, otherwise every call would fail and
+        # the tool would only cost prompt tokens.  Its spend folds into
+        # this task's accounting like ``talk``'s synthesis.
         if decisions_tool_available():
             tools.append(make_decide_tool(self))
         # No-op tool letting the model periodically condense its recent
@@ -2813,6 +2824,12 @@ class SorcarAgent(RelentlessAgent):
                 system_instructions += RESTRICTED_PROFILE_NOTE.format(
                     profile=profile, tools=", ".join(sorted(offered)),
                 )
+            elif self._append_basic_tools and not web_tools:
+                # The settings panel's "Use web tools" is off: the
+                # browser tools are not built (:meth:`_get_tools`), so
+                # the static Web Research rules above must not send the
+                # model after go_to_url() or a curl substitute.
+                system_instructions += WEB_TOOLS_OFF_NOTE
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,

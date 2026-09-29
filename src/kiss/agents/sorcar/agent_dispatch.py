@@ -89,6 +89,7 @@ from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.useful_tools import rewrite_parent_repo_paths
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.vscode_config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -674,12 +675,22 @@ def dispatch_result(
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /
-    # auto-commit request in the pinned-off modes).
+    # auto-commit request in the pinned-off modes).  In the git
+    # lifecycle (path mode) the defaults are the user's persisted
+    # "Use worktree" / "Auto commit" settings — the same values a
+    # task submitted from the chat panel runs with — not a hard-coded
+    # ``True`` that would ignore a user who turned them off.
+    if git_lifecycle:
+        cfg = load_config()  # fills every key from DEFAULTS
+        default_worktree = bool(cfg["is_worktree"])
+        default_auto_commit = bool(cfg["auto_commit_mode"])
+    else:
+        default_worktree = default_auto_commit = False
     use_worktree = (
-        git_lifecycle if options.use_worktree is None else options.use_worktree
+        default_worktree if options.use_worktree is None else options.use_worktree
     )
     auto_commit = (
-        git_lifecycle if options.auto_commit is None else options.auto_commit
+        default_auto_commit if options.auto_commit is None else options.auto_commit
     )
     classify_tasks = (
         (None if classify else False)

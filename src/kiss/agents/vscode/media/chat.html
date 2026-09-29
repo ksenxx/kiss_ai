@@ -480,14 +480,15 @@
             <input type="checkbox" id="cfg-classify-tasks" checked>
             Classify tasks before running
           </label>
-          <!-- classify_with_decisions: the classifier asks OpenRouter's
-               ~typesafe/jev-latest decisions model first and falls back
-               to the run's own LLM; unchecked (the default) pins the LLM
-               classifier.  Only consulted while "Classify tasks before
-               running" is on. -->
-          <label class="config-label config-checkbox" title="Ask the ~typesafe/jev-latest decisions model first (needs an OpenRouter API key); unchecked pins the LLM classifier, which runs on the run's own model and is skipped for cc/* and codex/* models">
+          <!-- classify_with_decisions: the one switch for OpenRouter's
+               ~typesafe/jev-latest decisions model.  Checked: the
+               pre-run classifier asks Jev first (falling back to the
+               run's own LLM) and the agent gets the ``decide`` tool.
+               Unchecked (the default): the LLM classifier runs and no
+               task ever calls Jev. -->
+          <label class="config-label config-checkbox" title="Let tasks use the ~typesafe/jev-latest decisions model (needs an OpenRouter API key): the pre-run classifier asks Jev first and the agent gets the decide tool. Unchecked: the classifier runs on the run's own model (skipped for cc/* and codex/* models) and no task calls Jev">
             <input type="checkbox" id="cfg-classify-with-decisions">
-            Classify with Jev
+            Use Jev (decisions model)
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-memory" checked>

@@ -47,6 +47,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
 )
 from kiss.server.agent_file import apply_agent_overrides
+from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 # The standalone tool (no calling-task work directory): relative agent
 # paths resolve against the process working directory and path-mode
@@ -285,15 +286,40 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     assert captured[0]["auto_commit"] is False
     assert captured[0]["classify_tasks"] is False
 
-    # Path mode: the standard task lifecycle (worktree + auto-commit,
-    # classification following the daemon's configured default).
+    # Path mode: the standard task lifecycle (worktree + auto-commit
+    # following the persisted "Use worktree" / "Auto commit" settings,
+    # both on by default; classification following the daemon's
+    # configured default).
     script = caller / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
-    captured.clear()
-    tool("say hi", str(script))
-    assert captured[0]["use_worktree"] is True
-    assert captured[0]["auto_commit"] is True
-    assert captured[0]["classify_tasks"] is None
+    isolated = IsolatedKissHome("kiss-dispatch-lifecycle-")
+    try:
+        captured.clear()
+        tool("say hi", str(script))
+        assert captured[0]["use_worktree"] is True
+        assert captured[0]["auto_commit"] is True
+        assert captured[0]["classify_tasks"] is None
+
+        # The user turned both settings off in the settings panel: a
+        # path-mode sub-agent follows them like a chat-panel task would.
+        isolated.write_config(is_worktree=False, auto_commit_mode=False)
+        captured.clear()
+        tool("say hi", str(script))
+        assert captured[0]["use_worktree"] is False
+        assert captured[0]["auto_commit"] is False
+
+        # Each setting is read on its own; explicit arguments still win.
+        isolated.write_config(is_worktree=True, auto_commit_mode=False)
+        captured.clear()
+        tool("say hi", str(script))
+        assert captured[0]["use_worktree"] is True
+        assert captured[0]["auto_commit"] is False
+        captured.clear()
+        tool("say hi", str(script), auto_commit="true")
+        assert captured[0]["use_worktree"] is True
+        assert captured[0]["auto_commit"] is True
+    finally:
+        isolated.cleanup()
 
 
 def test_run_option_parse_errors(tmp_path: Path) -> None:

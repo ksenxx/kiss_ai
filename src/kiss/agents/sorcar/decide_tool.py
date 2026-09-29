@@ -22,6 +22,12 @@ of option ids; ``score`` takes a list of rubric levels in ascending order.
 The decisions call's tokens and USD are folded into the running task's
 accounting exactly like ``talk``'s speech synthesis, so the per-task cost
 shown to the user stays honest.
+
+The tool is offered only while :func:`decisions_tool_available` holds: the
+settings panel's "Use Jev" checkbox (``classify_with_decisions``) is on, an
+OpenRouter key is configured and the catalog lists the model.  The same
+gate governs the pre-run task classifier's decisions route, so unticking
+the checkbox stops every use of Jev.
 """
 
 import json
@@ -53,16 +59,28 @@ _EXAMPLE_QUESTIONS = (
 
 
 def decisions_tool_available() -> bool:
-    """Report whether the ``decide`` tool can work in this process.
+    """Report whether Jev (the decisions model) may be used in this process.
 
-    The tool needs an OpenRouter key and the default decisions model in the
-    catalog; without either every call would fail, so the tool is not
-    offered to the agent at all (an unusable tool only costs prompt tokens).
+    This is the ONE gate for every use of the decisions model: the
+    ``decide`` tool offered to the agent and the pre-run task classifier's
+    decisions route (:func:`kiss.agents.sorcar.task_classifier.classify_task`).
+    The user's switch is the ``classify_with_decisions`` key of
+    ``~/.kiss/config.json`` — the settings panel's "Use Jev" checkbox, off by
+    default — read on every call so a settings change applies to the next
+    run without a daemon restart.  Even when the switch is on, the model
+    needs an OpenRouter key and a ``"dec": true`` catalog entry; without
+    either every call would fail, so the tool is not offered at all (an
+    unusable tool only costs prompt tokens).
 
     Returns:
-        True when ``OPENROUTER_API_KEY`` is configured and
-        :data:`DEFAULT_DECISIONS_MODEL` is a ``"dec": true`` catalog entry.
+        True when ``classify_with_decisions`` is on, ``OPENROUTER_API_KEY``
+        is configured and :data:`DEFAULT_DECISIONS_MODEL` is a decisions
+        catalog entry.
     """
+    from kiss.core.vscode_config import load_config
+
+    if not load_config().get("classify_with_decisions", False):
+        return False
     info = MODEL_INFO.get(DEFAULT_DECISIONS_MODEL)
     return bool(config_module.DEFAULT_CONFIG.OPENROUTER_API_KEY) and (
         info is not None and info.is_decisions_supported
