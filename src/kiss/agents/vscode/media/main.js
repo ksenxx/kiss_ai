@@ -4963,7 +4963,11 @@
   // boundary: the body above takes a fixed height (flex: 0 1 <px>), the
   // expanded bodies above it keep the heights they had when the drag
   // started, and the bodies below share the rest.  The LAST expanded
-  // section's body always fills the leftover height.  Collapse state
+  // section's body always fills the leftover height.  Every expanded
+  // body keeps a minimum height (main.css: half an equal share, at
+  // most 4rem) so a dragged body never leaves the sections below it
+  // as headers over 0px bodies; applyMetaSectionLayout publishes the
+  // equal share as --meta-body-share on the panel.  Collapse state
   // and dragged heights persist in localStorage; every section starts
   // expanded.  Adding a panel is one more <section> plus its resizer in
   // chat.html: nothing here names a particular section.
@@ -5014,20 +5018,12 @@
     const sections = metaSections();
     const expanded = sections.filter(metaSectionExpanded);
     const last = expanded[expanded.length - 1];
-    const dragged = expanded.some(
-      section =>
-        section !== last && metaSectionHeights[section.id] !== undefined,
-    );
     for (const section of sections) {
       const body = metaSectionBody(section);
       if (body) {
         const h = metaSectionHeights[section.id];
         body.style.flex =
           section === last || h === undefined ? '1 1 0px' : '0 1 ' + h + 'px';
-        // Once a body above has a dragged height, the filling body keeps
-        // a minimum share (main.css), or the dragged bodies could squeeze
-        // it to nothing.  Without one every share is equal.
-        body.classList.toggle('meta-section-fill', dragged && section === last);
       }
       const resizer = metaSectionResizer(section);
       if (!resizer) continue;
@@ -5042,6 +5038,33 @@
       resizer.setAttribute('aria-disabled', draggable ? 'false' : 'true');
       resizer.tabIndex = draggable ? 0 : -1;
     }
+    publishMetaSectionShare(expanded);
+  }
+
+  /**
+   * Set --meta-body-share on #meta-panel to the height one expanded
+   * body gets when all of them share the panel equally; main.css derives
+   * every body's minimum height from it.  Measured, not computed: the
+   * bodies fill exactly what the headers, status lines, separators,
+   * margins and padding leave, whatever the surface's CSS, so their
+   * heights add up to that free space.  The one exception is minimums
+   * left over from a taller panel, which overflow it; that excess is
+   * the panel's overflow and comes off again.  Nothing is touched to
+   * measure, so scroll positions stay.  0px without layout (jsdom, a
+   * display:none panel).
+   */
+  function publishMetaSectionShare(expanded) {
+    const panel = document.getElementById('meta-panel');
+    if (!panel) return;
+    let bodies = 0;
+    for (const section of expanded) {
+      const body = metaSectionBody(section);
+      if (body) bodies += body.getBoundingClientRect().height;
+    }
+    const overflow = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    const free = Math.max(0, bodies - overflow);
+    const share = expanded.length ? free / expanded.length : 0;
+    panel.style.setProperty('--meta-body-share', share.toFixed(2) + 'px');
   }
 
   /**
@@ -5089,9 +5112,9 @@
   /**
    * Wire the separator after a section: a pointer drag or the Up/Down
    * arrow keys move the boundary between that section's body and the
-   * expanded bodies below it (which can shrink to nothing: their
-   * headers stay); a double-click returns the section to its equal
-   * share.
+   * expanded bodies below it (each keeps the minimum height main.css
+   * gives .meta-section-body); a double-click returns the section to
+   * its equal share.
    */
   function setupMetaSectionResizer(resizer) {
     const section = resizer.previousElementSibling;
@@ -5136,13 +5159,14 @@
     function resizeTo(height) {
       const requested = Math.round(Math.max(0, Math.min(maxH, height)));
       setMetaSectionHeight(section, requested);
-      // When the panel is too short for everything, the body renders
-      // shorter than asked: keep the height that actually shows, so the
-      // stored value, aria-valuenow and the next drag all agree.
-      const h = Math.min(
-        requested,
-        Math.round(body.getBoundingClientRect().height),
-      );
+      // The body renders shorter than asked once the bodies below are
+      // at their minimum height (or the panel is too short): the drag
+      // can go no further.  It renders taller than asked at its own
+      // minimum.  Either way keep the height that actually shows, so
+      // the stored value, aria-valuenow, aria-valuemax and the next
+      // move all agree.
+      const h = Math.round(body.getBoundingClientRect().height);
+      if (h < requested) maxH = h;
       if (h !== requested) setMetaSectionHeight(section, h);
       resizer.setAttribute('aria-valuenow', String(h));
       resizer.setAttribute('aria-valuemax', String(Math.round(maxH)));
@@ -5220,6 +5244,11 @@
       setupMetaSectionResizer(resizer);
     }
     applyMetaSectionLayout();
+    // The equal share changes with the panel's height (a window resize,
+    // the drawer opening): re-measure it then.
+    const panel = document.getElementById('meta-panel');
+    if (panel && typeof ResizeObserver === 'function')
+      new ResizeObserver(applyMetaSectionLayout).observe(panel);
   }
   setupMetaSections();
   // metasections-coverage:end
@@ -5317,15 +5346,8 @@
       }
       return;
     }
-    if (content.trim()) {
-      setMetaInfoHTML(taskUpdateBodyHTML(content));
-    } else {
-      setMetaInfoHTML(
-        '<p class="meta-info-pending">' +
-          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
-          '</p>',
-      );
-    }
+    // The status line's height counts in the section layout that
+    // setMetaInfoHTML applies, so it is set first.
     if (metaInfoStatus) {
       let status = '';
       if (running) {
@@ -5342,6 +5364,15 @@
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
       }
       metaInfoStatus.textContent = status;
+    }
+    if (content.trim()) {
+      setMetaInfoHTML(taskUpdateBodyHTML(content));
+    } else {
+      setMetaInfoHTML(
+        '<p class="meta-info-pending">' +
+          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
+          '</p>',
+      );
     }
     if (metaInfoRefreshBtn) {
       metaInfoRefreshBtn.disabled = running;

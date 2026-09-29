@@ -44,6 +44,7 @@ from __future__ import annotations
 import datetime
 import functools
 import http.server
+import json
 import math
 import threading
 from collections.abc import Iterator
@@ -238,13 +239,21 @@ def _open_page(
     width: int,
     height: int = 900,
     global_sections: bool = False,
+    storage: dict[str, str] | None = None,
 ) -> Page:
     """Open the remote page at the given viewport with post recording.
 
     Unless ``global_sections``, the Schedule, Apps and Spend sections
-    are hidden so only the per-task sections share the panel."""
+    are hidden so only the per-task sections share the panel.
+    ``storage`` entries land in localStorage before the page's scripts
+    run, the way a previous visit would have left them."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.add_init_script(_RECORD_POSTS_JS)
+    if storage:
+        page.add_init_script(
+            f"for (const [k, v] of Object.entries({json.dumps(storage)})) "
+            "localStorage.setItem(k, v);"
+        )
     page.goto(url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
@@ -531,6 +540,8 @@ _EXTRA_GEOMETRY_JS = """
     contentHeight: rect('meta-info-content').height,
     valueNow: document.querySelector('#meta-section-info + .meta-section-resizer')
       .getAttribute('aria-valuenow'),
+    valueMax: document.querySelector('#meta-section-info + .meta-section-resizer')
+      .getAttribute('aria-valuemax'),
   };
 }
 """
@@ -582,14 +593,17 @@ def test_a_third_section_stacks_resizes_and_hides(
         assert after["valueNow"] == str(round(after["listHeight"]))
 
         # A drag further than the space below can give stops where the
-        # space ends, and the stored value matches what shows.
+        # space ends: every body below keeps the minimum height
+        # .meta-section-body has in main.css (the same for both, a
+        # couple of rows), so no expanded section is left as a header
+        # over an empty body; the stored value and aria-valuemax match
+        # what shows.
         _drag_separator_by(page, 2000)
         capped = page.evaluate(_EXTRA_GEOMETRY_JS)
         assert capped["valueNow"] == str(round(capped["listHeight"])), capped
-        assert capped["contentHeight"] == pytest.approx(0, abs=1), capped
-        # The filling (last expanded) body keeps its minimum share
-        # (.meta-section-fill in main.css) even against a long drag.
-        assert capped["extraHeight"] > 50, capped
+        assert capped["valueMax"] == capped["valueNow"], capped
+        assert capped["contentHeight"] > 40, capped
+        assert capped["extraHeight"] == pytest.approx(capped["contentHeight"], abs=1), capped
         for hdr in _geometry(page)["headers"]:
             assert 0 <= hdr["top"] < hdr["bottom"] <= 700, hdr
 
@@ -1116,5 +1130,200 @@ def test_every_surface_gives_the_expanded_sections_equal_heights(
         assert dragged[3] + dragged[4] == pytest.approx(
             heights[3] + heights[4] - 30, abs=2
         ), (heights, dragged)
+    finally:
+        page.close()
+
+
+_MINIMUM_GEOMETRY_JS = """
+() => {
+  const panel = document.getElementById('meta-panel');
+  const rect = id => document.getElementById(id).getBoundingClientRect();
+  const list = document.getElementById('meta-schedule-list');
+  const row = list.querySelector('li');
+  const share = parseFloat(getComputedStyle(panel).getPropertyValue('--meta-body-share'));
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return {
+    share,
+    minimum: Math.min(4 * rem, share / 2),
+    listHeight: rect('meta-list').height,
+    scheduleHeight: rect('meta-schedule-list').height,
+    appsHeight: rect('meta-apps-list').height,
+    spendHeight: rect('meta-spend-body').height,
+    scheduleScrolls: list.scrollHeight > list.clientHeight + 1,
+    firstRowInside: row !== null
+      && row.getBoundingClientRect().top >= list.getBoundingClientRect().top - 0.5
+      && row.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom + 0.5,
+    panelOverflows: panel.scrollHeight > panel.clientHeight + 1,
+    headerBottoms: Array.from(document.querySelectorAll('#meta-panel .meta-section-hdr'))
+      .map(h => h.getBoundingClientRect().bottom),
+  };
+}
+"""
+
+
+def _cron_jobs(count: int) -> dict[str, object]:
+    return {
+        "type": "cronJobs",
+        "jobs": [
+            {
+                "id": f"j{i}", "name": f"Job {i}", "schedule": "0 9 * * *",
+                "kind": "prompt", "what": f"task {i}", "enabled": True,
+                "running": False, "nextRunAt": "2099-01-01T09:00:00", "lastRunAt": "",
+                "lastStatus": "", "workDir": "",
+            }
+            for i in range(count)
+        ],
+    }
+
+
+def test_a_persisted_drag_cannot_hide_the_schedule_section(
+    browser: Browser, remote_url: str
+) -> None:
+    """The report behind this test: the Schedule header stood over an
+    empty body on every page load and "showed no scheduled tasks".  The
+    Task Info separator had once been dragged far down; that height
+    persists, and a middle body used to have no minimum, so the dragged
+    body took its whole share.  Every expanded body now keeps half of an
+    equal share (at most 4rem): the jobs stay on screen and scroll, the
+    dragged body yields instead, and because the minimum follows the
+    panel's height a short window never makes the panel itself
+    overflow.  A double-click on the separator still restores the equal
+    shares."""
+    page = _open_page(
+        browser,
+        remote_url,
+        1200,
+        height=800,
+        global_sections=True,
+        storage={"kiss-meta-section-h:meta-section-info": "2000"},
+    )
+    try:
+        page.wait_for_selector("body.remote-desktop", state="attached")
+        _deliver(page, _cron_jobs(12))
+        _deliver(page, {"type": "appsStatus", "apps": _APPS, "checkedAt": "2026-09-26T11:00:00"})
+        _deliver(page, _spend_report())
+        geo = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert geo["share"] > 100, geo
+        assert geo["minimum"] > 40, geo
+        # Schedule, Apps and Spend each keep the minimum; Task Info has
+        # the rest, far less than the 2000px it asked for.
+        for key in ("scheduleHeight", "appsHeight", "spendHeight"):
+            assert geo[key] == pytest.approx(geo["minimum"], abs=1), (key, geo)
+        assert geo["listHeight"] < 4 * geo["share"] - 3 * geo["minimum"] + 2, geo
+        assert geo["firstRowInside"] is True and geo["scheduleScrolls"] is True, geo
+        assert geo["panelOverflows"] is False, geo
+
+        # Measuring the share touches nothing: a scrolled body keeps its
+        # position through the sidebar's periodic refresh.
+        page.evaluate(
+            "() => { const l = document.getElementById('meta-apps-list');"
+            " l.scrollTop = l.scrollHeight; }"
+        )
+        scrolled = page.evaluate("() => document.getElementById('meta-apps-list').scrollTop")
+        assert scrolled > 0
+        _deliver(page, _cron_jobs(12))
+        assert page.evaluate(
+            "() => document.getElementById('meta-apps-list').scrollTop"
+        ) == scrolled
+
+        # A much shorter window: the share and the minimums shrink with
+        # it (ResizeObserver), every header stays on screen, the bodies
+        # still show something, and the panel still does not overflow.
+        page.set_viewport_size({"width": 1200, "height": 300})
+        page.wait_for_function(
+            "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
+            ".getPropertyValue('--meta-body-share')) < 60"
+        )
+        short = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert 0 < short["minimum"] < geo["minimum"], short
+        assert short["scheduleHeight"] == pytest.approx(short["minimum"], abs=1), short
+        assert short["panelOverflows"] is False, short
+        assert all(bottom <= 300 for bottom in short["headerBottoms"]), short
+
+        # A Task update whose status line then grows (a long error) adds
+        # a fifth section and a taller header row on this short panel:
+        # the share is measured after the status is set, so the
+        # minimums shrink to fit and the panel still does not overflow.
+        _show_task_update(page, _LONG_REPORT)
+        poll = page.evaluate(
+            "() => window.__posted.filter(m => m.type === 'getTaskUpdate').pop()"
+        )
+        _deliver(
+            page,
+            {
+                "type": "taskUpdate",
+                "tabId": poll["tabId"],
+                "token": poll["token"],
+                "taskId": "task-1",
+                "exists": True,
+                "sig": "sig-2",
+                "content": _LONG_REPORT,
+                "error": "task-update agent failed: " + "x" * 800,
+                "running": False,
+                "cost": 0,
+                "updatedAt": 0,
+            },
+        )
+        crowded = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert len(crowded["headerBottoms"]) == 5, crowded
+        assert 0 < crowded["minimum"] < short["minimum"], (short, crowded)
+        assert crowded["panelOverflows"] is False, crowded
+        assert all(bottom <= 300 for bottom in crowded["headerBottoms"]), crowded
+
+        # Double-clicking the separator forgets the dragged height:
+        # the four bodies share the panel equally again.
+        page.set_viewport_size({"width": 1200, "height": 800})
+        page.wait_for_function(
+            "() => parseFloat(getComputedStyle(document.getElementById('meta-panel'))"
+            ".getPropertyValue('--meta-body-share')) > 100"
+        )
+        _section_resizer(page).dblclick()
+        reset = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert reset["scheduleHeight"] == pytest.approx(reset["share"], abs=1), reset
+        assert reset["listHeight"] == pytest.approx(reset["share"], abs=1), reset
+        assert page.evaluate(
+            "() => localStorage.getItem('kiss-meta-section-h:meta-section-info')"
+        ) is None
+
+        # The dragged body has the same minimum: Arrow Up past it leaves
+        # the body at the minimum, and the stored height and
+        # aria-valuenow say what shows; Arrow Down then moves it again.
+        resizer = _section_resizer(page)
+        resizer.focus()
+        for _ in range(30):
+            page.keyboard.press("ArrowUp")
+        floor = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        stored = page.evaluate(
+            "() => localStorage.getItem('kiss-meta-section-h:meta-section-info')"
+        )
+        assert floor["listHeight"] == pytest.approx(floor["minimum"], abs=1), floor
+        assert stored == str(round(floor["listHeight"])), (stored, floor)
+        assert resizer.get_attribute("aria-valuenow") == stored
+        page.keyboard.press("ArrowDown")
+        assert page.evaluate(_MINIMUM_GEOMETRY_JS)["listHeight"] == pytest.approx(
+            floor["listHeight"] + 16, abs=1
+        )
+
+        # A pointer drag to the bottom of the window (past the cap) stops
+        # where the bodies below reach their minimum; moving back to 50px
+        # below the start in the same drag leaves the body 50px taller
+        # than it began (both moves stay inside the viewport so the
+        # pointer events reach the page).
+        start = page.evaluate(_MINIMUM_GEOMETRY_JS)["listHeight"]
+        box = resizer.bounding_box()
+        assert box is not None
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, 790, steps=8)
+        capped = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert capped["scheduleHeight"] == pytest.approx(capped["minimum"], abs=1), capped
+        assert start + 50 < capped["listHeight"] < 790 - y - 50, (start, y, capped)
+        assert resizer.get_attribute("aria-valuemax") == str(round(capped["listHeight"]))
+        page.mouse.move(x, y + 50, steps=4)
+        page.mouse.up()
+        back = page.evaluate(_MINIMUM_GEOMETRY_JS)
+        assert back["listHeight"] == pytest.approx(start + 50, abs=2), (start, capped, back)
     finally:
         page.close()
