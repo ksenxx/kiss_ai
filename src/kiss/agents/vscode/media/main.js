@@ -23683,11 +23683,14 @@
       return;
     }
     const atMatch = getAtCtx();
-    const searchQ = atMatch ? atMatch.query : '';
+    // Item texts are complete mentions ("./src/a.py" inside the work
+    // dir, "~/Documents/x.md" elsewhere under home); a leading "./" or
+    // "~/" in the query only scopes the search, so highlight without it.
+    const searchQ = atMatch ? atMatch.query.replace(/^(\.\/|~\/?)/, '') : '';
     renderAcDropdown(
       data,
-      ['frequent', 'file'],
-      {frequent: 'Frequent', file: 'Files'},
+      ['frequent', 'file', 'home'],
+      {frequent: 'Frequent', file: 'Files', home: 'Home'},
       item =>
         searchQ && searchQ.length > 0
           ? hlMatch(item.text, searchQ)
@@ -23702,7 +23705,8 @@
       const before = inp.value.substring(0, atCtx.start);
       const after = inp.value.substring(inp.selectionStart || inp.value.length);
       const sep = /^\s/.test(after) ? '' : ' ';
-      const mention = './' + file;
+      // The daemon already prefixed the mention ("./" or "~/").
+      const mention = file;
       inp.value = before + mention + sep + after;
       syncClearBtn();
       const np = before.length + mention.length + sep.length;

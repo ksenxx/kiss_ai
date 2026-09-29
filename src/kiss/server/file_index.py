@@ -22,7 +22,11 @@ replaces both with an index that is
 * **shared by every tab under the home directory**: the home index
   serves any work_dir below it through a cached :class:`FileView`, and
   roots outside it (or inside a skipped directory) get an index of
-  their own.
+  their own;
+* **home-wide**: a :class:`Picker` answers with ``./path`` mentions
+  from the work dir followed by ``~/path`` mentions from the rest of
+  the home directory, so any file under ``~`` can be handed to an
+  agent from any tab.
 
 Scan rules: dot-directories, :data:`JUNK_DIR_NAMES` and the non-glob
 entries of every ``.gitignore`` met on the way down (nested repositories
@@ -98,6 +102,11 @@ WIDE_DIR_MIN_CHILDREN = 50
 # Matches collected (in index order) before ranking by match position.
 # Beyond this many hits the query is too unspecific for position to matter.
 MATCH_CAP = 1000
+
+# Slots of a picker reply kept for matches outside the work dir, so the
+# rest of the home directory stays reachable when the work dir alone
+# would fill the list.
+HOME_SLOTS = 5
 
 # A view served more than this many seconds after its index was built
 # schedules a background refresh, so the next keystroke sees the change.
@@ -543,7 +552,7 @@ class FileIndex:
         self._derived = derived
         self.relisted = relisted
         self.built_at = time.monotonic()
-        self._views: dict[str, FileView] = {}
+        self._views: dict[tuple[str, bool], FileView] = {}
         self._views_lock = threading.Lock()
 
     @classmethod
@@ -674,33 +683,133 @@ class FileIndex:
         """Return an index of *root* with no entries (a failed scan)."""
         return cls(root, [], frozenset({""}), {}, {}, False, 0)
 
-    def view_dirs(self) -> list[str]:
-        """Return the ``sub_dir`` keys of the views built so far."""
+    def view_keys(self) -> list[tuple[str, bool]]:
+        """Return the ``(sub_dir, complement)`` keys of the views built so far."""
         with self._views_lock:
             return list(self._views)
 
-    def view(self, sub_dir: str) -> FileView:
+    def view(self, sub_dir: str, complement: bool = False) -> FileView:
         """Return the (cached) view of the entries below *sub_dir*.
 
         Args:
             sub_dir: ``""`` for the whole index, else a relative directory
                 path with a trailing ``/`` (``"kiss/src/"``).
+            complement: Return the entries NOT below *sub_dir* instead,
+                as root-relative paths (the ``~/`` part of a picker
+                rooted at *sub_dir*).  Ignored when *sub_dir* is ``""``.
         """
+        key = (sub_dir, complement and bool(sub_dir))
         with self._views_lock:
-            view = self._views.get(sub_dir)
+            view = self._views.get(key)
             if view is None:
-                if sub_dir:
-                    n = len(sub_dir)
-                    head = [
-                        p[n:] for p in self.paths[:self.wide_from]
-                        if p.startswith(sub_dir) and len(p) > n
-                    ]
-                    tail = [p[n:] for p in self.paths[self.wide_from:] if p.startswith(sub_dir)]
-                    view = FileView(head + tail, len(head))
-                else:
-                    view = FileView(self.paths, self.wide_from)
-                self._views[sub_dir] = view
+                view = self._make_view(*key)
+                self._views[key] = view
             return view
+
+    def _make_view(self, sub_dir: str, complement: bool) -> FileView:
+        """Build the view of :meth:`view` (*key* already normalised)."""
+        if not sub_dir:
+            return FileView(self.paths, self.wide_from)
+        head, tail = self.paths[:self.wide_from], self.paths[self.wide_from:]
+        if complement:
+            head = [p for p in head if not p.startswith(sub_dir)]
+            tail = [p for p in tail if not p.startswith(sub_dir)]
+        else:
+            n = len(sub_dir)
+            head = [p[n:] for p in head if p.startswith(sub_dir) and len(p) > n]
+            tail = [p[n:] for p in tail if p.startswith(sub_dir)]
+        return FileView(head + tail, len(head))
+
+
+def _search_prefixed(
+    view: FileView | None,
+    query: str,
+    usage: dict[str, int],
+    prefix: str,
+    kind: str,
+    limit: int,
+) -> list[dict[str, str]]:
+    """Search *view* and return its items as *prefix*-ed mentions.
+
+    Only the *usage* entries recorded under *prefix* count as frequent
+    here (a ``./`` mention and a ``~/`` mention are different paths).
+    Plain ``file`` hits are retyped *kind*; ``frequent`` ones keep their
+    type so both parts of a picker share one "Frequent" section.
+    """
+    if view is None:
+        return []
+    n = len(prefix)
+    own = {p[n:]: count for p, count in usage.items() if p.startswith(prefix)}
+    items = view.search(query, own, limit)
+    for item in items:
+        item["text"] = prefix + item["text"]
+        if item["type"] == "file":
+            item["type"] = kind
+    return items
+
+
+class Picker:
+    """What one tab's ``@``-mention picker searches.
+
+    Matches inside the work dir come back as ``./path`` items (types
+    ``frequent`` / ``file``), matches elsewhere below the home directory
+    as ``~/path`` items (types ``frequent`` / ``home``), so the text of
+    an item is exactly the mention to insert and the usage key to
+    record.  A query starting with ``./`` searches the work dir only; one
+    starting with ``~`` (``~/Doc``) searches the whole home directory
+    only and every hit is a ``~/`` item (the work dir included when the
+    home index holds it; a work dir inside a skipped directory such as
+    ``~/.cache/x`` is reachable through its ``./`` items only).
+
+    Attributes:
+        local: View of the work dir.
+        home_rest: View of the home directory minus the work dir, or
+            ``None`` when there is nothing outside the work dir to offer
+            (the work dir is home itself, or home is not indexed yet).
+        home_all: View of the whole home directory, or ``None`` when it
+            is not indexed yet.
+    """
+
+    def __init__(
+        self, local: FileView, home_rest: FileView | None, home_all: FileView | None,
+    ) -> None:
+        """Wrap the views; see the class attributes."""
+        self.local = local
+        self.home_rest = home_rest
+        self.home_all = home_all
+
+    def search(
+        self,
+        query: str,
+        usage: dict[str, int],
+        limit: int = SUGGESTION_LIMIT,
+    ) -> list[dict[str, str]]:
+        """Rank at most *limit* mentions for *query*.
+
+        Frequent mentions of either part lead, then the work dir's
+        files, then home's; when both parts together exceed *limit*,
+        the work dir yields up to :data:`HOME_SLOTS` places to the home
+        part so it never disappears entirely.
+
+        Args:
+            query: The text after ``@``, optionally led by ``./`` or ``~/``.
+            usage: Mention counts keyed by mention text, oldest first
+                (see ``_load_file_usage``).
+            limit: Maximum number of items returned.
+        """
+        if query.startswith("~"):
+            q = query[2:] if query.startswith("~/") else query[1:]
+            return _search_prefixed(self.home_all, q, usage, "~/", "home", limit)
+        if query.startswith("./"):
+            return _search_prefixed(self.local, query[2:], usage, "./", "file", limit)
+        local = _search_prefixed(self.local, query, usage, "./", "file", limit)
+        home = _search_prefixed(self.home_rest, query, usage, "~/", "home", limit)
+        if len(local) + len(home) > limit:
+            local = local[:limit - min(len(home), HOME_SLOTS)]
+            home = home[:limit - len(local)]
+        items = local + home
+        frequent = [item for item in items if item["type"] == "frequent"]
+        return frequent + [item for item in items if item["type"] != "frequent"]
 
 
 def _load_listings(path: Path, root: str) -> Listings:
@@ -795,20 +904,49 @@ class FileIndexRegistry:
                     return self.home, rel + "/"
         return wd, ""
 
-    def view_for(self, work_dir: str) -> FileView | None:
-        """Return the current view of *work_dir*, or ``None`` if unindexed.
+    def _current(self, root: str) -> FileIndex | None:
+        """Return the index of *root*, or ``None`` if it was never built.
 
-        Serving a view older than :data:`STALE_AFTER` also queues a
-        background refresh of its root.
+        Serving an index older than :data:`STALE_AFTER` also queues a
+        background refresh of its root, so the next request sees the
+        change without anyone waiting on the rescan.
         """
-        root, sub_dir = self.root_for(work_dir)
         with self._lock:
             index = self._indexes.get(root)
+        if index is not None and time.monotonic() - index.built_at > STALE_AFTER:
+            self._enqueue(root, None)
+        return index
+
+    def view_for(self, work_dir: str) -> FileView | None:
+        """Return the current view of *work_dir*, or ``None`` if unindexed."""
+        root, sub_dir = self.root_for(work_dir)
+        index = self._current(root)
+        return None if index is None else index.view(sub_dir)
+
+    def picker_for(self, work_dir: str) -> Picker | None:
+        """Return the :class:`Picker` of *work_dir*, or ``None`` if unindexed.
+
+        ``None`` only while the root covering *work_dir* itself is not
+        built yet.  The home part is whatever the home index holds at
+        the moment: the complement of *work_dir* when the home index
+        serves it, all of home when *work_dir* is a root of its own
+        beside home, nothing when *work_dir* is home itself or contains
+        it (its own index lists home's files already) or the home index
+        does not exist yet (the web server pre-warms it at start-up and
+        a missing one is never waited for).
+        """
+        root, sub_dir = self.root_for(work_dir)
+        index = self._current(root)
         if index is None:
             return None
-        if time.monotonic() - index.built_at > STALE_AFTER:
-            self._enqueue(root, None)
-        return index.view(sub_dir)
+        if root != self.home:
+            home = self._current(self.home)
+            home_all = None if home is None else home.view("")
+            # A work dir above home (``/home``) lists home's files itself.
+            above_home = self.home.startswith(os.path.join(root, ""))
+            return Picker(index.view(""), None if above_home else home_all, home_all)
+        home_rest = index.view(sub_dir, complement=True) if sub_dir else None
+        return Picker(index.view(sub_dir), home_rest, index.view(""))
 
     def ensure(self, work_dir: str, on_ready: Callable[[], object] | None = None) -> bool:
         """Build (or refresh) the index covering *work_dir* in the background.
@@ -899,8 +1037,8 @@ class FileIndexRegistry:
         # Rebuild the views tabs were using, here on the worker thread,
         # so the next keystroke does not pay for them.
         if previous is not None:
-            for sub_dir in previous.view_dirs():
-                index.view(sub_dir)
+            for sub_dir, complement in previous.view_keys():
+                index.view(sub_dir, complement)
         with self._lock:
             self._indexes[root] = index
         if index.relisted:

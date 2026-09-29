@@ -260,10 +260,10 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
         e["files"] for e in captured
         if e.get("type") == "files" and not e.get("loading")
     )
-    assert "alpha.txt" in _names(a_files), (
+    assert "./alpha.txt" in _names(a_files), (
         f"folder A scan must include alpha.txt; got {a_files}"
     )
-    assert "beta.txt" not in _names(a_files)
+    assert "./beta.txt" not in _names(a_files)
 
     captured.clear()
     server._handle_command({"type": "setWorkDir", "workDir": b})
@@ -279,10 +279,10 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
         e["files"] for e in captured
         if e.get("type") == "files" and not e.get("loading")
     )
-    assert "beta.txt" in _names(b_files), (
+    assert "./beta.txt" in _names(b_files), (
         f"after setWorkDir, scan must include folder B files; got {b_files}"
     )
-    assert "alpha.txt" not in _names(b_files), (
+    assert "./alpha.txt" not in _names(b_files), (
         f"folder A files must not leak after switching to B; got {b_files}"
     )
 

@@ -312,9 +312,9 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         await self._send(writer, {"type": "setWorkDir", "workDir": "C:\\"})
         await self._send(writer, {"type": "getFiles", "prefix": ""})
         ev = await self._drain_until(
-            reader, self._files_event_with("alpha.txt"),
+            reader, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["alpha.txt"])
+        self.assertEqual(_file_names(ev), ["./alpha.txt"])
 
     async def test_root_set_work_dir_does_not_poison_global(self) -> None:
         """``setWorkDir('/')`` must leave the daemon-global fallback
@@ -330,7 +330,7 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
             writer,
             {"type": "getFiles", "prefix": "", "workDir": str(self.dir_a)},
         )
-        await self._drain_until(reader, self._files_event_with("alpha.txt"))
+        await self._drain_until(reader, self._files_event_with("./alpha.txt"))
         self.assertEqual(backend.work_dir, before)
         self.assertNotEqual(backend.work_dir, "/")
 
@@ -346,9 +346,9 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
             writer, {"type": "getFiles", "prefix": "", "workDir": "/"},
         )
         ev = await self._drain_until(
-            reader, self._files_event_with("alpha.txt"),
+            reader, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["alpha.txt"])
+        self.assertEqual(_file_names(ev), ["./alpha.txt"])
 
     async def test_unstamped_command_uses_safe_global_after_root_pin(
         self,
@@ -367,9 +367,9 @@ class TestDispatchRootWorkDirGuard(IsolatedAsyncioTestCase):
         await self._send(writer_b, {"type": "setWorkDir", "workDir": "/"})
         await self._send(writer_b, {"type": "getFiles", "prefix": ""})
         ev = await self._drain_until(
-            reader_b, self._files_event_with("alpha.txt"),
+            reader_b, self._files_event_with("./alpha.txt"),
         )
-        self.assertEqual(_file_names(ev), ["alpha.txt"])
+        self.assertEqual(_file_names(ev), ["./alpha.txt"])
 
     async def test_save_config_root_work_dir_keeps_fallback(self) -> None:
         """``saveConfig`` carries ``work_dir`` NESTED in its config
