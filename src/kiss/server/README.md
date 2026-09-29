@@ -342,7 +342,12 @@ The parameters without getters:
   `scope_work_dir`.
 - **`use_web_tools()`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
-  "Use web tools" checkbox, persisted as `use_web_browser`).
+  "Use web tools" checkbox, persisted as `use_web_browser`).  Under
+  the daemon the browser tools include `show_browser()`, which moves
+  the page the agent is browsing into the Browser tab on every surface
+  (the daemon's `BrowserTabService`, passed to the run as
+  `live_browser` and forwarded to its sub-agents) so the user can
+  watch and act on it; there is no getter for it.
 - **`classify_tasks()`** — per-run pre-run task classification.
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as
