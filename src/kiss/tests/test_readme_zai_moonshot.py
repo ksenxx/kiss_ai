@@ -1,9 +1,10 @@
-"""End-to-end README checks for Z.AI/Moonshot support and MiniMax removal.
+"""End-to-end README/MODELS.md checks for Z.AI/Moonshot support and MiniMax removal.
 
-The README is a user-facing integration surface: it documents which API keys
-users should configure and which provider categories/models the bundled catalog
-contains. These tests ensure that the README stays aligned with
-``MODEL_INFO.json`` after replacing MiniMax support with Z.AI and Moonshot AI.
+The README and MODELS.md are user-facing integration surfaces: the README
+documents which API keys users should configure and the catalog totals, and
+MODELS.md the provider categories and models the bundled catalog contains.
+These tests ensure that both stay aligned with ``MODEL_INFO.json`` after
+replacing MiniMax support with Z.AI and Moonshot AI.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from kiss.core.models.model_info import get_model_provider
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _README = _REPO_ROOT / "README.md"
+_MODELS = _REPO_ROOT / "MODELS.md"
 _MODEL_INFO = _REPO_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
 
 
@@ -23,6 +25,10 @@ def _readme_text() -> str:
     # UTF-8 explicitly: the README has non-cp1252 characters and Windows'
     # default text encoding is cp1252.
     return _README.read_text(encoding="utf-8")
+
+
+def _models_text() -> str:
+    return _MODELS.read_text(encoding="utf-8")
 
 
 def _model_info() -> dict[str, dict[str, object]]:
@@ -68,11 +74,11 @@ def _provider_counts() -> dict[str, int]:
 
 
 def test_readme_has_no_minimax_references() -> None:
-    """The user-facing README should not advertise removed MiniMax support."""
-    readme = _readme_text()
-    assert re.search(r"minimax", readme, flags=re.IGNORECASE) is None
-    assert "| MiniMax |" not in readme
-    assert "<strong>MiniMax" not in readme
+    """The user-facing README and MODELS.md should not advertise removed MiniMax support."""
+    for text in (_readme_text(), _models_text()):
+        assert re.search(r"minimax", text, flags=re.IGNORECASE) is None
+        assert "| MiniMax |" not in text
+        assert "<strong>MiniMax" not in text
 
 
 def test_readme_documents_zai_and_moonshot_api_keys() -> None:
@@ -84,21 +90,22 @@ def test_readme_documents_zai_and_moonshot_api_keys() -> None:
 
 
 def test_readme_provider_table_matches_catalog_categories() -> None:
-    """Provider-category totals in the README match MODEL_INFO.json."""
-    readme = _readme_text()
+    """Provider-category totals in README.md and MODELS.md match MODEL_INFO.json."""
+    models = _models_text()
     counts = _provider_counts()
     total = sum(counts.values())
     header = f"**{total} models** across **{len(counts)} provider categories**"
-    assert header in readme
+    assert header in _readme_text()
+    assert header in models
     for provider, count in counts.items():
-        assert f"| {provider} | {count} |" in readme
-    assert "| Z.AI | 8 |" in readme
-    assert "| Moonshot AI | 10 |" in readme
+        assert f"| {provider} | {count} |" in models
+    assert "| Z.AI | 8 |" in models
+    assert "| Moonshot AI | 10 |" in models
 
 
 def test_readme_capability_totals_match_catalog() -> None:
-    """Capability totals in the README match MODEL_INFO.json."""
-    readme = _readme_text()
+    """Capability totals in MODELS.md match MODEL_INFO.json."""
+    readme = _models_text()
     model_info = _model_info()
     generation_count = sum(1 for entry in model_info.values() if entry.get("gen"))
     function_calling_count = sum(1 for entry in model_info.values() if entry.get("fc"))
@@ -111,8 +118,8 @@ def test_readme_capability_totals_match_catalog() -> None:
 
 
 def test_readme_lists_zai_and_moonshot_models() -> None:
-    """The full model list includes direct Z.AI and Moonshot AI sections."""
-    readme = _readme_text()
+    """The full model list in MODELS.md includes direct Z.AI and Moonshot AI sections."""
+    readme = _models_text()
     assert "<summary><strong>Z.AI (8)</strong></summary>" in readme
     assert "<summary><strong>Moonshot AI (10)</strong></summary>" in readme
     for model_name in (
