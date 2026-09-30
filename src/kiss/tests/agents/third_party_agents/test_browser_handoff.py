@@ -2,17 +2,22 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for the default-browser authentication hand-off.
+"""End-to-end tests for the authentication hand-off to the user.
 
 Every connector's sign-in ends on a page only the user may complete.
-The agents now open that page in the user's default browser when the
-process has one and always return the URL (and code) for a manual
-sign-in.  These tests run the real code paths with a scripted browser
-installed through ``$BROWSER`` (the ``webbrowser`` convention) that
-records every URL it is asked to open, so nothing is mocked: the
-launcher really forks the browser process, the consent sessions really
-start, the Composio Connect Link really comes from a local Composio API
-emulator.
+The agents open that page in the Browser tab streamed to every KISS
+surface when the kiss-web daemon has registered its opener, else in
+the user's default browser when the process has one, and word the
+agent's instructions accordingly (no URL to open when the user already
+sees the page).  These tests run the real code paths with a scripted
+browser installed through ``$BROWSER`` (the ``webbrowser`` convention)
+that records every URL it is asked to open, and with a recording
+Browser-tab opener registered through the daemon's real registration
+API, so nothing is mocked: the launcher really forks the browser
+process, the consent sessions really start, the Composio Connect Link
+really comes from a local Composio API emulator.  The daemon's own
+opener (a real streamed browser) is exercised in
+``tests/server/test_browser_tab_service.py``.
 
 Not covered here, and why:
 
@@ -27,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -47,10 +53,15 @@ from kiss.agents.third_party_agents.telegram.telegram_sea import TelegramAgent
 from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import _qr_handoff
 from kiss.core import browser_handoff as _browser_handoff
 from kiss.core.browser_handoff import (
+    BROWSER_TAB,
+    DEFAULT_BROWSER,
+    NOT_OPENED,
     _launch_commands,
     browser_handoff_note,
+    open_for_user,
     open_in_default_browser,
     portal_handoff,
+    set_browser_tab_opener,
 )
 from kiss.tests.agents.third_party_agents.composio_test_utils import start_fake_composio
 from kiss.tests.agents.third_party_agents.test_muse_connect_flows import _FAKE_SIGNAL_CLI
@@ -96,6 +107,49 @@ def fake_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("BROWSER", str(launcher))
     monkeypatch.setenv("KISS_HEADLESS", "0")
     return home
+
+
+class _BrowserTab:
+    """Recording stand-in for the daemon's Browser-tab opener.
+
+    Registered through :func:`set_browser_tab_opener` exactly as the
+    kiss-web daemon registers ``BrowserTabService.open_for_user``; it
+    records every URL and answers as told (``result`` may be an
+    exception instance to raise).
+    """
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.result: bool | Exception = True
+
+    def __call__(self, url: str) -> bool:
+        self.urls.append(url)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _forget_recent_pages() -> None:
+    """Reset the reopen guard: pages opened by an earlier step count as new again."""
+    with _browser_handoff._lock:
+        _browser_handoff._recent.clear()
+
+
+@pytest.fixture(autouse=True)
+def fresh_reopen_guard() -> None:
+    """Pages a previous test opened (same portal, same QR file) must not be 'recent'."""
+    _forget_recent_pages()
+
+
+@pytest.fixture()
+def browser_tab() -> Any:
+    """Register a recording Browser-tab opener for the test's duration."""
+    tab = _BrowserTab()
+    set_browser_tab_opener(tab)
+    try:
+        yield tab
+    finally:
+        set_browser_tab_opener(None)
 
 
 def _opened(home: Path) -> list[list[str]]:
@@ -272,19 +326,155 @@ def test_default_command_without_browser_env(monkeypatch: pytest.MonkeyPatch) ->
     assert _launch_commands("https://x.test/") == [[expected, "https://x.test/"]]
 
 
-def test_handoff_notes_always_carry_the_url() -> None:
-    """Both outcomes tell the agent to show the URL via ask_user_question()."""
+# --------------------------------------------------------------------------
+# open_for_user: Browser tab first, default browser second
+# --------------------------------------------------------------------------
+
+
+def test_open_for_user_prefers_the_browser_tab(fake_browser: Path, browser_tab: Any) -> None:
+    """With the daemon's opener registered the page goes to the Browser tab only."""
+    url = _unique_url("tab")
+    assert open_for_user(url) == BROWSER_TAB
+    assert browser_tab.urls == [url]
+    assert _opened(fake_browser) == []
+    # The reopen guard covers the Browser tab too: a second check within
+    # the window reports the tab without opening another one.
+    assert open_for_user(url) == BROWSER_TAB
+    assert browser_tab.urls == [url]
+
+
+def test_open_for_user_browser_tab_ignores_headless(
+    monkeypatch: pytest.MonkeyPatch, browser_tab: Any
+) -> None:
+    """The streamed browser is headless by design: KISS_HEADLESS does not stop it."""
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    url = _unique_url("tab-headless")
+    assert open_for_user(url) == BROWSER_TAB
+    assert browser_tab.urls == [url]
+
+
+def test_open_for_user_falls_back_when_the_tab_fails(
+    fake_browser: Path, browser_tab: Any
+) -> None:
+    """A refused or crashing tab opener hands the page to the default browser."""
+    browser_tab.result = False
+    url = _unique_url("tab-refused")
+    assert open_for_user(url) == DEFAULT_BROWSER
+    browser_tab.result = RuntimeError("no browser binary")
+    other = _unique_url("tab-crashed")
+    assert open_for_user(other) == DEFAULT_BROWSER
+    assert browser_tab.urls == [url, other]
+    assert _opened(fake_browser) == [[url], [other]]
+    # Both fail: nothing is open, and the claim is released so the next
+    # attempt for the same page tries the tab again instead of assuming
+    # a page that never appeared.
+    browser_tab.result = False
+    (fake_browser / "refuse").touch()
+    third = _unique_url("tab-and-browser-refused")
+    assert open_for_user(third) == NOT_OPENED
+    browser_tab.result = True
+    assert open_for_user(third) == BROWSER_TAB
+    assert browser_tab.urls == [url, other, third, third]
+
+
+def test_open_for_user_without_daemon_or_browser(
+    fake_browser: Path, monkeypatch: pytest.MonkeyPatch, browser_tab: Any
+) -> None:
+    """No opener: default browser; headless too: nothing; bad scheme: nothing."""
+    assert open_for_user("sgnl://linkdevice?uuid=1") == NOT_OPENED
+    assert browser_tab.urls == []
+    set_browser_tab_opener(None)
+    url = _unique_url("no-daemon")
+    assert open_for_user(url) == DEFAULT_BROWSER
+    assert _opened(fake_browser) == [[url]]
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    assert open_for_user(_unique_url("nothing")) == NOT_OPENED
+
+
+def test_concurrent_callers_share_the_final_outcome(
+    fake_browser: Path, browser_tab: Any
+) -> None:
+    """A caller that finds the same page mid-launch waits for the real outcome."""
+    import threading
+
+    gate = threading.Event()
+
+    class _SlowTab(_BrowserTab):
+        def __call__(self, url: str) -> bool:
+            self.urls.append(url)  # visible while the launch is in flight
+            assert gate.wait(10)
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    slow = _SlowTab()
+    set_browser_tab_opener(slow)
+    (fake_browser / "refuse").touch()  # the fallback fails too
+    slow.result = False
+    url = _unique_url("concurrent-fail")
+    results: list[str] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(open_for_user(url))) for _ in range(2)
+    ]
+    threads[0].start()
+    _wait_until(lambda: len(slow.urls) == 1)
+    threads[1].start()  # arrives while the first launch is in flight
+    # ... and blocks on the guard's condition until that launch settles.
+    _wait_until(lambda: len(_browser_handoff._lock._waiters) == 1)  # type: ignore[attr-defined]
+    assert results == []  # the second caller is waiting, not guessing
+    gate.set()
+    for thread in threads:
+        thread.join(15)
+    # Nothing opened anywhere: neither caller claims the user sees the page.
+    assert results == [NOT_OPENED, NOT_OPENED]
+    # The waiter retried the tab itself once the first claim was released.
+    assert slow.urls == [url, url]
+
+    # A launch that succeeds is shared: one tab, both callers told about it.
+    gate.clear()
+    slow.result = True
+    other = _unique_url("concurrent-ok")
+    results.clear()
+    threads = [
+        threading.Thread(target=lambda: results.append(open_for_user(other))) for _ in range(2)
+    ]
+    threads[0].start()
+    _wait_until(lambda: slow.urls.count(other) == 1)
+    threads[1].start()
+    gate.set()
+    for thread in threads:
+        thread.join(15)
+    assert results == [BROWSER_TAB, BROWSER_TAB] and slow.urls.count(other) == 1
+
+
+def _wait_until(condition: Any, timeout: float = 10.0) -> None:
+    """Poll *condition* until it is true (fails the test after *timeout* seconds)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.01)
+
+
+def test_handoff_notes_match_where_the_page_went() -> None:
+    """Browser tab: no URL to hand out; otherwise the URL goes via ask_user_question()."""
     url = "https://portal.test/apps"
-    opened = browser_handoff_note(url, True)
+    tab = browser_handoff_note(url, BROWSER_TAB)
+    assert tab.startswith(url) and "Browser tab" in tab
+    assert "do NOT ask them to open a URL" in tab and "already looking at it" in tab
+    opened = browser_handoff_note(url, DEFAULT_BROWSER)
     assert opened.startswith(url) and "default browser" in opened
     assert "ask_user_question()" in opened and "if no browser window appeared" in opened
-    closed = browser_handoff_note(url, False)
+    closed = browser_handoff_note(url, NOT_OPENED)
     assert url in closed and "OWN browser" in closed and "ask_user_question()" in closed
     assert "No browser could be opened" in closed
 
 
-def test_portal_handoff_opens_and_describes(fake_browser: Path) -> None:
-    """portal_handoff() opens the portal and returns the opened-note."""
+def test_portal_handoff_opens_and_describes(fake_browser: Path, browser_tab: Any) -> None:
+    """portal_handoff() opens the portal where it can and returns the matching note."""
+    url = _unique_url("portal")
+    assert "is now open in the Browser tab" in portal_handoff(url)
+    assert browser_tab.urls == [url] and _opened(fake_browser) == []
+    set_browser_tab_opener(None)
     url = _unique_url("portal")
     assert portal_handoff(url).startswith(f"{url} has just been opened")
     assert _opened(fake_browser) == [[url]]
@@ -303,11 +493,30 @@ def _session(uri: str, code: str = "", prefilled: bool = False) -> ConsentSessio
     return session
 
 
+def test_consent_required_opens_verification_page_in_the_browser_tab(
+    fake_browser: Path, browser_tab: Any
+) -> None:
+    """Under the daemon the page opens in the Browser tab and no URL is handed out."""
+    uri = _unique_url("device-tab")
+    answer = consent_required("demo", "Demo", _session(uri, "WDJB-MJHT"))
+    assert answer["opened_in"] == "browser_tab" and answer["browser_opened"] is True
+    assert browser_tab.urls == [uri] and _opened(fake_browser) == []
+    text = answer["instructions"]
+    assert "already open in the Browser tab" in text
+    assert "do NOT ask them to open a URL" in text and "OWN browser" not in text
+    assert "sign in to Demo in the Browser tab that just opened" in text
+    assert "enter the code WDJB-MJHT" in text and "finish_demo_auth()" in text
+    # The URL stays available, but only for a user who cannot see the tab.
+    assert f"cannot see the page, give them {uri}" in text
+    prefilled = consent_instructions("demo", "Demo", _session(uri, "CODE-1", True), BROWSER_TAB)
+    assert "confirm the code shown is CODE-1" in prefilled
+
+
 def test_consent_required_opens_verification_page_and_keeps_code(fake_browser: Path) -> None:
-    """The device-code page opens in the browser; URL and code are still returned."""
+    """Without the daemon the page opens in the browser; URL and code are still returned."""
     uri = _unique_url("device")
     answer = consent_required("demo", "Demo", _session(uri, "WDJB-MJHT"))
-    assert answer["browser_opened"] is True
+    assert answer["opened_in"] == "default_browser" and answer["browser_opened"] is True
     assert answer["verification_uri"] == uri and answer["user_code"] == "WDJB-MJHT"
     text = answer["instructions"]
     assert "has just been opened in the user's default browser" in text
@@ -322,7 +531,7 @@ def test_consent_required_headless_still_hands_off(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("KISS_HEADLESS", "1")
     uri = _unique_url("device-headless")
     answer = consent_required("demo", "Demo", _session(uri, "CODE-1", prefilled=True))
-    assert answer["browser_opened"] is False
+    assert answer["opened_in"] == "" and answer["browser_opened"] is False
     text = answer["instructions"]
     assert "No browser could be opened from this machine" in text
     assert uri in text and "confirm the code shown is CODE-1" in text
@@ -332,16 +541,27 @@ def test_consent_required_headless_still_hands_off(monkeypatch: pytest.MonkeyPat
 
 
 def test_signal_link_opens_black_on_white_qr_page(
-    isolated_kiss_home: Path, fake_browser: Path, tmp_path: Path
+    isolated_kiss_home: Path, fake_browser: Path, tmp_path: Path, browser_tab: Any
 ) -> None:
-    """Signal opens its QR page (a file:// URL it wrote) in the user's browser."""
+    """Signal opens its QR page (a file:// URL it wrote) in the Browser tab, else the browser."""
     cli = tmp_path / "signal-cli"
     install_cli_script(cli, _FAKE_SIGNAL_CLI)
     tools = _auth_tools(SignalAgent())
     try:
         started = json.loads(tools["authenticate_signal"](signal_cli_path=str(cli)))
         assert started["status"] == "consent_required"
-        assert started["browser_opened"] is True
+        assert started["opened_in"] == "browser_tab" and started["browser_opened"] is True
+        page = Path(started["qr_page"])
+        assert browser_tab.urls == [page.as_uri()] and _opened(fake_browser) == []
+        text = started["instructions"]
+        assert "scan the QR code shown in the Browser tab" in text
+        assert "do NOT ask them to open a URL or a file" in text
+        assert started["qr_text"] in text and "finish_signal_auth()" in text
+        ConsentSession.cancel_active("signal")
+        set_browser_tab_opener(None)
+        _forget_recent_pages()  # the same QR file is opened again, elsewhere
+        started = json.loads(tools["authenticate_signal"](signal_cli_path=str(cli)))
+        assert started["opened_in"] == "default_browser" and started["browser_opened"] is True
         page = Path(started["qr_page"])
         assert _opened(fake_browser) == [[page.as_uri()]]
         assert f"The QR page {page} has just been opened" in started["instructions"]
@@ -350,20 +570,32 @@ def test_signal_link_opens_black_on_white_qr_page(
         ConsentSession.cancel_active("signal")
 
 
-def test_whatsapp_qr_handoff_both_outcomes(
-    fake_browser: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_whatsapp_qr_handoff_all_outcomes(
+    fake_browser: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser_tab: Any
 ) -> None:
-    """The WhatsApp QR page opens when possible; otherwise show_browser() is the fallback."""
+    """The WhatsApp QR page goes to the Browser tab, else the browser, else show_browser()."""
     page = tmp_path / "qr.html"
     page.write_text("<html></html>")
+    tab = _qr_handoff(page)
+    assert tab["opened_in"] == "browser_tab" and tab["browser_opened"] is True
+    assert browser_tab.urls == [page.as_uri()] and _opened(fake_browser) == []
+    assert "already open in the Browser tab" in tab["message"]
+    assert "do NOT ask them to open a URL or a file" in tab["message"]
+    assert "wait_for_whatsapp_pairing()" in tab["message"]
+    set_browser_tab_opener(None)
+    page = tmp_path / "qr2.html"
+    page.write_text("<html></html>")
     opened = _qr_handoff(page)
-    assert opened["browser_opened"] is True and opened["qr_page"] == str(page)
+    assert opened["opened_in"] == "default_browser" and opened["browser_opened"] is True
+    assert opened["qr_page"] == str(page)
     assert "has just been opened" in opened["message"]
     assert "wait_for_whatsapp_pairing()" in opened["message"]
     assert _opened(fake_browser) == [[page.as_uri()]]
     monkeypatch.setenv("KISS_HEADLESS", "1")
+    page = tmp_path / "qr3.html"
+    page.write_text("<html></html>")
     closed = _qr_handoff(page)
-    assert closed["browser_opened"] is False
+    assert closed["opened_in"] == "" and closed["browser_opened"] is False
     assert "show_browser()" in closed["message"] and f"file://{page}" in closed["message"]
 
 
@@ -378,6 +610,22 @@ def composio(monkeypatch: pytest.MonkeyPatch):
     yield from start_fake_composio(monkeypatch)
 
 
+def test_google_connect_link_opens_in_the_browser_tab(
+    isolated_kiss_home: Path, fake_browser: Path, composio: Any, browser_tab: Any
+) -> None:
+    """Under the daemon the Connect Link opens in the Browser tab; no URL is handed out."""
+    tools = _auth_tools(GoogleCalendarAgent())
+    started = json.loads(tools["authenticate_google_calendar"]())
+    assert started["status"] == "consent_required"
+    assert started["opened_in"] == "browser_tab" and started["browser_opened"] is True
+    uri = started["verification_uri"]
+    assert browser_tab.urls == [uri] and _opened(fake_browser) == []
+    text = started["instructions"]
+    assert "already open in the Browser tab" in text and "do NOT ask them to open a URL" in text
+    assert "OWN browser" not in text and f"cannot see the page, give them {uri}" in text
+    assert "finish_google_calendar_auth()" in text
+
+
 def test_google_connect_link_opens_in_default_browser(
     isolated_kiss_home: Path, fake_browser: Path, composio: Any
 ) -> None:
@@ -385,10 +633,11 @@ def test_google_connect_link_opens_in_default_browser(
     tools = _auth_tools(GoogleCalendarAgent())
     started = json.loads(tools["authenticate_google_calendar"]())
     assert started["status"] == "consent_required" and started["browser_opened"] is True
+    assert started["opened_in"] == "default_browser"
     uri = started["verification_uri"]
     assert uri.startswith("https://connect.composio.dev/link/")
     assert _opened(fake_browser) == [[uri]]
-    assert uri in started["instructions"]
+    assert uri in started["instructions"] and "OWN browser" in started["instructions"]
     assert "finish_google_calendar_auth()" in started["instructions"]
 
 
@@ -399,6 +648,7 @@ def test_google_connect_link_headless_is_handed_over(
     monkeypatch.setenv("KISS_HEADLESS", "1")
     started = json.loads(_auth_tools(GoogleCalendarAgent())["authenticate_google_calendar"]())
     assert started["status"] == "consent_required" and started["browser_opened"] is False
+    assert started["opened_in"] == ""
     assert started["verification_uri"] in started["instructions"]
 
 
@@ -447,10 +697,11 @@ def test_device_flow_prerequisite_portals_open(
     assert len(_opened(fake_browser)) == 1
 
 
-def test_prompts_describe_the_default_browser_hand_off() -> None:
-    """The channel prompts tell the agent the page is opened for the user and to show the URL."""
+def test_prompts_describe_the_browser_tab_hand_off() -> None:
+    """The channel prompts explain 'opened_in' and forbid URLs when the page is in the tab."""
     prompt = SlackAgent.channel_system_prompt
-    assert "'browser_opened'" in prompt and "ALWAYS call ask_user_question()" in prompt
+    assert "'opened_in' is 'browser_tab'" in prompt and "never ask them" in prompt
+    assert "to open a URL" in prompt and "OWN browser" in prompt  # the fallback path
     assert "Do not drive the portal" not in prompt
     discord_prompt = DiscordAgent.channel_system_prompt
     assert "Do not drive the portal" not in discord_prompt
@@ -458,9 +709,10 @@ def test_prompts_describe_the_default_browser_hand_off() -> None:
     from kiss.agents.third_party_agents.github.github_sea import GitHubAgent
 
     prompt = GitHubAgent.channel_system_prompt
-    assert "tries by itself to open that URL in the user's default browser" in prompt
-    assert "'browser_opened'" in prompt and "ALWAYS call ask_user_question()" in prompt
-    assert "'browser_opened'" in SignalAgent.channel_system_prompt or (
-        "default browser" in SignalAgent.channel_system_prompt
-    )
+    assert "opens that page for the user by itself" in prompt
+    assert "Browser tab on every KISS surface" in prompt
+    assert "'opened_in' is 'browser_tab'" in SignalAgent.channel_system_prompt
+    assert "never ask them to open a URL or file" in SignalAgent.channel_system_prompt
+    assert "'browser_tab'" in GoogleCalendarAgent.channel_system_prompt
+    assert "never ask them to open a URL" in GoogleCalendarAgent.channel_system_prompt
     assert _browser_handoff.__doc__ is not None

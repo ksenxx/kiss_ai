@@ -122,10 +122,10 @@ def test_get_files_uses_explicit_work_dir_overriding_daemon_default(
     )
     populated = _wait_for_files_event(events)
     files = _names(populated["files"])
-    assert "beta.txt" in files, (
+    assert "./beta.txt" in files, (
         f"workDir=b must index folder B; got {files}"
     )
-    assert "alpha.txt" not in files, (
+    assert "./alpha.txt" not in files, (
         f"folder A files must not leak when workDir=b; got {files}"
     )
 
@@ -150,8 +150,8 @@ def test_get_files_per_tab_indexes_are_independent(
     )
     a_evt = _wait_for_files_event(events)
     a_files = _names(a_evt["files"])
-    assert "alpha.txt" in a_files
-    assert "beta.txt" not in a_files
+    assert "./alpha.txt" in a_files
+    assert "./beta.txt" not in a_files
 
     events.clear()
     server._handle_command(
@@ -159,8 +159,8 @@ def test_get_files_per_tab_indexes_are_independent(
     )
     b_evt = _wait_for_files_event(events)
     b_files = _names(b_evt["files"])
-    assert "beta.txt" in b_files
-    assert "alpha.txt" not in b_files
+    assert "./beta.txt" in b_files
+    assert "./alpha.txt" not in b_files
 
     registry = server._file_index
     assert set(registry._indexes) == {a, b}
@@ -175,8 +175,8 @@ def test_get_files_per_tab_indexes_are_independent(
         {"type": "getFiles", "prefix": "", "workDir": a},
     )
     a2 = _wait_for_files_event(events)
-    assert "alpha.txt" in _names(a2["files"])
-    assert "beta.txt" not in _names(a2["files"])
+    assert "./alpha.txt" in _names(a2["files"])
+    assert "./beta.txt" not in _names(a2["files"])
     assert not any(e.get("loading") for e in events), (
         f"a warm index must answer synchronously; got {events}"
     )
@@ -197,7 +197,7 @@ def test_get_files_falls_back_to_daemon_work_dir_when_workdir_missing(
     server._handle_command({"type": "getFiles", "prefix": ""})
     populated = _wait_for_files_event(events)
     files = _names(populated["files"])
-    assert "alpha.txt" in files, (
+    assert "./alpha.txt" in files, (
         f"missing workDir must fall back to daemon work_dir; got {files}"
     )
 
@@ -219,8 +219,8 @@ def test_get_files_empty_string_workdir_falls_back_to_daemon_work_dir(
     )
     populated = _wait_for_files_event(events)
     files = _names(populated["files"])
-    assert "alpha.txt" in files
-    assert "beta.txt" not in files, (
+    assert "./alpha.txt" in files
+    assert "./beta.txt" not in files, (
         f"empty workDir must NOT index folder B; got {files}"
     )
     assert b not in server._file_index._indexes

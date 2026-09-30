@@ -646,7 +646,10 @@ class _AutocompleteMixin:
         empty value falls back to ``self.work_dir``: the chat webview
         stamps the active tab's ``workDir`` on the ``getFiles`` command
         so tabs with different working directories see their own files,
-        independent of the daemon-wide default.
+        independent of the daemon-wide default.  Each item's ``text`` is
+        the mention to insert verbatim: ``./path`` for entries of the
+        work dir, ``~/path`` for entries elsewhere below the home
+        directory (see :class:`kiss.server.file_index.Picker`).
 
         Must not block the message-handling thread (H9).  When the
         index covering the work_dir is ready the reply is a few
@@ -670,8 +673,8 @@ class _AutocompleteMixin:
         with self._state_lock:
             reqs = self._files_request_map()
             reqs[conn_id] = token
-        view = self._file_index.view_for(wd)
-        if view is None:
+        picker = self._file_index.picker_for(wd)
+        if picker is None:
             # The placeholder must be emitted BEFORE the build is
             # requested.  Both events belong to the same request and
             # carry the same prefix, so the client cannot tell a stale
@@ -693,7 +696,7 @@ class _AutocompleteMixin:
                 self._release_files_token(conn_id, token)
             return
         try:
-            ranked = view.search(prefix, _load_file_usage())
+            ranked = picker.search(prefix, _load_file_usage())
             self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
         finally:
             # This request is answered (or has failed for good — e.g.
@@ -715,7 +718,7 @@ class _AutocompleteMixin:
         """Deliver the populated reply of a ``getFiles`` that hit a cold index.
 
         Runs on the :class:`FileIndexRegistry` worker thread once the
-        root it built is ready.  The view is resolved again: a work_dir
+        root it built is ready.  The picker is resolved again: a work_dir
         below the home directory is served by the home index unless the
         home scan turned out to skip it (gitignored, collapsed bulk
         data), in which case the work_dir becomes a root of its own and
@@ -727,8 +730,8 @@ class _AutocompleteMixin:
         emission can never be followed by this stale one (audit0903 F5).
         """
         try:
-            view = self._file_index.view_for(work_dir)
-            if view is None:
+            picker = self._file_index.picker_for(work_dir)
+            if picker is None:
                 with self._state_lock:
                     superseded = self._files_request_map().get(conn_id) is not token
                 if not superseded and not self._file_index.ensure(
@@ -740,7 +743,7 @@ class _AutocompleteMixin:
                 ):
                     self._release_files_token(conn_id, token)
                 return
-            ranked = view.search(prefix, _load_file_usage())
+            ranked = picker.search(prefix, _load_file_usage())
             with self._state_lock:
                 reqs = self._files_request_map()
                 if reqs.get(conn_id) is not token:

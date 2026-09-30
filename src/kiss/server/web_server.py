@@ -95,6 +95,7 @@ from kiss.agents.sorcar.persistence import (
     _queue_chat_event,
 )
 from kiss.core.brand import BRAND, PRODUCT_NAME
+from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
@@ -3819,6 +3820,7 @@ def _build_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
+        "HEAD_SCRIPT": f"<script>{_ASSET_LOAD_GUARD_JS}</script>",
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
@@ -3848,6 +3850,7 @@ def _build_html() -> str:
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "TREE_MENU_SRC": _media_url("treeContextMenu.js"),
         "BROWSER_TAB_SRC": _media_url("browserTab.js"),
+        "PDF_VIEW_SRC": _media_url("pdfView.js"),
         "MAIN_SRC": _media_url("main.js"),
         "SHIM_SCRIPT": (
             "<script>window.__HLJS_THEME_CSS__ = "
@@ -4214,6 +4217,64 @@ def _record_update_snooze(latest: str) -> None:
             pass
 
 
+_ASSET_LOAD_GUARD_JS = r"""
+// Reloads the remote webapp once when one of its own page assets
+// fails to load.  A page script that never arrives leaves the app
+// half-booted (with api.js missing, main.js throws at
+// ``createSorcarApi`` and the loading overlay covers #app for good
+// while the WebSocket authenticates happily); a stylesheet that never
+// arrives leaves it unstyled for its whole lifetime (without
+// remote-codex.css the docked history panel is main.css's 90vw
+// drawer, open on top of the chat).  Chromium aborts every in-flight
+// request with ERR_NETWORK_CHANGED when the network path changes
+// during the load (a Wi-Fi/cellular hand-over on a phone), so this is
+// a transient a reload fixes.  Load errors do not bubble, but a
+// capture-phase listener on window still sees them.  The timestamp
+// in sessionStorage stops a reload loop when an asset is really
+// broken: one reload per 30 s, then the failure stays visible.
+//
+// This script is the first thing in <head> (the HEAD_SCRIPT
+// placeholder of media/chat.html), before the stylesheet links: a
+// stylesheet's error
+// event is dispatched asynchronously once its fetch fails, so a
+// listener installed by a later script could miss it.
+//
+// Only the page's own assets count: same-origin ``<script src>`` and
+// ``<link rel=stylesheet>`` that fail while the document is still
+// parsing.  Assets main.js adds later on demand (the Monaco editor
+// from its CDN, the voice model, the swapped highlight theme sheet)
+// have their own fallbacks and must not restart the app.
+(function() {
+  var _RELOADED_AT = 'sorcar-script-reloaded-at';
+  // The URL of the failed asset ('' for anything else: an inline
+  // script, an image, the window's own error events).  src / href /
+  // rel read as '' when the attribute is missing.
+  function _assetUrl(target) {
+    var tag = target.tagName;
+    if (tag === 'SCRIPT') return target.src;
+    if (tag === 'LINK' && /\bstylesheet\b/.test(target.rel)) return target.href;
+    return '';
+  }
+  function _reloadOnAssetLoadError(ev) {
+    var url = _assetUrl(ev.target);
+    if (!url) return;
+    if (document.readyState !== 'loading') return;
+    if (url.indexOf(window.location.origin + '/') !== 0) return;
+    try {
+      var last = Number(sessionStorage.getItem(_RELOADED_AT)) || 0;
+      if (Date.now() - last < 30000) return;
+      sessionStorage.setItem(_RELOADED_AT, String(Date.now()));
+    } catch(e) {
+      // No storage means no loop guard: leave the failure visible.
+      return;
+    }
+    window.location.reload();
+  }
+  window.addEventListener('error', _reloadOnAssetLoadError, true);
+})();
+"""
+
+
 _WS_SHIM_JS = r"""
 // WebSocket shim for the remote webapp: provides acquireVsCodeApi()
 // so the extension's media/main.js + media/api.js run unmodified in a
@@ -4224,47 +4285,6 @@ _WS_SHIM_JS = r"""
 // kiss.server.sorcar.ServerApi.authenticate before the daemon starts
 // dispatching this connection's commands.
 (function() {
-  // A page script that never arrives leaves the app half-booted: with
-  // api.js missing, main.js throws at ``createSorcarApi`` and the
-  // loading overlay covers #app for good while the socket below
-  // authenticates happily.  Chromium aborts every in-flight request
-  // with ERR_NETWORK_CHANGED when the network path changes during the
-  // load (a Wi-Fi/cellular hand-over on a phone), so this is a
-  // transient a reload fixes.  Load errors do not bubble, but a
-  // capture-phase listener on window still sees them.  The timestamp
-  // in sessionStorage stops a reload loop when an asset is really
-  // broken: one reload per 30 s, then the failure stays visible.  This
-  // shim runs before every ``<script src>`` of the page (see
-  // media/chat.html; a script's load error fires when the parser
-  // reaches it, in document order) so a failed hljs/marked load is
-  // caught too.
-  //
-  // Only the page's own scripts count: same-origin ``<script src>``
-  // that fail while the document is still parsing.  Scripts main.js
-  // adds later on demand (the Monaco editor from its CDN, the voice
-  // model) have their own fallbacks and must not restart the app.
-  var _SCRIPT_RELOADED_AT = 'sorcar-script-reloaded-at';
-  function _reloadOnScriptLoadError(ev) {
-    var target = ev.target;
-    if (!target || target.tagName !== 'SCRIPT' || !target.src) return;
-    if (document.readyState !== 'loading') return;
-    if (target.src.indexOf(window.location.origin + '/') !== 0) return;
-    try {
-      var last = Number(sessionStorage.getItem(_SCRIPT_RELOADED_AT)) || 0;
-      if (Date.now() - last < 30000) return;
-      sessionStorage.setItem(_SCRIPT_RELOADED_AT, String(Date.now()));
-    } catch(e) {
-      // No storage means no loop guard: leave the failure visible.
-      return;
-    }
-    window.location.reload();
-  }
-  // Guarded like the wake-up listeners below: the DOM-less node
-  // harnesses of the tests load this shim with a bare window object.
-  if (typeof window.addEventListener === 'function') {
-    window.addEventListener('error', _reloadOnScriptLoadError, true);
-  }
-
   var _state = null;
   try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
   var _ws = null;
@@ -6850,7 +6870,11 @@ class RemoteAccessServer:
         )
 
     def _resolve_tab_file(
-        self, raw_path: str, work_dir: str, tab_id: str,
+        self,
+        raw_path: str,
+        work_dir: str,
+        tab_id: str,
+        file_only: bool = False,
     ) -> Path | None:
         """Resolve *raw_path* for a tab, trying its pending worktree too.
 
@@ -6867,10 +6891,14 @@ class RemoteAccessServer:
                 relative, absolute, or ``~``-prefixed).
             work_dir: The tab's working directory.
             tab_id: The requesting client's tab id (may be ``""``).
+            file_only: Accept regular files only.  A directory
+                candidate is skipped rather than returned, so it can
+                neither satisfy the lookup nor shadow a pending-worktree
+                file at the same relative path.
 
         Returns:
             The resolved path when it names an existing regular file
-            or directory, otherwise ``None``.
+            (or, unless *file_only*, a directory), otherwise ``None``.
         """
         try:
             path = Path(os.path.expanduser(raw_path))
@@ -6887,7 +6915,9 @@ class RemoteAccessServer:
                     candidates.append(Path(wt_dir) / path)
             for candidate in candidates:
                 resolved = candidate.resolve()
-                if resolved.is_file() or resolved.is_dir():
+                if resolved.is_file() or (
+                    not file_only and resolved.is_dir()
+                ):
                     return resolved
         except (OSError, ValueError):
             # ValueError: a path with an embedded NUL byte.
@@ -8470,17 +8500,90 @@ class RemoteAccessServer:
                 resume["taskId"] = rt_task
             await self._run_cmd(resume)
 
-    async def _handle_submit(self, cmd: dict[str, Any]) -> None:
+    async def _open_path_only_prompt(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> bool:
+        """Open the file a path-only ``submit`` names; ``True`` when it did.
+
+        The extension host's shortcut (``SorcarSidebarView`` ``case
+        'submit'``) for the daemon: a single-line prompt that is nothing
+        but the path of an existing regular file, typed into a tab that
+        is not running a task, is a request to open that file.  The
+        submitting connection gets ``promptOpened`` (the webview drops
+        the prompt and the task claim it stamped on the tab, see
+        ``main.js`` ``handleEvent``) and then the file's ``fileContent``
+        (:meth:`_handle_open_file`); no task starts.
+
+        A tab whose task is running, or that views a task blocked in
+        ``ask_user_question``, is skipped: there the prompt is a
+        follow-up or an answer that ``_cmd_run`` routes to the worker —
+        the same precedence the extension host gives its running tabs.
+        Directories are skipped too, so a one-word prompt that happens
+        to name a folder (``src``, ``tmp``) is still a task.
+
+        Args:
+            cmd: The ``submit`` message from the browser.
+            endpoint: The submitting connection.
+
+        Returns:
+            ``True`` when the prompt was answered with the file and the
+            caller must not start a run, ``False`` to run as usual.
+        """
+        prompt = cmd.get("prompt", "")
+        if not isinstance(prompt, str):
+            return False
+        trimmed = prompt.strip()
+        if not trimmed or "\n" in trimmed:
+            return False
+        tab_id = self._cmd_str(cmd, "tabId")
+        with agent_state.STATE_LOCK:
+            prev = agent_state.find_by_tab(tab_id)
+            if prev is not None and prev.task_thread is not None:
+                return False
+            if self._vscode_server._viewer_awaiting_answer(tab_id) is not None:
+                return False
+        work_dir = self._cmd_work_dir(cmd)
+        path = self._resolve_tab_file(
+            trimmed, work_dir, tab_id, file_only=True,
+        )
+        if path is None:
+            return False
+        await self._reply_direct(
+            endpoint, {"type": "promptOpened", "tabId": tab_id}, "submit",
+        )
+        await self._handle_open_file(
+            {"path": str(path), "workDir": work_dir, "tabId": tab_id},
+            endpoint,
+        )
+        return True
+
+    async def _handle_submit(
+        self, cmd: dict[str, Any], endpoint: Any = None,
+    ) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
 
         The VS Code TypeScript extension transforms ``submit`` into a
         ``run`` command after resolving paths and tracking running tabs.
-        The web server performs the same translation.
+        The web server performs the same translation, including the
+        extension host's path-only shortcut: a single-line prompt that
+        is nothing but the path of an existing regular file (relative
+        to the tab's work dir or its pending worktree) is a request to
+        open that file, so it is answered with the file's
+        ``fileContent`` (:meth:`_handle_open_file`) and no task starts.
+        Only regular files qualify: a one-word prompt that happens to
+        name a directory (``src``, ``tmp``) is still a task.
 
         Args:
             cmd: The ``submit`` message from the browser.
+            endpoint: The submitting connection, which receives the
+                ``fileContent`` reply of a path-only prompt; ``None``
+                disables the shortcut.
         """
         tab_id = cmd.get("tabId", "")
+        if endpoint is not None and await self._open_path_only_prompt(
+            cmd, endpoint,
+        ):
+            return
         if self._shutdown_initiated:
             # Shutdown admission gate (F4-06): a task submitted after
             # the shutdown sweep snapshotted the active workers would
@@ -9641,6 +9744,12 @@ class RemoteAccessServer:
             await self._bind_uds()
 
         try:
+            # Sign-in pages that connectors hand to the user open in the
+            # streamed Browser tab, focused on every surface, while this
+            # daemon is up (kiss.core.browser_handoff.open_for_user).
+            # Inside the rollback scope: a setup that fails or is
+            # cancelled unregisters it again in _close_partial_setup.
+            set_browser_tab_opener(self._vscode_server.browser_tabs.open_for_user)
             await self._setup_server_after_uds()
         except BaseException:
             # Rollback (F4-04): a TLS/WSS/tunnel failure or a
@@ -9781,6 +9890,9 @@ class RemoteAccessServer:
 
     def _close_partial_setup(self) -> None:
         """Tear down listeners bound by a failed/cancelled ``_setup_server``."""
+        # No surfaces will ever attach to this server: sign-in pages
+        # must not be sent to its Browser tab.
+        set_browser_tab_opener(None)
         if self._uds_server is not None:
             self._uds_server.close()
             self._uds_server = None
@@ -10542,6 +10654,9 @@ class RemoteAccessServer:
             # (e.g. a briefly unwritable KISS dir); no-op when the
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
+            # The Browser tab dies with this server: a later hand-off in
+            # this process must fall back to the default browser.
+            set_browser_tab_opener(None)
             # Also stop the SEA registry watcher on the blocking
             # start() cleanup path (KeyboardInterrupt / pre-loop
             # SIGTERM).  The async ``stop_async`` path unhooks it via
@@ -10686,6 +10801,7 @@ class RemoteAccessServer:
             await self._voice_wake.stop_all()
             # The streamed browser (if one was opened) is a child of this
             # daemon: close it so no orphan browser survives shutdown.
+            set_browser_tab_opener(None)
             await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is

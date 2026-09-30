@@ -185,21 +185,21 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
-            reader_a, self._files_event_with("alpha.txt"),
+            reader_a, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("beta.txt", _file_names(ev_a))
+        self.assertNotIn("./beta.txt", _file_names(ev_a))
 
         await self._send(writer_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
-            reader_b, self._files_event_with("beta.txt"),
+            reader_b, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("alpha.txt", _file_names(ev_b))
+        self.assertNotIn("./alpha.txt", _file_names(ev_b))
 
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev_a2 = await self._drain_until(
-            reader_a, self._files_event_with("alpha.txt"),
+            reader_a, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("beta.txt", _file_names(ev_a2))
+        self.assertNotIn("./beta.txt", _file_names(ev_a2))
 
     async def test_explicit_work_dir_wins_over_connection_work_dir(
         self,
@@ -220,9 +220,9 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
             {"type": "getFiles", "prefix": "", "workDir": str(self.dir_b)},
         )
         ev = await self._drain_until(
-            reader_a, self._files_event_with("beta.txt"),
+            reader_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("alpha.txt", _file_names(ev))
+        self.assertNotIn("./alpha.txt", _file_names(ev))
 
     async def test_empty_set_work_dir_keeps_connection_work_dir(self) -> None:
         """An empty ``setWorkDir`` must not clear the window's folder."""
@@ -233,9 +233,9 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         await self._send(writer_a, {"type": "setWorkDir", "workDir": ""})
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev = await self._drain_until(
-            reader_a, self._files_event_with("alpha.txt"),
+            reader_a, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("beta.txt", _file_names(ev))
+        self.assertNotIn("./beta.txt", _file_names(ev))
 
     async def test_commit_message_uses_connection_work_dir(self) -> None:
         """``generateCommitMessage`` without ``workDir`` must run in the

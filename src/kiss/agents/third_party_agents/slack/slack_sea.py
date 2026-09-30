@@ -1194,9 +1194,9 @@ class SlackAgent(BaseChannelAgent):
             if agent._backend._client is None:
                 return (
                     "Not authenticated with Slack. Call authenticate_slack() to "
-                    "start the browser sign-in to KISS's Slack app, relay the URL "
-                    "it returns with ask_user_question() so the user signs in and "
-                    "clicks Allow in their OWN browser, then call "
+                    "start the browser sign-in to KISS's Slack app and follow its "
+                    "'instructions' (ask_user_question) so the user signs in and "
+                    "clicks Allow on the page it opened for them, then call "
                     "finish_slack_auth(). Never ask for the user's Slack password "
                     "or 2FA code."
                 )
@@ -1218,10 +1218,11 @@ class SlackAgent(BaseChannelAgent):
             """Start the browser sign-in to the KISS-owned Slack app.
 
             Opens Slack's authorization page (user scopes only, PKCE, no
-            client secret) in the user's default browser when possible
-            and waits for Slack's redirect on
-            http://localhost:53682/callback.  Relay the returned URL to
-            the user with ask_user_question(); after they click Allow,
+            client secret) for the user (the Browser tab on every KISS
+            surface, else their default browser) and waits for Slack's
+            redirect on http://localhost:53682/callback.  Follow the
+            returned ``instructions`` with ask_user_question(); after
+            they click Allow,
             call finish_slack_auth().  The credential is stored under the
             current workspace (set via ``--workspace``).
 

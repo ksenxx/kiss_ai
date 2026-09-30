@@ -44,9 +44,11 @@ per call:
   four LLM classifiers measured (89% against 84% for the best), at
   about 1/200 of that LLM's cost and 1/15 of its latency.  It runs only
   when
-  :func:`decisions_classification_enabled` says so: the
-  ``classify_with_decisions`` config key (default off) and an
-  ``OPENROUTER_API_KEY`` with the model in the catalog.  When it is off,
+  :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available` says
+  so — the one gate for every use of Jev, the ``decide`` tool included:
+  the ``classify_with_decisions`` config key (the settings panel's "Use
+  Jev" checkbox, default off) and an ``OPENROUTER_API_KEY`` with the
+  model in the catalog.  When it is off,
   unavailable, or its call fails, the LLM classifier below runs
   instead, so a missing key or an OpenRouter outage never changes the
   classification path's behaviour from what it was before.
@@ -390,29 +392,6 @@ def classification_enabled(override: bool | None = None) -> bool:
     except Exception:  # pragma: no cover — unreadable config
         logger.debug("Could not read classify_tasks", exc_info=True)
         return True
-
-
-def decisions_classification_enabled() -> bool:
-    """Whether :func:`classify_task` should try the decisions classifier first.
-
-    Returns:
-        ``True`` when the ``classify_with_decisions`` config key (persisted
-        in ``~/.kiss/config.json``, default ``False``; the settings panel's
-        "Classify with Jev" checkbox) is on AND the
-        ``decide`` tool can work in this process — an ``OPENROUTER_API_KEY``
-        is configured and :data:`DEFAULT_DECISIONS_MODEL` is in the catalog
-        (see :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available`).
-        ``False`` sends every classification to the LLM classifier.
-    """
-    if not decisions_tool_available():
-        return False
-    from kiss.core.vscode_config import load_config
-
-    try:
-        return bool(load_config().get("classify_with_decisions", False))
-    except Exception:  # pragma: no cover — unreadable config
-        logger.debug("Could not read classify_with_decisions", exc_info=True)
-        return False
 
 
 def _verdict_bool(value: Any) -> bool | None:
@@ -933,7 +912,8 @@ def classify_task(
 ) -> ClassifierRun:
     """Classify *task*: with the decisions classifier when it can run, else the LLM.
 
-    When :func:`decisions_classification_enabled` allows it, one
+    When :func:`~kiss.agents.sorcar.decide_tool.decisions_tool_available`
+    allows it (the "Use Jev" setting is on and Jev can run), one
     ``decide`` tool call on :data:`DEFAULT_DECISIONS_MODEL` produces the
     verdict.  If that classifier is off, unavailable (no
     ``OPENROUTER_API_KEY``), or its call fails for any reason, the LLM
@@ -959,7 +939,7 @@ def classify_task(
         tokens and zero steps (it is not an LLM step).
     """
     task = _truncate_task(task)
-    if not decisions_classification_enabled():
+    if not decisions_tool_available():
         return _classify_with_llm(task, model_name, model_config)
     decided = _classify_with_decisions(task)
     if decided.classification is not None:

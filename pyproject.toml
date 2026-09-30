@@ -292,10 +292,6 @@ module = "playwright.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "patchright.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = "vosk.*"
 ignore_missing_imports = true
 
@@ -332,27 +328,11 @@ module = "mattermostdriver.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = "twitchio.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = "twilio.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "pynostr.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "irc.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["harbor", "harbor.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["datasets", "datasets.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

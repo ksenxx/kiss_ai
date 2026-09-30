@@ -28,7 +28,7 @@ from kiss.core.kiss_error import (
     KISSError,
     ModelRefusalError,
 )
-from kiss.core.models.model import Attachment
+from kiss.core.models.model import Attachment, strip_system_cache_break
 from kiss.core.models.model_info import calculate_cost, get_max_context_length, model
 from kiss.core.prompt_cache_keepalive import PromptCacheKeepAlive, is_long_running_call
 from kiss.core.tool_interrupt import (
@@ -455,7 +455,9 @@ class KISSAgent(Base):
                 )
             self._setup_tools(tools)
             if system_prompt and self.printer and self.print_prompts:
-                self.printer.print(system_prompt, type="system_prompt")
+                self.printer.print(
+                    strip_system_cache_break(system_prompt), type="system_prompt"
+                )
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
             if not self.is_agentic:

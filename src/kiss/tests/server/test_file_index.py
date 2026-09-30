@@ -550,7 +550,7 @@ class TestServerWiring:
         assert first["loading"] is True and first["files"] == []
         assert first["prefix"] == "be" and first["connId"] == "c1" and first["tabId"] == "t1"
         reply = s.wait_populated()
-        assert _texts(reply["files"]) == ["sub/beta.py"]
+        assert _texts(reply["files"]) == ["./sub/beta.py"]
         assert reply["prefix"] == "be" and reply["connId"] == "c1" and reply["tabId"] == "t1"
         assert s.server._files_request_map() == {}
         s.stop()
@@ -571,7 +571,7 @@ class TestServerWiring:
         _build(s.server._file_index, str(root))
         s.get_files("", str(root))
         assert [e.get("loading") for e in s.files_events()] == [None]
-        assert _texts(s.files_events()[0]["files"]) == ["alpha.py", "sub/", "sub/beta.py"]
+        assert _texts(s.files_events()[0]["files"]) == ["./alpha.py", "./sub/", "./sub/beta.py"]
         assert s.server._files_request_map() == {}
         s.stop()
 
@@ -580,7 +580,7 @@ class TestServerWiring:
         _touch(root, "only.py")
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.get_files("", "")
-        assert _texts(s.wait_populated()["files"]) == ["only.py"]
+        assert _texts(s.wait_populated()["files"]) == ["./only.py"]
         s.stop()
 
     def test_non_string_prefix_is_treated_as_empty(self, tmp_path: Path) -> None:
@@ -589,7 +589,7 @@ class TestServerWiring:
         s = _Server(tmp_path, tmp_path / "home", str(root))
         s.server._handle_command({"type": "getFiles", "prefix": {"a": 1}, "workDir": str(root)})
         reply = s.wait_populated()
-        assert reply["prefix"] == "" and _texts(reply["files"]) == ["only.py"]
+        assert reply["prefix"] == "" and _texts(reply["files"]) == ["./only.py"]
         s.stop()
 
     def test_tab_below_home_is_served_by_the_home_index(self, tmp_path: Path) -> None:
@@ -597,10 +597,15 @@ class TestServerWiring:
         _touch(home, "notes.md", "proj/a.py", "proj/src/b.py", "other/c.py")
         s = _Server(tmp_path, home, str(home))
         s.get_files("", str(home / "proj"))
-        assert _texts(s.wait_populated()["files"]) == ["a.py", "src/", "src/b.py"]
+        items = s.wait_populated()["files"]
+        assert _texts(items[:3]) == ["./a.py", "./src/", "./src/b.py"]
+        assert {(i["type"], i["text"]) for i in items[3:]} == {
+            ("home", "~/notes.md"), ("home", "~/other/"), ("home", "~/other/c.py"),
+        }, "the rest of home follows the work dir, without the work dir's own entries"
         # Warm now: another tab below home answers synchronously.
         s.get_files("", str(home / "other"), tab_id="t2")
-        assert _texts(s.populated()[1]["files"]) == ["c.py"]
+        assert _texts(s.populated()[1]["files"])[0] == "./c.py"
+        assert "~/proj/src/b.py" in _texts(s.populated()[1]["files"])
         assert s.populated()[1]["tabId"] == "t2"
         assert set(s.server._file_index._indexes) == {str(home)}
         s.stop()
@@ -614,7 +619,7 @@ class TestServerWiring:
         s = _Server(tmp_path, home, str(home))
         s.get_files("", str(home / "scratch"))
         reply = s.wait_populated()
-        assert _texts(reply["files"]) == ["work.py"]
+        assert _texts(reply["files"]) == ["./work.py", "~/proj/", "~/proj/a.py", "~/.gitignore"]
         assert set(s.server._file_index._indexes) == {str(home), str(home / "scratch")}
         assert s.server._files_request_map() == {}
         s.stop()
@@ -632,7 +637,7 @@ class TestServerWiring:
         reply = s.wait_populated()
         time.sleep(0.2)
         assert len(s.populated()) == 1
-        assert reply["prefix"] == "abd" and _texts(reply["files"]) == ["abd.py"]
+        assert reply["prefix"] == "abd" and _texts(reply["files"]) == ["./abd.py"]
         assert s.server._files_request_map() == {}
         s.stop()
 
@@ -652,7 +657,7 @@ class TestServerWiring:
         reply = s.wait_populated()
         time.sleep(0.2)
         assert len(s.populated()) == 1
-        assert reply["prefix"] == "" and _texts(reply["files"]) == [".gitignore"]
+        assert reply["prefix"] == "" and _texts(reply["files"]) == ["./.gitignore"]
         assert str(home / "scratch") not in s.server._file_index._indexes
         assert s.server._files_request_map() == {}
         s.stop()
@@ -682,7 +687,7 @@ class TestServerWiring:
         _wait(lambda: "new_test.py" in (reg.view_for(str(root)) or FileView([])).paths)
         assert s.files_events() == [], "no unsolicited files event"
         s.get_files("new", str(root))
-        assert _texts(s.files_events()[0]["files"]) == ["new_test.py"]
+        assert _texts(s.files_events()[0]["files"]) == ["./new_test.py"]
         s.stop()
 
     def test_set_work_dir_prewarms_the_new_directory(self, tmp_path: Path) -> None:
@@ -694,7 +699,7 @@ class TestServerWiring:
         assert s.server.work_dir == str(new)
         _wait(lambda: s.server._file_index.view_for(str(new)) is not None)
         s.get_files("", "")
-        assert _texts(s.files_events()[0]["files"]) == ["n.py"]
+        assert _texts(s.files_events()[0]["files"]) == ["./n.py"]
         s.stop()
 
 

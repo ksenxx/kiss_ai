@@ -1,6 +1,6 @@
 # KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.
 
-> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 661 models. Works as a VS Code extension, a web/mobile app, and a Python API.
+> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 695 models. Works as a VS Code extension, a web/mobile app, and a Python API.
 
 This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-readable entry points: [/llms.txt](https://kisssorcar.github.io/llms.txt) and [/llms-full.txt](https://kisssorcar.github.io/llms-full.txt).
 
@@ -9,8 +9,8 @@ This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-read
 **KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a VS Code extension and a browser/mobile web app, both served by a local daemon (`kiss-web`), and offers a Python client API for scripting tasks. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. Agents run as daemons hosted by the local server (a standalone `sorcar` terminal command can also run a task without the daemon). Complex AI systems/techniques can be replaced with a paragraph of prompt.
 
 - **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
-- **661 models** across 9 provider categories (OpenAI, Anthropic, Gemini, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
-- **44 third-party agents**: 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace
+- **695 models** across 9 provider categories (OpenAI, Anthropic, Gemini, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
+- **44 third-party agents**: 32 messaging channels (Slack, Gmail, Email, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace
 - Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat, persistent agent memory, inbound channel gateways, Muse-auth credential isolation for connector secrets
 
 ## Install
@@ -32,11 +32,13 @@ Then open the KISS Sorcar sidebar in VS Code, or the remote web app URL from the
 
 - [Documentation index](docs/index.md)
 - [Overview & comparison vs Claude Code / Cursor](docs/overview.md)
+- [Terminal-Bench 2.0 benchmark vs Pi, Codex CLI, Claude Code](docs/benchmarks.md)
 - [Installation](docs/installation.md)
 - [Client interfaces](docs/cli.md)
 - [Python API reference](docs/api.md)
 - [Supported models](docs/models.md)
 - [Messaging & third-party agents](docs/messaging-agents.md)
+- [Slash commands for SEAs](docs/sea-commands.md)
 - [Sample tasks](docs/sample-tasks.md)
 - [Prompt tricks](docs/prompt-tricks.md)
 - [Tips](docs/tips.md)
@@ -52,6 +54,7 @@ Then open the KISS Sorcar sidebar in VS Code, or the remote web app URL from the
 
 ## Blog
 
+- **[The Harness Tax, Audited: A 727-Word Prompt Beats Three Coding Harnesses on Terminal-Bench 2.0](blog/harness-tax-terminal-bench-blog.html)** (29 Sep 2026). KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved vs Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%; paired rerun of Pi on Claude Fable 5 gives +11.1 points [+3.3, +20.0]; 79.1% on the 59 unsampled tasks, and +10.5 points [+2.9, +18.7] over Pi on 57 of them.
 - **[Making LZ4's Multithreaded File Compression Scale](blog/lz4-optimization-blog.html)** (10 Aug 2026). Rewires lz4 v1.10.0's multithreaded file-mode pipeline to 1.88–2.57× stock throughput at level -1, byte-identical output, head-to-head vs pigz/pzstd/zstd -T.
 - **[Optimizing DuckDB Against Its Official and Academic Benchmarks](blog/duckdb-optimization-blog.html)** (10 Aug 2026). Verified 1.152–1.237× geometric-mean speedups per suite on TPC-H, TPC-DS, IMDB/JOB, h2oai, and ClickBench.
 - **[Reaching 99+ on Biomni × TusoAI-Style Biology Benchmarks with AI Discovery](blog/tuso-evolved-blog.html)** (9 Aug 2026). An AI-discovery loop evolves one method scoring ≥99/100 on perturbation-response and enhancer–gene-linking benchmarks.

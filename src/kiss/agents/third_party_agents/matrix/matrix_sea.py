@@ -945,8 +945,8 @@ class MatrixAgent(BaseChannelAgent):
                 return (
                     "Not authenticated with Matrix. Call "
                     "authenticate_matrix(homeserver_url=...) (e.g. https://matrix.org) "
-                    "to sign in the way the Muse app connects: it returns a link for the "
-                    "user to open in their OWN browser, sign in and approve; then call "
+                    "to sign in the way the Muse app connects: it opens a sign-in page "
+                    "for the user (follow its 'instructions') to sign in and approve; then call "
                     "finish_matrix_auth(). Never ask for the user's Matrix password or "
                     "2FA code. Only when the homeserver lacks the OAuth 2.0 API (the "
                     "tool says so) may the user hand you an access token (Element > All "
@@ -974,8 +974,8 @@ class MatrixAgent(BaseChannelAgent):
             API: the authorization server is discovered, this client is
             registered as a public client, and the device authorisation
             grant starts.  The answer is ``consent_required`` with a
-            verification URL (and code): give it to the user
-            (ask_user_question) to complete in their OWN browser, then
+            verification URL (and code) and ``instructions`` on how to
+            hand the page to the user (ask_user_question), then
             call finish_matrix_auth().  With ``access_token`` the token is
             stored directly (needed for homeservers without the OAuth
             2.0 API).

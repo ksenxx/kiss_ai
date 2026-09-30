@@ -144,7 +144,7 @@ def charge_side_channel_usage(
         _add_late_task_usage,
         _append_chat_event,
     )
-    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage, _live_agent_usage
     from kiss.server import agent_state
 
     if not task_id or (budget <= 0 and tokens <= 0 and steps <= 0):
@@ -158,6 +158,7 @@ def charge_side_channel_usage(
                 exc_info=True,
             )
             return
+        banked = False
         if running:
             # Banked first: the task can finish (saving its counters) at
             # any moment after the transaction above released it.
@@ -174,6 +175,21 @@ def charge_side_channel_usage(
                 )
             else:
                 _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
+                banked = True
+                if printer is not None:
+                    # Show the new totals now (banked plus the in-flight
+                    # session's): the task may already be past its last
+                    # usage event, and a ``run_agent`` caller waiting on
+                    # it takes its spend from the latest one
+                    # (daemon_client.run).
+                    live_budget, live_tokens, live_steps = _live_agent_usage(agent)
+                    printer.broadcast_transient({
+                        "type": "usage_info",
+                        "text": "",
+                        "total_tokens": live_tokens,
+                        "cost": f"${live_budget:.4f}",
+                        "total_steps": live_steps,
+                    }, task_id=running)
         for row_id, row_tokens, row_cost, row_steps in updated:
             event: dict[str, Any] = {
                 "type": "usage_info",
@@ -182,6 +198,14 @@ def charge_side_channel_usage(
                 "cost": f"${row_cost:.4f}",
                 "total_steps": row_steps,
             }
+            if banked:
+                # The spend was banked on the running ancestor above,
+                # so a ``run_agent`` caller still waiting on this row's
+                # task must not fold it again (daemon_client._net_totals
+                # subtracts it).
+                event["ancestor_charged"] = {
+                    "cost": budget, "tokens": tokens, "steps": steps,
+                }
             stamp_event_ts(event)
             if printer is not None:
                 printer.broadcast_transient(event, task_id=row_id)

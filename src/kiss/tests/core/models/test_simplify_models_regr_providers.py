@@ -54,6 +54,12 @@ from kiss.core.models.model import (
 )
 from kiss.tests.cli_locator_stub import stub_cli_locators  # noqa: F401
 
+
+def _cached(text: str) -> list[dict[str, object]]:
+    """The ``system`` block list the adapter sends with prompt caching on."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfakepngdata"
 
 
@@ -256,7 +262,7 @@ class TestAnthropicNormalization:
         ]
         kwargs = m._build_create_kwargs()
         assert kwargs["model"] == "claude-sonnet-4-5"
-        assert kwargs["system"] == "sys prompt"
+        assert kwargs["system"] == _cached("sys prompt")
         assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
         assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
         assert kwargs["max_tokens"] == 64000

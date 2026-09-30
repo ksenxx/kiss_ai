@@ -51,6 +51,9 @@ const executedCommands = [];
 const positionCalls = [];
 const selectionAssignments = [];
 const revealCalls = [];
+const createdPanels = [];
+const saveDialogs = []; // options of every showSaveDialog call
+let saveDialogAnswer = undefined; // the Uri the next dialog resolves with
 
 class StubPosition {
   constructor(line, character) {
@@ -89,6 +92,12 @@ const vscodeStub = {
       return Promise.resolve({uri: makeUri(fsPath), getText: () => ''});
     },
     textDocuments: [],
+    fs: {
+      copy: (source, target, _opts) => {
+        fs.copyFileSync(source.fsPath, target.fsPath);
+        return Promise.resolve();
+      },
+    },
   },
   EventEmitter: StubEventEmitter,
   CancellationTokenSource: StubCancellationTokenSource,
@@ -112,6 +121,10 @@ const vscodeStub = {
     showInformationMessage: () => Promise.resolve(undefined),
     showWarningMessage: () => Promise.resolve(undefined),
     showErrorMessage: () => Promise.resolve(undefined),
+    showSaveDialog: options => {
+      saveDialogs.push(options);
+      return Promise.resolve(saveDialogAnswer);
+    },
     showTextDocument: (doc, _opts) => {
       shownTextDocs.push(doc && doc.uri ? doc.uri.fsPath : '');
       const editor = {
@@ -123,8 +136,7 @@ const vscodeStub = {
           this._selection = value;
           selectionAssignments.push({
             line: value && value.active ? value.active.line : null,
-            character:
-              value && value.active ? value.active.character : null,
+            character: value && value.active ? value.active.character : null,
           });
         },
         revealRange: (range, type) => {
@@ -138,6 +150,32 @@ const vscodeStub = {
     },
     activeTextEditor: undefined,
     tabGroups: {all: []},
+    createWebviewPanel: (viewType, title, _column, options) => {
+      const received = new StubEventEmitter();
+      const panel = {
+        viewType,
+        title,
+        options,
+        revealed: 0,
+        webview: {
+          html: '',
+          cspSource: 'vscode-resource:',
+          asWebviewUri: uri => ({
+            toString: () => 'vscode-resource:' + uri.fsPath,
+          }),
+          onDidReceiveMessage: cb => received.event(cb),
+        },
+        // What the panel's page would post with acquireVsCodeApi().
+        fireMessage: msg => received.fire(msg),
+        reveal: () => {
+          panel.revealed++;
+        },
+        dispose: () => {},
+        onDidDispose: () => ({dispose: () => {}}),
+      };
+      createdPanels.push(panel);
+      return panel;
+    },
   },
   commands: {
     executeCommand: (cmd, ...args) => {
@@ -324,23 +362,94 @@ async function runTests() {
 
   clear();
   wv.fireMessage({type: 'openFile', path: 'docs/spec.pdf'});
-  await waitFor(
-    () =>
-      executedCommands.some(
-        c =>
-          c.cmd === 'vscode.open' &&
-          c.args.length >= 1 &&
-          c.args[0] &&
-          c.args[0].fsPath === pdfFile,
-      ),
-    'pdf file: vscode.open command must be invoked',
+  const pdfPanel = await waitFor(
+    () => createdPanels.find(p => p.viewType === 'kissSorcarPdfPreview'),
+    'pdf file: a PDF preview webview panel must be created',
+  );
+  assert.strictEqual(pdfPanel.title, 'spec.pdf');
+  assert.strictEqual(pdfPanel.options.enableScripts, true);
+  assert.ok(
+    pdfPanel.options.localResourceRoots.some(
+      u => u.fsPath === path.dirname(pdfFile),
+    ),
+    "pdf file: the file's directory must be a local resource root",
+  );
+  const pdfHtml = pdfPanel.webview.html;
+  assert.ok(
+    pdfHtml.includes('vscode-resource:' + pdfFile),
+    'pdf panel: the page must fetch the PDF through its webview URI',
+  );
+  assert.ok(
+    /pdfView\.js\?v=[0-9a-f]{16}/.test(pdfHtml),
+    'pdf panel: the page must load the content-versioned pdfView.js',
+  );
+  assert.ok(
+    /Content-Security-Policy[^>]*worker-src blob:/.test(pdfHtml),
+    'pdf panel: CSP must allow the blob: pdf.js worker',
+  );
+  assert.ok(
+    !executedCommands.some(c => c.cmd === 'vscode.open'),
+    'pdf file: vscode.open must NOT be invoked',
   );
   assert.deepStrictEqual(
     openedTextDocs,
     [],
     'pdf file: openTextDocument must NOT be called',
   );
-  console.log('  ok - pdf file opens via native viewer (vscode.open)');
+  // A second click reveals the same panel (and reloads the file)
+  // instead of stacking a duplicate.
+  wv.fireMessage({type: 'openFile', path: 'docs/spec.pdf'});
+  await waitFor(
+    () => pdfPanel.revealed === 1,
+    'pdf file: second click must reveal the existing panel',
+  );
+  assert.strictEqual(
+    createdPanels.filter(p => p.viewType === 'kissSorcarPdfPreview').length,
+    1,
+    'pdf file: one panel per path',
+  );
+  console.log('  ok - pdf file opens in the pdf.js preview panel');
+
+  // The viewer's Download link posts {type: 'download'}: the extension
+  // asks where to save a copy (the file's name in the home directory by
+  // default) and copies the file there.
+  assert.ok(
+    pdfHtml.includes('acquireVsCodeApi()') &&
+      pdfHtml.includes('"downloadMessage":"download"'),
+    'pdf panel: the page must be able to post the download message',
+  );
+  const savedPdf = path.join(tmpHome, 'saved-copy.pdf');
+  saveDialogAnswer = makeUri(savedPdf);
+  pdfPanel.fireMessage({type: 'download'});
+  await waitFor(
+    () => fs.existsSync(savedPdf),
+    'pdf download: the file must be copied to the chosen location',
+  );
+  assert.strictEqual(
+    fs.readFileSync(savedPdf, 'utf8'),
+    fs.readFileSync(pdfFile, 'utf8'),
+    'pdf download: the copy must have the original bytes',
+  );
+  assert.strictEqual(saveDialogs.length, 1);
+  assert.strictEqual(
+    saveDialogs[0].defaultUri.fsPath,
+    path.join(tmpHome, 'spec.pdf'),
+    'pdf download: the dialog must default to ~/<file name>',
+  );
+  assert.deepStrictEqual(saveDialogs[0].filters, {PDF: ['pdf']});
+  // A cancelled dialog copies nothing; other messages are ignored.
+  fs.unlinkSync(savedPdf);
+  saveDialogAnswer = undefined;
+  pdfPanel.fireMessage({type: 'download'});
+  pdfPanel.fireMessage({type: 'something-else'});
+  await waitFor(() => saveDialogs.length === 2, 'pdf download: second dialog');
+  await new Promise(r => setTimeout(r, 50));
+  assert.ok(
+    !fs.existsSync(savedPdf),
+    'pdf download: a cancelled dialog must not copy the file',
+  );
+  assert.strictEqual(saveDialogs.length, 2);
+  console.log('  ok - pdf panel download saves a copy through a save dialog');
 
   clear();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-'));

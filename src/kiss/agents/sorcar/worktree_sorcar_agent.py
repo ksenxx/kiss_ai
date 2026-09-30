@@ -70,6 +70,23 @@ _PRECOMMIT_FIX_LINES = (
 _ABANDONED_SUBAGENT_WAIT_SECONDS = 5.0
 
 
+def _broadcast_launch_phase(printer: Any, text: str, tab_id: str) -> None:
+    """Show *text* as the task's launch-phase line, if the printer can.
+
+    Args:
+        printer: The run's printer; only a ``JsonPrinter`` (duck-typed
+            through ``broadcast_launch_phase``) reaches a chat UI.
+        text: The phase label; ``""`` removes the line.
+        tab_id: The launching tab (the runner's ``agent._tab_id``),
+            passed explicitly because the run has no registered task —
+            and so no tab subscription the printer could resolve — until
+            the agent itself starts.
+    """
+    broadcast = getattr(printer, "broadcast_launch_phase", None)
+    if broadcast is not None:
+        broadcast(text, tab_id=tab_id)
+
+
 def _config_auto_commit_enabled() -> bool:
     """Return the user's persisted "Auto commit" setting.
 
@@ -1238,12 +1255,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 return None
             acquired = (branch, wt_dir)
-        # Refill the pool for the next task while this one runs.  The
-        # exclusion callable is evaluated by the refill thread right
-        # before its reclaim pass (under ``repo_lock``), so it sees the
-        # live-agent set as it stands THEN — including this task's own
-        # branch once ``self._wt`` is assigned.
-        worktree_pool.prewarm_async(repo, self._live_worktree_branches)
+        # The pool is refilled when this run ends (see :meth:`run`),
+        # not here: a refill's checkout traffic would otherwise compete
+        # with the launch it was scheduled beside.
         return acquired
 
     def _try_setup_worktree(
@@ -1345,7 +1359,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     offset = Path(".")
 
                 try:
-                    GitWorktreeOps.ensure_excluded(repo)
+                    GitWorktreeOps.prepare_repo(repo)
                     GitWorktreeOps.ensure_scratch_merge_driver(repo)
                 except Exception:  # pragma: no cover — filesystem permission error
                     logger.warning("Failed to update git exclude", exc_info=True)
@@ -1634,6 +1648,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             use_worktree = use_worktree and classification.is_development
 
         wt_work_dir: Path | None = None
+        repo: Path | None = None
+        launch_tab_id = str(getattr(self, "_tab_id", "") or "")
         if use_worktree:
             work_dir_str = kwargs.get("work_dir")
             discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
@@ -1641,7 +1657,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if repo is None:
                 logger.warning("Not a git repo, running task directly")
             else:
+                _broadcast_launch_phase(printer, "Preparing worktree…", launch_tab_id)
                 wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
+        # The agent's own events take over from here.
+        _broadcast_launch_phase(printer, "", launch_tab_id)
 
         self._flush_warnings(printer)
         if wt_work_dir is not None:
@@ -1673,6 +1692,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     }
                 )
             )
+        finally:
+            if wt_work_dir is not None and repo is not None:
+                # Refill the pool now that this run is over, so the
+                # next launch finds a spare while the checkout never
+                # competes with a running launch.  The exclusion
+                # callable is evaluated by the refill thread right
+                # before its reclaim pass (under ``repo_lock``), so it
+                # sees the live-agent set as it stands then —
+                # including this task's own, still pending, branch.
+                worktree_pool.prewarm_async(repo, self._live_worktree_branches)
 
 
     def merge(self, conflict_resolver: MergeConflictResolver | None = None) -> str:

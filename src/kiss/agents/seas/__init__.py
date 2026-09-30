@@ -17,6 +17,10 @@ model tier that passes its acceptance check, or
 one fixed frontier model and has a second model review its work, or
 :mod:`kiss.agents.seas.skillopt.skillopt_sea`, which optimizes the prompt text of
 a skill or of another SEA against an eval set (SkillOpt), or
+:mod:`kiss.agents.seas.write.write_sea`, which adds a writing protocol to
+the system prompt so the prose it produces is concise, professional
+American English for a general audience that reads as if a person wrote
+it, or
 :mod:`kiss.agents.seas.write_paper.write_paper_sea`, which writes or revises a
 research paper under the rules of ``templates/write_paper_prompt.md``
 with tools for the AI-slop gates and the LaTeX build, or
@@ -48,7 +52,7 @@ its helper modules and data files (``sh/sh_sea.py`` and ``sh/evals/``,
 shared helpers such as :mod:`kiss.agents.seas.sorcar_md` stay at the
 package top level.  :mod:`kiss.agents.sorcar.sea_commands` exposes every
 such folder as the chat slash command ``/<name>`` (``/merge``, ``/sh``,
-``/autorouter``, ``/bestrouter``, ``/skillopt``, ``/write_paper``, ``/review_paper``,
+``/autorouter``, ``/bestrouter``, ``/skillopt``, ``/write``, ``/write_paper``, ``/review_paper``,
 ``/revise_and_review_paper``, ``/git_extract_knowledge``, ``/remember``, ``/forget``,
 ...); a script
 placed directly in the package, outside its own folder, is not

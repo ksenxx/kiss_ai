@@ -271,13 +271,12 @@ class TestResumeRunningTaskReattachesLiveEvents:
         post_delta_tab_ids = sorted(
             {str(e.get("tabId") or "") for e in post_deltas},
         )
-        assert tab_id_a in post_delta_tab_ids, (
-            "Source-tagged 'post' delta missing — original client "
-            f"would not see it.  Got: {post_deltas}"
-        )
-        assert tab_id_b in post_delta_tab_ids, (
-            "Fan-out 'post' delta tagged with the new viewer tab id "
-            f"missing — multi-viewer broken.  Got: {post_deltas}"
+        # The closed tab-A was unsubscribed at its close (no surface
+        # shows it any more); the reopened tab-B is the task's only
+        # viewer.
+        assert post_delta_tab_ids == [tab_id_b], (
+            "Fan-out 'post' delta must reach exactly the new viewer tab "
+            f"— got: {post_deltas}"
         )
 
     def test_resume_finished_task_does_not_rebind(self) -> None:

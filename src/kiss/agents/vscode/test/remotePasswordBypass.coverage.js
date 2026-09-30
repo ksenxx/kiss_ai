@@ -15,12 +15,17 @@ const WEB_SERVER_PY = path.resolve(
   __dirname, '..', '..', '..', 'server', 'web_server.py',
 );
 const TEST_FILE = path.join(__dirname, 'remotePasswordBypass.test.js');
-const SHIM_URL = 'ws-shim.js';
+// The two page scripts web_server.py inlines into the remote page, each
+// eval'ed by the functional test under its own sourceURL pragma.
+const SCRIPTS = [
+  {name: '_WS_SHIM_JS', url: 'ws-shim.js'},
+  {name: '_ASSET_LOAD_GUARD_JS', url: 'asset-guard.js'},
+];
 
-function readShimJs() {
+function readPyLiteral(name) {
   const src = fs.readFileSync(WEB_SERVER_PY, 'utf-8');
-  const m = src.match(/_WS_SHIM_JS\s*=\s*r"""([\s\S]*?)"""/);
-  assert.ok(m, 'could not locate _WS_SHIM_JS literal in web_server.py');
+  const m = src.match(new RegExp(name + '\\s*=\\s*r"""([\\s\\S]*?)"""'));
+  assert.ok(m, `could not locate ${name} literal in web_server.py`);
   return m[1];
 }
 
@@ -39,7 +44,6 @@ function paintInstance(functions, length) {
 }
 
 function main() {
-  const shim = readShimJs();
   const covDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-shim-cov-'));
 
   const res = spawnSync(process.execPath, [TEST_FILE], {
@@ -53,21 +57,26 @@ function main() {
     process.exit(res.status || 1);
   }
 
+  const reports = fs.readdirSync(covDir).map((f) =>
+    JSON.parse(fs.readFileSync(path.join(covDir, f), 'utf-8')));
+  fs.rmSync(covDir, {recursive: true, force: true});
+  for (const {name, url} of SCRIPTS) gate(readPyLiteral(name), url, reports);
+}
+
+function gate(shim, url, reports) {
   const covered = new Uint8Array(shim.length);
   let instances = 0;
-  for (const f of fs.readdirSync(covDir)) {
-    const report = JSON.parse(fs.readFileSync(path.join(covDir, f), 'utf-8'));
+  for (const report of reports) {
     for (const script of report.result || []) {
-      if (script.url !== SHIM_URL) continue;
+      if (script.url !== url) continue;
       instances++;
       const painted = paintInstance(script.functions, shim.length);
       for (let i = 0; i < shim.length; i++) if (painted[i]) covered[i] = 1;
     }
   }
-  fs.rmSync(covDir, {recursive: true, force: true});
   assert.ok(instances > 0,
-    'no ws-shim.js coverage entries found — did the test stop eval-ing ' +
-    'the shim with the sourceURL pragma?');
+    `no ${url} coverage entries found — did the test stop eval-ing ` +
+    'the script with the sourceURL pragma?');
 
   const lines = shim.split('\n');
   let offset = 0;
@@ -91,10 +100,10 @@ function main() {
 
   const pct = ((100 * hit) / total).toFixed(1);
   console.log(
-    `\nws-shim.js line coverage: ${hit}/${total} (${pct}%) ` +
+    `\n${url} line coverage: ${hit}/${total} (${pct}%) ` +
     `across ${instances} eval instances`);
   if (missed.length) {
-    console.error('\nUNCOVERED SHIM LINES:');
+    console.error(`\nUNCOVERED ${url} LINES:`);
     for (const m of missed) {
       console.error(`  ${String(m.n).padStart(4)}: ${m.line}`);
     }
@@ -116,7 +125,7 @@ function main() {
     if (!isReloadCatch) badSpans.push({start, text});
   }
   if (badSpans.length) {
-    console.error('\nUNCOVERED SHIM BRANCHES:');
+    console.error(`\nUNCOVERED ${url} BRANCHES:`);
     for (const s of badSpans) {
       console.error(`  at char ${s.start}: ${JSON.stringify(s.text)}`);
     }
@@ -125,7 +134,7 @@ function main() {
     process.exit(1);
   }
   console.log(
-    'coverage gate passed: 100% line coverage of the shim; all branches ' +
+    `coverage gate passed: 100% line coverage of ${url}; all branches ` +
     'covered except the spec-unreachable location.reload() catch.');
 }
 

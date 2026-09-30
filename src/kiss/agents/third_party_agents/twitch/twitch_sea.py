@@ -638,8 +638,8 @@ class TwitchAgent(BaseChannelAgent):
                 return (
                     "Not authenticated with Twitch. Call "
                     "authenticate_twitch(client_id=...) to sign in the way the Muse "
-                    "app connects: it returns a twitch.tv/activate link (code "
-                    "pre-filled) for the user to open in their OWN browser, sign in "
+                    "app connects: it opens a twitch.tv/activate page (code "
+                    "pre-filled) for the user (follow its 'instructions') to sign in "
                     "and authorize; then call finish_twitch_auth(). The client_id "
                     "is the public Client ID of an app registered at "
                     "https://dev.twitch.tv/console/apps (client type Public; no "
@@ -672,8 +672,8 @@ class TwitchAgent(BaseChannelAgent):
 
             Without ``access_token`` this starts Twitch's device code grant
             for the public app ``client_id`` and returns a
-            ``consent_required`` answer: give the user the activation URL
-            (ask_user_question) to open in their OWN browser, where they
+            ``consent_required`` answer whose ``instructions`` say how to
+            hand the activation page to the user (ask_user_question); they
             sign in and authorize; then call finish_twitch_auth().  With
             ``access_token`` the token is validated and stored directly.
 

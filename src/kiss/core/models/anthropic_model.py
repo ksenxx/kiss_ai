@@ -31,6 +31,8 @@ from kiss.core.models.model import (
     accepted_request_params,
     merge_system_texts,
     responses_items_to_chat_messages,
+    split_system_cache_break,
+    strip_system_cache_break,
     transcribe_audio,
 )
 from kiss.core.models.stream_abort import StreamAbortWatchdog, stall_error
@@ -434,6 +436,38 @@ def _content_as_block_list(content: Any) -> list[dict[str, Any]]:
     return list(content)
 
 
+def _system_param(system_instruction: str, enable_cache: bool) -> str | list[dict[str, Any]]:
+    """Shape the ``system`` request parameter from the merged instruction.
+
+    With prompt caching on, the instruction is sent as text blocks: the
+    part before :data:`~kiss.core.models.model.SYSTEM_CACHE_BREAK` (or
+    the whole instruction when there is no marker) carries an explicit
+    ``cache_control`` breakpoint, so ``tools`` plus that prefix form one
+    cache entry that every request with the same prefix reads — the
+    automatic top-level breakpoint alone writes an entry only at the
+    end of the prompt, which differs for every task, so a task's first
+    call never hit the cache.  The per-run tail after the marker follows
+    as a plain block.  With caching off the marker is dropped and the
+    instruction is sent as a single string.
+
+    Args:
+        system_instruction: The merged, non-empty system instruction.
+        enable_cache: Whether prompt caching is on for this model.
+
+    Returns:
+        The ``system`` value: a string, or a list of text blocks.
+    """
+    prefix, tail = split_system_cache_break(system_instruction)
+    if not enable_cache or not prefix.strip():
+        return strip_system_cache_break(system_instruction)
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": prefix, "cache_control": {"type": "ephemeral"}}
+    ]
+    if tail.strip():
+        blocks.append({"type": "text", "text": tail})
+    return blocks
+
+
 class AnthropicModel(Model):
     """A model that uses Anthropic's Messages API (Claude)."""
 
@@ -810,7 +844,7 @@ class AnthropicModel(Model):
             }
         )
         if system_instruction:
-            kwargs["system"] = system_instruction
+            kwargs["system"] = _system_param(system_instruction, enable_cache)
         if tools:
             kwargs["tools"] = tools
             if "tool_choice" not in kwargs and "thinking" not in kwargs:
