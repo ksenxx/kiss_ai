@@ -1935,6 +1935,30 @@ def _post_url_to_message_board(
         logger.debug("Failed to post URL to ntfy.sh", exc_info=True)
 
 
+def _describe_port_listeners(port: int) -> str:
+    """Name the other processes listening on TCP *port*, via ``lsof``.
+
+    Returns e.g. ``"Code Helper (Plugin)[90174]"`` (several are
+    comma-separated); the calling process is left out.  Empty when
+    ``lsof`` is unavailable or reports nothing.
+    """
+    try:
+        proc = subprocess.run(
+            ["lsof", "-nP", "+c", "0", "-Fpc", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    names: list[str] = []
+    pid = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("c") and pid != str(os.getpid()):
+            names.append(f"{line[1:]}[{pid}]")
+    return ", ".join(names)
+
+
 def _get_local_ips() -> frozenset[str]:
     """Return the current routable IPv4 addresses of the host machine.
 
@@ -5479,6 +5503,9 @@ class RemoteAccessServer:
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
+        # Second WSS listener bound to 127.0.0.1:<port> beside the
+        # wildcard one; see :meth:`_bind_loopback_alias`.
+        self._ws_loopback_server: Any = None
         self._uds_path: Path = (
             Path(uds_path) if uds_path else _default_uds_path()
         )
@@ -9387,7 +9414,11 @@ class RemoteAccessServer:
            tunnel mode only log the change — ``cloudflared``
            re-registers with the edge automatically, so no restart is
            needed.
-        4. **WebSocket ping** — send a ping to every connected client
+        4. **Loopback alias** — on macOS, retry binding
+           ``127.0.0.1:port`` while another process (typically a VS
+           Code forwarded port) holds it; see
+           :meth:`_bind_loopback_alias`.
+        5. **WebSocket ping** — send a ping to every connected client
            and close connections that fail to respond within
            :data:`_WS_PING_TIMEOUT` seconds.
         """
@@ -9414,6 +9445,12 @@ class RemoteAccessServer:
                 raise
             except Exception:
                 logger.debug("Watchdog IP check error", exc_info=True)
+            try:
+                await self._watchdog_reclaim_loopback()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog loopback reclaim error", exc_info=True)
             # Single-flight background task: re-issuing a certificate
             # (key generation, signing, lock wait) must not delay the
             # tick and the IP-change restart decision above.
@@ -9553,10 +9590,22 @@ class RemoteAccessServer:
                         prev_ips,
                         current_ips,
                     )
-                    if self._ws_server is not None:
-                        self._ws_server.close()
+                    self._close_ws_listeners()
                     return True
         return False
+
+    def _close_ws_listeners(self) -> None:
+        """Stop accepting on the wildcard and loopback WSS listeners.
+
+        ``close()`` only; callers that must wait for the sockets to be
+        released (:meth:`stop_async`) await ``wait_closed()`` themselves.
+        The wildcard server object is kept so its pending
+        ``serve_forever()`` observes the close.
+        """
+        if self._ws_server is not None:
+            self._ws_server.close()
+        if self._ws_loopback_server is not None:
+            self._ws_loopback_server.close()
 
     async def _watchdog_ping_clients(self) -> None:
         """Ping every connected WSS client, closing unresponsive ones.
@@ -9566,13 +9615,17 @@ class RemoteAccessServer:
         collected via ``return_exceptions`` so one bad client cannot
         skip the rest.
         """
-        if self._ws_server is not None:
-            connections = list(self._ws_server.connections)
-            if connections:
-                await asyncio.gather(
-                    *[self._ping_one_ws(ws) for ws in connections],
-                    return_exceptions=True,
-                )
+        connections = [
+            ws
+            for server in (self._ws_server, self._ws_loopback_server)
+            if server is not None
+            for ws in server.connections
+        ]
+        if connections:
+            await asyncio.gather(
+                *[self._ping_one_ws(ws) for ws in connections],
+                return_exceptions=True,
+            )
 
     def _reset_tunnel_proc_state(self) -> None:
         """Reset per-process tunnel bookkeeping.
@@ -9936,6 +9989,9 @@ class RemoteAccessServer:
         if self._ws_server is not None:
             self._ws_server.close()
             self._ws_server = None
+        if self._ws_loopback_server is not None:
+            self._ws_loopback_server.close()
+            self._ws_loopback_server = None
 
     def _unlink_own_uds_socket(self) -> None:
         """Unlink the UDS pathname only when it still names OUR socket.
@@ -10009,6 +10065,89 @@ class RemoteAccessServer:
         finally:
             uds_lock.close()
 
+    async def _serve_wss(self, host: str) -> Any:
+        """Start a WSS listener for this server on ``host:self.port``.
+
+        Every listener (the wildcard one and the loopback alias of
+        :meth:`_bind_loopback_alias`) is created here so they share the
+        handler, TLS context and connection limits.  Raises ``OSError``
+        when the address cannot be bound.
+        """
+        return await serve(
+            self._ws_handler,
+            host,
+            self.port,
+            process_request=self._process_request,
+            ssl=self._ssl_context,
+            open_timeout=_OPEN_TIMEOUT_SECONDS,
+            ping_interval=None,
+            ping_timeout=None,
+            max_size=_MAX_LINE_BYTES,
+            create_connection=_HeadAwareServerConnection,
+        )
+
+    def _wants_loopback_alias(self) -> bool:
+        """Whether this server should also bind ``127.0.0.1`` explicitly.
+
+        Only a wildcard listener on a BSD-derived kernel (macOS) needs
+        it: there another process may bind the specific loopback
+        address of the same port beside our ``0.0.0.0`` socket and
+        take over every ``127.0.0.1`` connection.  Linux refuses that
+        bind while the wildcard listener exists, and a server that
+        already listens on a specific address has nothing to protect.
+        """
+        return sys.platform == "darwin" and self.host in ("", "0.0.0.0")
+
+    async def _bind_loopback_alias(self) -> bool:
+        """Bind ``127.0.0.1:port`` beside the wildcard listener (macOS).
+
+        On macOS a ``0.0.0.0:8787`` listener does not stop another
+        process from binding ``127.0.0.1:8787`` with ``SO_REUSEADDR``,
+        and loopback connections then go to that more specific socket.
+        VS Code's Remote-SSH port forwarding does exactly this when the
+        remote machine also runs kiss-web on 8787: the forward binds
+        ``127.0.0.1:8787`` on the laptop and ``https://127.0.0.1:8787``
+        silently reaches the remote daemon, whose certificate the
+        laptop does not trust.  Holding ``127.0.0.1`` ourselves makes
+        that bind fail with ``EADDRINUSE``, so VS Code maps the forward
+        to another local port instead.
+
+        When another process already holds the loopback address, a
+        warning names it (``lsof``) and the watchdog retries every
+        :data:`TUNNEL_CHECK_INTERVAL` seconds so the address is
+        reclaimed as soon as it is released.  Returns True when this
+        server holds ``127.0.0.1:port`` (or does not need it).
+        """
+        if self._ws_loopback_server is not None or not self._wants_loopback_alias():
+            return True
+        try:
+            self._ws_loopback_server = await self._serve_wss("127.0.0.1")
+        except OSError as exc:
+            holders = await asyncio.to_thread(_describe_port_listeners, self.port)
+            logger.warning(
+                "127.0.0.1:%d is bound by another process (%s): %s. "
+                "https://127.0.0.1:%d reaches that process, not this "
+                "server, until it releases the port (a VS Code forwarded "
+                "port: Ports view → Stop Forwarding Port); retrying every "
+                "%ds. Meanwhile use https://%s.local:%d",
+                self.port, holders or "unknown", exc, self.port,
+                TUNNEL_CHECK_INTERVAL, platform.node().split(".")[0],
+                self.port,
+            )
+            return False
+        return True
+
+    async def _watchdog_reclaim_loopback(self) -> None:
+        """Retry :meth:`_bind_loopback_alias` while another process holds ``127.0.0.1``."""
+        if self._ws_loopback_server is not None or not self._wants_loopback_alias():
+            return
+        if await self._bind_loopback_alias():
+            logger.info(
+                "Reclaimed 127.0.0.1:%d: https://127.0.0.1:%d reaches this "
+                "server again",
+                self.port, self.port,
+            )
+
     async def _setup_server_after_uds(self) -> None:
         """Continue :meth:`_setup_server` after the UDS bind."""
         if self._ssl_context is None:
@@ -10028,18 +10167,7 @@ class RemoteAccessServer:
         last_err: OSError | None = None
         for attempt in range(_BIND_RETRY_ATTEMPTS):
             try:
-                self._ws_server = await serve(
-                    self._ws_handler,
-                    self.host,
-                    self.port,
-                    process_request=self._process_request,
-                    ssl=self._ssl_context,
-                    open_timeout=_OPEN_TIMEOUT_SECONDS,
-                    ping_interval=None,
-                    ping_timeout=None,
-                    max_size=_MAX_LINE_BYTES,
-                    create_connection=_HeadAwareServerConnection,
-                )
+                self._ws_server = await self._serve_wss(self.host)
                 break
             except OSError as exc:
                 if exc.errno not in _BIND_RETRYABLE_ERRNOS:
@@ -10078,6 +10206,7 @@ class RemoteAccessServer:
                 file=sys.stderr,
             )
             raise SystemExit(2)
+        await self._bind_loopback_alias()
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -10218,6 +10347,7 @@ class RemoteAccessServer:
             )
         finally:
             cron_stop.set()
+            self._close_ws_listeners()
             if not serve_task.done():
                 serve_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -10796,14 +10926,15 @@ class RemoteAccessServer:
             self._update_when_idle_task = None
             await _cancel_task(self._update_models_watch_task)
             self._update_models_watch_task = None
-            if self._ws_server is not None:
-                self._ws_server.close()
+            for ws_server in (self._ws_server, self._ws_loopback_server):
+                if ws_server is None:
+                    continue
+                ws_server.close()
                 try:
-                    await asyncio.wait_for(
-                        self._ws_server.wait_closed(), timeout=2,
-                    )
+                    await asyncio.wait_for(ws_server.wait_closed(), timeout=2)
                 except TimeoutError:
                     pass
+            self._ws_loopback_server = None
             if self._uds_server is not None:
                 self._uds_server.close()
                 try:

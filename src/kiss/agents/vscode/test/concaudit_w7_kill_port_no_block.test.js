@@ -77,13 +77,16 @@ fs.chmodSync(kissWebBin, 0o755);
 // test must not be started before that, or a SIGTERM delivered to a
 // still-booting node (default disposition) would kill it outright, the
 // poll loop would end early and the ">= 7 lsof calls" assertion below
-// would fail spuriously.
+// would fail spuriously.  Its argv carries "kiss-web" because
+// pidsOnPort() only returns listeners whose `ps` command line names
+// kiss-web (see pidsOnPortKissWebOnly.test.js).
 const victim = spawn(
   process.execPath,
   [
     '-e',
     'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); ' +
       'process.stdout.write("READY\\n");',
+    '/tmp/fake/.venv/bin/kiss-web',
   ],
   {stdio: ['ignore', 'pipe', 'ignore']},
 );

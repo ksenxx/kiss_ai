@@ -851,9 +851,16 @@ async function runSlowPathSetup(
 }
 
 /**
- * PIDs listening on TCP *port*, via `lsof`; empty when none or when
- * `lsof` fails.  Asynchronous: a slow `lsof` must not freeze the
- * extension host for its 3s deadline on every poll.
+ * PIDs of kiss-web daemons listening on TCP *port*, via `lsof` and
+ * `ps`; empty when none or when either tool fails.  Asynchronous: a
+ * slow `lsof` must not freeze the extension host for its 3s deadline
+ * on every poll.
+ *
+ * Only processes whose command line names `kiss-web` are returned.
+ * Other listeners share the port legitimately: on macOS a VS Code
+ * Remote window's extension host binds `127.0.0.1:8787` when it
+ * forwards a remote kiss-web, and signalling it would tear down that
+ * whole window.
  */
 export async function pidsOnPort(port: number): Promise<string[]> {
   try {
@@ -863,7 +870,25 @@ export async function pidsOnPort(port: number): Promise<string[]> {
       {timeoutMs: 3000},
     );
     if (r.code !== 0) return [];
-    return r.stdout.trim().split('\n').filter(Boolean);
+    const pids = r.stdout.trim().split('\n').filter(Boolean);
+    if (pids.length === 0) return [];
+    const ps = await spawnCollect(
+      'ps',
+      ['-o', 'pid=,command=', '-p', pids.join(',')],
+      {timeoutMs: 3000},
+    );
+    if (ps.code !== 0) return [];
+    // A whole argv token ending in `kiss-web` (the `.venv/bin/kiss-web`
+    // entry point that launchd, systemd and spawnKissWebDirect run), not
+    // any substring: `--directory /x/kiss-web-client` is not a daemon.
+    const kissWebPids: string[] = [];
+    for (const line of ps.stdout.split('\n')) {
+      const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+      if (m && pids.includes(m[1]) && /(^|[\s/])kiss-web(\s|$)/.test(m[2])) {
+        kissWebPids.push(m[1]);
+      }
+    }
+    return kissWebPids;
   } catch {
     return [];
   }
