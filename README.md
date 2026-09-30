@@ -291,7 +291,7 @@ Cost and budget tracking use the catalog prices, except for `openrouter/*` model
 
 ## Contributing
 
-Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.
+Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.  If you want to send a pull request (PR), please make sure that all Python and JavaScript tests pass across Mac OSX, Linux, Windows.
 
 ## License
 
