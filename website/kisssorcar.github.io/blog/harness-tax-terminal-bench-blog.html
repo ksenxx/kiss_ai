@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Harness Tax, Audited: KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
-<meta name="description" content="KISS Sorcar run on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, the best point estimate on all seven models, and an 11-point paired gap over Pi rerun on the same model.">
+<title>KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
+<meta name="description" content="We ran KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models. It solved 75.6% of attempts against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, had the best point estimate on all seven models, and beat a Pi rerun on the same model by 11 points in a paired comparison.">
 <link rel="canonical" href="https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html">
 <style>
   :root{
@@ -65,14 +65,14 @@
 </header>
 <main>
 
-<h2>The short version.</h2> 
+<h2>The short version</h2>
 <p>
 A group at UC Berkeley and Arena
-Intelligence recently asked how much the harness around a coding model actually
+Intelligence recently asked how much the harness around a coding model
 matters. They held the model fixed, swapped between Claude Code, Codex CLI and
 Pi, and found that the harness changes what you pay far more than it changes
 what gets solved. We had a harness of our own, built on the opposite hunch, so
-we added it to their Terminal-Bench 2.0 table. Averaged over their seven models it solved 75.6%
+we added it to their Terminal-Bench 2.0 table. Averaged over their seven models, it solved 75.6%
 of attempts. Pi got 70.0%, Codex CLI 65.7% and Claude Code 65.1%. Thirty tasks
 isn&rsquo;t many, though, and that pooled gap sits inside the noise. So we
 reran Pi ourselves on Claude Fable 5, on the same tasks, priced from the same
@@ -82,7 +82,7 @@ cents more per attempt. On the 59 Terminal-Bench 2.0 tasks the study
 didn&rsquo;t sample, it solved 79.1%.</p>
 
 <h2>What HarnessTax found</h2>
-<p>Every coding agent is really two things: a model, and the harness wrapped
+<p>Every coding agent is two things: a model and the harness wrapped
 around it. The harness is the loop that calls the model, the tools it exposes,
 the instructions it sends along, and all the bookkeeping in between.
 Leaderboards mostly report the pair as one number. Melissa Pan, Shuo Yang,
@@ -107,20 +107,21 @@ cost-success frontier of both benchmarks.</li>
 harness.</strong> In nine of the twelve model-benchmark comparisons for the
 Anthropic and OpenAI models, some other harness had the highest success.</li>
 </ol>
-<p>Hence the name. If you accept a coding agent&rsquo;s default harness without
-trying the alternatives, the authors say, you are probably paying a harness
-tax, meaning more money for the same result.</p>
+<p>The name comes from the first finding. If you accept a coding agent&rsquo;s
+default harness without trying the alternatives, the authors say, you are
+probably paying a harness tax, meaning more money for the same result.</p>
 <p>We have no quarrel with the second and third findings. The first one we
 wanted to poke at, because our harness was built on a different assumption. We
 had been betting that a prompt full of solid engineering rules, backed by a little
-code, changes what the model gets right and not just what it costs. HarnessTax
-gave us a way to check.</p>
+code, changes what the model gets right as well as what it costs, and the
+study&rsquo;s published tasks and tables let us test that bet on the same
+footing.</p>
 
 <h2>What we ran</h2>
 <p><a href="https://github.com/ksenxx/kiss_ai">KISS Sorcar</a> is an open-source
 general-purpose agent and IDE assistant. We have spent the last six months
-using it to build itself. Under the hood it is five small Python agent classes
-and a system prompt that mostly consists of rules about how to work: read a
+using it to build itself. It consists of five small Python agent classes
+and a system prompt that is mostly rules about how to work: read a
 file before you edit it, reproduce a bug before you fix it, verify every
 requirement from a fresh shell before you say you&rsquo;re done. The paper
 about it covers a study of our own task database, an ablation of that prompt, a
@@ -128,18 +129,18 @@ cross-vendor reviewer experiment and two systems case studies (a key-value
 store and a TPC-H engine). What it
 didn&rsquo;t have was a head-to-head with other harnesses on the same tasks.
 HarnessTax publishes its task list, its per-model numbers and its protocol,
-which is exactly what you need for that.</p>
+which is what you need for that.</p>
 <p>We picked Terminal-Bench 2.0 rather than SWE-bench Lite because its tasks
-are longer running. For the benchmark we stripped the general-purpose material
+run longer. For the benchmark we stripped the general-purpose material
 out of the system prompt and kept the coding rules. That left 727 words, down
-from the 3,851 words of the full <code>SYSTEM.md</code>. </p>
+from the 3,851 words of the full <code>SYSTEM.md</code>.</p>
 
-<p>Two of our choices differ from the study&rsquo;s harnesses, and you should
+<p>Two of our settings differ from the study&rsquo;s, and you should
 keep them in mind when you read the table. We set no turn cap and no wall-clock
 limit; an attempt ends when the agent calls <code>finish</code> or when it has
-spent $50. And we sent the providers&rsquo; default request parameters, where
+spent $50. We also sent the providers&rsquo; default request parameters, where
 the study ran at high effort. The tasks, the attempt count and the scoring
-match the study. Same 30 tasks, three attempts each, graded by the
+match the study: the same 30 tasks, three attempts each, graded by the
 Terminal-Bench 2.0 verifier. A task&rsquo;s
 three attempts are averaged first, then the 30 tasks; the pooled figure
 averages the seven per-model results; the intervals are percentile bootstraps
@@ -272,20 +273,20 @@ Luna (+2.2 each) and Sol (+2.3).</figcaption>
 
 <p>Averaged over the seven models, KISS Sorcar solved 75.6% of attempts, with
 a 95% interval over tasks of 63.8 to 85.9. That is 5.6 points above Pi and
-10.5 above Claude Code. On each of the seven models taken individually it has
+10.5 above Claude Code. On each of the seven models taken individually, it has
 the highest point estimate of the four. If we treat the solves that took more
 than 100 turns as failures, to approximate the study&rsquo;s cap, the pooled
 rate drops to 74.1%, which is still above the other three.</p>
 
 <div class="card caveat">
-<p><strong>A word about the intervals.</strong> Thirty tasks is not a lot. A
+<p>Thirty tasks is not a lot, and the intervals show it. A
 per-model interval spans 27 points on average, so no single row of Table 1
 settles anything on its own, and the pooled interval of 63.8 to 85.9 contains
 all three published means. The comparison with the published table also
-differs from the study in several ways at the same time: date, price list, 
-turn cap and prompt. On price lists in particular, the
-study priced on a September&nbsp;1 list and we used our framework&rsquo;s price
-table, which for Kimi K3 mixes two providers, so we don&rsquo;t draw any cost
+differs from the study in several ways at once: date, price list,
+turn cap and prompt. On price lists, the study priced its runs on a
+September&nbsp;1 list and we priced ours with our framework&rsquo;s table,
+which for Kimi K3 mixes two providers, so we don&rsquo;t draw any cost
 ratio from this table.</p>
 </div>
 
@@ -394,15 +395,15 @@ other three points and, on the published price lists, to the right of Pi.</figca
 yourself, so we did that for one row. We ran Harbor&rsquo;s Pi agent (Pi 0.87.1)
 on Claude Fable 5 on 26&nbsp;September 2026, the day after our own run, on the
 same 30 tasks, three attempts each, at the study&rsquo;s high-effort setting,
-with no turn cap and no wall clock. Pi has no budget cap, so an attempt ends
+with no turn cap and no wall-clock limit. Pi has no budget cap, so an attempt ends
 when the model stops. We priced its token counts with the same table as ours.
-All 90 attempts count. We did kill one after two hours, while Pi was waiting on
+All 90 attempts count. We killed one after two hours, while Pi was waiting on
 a training command it had started; that attempt is counted as failed, with its
 spend.</p>
 <p>Pi solved 62 of the 90 attempts, or 68.9% (interval 52.2 to 84.4), at $1.45
 and 14.5 turns per attempt. KISS Sorcar on the same model solved 80.0% at $1.50
-and 15.3 turns. Both harnesses tried every task, so the comparison is paired.
-We resample the tasks once and apply the same resample to both harnesses. That
+and 15.3 turns. Both harnesses tried every task, so the comparison is paired;
+we resample the tasks once and apply the same resample to both harnesses. That
 gives a success gap of 11.1 points in KISS Sorcar&rsquo;s favor, with a 95%
 interval of +3.3 to +20.0. The cost difference is five cents per attempt, with
 an interval of &minus;$0.71 to +$0.70 that straddles zero.</p>
@@ -443,9 +444,9 @@ higher task mean on 7 tasks, Pi on none, and 23 are ties, 20 of them solved by
 both on every attempt.</figcaption>
 </figure>
 
-<p>One task needs a note. Pi&rsquo;s three attempts on
+<p>Pi&rsquo;s three attempts on
 <code>feal-linear-cryptanalysis</code> all died with an API error and no answer
-submitted; two hit a Pi client bug on a mid-output model fallback, the third
+submitted; two hit a Pi client bug on a mid-output model fallback, and the third
 hit a content filter. Drop that task and the gap is +8.0 points (6 tasks to 0,
 <em>p</em>&nbsp;=&nbsp;0.031). We didn&rsquo;t rerun Codex CLI or Claude Code,
 so the paired claim is about Pi, on one model.</p>
@@ -454,11 +455,11 @@ so the paired claim is about Pi, on one model.</p>
 <p>A harness that has been tuned on a public sample can look good on that
 sample and nowhere else. To check, we ran the same agent and prompt on Claude
 Fable 5 on the 59 Terminal-Bench 2.0 tasks the study didn&rsquo;t sample, three
-attempts each, same protocol. The prompt was frozen before the run and we
+attempts each, under the same protocol. The prompt was frozen before the run and we
 didn&rsquo;t touch it between the two sets.</p>
 <p>It solved 79.1% of attempts on the unsampled tasks, and 79.4% across all 89.
-Those figures count as failed one attempt, on
-<code>extract-moves-from-video</code>, that we stopped before it finished; it
+Those figures count one stopped attempt, on
+<code>extract-moves-from-video</code>, as failed; it
 left no result, so we treat it the way we treated Pi&rsquo;s stopped attempt.
 If you look only at the 176 attempts that ran to completion, the unsampled
 tasks come out at 79.7% (interval 70.1 to 88.1) against 80.0% on the
@@ -467,15 +468,16 @@ that difference, &minus;15.8 to +15.4, is far too wide to call it a real gap.
 Over all 89 tasks the completed-attempt rate is 79.8% (71.9 to 86.9).</p>
 <p>These tasks cost a little more, $1.60 per attempt against $1.50. The
 attempts ran longer (17.2 turns against 15.3) but were cheaper per turn
-($0.089 against $0.098). The rest of the gap is weighting. The two attempts of
-<code>extract-moves-from-video</code> that did finish cost $13.27 each, and that
-one task counts as much as any other in the average.</p>
+($0.089 against $0.098). The rest of the gap comes from giving one task a
+full task&rsquo;s weight: the two attempts of
+<code>extract-moves-from-video</code> that did finish averaged $13.27, and
+that task counts as much as any other in the average.</p>
 
 <h2>What the trajectories look like</h2>
 <p>The average attempt took 27.9 turns (the longest, 276) and 17.2
 minutes. Twenty-eight attempts went past the
-study&rsquo;s 100-turn cap, and 9 of those were eventually solved. A cap does
-cost solves, which is why we gave the 74.1% figure next to the 75.6% above.
+study&rsquo;s 100-turn cap, and 9 of those were solved. A cap
+costs solves, which is why we gave the 74.1% figure next to the 75.6% above.
 Three attempts cost more than $15 (the most expensive, $33.64), and two of
 those were solved.</p>
 <p>Of the 630 attempts, 250 received at least one harness note about a
@@ -485,14 +487,14 @@ looks at files the agent may have brushed against by accident. A one-line note
 puts both facts in front of the model instead of leaving it to guess. The
 harness refused 15 tool calls, in 15 different attempts. Fourteen were
 <code>run_agent</code> calls, which have no channel agent to reach inside a
-container; the last was a shell command that the destructive-command guard
+container; the other was a shell command that the destructive-command guard
 misread.</p>
 <p>The prompt itself is short, and the full text is archived with the records
 at <code>papers/kisssorcar/evidence/tb2_prompt.txt</code>. Its six rules,
 paraphrased:</p>
 <ol>
 <li>Understand the task before acting: list what &ldquo;done&rdquo; means for every item it names.</li>
-<li>Look before you change; never modify the task&rsquo;s input files, experiment on copies.</li>
+<li>Look before you change; never modify the task&rsquo;s input files, and experiment on copies instead.</li>
 <li>Work in small verified steps; reproduce a bug before fixing it; never replace something that works with something unverified.</li>
 <li>Verify before you finish, from a fresh shell, requirement by requirement; never weaken a test or threshold to pass a check.</li>
 <li>Leave the environment as the task expects to find it.</li>
@@ -503,45 +505,44 @@ prompt, the tool schemas and the notes. The paired run on Claude Fable 5 is
 the only place we can compare that cost with Pi on one price list, and there
 the difference was five cents per attempt.</p>
 
-<h2>So is there a harness tax?</h2>
+<h2>Where this leaves the harness tax</h2>
 <p>HarnessTax&rsquo;s central claim is that on these benchmarks the harness
 moves cost more than success, and for Terminal-Bench 2.0 it puts the harness
 effect within about &plusmn;5 points. Our pooled gap over Pi is 5.6 points,
 right at the edge of that band. Our paired gap on one model is 11 points, with
-an interval that doesn&rsquo;t include zero. We don&rsquo;t think this
-overturns the study. It does suggest that the band is wider than three
-harnesses show.</p>
+an interval that doesn&rsquo;t include zero. The study stands; the band a
+fourth harness draws is wider than the one three harnesses drew.</p>
 <p>The study describes its three harnesses mostly in terms of how much they
 send the model. Pi sends four tools and little else; on SWE-bench Lite, Claude
 Code&rsquo;s first call carries more than ten times Pi&rsquo;s context. Ours is
 small by that measure too. What it adds is a short account of how to work, and
 a note whenever the model can&rsquo;t see something important in a shell
 result, such as a process it started that is still running, or a file the
-verifier is going to inspect that has changed. Whether those two things are
-what moved the numbers, we have not tested. The all-model comparison also
+verifier is going to inspect that has changed. We have not tested whether those two things are
+what moved the numbers. The all-model comparison also
 changes effort, cap and date, and the paired run leaves effort and prompt
 tangled together.</p>
-<p>That fits with how the HarnessTax authors close their own post. For
+<p>The HarnessTax authors leave room for this when they close their own post. For
 day-to-day tasks, they write, a coding agent is essentially an interface to
 model intelligence, but harder problems &ldquo;may still benefit from
 harnesses that provide structured guidance.&rdquo; Terminal-Bench 2.0 tasks
 are single-session, but they involve background processes and container state
-that a model with four tools and no notes has to infer. A 727-word statement
-of engineering discipline and a one-line note in the tool result is not much
-structured guidance. On this benchmark, our results are consistent with that
-little bit being worth having. Settling it means varying the prompt, the notes
+that a model with four tools and no notes has to infer. Our harness supplies
+727 words of working rules and a one-line note in the tool result, and on this
+benchmark the harness that carries them came out ahead. Whether they are the
+reason is the open question. Settling it means varying the prompt, the notes
 and the guard one at a time with everything else held fixed, which we have not
 done.</p>
 <p>We can also add a fourth data point to the study&rsquo;s second and third
 findings. A simple harness is competitive; ours is a loop, six tools and a
-prompt. And models do fine outside their vendor&rsquo;s harness; every
+prompt. Models also do fine outside their vendor&rsquo;s harness; every
 Anthropic and OpenAI model in Table 1 has its best point estimate under a
 harness that neither vendor wrote.</p>
 
 <h2>Things to keep in mind</h2>
 <p>The paired run matches tasks, scoring and price list and drops the turn cap
-for both agents, but it still differs from a clean A/B. Pi ran at high effort
-with its own prompt and no budget cap, one day after our run, and only Pi was
+for both agents, but it still differs from a clean A/B test. Pi ran at high effort
+with its own prompt and no budget cap, the day after our run, and only Pi was
 rerun, on one model. The paired interval and the sign test are the results
 that stand on their own; the pooled interval over seven models covers all
 three published means.</p>
@@ -552,8 +553,8 @@ here speaks to them.</p>
 
 <h2>Credit</h2>
 <p>This comparison was possible because the HarnessTax authors published their
-task sample, their per-model tables and their protocol.
-<p>The full method, the intervals, and the rest of the evidence for KISS Sorcar
+task sample, their per-model tables and their protocol.</p>
+<p>The full method, the intervals and the rest of the evidence for KISS Sorcar
 are in <a href="../assets/kiss_sorcar.pdf"><em>KISS Sorcar: A Stupidly-Simple
 General-Purpose and Software Engineering AI Assistant</em></a>, Section 5.
 Terminal-Bench 2.0 is by Merrill et al.,
