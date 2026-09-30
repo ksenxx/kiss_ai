@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import fnmatch
 import logging
 import os
 import re
@@ -604,6 +605,40 @@ _RESCUE_SKIP_COMPONENTS = frozenset({
     ".cache",
     ".DS_Store",
 })
+
+# Basename glob patterns (``fnmatch``) whose files are never rescued
+# either: regenerable build artifacts that do not live under a skipped
+# directory.  Without this list every worktree that rebuilt one of
+# them (a fresh ``kiss-sorcar.vsix``, pytest-cov's ``.coverage`` data,
+# stray ``*.pyc``) differed from the main-tree copy and landed a
+# ``<stem>.kiss-rescued-<ns><ext>`` sibling on each teardown.
+_RESCUE_SKIP_PATTERNS = (
+    "*.vsix",
+    ".coverage",
+    ".coverage.*",
+    "*.pyc",
+    "*.pyo",
+    "*.tsbuildinfo",
+)
+
+
+def _rescue_skipped(rel: str) -> bool:
+    """Whether the ignored worktree file *rel* is a regenerable artifact.
+
+    True when any path component is in :data:`_RESCUE_SKIP_COMPONENTS`
+    or the basename matches one of :data:`_RESCUE_SKIP_PATTERNS`; such
+    files are left to die with the worktree instead of being rescued
+    (see :meth:`GitWorktreeOps.rescue_ignored_files`).
+
+    Args:
+        rel: Path of the file relative to the worktree root.
+    """
+    parts = Path(rel).parts
+    if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
+        return True
+    name = parts[-1] if parts else rel
+    return any(fnmatch.fnmatch(name, pat) for pat in _RESCUE_SKIP_PATTERNS)
+
 
 # Repo-local (info/exclude) ignore pattern covering every collision
 # sibling the rescue can generate — ``<stem>.kiss-rescued-<ns><ext>``
@@ -2125,9 +2160,13 @@ class GitWorktreeOps:
           pointing elsewhere must not let the rescue write outside
           the repository.
         * Paths with a component in :data:`_RESCUE_SKIP_COMPONENTS`
-          (``__pycache__``, ``.venv``, ``node_modules``, ...) are
-          skipped: they are regenerable build/cache artifacts, and a
-          copied virtualenv would carry broken absolute paths anyway.
+          (``__pycache__``, ``.venv``, ``node_modules``, ...) or a
+          basename matching :data:`_RESCUE_SKIP_PATTERNS` (``*.vsix``,
+          ``.coverage``, ``.coverage.*``, ``*.pyc``, ...; deliberately
+          not ``.coverage*``, which would discard a ``.coveragerc``)
+          are skipped: they are
+          regenerable build/cache artifacts, and a copied virtualenv
+          would carry broken absolute paths anyway.
         * The rescue FAILS CLOSED: enumeration failure or any file
           that could not be landed makes the returned flag ``False``,
           and callers must then PRESERVE the worktree instead of
@@ -2151,12 +2190,7 @@ class GitWorktreeOps:
                 wt_dir,
             )
             return (0, False)
-        candidates = [
-            rel for rel in ignored
-            if not any(
-                p in _RESCUE_SKIP_COMPONENTS for p in Path(rel).parts
-            )
-        ]
+        candidates = [rel for rel in ignored if not _rescue_skipped(rel)]
         # The exclusion must be in place BEFORE anything lands: a
         # collision sibling is auto-commit bait from the instant it
         # exists (see _RESCUE_EXCLUDE_PATTERN).
