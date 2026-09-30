@@ -30,6 +30,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_SLUG_PREFIX,
     _WORKTREE_SUBDIR,
 )
+from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.core import tool_interrupt
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
@@ -607,6 +608,18 @@ def _format_bash_result(returncode: int, output: str, max_output_chars: int) -> 
     return _truncate_output(output, max_output_chars)
 
 
+def _format_bash_timeout(output: str, timeout_seconds: float, max_output_chars: int) -> str:
+    """Report a killed-at-the-deadline command, keeping what it printed before the kill.
+
+    The partial output (how far a test run or build got) is what lets the
+    model act on the next step instead of re-running the command blind.
+    """
+    msg = "Error: Command execution timeout"
+    if output:
+        msg += f" after {timeout_seconds:g}s. Output before the timeout:\n{output}"
+    return _truncate_output(msg, max_output_chars)
+
+
 def _run_one_command(
     command: str, cancel: threading.Event, work_dir: str | None, timeout_seconds: float,
 ) -> tuple[int | None, str, float]:
@@ -623,9 +636,11 @@ def _run_one_command(
         timeout, ``-1`` when the command was refused or failed to
         launch), the combined output, and the wall time spent.
     """
-    guard = _bash_parent_repo_guard(command, work_dir)
+    guard = _bash_parent_repo_guard(command, work_dir) or destructive_command_guard(
+        command, work_dir)
     if guard is not None:
         return -1, guard, 0.0
+    timeout_seconds = lift_install_timeout(command, timeout_seconds)
     started = time.monotonic()
     try:
         # Stream-less: printers attribute output by thread-local task
@@ -1422,12 +1437,14 @@ class UsefulTools:
         """
         del description
 
-        guard = _bash_parent_repo_guard(command, self.work_dir)
+        guard = _bash_parent_repo_guard(command, self.work_dir) or destructive_command_guard(
+            command, self.work_dir)
         if guard is not None:
             return guard
 
         if background:
             return self._start_background_job(command)
+        timeout_seconds = lift_install_timeout(command, timeout_seconds)
 
         if self.stream_callback:
             # Contract (see test_bash_background_pipe_hang): an exception
@@ -1442,7 +1459,7 @@ class UsefulTools:
                 logger.debug("Exception caught", exc_info=True)
                 return f"Error: {e}"
         if returncode is None:
-            return "Error: Command execution timeout"
+            return _format_bash_timeout(output, timeout_seconds, max_output_chars)
         return _format_bash_result(returncode, output, max_output_chars)
 
     def bash_job(
@@ -1712,5 +1729,5 @@ class UsefulTools:
         tool_interrupt.raise_if_interrupted()
 
         if timed_out:
-            return None, ""
+            return None, "".join(chunks)
         return process.returncode, "".join(chunks)

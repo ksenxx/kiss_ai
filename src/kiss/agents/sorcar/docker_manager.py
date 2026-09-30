@@ -25,6 +25,7 @@ from docker.models.containers import Container  # type: ignore[assignment]
 
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.fanout_guard import parse_tasks_json
+from kiss.agents.sorcar.shell_guards import destructive_command_guard, lift_install_timeout
 from kiss.agents.sorcar.useful_tools import _truncate_output, run_commands_pool
 from kiss.core.config import DEFAULT_CONFIG
 from kiss.core.kiss_error import KISSError
@@ -87,6 +88,18 @@ def _new_utf8_decoder() -> Any:
         ``decoder.decode(chunk)`` and flush with ``decoder.decode(b"", True)``.
     """
     return codecs.getincrementaldecoder("utf-8")("replace")
+
+
+def _join_demuxed(stdout_parts: list[bytes], stderr_parts: list[bytes]) -> str:
+    """Decode the collected stdout then stderr chunks of a non-streaming exec.
+
+    Each stream is decoded as one byte string, so a multibyte character
+    split across chunks survives; the two streams are joined by a newline,
+    stdout first, as the streaming path reports them.
+    """
+    texts = [b"".join(parts).decode("utf-8", errors="replace")
+             for parts in (stdout_parts, stderr_parts)]
+    return "\n".join(text for text in texts if text)
 
 
 def _drain_exec_stream(
@@ -367,13 +380,20 @@ class DockerManager:
 
         print(f"{description}")
 
+        guard = destructive_command_guard(command, self.workdir)
+        if guard is not None:
+            return guard
+        timeout_seconds = int(lift_install_timeout(command, timeout_seconds))
         if self.stream_callback:
             return self._bash_streaming(
                 container, command, timeout_seconds, max_output_chars,
             )
         exit_code, output = self._exec(container, command, timeout_seconds)
         if exit_code is None:
-            return f"Error: command timed out after {timeout_seconds}s"
+            msg = f"Error: command timed out after {timeout_seconds}s"
+            if output:
+                msg += " and was killed. Output before the timeout:\n" + _collapse_progress(output)
+            return _truncate_output(msg, max_output_chars)
         return _truncate_output(
             _with_exit_code(output, exit_code), max_output_chars,
         )
@@ -452,6 +472,10 @@ class DockerManager:
             timeout, ``-1`` when the exec failed to run or was stopped),
             the output and the wall time spent.
         """
+        guard = destructive_command_guard(command, self.workdir)
+        if guard is not None:
+            return -1, guard, 0.0
+        timeout_seconds = lift_install_timeout(command, timeout_seconds)
         started = time.monotonic()
         try:
             exit_code, output = self._exec(container, command, timeout_seconds, cancel)
@@ -484,6 +508,12 @@ class DockerManager:
         """
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
+        # Output is accumulated chunk by chunk (not returned whole by
+        # ``exec_start``) so a timed-out command can still report what it
+        # printed before the kill.  ``list.append`` is atomic, so the
+        # deadline path may join the lists while the worker still appends.
+        stdout_parts: list[bytes] = []
+        stderr_parts: list[bytes] = []
 
         # The exec is tagged with a unique environment token — exactly
         # like the streaming path — so a timed-out command can be
@@ -515,9 +545,25 @@ class DockerManager:
                     if state["cancelled"]:
                         return
                     state["start_committed"] = True
-                result_holder["output"] = self.client.api.exec_start(
-                    result_holder["exec_id"], demux=True,
+                # The SDK leaves closing a streamed exec to the caller;
+                # without it the socket lingers until a GC cycle.  The
+                # HTTP response is closed rather than the stream:
+                # ``CancellableStream.close()`` only shuts the raw socket,
+                # keeps the descriptor until GC and makes the response's
+                # own close raise ``ValueError`` later (measured against a
+                # live daemon: 15 execs left 16 / 11 / 0 descriptors open
+                # with no close / stream close / response close).
+                stream = self.client.api.exec_start(
+                    result_holder["exec_id"], stream=True, demux=True,
                 )
+                try:
+                    for stdout_chunk, stderr_chunk in stream:
+                        if stdout_chunk:
+                            stdout_parts.append(stdout_chunk)
+                        if stderr_chunk:
+                            stderr_parts.append(stderr_chunk)
+                finally:
+                    getattr(stream, "_response", stream).close()
             except BaseException as exc:
                 error_holder["error"] = exc
 
@@ -539,23 +585,14 @@ class DockerManager:
                 self._reap_timed_out_exec(result_holder["exec_id"], token)
             if cancel is not None and cancel.is_set():
                 return -1, "Killed: the task was stopped."
-            return None, ""
+            return None, _join_demuxed(stdout_parts, stderr_parts)
         if error_holder:  # pragma: no branch
             raise error_holder["error"]
 
-        output_payload = result_holder["output"]
-        if output_payload:  # pragma: no branch
-            stdout_bytes, stderr_bytes = output_payload
-        else:
-            stdout_bytes, stderr_bytes = None, None
-        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-        output_parts = [part for part in (stdout, stderr) if part]
-        output = "\n".join(output_parts)
         exit_code = self.client.api.exec_inspect(
             result_holder["exec_id"],
         ).get("ExitCode", 0)
-        return int(exit_code), output
+        return int(exit_code), _join_demuxed(stdout_parts, stderr_parts)
 
     def _tagged_exec_create(
         self, container_id: str | None, command: str, token: str,

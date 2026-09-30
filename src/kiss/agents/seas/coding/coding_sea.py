@@ -38,6 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.seas.coding import coding_test_context as test_context
+from kiss.agents.sorcar.shell_guards import (
+    INSTALL_COMMANDS,
+    INSTALL_TIMEOUT_SECONDS,
+    destructive_pattern,
+)
 
 #: Harness instances by config path (see :meth:`ContainerHarness.shared`).
 _HARNESSES: dict[str, ContainerHarness] = {}
@@ -136,29 +141,15 @@ FINISH_GATE_VERDICT = (
 #: a redirection or a comment.  ``_CMD`` is where a command name may start:
 #: the beginning or a separator, then optional ``sudo`` or environment
 #: assignments and an optional directory prefix.
-_END = r"(?=\s|$|[;&|)\"'>#])"
-_CMD = r"(?:^|[;&|(])\s*(?:sudo\s+|\w+=\S*\s+)*(?:\S*/)?"
-DESTRUCTIVE_COMMANDS = (
-    _CMD + r"(?:kill\s+(?:\S+\s+)*?-1" + _END + r"(?!\s+[\d$%`])"
-    + r"|pkill\s+(?:-\S+\s+)*(?:-f|--full)\s+['\"]?\.(?:\*)?['\"]?" + _END
-    + r"|rm\s+(?:-\S+\s+)*['\"]?(?:/|{workdir})(?:/\*?)?['\"]?" + _END + r")"
-)
+#: The patterns live in :mod:`kiss.agents.sorcar.shell_guards`, shared with the
+#: host and Docker ``Bash`` tools; the harness applies them in its tool hook
+#: because a HarnessTax container's tools run outside :class:`DockerManager`.
 DESTRUCTIVE_VERDICT = (
     "Blocked: this command would kill every process in the container (your own "
     "shell included) or delete the working directory, which ends the task with "
     "nothing to deliver. Kill only the processes you started, by pid or exact name, "
     "and delete only files you created."
 )
-
-#: Commands whose runtime is dominated by package managers or compilers; a
-#: short tool timeout would leave them half done (broken dpkg state, partial
-#: builds), so the harness lifts the timeout instead of letting the model guess.
-INSTALL_COMMANDS = re.compile(
-    _CMD + r"(?:(?:apt-get|apt|dpkg|pip3?|python3?\s+-m\s+pip|conda|mamba|npm|yarn|cargo|gem|go)\s+"
-    r"(?:-\S+\s+)*(?:install|update|upgrade|build|configure)" + _END
-    + r"|(?:make|cmake|ninja)" + _END + r")"
-)
-INSTALL_TIMEOUT_SECONDS = 900
 
 #: Largest file the test-context note reads back and diffs.
 MAX_SNAPSHOT_BYTES = 400_000
@@ -286,8 +277,7 @@ class ContainerHarness:
         self.model_overrides: dict[str, Any] = dict(cfg.get("model_config") or {})
         self.gate_answered = False
         self.implicit_finish_vetoed = False
-        self.destructive = re.compile(
-            DESTRUCTIVE_COMMANDS.format(workdir=re.escape(self.workdir.rstrip("/") or "/")))
+        self.destructive = destructive_pattern(self.workdir)
         #: ``(path, content before the edit)`` of the edits made since the last model call.
         self.pending_edits: list[tuple[str, str]] = []
         #: Test files already pointed out to the model.
