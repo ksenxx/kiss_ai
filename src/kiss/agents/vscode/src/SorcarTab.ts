@@ -416,6 +416,9 @@ export function buildChatHtml(
     HEAD_STYLE: '',
     BODY_CLASS_ATTR: bodyAttrs || '',
     PRODUCT_NAME: escapeHtml(BRAND.productName),
+    // The remote page appends the host name (`_build_html`); the
+    // webview's own title is never shown, VS Code labels the tab.
+    PAGE_TITLE: escapeHtml(BRAND.productName),
     TAGLINE: escapeHtml(BRAND.tagline),
     BRAND_JSON: JSON.stringify({
       productName: BRAND.productName,

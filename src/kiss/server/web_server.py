@@ -3750,6 +3750,18 @@ def _build_share_page(title: str, body_html: str) -> str:
     )
 
 
+def _page_title() -> str:
+    """Return the remote page's ``<title>``: ``KISS Sorcar: <machine name>``.
+
+    The machine name is ``platform.node()`` (the same host name the
+    task settings report as "Machine info"), so a user with several
+    KISS servers open can tell the browser tabs apart.  Falls back to
+    the bare product name when the host name is unknown.
+    """
+    node = platform.node().strip()
+    return f"{PRODUCT_NAME}: {node}" if node else PRODUCT_NAME
+
+
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
@@ -3833,6 +3845,9 @@ def _build_html() -> str:
         "HEAD_STYLE": head_style,
         "BODY_CLASS_ATTR": ' class="remote-chat light-theme"',
         "PRODUCT_NAME": html.escape(PRODUCT_NAME),
+        # The browser tab names the machine the daemon runs on, so a
+        # user with several servers open can tell them apart.
+        "PAGE_TITLE": html.escape(_page_title()),
         "TAGLINE": html.escape(BRAND["tagline"]),
         "BRAND_JSON": json.dumps(
             {"productName": PRODUCT_NAME, "shortName": BRAND["short_name"]},

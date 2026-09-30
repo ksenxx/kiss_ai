@@ -135,7 +135,7 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
                 ),
             )
             html = resp.read().decode()
-            self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
+            self.assertIn(f"<title>{PRODUCT_NAME}: ", html)
             self.assertEqual(resp.status, 200)
         finally:
             await server.stop_async()
@@ -212,7 +212,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
                 ),
             )
             html = resp2.read().decode()
-            self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
+            self.assertIn(f"<title>{PRODUCT_NAME}: ", html)
             self.assertEqual(resp2.status, 200)
 
             self.assertTrue(_URL_FILE.is_file())
