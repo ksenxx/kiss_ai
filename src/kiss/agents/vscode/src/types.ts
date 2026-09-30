@@ -146,10 +146,9 @@ export type FromWebviewMessage =
       webTools?: boolean;
       tabId?: string;
       workDir?: string;
-      // The client's workspace, sent only when `workDir` (a folder
-      // picked in the "Working directory" panel) lies outside it, so
-      // the tab stays scoped to this window.
-      tabScopeWorkDir?: string;
+      // The file tab the webview's user viewed last; the host's own
+      // visible editor takes precedence when there is one.
+      activeFile?: string;
     }
   | {type: 'stop'; tabId?: string}
   // The Stop button of one tool-call panel: interrupts only that tool
@@ -292,7 +291,19 @@ export type FromWebviewMessage =
       tabId?: string;
     }
   | {type: 'getWelcomeInfo'}
-  | {type: 'complete'; query: string; tabId?: string}
+  // activeFile / activeFileContent: the file tab the webview's user
+  // viewed last (its Monaco buffer as content; "" when no file tab is
+  // open); the host's own visible editor takes precedence when there
+  // is one, and when neither a native editor nor a webview file is
+  // open the host sends no activeFile at all (the daemon then keeps
+  // the last editor it was told about).
+  | {
+      type: 'complete';
+      query: string;
+      tabId?: string;
+      activeFile?: string;
+      activeFileContent?: string;
+    }
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
@@ -1050,11 +1061,6 @@ type ToWebviewMessageBody =
         chatId: string;
         title: string;
         workDir: string;
-        // Workspace-visibility scope, distinct from workDir (the
-        // execution directory): a run_agent sub-task runs in a
-        // channel/cron scratch dir but is scoped to the calling
-        // workspace. Empty means "scope by workDir".
-        scopeWorkDir: string;
       }>;
     }
   | {

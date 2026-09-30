@@ -92,9 +92,9 @@ client-transport parameters — the script only runs on the daemon that
 ``stop_on_timeout`` picks the client's timeout behavior — so a
 daemon-side getter could never take effect.
 ``scope_work_dir()`` (wire field ``tabScopeWorkDir``) overrides the
-tab-bar visibility scope of the run's tab; an empty override scopes
-the tab to the run's work directory, like an empty client-sent
-``scope_work_dir``.  ``use_web_tools()`` (wire field ``webTools``),
+calling workspace recorded on the run's registry tab (informational:
+every client shows every tab); an empty override records none, like
+an empty client-sent ``scope_work_dir``.  ``use_web_tools()`` (wire field ``webTools``),
 ``classify_tasks()`` (wire field ``classifyTasks``), and
 ``use_memory()`` (wire field ``useMemory``) return a bool for a
 per-run override or ``None`` to fall back to the daemon's default —

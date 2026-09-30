@@ -561,12 +561,12 @@ def dispatch_result(
             and its persisted task id / frontend tab id make the
             sub-task a nested sub-agent of the calling task (same tab
             behavior as a ``run_parallel`` sub-task).
-        scope_work_dir: The CALLING task's work directory, used as the
-            sub-task's tab workspace-scope so its tab shows in the
-            caller's tab bar even though the sub-task executes in
-            *work_dir* (a channel/cron scratch directory).  Empty
-            (standalone tools-file use) leaves the scope falling back
-            to *work_dir*.
+        scope_work_dir: The CALLING task's work directory, recorded on
+            the sub-task's registry tab (``scopeWorkDir``) alongside
+            *work_dir* (the channel/cron scratch directory it executes
+            in).  Informational: the tab is shown on every client
+            regardless.  Empty (standalone tools-file use) records
+            nothing.
         git_lifecycle: Whether the sub-task runs through the standard
             project git lifecycle (worktree isolation + auto-commit).
             ``False`` — the channel and cron modes — dispatches with

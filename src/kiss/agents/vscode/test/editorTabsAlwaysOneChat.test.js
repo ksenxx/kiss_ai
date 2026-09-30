@@ -400,8 +400,7 @@ async function runTest() {
   await sleep(50);
   assert.strictEqual(createdPanels.length, 9, 'X remains: no open');
   manager.adoptRegistryTabs(
-    [{tabId: 'reg-x', chatId: 'chat-X', title: 'X', workDir: '', scopeWorkDir: ''}],
-    '',
+    [{tabId: 'reg-x', chatId: 'chat-X', title: 'X', workDir: ''}],
   );
   assert.strictEqual(createdPanels.length, 9, 'same-chat tab: adoption blocked');
   panelX.dispose();
@@ -429,10 +428,10 @@ async function runTest() {
   editorTabsMode = true;
 
   // --- enterMode with nothing to migrate opens one chat ---------------
-  manager.enterMode([], '/ws');
+  manager.enterMode([]);
   assert.strictEqual(createdPanels.length, 11, 'enterMode: one chat');
   await assertFocusedReplacement(lastPanel());
-  manager.enterMode([], '/ws');
+  manager.enterMode([]);
   assert.strictEqual(createdPanels.length, 11, 'enterMode again: no dup');
 
   // --- terminal dispose: panels stand, nothing new opens --------------

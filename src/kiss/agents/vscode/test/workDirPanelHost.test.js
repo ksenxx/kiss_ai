@@ -12,8 +12,8 @@
 // directory or a file-system root (also one reached through `..` or a
 // symlink).  The host never opens the folder as the window's workspace:
 // `vscode.openFolder` must not run, and the window's own folder is as
-// valid a pick as any other.  A `submit` carrying the webview's
-// `tabScopeWorkDir` passes it on to the daemon's `run`.
+// valid a pick as any other.  A `submit` carrying a tab work dir runs
+// there; without one the run uses the window's workspace.
 //
 // Runs the compiled extension (out/SorcarSidebarView.js) against a
 // minimal `vscode` stub; run `npm run compile` first.
@@ -300,7 +300,7 @@ async function testPickWorkDirUsesTheEditorDialog() {
   view.dispose();
 }
 
-async function testSubmitPassesTheTabScope() {
+async function testSubmitRunsInTheTabWorkDir() {
   const {view, runs} = makeView();
   await view._handleMessage({
     type: 'submit',
@@ -309,7 +309,6 @@ async function testSubmitPassesTheTabScope() {
     attachments: [],
     tabId: 'tab-1',
     workDir: other,
-    tabScopeWorkDir: wsRoot,
   });
   await view._handleMessage({
     type: 'submit',
@@ -320,17 +319,67 @@ async function testSubmitPassesTheTabScope() {
   });
   assert.strictEqual(runs.length, 2);
   assert.strictEqual(runs[0].workDir, other, 'the tab dir is the run dir');
-  assert.strictEqual(
-    runs[0].tabScopeWorkDir,
-    wsRoot,
-    'the tab stays scoped to the window workspace',
-  );
   assert.strictEqual(runs[1].workDir, wsRoot, 'no tab dir: the workspace');
-  assert.strictEqual(
-    runs[1].tabScopeWorkDir,
-    undefined,
-    'no scope override for an ordinary run',
-  );
+  view.dispose();
+}
+
+async function testWebviewEditorContextFallsBackToTheFileTab() {
+  // Without a visible VS Code editor the webview's own file tab (the
+  // Monaco buffer the remote webapp also has) is the editor context of
+  // a run and of a completion; with one, the native editor wins.
+  const {view, runs} = makeView();
+  const completes = [];
+  view._api.complete = fields => completes.push(fields);
+  await view._handleMessage({
+    type: 'submit',
+    prompt: 'explain',
+    model: 'm',
+    attachments: [],
+    tabId: 'tab-1',
+    activeFile: '/ws/notes.md',
+  });
+  assert.strictEqual(runs[0].activeFile, '/ws/notes.md');
+  await view._handleMessage({
+    type: 'complete',
+    query: 'exp',
+    tabId: 'tab-1',
+    activeFile: '/ws/notes.md',
+    activeFileContent: 'buffer text',
+  });
+  assert.strictEqual(completes[0].activeFile, '/ws/notes.md');
+  assert.strictEqual(completes[0].activeFileContent, 'buffer text');
+  await view._handleMessage({type: 'complete', query: 'exp', tabId: 'tab-1'});
+  assert.strictEqual(completes[1].activeFile, undefined, 'no file tab: no context');
+  assert.strictEqual(completes[1].activeFileContent, undefined);
+
+  const native = path.join(wsRoot, 'native.ts');
+  vscodeStub.window.activeTextEditor = {document: {uri: {fsPath: native}}};
+  vscodeStub.workspace.textDocuments = [
+    {uri: {fsPath: native}, getText: () => 'native text'},
+  ];
+  try {
+    await view._handleMessage({
+      type: 'submit',
+      prompt: 'explain',
+      model: 'm',
+      attachments: [],
+      tabId: 'tab-3',
+      activeFile: '/ws/notes.md',
+    });
+    assert.strictEqual(runs[1].activeFile, native, 'the visible editor wins');
+    await view._handleMessage({
+      type: 'complete',
+      query: 'exp',
+      tabId: 'tab-1',
+      activeFile: '/ws/notes.md',
+      activeFileContent: 'buffer text',
+    });
+    assert.strictEqual(completes[2].activeFile, native);
+    assert.strictEqual(completes[2].activeFileContent, 'native text');
+  } finally {
+    vscodeStub.window.activeTextEditor = undefined;
+    vscodeStub.workspace.textDocuments = [];
+  }
   view.dispose();
 }
 
@@ -342,7 +391,11 @@ async function main() {
     ],
     ['openWorkDir refusals are reported to the panel', testOpenWorkDirRefusals],
     ['pickWorkDir uses the editor dialog', testPickWorkDirUsesTheEditorDialog],
-    ['submit passes tabScopeWorkDir to run', testSubmitPassesTheTabScope],
+    ['submit runs in the tab work dir', testSubmitRunsInTheTabWorkDir],
+    [
+      'the webview file tab is the editor context unless an editor is visible',
+      testWebviewEditorContextFallsBackToTheFileTab,
+    ],
   ];
   let failed = 0;
   for (const [name, fn] of tests) {

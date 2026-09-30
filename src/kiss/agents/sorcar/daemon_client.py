@@ -455,15 +455,13 @@ def run(
         prompt: The task instruction to run.
         work_dir: Working directory for the task; the daemon's current
             default is used when empty.
-        scope_work_dir: The workspace-scope directory of the task's
-            tab in the daemon's shared tab registry — the directory a
-            client's tab bar matches against to decide whether to show
-            the tab — kept separate from *work_dir* (the execution
-            directory) so a standalone dispatch that runs in a
-            channel/cron scratch directory can still appear in the
-            CALLING workspace's tab bar.  Empty (the default) leaves
-            the tab's scope falling back to *work_dir*, unchanged from
-            ordinary runs.  Irrelevant for a sub-agent run (non-empty
+        scope_work_dir: The CALLING workspace recorded on the task's
+            tab in the daemon's shared tab registry (``scopeWorkDir``),
+            kept separate from *work_dir* (the channel/cron scratch
+            directory a standalone dispatch executes in).
+            Informational only: every client shows every registry tab
+            whatever folder it runs in.  Empty (the default) records
+            nothing.  Irrelevant for a sub-agent run (non-empty
             *parent_task_id*), which gets no registry tab at all.
             An agent script's ``scope_work_dir()`` getter overrides
             this value on the daemon.
@@ -626,9 +624,9 @@ def run(
             returns a *list* of tool callables (the tools-file
             contract, as in the channel agent modules) makes the
             script its own tools file.  ``scope_work_dir()`` overrides
-            the tab-bar workspace scope of the run's tab (an empty
-            override scopes the tab to the run's work directory, like
-            an empty client-sent *scope_work_dir*);
+            the calling workspace recorded on the run's tab (an empty
+            override records none, like an empty client-sent
+            *scope_work_dir*);
             ``use_web_tools()``, ``classify_tasks()``, and
             ``use_memory()`` return a bool for a per-run override
             or ``None`` for the daemon's configured default; and

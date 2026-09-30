@@ -22,7 +22,8 @@
 //  - a re-broadcast of the same snapshot opens no duplicate;
 //  - a known tab that later gains its FIRST chat binding (a task ran
 //    in an idle remote tab) opens a panel;
-//  - tabs scoped to another workspace are skipped;
+//  - tabs running in another folder (or scoped elsewhere) open panels
+//    too: every surface shows the same tabs;
 //  - a tab bound to a chat some open panel already shows is skipped
 //    while that panel's tab is still registered (resume race) — but
 //    ADOPTED when the registry displaced the panel's tab (one tab per
@@ -284,7 +285,7 @@ function wire(sidebar, manager, priorPanelTabIds) {
         toAdopt = [];
       }
     }
-    manager.adoptRegistryTabs(toAdopt, WORKSPACE_DIR, delta.listed);
+    manager.adoptRegistryTabs(toAdopt, delta.listed);
   });
 }
 
@@ -429,7 +430,7 @@ async function runTest() {
   );
   assert.strictEqual(tabIdOf(createdPanels[2]), 'T-idle');
 
-  // --- tabs scoped to another workspace are skipped -------------------
+  // --- tabs of other folders / scopes are adopted too -----------------
   await daemonBroadcast({
     type: 'tabs_state',
     tabs: [
@@ -442,12 +443,12 @@ async function runTest() {
     ],
     tabId: '',
   });
-  await new Promise(r => setTimeout(r, 150));
-  assert.strictEqual(
-    createdPanels.length,
-    3,
-    'tabs of another workspace must not open panels here',
+  await waitFor(
+    () => createdPanels.length === 5,
+    'tabs of other folders open panels here: all surfaces show the same tabs',
   );
+  assert.strictEqual(tabIdOf(createdPanels[3]), 'T-other');
+  assert.strictEqual(tabIdOf(createdPanels[4]), 'T-pinned');
 
   // --- resume race: a still-registering panel's chat is not doubled ---
   // This window resumed chat-R from history (the panel knows its chat
@@ -455,7 +456,7 @@ async function runTest() {
   // snapshot), then another client resumed the SAME chat into its own
   // new registry tab: no second panel may open for it.
   manager.openChat({chatId: 'chat-R', title: 'resumed here'});
-  assert.strictEqual(createdPanels.length, 4);
+  assert.strictEqual(createdPanels.length, 6);
   await daemonBroadcast({
     type: 'tabs_state',
     tabs: [
@@ -470,7 +471,7 @@ async function runTest() {
   await new Promise(r => setTimeout(r, 150));
   assert.strictEqual(
     createdPanels.length,
-    4,
+    6,
     'a chat still registering in an open panel must not get a second panel',
   );
 
@@ -488,10 +489,10 @@ async function runTest() {
     tabId: '',
   });
   await waitFor(
-    () => createdPanels.length === 5,
+    () => createdPanels.length === 7,
     'an unpinned tab must be adopted like enterMode does',
   );
-  assert.strictEqual(tabIdOf(createdPanels[4]), 'T-unpinned');
+  assert.strictEqual(tabIdOf(createdPanels[6]), 'T-unpinned');
 
   // --- displacement: the replacement tab of a displaced chat IS
   // adopted. panel1's root tab T1 is registry-confirmed (listed by
@@ -512,10 +513,10 @@ async function runTest() {
     tabId: '',
   });
   await waitFor(
-    () => createdPanels.length === 6,
+    () => createdPanels.length === 8,
     'the displaced chat-1 replacement tab must be adopted',
   );
-  assert.strictEqual(tabIdOf(createdPanels[5]), 'T1b');
+  assert.strictEqual(tabIdOf(createdPanels[7]), 'T1b');
 
   // --- displacement with a LAGGING panel socket: the manager must
   // confirm a panel's registration from the CONTROLLER's snapshot
@@ -525,10 +526,10 @@ async function runTest() {
   // be adopted after the controller saw the panel's tab listed once.
   manager.openChat({chatId: 'chat-S', title: 'slow-socket resume'});
   await waitFor(
-    () => createdPanels.length === 7,
+    () => createdPanels.length === 9,
     'the chat-S resume opens its own panel',
   );
-  const slowPanelTabId = tabIdOf(createdPanels[6]);
+  const slowPanelTabId = tabIdOf(createdPanels[8]);
   const baseTabs = [
     entry('T0', 'chat-0', 'old chat', WORKSPACE_DIR),
     entry('T-idle', 'chat-idle', 'first task here', WORKSPACE_DIR),
@@ -548,7 +549,7 @@ async function runTest() {
     },
     [controllerSocket],
   );
-  assert.strictEqual(createdPanels.length, 7, 'own tab: nothing to adopt');
+  assert.strictEqual(createdPanels.length, 9, 'own tab: nothing to adopt');
   await daemonBroadcast(
     {
       type: 'tabs_state',
@@ -561,11 +562,11 @@ async function runTest() {
     [controllerSocket],
   );
   await waitFor(
-    () => createdPanels.length === 8,
+    () => createdPanels.length === 10,
     'the displaced chat-S replacement tab must be adopted even though ' +
       "the old panel's own socket saw no snapshot",
   );
-  assert.strictEqual(tabIdOf(createdPanels[7]), 'T-s2');
+  assert.strictEqual(tabIdOf(createdPanels[9]), 'T-s2');
 
   // --- persisted tab ids: user closes update the record ---------------
   assert.deepStrictEqual(
@@ -574,16 +575,18 @@ async function runTest() {
       'T0', // previous session's ids stay until their panels close
       'T-idle',
       'T-race',
+      'T-other',
+      'T-pinned',
       'T-s2',
       'T-unpinned',
       'T1',
       'T1b',
-      tabIdOf(createdPanels[3]), // the chat-R resume panel's random id
+      tabIdOf(createdPanels[5]), // the chat-R resume panel's random id
       slowPanelTabId,
     ].sort(),
     'the record lists every open panel tab id',
   );
-  createdPanels[7].dispose(); // user closes the T-s2 panel
+  createdPanels[9].dispose(); // user closes the T-s2 panel
   assert.ok(
     !recordedIds.includes('T-s2'),
     'a user close must drop the tab id from the record',
@@ -602,7 +605,7 @@ async function runTest() {
   await new Promise(r => setTimeout(r, 150));
   assert.strictEqual(
     createdPanels.length,
-    8,
+    10,
     'with editor-tabs mode off the host must not open panels',
   );
   editorTabsMode = true;

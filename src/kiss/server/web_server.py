@@ -118,7 +118,7 @@ from kiss.server.json_printer import (
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.stall_watchdog import start_stall_watchdog
 from kiss.server.task_update import TaskUpdateRunner
-from kiss.server.tips import read_tips, tips_disabled
+from kiss.server.tips import tips_data
 from kiss.server.tricks import read_tricks_data
 from kiss.server.voice_wake import (
     DEFAULT_AUDIO_MODEL,
@@ -3806,15 +3806,7 @@ def _build_html() -> str:
     version = _read_version()
     tricks_data = read_tricks_data()
     tricks_json = json.dumps(tricks_data["tricks"]).replace("</", "<\\/")
-    # The server serves many devices and cannot tell which of them saw
-    # the tips, so unless the user opted out (a choice shared with the
-    # extension) it allows the auto-open and sends the running version:
-    # tips.js opens the window once per version per browser
-    # (localStorage), i.e. on first use and again after every update.
-    tips = read_tips()
-    tips_json = json.dumps(
-        {"tips": tips, "show": bool(tips) and not tips_disabled(), "version": version},
-    ).replace("</", "<\\/")
+    tips_json = json.dumps(tips_data(version)).replace("</", "<\\/")
     head_style = (
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
@@ -6014,6 +6006,18 @@ class RemoteAccessServer:
             is_uds=isinstance(endpoint, asyncio.StreamWriter),
         )
         await self._server_api.dispatch(cmd, ctx)
+
+    @staticmethod
+    def _bootstrap_events() -> list[dict[str, Any]]:
+        """The ``tricksData`` and ``tipsData`` events a ``ready`` answers with.
+
+        Reads ``MY_INJECTION.md``, the bundled promptlets and tips, and
+        the opt-out marker, so callers run it off the event loop.
+        """
+        return [
+            {"type": "tricksData", **read_tricks_data()},
+            {"type": "tipsData", **tips_data(_read_version())},
+        ]
 
     def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
@@ -8528,6 +8532,12 @@ class RemoteAccessServer:
         # from before a disconnect or a daemon restart.
         self._broadcast_to_conn(self._vscode_server.browser_tabs.snapshot_event(), conn_id)
         await self._send_welcome_info()
+        # The Inject promptlets and the tips: the daemon owns both files
+        # (and the opt-out marker), so every surface paints them from
+        # these events. The remote page also embeds them at load; the
+        # VS Code webview has nothing until they arrive.
+        for bootstrap in await asyncio.to_thread(self._bootstrap_events):
+            self._broadcast_to_conn(bootstrap, conn_id)
         try:
             await self._endpoint_send(
                 websocket,
@@ -8706,11 +8716,11 @@ class RemoteAccessServer:
             "prompt": prompt,
             "model": cmd.get("model", ""),
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
-            # A tab pinned to a folder outside the client's workspace
-            # keeps its registry scope there (the webview sends the
-            # workspace); empty for ordinary runs.
-            "tabScopeWorkDir": cmd.get("tabScopeWorkDir", ""),
             "tabId": tab_id,
+            # The file tab the user viewed last (the webview's Monaco
+            # editor), named in the run's system prompt like the
+            # visible editor the VS Code host reports.
+            "activeFile": cmd.get("activeFile"),
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", True),
             "useParallel": cmd.get("useParallel", True),

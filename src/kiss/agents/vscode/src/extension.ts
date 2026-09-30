@@ -207,14 +207,8 @@ export function activate(context: vscode.ExtensionContext): void {
     return panelManager!.activeController();
   };
 
-  const workspaceDir = (): string => {
-    const folders = vscode.workspace.workspaceFolders;
-    return folders && folders.length > 0 ? folders[0].uri.fsPath : '';
-  };
-
   // Switching the editor-tabs mode (from the settings UI toggle or
-  // settings.json): ON migrates the registry's chats of this workspace
-  // into editor tabs (the sidebar view hides via its `when` clause)
+  // settings.json): ON migrates the registry's chats into editor tabs (the sidebar view hides via its `when` clause)
   // and KEEPS the secondary sidebar open, now showing the Task Info
   // view — the remote webapp's rightmost desktop panel — in the spot
   // the sidebar chat occupied;
@@ -256,10 +250,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // bar, OFF restores the user's own actions location.
         void syncEditorActionsLocation(context, editorTabsMode());
         if (editorTabsMode()) {
-          panelManager!.enterMode(
-            sidebarView!.getRegistryTabEntries(),
-            workspaceDir(),
-          );
+          panelManager!.enterMode(sidebarView!.getRegistryTabEntries());
           // The secondary sidebar stays OPEN: the chat view it hosted
           // just hid (its `when` clause flipped false), and the Task
           // Info view takes its place. The reveal's focus then goes
@@ -382,7 +373,7 @@ export function activate(context: vscode.ExtensionContext): void {
           toAdopt = [];
         }
       }
-      panelManager!.adoptRegistryTabs(toAdopt, workspaceDir(), delta.listed);
+      panelManager!.adoptRegistryTabs(toAdopt, delta.listed);
     }),
   );
 

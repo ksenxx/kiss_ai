@@ -474,15 +474,13 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
 
-    async def test_submit_forwards_tab_scope_work_dir_to_run(self) -> None:
-        """A webapp ``submit`` with ``tabScopeWorkDir`` keeps the tab scoped.
+    async def test_submit_forwards_active_file_to_run(self) -> None:
+        """A webapp ``submit`` with ``activeFile`` reaches the agent.
 
-        The "Working directory" panel pins one tab to a folder outside
-        the client's workspace; the webview then sends the workspace as
-        ``tabScopeWorkDir`` so the tab does not vanish from that tab bar
-        once the run publishes its work dir.  The submit → run
-        translation must forward it to the tab registry's scope while
-        the run's ``workDir`` stays the picked folder.
+        The remote webapp names the file tab its user viewed last
+        (``main.js`` ``editorContext``) the way the VS Code host names
+        its visible editor; the submit → run translation must forward
+        it so ``task_runner`` passes it as ``current_editor_file``.
         """
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
         from kiss.core import config as config_module
@@ -497,7 +495,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             self.assertTrue(available, "no model available with fake key")
             model = next(m for m in available if m.startswith("claude-"))
 
-            tab_id = "tab-parity-scope"
+            tab_id = "tab-parity-activefile"
             agent = WorktreeSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_kwargs: dict[str, Any] = {}
@@ -508,27 +506,27 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
 
             agent.run = fake_run  # type: ignore[assignment]
             seed = agent_state.AgentState(
-                "parity-scope-seed",
+                "parity-activefile-seed",
                 agent=agent,
                 tab_id=tab_id,
                 server_owned=True,
             )
             agent_state.register(seed)
 
-            workspace = Path(self.tmpdir) / "workspace"
-            picked = Path(self.tmpdir) / "picked"
-            workspace.mkdir(parents=True, exist_ok=True)
-            picked.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(self.tmpdir) / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            viewed = work_dir / "notes.md"
+            viewed.write_text("# notes\n", encoding="utf-8")
 
             reader, writer = await self._connect()
             try:
                 await self._send(writer, {
                     "type": "submit",
                     "tabId": tab_id,
-                    "prompt": "run in the picked folder",
+                    "prompt": "summarize the notes",
                     "model": model,
-                    "workDir": str(picked),
-                    "tabScopeWorkDir": str(workspace),
+                    "workDir": str(work_dir),
+                    "activeFile": str(viewed),
                     "attachments": [],
                     "useWorktree": False,
                     "useParallel": False,
@@ -542,16 +540,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     ),
                     "stub agent.run never started",
                 )
-                self.assertEqual(seen_kwargs.get("work_dir"), str(picked))
-                entry = next(
-                    e for e in self.server._vscode_server.tab_registry.snapshot()
-                    if e["tabId"] == tab_id
-                )
-                self.assertEqual(entry["workDir"], str(picked))
                 self.assertEqual(
-                    entry["scopeWorkDir"],
-                    str(workspace),
-                    "tabScopeWorkDir was dropped on the submit → run path",
+                    seen_kwargs.get("current_editor_file"),
+                    str(viewed),
+                    "activeFile was dropped on the submit → run path",
                 )
             finally:
                 writer.close()

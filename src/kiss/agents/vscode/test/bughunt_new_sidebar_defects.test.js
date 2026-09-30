@@ -279,36 +279,34 @@ async function runTests() {
   assert.ok(!view._commitPendingTabs.has('tabB'), 'tabB no longer pending');
   console.log('  ok - commit-message generations are scoped per tab');
 
-  const urlFile = path.join(tmpHome, '.kiss', 'remote-url.json');
-  await waitFor(
-    () => wv.posted.some(m => m && m.type === 'remote_url'),
-    'initial remote_url message was not posted',
-  );
-  fs.writeFileSync(path.join(tmpHome, '.kiss', 'ntfy_topic'), 'kiss-topic-1\n');
-  const beforeNtfy = wv.posted.length;
-  view._tryReadAndSendUrl(urlFile);
-  const ntfyMsg = wv.posted
-    .slice(beforeNtfy)
-    .find(m => m && m.type === 'remote_url');
-  assert.ok(
-    ntfyMsg,
-    'BUG: remote_url resend was deduped even though the ntfy topic ' +
-      'changed (dedup key ignored ntfyUrl)',
-  );
-  assert.strictEqual(
-    ntfyMsg.ntfyUrl,
-    'https://ntfy.sh/kiss-topic-1',
-    'resent remote_url must carry the new ntfy URL',
-  );
-  const beforeDedup = wv.posted.length;
-  view._tryReadAndSendUrl(urlFile);
-  assert.strictEqual(
-    wv.posted.slice(beforeDedup).filter(m => m && m.type === 'remote_url')
-      .length,
-    0,
-    'unchanged url+ntfy state must still be deduped',
-  );
-  console.log('  ok - ntfy topic written after first send reaches webview');
+  // The daemon owns the remote URL and the ntfy topic: its `remote_url`
+  // event (sent on ready and on every URL or topic change) is relayed
+  // to the webview verbatim, the host neither reads the URL file nor
+  // dedupes.
+  const beforeUrl = wv.posted.length;
+  await daemonSend({
+    type: 'remote_url',
+    url: 'https://tunnel.example.dev',
+    tunnelActive: true,
+    ntfyUrl: 'https://ntfy.sh/kiss-topic-1',
+  });
+  const urlMsgs = wv.posted
+    .slice(beforeUrl)
+    .filter(m => m && m.type === 'remote_url');
+  assert.strictEqual(urlMsgs.length, 1, 'the remote_url event reaches the webview');
+  assert.strictEqual(urlMsgs[0].ntfyUrl, 'https://ntfy.sh/kiss-topic-1');
+  await daemonSend({
+    type: 'remote_url',
+    url: 'https://tunnel.example.dev',
+    tunnelActive: true,
+    ntfyUrl: 'https://ntfy.sh/kiss-topic-2',
+  });
+  const resent = wv.posted
+    .slice(beforeUrl)
+    .filter(m => m && m.type === 'remote_url');
+  assert.strictEqual(resent.length, 2, 'a changed topic is relayed, never deduped');
+  assert.strictEqual(resent[1].ntfyUrl, 'https://ntfy.sh/kiss-topic-2');
+  console.log("  ok - the daemon's remote_url events are relayed verbatim");
 
   view.dispose();
 }

@@ -91,11 +91,6 @@ process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 
-fs.writeFileSync(
-  path.join(tmpHome, '.kiss', 'remote-url.json'),
-  JSON.stringify({tunnel: 'https://tunnel.example.dev', local: 'http://localhost:8787'}),
-);
-
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
   fs.rmSync(tmpHome, {recursive: true, force: true});
@@ -103,9 +98,31 @@ if (process.platform === 'win32') {
 }
 
 let lastServerSock = null;
+// The daemon stub answers every `ready` with the `remote_url` event the
+// real daemon's ready handler sends (the welcome page's server address).
+const REMOTE_URL = {
+  type: 'remote_url',
+  url: 'https://tunnel.example.dev',
+  tunnelActive: true,
+};
 const server = net.createServer((sock) => {
   lastServerSock = sock;
-  sock.on('data', () => {});
+  let buf = '';
+  sock.on('data', (chunk) => {
+    buf += chunk.toString('utf8');
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      let cmd;
+      try {
+        cmd = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (cmd.type === 'ready') sock.write(JSON.stringify(REMOTE_URL) + '\n');
+    }
+  });
 });
 
 function daemonSend(msg) {
@@ -202,9 +219,9 @@ async function runTests() {
         m.url === 'https://tunnel.example.dev' &&
         m.tunnelActive,
     ),
-    'BUG 1: the re-opened webview must receive remote_url again — the ' +
-      '_lastSentUrl dedup key must be reset when a fresh webview is ' +
-      'resolved, otherwise the welcome-page remote panel stays blank',
+    'BUG 1: the re-opened webview must receive remote_url again — its ' +
+      'ready reaches the daemon, whose answer is relayed to the fresh ' +
+      'webview, otherwise the welcome-page remote panel stays blank',
   );
 
   const commitEvents = [];

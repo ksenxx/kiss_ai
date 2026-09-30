@@ -475,10 +475,8 @@ async function runTest() {
         chatId: 'reg-chat-1',
         title: 'registry chat',
         workDir: '/some/ws',
-        scopeWorkDir: '',
       },
     ],
-    '/some/ws',
   );
   assert.strictEqual(createdPanels.length, before + 1);
   const panelD = createdPanels[createdPanels.length - 1];

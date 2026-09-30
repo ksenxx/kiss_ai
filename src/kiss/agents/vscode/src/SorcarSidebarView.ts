@@ -192,7 +192,7 @@ import {
   provisionalDefaultModel,
   resolveDefaultModel,
 } from './DependencyInstaller';
-import {buildChatHtml, clearTipsOptOut, recordTipsOptOut} from './SorcarTab';
+import {buildChatHtml} from './SorcarTab';
 import {PDF_DOWNLOAD_MESSAGE, buildPdfPreviewHtml} from './pdfPreview';
 import {VoiceWakeService} from './voiceWake';
 import {kissHomeDir} from './userAssets';
@@ -283,7 +283,6 @@ export interface RegistryTabEntry {
   chatId: string;
   title: string;
   workDir: string;
-  scopeWorkDir: string;
 }
 
 /** One `tabs_state` snapshot as seen by the extension host (see
@@ -332,6 +331,14 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // `tool_interrupt_ack` that the client-listener relay passes back.
   interruptTool: ['tabId', 'toolName', 'callId'],
   getInputHistory: [],
+  // The welcome page and the settings panel show how to reach the
+  // remote webapp: the daemon owns the URL file and the tunnel, and
+  // answers with the `remote_url` event it also broadcasts on every
+  // URL change, so the host reads and polls nothing itself.
+  getWelcomeInfo: [],
+  // "Don't show tips again": the daemon writes the one opt-out marker
+  // both surfaces honour.
+  tipsOptOut: ['optOut'],
   newChat: ['tabId'],
   openTab: ['tabId', 'title', 'workDir'],
   getHistory: ['query', 'tag', 'offset', 'generation'],
@@ -560,7 +567,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   // detach them; otherwise a late queued webview message could reach
   // _handleMessage() after terminal teardown.
   private _viewSubs: vscode.Disposable[] = [];
-  private _lastSentUrl: string = '';
   private _lastSeenRemotePassword: string | undefined;
   private _configFileWatchTimer?: ReturnType<typeof setInterval>;
   private _onFirstResolve: (() => void) | undefined;
@@ -921,7 +927,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
               chatId: t.chatId || '',
               title: t.title || '',
               workDir: t.workDir || '',
-              scopeWorkDir: t.scopeWorkDir || '',
             });
           }
         }
@@ -1118,7 +1123,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       setWebviewNotificationPoster(poster);
     }
     this._disposed = false;
-    this._lastSentUrl = '';
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -1291,72 +1295,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendRemoteUrl(): void {
-    const urlFile = path.join(kissHomeDir(), 'remote-url.json');
-    this._tryReadAndSendUrl(urlFile);
-    this._watchUrlFile(urlFile);
-  }
-
-  private _tryReadAndSendUrl(urlFile: string): void {
-    let tunnel = '';
-    let local = '';
-    let loopback = '';
-    let lanUrls: string[] = [];
-    let localCa = false;
-    try {
-      const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
-      tunnel = data.tunnel || '';
-      local = data.local || '';
-      loopback = data.loopback || '';
-      if (Array.isArray(data.lan)) {
-        lanUrls = data.lan.filter((u: unknown) => typeof u === 'string');
-      }
-      localCa = data.localCa === true;
-    } catch {}
-    const tunnelActive = !!tunnel;
-    const url = tunnel || local || '';
-    const ntfyUrl = this._getNtfyUrl();
-    const key =
-      `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}|` +
-      `${loopback}|${lanUrls.join(',')}|${localCa ? '1' : '0'}`;
-    if (key === this._lastSentUrl) return;
-    this._lastSentUrl = key;
-    const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
-    if (ntfyUrl) {
-      msg.ntfyUrl = ntfyUrl;
-    }
-    if (loopback) {
-      msg.loopbackUrl = loopback;
-    }
-    if (lanUrls.length > 0) {
-      msg.lanUrls = lanUrls;
-    }
-    if (localCa) {
-      msg.localCa = true;
-    }
-    this._sendToWebview(msg);
-  }
-
-  private _getNtfyUrl(): string {
-    try {
-      const topicFile = path.join(kissHomeDir(), 'ntfy_topic');
-      const topic = fs.readFileSync(topicFile, 'utf-8').trim();
-      if (topic) {
-        return `https://ntfy.sh/${topic}`;
-      }
-    } catch {}
-    return '';
-  }
-
-  private _urlFileWatchTimer?: ReturnType<typeof setInterval>;
-
-  private _watchUrlFile(urlFile: string): void {
-    if (this._urlFileWatchTimer) return;
-    this._urlFileWatchTimer = setInterval(() => {
-      this._tryReadAndSendUrl(urlFile);
-    }, 10_000);
-  }
-
   private _watchConfigFile(): void {
     if (this._configFileWatchTimer) return;
     this._checkConfigFile();
@@ -1428,7 +1366,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     workDir?: string,
     autoCommit?: boolean,
     webTools?: boolean,
-    tabScopeWorkDir?: string,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     // No local setTaskText echo: the daemon's common run path
@@ -1439,11 +1376,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       prompt,
       model,
       workDir: effectiveWorkDir,
-      // Set by the webview when the tab's folder (picked in the
-      // "Working directory" panel) lies outside this window's
-      // workspace: the tab stays scoped to the workspace instead of
-      // disappearing from this tab bar when the run publishes its dir.
-      tabScopeWorkDir: tabScopeWorkDir || undefined,
       activeFile,
       attachments,
       useWorktree,
@@ -1489,7 +1421,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'daemonStatus',
           connected: this._daemonConnected,
         });
-        this._sendRemoteUrl();
         this._watchConfigFile();
         // The Task Info view (meta-panel-mode): a metaState relayed
         // before the webview loaded — or lost to a webview reload —
@@ -1566,7 +1497,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._startTask(
           message.prompt,
           message.model,
-          this._getVisibleEditorFile() || undefined,
+          this._getVisibleEditorFile() || message.activeFile || undefined,
           message.attachments,
           message.useWorktree,
           message.useParallel,
@@ -1574,7 +1505,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           effectiveWorkDir,
           message.autoCommit,
           message.webTools,
-          message.tabScopeWorkDir,
         );
         break;
       }
@@ -1662,11 +1592,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'getWelcomeInfo':
-        this._sendRemoteUrl();
-        break;
-
       case 'complete': {
+        // The visible VS Code editor wins; without one the webview's
+        // own file tab (a Monaco buffer, as in the remote webapp) is
+        // the context.
         const editorFile = this._getVisibleEditorFile();
         const completeDoc = editorFile
           ? vscode.workspace.textDocuments.find(
@@ -1676,8 +1605,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getApi().complete({
           query: message.query,
           tabId: message.tabId || this._activeTabId || undefined,
-          activeFile: editorFile || undefined,
-          activeFileContent: completeDoc?.getText(),
+          activeFile: editorFile || message.activeFile || undefined,
+          activeFileContent: editorFile
+            ? completeDoc?.getText()
+            : message.activeFileContent,
         });
         break;
       }
@@ -1882,14 +1813,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'serverReset':
         this._getApi().serverReset();
-        break;
-
-      case 'tipsOptOut':
-        if (message.optOut === false) {
-          clearTipsOptOut();
-        } else {
-          recordTipsOptOut();
-        }
         break;
 
       case 'notificationAction':
@@ -2735,10 +2658,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._voiceWake?.dispose();
     // audit0903-coverage:end
     this._voiceWake = undefined;
-    if (this._urlFileWatchTimer) {
-      clearInterval(this._urlFileWatchTimer);
-      this._urlFileWatchTimer = undefined;
-    }
     if (this._configFileWatchTimer) {
       clearInterval(this._configFileWatchTimer);
       this._configFileWatchTimer = undefined;
