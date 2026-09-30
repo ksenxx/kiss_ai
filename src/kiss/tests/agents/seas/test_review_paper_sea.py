@@ -99,6 +99,11 @@ Detailed review
 Overall, this paper is well-written. It delves into a \u201cnew\u201d protocol. It seems that
 the numbers hold. The closest prior work is not
 named. The closest prior work is not named.
+
+Scores
+Originality: 11/10. Off the scale.
+Clarity of the writing: 6/10. Readable.
+Value to the community: 0/10. None.
 """
 
 _CLEAN_REVIEW = """\
@@ -123,7 +128,19 @@ Novelty. The closest prior work is Smith and Jones (USENIX ATC 2025), which meas
 reviewer model on a benchmark of 300 synthetic tasks, and Lee (ICSE 2024), which
 red-teamed a single model. This paper adds a production log and a leak audit. """ + " ".join(
     f"I checked ratio {i} in Section 5.{i} against Table 2." for i in range(12)
-)
+) + """
+
+Scores
+Originality: 7/10. The leak audit has no counterpart in Smith and Jones.
+Importance of the research question: 6/10. Review protocols run in every agent stack.
+Support for the claims: 5/10. Table 3 has no spread.
+Soundness of the experiments: 6/10. One deployment, one labeler.
+Clarity of the writing: 8/10. Section 3 explains the log in one page.
+Value to the community: 7/10. The log and the taxonomy are released.
+Contextualization relative to prior work: 5/10. Lee (ICSE) is cited but not compared.
+Rating: 6 (marginally above the acceptance threshold)
+Confidence: 4
+"""
 
 
 def _gate(report: str, name: str) -> str:
@@ -141,6 +158,14 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "`read_paper`" in prompt and "`check_review`" in prompt
     assert "Judge the novelty" in prompt and "at least 20 distinct sources" in prompt
     assert "Em dashes: zero" in prompt
+    # The paperreview.ai process: a sanity check, API-backed related-work queries from
+    # three perspectives, and the seven dimension scores under a Scores heading.
+    assert "1. Sanity check: `read_paper` page 1." in prompt
+    assert "api.semanticscholar.org/graph/v1/paper/search" in prompt
+    assert "export.arxiv.org/api/query" in prompt
+    assert "\n       Scores\n       Originality: N/10." in prompt
+    assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
+    assert review_paper_sea._HEADINGS[-1] == "Scores"
     assert [t.__name__ for t in review_paper_sea.tools()] == ["read_paper", "check_review"]
     assert review_paper_sea.use_web_tools() is True
     assert review_paper_sea.is_parallel() is True
@@ -232,6 +257,13 @@ def test_check_review_flags_the_sloppy_review(tmp_path: Path) -> None:
     assert _gate(report, "strengths bullets") == "strengths bullets: 1 (at least 1) PASS"
     assert _gate(report, "weaknesses bullets") == "weaknesses bullets: 1 (at least 1) PASS"
     assert _gate(report, "detailed review words").endswith("(at least 100) FAIL")
+    # 11/10 and 0/10 are out of range; four dimensions have no line at all.
+    assert _gate(report, "dimensions unscored") == (
+        "dimensions unscored: 6 (limit 0) FAIL; one '<dimension>: N/10' line per "
+        "dimension, N from 1 to 10"
+    )
+    assert "    Originality\n    Importance of the research question\n" in report
+    assert "    Clarity of the writing\n" not in report
     assert _gate(report, "years named").startswith("years named: 0 ")
     assert "CHECK; name the closest prior work with its year" in report
     assert _gate(report, "em dashes").startswith("em dashes: 1 (limit 0) FAIL")
@@ -253,7 +285,7 @@ def test_check_review_flags_the_sloppy_review(tmp_path: Path) -> None:
     assert _gate(report, "duplicated sentences") == "duplicated sentences: 1 (limit 0) FAIL"
     assert "    L11, L11: the closest prior work is not named." in report
     assert _gate(report, "non-ASCII lines").startswith("non-ASCII lines: 1 (list only) CHECK")
-    assert report.endswith("summary: 6 gate(s) failed"), report
+    assert report.endswith("summary: 7 gate(s) failed"), report
 
 
 def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_path: Path) -> None:
@@ -264,6 +296,7 @@ def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_pat
     assert report.endswith("summary: 0 gate(s) failed"), report
     assert _gate(report, "summary sentences") == "summary sentences: 3 (2 to 3) PASS"
     assert _gate(report, "strengths bullets") == "strengths bullets: 2 (at least 1) PASS"
+    assert _gate(report, "dimensions unscored").startswith("dimensions unscored: 0 (limit 0) PASS")
     assert _gate(report, "years named") == (
         "years named: 2 (a rough proxy for named prior work) PASS; 2024, 2025"
     )
@@ -280,10 +313,10 @@ def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_pat
         encoding="utf-8",
     )
     report = review_paper_sea.check_review(str(path))
-    assert _gate(report, "headings missing") == "headings missing: 1 (limit 0) FAIL"
-    assert "    Summary\n" in report
+    assert _gate(report, "headings missing") == "headings missing: 2 (limit 0) FAIL"
+    assert "    Summary\n    Scores\n" in report
     assert "headings out of order: Strengths L4, Weaknesses L1, Detailed review L7 FAIL" in report
-    assert "summary sentences" not in report
+    assert "summary sentences" not in report and "dimensions unscored" not in report
     assert _gate(report, "strengths bullets") == "strengths bullets: 1 (at least 1) PASS"
     assert _gate(report, "weaknesses bullets") == "weaknesses bullets: 1 (at least 1) PASS"
     assert _gate(report, "detailed review words") == "detailed review words: 3 (at least 100) FAIL"
@@ -303,8 +336,8 @@ def test_check_review_passes_a_clean_review_and_reports_structure_faults(tmp_pat
     # Text before the first heading is ignored; parts that are absent have no gate line.
     path.write_text("Reviewer 2\nSummary\nA. B.\nStrengths\n- x\n", encoding="utf-8")
     report = review_paper_sea.check_review(str(path))
-    assert _gate(report, "headings missing") == "headings missing: 2 (limit 0) FAIL"
-    assert "    Weaknesses\n    Detailed review\n" in report
+    assert _gate(report, "headings missing") == "headings missing: 3 (limit 0) FAIL"
+    assert "    Weaknesses\n    Detailed review\n    Scores\n" in report
     assert _gate(report, "summary sentences") == "summary sentences: 2 (2 to 3) PASS"
     assert "weaknesses bullets" not in report and "detailed review words" not in report
     missing = tmp_path / "nope.txt"
@@ -326,7 +359,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     script = [
         tool_call_body("read_paper", {"paper_path": str(paper)}, prompt_tokens=500),
         tool_call_body("check_review", {"review_path": str(review)}, prompt_tokens=600),
-        finish_body("<pre>summary: 6 gate(s) failed</pre>", prompt_tokens=700),
+        finish_body("<pre>summary: 7 gate(s) failed</pre>", prompt_tokens=700),
     ]
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("review-paper-sea-test")
@@ -345,7 +378,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
         )
     parsed = yaml.safe_load(result)
     assert parsed["success"] is True
-    assert "6 gate(s) failed" in parsed["summary"]
+    assert "7 gate(s) failed" in parsed["summary"]
 
     agentic: list[dict[str, Any]] = [r for r in requests if r.get("tools")]
     assert len(agentic) == 3, [list(r) for r in requests]
@@ -362,5 +395,5 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
     assert f"paper: {paper} (1 page)\n=== page 1 ===\n\\section{{Intro}}" in str(
         tool_results[0]["content"]
     )
-    assert "summary: 6 gate(s) failed" in str(tool_results[1]["content"])
+    assert "summary: 7 gate(s) failed" in str(tool_results[1]["content"])
     assert "reviewer boilerplate: 4 (limit 0) FAIL" in str(tool_results[1]["content"])

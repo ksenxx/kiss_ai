@@ -26,16 +26,27 @@ agent keeps the full Sorcar toolset, the browser tools (related work,
 the venue's reviewer guidelines) and ``run_parallel`` (the read-only
 second opinion).
 
+The process follows the Stanford Agentic Reviewer
+(https://paperreview.ai/tech-overview): a sanity check of the input,
+related-work queries at several levels of specificity from three
+perspectives (the paper's benchmarks and baselines, the same problem, the
+same technique) run through the arXiv and Semantic Scholar APIs with the
+web tools, metadata triage with a full read of the closest papers, and
+scores on seven dimensions (originality, importance, support for the
+claims, soundness, clarity, value, contextualization) from which the
+overall rating follows.  The related-work search uses the browser and
+Bash the agent already has; no search tool is bundled.
+
 Two tools implement the mechanical steps:
 
 * :func:`read_paper` returns the text of the paper, page by page, with
   the line numbers that submission templates print in the margin
   removed, so the model can quote page and section.
 * :func:`check_review` runs the structure and AI-slop gates on the
-  review text (word limit, the four parts in order, a 2 to 3 sentence
-  summary, bullets under Strengths and Weaknesses, named related work,
-  the slop and reviewer-boilerplate lists) and lists every hit with its
-  line number.
+  review text (word limit, the five parts in order, a 2 to 3 sentence
+  summary, bullets under Strengths and Weaknesses, the seven dimension
+  scores, named related work, the slop and reviewer-boilerplate lists)
+  and lists every hit with its line number.
 
 Module-level getters (``append_to_system_prompt()``, ``tools()``,
 ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
@@ -79,11 +90,12 @@ process, whose working directory is not the task's. Use model names literally; n
 
 ## What a review must do
 
-1. Judge the novelty. Search the internet extensively to collect all recent related work.
-   Thoroughly read the related work and create a relevant summary of the related work in
-   the context of the reviewed paper. Name the closest prior work (authors, venue, year)
-   and say in a sentence what the paper adds to each, or that it adds nothing. A novelty
-   verdict without named prior work is worthless.
+1. Judge the novelty. Novelty is the blind spot of machine reviewers: they grade
+   technical validity and skip what is new (Liang et al. 2024; Shin et al. 2025). Search
+   the related work as the Process below says, read the closest papers, and summarize
+   each in the context of the reviewed paper. Name the closest prior work (authors,
+   venue, year) and say in a sentence what the paper adds to each, or that it adds
+   nothing. A novelty verdict without named prior work is worthless.
 2. Check the claims against the paper's own evidence: the abstract and introduction
    against the tables, the numbers in the text against the numbers in the tables,
    the conclusions against the experiments actually run, the baselines against their
@@ -105,26 +117,51 @@ process, whose working directory is not the task's. Use model names literally; n
    specific unclear sentence, and say why it matters for the claim.
 7. Weigh the paper against the venue's bar and its reviewer guidelines. Open the venue's
    reviewer instructions on the web. Read some of the recent papers related to the current
-   paper at the venue to calibrate the novelty and the quality of the paper.  If the
-   venue's form asks for scores (rating, confidence, soundness, presentation, contribution,
-   or the venue's own names), end the review with one line per score. Ignore the venue rules
-   the task tells you to ignore.
+   paper at the venue to calibrate the novelty and the quality of the paper. Score the
+   seven dimensions under Scores first; the venue's own scores (rating, confidence,
+   soundness, presentation, contribution, or its own names) follow from them, one line
+   each after the seven. Ignore the venue rules the task tells you to ignore.
+8. Write for the authors as much as for the area chair: each weakness carries the change
+   that removes it, and a request for a new experiment stays small enough to run before
+   a rebuttal (one baseline, one ablation, one statistic), never a new study.
 
 ## Process
 
-1. Read the paper in full with the `read_paper` tool, a few pages per call; do not
+1. Sanity check: `read_paper` page 1. Record the title and, when shown, the authors and
+   the venue the paper targets. If the file is not a research paper (a slide deck, a
+   blank or garbled conversion, a document with no claims to check), stop and report
+   that instead of reviewing.
+2. Read the paper in full with the `read_paper` tool, a few pages per call; do not
    skip the appendix. Write `./tmp/PAPER-NOTES.md`: the claims, each number the
    abstract and introduction rely on with where it comes from in the paper, the
    baselines, the sections with suspected AI slop, and open questions.
-2. Search the internet for the related work: Google Scholar, arXiv, DBLP, Semantic
-   Scholar, the venue's own proceedings, the papers the paper cites and the papers that
-   cite them. Look for work before the cutoff date. You must prioritize papers that are
-   recent and highly cited.  Visit at least 20 distinct sources
-   and log each with its URL and thoroughly summarize what it does in
-   `./tmp/information-<paper stem>.md` in the context of the current paper.  You must
-   read a related work paper throughly before summarization. Do not cite a paper you
-   could not open.
-3. Write the review to the output path as plain text, in this order and with these
+3. Search the related work before you form the novelty verdict. Write 6 to 9 queries
+   in `./tmp/information-<paper stem>.md`, three perspectives (the benchmarks and
+   baselines the paper uses; other work on the same problem; the same technique in
+   other settings) at three levels of specificity (the paper's own phrasing, the
+   problem in general terms, the technique in general terms). Run each with the web
+   tools or `curl` through the search APIs, which return compact metadata (title,
+   authors, date, venue, citations, abstract) instead of a search page:
+   `https://api.semanticscholar.org/graph/v1/paper/search?query=<words>&fields=title,authors,year,venue,citationCount,externalIds,abstract&publicationDateOrYear=:<cutoff>&limit=10`
+   (plain words, no hyphens; on a 429 wait ten seconds and retry once) and
+   `https://export.arxiv.org/api/query?search_query=all:%22<phrase>%22%20AND%20submittedDate:%5B190001010000%20TO%20<YYYYMMDD>2359%5D&max_results=10`
+   (quote phrases, bare words are OR-ed; keep the brackets percent-encoded, `curl` globs
+   raw ones; one call per three seconds). Then Google
+   Scholar, DBLP, the venue's proceedings, and the paper's own citations for what the
+   APIs miss. Log every candidate with its URL, date and a one-line relevance verdict;
+   keep at least 20 distinct sources, recent and highly cited first. For the 5 to 8
+   closest, write what to look for (the overlapping claim, the shared baseline, the
+   number to compare), download the PDF to `./tmp/` (`curl -L
+   https://arxiv.org/pdf/<id> -o <path>`), read it with `read_paper`, and summarize it
+   in the context of the reviewed paper. The abstract is enough for the rest. Do not
+   cite a paper you could not open.
+4. Score the seven dimensions in `./tmp/PAPER-NOTES.md`, 1 to 10 each with the page,
+   table or prior work that justifies the number: originality; importance of the
+   research question; support for the claims; soundness of the experiments; clarity of
+   the writing; value to the community; contextualization relative to prior work. The
+   Summary's judgment and the venue's rating follow from these seven, never the other
+   way round.
+5. Write the review to the output path as plain text, in this order and with these
    headings, each on its own line:
 
        Summary
@@ -139,12 +176,21 @@ process, whose working directory is not the task's. Use model names literally; n
 
        Detailed review
        (paragraphs: the novelty judgment with the named prior work, the claims you
-       checked and what you found, the AI-slop examples, the improvements you suggest
-       in the order the authors should make them, and the venue's scores when its
-       form asks for them)
+       checked and what you found, the AI-slop examples, and the improvements you
+       suggest in the order the authors should make them)
 
-4. Run the `check_review` tool with the word limit and fix everything it flags.
-5. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
+       Scores
+       Originality: N/10. (one clause of evidence)
+       Importance of the research question: N/10. ...
+       Support for the claims: N/10. ...
+       Soundness of the experiments: N/10. ...
+       Clarity of the writing: N/10. ...
+       Value to the community: N/10. ...
+       Contextualization relative to prior work: N/10. ...
+       (then one line per score the venue's form asks for)
+
+6. Run the `check_review` tool with the word limit and fix everything it flags.
+7. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
    the review read-only through `run_parallel(tasks, model_name=<second model>,
    tool_profile="review")`. It does not have `read_paper`: give it the paper path and
    the review path, and tell it that `pdftotext <paper> -` in Bash (or Read for a text
@@ -153,7 +199,7 @@ process, whose working directory is not the task's. Use model names literally; n
    report only demonstrated problems with page evidence and not to invent new ones.
    Spend at most 50% of the task budget on this check. Fix each finding you confirm;
    rerun `check_review`.
-6. Reread the review once more as a human reader would. Remove every sentence a reader
+8. Reread the review once more as a human reader would. Remove every sentence a reader
    would recognize as machine-written. Git add the review file.
 
 ## Style (Strunk and White)
@@ -213,9 +259,9 @@ they are the tells.
 
 ## Report back
 
-The output path, the word count, the gate counts before and after, the prior works you
-named with their source URLs, each second-opinion finding and what you did with it, and
-anything the paper claims that you could not verify.
+The output path, the word count, the gate counts before and after, the seven dimension
+scores, the prior works you named with their source URLs, each second-opinion finding
+and what you did with it, and anything the paper claims that you could not verify.
 """ """\
 
 
@@ -230,9 +276,10 @@ anything the paper claims that you could not verify.
   review; otherwise do that check on your own model and say in the report that the
   second-opinion check ran without a second model.
 - Draft to 85% of the word limit L. Before writing, allot words per section with these
-  caps: Summary 3 sentences (0.08 L), Strengths 3 bullets (0.15 L), Weaknesses 5 to 7
-  bullets of at most 0.05 L words each (0.35 L, the largest share), Detailed review
-  0.27 L; then write the file once. Count with `wc -w` before `check_review`. If it is
+  caps: Summary 3 sentences (0.08 L), Strengths 3 bullets (0.12 L), Weaknesses 5 to 7
+  bullets of at most 0.05 L words each (0.32 L, the largest share), Detailed review
+  0.20 L, Scores 7 lines of one clause each plus the venue's lines (0.13 L); then write
+  the file once. Count with `wc -w` before `check_review`. If it is
   still over, cut whole sentences or bullets in one `Edit` pass; do not rewrite the whole
   file again and again.
 - Trim to at most 95% of L (950 words for L = 1000) before the second-opinion step, not
@@ -254,8 +301,19 @@ anything the paper claims that you could not verify.
   rejected array costs a step and resends every command."""
 """The reviewing rules, appended to the default system prompt."""
 
-_HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review")
-"""The four parts of a review, in the order the rules require."""
+_HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review", "Scores")
+"""The five parts of a review, in the order the rules require."""
+
+_DIMENSIONS = (
+    "Originality",
+    "Importance of the research question",
+    "Support for the claims",
+    "Soundness of the experiments",
+    "Clarity of the writing",
+    "Value to the community",
+    "Contextualization relative to prior work",
+)
+"""The seven dimensions scored under Scores (paperreview.ai/tech-overview), in order."""
 
 _BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S")
 """A bullet line: ``- x``, ``* x``, a Unicode bullet, or ``1. x``."""
@@ -302,7 +360,8 @@ def description() -> str:
     return (
         "Reviews a research paper (PDF, .tex, .md or .txt) for a venue like a careful human "
         "reviewer, searching the related work and writing a Summary/Strengths/Weaknesses/"
-        "Detailed review that passes the word-limit and AI-slop gates; use it as "
+        "Detailed review/Scores (seven dimensions, 1 to 10) review that passes the "
+        "word-limit and AI-slop gates; use it as "
         "`/review_paper Review <paper path> for <venue>; <word limit> words; to <output path>` "
         "or `run_agent(agent=\"review_paper\", task=...)`."
     )
@@ -457,7 +516,21 @@ def _structure(review: str) -> list[str]:
     if "Detailed review" in parts:
         words = len(" ".join(parts["Detailed review"][1]).split())
         lines.append(f"detailed review words: {words} (at least 100) {_verdict(words >= 100)}")
+    if "Scores" in parts:
+        missing = _unscored_dimensions("\n".join(parts["Scores"][1]))
+        note = "one '<dimension>: N/10' line per dimension, N from 1 to 10"
+        lines += _section("dimensions unscored", missing, 0, note)
     return lines
+
+
+def _unscored_dimensions(scores: str) -> list[str]:
+    """Return the dimensions without a ``<name>: N/10`` line, N in 1 to 10, in *scores*."""
+    missing = []
+    for name in _DIMENSIONS:
+        found = re.search(rf"(?im)^\s*{re.escape(name)}\s*:\s*(\d{{1,2}})\s*/\s*10\b", scores)
+        if found is None or not 1 <= int(found.group(1)) <= 10:
+            missing.append(name)
+    return missing
 
 
 def _verdict(ok: bool) -> str:
@@ -476,11 +549,11 @@ def check_review(review_path: str, word_limit: int = DEFAULT_WORD_LIMIT) -> str:
 
     Returns:
         One block per gate marked ``PASS``, ``FAIL`` or ``CHECK`` (list only):
-        the word count, the four headings and their order, the summary's
+        the word count, the five headings and their order, the summary's
         sentence count, the bullets under Strengths and Weaknesses, the size
-        of the detailed review, the years named (prior work), the word gates,
-        duplicated sentences and non-ASCII lines; then the number of failed
-        gates.
+        of the detailed review, the seven dimension scores under Scores, the
+        years named (prior work), the word gates, duplicated sentences and
+        non-ASCII lines; then the number of failed gates.
     """
     path = Path(review_path).expanduser()
     if not path.is_file():
