@@ -450,6 +450,17 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     The navigation is retried up to three times for that error only; any
     other error, or a third failure, propagates unchanged.
 
+    The same event can also strike the remote webapp's self-reload: when
+    one of the page's scripts fails to load, the shim in
+    ``web_server._WS_SHIM_JS`` reloads the page once, and when that reload's
+    own document request is aborted too, Chromium shows its error page
+    (``chrome-error://chromewebdata/``, an empty DOM). ``page.goto`` tracked
+    the first navigation and returns normally, so the caller's first
+    ``wait_for_selector`` would sit out its full timeout. That case is
+    retried under the same rule: only when the failed navigation reported
+    ``net::ERR_NETWORK_CHANGED``; any other reason raises an
+    ``AssertionError`` naming it, so a real server fault stays visible.
+
     Args:
         page: A ``playwright.sync_api.Page``.
         url: The address to open.
@@ -457,14 +468,33 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     """
     from playwright.sync_api import Error as PlaywrightError
 
-    for attempt in range(3):
-        try:
-            page.goto(url, **goto_kwargs)
-            return
-        except PlaywrightError as exc:
-            if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
-                raise
+    failures: list[str] = []
+
+    def note_failed_navigation(request) -> None:
+        if request.is_navigation_request():
+            failures.append(f"{request.url}: {request.failure}")
+
+    page.on("requestfailed", note_failed_navigation)
+    try:
+        for attempt in range(3):
+            failures.clear()
+            try:
+                page.goto(url, **goto_kwargs)
+            except PlaywrightError as exc:
+                if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(1.0)
+                continue
+            if not page.url.startswith("chrome-error://"):
+                return
+            network_changed = any("net::ERR_NETWORK_CHANGED" in f for f in failures)
+            if not network_changed or attempt == 2:
+                raise AssertionError(
+                    f"{url} ended on {page.url}; failed navigations: {failures}"
+                )
             time.sleep(1.0)
+    finally:
+        page.remove_listener("requestfailed", note_failed_navigation)
 
 
 def pytest_addoption(parser):

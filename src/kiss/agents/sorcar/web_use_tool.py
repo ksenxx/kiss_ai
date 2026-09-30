@@ -88,6 +88,10 @@ _INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
 # Cloudflare's managed challenge takes 3-8 s in a browser it rates human.
 _CHALLENGE_WAIT_SECS = 12.0
 
+# How many times ``go_to_url`` issues a navigation that Chromium aborted with
+# ``net::ERR_NETWORK_CHANGED`` (a host interface came or went mid-request).
+_NETWORK_CHANGE_ATTEMPTS = 3
+
 # How long the Turnstile "Verify you are human" box must have been showing
 # before it is pressed: a person's reading/reaction time, during which the
 # pointer keeps drifting.
@@ -1550,7 +1554,7 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
-            response = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            response = self._goto_retrying_network_change(url)
             self._wait_for_stable()
             notice = self._settle_challenge(response)
             tree = self._get_ax_tree()
@@ -1558,6 +1562,29 @@ class WebUseTool:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"
+
+    def _goto_retrying_network_change(self, url: str) -> Any:
+        """Open *url* in the active tab, retrying when a network change aborts it.
+
+        Chromium fails every in-flight request with ``net::ERR_NETWORK_CHANGED``
+        when a host interface appears or disappears (Wi-Fi hand-over, VPN
+        connect, a container's veth link). The browser's own UI retries that
+        error by itself; this tool does the same, up to two more times a
+        second apart, so a transient event does not cost the agent a step.
+        Any other error, or a third failure, propagates unchanged.
+        """
+        for attempt in range(_NETWORK_CHANGE_ATTEMPTS):
+            try:
+                return self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except web_stealth.playwright_api().Error as exc:
+                if (
+                    "net::ERR_NETWORK_CHANGED" not in str(exc)
+                    or attempt == _NETWORK_CHANGE_ATTEMPTS - 1
+                ):
+                    raise
+                logger.debug("Navigation aborted by a network change; retrying", exc_info=True)
+                time.sleep(1.0)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def click(self, element_id: int, action: str = "click") -> str:
         """Click or hover on an interactive element by its [N] ID from the accessibility tree.
