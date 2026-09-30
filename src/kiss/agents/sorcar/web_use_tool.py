@@ -71,6 +71,11 @@ _HEADED_UA_TOKEN = "Chrome"
 # a tool error, never as a tool call that hangs the whole task.
 _PAGE_READ_TIMEOUT_MS = 10000
 
+# How many navigations a single page read follows (see
+# ``WebUseTool._read_page``): a challenge page reloading into the real
+# page, which then redirects once more, is the longest chain seen live.
+_PAGE_READ_NAVIGATIONS = 3
+
 # How long to wait for a tab the daemon opened in the Browser tab's
 # browser to show up in this tool's own CDP client.
 _LIVE_PAGE_TIMEOUT = 15.0
@@ -88,6 +93,10 @@ _INPUT_WATCHDOG_SECS = _PAGE_READ_TIMEOUT_MS / 1000 + 5.0
 # Cloudflare's managed challenge takes 3-8 s in a browser it rates human.
 _CHALLENGE_WAIT_SECS = 12.0
 
+# How many times ``go_to_url`` issues a navigation that Chromium aborted with
+# ``net::ERR_NETWORK_CHANGED`` (a host interface came or went mid-request).
+_NETWORK_CHANGE_ATTEMPTS = 3
+
 # How long the Turnstile "Verify you are human" box must have been showing
 # before it is pressed: a person's reading/reaction time, during which the
 # pointer keeps drifting.
@@ -97,6 +106,17 @@ _TURNSTILE_REACTION_SECS = 1.2
 def _abort_route(route: Any) -> None:
     """Abort a Playwright route request (used to block accounts.google.com)."""
     route.abort()
+
+
+def _evaluate_list(page: Any, expression: str) -> Any:
+    """Evaluate *expression* (a function returning a non-empty list) on *page*, bounded.
+
+    ``wait_for_function`` (not ``evaluate``) so a wedged renderer raises
+    ``TimeoutError`` after ``_PAGE_READ_TIMEOUT_MS``; ``polling=100`` so
+    throttled background tabs still answer.  See ``WebUseTool._read_page``.
+    """
+    handle = page.wait_for_function(expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
+    return handle.json_value()
 
 
 def _get_frontmost_app() -> str | None:
@@ -1118,7 +1138,9 @@ class WebUseTool:
         checks pass, a redirecting landing page — can destroy the execution
         context between the two calls, which surfaced as ``Error navigating
         to ...: JSHandle.json_value: Execution context was destroyed``.
-        The read is then repeated once on the new document.
+        The read is then repeated on the new document, following up to
+        ``_PAGE_READ_NAVIGATIONS`` navigations in a row (a challenge page
+        that reloads into the real page, which then redirects again).
 
         Args:
             page: The Playwright page to read.
@@ -1127,18 +1149,18 @@ class WebUseTool:
         Returns:
             The list the expression returned, as Python values.
         """
-        try:
-            return page.wait_for_function(
-                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-            ).json_value()
-        except web_stealth.playwright_api().Error as exc:
-            if "Execution context was destroyed" not in str(exc):
-                raise
-            logger.debug("page navigated under the read; reading the new document", exc_info=True)
-            page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
-            return page.wait_for_function(
-                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-            ).json_value()
+        for _ in range(_PAGE_READ_NAVIGATIONS):
+            try:
+                return _evaluate_list(page, expression)
+            except web_stealth.playwright_api().Error as exc:
+                if "Execution context was destroyed" not in str(exc):
+                    raise
+                logger.debug(
+                    "page navigated under the read; reading the new document", exc_info=True
+                )
+                page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
+        # A page that keeps navigating surfaces its error like any other.
+        return _evaluate_list(page, expression)
 
     def _require_responsive_renderer(self) -> None:
         """Raise ``TimeoutError`` unless the page's renderer answers promptly.
@@ -1550,7 +1572,7 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
-            response = self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            response = self._goto_retrying_network_change(url)
             self._wait_for_stable()
             notice = self._settle_challenge(response)
             tree = self._get_ax_tree()
@@ -1558,6 +1580,29 @@ class WebUseTool:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error navigating to {url}: {e}"
+
+    def _goto_retrying_network_change(self, url: str) -> Any:
+        """Open *url* in the active tab, retrying when a network change aborts it.
+
+        Chromium fails every in-flight request with ``net::ERR_NETWORK_CHANGED``
+        when a host interface appears or disappears (Wi-Fi hand-over, VPN
+        connect, a container's veth link). The browser's own UI retries that
+        error by itself; this tool does the same, up to two more times a
+        second apart, so a transient event does not cost the agent a step.
+        Any other error, or a third failure, propagates unchanged.
+        """
+        for attempt in range(_NETWORK_CHANGE_ATTEMPTS):
+            try:
+                return self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except web_stealth.playwright_api().Error as exc:
+                if (
+                    "net::ERR_NETWORK_CHANGED" not in str(exc)
+                    or attempt == _NETWORK_CHANGE_ATTEMPTS - 1
+                ):
+                    raise
+                logger.debug("Navigation aborted by a network change; retrying", exc_info=True)
+                time.sleep(1.0)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def click(self, element_id: int, action: str = "click") -> str:
         """Click or hover on an interactive element by its [N] ID from the accessibility tree.

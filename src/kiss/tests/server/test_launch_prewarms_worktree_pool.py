@@ -2,23 +2,24 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Spare worktrees are prepared at daemon start and at every submit.
+"""Spare worktrees are prepared at daemon start and when a worktree run ends.
 
-Submit-path latency: a full-checkout ``git worktree add`` takes seconds
-on a large repository, and a worktree run used to pay for it inline
-whenever the spare pool was empty — always for the first worktree task
-after a daemon start, and for any run whose classifier verdict came
-from the cache (no LLM wait to overlap the checkout with).
+A full-checkout ``git worktree add`` takes seconds to tens of seconds
+on a large repository.  The pool keeps one spare per repository so a
+launch only hard-resets it, and refills:
 
-* ``VSCodeServer.prewarm_worktree_pool`` (called by ``kiss-web`` at
-  start) creates a spare for the daemon's work dir.
-* ``_run_task_inner`` schedules ``worktree_pool.prewarm_async`` right
-  before classification (maintenance-free, so it never squash-merges
-  anything into the main tree), whether or not a classifier call
-  follows.
-* A run that reaches ``_acquire_task_worktree`` while that refill is
-  still checking out waits on ``repo_lock`` (held by the refill) and
-  then consumes the spare, never running a second checkout.
+* at daemon start (``VSCodeServer.prewarm_worktree_pool``, called by
+  ``kiss-web``), and
+* when a worktree run ends (``WorktreeSorcarAgent.run``), never at
+  submit or consume time, so the checkout's disk traffic does not
+  compete with the launch it would run beside;
+* holding ``repo_lock`` only for the millisecond-scale registration
+  (``git worktree add --no-checkout``), not for the checkout, so a
+  launch, stop or merge in that window no longer stalls behind it.
+
+The daemon also tells the user what a launch is doing (``launch_phase``
+events: "Classifying task…", "Preparing worktree…") until the agent's
+first output.
 
 Everything here is real: a real :class:`VSCodeServer`, a real
 :class:`WorktreeSorcarAgent`, a real temporary git repository and a
@@ -32,11 +33,13 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import worktree_pool
+from kiss.agents.sorcar.git_worktree import repo_lock
 from kiss.agents.sorcar.task_classifier import (
     _DISABLE_ENV as _CLASSIFIER_DISABLE_ENV,
 )
@@ -219,91 +222,121 @@ class _PrewarmHarness(unittest.TestCase):
         return state.agent
 
 
-class TestPrewarmOverlapsClassifier(_PrewarmHarness):
-    """A spare is being prepared while the classifier is still out."""
+class TestNoRefillAtSubmit(_PrewarmHarness):
+    """Submitting a task prepares no spare: the pool is refilled when a
+    worktree task ends (and at daemon start), never beside a launch."""
 
-    def test_prewarm_starts_before_the_classifier_request(self) -> None:
-        """By the time the classifier request reaches the model, the pool
-        is already refilling (or holds a spare) for the run's repo."""
+    def test_classifier_sees_an_idle_pool(self) -> None:
         self._run("say hello", use_worktree=True)
         self.assertEqual(len(self.classifier_seen), 1)
         seen = self.classifier_seen[0]
-        self.assertTrue(
-            seen["spare"] is not None or seen["refilling"],
-            f"no spare preparation was in flight at classification time: {seen}",
-        )
+        self.assertIsNone(seen["spare"])
+        self.assertFalse(seen["refilling"], f"a refill ran beside the launch: {seen}")
 
-    def test_simple_verdict_leaves_the_spare_pooled_for_the_next_task(self) -> None:
-        """A run the verdict keeps out of a worktree does not consume the
-        spare; it stays ready for the next development task."""
+    def test_direct_run_leaves_the_pool_empty(self) -> None:
+        """A run the verdict keeps out of a worktree ends no worktree
+        run, so nothing schedules a refill."""
         self._run("say hello", use_worktree=True)
         self._join_refill()
-        spare = worktree_pool.take_spare(self.repo)
-        self.assertIsNotNone(spare, "the submit-time prewarm produced no spare")
-        branch, wt_dir = spare  # type: ignore[misc]
-        self.assertTrue(branch.startswith("kiss/wt-"))
-        self.assertTrue(wt_dir.is_dir())
-        # The direct run itself never touched a worktree.
         self.assertIsNone(getattr(self._agent(), "_wt", None))
-        # Maintenance-free prewarm: nothing was merged into the main
-        # branch and the checkout is untouched.
+        self.assertIsNone(worktree_pool.take_spare(self.repo))
+        self.assertEqual(worktree_pool.spare_branches(), set())
         self.assertEqual(
             (self.repo / "seed.txt").read_text(encoding="utf-8"), "seed\n",
         )
 
+    def test_launch_phases_are_shown_and_cleared(self) -> None:
+        """The user sees "Classifying task…" while the classifier is
+        out and the line is cleared when the agent takes over."""
+        self._run("say hello", use_worktree=True)
+        events = self.printer.events_of_type("launch_phase")
+        self.assertEqual([e["text"] for e in events], ["Classifying task…", ""])
+        # Transient: every copy is addressed to the launching tab (the
+        # run has no registered task yet, so the printer cannot resolve
+        # the tab itself) and never recorded under a taskId.
+        self.assertEqual([e.get("tabId") for e in events], ["prewarm-tab"] * 2)
+        self.assertFalse(any(e.get("taskId") for e in events))
 
-class TestDevelopmentRunConsumesThePrewarmedSpare(_PrewarmHarness):
-    """A development verdict runs inside the spare prepared at submit."""
+    def test_no_classifying_phase_when_the_classifier_is_off(self) -> None:
+        self._run("say hello", use_worktree=False, classify=False)
+        self.assertEqual(self.classifier_seen, [])
+        phases = [e["text"] for e in self.printer.events_of_type("launch_phase")]
+        self.assertEqual(phases, [""])
+
+
+class TestRefillWhenTheWorktreeRunEnds(_PrewarmHarness):
+    """A development run checks out its worktree inline (the pool was
+    empty) and schedules the refill when it ends."""
 
     development_verdict = True
     agent_writes_file = True
 
-    def test_worktree_run_uses_the_spare_created_during_classification(self) -> None:
+    def test_spare_is_pooled_after_the_run(self) -> None:
         self._run("PREWARM-WRITE: create a file", use_worktree=True)
         agent = self._agent()
         wt = getattr(agent, "_wt", None)
         assert wt is not None, "the development verdict should leave a pending worktree"
         self.assertTrue((wt.wt_dir / "prewarm-written.txt").is_file())
-        # The spare prepared during classification was consumed: the
-        # pool holds a different (refilled) spare or is refilling it.
+        # Nothing was prepared at submit ...
+        self.assertIsNone(self.classifier_seen[0]["spare"])
+        self.assertFalse(self.classifier_seen[0]["refilling"])
+        # ... and the run's end refilled the pool with a different branch.
         self._join_refill()
-        with worktree_pool._pool_lock:
-            pooled = worktree_pool._spares.get(worktree_pool._repo_key(self.repo))
-        self.assertTrue(pooled is None or pooled[0] != wt.branch)
-        seen = self.classifier_seen[0]
-        self.assertTrue(seen["spare"] is not None or seen["refilling"])
+        spare = worktree_pool.take_spare(self.repo)
+        assert spare is not None, "no spare was prepared when the worktree run ended"
+        self.assertNotEqual(spare[0], wt.branch)
+        self.assertTrue(spare[1].is_dir())
+        # The refill's maintenance pass left the pending task worktree alone.
+        self.assertTrue((wt.wt_dir / "prewarm-written.txt").is_file())
+
+    def test_worktree_run_shows_every_launch_phase(self) -> None:
+        self._run("PREWARM-WRITE: create a file", use_worktree=True)
+        events = self.printer.events_of_type("launch_phase")
+        self.assertEqual(
+            [e["text"] for e in events], ["Classifying task…", "Preparing worktree…", ""],
+        )
+        self.assertEqual([e.get("tabId") for e in events], ["prewarm-tab"] * 3)
+        self.assertFalse(any(e.get("taskId") for e in events))
+
+    def test_consumed_spare_is_replaced_when_the_run_ends(self) -> None:
+        """A run that consumed a pooled spare also refills at its end."""
+        assert worktree_pool.prewarm(self.repo) is True
+        (pooled,) = worktree_pool.spare_branches()
+        self._run("PREWARM-WRITE: create a file", use_worktree=True)
+        wt = getattr(self._agent(), "_wt", None)
+        assert wt is not None
+        self.assertEqual(wt.branch, pooled)
+        self._join_refill()
+        spare = worktree_pool.take_spare(self.repo)
+        assert spare is not None
+        self.assertNotEqual(spare[0], pooled)
 
 
 class TestPrewarmGating(_PrewarmHarness):
-    """A spare is prepared at submit only for a user who has worktrees
-    on, in a repo that is not itself a kiss worktree."""
+    """Only a worktree run in a repo that is not itself a kiss worktree
+    ever ends with a refill."""
 
-    def test_no_prewarm_when_worktree_off_and_classifier_off(self) -> None:
+    def test_no_spare_when_worktree_off_and_classifier_off(self) -> None:
         self._run("say hello", use_worktree=False, classify=False)
         self.assertEqual(self.classifier_seen, [], "classifier must not run")
         self._join_refill()
         self.assertIsNone(worktree_pool.take_spare(self.repo))
         self.assertEqual(worktree_pool.spare_branches(), set())
 
-    def test_no_prewarm_when_the_user_turned_worktrees_off(self) -> None:
+    def test_no_spare_when_the_user_turned_worktrees_off(self) -> None:
         """Worktrees off in the client: the classifier still runs (its
         verdict picks the system prompt but can no longer force a
         worktree on a pinned-off run) and no spare checkout is put on
         disk the user did not ask for."""
         self._run("say hello", use_worktree=False)
         self.assertEqual(len(self.classifier_seen), 1)
-        self.assertFalse(
-            self.classifier_seen[0]["spare"] is not None
-            or self.classifier_seen[0]["refilling"],
-            "a spare was being prepared although worktrees are off",
-        )
         self._join_refill()
         self.assertIsNone(worktree_pool.take_spare(self.repo))
         self.assertEqual(worktree_pool.spare_branches(), set())
 
-    def test_no_prewarm_for_a_run_inside_a_kiss_worktree(self) -> None:
+    def test_no_spare_for_a_run_inside_a_kiss_worktree(self) -> None:
         """A run whose work dir is itself a kiss worktree (a nested
-        sub-agent run) keeps the acquire-then-refill path: no spare is
+        sub-agent run) gets no worktree and so no refill: no spare is
         nested under a worktree that will be removed."""
         assert worktree_pool.prewarm(self.repo) is True
         spare = worktree_pool.take_spare(self.repo)
@@ -327,30 +360,6 @@ class TestPrewarmGating(_PrewarmHarness):
         self._join_refill()
         self.assertEqual(worktree_pool.spare_branches(), set())
         self.assertFalse((nested_dir / ".kiss-worktrees").exists())
-
-    def test_classifier_off_still_pools_a_spare(self) -> None:
-        """With no classifier wait to overlap, a worktree run still
-        leaves a spare pooled for the next task."""
-        self._run("say hello", use_worktree=True, classify=False)
-        self.assertEqual(self.classifier_seen, [])
-        self._join_refill()
-        self.assertIsNotNone(worktree_pool.take_spare(self.repo))
-
-    def test_cached_verdict_still_prewarms(self) -> None:
-        """A memoised verdict means no LLM wait, but the submit-time
-        prewarm still runs: a direct run leaves a spare pooled."""
-        self._run("say hello", use_worktree=True)
-        self.assertEqual(len(self.classifier_seen), 1)
-        self._join_refill()
-        worktree_pool.discard_all()
-        self.assertIsNone(worktree_pool.take_spare(self.repo))
-
-        self._run("say hello", use_worktree=True)
-        self.assertEqual(
-            len(self.classifier_seen), 1, "the second run must hit the verdict cache",
-        )
-        self._join_refill()
-        self.assertIsNotNone(worktree_pool.take_spare(self.repo))
 
     def test_non_git_work_dir_is_harmless(self) -> None:
         plain_dir = Path(self.home.tmpdir) / "not-a-repo"
@@ -399,61 +408,57 @@ class TestDevelopmentVerdictRespectsWorktreePin(_PrewarmHarness):
         self.assertTrue(results and results[-1].get("success") is not False)
 
 
-def _record_checkouts(repo: Path) -> Path:
-    """Install a ``post-checkout`` hook that logs each new worktree.
+def _slow_down_index_writes(repo: Path, seconds: float) -> None:
+    """Install a ``post-index-change`` hook that sleeps.
 
-    ``git worktree add`` runs the hook inside the new checkout, so the
-    log lists worktree branches in creation order.  The hook also
-    sleeps, standing in for a large repository's slow checkout, so a
-    run really starts while the submit-time spare is still being
-    created.  Returns the log.
+    ``git reset --hard`` — the step that populates a spare — rewrites
+    the index and so runs this hook; the sleep stands in for the
+    checkout time of a large repository, so a test can observe what
+    the pool does while a spare is still being populated.
     """
-    log = repo.parent / "checkouts.log"
-    hook = repo / ".git" / "hooks" / "post-checkout"
+    hook = repo / ".git" / "hooks" / "post-index-change"
     hook.parent.mkdir(exist_ok=True)
-    hook.write_text(f"#!/bin/sh\nsleep 1\ngit symbolic-ref --short HEAD >> '{log}'\n")
+    hook.write_text(f"#!/bin/sh\nsleep {seconds}\n")
     hook.chmod(0o755)
-    return log
 
 
-class TestRunWaitsForTheInFlightSpare(_PrewarmHarness):
-    """A worktree run with no classifier wait consumes the spare the
-    submit-time prewarm is still creating instead of running a second
-    checkout inline."""
+class TestCheckoutHoldsNoLock(_PrewarmHarness):
+    """While a refill populates its spare, ``repo_lock`` is free, so a
+    launch, stop or merge in that window no longer waits for the
+    checkout; the half-built spare is meanwhile fenced off from the
+    reclaim pass and from consumers."""
 
-    development_verdict = True
-    agent_writes_file = True
-
-    def _assert_run_used_first_checkout(self, log: Path) -> None:
-        """The run's worktree is the first one created after submit:
-        the prewarm's spare, not a second inline checkout."""
-        wt = getattr(self._agent(), "_wt", None)
-        assert wt is not None, "the run should leave a pending worktree"
-        self.assertTrue((wt.wt_dir / "prewarm-written.txt").is_file())
-        self._join_refill()
-        created = log.read_text(encoding="utf-8").split()
-        self.assertEqual(created[0], wt.branch, created)
-
-    def test_cached_development_verdict_uses_the_submit_time_spare(self) -> None:
-        self._run("PREWARM-WRITE: create a file", use_worktree=True)
-        self.assertEqual(len(self.classifier_seen), 1)
-        self._agent().discard()
-        self._join_refill()
-        worktree_pool.discard_all()
-        self.printer.captured.clear()
-        log = _record_checkouts(self.repo)
-
-        self._run("PREWARM-WRITE: create a file", use_worktree=True)
-        self.assertEqual(
-            len(self.classifier_seen), 1, "the second run must hit the verdict cache",
-        )
-        self._assert_run_used_first_checkout(log)
-
-    def test_classifier_off_run_uses_the_submit_time_spare(self) -> None:
-        log = _record_checkouts(self.repo)
-        self._run("PREWARM-WRITE: create a file", use_worktree=True, classify=False)
-        self.assertEqual(self.classifier_seen, [])
-        self._assert_run_used_first_checkout(log)
+    def test_repo_lock_is_free_while_the_spare_is_populated(self) -> None:
+        _slow_down_index_writes(self.repo, 2.0)
+        thread = threading.Thread(target=worktree_pool.prewarm, args=(self.repo,))
+        thread.start()
+        try:
+            key = worktree_pool._repo_key(self.repo)
+            deadline = time.monotonic() + 30
+            building: str | None = None
+            while time.monotonic() < deadline:
+                with worktree_pool._pool_lock:
+                    building = worktree_pool._building.get(key)
+                if building is not None:
+                    break
+                time.sleep(0.01)
+            assert building is not None, "the refill never registered its spare"
+            # The spare is registered but unpopulated: reported to the
+            # reclaim exclusion set, not yet consumable.
+            self.assertIn(building, worktree_pool.spare_branches())
+            self.assertIsNone(worktree_pool.take_spare(self.repo))
+            started = time.monotonic()
+            with repo_lock(self.repo):
+                pass
+            waited = time.monotonic() - started
+            self.assertLess(waited, 1.0, f"repo_lock was held during the checkout ({waited:.1f}s)")
+        finally:
+            thread.join(timeout=120)
+        self.assertNotIn(key, worktree_pool._building)
+        spare = worktree_pool.take_spare(self.repo)
+        assert spare is not None, "the refill published no spare"
+        self.assertEqual(spare[0], building)
+        self.assertTrue((spare[1] / "seed.txt").is_file())
 
 
 class TestDaemonStartPrewarm(_PrewarmHarness):

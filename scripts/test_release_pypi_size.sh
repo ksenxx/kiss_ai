@@ -35,7 +35,8 @@ pass "sdist ($(( $(wc -c < "$SDIST") / 1024 / 1024 )) MiB) and wheel ($(( $(wc -
 
 tar tzf "$SDIST" > "$WORK/sdist-files.txt"
 # Members are "<name>-<version>/<path>"; the repository-level directories are
-# matched at the root so src/kiss/tests/benchmarkings/ does not trip the check.
+# matched at the root so a same-named directory deeper in the tree (as
+# src/kiss/tests/benchmarkings/ once was) does not trip the check.
 for banned in benchmarkings/ papers/ assets/ reports/ .kiss-worktrees/; do
     if grep -q "^[^/]*/$banned" "$WORK/sdist-files.txt"; then
         fail "sdist contains $banned:"$'\n'"$(grep "^[^/]*/$banned" "$WORK/sdist-files.txt" | head -3)"

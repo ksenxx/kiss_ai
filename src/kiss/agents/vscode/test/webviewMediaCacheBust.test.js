@@ -95,6 +95,7 @@ function testBuildChatHtmlUsesContentVersionedMediaUrls() {
     'contentContextMenu.js',
     'treeContextMenu.js',
     'browserTab.js',
+    'pdfView.js',
     'main.js',
   ].forEach(name => assertAssetUrl(html, name));
 

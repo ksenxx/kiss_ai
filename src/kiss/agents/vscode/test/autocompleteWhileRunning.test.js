@@ -192,7 +192,7 @@ function testAtMentionPickerWhileRunning() {
 
   send(win, {
     type: 'files',
-    files: [{type: 'file', text: 'src/main.py'}],
+    files: [{type: 'file', text: './src/main.py'}],
     prefix: 'sr',
     tabId,
   });

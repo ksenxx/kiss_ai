@@ -1200,7 +1200,9 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     :func:`_openai_charges_cache_writes`). The multipliers below match
     OpenAI's published pricing: GPT-5.x and GPT-6.x are 0.10x when a
     cached-input price is published (gpt-6-astra: $1.00 cached vs $10.00
-    input), GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
+    input) except GPT-6.1 Sol at 0.05x ($0.10 cached vs $2.00 input,
+    https://developers.openai.com/api/docs/models/gpt-6.1-sol),
+    GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
     GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
     no cached-input discount, so cached tokens are charged at the full input
     price rather than silently undercounted.
@@ -1218,6 +1220,8 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     # share the 0.10x discount (see :data:`_OPENAI_ROLLING_LATEST`).
     if bare.startswith(_OPENAI_ROLLING_LATEST + ("gpt-mini-latest",)):
         return 0.10
+    if bare.startswith("gpt-6.1-sol"):
+        return 0.05
     if bare.startswith(("gpt-5", "gpt-6")) or "chat-latest" in bare:
         return 0.10
     if bare.startswith("gpt-image-1-mini"):
@@ -1747,7 +1751,8 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     Verified against the OpenAI pricing page
     (https://developers.openai.com/api/docs/pricing: gpt-6-astra
     $10/$1/$12.50/$50 -> $20/$2/$25/$75, gpt-6-sol $2/$0.20/$2.50/$10 ->
-    $4/$0.40/$5/$15, gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
+    $4/$0.40/$5/$15, gpt-6.1-sol $2/$0.10/$2.50/$10 -> $4/$0.20/$5/$15,
+    gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
     $0.20/$0.02/$0.25/$0.75, gpt-5.6-sol $4/$0.40/$5/$20 ->
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
     2x/1.5x) and https://ai.google.dev/gemini-api/docs/pricing
@@ -1775,7 +1780,8 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES + _GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
     if bare.startswith(
-        ("gpt-6-", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna") + _OPENAI_ROLLING_LATEST
+        ("gpt-6-", "gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+        + _OPENAI_ROLLING_LATEST
     ):
         return 272_000, 2.0, 1.5
     if bare.startswith("gpt-5.5") and "-pro" not in bare:

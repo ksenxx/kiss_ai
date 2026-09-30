@@ -287,7 +287,7 @@ class ClaudeCodeModel(CLITextModel):
             "--verbose",
             "--include-partial-messages",
         ]
-        system_instruction = self.model_config.get("system_instruction")
+        system_instruction = self.system_instruction_text()
         if system_instruction:
             args += ["--append-system-prompt", system_instruction]
         return args

@@ -1234,10 +1234,10 @@ class GitHubAgent(BaseChannelAgent):
             if not agent._is_authenticated():
                 return (
                     "Not configured for GitHub. Call authenticate_github() to sign "
-                    "in the way the Muse app connects: it returns "
-                    "https://github.com/login/device plus a short code for the user "
-                    "to enter in their OWN browser after signing in and clicking "
-                    "Authorize; then call finish_github_auth(). Never ask for the "
+                    "in the way the Muse app connects: it opens "
+                    "https://github.com/login/device for the user (follow its "
+                    "'instructions') with a short code they enter after signing in "
+                    "and clicking Authorize; then call finish_github_auth(). Never ask for the "
                     "user's GitHub password or 2FA code."
                 )
             return json.dumps({"ok": True, "read_only": agent._backend._read_only})
@@ -1247,9 +1247,9 @@ class GitHubAgent(BaseChannelAgent):
 
             Starts GitHub's device flow with the KISS-owned OAuth app
             (``$KISS_GITHUB_CLIENT_ID`` overrides its client ID) and
-            returns a ``consent_required`` answer: give the user the
-            verification URL and code (ask_user_question) to complete in
-            their OWN browser, then call finish_github_auth().  The
+            returns a ``consent_required`` answer whose ``instructions``
+            say how to hand the page and code to the user
+            (ask_user_question), then call finish_github_auth().  The
             credential in use stays in force until the sign-in finishes.
 
             Args:

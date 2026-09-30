@@ -734,7 +734,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         self._ensure_client()
         self.conversation = []
-        system_instruction = self.model_config.get("system_instruction")
+        system_instruction = self.system_instruction_text()
         if system_instruction:
             self.conversation.append({"role": "system", "content": system_instruction})
         content: str | list[dict[str, Any]] = prompt

@@ -47,7 +47,7 @@ from kiss.agents.sorcar.mcp_servers import (
     save_mcp_server,
 )
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
 
 #: Well-known remote MCP servers: name -> (transport, URL).
 KNOWN_MCP_SERVERS: dict[str, tuple[str, str]] = {
@@ -220,7 +220,9 @@ class MCPLoginSession:
     def __init__(self, cfg: MCPServerConfig) -> None:
         self.cfg = cfg
         self.auth_url = ""
+        self.opened_in = ""  # where open_for_user() put the sign-in page
         self.url_shown = False
+        self._open_task: asyncio.Task[None] | None = None
         self.done = False
         self.error = ""
         self._cancelled = False
@@ -313,11 +315,36 @@ class MCPLoginSession:
         if auth.context.oauth_metadata is not None:
             FileTokenStorage(self.cfg.name).set_oauth_metadata(auth.context.oauth_metadata)
 
+    @property
+    def ready(self) -> bool:
+        """Whether the authorization URL is known AND its hand-off is settled.
+
+        ``auth_url`` alone is not enough for a tool answer: where the
+        page went (Browser tab, default browser, nowhere) decides how
+        the agent must word the hand-off, so answers wait for this.
+        """
+        return self._url_ready.is_set()
+
     async def _on_redirect(self, url: str) -> None:
-        """Publish the authorization URL and open it for the user."""
+        """Publish the authorization URL and open it for the user.
+
+        The opening runs as a concurrent task: the loopback callback is
+        only served once this returns, and a provider that approves at
+        once redirects there before the page finishes loading (which the
+        Browser tab waits for), so opening inline would deadlock.
+        ``ready`` turns true when the opening outcome is known, so the
+        first tool answer is worded right.
+        """
         self.auth_url = url
+        self._open_task = asyncio.create_task(self._open_for_user(url))
+
+    async def _open_for_user(self, url: str) -> None:
+        # Cancelled only when the flow already ended (asyncio.run tears the
+        # loop down): ``done`` / ``error`` then speak for the session, and
+        # an unknown hand-off must not be published as a settled one, so
+        # ``ready`` stays false on cancellation.
+        self.opened_in = await asyncio.to_thread(open_for_user, url)
         self._url_ready.set()
-        await asyncio.to_thread(open_in_default_browser, url)
 
     async def _await_callback(self) -> tuple[str, str | None]:
         """Serve the loopback port until the redirect arrives."""
@@ -384,23 +411,40 @@ def _session_answer(session: MCPLoginSession) -> dict[str, Any]:
         }
     if session.error:
         return {"ok": False, "error": f"MCP sign-in to {name!r} failed: {session.error}"}
-    if not session.auth_url:
-        return {"ok": False, "status": "pending", "error": "still contacting the server; retry"}
+    if not session.ready:
+        return {
+            "ok": False,
+            "status": "pending",
+            "error": "still contacting the server or opening the sign-in page; retry",
+        }
     session.url_shown = True
+    if session.opened_in == BROWSER_TAB:
+        step_one = (
+            "The sign-in page is already open in the Browser tab that every KISS "
+            "surface has just switched to, so the user is looking at it: do NOT ask "
+            "them to open a URL. 1) Call ask_user_question() telling the user to sign "
+            "in and click Allow in that Browser tab and reply here when done; only if "
+            f"they cannot see the page, give them {session.auth_url} to open themselves."
+        )
+    else:
+        step_one = (
+            "1) Call ask_user_question() with this URL for the user to open in their "
+            f"OWN browser if no window appeared: {session.auth_url}"
+        )
     return {
         "ok": True,
         "status": "consent_required",
         "verification_uri": session.auth_url,
+        "opened_in": session.opened_in,
         "instructions": (
             f"The USER signs in and clicks Allow for MCP server {name!r}; you only "
-            "relay the link. Do NOT open it in your built-in browser and never ask "
-            "for passwords or 2FA codes. 1) Call ask_user_question() with this URL "
-            f"for the user to open in their OWN browser if no window appeared: "
-            f"{session.auth_url} 2) Call finish_mcp_server_connect({name!r}); if it "
-            "returns 'pending', wait a few seconds and call it again. If the user "
-            "approved on ANOTHER device, their browser ends on an unreachable "
-            "http://localhost:53683/callback?... page: ask them to paste that URL "
-            "and deliver it here with Bash: curl -s '<pasted URL>' (quoted)."
+            "tell them what to do. Do NOT open the page in your built-in browser and "
+            f"never ask for passwords or 2FA codes. {step_one} 2) Call "
+            f"finish_mcp_server_connect({name!r}); if it returns 'pending', wait a "
+            "few seconds and call it again. If the user approved on ANOTHER device, "
+            "their browser ends on an unreachable http://localhost:53683/callback?... "
+            "page: ask them to paste that URL and deliver it here with Bash: "
+            "curl -s '<pasted URL>' (quoted)."
         ),
     }
 
@@ -419,8 +463,10 @@ def make_mcp_auth_tools(work_dir: str) -> list[Any]:
         """Sign in to a remote MCP server (Notion, Linear, Asana, Zoom, or any URL).
 
         Configures the server in ~/.kiss/mcp.json when it is new, then
-        starts the OAuth sign-in: the user opens the returned URL, signs
-        in, and clicks Allow.  Finish with finish_mcp_server_connect().
+        starts the OAuth sign-in and opens its page for the user (the
+        Browser tab on every KISS surface, else their default browser;
+        see 'opened_in'): follow the returned 'instructions' so the user
+        signs in and clicks Allow.  Finish with finish_mcp_server_connect().
 
         Args:
             name: Server name: a configured one, or notion, linear,
@@ -460,7 +506,7 @@ def make_mcp_auth_tools(work_dir: str) -> list[Any]:
                 "error": f"no sign-in in progress for {name!r}; call connect_mcp_server() first",
             })
         if not session.wait(5.0):
-            if session.auth_url and not session.url_shown:
+            if session.ready and not session.url_shown:
                 # Discovery outlasted connect's wait: hand the URL over now.
                 return json.dumps(_session_answer(session))
             return json.dumps({
@@ -498,9 +544,12 @@ def main(argv: list[str] | None = None) -> int:
     finished = False
     while not finished:
         finished = session.wait(1.0)
-        if session.auth_url and not session.url_shown:
+        if session.ready and not session.url_shown:
             session.url_shown = True
-            print(f"Open this URL, sign in, and click Allow:\n{session.auth_url}")
+            if session.opened_in == BROWSER_TAB:
+                print("Sign in and click Allow in the Browser tab that just opened.")
+            else:
+                print(f"Open this URL, sign in, and click Allow:\n{session.auth_url}")
     answer = _session_answer(session)
     print(answer.get("message") or answer.get("error"))
     return 0 if session.done else 1

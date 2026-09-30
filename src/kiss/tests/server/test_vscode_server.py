@@ -139,7 +139,7 @@ class TestGetFiles(unittest.TestCase):
         self.server._get_files("main")
         assert len(self.events) == 1 and "loading" not in self.events[0]
         files = [f["text"] for f in self.events[0]["files"]]
-        assert sorted(files) == ["src/main.py", "test/test_main.py"]
+        assert sorted(files) == ["./src/main.py", "./test/test_main.py"]
         for f in files:
             assert "main" in f.lower()
 

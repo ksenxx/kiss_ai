@@ -90,13 +90,17 @@ async function runTests() {
     'getFiles prefix must be the @-mention query (empty here)',
   );
 
-  const PICKED = 'src/foo.py';
+  // The daemon sends complete mentions: "./" for the work dir, "~/" for
+  // the rest of the home directory (see kiss.server.file_index.Picker).
+  const PICKED = './src/foo.py';
+  const HOME_PICK = '~/Documents/notes.md';
   send(win, {
     type: 'files',
     prefix: '',
     files: [
       {type: 'file', text: PICKED},
-      {type: 'file', text: 'src/bar.py'},
+      {type: 'file', text: './src/bar.py'},
+      {type: 'home', text: HOME_PICK},
     ],
   });
 
@@ -107,7 +111,15 @@ async function runTests() {
     'autocomplete must be visible after files reply',
   );
   const items = ac.querySelectorAll('.ac-item');
-  assert.ok(items.length >= 2, 'autocomplete must list the returned files');
+  assert.strictEqual(items.length, 3, 'autocomplete must list the returned files');
+  const labels = Array.from(ac.querySelectorAll('.ac-section')).map(
+    e => e.textContent,
+  );
+  assert.deepStrictEqual(
+    labels,
+    ['Files', 'Home'],
+    'work-dir items and home items get their own sections',
+  );
 
   let target = null;
   items.forEach(it => {
@@ -126,11 +138,11 @@ async function runTests() {
       '@-mention insertAtMention() path.',
   );
 
-  assert.ok(
-    inp.value.startsWith('./' + PICKED),
-    'file selector must insert the picked file as "./<path>" (got: ' +
-      JSON.stringify(inp.value) +
-      ')',
+  assert.strictEqual(
+    inp.value,
+    PICKED + ' ',
+    'file selector must insert the mention exactly as the daemon sent it ' +
+      '(no second "./")',
   );
 
   const rec = posted.find(m => m.type === 'recordFileUsage');
@@ -138,8 +150,40 @@ async function runTests() {
   assert.strictEqual(
     rec.path,
     PICKED,
-    'recordFileUsage.path must be the raw picked path (no PWD/ prefix)',
+    'recordFileUsage.path must be the mention text (the usage key)',
   );
+
+  // A file elsewhere under home is inserted with its "~/" prefix.
+  inp.value = 'read @';
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+  inp.focus();
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  send(win, {
+    type: 'files',
+    prefix: '',
+    files: [{type: 'home', text: HOME_PICK}],
+  });
+  const homeItem = win.document.querySelector('#autocomplete .ac-item');
+  assert.strictEqual(homeItem.dataset.text, HOME_PICK);
+  homeItem.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(inp.value, 'read ' + HOME_PICK + ' ');
+  assert.strictEqual(
+    posted.filter(m => m.type === 'recordFileUsage').pop().path,
+    HOME_PICK,
+  );
+
+  // A "~/" query scopes the search; the highlight uses the query without it.
+  inp.value = 'read @~/note';
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+  inp.dispatchEvent(new win.Event('input', {bubbles: true}));
+  assert.strictEqual(posted.filter(m => m.type === 'getFiles').pop().prefix, '~/note');
+  send(win, {
+    type: 'files',
+    prefix: '~/note',
+    files: [{type: 'home', text: HOME_PICK}],
+  });
+  const hl = win.document.querySelector('#autocomplete .ac-item .ac-hl');
+  assert.ok(hl && hl.textContent === 'note', 'the matched part is highlighted');
 
   inp.value = 'please open @sr';
   inp.setSelectionRange(inp.value.length, inp.value.length);
@@ -149,7 +193,7 @@ async function runTests() {
   send(win, {
     type: 'files',
     prefix: 'sr',
-    files: [{type: 'file', text: 'src/baz.py'}],
+    files: [{type: 'file', text: './src/baz.py'}],
   });
   const ac2 = win.document.getElementById('autocomplete');
   const items2 = ac2.querySelectorAll('.ac-item');

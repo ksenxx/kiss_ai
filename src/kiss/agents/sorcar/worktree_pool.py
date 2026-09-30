@@ -4,8 +4,8 @@
 # add your name here
 """Background pre-creation of spare git worktrees.
 
-``git worktree add`` performs a full checkout, which takes on the order
-of a second on a large repository and dominates the delay between a
+``git worktree add`` performs a full checkout, which takes seconds to
+tens of seconds on a large repository and dominates the delay between a
 user submitting a task and the agent actually starting.  This module
 keeps at most ONE ready-to-use spare worktree per repository, created
 on a background thread while no task is waiting for it.  When the next
@@ -13,6 +13,13 @@ task starts, :meth:`WorktreeSorcarAgent._acquire_task_worktree`
 consumes the spare and merely hard-resets it onto the tip of the
 task's original branch — a near-instant operation when HEAD moved
 little — instead of paying for the full checkout on the submit path.
+
+A refill is scheduled when the daemon starts and when a worktree task
+finishes — not when a task starts, so its disk traffic never competes
+with the launch it would otherwise run beside.  Only the cheap steps
+hold ``repo_lock``: the maintenance passes, then a ``--no-checkout``
+registration of the spare (milliseconds); the checkout itself runs
+with no lock held, so launches, stops and merges never wait for it.
 
 The orphan-maintenance passes (``reclaim_orphaned_worktrees`` and
 ``sweep_orphaned_state``) formerly ran on the submit path too; a pool
@@ -50,6 +57,7 @@ from kiss.agents.sorcar.git_worktree import (
     _WORKTREE_BRANCH_PREFIX,
     _WORKTREE_SUBDIR,
     GitWorktreeOps,
+    _reclaim_process_lock,
     repo_lock,
 )
 
@@ -78,6 +86,10 @@ def pool_enabled() -> bool:
 _spares: dict[str, tuple[str, Path]] = {}
 # Resolved repo roots with a refill currently running (dedup guard).
 _prewarming: set[str] = set()
+# Resolved repo root -> branch of a registered spare whose checkout is
+# still running outside ``repo_lock`` (see :func:`prewarm`).  Reported
+# by :func:`spare_branches` so no reclaim pass touches it meanwhile.
+_building: dict[str, str] = {}
 # Resolved repo root -> the background refill thread last spawned by
 # :func:`prewarm_async`; joined by :func:`discard_all` so an in-flight
 # refill cannot publish a spare after the sweep.
@@ -147,10 +159,11 @@ def spare_branches() -> set[str]:
     pass never merges or deletes a spare the pool is holding.
 
     Returns:
-        Set of ``kiss/wt-*`` branch names currently pooled.
+        Set of ``kiss/wt-*`` branch names currently pooled or still
+        being populated by a refill.
     """
     with _pool_lock:
-        return {branch for branch, _ in _spares.values()}
+        return {branch for branch, _ in _spares.values()} | set(_building.values())
 
 
 def take_spare(repo: Path) -> tuple[str, Path] | None:
@@ -282,10 +295,11 @@ def prewarm(
 ) -> bool:
     """Ensure a spare worktree exists for *repo* (synchronous).
 
-    Runs the orphan-maintenance passes (reclaim + sweep) and then
-    creates one spare worktree, all under ``repo_lock`` so it never
-    interleaves with a task's own multi-step git operations.  A no-op
-    when a spare is already pooled or another thread is refilling.
+    Runs the orphan-maintenance passes (reclaim + sweep) and registers
+    one empty spare worktree under ``repo_lock`` (see
+    :func:`_register_spare`), then populates it with no lock held and
+    publishes it.  A no-op when a spare is already pooled or another
+    thread is refilling.
 
     Args:
         repo: Git repo root path.
@@ -310,52 +324,33 @@ def prewarm(
         _prewarming.add(key)
         generation = _generation
     try:
-        with repo_lock(repo):
-            if exclude_branches_fn is not None:
-                try:
-                    excluded = exclude_branches_fn() | spare_branches()
-                    GitWorktreeOps.reclaim_orphaned_worktrees(
-                        repo, exclude_branches=excluded,
-                    )
-                    GitWorktreeOps.sweep_orphaned_state(repo)
-                except Exception:
-                    logger.warning(
-                        "Worktree-pool maintenance failed for %s",
-                        repo,
-                        exc_info=True,
-                    )
-            try:
-                GitWorktreeOps.ensure_excluded(repo)
-            except Exception:  # pragma: no cover — filesystem permission
-                logger.warning(
-                    "Failed to update git exclude", exc_info=True,
-                )
-            branch = new_task_branch(repo)
-            wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
-            if not GitWorktreeOps.create(repo, branch, wt_dir):
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-                return False
-            # The marker makes the spare's nature durable: if this
-            # process dies before a task consumes the spare, the next
-            # reclaim pass discards it instead of squash-merging its
-            # branch snapshot into whatever branch is then current.
-            if not GitWorktreeOps.save_spare_marker(repo, branch):
-                # pragma: no cover — git config failure
-                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-                return False
-            # Warm the fresh worktree's index stat-cache here, in the
-            # background.  Right after ``git worktree add`` every index
-            # entry is racily clean (file mtimes equal the index write
-            # time), so the FIRST ``git reset --hard`` re-hashes every
-            # file — ~1s on a large repo, which would land on the
-            # submit path when the spare is consumed.  After this warm
-            # reset the consume-time reset only pays for actual
-            # differences.
+        registered = _register_spare(repo, exclude_branches_fn)
+        if registered is None:
+            return False
+        branch, wt_dir = registered
+        # The full checkout runs with NO lock held: on a large
+        # repository it takes many seconds, and while it ran under
+        # ``repo_lock`` every task launch, stop and merge in that
+        # window stalled behind it.  The worktree is already registered,
+        # owner-stamped and spare-marked, and ``_building`` keeps it
+        # out of this process's reclaim pass (which would otherwise
+        # find a worktree owned by this pid whose every file shows as
+        # deleted).  The second reset warms the index stat-cache:
+        # right after the checkout every index entry is racily clean
+        # (file mtimes equal the index write time), so the next
+        # ``git reset --hard`` would re-hash every file — ~1 s on a
+        # large repo, landing on the submit path when the spare is
+        # consumed.
+        populated = (
             GitWorktreeOps.reset_worktree_to(wt_dir, "HEAD")
-            with _pool_lock:
-                if generation == _generation and _active_discards == 0:
-                    _spares[key] = (branch, wt_dir)
-                    return True
+            and GitWorktreeOps.reset_worktree_to(wt_dir, "HEAD")
+        )
+        with _pool_lock:
+            _building.pop(key, None)
+            if populated and generation == _generation and _active_discards == 0:
+                _spares[key] = (branch, wt_dir)
+                return True
+        if populated:
             # discard_all ran (or is running) since this refill started:
             # the pool it would publish into has been declared empty,
             # so the spare is removed rather than leaked past the sweep.
@@ -368,8 +363,8 @@ def prewarm(
                 "discarded while it was being created",
                 wt_dir, repo,
             )
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return False
+        GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+        return False
     except Exception:  # pragma: no cover — unexpected git failure
         logger.warning(
             "Worktree-pool prewarm failed for %s", repo, exc_info=True,
@@ -377,7 +372,75 @@ def prewarm(
         return False
     finally:
         with _pool_lock:
+            _building.pop(key, None)
             _prewarming.discard(key)
+
+
+def _register_spare(
+    repo: Path,
+    exclude_branches_fn: Callable[[], set[str]] | None,
+) -> tuple[str, Path] | None:
+    """Run pool maintenance and register an empty spare worktree under ``repo_lock``.
+
+    Everything that must not interleave with a task's own multi-step
+    git operations happens here — the orphan reclaim and sweep, the
+    repository setup, and the ``--no-checkout`` worktree registration
+    with its owner and spare stamps — and all of it takes well under a
+    second, so the lock is never held across the checkout itself.
+
+    Args:
+        repo: Git repo root path.
+        exclude_branches_fn: See :func:`prewarm`.
+
+    Returns:
+        ``(branch, wt_dir)`` of the registered, still unpopulated spare
+        (recorded in :data:`_building`), or ``None`` when it could not
+        be created (nothing is left on disk).
+    """
+    key = _repo_key(repo)
+    with repo_lock(repo):
+        if exclude_branches_fn is not None:
+            try:
+                excluded = exclude_branches_fn() | spare_branches()
+                GitWorktreeOps.reclaim_orphaned_worktrees(
+                    repo, exclude_branches=excluded,
+                )
+                GitWorktreeOps.sweep_orphaned_state(repo)
+            except Exception:
+                logger.warning(
+                    "Worktree-pool maintenance failed for %s",
+                    repo,
+                    exc_info=True,
+                )
+        try:
+            GitWorktreeOps.prepare_repo(repo)
+        except Exception:  # pragma: no cover — filesystem permission
+            logger.warning(
+                "Failed to update git exclude", exc_info=True,
+            )
+        branch = new_task_branch(repo)
+        wt_dir = repo / _WORKTREE_SUBDIR / branch.replace("/", "_")
+        # The spare marker is saved BEFORE the worktree exists: an
+        # unmarked dead-owner worktree is auto-committed and
+        # squash-merged by the reclaim pass, and an unpopulated one
+        # (empty index, every file staged as deleted) would merge those
+        # deletions into the user's branch should this process die
+        # between the registration and the checkout.  With the marker
+        # already in place the reclaim pass preserves or discards it
+        # instead.  Both steps run under the cross-process reclaim lock
+        # (``create`` re-enters it) so no peer sweep can purge the
+        # marker of a branch that does not exist yet; a marker left
+        # behind by a failed registration is swept later.
+        with _reclaim_process_lock(repo):
+            registered = GitWorktreeOps.save_spare_marker(
+                repo, branch,
+            ) and GitWorktreeOps.create(repo, branch, wt_dir, checkout=False)
+        if not registered:
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            return None
+        with _pool_lock:
+            _building[key] = branch
+    return branch, wt_dir
 
 
 def prewarm_async(
@@ -386,9 +449,9 @@ def prewarm_async(
 ) -> threading.Thread | None:
     """Refill the pool for *repo* on a background daemon thread.
 
-    Cheap and safe to call on every task start: returns immediately
-    without spawning when a spare is already pooled or a refill is
-    already running.
+    Called when the daemon starts and when a worktree task ends.
+    Cheap and idempotent: returns immediately without spawning when a
+    spare is already pooled or a refill is already running.
 
     Args:
         repo: Git repo root path.

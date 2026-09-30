@@ -486,12 +486,18 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         # A child born between turns is adopted at the next call's start, so it stays
         # tracked when its parent exits during that call and is orphaned to pid 1; a
         # tracked shell that exec()s the program keeps its (pid, start time) identity.
-        result = shell("cd /app && nohup sh -c 'sleep 0.5; exec sleep 302' >/dev/null 2>&1 & "
-                       "cd /app && nohup sh -c 'sleep 0.5; sleep 303 & sleep 2' >/dev/null 2>&1 &")
+        # Timeline (t = 0 at the nohup): sleep 303 is born at 1.5 s, after this
+        # call returned but before the next one starts at ~2 s; its parent exits
+        # at 3 s, inside that next call (~2 s to ~3.5 s).  The 1.5 s head start
+        # covers a slow call return on a loaded host.
+        result = shell(
+            "cd /app && nohup sh -c 'sleep 1.5; exec sleep 302' >/dev/null 2>&1 & "
+            "cd /app && nohup sh -c 'sleep 1.5; sleep 303 & sleep 1.5' >/dev/null 2>&1 &"
+        )
         assert "started by your last shell command(s)" in result["content"]
         assert not [cmd for _pid, cmd in harness.process_snapshot().values()
                     if cmd.startswith("sleep 303")]
-        time.sleep(1.0)
+        time.sleep(2.0)
         assert shell("sleep 1.5")["content"] == "ran"
         assert [cmd for _pid, cmd in harness.process_snapshot().values()
                 if cmd.startswith("sleep 303")]

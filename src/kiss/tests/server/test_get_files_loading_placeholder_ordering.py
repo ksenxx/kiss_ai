@@ -137,7 +137,7 @@ class TestGetFilesLoadingPlaceholderOrdering(unittest.TestCase):
         assert events[1].get("loading") is None, (
             f"the placeholder must not be the final reply: {events}"
         )
-        assert _texts(events[1]) == ["alpha.py"], (
+        assert _texts(events[1]) == ["./alpha.py"], (
             f"the scan reply lost its files: {events}"
         )
 
@@ -157,7 +157,7 @@ class TestGetFilesLoadingPlaceholderOrdering(unittest.TestCase):
         events = self._files_events("warm2")
         assert len(events) == 1, f"expected a single reply, got {events}"
         assert events[0].get("loading") is None
-        assert _texts(events[0]) == ["alpha.py"]
+        assert _texts(events[0]) == ["./alpha.py"]
 
 
 if __name__ == "__main__":

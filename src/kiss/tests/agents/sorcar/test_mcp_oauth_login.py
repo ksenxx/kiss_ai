@@ -317,6 +317,8 @@ def test_login_stores_tokens_and_manager_connects(server: _AuthMCPServer, home: 
     answer = _session_answer(session)
     assert answer["status"] == "consent_required"
     assert answer["verification_uri"] == session.auth_url
+    assert answer["opened_in"] == "" and session.opened_in == ""  # KISS_HEADLESS=1
+    assert "OWN browser" in answer["instructions"]
     assert "finish_mcp_server_connect('authdemo')" in answer["instructions"]
 
     wrong = httpx.get(f"http://127.0.0.1:{MCP_REDIRECT_PORT}/elsewhere", trust_env=False)
@@ -445,12 +447,139 @@ def test_half_open_redirect_connection_does_not_pin_the_port(
         half_open.close()
 
 
+def test_login_opens_the_browser_tab_and_hands_off_without_a_url(
+    server: _AuthMCPServer, home: Path
+) -> None:
+    """Under the daemon the consent page opens in the Browser tab before the URL is announced."""
+    from kiss.core.browser_handoff import set_browser_tab_opener
+
+    seen: list[str] = []
+
+    def open_tab(url: str) -> bool:
+        seen.append(url)
+        return True
+
+    set_browser_tab_opener(open_tab)
+    try:
+        session = MCPLoginSession.start(_cfg(server))
+        assert session.error == "" and session.auth_url
+        # The page was opened first, so the very first answer is worded right.
+        assert seen == [session.auth_url]
+        assert session.opened_in == "browser_tab"
+        answer = _session_answer(session)
+        assert answer["status"] == "consent_required"
+        assert answer["opened_in"] == "browser_tab"
+        text = answer["instructions"]
+        assert "already open in the Browser tab" in text
+        assert "do NOT ask them to open a URL" in text and "OWN browser" not in text
+        assert f"cannot see the page, give them {session.auth_url}" in text
+        _approve(session.auth_url)
+        assert session.wait(30)
+        assert session.done, session.error
+    finally:
+        set_browser_tab_opener(None)
+
+
+def test_browser_tab_that_follows_an_immediate_redirect_does_not_deadlock(
+    server: _AuthMCPServer, home: Path
+) -> None:
+    """The Browser tab waits for the page to load; a provider that approves at once redirects
+    straight to the loopback callback, which must be served while the tab is still opening."""
+    from kiss.core.browser_handoff import set_browser_tab_opener
+
+    def open_tab(url: str) -> bool:
+        # Like the streamed browser: return only once navigation committed,
+        # here after following every redirect down to the callback page.
+        assert "Sign-in received" in _approve(url).text
+        return True
+
+    set_browser_tab_opener(open_tab)
+    try:
+        started = time.monotonic()
+        session = MCPLoginSession.start(_cfg(server))
+        assert session.wait(30)
+        assert session.done, session.error
+        assert time.monotonic() - started < 20
+        assert session.opened_in == "browser_tab"
+        assert _session_answer(session)["ok"] is True
+    finally:
+        set_browser_tab_opener(None)
+
+
+def test_answer_waits_for_the_hand_off_outcome(server: _AuthMCPServer, home: Path) -> None:
+    """While the page is still opening the answer is pending, never a URL-based hand-off."""
+    from kiss.core.browser_handoff import set_browser_tab_opener
+
+    release = threading.Event()
+
+    def slow_tab(url: str) -> bool:
+        assert release.wait(10)
+        return True
+
+    set_browser_tab_opener(slow_tab)
+    session = MCPLoginSession.start(_cfg(server), wait_seconds=1.0)
+    try:
+        deadline = time.monotonic() + 10
+        while not session.auth_url and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert session.auth_url and not session.ready  # the page is still opening
+        pending = _session_answer(session)
+        assert pending["status"] == "pending" and session.url_shown is False
+        release.set()
+        deadline = time.monotonic() + 10
+        while not session.ready and time.monotonic() < deadline:
+            time.sleep(0.05)
+        answer = _session_answer(session)
+        assert answer["status"] == "consent_required" and answer["opened_in"] == "browser_tab"
+        assert "do NOT ask them to open a URL" in answer["instructions"]
+    finally:
+        set_browser_tab_opener(None)
+        session.cancel()
+
+
+def test_flow_finishing_before_the_page_opened_never_publishes_a_url_hand_off(
+    server: _AuthMCPServer, home: Path
+) -> None:
+    """The opener follows the redirect (approving) but returns late: the flow ends first and
+    cancels the opening task; the answer must then be success, never an 'open this URL'."""
+    from kiss.core.browser_handoff import set_browser_tab_opener
+
+    release = threading.Event()
+
+    def approve_then_linger(url: str) -> bool:
+        assert "Sign-in received" in _approve(url).text
+        assert release.wait(20)
+        return True
+
+    set_browser_tab_opener(approve_then_linger)
+    try:
+        session = MCPLoginSession.start(_cfg(server), wait_seconds=1.0)
+        deadline = time.monotonic() + 10
+        while not session.auth_url and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert session.auth_url
+        # The flow has (or is about to have) finished while the opener still
+        # lingers: nothing may be answered as consent_required now.
+        for _ in range(20):
+            answer = _session_answer(session)
+            assert answer["status"] != "consent_required", answer
+            if answer.get("ok"):
+                break
+            time.sleep(0.1)
+        release.set()
+        assert session.wait(30) and session.done, session.error
+        assert _session_answer(session)["ok"] is True
+    finally:
+        release.set()
+        set_browser_tab_opener(None)
+
+
 def test_session_answer_before_url_is_pending(server: _AuthMCPServer) -> None:
     session = MCPLoginSession(_cfg(server))
     assert _session_answer(session) == {
         "ok": False,
         "status": "pending",
-        "error": "still contacting the server; retry",
+        "error": "still contacting the server or opening the sign-in page; retry",
     }
 
 
@@ -686,7 +815,7 @@ def test_finish_delivers_url_that_arrived_after_connect(
     assert _session_answer(session) == {
         "ok": False,
         "status": "pending",
-        "error": "still contacting the server; retry",
+        "error": "still contacting the server or opening the sign-in page; retry",
     }
     assert session.url_shown is False
 

@@ -449,3 +449,33 @@ def test_headed_launch_falls_back_to_headless(
     server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
     opened = _wait(lambda: _events(printer, "openBrowserTab"), "openBrowserTab", timeout=90)[0]
     _wait(lambda: _events(printer, "browserState", tab_id=opened["tab_id"], title="Tall"), "state")
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_open_for_user_focuses_every_surface_and_reports_failures(
+    daemon: Any, page_server: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sign-in hand-off opens a focused tab everywhere and blocks until it loads."""
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+
+    assert service.open_for_user(page_server) is True
+    # Announced to every surface (tabId ""), then focused everywhere: the
+    # user has to act on the page, so no surface stays on another tab.
+    opened = _events(printer, "openBrowserTab")
+    assert [event["focus"] for event in opened] == [False, True]
+    assert {event["tabId"] for event in opened} == {""}
+    tab_id = opened[0]["tab_id"]
+    assert opened[1]["tab_id"] == tab_id
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Tall"), "state")
+    assert _evaluate(service, tab_id, "location.href") == page_server
+
+    # A page that cannot load is no hand-off: the blank tab is closed again.
+    assert service.open_for_user("http://127.0.0.1:9/") is False
+    _wait(lambda: len(_events(printer, "closeBrowserTab")) == 1 or None, "tab closed")
+    assert set(service._pages) == {tab_id}
+
+    # After shutdown nothing can be opened, and the failure is reported, not raised.
+    service.shutdown()
+    assert service.open_for_user(page_server) is False

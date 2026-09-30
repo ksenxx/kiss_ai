@@ -30,7 +30,7 @@ from kiss.core.kiss_error import (
     ContextWindowExceededError,
     KISSError,
 )
-from kiss.core.models.model import Attachment
+from kiss.core.models.model import SYSTEM_CACHE_BREAK, Attachment
 from kiss.core.models.model_info import model_runs_task_to_completion
 from kiss.core.printer import Printer
 from kiss.core.utils import _coerce_bool as _str_to_bool
@@ -322,6 +322,10 @@ TASK_PROMPT = """
 {previous_progress}
 """
 
+#: Everything up to the cache-break marker is identical for every task of a
+#: Sorcar daemon (the base system prompt precedes it); the work dir, PID,
+#: Task Settings and SORCAR.md that follow vary per task.  The Anthropic
+#: adapter caches the prefix as one block (see ``SYSTEM_CACHE_BREAK``).
 IMPORTANT_INSTRUCTIONS = """
 # MOST IMPORTANT INSTRUCTIONS
 - **If the task is not complete and you are at risk of running out of context \
@@ -330,7 +334,8 @@ summary_in_html="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets, formatted \
 as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")**
 - The summary_in_html argument of finish MUST always be formatted as HTML.
-{work_dir_line}- Current process PID: {current_pid} — NEVER kill this process.
+""" + SYSTEM_CACHE_BREAK + """{work_dir_line}\
+- Current process PID: {current_pid} — NEVER kill this process.
 """
 
 #: The ``IMPORTANT_INSTRUCTIONS`` work-dir line.  A container run from an
