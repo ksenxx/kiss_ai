@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KISS Sorcar Beats Three Coding Harnesses on Terminal-Bench 2.0</title>
-<meta name="description" content="We ran KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models. It solved 75.6% of attempts against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, had the best point estimate on all seven models, and beat a Pi rerun on the same model by 11 points in a paired comparison.">
+<meta name="description" content="We ran KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models. It solved 75.6% of attempts against 70.0% for Pi, 65.7% for Codex CLI and 65.1% for Claude Code, had the best point estimate on all seven models, and beat a Pi rerun on the same model by 11 points in a paired comparison, and by 10.5 points on 57 of the 59 tasks the study did not sample.">
 <link rel="canonical" href="https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html">
 <style>
   :root{
@@ -77,7 +77,8 @@ reran Pi ourselves on Claude Fable 5, on the same tasks, priced from the same
 table, with no turn cap for either agent. KISS Sorcar solved 80.0% of attempts
 to Pi&rsquo;s 68.9%, an 11-point gap that holds up statistically, for five
 cents more per attempt. On the 59 Terminal-Bench 2.0 tasks the study
-didn&rsquo;t sample, it solved 79.1%.</p>
+didn&rsquo;t sample, it solved 79.1%, and a second Pi rerun on 57 of them came
+out 10.5 points behind.</p>
 
 <h2>What HarnessTax found</h2>
 <p>Every coding agent is two things: a model and the harness wrapped
@@ -471,6 +472,78 @@ full task&rsquo;s weight: the two attempts of
 <code>extract-moves-from-video</code> that did finish averaged $13.27, and
 that task counts as much as any other in the average.</p>
 
+<h2>Pi on the unsampled tasks</h2>
+<p>We then gave Pi the same 59 tasks, on 29 and 30&nbsp;September, under the
+terms of the first rerun: Claude Fable 5 at high effort, three attempts per
+task, no turn cap, no wall-clock limit, no budget cap, the same price table.
+Two tasks had to come out of the comparison. The test script of
+<code>qemu-startup</code> and <code>qemu-alpine-ssh</code> installs curl from a
+Debian 11 package repository that now answers 404, and the verifier failed all
+six of our attempts on that install before it ran a single test. Pi&rsquo;s
+installer had tripped over the same 404, and the repair we added for it left
+the verifier working inside Pi&rsquo;s containers, so Pi&rsquo;s six attempts
+were graded and passed. The two harnesses were not scored the same way on
+those tasks. Our six attempts still count as failures in the 79.1% above; we
+only leave the two tasks out of the head-to-head.</p>
+<p>On the other 57 tasks, Pi solved 123 of 171 attempts, or 71.9% (interval
+61.4 to 81.9), at $1.00 and 12.3 turns per attempt. KISS Sorcar solved 82.5% at
+$1.63 and 17.3 turns. The paired gap is 10.5 points, with a 95% interval of
++2.9 to +18.7. KISS Sorcar has the higher task mean on 15 tasks, Pi on 3, and
+39 are ties, 32 of them solved by both on every attempt (sign test
+<em>p</em>&nbsp;=&nbsp;0.008). Counting our stopped attempt as failed, the gap
+is 9.9 points (+1.8 to +18.1, <em>p</em>&nbsp;=&nbsp;0.019). Had we kept the
+two qemu tasks, it would be 6.8 points (&minus;2.3 to +15.8,
+<em>p</em>&nbsp;=&nbsp;0.041). This time the cost difference does not straddle
+zero: KISS Sorcar paid 63 cents more per attempt (+$0.31 to +$1.03), and spent
+it on turns.</p>
+
+<figure>
+<svg viewBox='0 0 760 170' width='100%' role='img' aria-label='Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks' font-family='Georgia,serif'>
+<line x1='60.0' y1='47' x2='60.0' y2='63' stroke='#9aa3ad'/>
+<text x='60.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>-5</text>
+<line x1='163.3' y1='47' x2='163.3' y2='63' stroke='#9aa3ad'/>
+<text x='163.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+0</text>
+<line x1='266.7' y1='47' x2='266.7' y2='63' stroke='#9aa3ad'/>
+<text x='266.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+5</text>
+<line x1='370.0' y1='47' x2='370.0' y2='63' stroke='#9aa3ad'/>
+<text x='370.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+10</text>
+<line x1='473.3' y1='47' x2='473.3' y2='63' stroke='#9aa3ad'/>
+<text x='473.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+15</text>
+<line x1='576.7' y1='47' x2='576.7' y2='63' stroke='#9aa3ad'/>
+<text x='576.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+20</text>
+<line x1='680.0' y1='47' x2='680.0' y2='63' stroke='#9aa3ad'/>
+<text x='680.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+25</text>
+<line x1='60.0' y1='55' x2='680.0' y2='55' stroke='#9aa3ad'/>
+<line x1='163.3' y1='33' x2='163.3' y2='67' stroke='#a03030' stroke-dasharray='4 3'/>
+<text x='163.3' y='28' font-size='11' text-anchor='middle' fill='#a03030'>no difference</text>
+<line x1='223.3' y1='55' x2='549.8' y2='55' stroke='#2456a6' stroke-width='6'/>
+<polygon points='380.3,48 387.3,55 380.3,62 373.3,55' fill='#2456a6'/>
+<text x='380.3' y='41' font-size='13' font-weight='bold' text-anchor='middle' fill='#2456a6'>+10.5 points  [+2.9, +18.7]</text>
+<text x='60' y='103' font-size='13' fill='#1e2430'>Success gap, KISS Sorcar minus Pi, on the 57 unsampled tasks (percentage points; 95% paired bootstrap)</text>
+<rect x='60.0' y='130' width='163.2' height='22' fill='#2456a6'/>
+<text x='141.6' y='146' font-size='12' text-anchor='middle' fill='white'>KISS Sorcar higher: 15</text>
+<rect x='223.2' y='130' width='424.2' height='22' fill='#9aa3ad'/>
+<text x='435.3' y='146' font-size='12' text-anchor='middle' fill='white'>tie: 39</text>
+<rect x='647.4' y='130' width='32.6' height='22' fill='#1e7a46'/>
+<text x='686' y='146' font-size='12' text-anchor='start' fill='#1e7a46'>Pi higher: 3</text>
+<text x='60' y='122' font-size='13' fill='#1e2430'>Per-task tally over the 57 tasks (exact sign test p = 0.008)</text>
+</svg>
+<figcaption>Figure 4. The paired comparison on the 57 unsampled tasks the verifier
+scored alike for both harnesses. Top: the success gap and its bootstrap interval.
+Bottom: KISS Sorcar has the higher task mean on 15 tasks, Pi on 3, and 39 are
+ties, 32 of them solved by both on every attempt.</figcaption>
+</figure>
+
+<p>The Pi client bug from the first rerun showed up again, in 11 attempts: all
+three on <code>dna-assembly</code>, <code>feal-differential-cryptanalysis</code>
+and <code>winning-avg-corewars</code>, and one each on two other tasks. Without
+those three tasks the gap is 6.2 points (12 tasks to 3,
+<em>p</em>&nbsp;=&nbsp;0.035). Pi&rsquo;s remaining failures were its own
+doing. It was killed for memory on all three <code>caffe-cifar-10</code>
+attempts after launching make with 40 or 80 jobs in a one-CPU, 2&nbsp;GB
+container, and twice on <code>rstan-to-pystan</code> its <code>pkill -f</code>
+matched its own command line. We went 0 for 3 on caffe-cifar-10 as well.</p>
+
 <h2>What the trajectories look like</h2>
 <p>The average attempt took 27.9 turns (the longest, 276) and 17.2
 minutes. Twenty-eight attempts went past the
@@ -499,16 +572,19 @@ paraphrased:</p>
 <li>Be honest at the end: <code>success=True</code> only when every requirement is met and checked.</li>
 </ol>
 <p>Cost depends on the number of turns and on what goes out with each one: the
-prompt, the tool schemas and the notes. The paired run on Claude Fable 5 is
-the only place we can compare that cost with Pi on one price list, and there
-the difference was five cents per attempt.</p>
+prompt, the tool schemas and the notes. The paired runs on Claude Fable 5 are
+the only place we can compare that cost with Pi on one price list. On the
+study&rsquo;s 30 tasks the difference was five cents per attempt; on the 57
+unsampled tasks it was 63 cents, and there our attempts ran five turns longer
+than Pi&rsquo;s.</p>
 
 <h2>Where this leaves the harness tax</h2>
 <p>HarnessTax&rsquo;s central claim is that on these benchmarks the harness
 moves cost more than success, and for Terminal-Bench 2.0 it puts the harness
 effect within about &plusmn;5 points. Our pooled gap over Pi is 5.6 points,
-right at the edge of that band. Our paired gap on one model is 11 points, with
-an interval that doesn&rsquo;t include zero. The study stands; the band a
+right at the edge of that band. Our paired gaps on one model are 11 points on
+the study&rsquo;s tasks and 10.5 on 57 of the others, both with intervals that
+leave out zero. The study stands; the band a
 fourth harness draws is wider than the one three harnesses drew.</p>
 <p>The study describes its three harnesses mostly in terms of how much they
 send the model. Pi sends four tools and little else; on SWE-bench Lite, Claude
@@ -518,7 +594,7 @@ a note whenever the model can&rsquo;t see something important in a shell
 result, such as a process it started that is still running, or a file the
 verifier is going to inspect that has changed. We have not tested whether those two things are
 what moved the numbers. The all-model comparison also
-changes effort, cap and date, and the paired run leaves effort and prompt
+changes effort, cap and date, and the paired runs leave effort and prompt
 tangled together.</p>
 <p>The HarnessTax authors leave room for this when they close their own post. For
 day-to-day tasks, they write, a coding agent is essentially an interface to
@@ -538,10 +614,12 @@ Anthropic and OpenAI model in Table 1 has its best point estimate under a
 harness that neither vendor wrote.</p>
 
 <h2>Things to keep in mind</h2>
-<p>The paired run matches tasks, scoring and price list and drops the turn cap
-for both agents, but it still differs from a clean A/B test. Pi ran at high effort
-with its own prompt and no budget cap, the day after our run, and only Pi was
-rerun, on one model. The paired interval and the sign test are the results
+<p>The paired runs match tasks, scoring and price list and drop the turn cap
+for both agents, but they still differ from a clean A/B test. Pi ran at high effort
+with its own prompt and no budget cap, after our runs, and only Pi was
+rerun, on one model. Two of the 59 unsampled tasks are out of the head-to-head
+because the verifier did not treat the two harnesses alike; with them in, that
+gap shrinks to 6.8 points. The paired intervals and the sign tests are the results
 that stand on their own; the pooled interval over seven models covers all
 three published means.</p>
 <p>This benchmark exercises the loop, the tools and the coding rules. The
@@ -564,7 +642,7 @@ open-source coding agent at
 <footer>
   <a href="https://kisssorcar.github.io/">KISS Sorcar</a> &middot;
   <a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a> &middot;
-  29 September 2026
+  29 September 2026, updated 30 September 2026
 </footer>
 </body>
 </html>
