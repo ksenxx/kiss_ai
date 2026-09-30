@@ -42,6 +42,7 @@ the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
 body runs.
 """
 
+import atexit
 import contextlib
 import functools
 import os
@@ -62,6 +63,7 @@ from kiss.agents.sorcar import persistence as _th
 from kiss.core import stop_signal, vscode_config
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
+from kiss.tests import subprocess_reaper
 
 # Generous: a sweep only walks the sentinel rows of one temporary
 # database, so it finishes in milliseconds unless the machine is badly
@@ -108,7 +110,51 @@ def _seed_voice_models(test_home: str, real_home: Path) -> None:
             (test_models / entry.name).symlink_to(entry)
 
 
+def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
+    """Delete the session ``KISS_HOME`` when the process that made it exits.
+
+    Every pytest process (each split of a parallel run, each
+    ``uv run pytest file.py``, ``--collect-only``, IDE discovery)
+    imports this module and makes its own directory; before this
+    handler existed nothing removed it, and 1,700 ``kiss_test_*``
+    trees (6 GB) piled up in one month.  Registered with :mod:`atexit`
+    rather than ``pytest_sessionfinish`` so it also fires for a plain
+    import of the module and for a run cut short by ``pytest.exit`` or
+    Ctrl-C.
+
+    atexit runs handlers newest-first, so the three import-time
+    handlers that still write into the home — persistence's event
+    drain (``_drain_events_at_exit`` reopens ``sorcar.db`` and
+    recreates the directory for a queued event) and owner-marker
+    release, and the subprocess reaper's last-resort sweep (the test
+    bucket of a run cut short by ``pytest.exit`` never reached
+    teardown) — would run *after* this one.  They are idempotent, so
+    this handler runs them first and their own atexit calls find
+    nothing left to do.  The database connection is deliberately left
+    open: closing it while an ``orphan-task-sweep`` thread is inside
+    ``execute`` is the SIGSEGV described in the module docstring, and
+    unlinking an open SQLite file is harmless on POSIX.
+
+    A child forked from the pytest process inherits the atexit table;
+    the pid check keeps such a child from deleting its parent's home
+    when it exits through ``sys.exit`` instead of ``os._exit``.
+    Errors are ignored: a still-open ``sorcar.db`` on Windows is not
+    worth failing the exit for.
+
+    Args:
+        home: The temporary ``KISS_HOME`` created at import.
+        owner_pid: The pid of the process that created it.
+    """
+    if os.getpid() != owner_pid:
+        return
+    subprocess_reaper._sweep_at_exit()
+    _th._drain_events_at_exit()
+    _th._release_owner_marker()
+    shutil.rmtree(home, ignore_errors=True)
+
+
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
+atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid())
 _seed_voice_models(_test_kiss_home, Path(os.environ.get("KISS_HOME") or Path.home() / ".kiss"))
 os.environ["KISS_HOME"] = _test_kiss_home
 # The chat page auto-opens the Tips window once per version in every
