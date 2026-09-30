@@ -26,6 +26,8 @@
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
+**Features:** the complete feature inventory, checked against the source tree, is in [FEATURES.md](FEATURES.md).
+
 ______________________________________________________________________
 
 <details>
@@ -66,7 +68,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 695 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 706 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -308,31 +310,31 @@ These agents live in `src/kiss/agents/third_party_agents/`; a prompt-oriented us
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **695 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend, every earlier session of a task that was continued after a crash, and the whole spend of the sub-tasks the task dispatches with `run_agent` and `run_parallel` — the last total each sub-task reports, so spend booked after its result (its classifier, a merge agent, a side channel) is counted too, and the spend already seen is kept when the wait on a sub-task is interrupted or the daemon connection drops. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
+KISS Sorcar ships a catalog of **706 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json). Cost and budget tracking use these prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response (`usage.cost`; the upstream provider's separate charge is added only when the response is marked `is_byok`, since a non-BYOK `cost` already includes it) is billed instead of the catalog estimate, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it — output cut off at the token limit, an `incomplete`/`failed` Responses status, a safety refusal — still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend, every earlier session of a task that was continued after a crash, and the whole spend of the sub-tasks the task dispatches with `run_agent` and `run_parallel` — the last total each sub-task reports, so spend booked after its result (its classifier, a merge agent, a side channel) is counted too, and the spend already seen is kept when the wait on a sub-task is interrupted or the daemon connection drops. Models are grouped below by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 106 |
+| OpenAI | 111 |
 | Anthropic | 16 |
 | Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 407 |
+| OpenRouter | 412 |
 | Claude Code CLI (`cc/*`) | 16 |
-| Codex CLI (`codex/*`) | 9 |
+| Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **676** generation-capable models
-- **509** function-calling-capable models
+- **687** generation-capable models
+- **525** function-calling-capable models
 - **7** embedding models
 - **4** decision models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (106)</strong></summary>
+<summary><strong>OpenAI (111)</strong></summary>
 
 - `gpt-3.5-turbo`
 - `gpt-3.5-turbo-0125`
@@ -418,6 +420,11 @@ Full model list:
 - `gpt-6-sol-low`
 - `gpt-6-sol-medium`
 - `gpt-6-sol-xhigh`
+- `gpt-6.1-sol`
+- `gpt-6.1-sol-high`
+- `gpt-6.1-sol-low`
+- `gpt-6.1-sol-medium`
+- `gpt-6.1-sol-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
 - `gpt-audio-2025-08-28`
@@ -631,7 +638,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (407)</strong></summary>
+<summary><strong>OpenRouter (412)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -850,6 +857,11 @@ Full model list:
 - `openrouter/openai/gpt-6-sol-low`
 - `openrouter/openai/gpt-6-sol-medium`
 - `openrouter/openai/gpt-6-sol-xhigh`
+- `openrouter/openai/gpt-6.1-sol`
+- `openrouter/openai/gpt-6.1-sol-high`
+- `openrouter/openai/gpt-6.1-sol-low`
+- `openrouter/openai/gpt-6.1-sol-medium`
+- `openrouter/openai/gpt-6.1-sol-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
@@ -1066,7 +1078,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Codex CLI (codex/*) (9)</strong></summary>
+<summary><strong>Codex CLI (codex/*) (10)</strong></summary>
 
 - `codex/codex-auto-review`
 - `codex/default`
@@ -1077,6 +1089,7 @@ Full model list:
 - `codex/gpt-6-astra`
 - `codex/gpt-6-luna`
 - `codex/gpt-6-sol`
+- `codex/gpt-6.1-sol`
 
 </details>
 
