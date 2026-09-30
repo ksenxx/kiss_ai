@@ -565,6 +565,37 @@ def test_page_read_survives_a_navigation_landing_under_it(tool, server):
         tool._page.wait_for_load_state("domcontentloaded")
 
 
+_CHAIN_READ = """
+() => {
+  const hops = Number(location.pathname.split('/').pop());
+  if (hops > 0) {
+    setTimeout(() => location.replace('/chain/' + (hops - 1) + location.search), 0);
+  }
+  return [document.title];
+}
+"""
+
+
+def test_page_read_survives_a_chain_of_navigations(tool, server):
+    """A page that navigates twice in a row under a read is still read.
+
+    The live journals.sagepub.com run of 2026-09-30 destroyed the context
+    of the re-read too (the challenge reloaded into the real page, which
+    redirected once more), so a single repeat was not enough: ``go_to_url``
+    answered the same ``Execution context was destroyed`` error.  Here the
+    read expression itself schedules the next hop of ``/chain/2`` ->
+    ``/chain/1`` -> ``/chain/0`` the moment it resolves, so every hop but
+    the last lands in the gap before ``json_value``; with a single repeat
+    the read fails on the first attempt.
+    """
+    tool.go_to_url(f"{server}/chain/0")
+    for i in range(1, 41):
+        tool._page.goto(f"{server}/chain/2?a={i}")
+        assert tool._read_page(tool._page, _CHAIN_READ) == ["inert"]
+        tool._page.wait_for_url(f"**/chain/0?a={i}")
+        tool._page.wait_for_load_state("domcontentloaded")
+
+
 def test_turnstile_checkbox_is_ticked_like_a_person(tool, server):
     """The interactive "Verify you are human" box is found in the widget frame and pressed.
 

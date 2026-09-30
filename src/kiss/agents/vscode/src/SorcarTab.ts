@@ -403,6 +403,9 @@ export function buildChatHtml(
   const subs: Record<string, string> = {
     VIEWPORT: 'width=device-width, initial-scale=1.0',
     CSP_META: csp,
+    // The webview loads its assets from the extension's own files:
+    // the remote page's asset-load reload guard has nothing to do here.
+    HEAD_SCRIPT: '',
     STYLE_HREF: u('main.css'),
     BRAND_STYLE_HREF: u('brand.css'),
     WELCOME_LOGO_SRC: u('welcome-logo.png'),

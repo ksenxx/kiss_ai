@@ -157,6 +157,7 @@ def _build_extension_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width, initial-scale=1.0",
         "CSP_META": "",
+        "HEAD_SCRIPT": "",
         "STYLE_HREF": "main.css",
         "HLJS_CSS_HREF": "highlight-vscode-dark.css",
         "HEAD_STYLE": _vars_style_block(),

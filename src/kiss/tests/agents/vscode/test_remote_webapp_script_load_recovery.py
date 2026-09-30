@@ -5,7 +5,7 @@
 # ruff: noqa: F811  (the `harness` module fixture is imported from
 #   kiss.tests.server.test_explorer_scm_commands and is intentionally
 #   shadowed by test parameters of the same name)
-"""E2E: the remote webapp recovers from a page script that failed to load.
+"""E2E: the remote webapp recovers from a page asset that failed to load.
 
 Chromium aborts every in-flight request with ``ERR_NETWORK_CHANGED``
 when the network path changes during a page load (a phone's
@@ -13,10 +13,14 @@ Wi-Fi/cellular hand-over; on a busy CI host, container network churn).
 Before the fix a page whose ``api.js`` never arrived stayed at the
 "Server is starting" overlay for good: ``main.js`` threw
 ``createSorcarApi is not defined`` while the WebSocket shim happily
-authenticated.  The shim (``_WS_SHIM_JS`` in ``web_server.py``) now
-reloads the page once when a ``<script src>`` fails to load, and
-``chat.html`` runs the shim before every external script so hljs and
-marked are covered as well.
+authenticated; a page whose ``remote-codex.css`` never arrived came up
+with the history panel as main.css's 90vw drawer, open on top of the
+chat, for its whole lifetime.  The asset-load guard
+(``_ASSET_LOAD_GUARD_JS`` in ``web_server.py``, the first script of
+``<head>`` so it is installed before any stylesheet fetch can fail)
+now reloads the page once when a same-origin ``<script src>`` or
+``<link rel=stylesheet>`` fails to load while the document is still
+parsing.
 
 Driven against the production ``RemoteAccessServer`` + daemon of
 ``test_explorer_scm_commands.harness`` and a real headless Chromium.
@@ -116,8 +120,19 @@ def _reloaded_at(page: Page) -> float:
     return float(page.evaluate(f"Number(sessionStorage.getItem('{RELOADED_AT_KEY}')) || 0"))
 
 
-@pytest.mark.parametrize("asset", ["api.js", "highlight.min.js"])
-def test_page_reloads_itself_once_when_a_script_fails_to_load(browser, harness, asset):
+_CHAT_CLEAR_OF_SIDEBAR_JS = """
+() => {
+  const app = document.getElementById('app').getBoundingClientRect();
+  const sidebar = document.getElementById('sidebar').getBoundingClientRect();
+  return app.left >= sidebar.right && sidebar.width > 0;
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "asset", ["api.js", "highlight.min.js", "remote-codex.css", "main.css"],
+)
+def test_page_reloads_itself_once_when_an_asset_fails_to_load(browser, harness, asset):
     loads = _Loads(asset, abort_first_n=1)
     context, page = _open(browser, harness, loads)
     try:
@@ -132,6 +147,10 @@ def test_page_reloads_itself_once_when_a_script_fails_to_load(browser, harness, 
             "document.getElementById('meta-workdir').textContent.length > 1",
             timeout=30000,
         )
+        # ... and styled: the docked history panel sits beside the chat
+        # (without remote-codex.css it is a 90vw drawer over the chat,
+        # and every click on the chat lands on the history list).
+        page.wait_for_function(_CHAT_CLEAR_OF_SIDEBAR_JS, timeout=10000)
     finally:
         context.close()
 

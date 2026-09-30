@@ -15,11 +15,21 @@ const WEB_SERVER_PY = path.resolve(
   PROJECT_ROOT, '..', '..', 'server', 'web_server.py',
 );
 
-function readShimJs() {
+function readPyLiteral(name) {
   const src = fs.readFileSync(WEB_SERVER_PY, 'utf-8');
-  const m = src.match(/_WS_SHIM_JS\s*=\s*r"""([\s\S]*?)"""/);
-  assert.ok(m, 'could not locate _WS_SHIM_JS literal in web_server.py');
+  const m = src.match(new RegExp(name + '\\s*=\\s*r"""([\\s\\S]*?)"""'));
+  assert.ok(m, `could not locate ${name} literal in web_server.py`);
   return m[1];
+}
+
+function readShimJs() {
+  return readPyLiteral('_WS_SHIM_JS');
+}
+
+// The asset-load guard is the page's first <head> script (chat.html's
+// HEAD_SCRIPT placeholder), installed before any stylesheet or script.
+function readAssetGuardJs() {
+  return readPyLiteral('_ASSET_LOAD_GUARD_JS');
 }
 
 function evalShim(window, shimJs) {
@@ -1203,59 +1213,67 @@ async function run() {
   }
 
   {
-    // A page script that fails to load while the document is parsing
-    // (a server restart mid-load) reloads the page once per 30 s; any
-    // other error event is ignored.  jsdom keeps readyState 'loading'
-    // until a later macrotask, so the synchronous part below runs while
-    // the document still counts as parsing.
+    // A page script or stylesheet that fails to load while the document
+    // is parsing (a server restart mid-load, a network change aborting
+    // the fetch) reloads the page once per 30 s; any other error event
+    // is ignored.  jsdom keeps readyState 'loading' until a later
+    // macrotask, so the synchronous part below runs while the document
+    // still counts as parsing.
     const reloads = [];
     const dom = buildDom({reloads});
     const {window} = dom;
     const doc = window.document;
     installFakeWebSocket(window, []);
+    window.eval(readAssetGuardJs() + '\n//# sourceURL=asset-guard.js');
     evalShim(window, shimJs);
-    function failLoad(tag, src) {
+    function failLoad(tag, attrs) {
       const el = doc.createElement(tag);
-      if (src) el.setAttribute('src', src);
+      for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
       doc.head.appendChild(el);
       el.dispatchEvent(new window.Event('error'));
     }
     try {
       assert.strictEqual(doc.readyState, 'loading');
       window.dispatchEvent(new window.Event('error'));
-      failLoad('img', '/logo.png');
-      failLoad('script', '');
-      failLoad('script', 'https://cdn.other.test/monaco.js');
+      failLoad('img', {src: '/logo.png'});
+      failLoad('script', {});
+      failLoad('script', {src: 'https://cdn.other.test/monaco.js'});
+      failLoad('link', {rel: 'icon', href: '/media/favicon.ico'});
+      failLoad('link', {rel: 'stylesheet'});
+      failLoad('link', {rel: 'stylesheet', href: 'https://cdn.other.test/x.css'});
       assert.strictEqual(reloads.length, 0,
-        'non-script, inline and cross-origin failures never reload');
-      failLoad('script', '/media/main.js');
+        'non-asset, inline and cross-origin failures never reload');
+      failLoad('script', {src: '/media/main.js'});
       assert.strictEqual(reloads.length, 1, 'a failed page script reloads');
       assert.ok(Number(window.sessionStorage.getItem(
         'sorcar-script-reloaded-at')) > 0, 'the reload is time-stamped');
-      failLoad('script', '/media/main.js');
+      failLoad('script', {src: '/media/main.js'});
       assert.strictEqual(reloads.length, 1,
         'a second failure within 30 s does not reload again');
       window.sessionStorage.setItem('sorcar-script-reloaded-at',
         String(Date.now() - 31000));
-      failLoad('script', '/media/main.js');
-      assert.strictEqual(reloads.length, 2, 'the guard expires after 30 s');
+      failLoad('link', {rel: 'stylesheet', href: '/media/remote-codex.css'});
+      assert.strictEqual(reloads.length, 2,
+        'a failed page stylesheet reloads once the guard expired (30 s)');
       const realGetItem = window.Storage.prototype.getItem;
       window.Storage.prototype.getItem = function () {
         throw new Error('SecurityError');
       };
-      failLoad('script', '/media/main.js');
+      failLoad('script', {src: '/media/main.js'});
       window.Storage.prototype.getItem = realGetItem;
       assert.strictEqual(reloads.length, 2,
         'without storage there is no loop guard, so no reload');
       await tick();
       assert.notStrictEqual(doc.readyState, 'loading');
       window.sessionStorage.removeItem('sorcar-script-reloaded-at');
-      failLoad('script', '/media/main.js');
+      failLoad('script', {src: '/media/main.js'});
+      failLoad('link', {rel: 'stylesheet', href: '/media/highlight-vscode-dark.css'});
       assert.strictEqual(reloads.length, 2,
-        'a script failing after parsing (on-demand load) never reloads');
-      ok('a page script failing to load mid-parse reloads once per 30 s');
+        'assets failing after parsing (on-demand script, swapped theme ' +
+        'sheet) never reload');
+      ok('a page asset failing to load mid-parse reloads once per 30 s');
     } catch (err) {
-      fail('script load-error recovery broken', err);
+      fail('asset load-error recovery broken', err);
     }
     window.close();
   }

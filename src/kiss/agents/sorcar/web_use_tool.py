@@ -71,6 +71,11 @@ _HEADED_UA_TOKEN = "Chrome"
 # a tool error, never as a tool call that hangs the whole task.
 _PAGE_READ_TIMEOUT_MS = 10000
 
+# How many navigations a single page read follows (see
+# ``WebUseTool._read_page``): a challenge page reloading into the real
+# page, which then redirects once more, is the longest chain seen live.
+_PAGE_READ_NAVIGATIONS = 3
+
 # How long to wait for a tab the daemon opened in the Browser tab's
 # browser to show up in this tool's own CDP client.
 _LIVE_PAGE_TIMEOUT = 15.0
@@ -101,6 +106,17 @@ _TURNSTILE_REACTION_SECS = 1.2
 def _abort_route(route: Any) -> None:
     """Abort a Playwright route request (used to block accounts.google.com)."""
     route.abort()
+
+
+def _evaluate_list(page: Any, expression: str) -> Any:
+    """Evaluate *expression* (a function returning a non-empty list) on *page*, bounded.
+
+    ``wait_for_function`` (not ``evaluate``) so a wedged renderer raises
+    ``TimeoutError`` after ``_PAGE_READ_TIMEOUT_MS``; ``polling=100`` so
+    throttled background tabs still answer.  See ``WebUseTool._read_page``.
+    """
+    handle = page.wait_for_function(expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100)
+    return handle.json_value()
 
 
 def _get_frontmost_app() -> str | None:
@@ -1122,7 +1138,9 @@ class WebUseTool:
         checks pass, a redirecting landing page — can destroy the execution
         context between the two calls, which surfaced as ``Error navigating
         to ...: JSHandle.json_value: Execution context was destroyed``.
-        The read is then repeated once on the new document.
+        The read is then repeated on the new document, following up to
+        ``_PAGE_READ_NAVIGATIONS`` navigations in a row (a challenge page
+        that reloads into the real page, which then redirects again).
 
         Args:
             page: The Playwright page to read.
@@ -1131,18 +1149,18 @@ class WebUseTool:
         Returns:
             The list the expression returned, as Python values.
         """
-        try:
-            return page.wait_for_function(
-                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-            ).json_value()
-        except web_stealth.playwright_api().Error as exc:
-            if "Execution context was destroyed" not in str(exc):
-                raise
-            logger.debug("page navigated under the read; reading the new document", exc_info=True)
-            page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
-            return page.wait_for_function(
-                expression, timeout=_PAGE_READ_TIMEOUT_MS, polling=100
-            ).json_value()
+        for _ in range(_PAGE_READ_NAVIGATIONS):
+            try:
+                return _evaluate_list(page, expression)
+            except web_stealth.playwright_api().Error as exc:
+                if "Execution context was destroyed" not in str(exc):
+                    raise
+                logger.debug(
+                    "page navigated under the read; reading the new document", exc_info=True
+                )
+                page.wait_for_load_state("domcontentloaded", timeout=_PAGE_READ_TIMEOUT_MS)
+        # A page that keeps navigating surfaces its error like any other.
+        return _evaluate_list(page, expression)
 
     def _require_responsive_renderer(self) -> None:
         """Raise ``TimeoutError`` unless the page's renderer answers promptly.

@@ -3820,6 +3820,7 @@ def _build_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
         "CSP_META": "",
+        "HEAD_SCRIPT": f"<script>{_ASSET_LOAD_GUARD_JS}</script>",
         "STYLE_HREF": _media_url("main.css"),
         "BRAND_STYLE_HREF": _media_url("brand.css"),
         "WELCOME_LOGO_SRC": _media_url("welcome-logo.png"),
@@ -4216,6 +4217,64 @@ def _record_update_snooze(latest: str) -> None:
             pass
 
 
+_ASSET_LOAD_GUARD_JS = r"""
+// Reloads the remote webapp once when one of its own page assets
+// fails to load.  A page script that never arrives leaves the app
+// half-booted (with api.js missing, main.js throws at
+// ``createSorcarApi`` and the loading overlay covers #app for good
+// while the WebSocket authenticates happily); a stylesheet that never
+// arrives leaves it unstyled for its whole lifetime (without
+// remote-codex.css the docked history panel is main.css's 90vw
+// drawer, open on top of the chat).  Chromium aborts every in-flight
+// request with ERR_NETWORK_CHANGED when the network path changes
+// during the load (a Wi-Fi/cellular hand-over on a phone), so this is
+// a transient a reload fixes.  Load errors do not bubble, but a
+// capture-phase listener on window still sees them.  The timestamp
+// in sessionStorage stops a reload loop when an asset is really
+// broken: one reload per 30 s, then the failure stays visible.
+//
+// This script is the first thing in <head> (the HEAD_SCRIPT
+// placeholder of media/chat.html), before the stylesheet links: a
+// stylesheet's error
+// event is dispatched asynchronously once its fetch fails, so a
+// listener installed by a later script could miss it.
+//
+// Only the page's own assets count: same-origin ``<script src>`` and
+// ``<link rel=stylesheet>`` that fail while the document is still
+// parsing.  Assets main.js adds later on demand (the Monaco editor
+// from its CDN, the voice model, the swapped highlight theme sheet)
+// have their own fallbacks and must not restart the app.
+(function() {
+  var _RELOADED_AT = 'sorcar-script-reloaded-at';
+  // The URL of the failed asset ('' for anything else: an inline
+  // script, an image, the window's own error events).  src / href /
+  // rel read as '' when the attribute is missing.
+  function _assetUrl(target) {
+    var tag = target.tagName;
+    if (tag === 'SCRIPT') return target.src;
+    if (tag === 'LINK' && /\bstylesheet\b/.test(target.rel)) return target.href;
+    return '';
+  }
+  function _reloadOnAssetLoadError(ev) {
+    var url = _assetUrl(ev.target);
+    if (!url) return;
+    if (document.readyState !== 'loading') return;
+    if (url.indexOf(window.location.origin + '/') !== 0) return;
+    try {
+      var last = Number(sessionStorage.getItem(_RELOADED_AT)) || 0;
+      if (Date.now() - last < 30000) return;
+      sessionStorage.setItem(_RELOADED_AT, String(Date.now()));
+    } catch(e) {
+      // No storage means no loop guard: leave the failure visible.
+      return;
+    }
+    window.location.reload();
+  }
+  window.addEventListener('error', _reloadOnAssetLoadError, true);
+})();
+"""
+
+
 _WS_SHIM_JS = r"""
 // WebSocket shim for the remote webapp: provides acquireVsCodeApi()
 // so the extension's media/main.js + media/api.js run unmodified in a
@@ -4226,47 +4285,6 @@ _WS_SHIM_JS = r"""
 // kiss.server.sorcar.ServerApi.authenticate before the daemon starts
 // dispatching this connection's commands.
 (function() {
-  // A page script that never arrives leaves the app half-booted: with
-  // api.js missing, main.js throws at ``createSorcarApi`` and the
-  // loading overlay covers #app for good while the socket below
-  // authenticates happily.  Chromium aborts every in-flight request
-  // with ERR_NETWORK_CHANGED when the network path changes during the
-  // load (a Wi-Fi/cellular hand-over on a phone), so this is a
-  // transient a reload fixes.  Load errors do not bubble, but a
-  // capture-phase listener on window still sees them.  The timestamp
-  // in sessionStorage stops a reload loop when an asset is really
-  // broken: one reload per 30 s, then the failure stays visible.  This
-  // shim runs before every ``<script src>`` of the page (see
-  // media/chat.html; a script's load error fires when the parser
-  // reaches it, in document order) so a failed hljs/marked load is
-  // caught too.
-  //
-  // Only the page's own scripts count: same-origin ``<script src>``
-  // that fail while the document is still parsing.  Scripts main.js
-  // adds later on demand (the Monaco editor from its CDN, the voice
-  // model) have their own fallbacks and must not restart the app.
-  var _SCRIPT_RELOADED_AT = 'sorcar-script-reloaded-at';
-  function _reloadOnScriptLoadError(ev) {
-    var target = ev.target;
-    if (!target || target.tagName !== 'SCRIPT' || !target.src) return;
-    if (document.readyState !== 'loading') return;
-    if (target.src.indexOf(window.location.origin + '/') !== 0) return;
-    try {
-      var last = Number(sessionStorage.getItem(_SCRIPT_RELOADED_AT)) || 0;
-      if (Date.now() - last < 30000) return;
-      sessionStorage.setItem(_SCRIPT_RELOADED_AT, String(Date.now()));
-    } catch(e) {
-      // No storage means no loop guard: leave the failure visible.
-      return;
-    }
-    window.location.reload();
-  }
-  // Guarded like the wake-up listeners below: the DOM-less node
-  // harnesses of the tests load this shim with a bare window object.
-  if (typeof window.addEventListener === 'function') {
-    window.addEventListener('error', _reloadOnScriptLoadError, true);
-  }
-
   var _state = null;
   try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
   var _ws = null;

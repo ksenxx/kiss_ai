@@ -78,6 +78,7 @@ def _render_chat_html() -> str:
     subs = {
         "VIEWPORT": "width=device-width,initial-scale=1",
         "CSP_META": "",
+        "HEAD_SCRIPT": "",
         "STYLE_HREF": "about:blank",
         "HLJS_CSS_HREF": "about:blank",
         "HEAD_STYLE": f"<style>{css}</style>",
