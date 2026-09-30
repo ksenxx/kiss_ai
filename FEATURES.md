@@ -8,25 +8,25 @@ Every count and feature in this document was checked against the source tree at 
 
 1. [At a glance](#1-at-a-glance)
 2. [What changed since 2026-09-21](#2-what-changed-since-2026-09-21)
-3. [Architecture](#3-architecture)
-4. [Interfaces and prompt surfaces](#4-interfaces-and-prompt-surfaces)
-5. [Agent runtime](#5-agent-runtime)
-6. [Built-in tools and tool profiles](#6-built-in-tools-and-tool-profiles)
-7. [Models, routing and cost accounting](#7-models-routing-and-cost-accounting)
-8. [Sorcar Extension Agents and slash commands](#8-sorcar-extension-agents-and-slash-commands)
-9. [Sub-agents and parallelism](#9-sub-agents-and-parallelism)
-10. [Task classification, tags and chat summaries](#10-task-classification-tags-and-chat-summaries)
-11. [Git worktrees, merging and auto-commit](#11-git-worktrees-merging-and-auto-commit)
-12. [Persistent memory and repository knowledge](#12-persistent-memory-and-repository-knowledge)
-13. [The kiss-web daemon and remote web app](#13-the-kiss-web-daemon-and-remote-web-app)
-14. [Chat client features](#14-chat-client-features)
-15. [Browser, web research and sign-in hand-off](#15-browser-web-research-and-sign-in-hand-off)
-16. [Voice](#16-voice)
-17. [Messaging and third-party agents](#17-messaging-and-third-party-agents)
-18. [Scheduled automations](#18-scheduled-automations)
-19. [Installation, deployment, Docker and release](#19-installation-deployment-docker-and-release)
-20. [Developer tooling and tests](#20-developer-tooling-and-tests)
-21. [Research drivers and website](#21-research-drivers-and-website)
+3. [Research drivers, papers and website](#3-research-drivers-papers-and-website)
+4. [Architecture](#4-architecture)
+5. [Interfaces and prompt surfaces](#5-interfaces-and-prompt-surfaces)
+6. [Agent runtime](#6-agent-runtime)
+7. [Built-in tools and tool profiles](#7-built-in-tools-and-tool-profiles)
+8. [Models, routing and cost accounting](#8-models-routing-and-cost-accounting)
+9. [Sorcar Extension Agents and slash commands](#9-sorcar-extension-agents-and-slash-commands)
+10. [Sub-agents and parallelism](#10-sub-agents-and-parallelism)
+11. [Task classification, tags and chat summaries](#11-task-classification-tags-and-chat-summaries)
+12. [Git worktrees, merging and auto-commit](#12-git-worktrees-merging-and-auto-commit)
+13. [Persistent memory and repository knowledge](#13-persistent-memory-and-repository-knowledge)
+14. [The kiss-web daemon and remote web app](#14-the-kiss-web-daemon-and-remote-web-app)
+15. [Chat client features](#15-chat-client-features)
+16. [Browser, web research and sign-in hand-off](#16-browser-web-research-and-sign-in-hand-off)
+17. [Voice](#17-voice)
+18. [Messaging and third-party agents](#18-messaging-and-third-party-agents)
+19. [Scheduled automations](#19-scheduled-automations)
+20. [Installation, deployment, Docker and release](#20-installation-deployment-docker-and-release)
+21. [Developer tooling and tests](#21-developer-tooling-and-tests)
 22. [What the trajectories show](#22-what-the-trajectories-show)
 23. [Caveats, corrections and stale documentation](#23-caveats-corrections-and-stale-documentation)
 
@@ -63,7 +63,34 @@ Every count and feature in this document was checked against the source tree at 
 | Cron | Schedules evaluated in `America/Los_Angeles`; `ensure` action for idempotent jobs | `59561f6ed` `3d0245792` |
 | Install and release | Node v22.23.3 and uv 0.12.19 pins; web app opened after install; PyPI size check and sdist `only-include`; pytest subprocess reaper; Windows test run fixes | `442c54960` `ab1f44abb` `253372168` `e4d8192f1` `537de3e65` `52a718e42` |
 
-## 3. Architecture
+## 3. Research drivers, papers and website
+
+**Prompt-level drivers** in SYSTEM.md: the 7-step AI discovery loop (baseline → SOTA search → `tmp/ideas.md` → pairwise judging → implement and evaluate → `tmp/explored-ideas.md` → repeat until the metric is met with a held-out check), adversarial testing (one sub-task breaks, another fixes), adversarial training (iterated adversarial datasets), Deep Work (read the target state fully, concrete values, planned changes, a verification per change), and the 10-site web research rule.
+
+**Papers** (`papers/`, 10 directories, 6,050 files): every paper is LaTeX with its PDF checked in, written and revised by the agent through the `/write_paper`, `/review_paper` and `/revise_and_review_paper` SEAs (section 9; 41 of the 64 slash-command tasks in the database are paper tasks, section 22). 69 commits touched `papers/` between 09-22 and 09-30. Dates are the first and last commit to each directory; page counts are from the checked-in PDFs.
+
+| Directory | Title | Format | Pages | Active | What it claims |
+| --- | --- | --- | --- | --- | --- |
+| `kisssorcar/kiss_sorcar.tex` | *KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant* | NeurIPS 2026 preprint (arXiv 2604.23822), 43 sections, 6 appendices, checklist | 53 | 04-24 → 09-30 | Five agent classes of 4,531 significant lines under a 3,851-word prompt; ablation on 10 tasks × 6 arms (120 cells) finds the rules change how the agent works but not the hidden-test pass rate, and the second-vendor reviewer found real defects in 15 of 20 reviewed runs at 2.3× cost / 3.1× wall time; HydraKV 5.50 Mops/s on YCSB-A, TPC-H engine 34.5× faster; 30 Terminal-Bench 2.0 tasks × 7 models pooled 75.6% (74.1% under the 100-turn cap) vs Pi 70.0%; 59 held-out tasks 79.7%; paired Pi 0.87.1 on 57 held-out tasks (`qemu-alpine-ssh`, `qemu-startup` excluded for a verifier apt confound) **82.5% vs 71.9%** **NEW** |
+| `kisssorcar/ks_assistant.tex` | *KS Gov: Long-Running AI Discovery and Adversarial Testing from a System Prompt* | ICLR 2027 double-blind (anonymised as "KS Gov") | 15 | 09-25 → 09-26 | Two long runs (HydraKV over 17.2 agent hours, TPC-H 34.5×) as case studies of the discovery loop and adversarial testing; TB2 comparison against the HarnessTax study; revised through nine review rounds; ships a renamed supplement (`make_supplement.py`, `supplement_README.md`: `ks` package, `ksgov.db`) **NEW** |
+| `fable_sol/` | *A Trace-Based Study of Heterogeneous LLM Review and Repair in a Ten-Week Deployment* | ICLR 2027 double-blind, one directory per section, `math_commands.tex` | 29 | 09-24 → 09-25 | 486 tasks and 1.1M events from a deployment where an Anthropic model wrote and an OpenAI model reviewed read-only: 3 of 2,164 attributable reviewer calls performed a write, none to tracked source; review took 9.3% of task cost on the 42 separable tasks; 1,943 self-reported findings and 1,779 fixes, a second coder counts a fifth fewer; 60-task re-coded sample; no comparison arm; scripts in `scripts/` (`corpus_selection.py`, `review_passes.py`, `later_round_recoding.py`, `reviewer_child_costs.py`); the reviewer's own round in `fable_sol.txt` (rating 6) **NEW** |
+| `sesorcar/` | *Rules in the Prompt, Guards in the Tools: Software Engineering Discipline in a Self-Hosted Coding Agent* | ACM `acmart` (FSE 2027, anonymous review) | 22 | 09-28 → 09-29 | Six months of the agent's own task database and git history (20,074 full-prompt tasks): 5.2% of `Edit` calls went to a file not opened with `Read`, 0.17% to a file never named in any call; after the read guard, repeat violations fell from 49.5% to 11.3% of later files at one wasted step per 35 guarded tasks; strict success rose 79.5% → 84.3% over six months but not within a single model; full-vs-lite controlled study; 464-file `evidence/` (`events_export.jsonl.gz`, `edit_pairs.py`, `classify_quality.py`, `ablation_summary.py`), macros recomputed by `se_numbers.py` and `quality_macros.py` into `macros.tex`, figures by `figures.py` **NEW** |
+| `sorcarccl/` and `Collective_Algebra_…/` | *Collective Algebra Above a Closed Library: A Research-Loop Agent Finds the Rewrites That Strategy Enumeration Misses* | ICLR 2027 double-blind | 15 / 15 | 09-15; 09-25 | The research-loop agent replaces OverlayCCL's strategy enumerator above the closed Trainium collective library; on a 143-problem pool the agent's rewrite beats the enumerator by >5% in the simulator on 55 (09-15 build) / 40 (09-25 ICLR build) anchors, 45 / 40 confirmed on 224 Trainium cores at 1.06–3.38× / 1.12–4.37× warm-cache speedup, the enumerator wins 0; step time 2.46× (9.75B Llama-style) and 2.15× (9.70B GPT-3-class) faster. The 09-25 directory adds the 858-file `sorcarccl-production-set-main/` (40 production all-reduce / all-gather / reduce-scatter problems, harness, results), `compute_numbers.py`, `make_figures.py`, `make_tables.py`, `notes/citation-verification.md` and `notes/review-dispositions.md` **NEW** |
+| `sekisssorcar/` | *Software Engineering KISS Sorcar with KISS Sorcar* | NeurIPS 2026 style, with `se_kiss_sorcar_slides.pptx` | 19 | 05-15 → 06-30 | 3,099 tasks over 44 days (April 22 to June 5) mined from the SQLite log into nine recurring patterns (test-first bug fixing, paper–code co-evolution, defensive revert, cross-model iterative review, ...); six SE principles encoded in the prompt and a five-layer hierarchy of roughly 2,400 lines |
+| `kvstorepaper/` | *HydraKV: Adversarial AI Discovery of a Larger-than-Memory Key-Value Store* | NeurIPS 2026 style, `social/hackernews.md` | 19 | 07-18 → 09-15 | YCSB-A (Zipfian θ = 0.95) under a hard memory budget on 64 vCPUs and eight NVMe SSDs: 5.50 Mops/s vs FASTER's 0.93 (5.9×), about 89% of the miss-bandwidth bound, 3.87–5.67 Mops/s on four adversarial workload variants; ~4,000 lines of dependency-free C++17 (O_DIRECT log, fingerprint hash index, admission-controlled write-back cache, `io_uring` read-miss path, scan-based crash recovery, hole-punch compaction) |
+| `swedefend/` | *SWEDefend: A Confidence-Gated Intent-Alignment Judge with Capability-Diff Reasoning for Automated-Program-Repair Backdoor Defense* | NeurIPS 2026 style | 14 | 07-12 → 07-20 | Defends APR agents against SWExploit-style magic-string-gated CWE payloads; a naive fail-closed intent judge reaches 100% catch at ~20% false positives, three design elements lower that operating point; the evaluator ships as the `swedefend-eval` console script and `projects/swedefend` is in the sdist (sections 1 and 20) |
+| `cleverest_plus_paper/` | *Cleverest+: A Fixed-Budget Portfolio and Signature-Grounded Oracle for LLM-Based Commit-Directed Test Generation* | NeurIPS 2026 style, `REVIEW_NOTES.md` | 11 | 07-10 → 07-11 | Four mechanisms on top of Cleverest (JSON/base64 candidates with an allowlisted argument vector, shell-free invocation, sanitizer signatures, a (4,3,3) portfolio of DeepSeek-R1 and GPT-4o over exactly 10 trials fixed before any outcome); a three-subject mini-benchmark because the 72-commit benchmark's eight builds are not co-located |
+| `writingpaper/` | *Writing a Research Paper with an AI Agent: A Chronicle of KISS Sorcar Writing Its Own Paper* | NeurIPS 2026 style | 9 | 04-30 → 06-06 | Nine days and over one hundred user tasks, each in the task database with its git diff, organised into seven phases; the human steered at the level of intent while the agent edited LaTeX, searched for citations, ran `pdflatex` and fixed its own bugs when the diff/merge interface failed |
+
+**Numbers are regenerated, not typed.** Every headline figure above is a `\newcommand` macro (326 in `kiss_sorcar.tex`) recomputed by a script in the paper directory: `kisssorcar/ks_numbers.py` and `ks_tb2.py` (the latter also writes `tables/ks_tb2_table.tex` and `figures/ks_tb2_frontier.pdf`), `paste_macros.py`, `ks_figures.py`; `sesorcar/se_numbers.py`; `sorcarccl/compute_numbers.py`. Inputs live beside the papers: `kisssorcar/evidence/` (`mine_sorcar_db.py`, `mine_case_studies.py` → `case_studies.json`, `classify_reviews.py` → `review_verdicts.jsonl`, `db_metrics.json`, `tb2_trials.json` with the `main`, `heldout` and `pi` runs, `tb2_prompt.txt`, `tb2_blog_tables.json`) and the 4,575-file `kisssorcar/ablation/` (`arms.py` freezes the six prompt arms at the commit they ran on, `run_all.py`/`run_one.py`/`run_staged.py`, `paired_stats.py`, `rate_findings.py`, `PREREG_staged.md`, 122 result files plus `results_hard`, `results_heldout`, `results_heldout_calib`, `results_review` and their ratings). The `/write_paper` SEA's `check_paper` gate (AI-slop and consistency checks) and `build_paper` (pdflatex + bibtex) run on every revision.
+
+**Around the papers**: the 44-page `KISS_Sorcar_Lecture.pdf` / `.pptx` and a one-slide deck in `kisssorcar/`; six social drafts in `kisssorcar/social/` (X and LinkedIn posts for the paper and for the HarnessTax TB2 result, rewritten four times on 09-29 and 09-30 to lead with the headline and match the blog's voice) and `kvstorepaper/social/hackernews.md`; the "Harness Tax, Audited" blog (`website/.../blog/harness-tax-terminal-bench-blog.html`, updated 30 September) **NEW**, which joins five optimisation blogs (LZ4, DuckDB, SQLite ×2, Tuso).
+
+**Known gaps in `papers/`**: the Collective Algebra paper exists twice, and the two `sorcarccl.tex` files disagree on `\Anchors` (55 vs 40), `\RTconf` (45 vs 40) and the speedup range, so a reader must know that the long-named directory is the ICLR build; `\PromptWordsNow` is 3,851 in both `kisssorcar` papers against 3,971 words in SYSTEM.md today, and `\LocFive` is 4,531 in `kiss_sorcar.tex` but 4,449 in `ks_assistant.tex`; `KISS_Sorcar_Lecture.pdf` (built 06-09) predates the folder-per-SEA layout, the routers and the memory move; `website/.../llms.txt` lists six paper PDFs and omits `fable_sol`, `ks_assistant`, `sesorcar` and Collective Algebra.
+
+**Website** (`website/kisssorcar.github.io/`): 11 docs pages, 6 blog pages, `privacy.html` **NEW**, `llms.txt` / `llms-full.txt`, sitemap.
+
+## 4. Architecture
 
 ```
  Clients (one shared webview, media/chat.html + main.js)
@@ -101,7 +128,7 @@ Every count and feature in this document was checked against the source tree at 
 
 Figure 1. The data path from clients to models. Every client speaks the same command catalogue (`src/kiss/server/sorcar.py`, `API`), whether over the Unix socket or a WebSocket, and receives the same events; the daemon runs the agents for every client except the standalone `sorcar` CLI, which runs `SorcarAgent` in its own process.
 
-## 4. Interfaces and prompt surfaces
+## 5. Interfaces and prompt surfaces
 
 | Surface | How it is reached | Notes |
 | --- | --- | --- |
@@ -109,9 +136,9 @@ Figure 1. The data path from clients to models. Every client speaks the same com
 | Remote web app | `https://<host>:8787` served by `kiss-web`, password from Settings; Cloudflare tunnel URL on remote deploys; installable PWA with an offline shell (`sw.js`) | Same `chat.html`/`main.js` as the extension; light theme by default **NEW**; reconnects in place with backoff and a 45 s half-open detector **NEW** |
 | `sorcar` CLI | `sorcar -t "task"` or `-f file`, with `-m model`, `-b budget`, `--work-dir` | Runs `SorcarAgent` in the terminal process, outside the daemon; the 44 `kiss-<channel>` CLIs run through the daemon instead |
 | Python client API | `from kiss.server import sorcar; sorcar.run(task, ...)` returning `TaskResult(text, success, cost, tokens, steps, chat_id, task_id)` | 27 keyword options including `tools=` (path of a file whose `get_tools()` returns callables), `extension_agent_path`, `tool_profile`, `docker_image`, `timeout=3600`, `stop_on_timeout` |
-| Slash commands | `/<name> <text>` at position 0 of a prompt | Registered from three sources (section 8); `/<name> help` prints the SEA's `description()` |
-| Channels | `kiss-<channel>` CLIs, `run_agent(agent="slack", ...)`, always-on gateways scheduled by cron | 44 agents (section 17) |
-| Voice | In-page wake word "Hey Sorcar" **NEW wording**, host-side Vosk listener, `talk()` playback on every open tab | Section 16 |
+| Slash commands | `/<name> <text>` at position 0 of a prompt | Registered from three sources (section 9); `/<name> help` prints the SEA's `description()` |
+| Channels | `kiss-<channel>` CLIs, `run_agent(agent="slack", ...)`, always-on gateways scheduled by cron | 44 agents (section 18) |
+| Voice | In-page wake word "Hey Sorcar" **NEW wording**, host-side Vosk listener, `talk()` playback on every open tab | Section 17 |
 
 Prompt assets shipped in `src/kiss/`:
 
@@ -121,7 +148,7 @@ Prompt assets shipped in `src/kiss/`:
 - `INJECTIONS.md` (6 promptlets) plus `~/.kiss/MY_INJECTION.md` (user promptlets, editable in place from the Inject panel **NEW**); `TIPS.md` (23 tips shown once per version **NEW cadence**); `SAMPLE_TASKS.md` (12 sample tasks).
 - `~/.kiss/SEAS.md`: extra SEA folders, one per line, bottom line wins.
 
-## 5. Agent runtime
+## 6. Agent runtime
 
 ### KISSAgent (`src/kiss/core/kiss_agent.py`)
 
@@ -141,30 +168,30 @@ Prompt assets shipped in `src/kiss/`:
 
 ### SorcarAgent (`sorcar_agent.py`, 3,511 lines)
 
-- Builds the tool set (section 6), the system prompt (SYSTEM.md + restricted-profile note + `WEB_TOOLS_OFF_NOTE` when browsing is off **NEW** + memory protocol + SEA additions), the memory root and domain memories, and the model (a picker SEA such as `autorouter` resolves to its `model()`).
+- Builds the tool set (section 7), the system prompt (SYSTEM.md + restricted-profile note + `WEB_TOOLS_OFF_NOTE` when browsing is off **NEW** + memory protocol + SEA additions), the memory root and domain memories, and the model (a picker SEA such as `autorouter` resolves to its `model()`).
 - `set_model` rebuilds the tool schema for the new model and shows it in the picker; `summary` is a no-op tool whose every-10-steps cadence is enforced by the prompt only.
 - Review fan-out guardrails (`ReviewQuota`, `MAX_REVIEW_ROUNDS`, `MIN_SUBAGENT_BUDGET`, `KISS_REVIEW_BUDGET_FRACTION`) were removed on 2026-09-25; a sub-agent's budget share is now `remaining / (num_tasks + 1)`. **CHANGED**
 
 ### ChatSorcarAgent and WorktreeSorcarAgent
 
 - `ChatSorcarAgent` persists chats and task chains in `sorcar.db`; prompts carry at most 10 prior tasks, normally the newest two in full and the older ones as 600/300-character task/result digests, shortened further to fit a 6,000-character prefix cap (`chat_history_digest`, default on). It records the SEA name of the run (`task_history.sea`) **NEW** and bare-path prompts are turned into open-file directives **NEW**.
-- `WorktreeSorcarAgent` gives a development-classified task its own `git worktree` under `.kiss-worktrees/` on branch `kiss/wt-*` (worktrees off, non-development verdicts, non-git directories and detached HEADs run directly); a spare worktree is prewarmed at daemon start and refilled after each worktree task ends **NEW**; outcomes: committed and removed, preserved (no auto-commit, commit failed, sub-agent active, rescue failed). Section 11 has the merge rules.
+- `WorktreeSorcarAgent` gives a development-classified task its own `git worktree` under `.kiss-worktrees/` on branch `kiss/wt-*` (worktrees off, non-development verdicts, non-git directories and detached HEADs run directly); a spare worktree is prewarmed at daemon start and refilled after each worktree task ends **NEW**; outcomes: committed and removed, preserved (no auto-commit, commit failed, sub-agent active, rescue failed). Section 12 has the merge rules.
 
 ### Configuration knobs (`src/kiss/core/config.py`)
 
 `KISS_READ_DEDUPE` (on), `KISS_READ_OUTLINE_LINES` (2000), `KISS_TOOL_OUTPUT_COMPACTION` (on), `KISS_COMPACTION_START_TOKENS` / `KISS_COMPACTION_STEP_TOKENS` (100,000), `KISS_TOOL_OUTPUT_MAX_CHARS` (50,000), `KISS_CONTEXT_LIMIT_FRACTION` (0.7), `KISS_TOOL_PROFILES` (on), `KISS_CHAT_HISTORY_DIGEST` (on), `KISS_DISPATCH_PATH_REWRITE` (on), `KISS_USE_MEMORY` (one-process override), `KISS_HOME` (default `~/.kiss`), `KISS_DISABLE_WORKTREE_POOL`, `KISS_DISABLE_TASK_CLASSIFIER`, `KISS_MUSE_AUTH=0`; seven API-key variables plus a workspace id (`ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `MOONSHOT_API_KEY`). Per-run settings in `~/.kiss/config.json`: `max_budget`, `auto_commit_mode`, `is_worktree`, `use_web_browser`, `classify_tasks` (on), `classify_with_decisions` (off), `use_memory` (on), `memory_dir` (empty = `~/.kiss/memories`), voice options, remote password, custom models.
 
-## 6. Built-in tools and tool profiles
+## 7. Built-in tools and tool profiles
 
 | Group | Tools | Notes |
 | --- | --- | --- |
 | Files and shell | `Bash`, `bash_job`, `run_commands_parallel`, `Read`, `Edit`, `Write` | `Bash(background=true)` detaches with `nohup` and returns a job id; `bash_job` tails, waits or kills; `run_commands_parallel` runs shell commands in threads with per-command exit codes; a whole-file `Read` of a file over 2,000 lines returns an outline, and an unchanged range already shown returns a one-line stub (`force=True` re-reads); `Edit` rejects a file not read in the session and `Write` rejects overwriting an unread existing file (new files and scratch files under `tmp/` are exempt). In Docker the file tools execute inside the container without this guard and `bash_job` is absent. |
 | Browser | `go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `show_browser`, `close_browser` | Patchright/Chromium; `show_browser` streams the page into the KISS Browser tab on every surface **NEW**; sub-agents get an ephemeral profile; only in the `full` profile with "Use web tools" on |
-| Memory | `memory_search`, `memory_pull`, `memory_read`, `memory_write`, `memory_list`, `memory_delete`, `memory_refresh` | Section 12; `memory=` narrows to the general or a domain memory **NEW** |
-| Dispatch | `run_agent`, `run_parallel`, `number_of_cores` | Section 9; `run_parallel` and `number_of_cores` only in parallel mode |
+| Memory | `memory_search`, `memory_pull`, `memory_read`, `memory_write`, `memory_list`, `memory_delete`, `memory_refresh` | Section 13; `memory=` narrows to the general or a domain memory **NEW** |
+| Dispatch | `run_agent`, `run_parallel`, `number_of_cores` | Section 10; `run_parallel` and `number_of_cores` only in parallel mode |
 | MCP | tools of configured MCP servers, `connect_mcp_server`, `finish_mcp_server_connect` **NEW** | OAuth sign-in for remote MCP servers (Notion, Linear, Asana, Zoom or any URL); tokens in `~/.kiss/mcp_auth/<server>.json` |
 | Skills | `skill` | Present when the work dir or `~/.kiss/skills`, `.kiss/skills`, `.agents/skills` or Claude skill directories hold a `SKILL.md` |
-| Interaction | `ask_user_question`, `talk(language, text, emotion)`, `set_model`, `decide`, `summary`, `finish` | `decide` only when the Jev decisions model is enabled (section 10); `finish` carries `summary_in_html`, `is_continue`, `suggested_next_task` |
+| Interaction | `ask_user_question`, `talk(language, text, emotion)`, `set_model`, `decide`, `summary`, `finish` | `decide` only when the Jev decisions model is enabled (section 11); `finish` carries `summary_in_html`, `is_continue`, `suggested_next_task` |
 
 Tool profiles (`TOOL_PROFILES`, `sorcar_agent.py:71-92`):
 
@@ -178,7 +205,7 @@ Tool profiles (`TOOL_PROFILES`, `sorcar_agent.py:71-92`):
 
 Every restricted profile also receives `ask_user_question`, `talk`, `set_model`, `summary` (and `decide` when available) before filtering, and `finish` is always added. A restricted run gets `RESTRICTED_PROFILE_NOTE` in its system prompt listing the tools it has.
 
-## 7. Models, routing and cost accounting
+## 8. Models, routing and cost accounting
 
 - **Catalogue**: 706 entries; direct families are `gpt-*` (100 entries with `-low`/`-high`/`-xhigh` effort aliases), `gemini-*` (20), `claude-*` (16), `glm-*` (8), `kimi-*` (7), `o1`/`o3`/`o4` (8); OpenRouter (412), Together-hosted open weights (Qwen 24, Meta Llama 16, DeepSeek 13, Moonshot 10, Z.ai 10, DeepCogito 6, Mistral 6), `cc/*` (16) and `codex/*` (10) drive the Claude Code and Codex CLIs to completion. Price fields include cache read/write, long-context tiers and audio input. Custom OpenAI-compatible endpoints can be added from Settings with name, endpoint, key and headers.
 - **Picker routers** **NEW**: `autorouter` splits a task into units and runs each on the cheapest tier (small, medium, frontier) that passes its acceptance check, escalating on failure and logging every decision to `~/.kiss/MODEL_DECISIONS.md`; its per-model evidence lives in `~/.kiss/AUTOROUTER.md` (capped at 2,500 characters, refreshed weekly by `/rsi7d`). `bestrouter` runs everything on `claude-fable-5-1` and has `gpt-6-astra` review read-only through `run_parallel` with at most 75% of the budget. Picking a router SEA fires its `on_picked_as_model` hook (15 s cap); autorouter's hook ensures the weekly cron job.
@@ -186,7 +213,7 @@ Every restricted profile also receives `ask_user_question`, `talk`, `set_model`,
 - **Live accounting**: cost, tokens, steps and remaining budget are printed in every tool result and shown in the status bar and Task Info; the daily cost-calculation audit is a cron job on the development machine.
 - **Model updates**: the "Update Models" button and the daily `update_models.py` cron job refresh prices; the `-low`/`-high` aliases mirror their base model's prices.
 
-## 8. Sorcar Extension Agents and slash commands
+## 9. Sorcar Extension Agents and slash commands
 
 An SEA is a Python file exposing optional zero-argument getters (`system_prompt`, `model`, `tools`, `tool_profile`, `max_budget`, `use_worktree`, `auto_commit`, `use_memory`, `use_web_tools`, `is_parallel`, `classify_tasks`, `append_to_system_prompt`, `add_to_system_prompt`, `append_to_prompt`, `dispatch_timeout`, `register_as_model`, `llm_call_hook`, `tool_call_hook`), an optional picker hook `on_picked_as_model(work_dir)` and, since `86c09b15d`, a mandatory `description()` returning one sentence that `/<name> help` prints. **NEW contract**
 
@@ -216,7 +243,7 @@ The 17 bundled SEAs (`src/kiss/agents/seas/`):
 
 Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, `MODEL_DECISIONS.md`, `memories/<repo>/knowledge.sqlite3`, `cron/jobs.json` (weekly rsi7d and daily knowledge jobs), and read-only access to `sorcar.db`.
 
-## 9. Sub-agents and parallelism
+## 10. Sub-agents and parallelism
 
 - `run_agent(task, agent="", workspace, model_name, max_budget, timeout, chat_id, system_prompt, tools, model_config, use_worktree, auto_commit, use_web_tools, classify_tasks, use_memory, is_parallel, append_basic_tools, append_to_system_prompt, append_to_prompt, tool_profile)`: `agent` is empty (plain sub-agent), a channel name, `"cron"`, or a `.py` path. Default wait 300 s; on timeout the child is stopped and its spend still charged **NEW**. Path-named agents honour the persisted worktree and auto-commit settings **NEW**. Task text naming the parent repository path is rewritten to the active worktree (`dispatch_path_rewrite`).
 - `run_parallel(tasks, max_workers, model_name, tool_profile)`: independent LLM sub-agents, each in its own tab on every surface; fan-out may recurse (the prompt asks for at most two levels, the code sets no limit); children classified as reviewers get the `review` profile when tool profiles are on and the task needs no implementation, unless `tool_profile=` says otherwise.
@@ -224,7 +251,7 @@ Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, 
 - Sub-agent tabs: opened on all clients while the child runs, closed everywhere by `subagentDone` when it finishes or by `closeSubagentTab` when any client closes them; the user's close is remembered so a replay does not reopen it. **NEW**
 - 21,216 of the 27,673 recorded task rows are sub-agents; 4,461 top-level tasks ran in parallel mode.
 
-## 10. Task classification, tags and chat summaries
+## 11. Task classification, tags and chat summaries
 
 - **Pre-run classifier** (`task_classifier.py`, "Classify tasks before running", default on): decides `is_simple` and `is_development` so trivial prompts skip the worktree and the full prompt; verdicts are cached; classifier spend folds into the task. Launch phases "Classifying task…" and "Preparing worktree…" are shown in the tab. **NEW**
 - **Jev decisions model** (`openrouter/~typesafe/jev-latest`): one gate, `decisions_tool_available()`, controls both the classifier's Jev route and the `decide` tool; it needs the "Use Jev (decisions model)" setting (default **off** since 09-27), an OpenRouter key and the model in the catalogue.
@@ -232,7 +259,7 @@ Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, 
 - **SEA column** **NEW**: `task_history.sea` holds the file stem of the agent script that ran the task (`bestrouter_sea`, `review_paper_sea`, `cron_agent`, `slack_sea`, ...), back-filled for sub-agents from their parent's `run_agent` call; the History panel's SEA filter offers `All`, `None` and one entry per script seen.
 - **Chat summaries** **NEW**: `chat_summaries(chat_id, summary, last_launched)` stores a title of up to 8 words per chat (target 6-8, derived from the chat's first five top-level tasks, sometimes shorter or empty); History shows it as the group header when present and the first task's text otherwise (2,743 rows on the development machine). `src/kiss/scripts/backfill_task_metadata.py` fills tags and chat summaries in batches of 500 and SEA values per parent task.
 
-## 11. Git worktrees, merging and auto-commit
+## 12. Git worktrees, merging and auto-commit
 
 - With "Use worktree" on (default), a task the classifier marks as development runs in its own worktree under `<repo>/.kiss-worktrees/` on a `kiss/wt-*` branch; the main checkout's `node_modules` directories are symlinked in; `core.untrackedCache` is enabled when unset (an existing setting is preserved). **NEW cache**
 - **Worktree pool** **NEW**: one spare per repository, registered with `git worktree add --no-checkout` under the repo lock and populated outside it; prewarmed at daemon start (`prewarm_worktree_pool`), consumed by the next task, refilled after a worktree task ends; disabled by `KISS_DISABLE_WORKTREE_POOL` (the test suite sets it).
@@ -241,7 +268,7 @@ Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, 
 - **Orphan recovery**: `sweep_orphaned_state` and `reclaim_orphaned_worktrees` clean up after a crashed daemon; the `owner` column in `task_history` records the process token; a stale stop signal is cleared before deferred disposal so a later "cron list" is not refused with "A worktree merge is in progress" **NEW**.
 - 3,197 of 27,673 task rows carry `is_worktree = 1`; 3,966 of 6,457 top-level tasks ran with auto-commit on.
 
-## 12. Persistent memory and repository knowledge
+## 13. Persistent memory and repository knowledge
 
 `kiss.core.memoryfield` (`pages.py`, `index.py`, `tools.py`, `evaluate.py`; 2,431 lines):
 
@@ -253,7 +280,7 @@ Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, 
 - **Memory sync on deploy** **NEW**: `rsorcar` step 4c streams pages and tombstones both ways as tar over ssh and merges with `merge_memory_pages.py` (newest `updated` wins, mtime tie-break for hand edits, same-second conflicts named on stdout, tombstones propagate, indexes never copied); clock skew between machines is measured first and widens the tolerance.
 - **Recall evaluation**: `python -m kiss.core.memoryfield.evaluate` builds a memory from past tasks and reports Recall@1/3/5 and MRR for vector, hashed, BM25 and hybrid retrievers; `src/kiss/scripts/memory_search_eval.py` runs a YAML question set (76 questions for the `kiss` memory) with a `--min-recall5` gate.
 
-## 13. The kiss-web daemon and remote web app
+## 14. The kiss-web daemon and remote web app
 
 `src/kiss/server/` (31 modules, 37,727 lines; `web_server.py` 10,881). One daemon per machine owns the agents, the tab registry, the cron scheduler, the SEA watcher, the worktree pool, the browser tab service, the file index and the voice pipeline.
 
@@ -268,7 +295,7 @@ Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, 
 - **Resilience**: stall watchdog (`faulthandler` dump after 60 s of a blocked GIL, disarmed at shutdown **NEW**), `_MAX_INPUT_HISTORY` 500, service worker cache `kiss-shell-<version>` (`/media/*` cache-first, `/` network-first with offline shell, `/ws`, `/api/*`, `/trajectories` and the voice model never intercepted), forced restart from the extension when the daemon is wedged **NEW**, "Reset Server" with an in-panel confirmation when a task is running.
 - **Trajectory sharing**: `shareChat` writes `reports/chat-<id>.html` with `share.js` (collapsible think panels, nested `run_parallel` groups, a sub-agent tab bar, light/dark theme).
 
-## 14. Chat client features
+## 15. Chat client features
 
 One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 lines) render the VS Code sidebar chat, each editor tab, the History view, Task Info and the remote app.
 
@@ -283,20 +310,20 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 - **Look and feel** **NEW**: 86 root design tokens in `main.css` (`--fs-xs` … `--fs-2xl` font scale, spacing, radii, shadows, 17-layer z-index scale, motion) with 67 remote overrides; unified welcome page with the product logo (suggestion chips removed); themed tips popup that reopens once per device after every update; light theme default on the remote app.
 - **Extension host**: `DependencyInstaller.ts` installs uv 0.12.19 and Git (MinGit 2.55.0.5 on Windows) while `install.sh` installs Node; PyPI update check at most every 6 h with Update / Update when idle / Snooze; automatic window reload after `install.sh` finishes **NEW**; VSIX excludes `**/*.kiss-rescued-*` siblings **NEW**.
 
-## 15. Browser, web research and sign-in hand-off
+## 16. Browser, web research and sign-in hand-off
 
 - **Agent browser**: Patchright (Chromium) driven by `WebUseTool`; accessibility-tree page content with `[N]` ids, screenshots, typing, scrolling; persistent cookies and logins across tasks; `show_browser()` puts the live page in the KISS Browser tab on every surface so the user can solve CAPTCHAs or log in while the agent keeps driving it **NEW**.
 - **Web research protocol** (SYSTEM.md): at least 10 distinct sites per research session via `go_to_url` (curl/wget do not count), a running `./tmp/information-<id>.md` with a visited counter, exceptions for real-time lookups (1 authoritative site); when Google blocks, open the search in the visible browser and ask the user for the bot check.
 - **Sign-in hand-off** **NEW**: `browser_handoff.open_for_user(url)` tries the streamed tab first, then the machine's default browser, else reports the URL; `portal_handoff` is what channel auth tools call, so OAuth consent, device-code, QR and portal pages appear in the tab without asking the user to open a link.
 - 9,961 `go_to_url`, 655 `screenshot`, 525 `click`, 190 `get_page_content` and 48 `show_browser` calls are recorded in the task database.
 
-## 16. Voice
+## 17. Voice
 
 - In-page wake-word listener (`voice.js` + `vosk.js`) and a host-side listener (`voiceWake.ts`, `voice_wake.py`); the wake phrase is **"Hey Sorcar"** (changed from "Sorcar" on 09-26); sensitivity 0-100 in Settings; spoken text is either submitted at once or inserted at the cursor ("Auto submit spoken task"); an acknowledgement clip (`working-on-it.mp3`) plays when a spoken task starts.
 - Spoken input arrives as `Speaker #n:` text; the agent answers with `talk(language, text, emotion)` (emotions such as calm, cheerful, curious, serious, warm), played on every device with the task's tab open (`talk_player.py`); TTS spend folds into the task.
 - 116 top-level voice tasks and 265 `talk` calls recorded.
 
-## 17. Messaging and third-party agents
+## 18. Messaging and third-party agents
 
 `src/kiss/agents/third_party_agents/` holds **44 agents**, one folder each (`<name>/<name>_sea.py`), plus `muse_auth/`, `auth_status.py`, `govee.py` (Govee lights CLI, not one of the 44) and shared helpers (`_channel_agent_utils.py` 2,040 lines, `_channel_cli.py`, `_composio_google.py`, `_device_auth.py`, `_oauth_apps.py`, `_overleaf_realtime.py`).
 
@@ -309,7 +336,7 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 - **Muse auth**: a credential-isolation daemon holding real tokens in a vault and handing surrogate tokens to 18 connectors (17 SEAs plus Govee) under a host allow-list and read/write policy; CLI verbs `status, import, grant, revoke, audit, clear, daemon, stop, export`; daemon spawn serialised behind `spawn.lock` **NEW**; Microsoft Teams requires it; `KISS_MUSE_AUTH=0` opts out.
 - Recorded use: `slack_sea` 33 runs, `gmail_sea` 16, `github_sea` 5, `whatsapp_sea` 3, `gcal_sea` 2 in the `sea` column; 109 `list_messages`, 37 `check_slack_auth`, 36 `post_message`, 22 `check_gmail_auth` tool calls.
 
-## 18. Scheduled automations
+## 19. Scheduled automations
 
 `cron_agent.py` (1,813 lines) is an agent script dispatched with `run_agent(agent="cron", task=...)`; only that session holds the `cron_job` tool, so the chat agent never edits schedules directly.
 
@@ -320,7 +347,7 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 - **Auto-scheduled jobs** **NEW**: picking `autorouter` ensures "Weekly rsi7d: autorouter evidence and prompt (Sat 1am PT)" (`0 1 * * 6`, claude-fable-5-1, $25 + $5 relay, 2 h nested run inside a 2 h 10 min job); `/git_extract_knowledge` ensures "git-knowledge daily update: <repo>" at 04:00 PT.
 - The Schedule subpanel lists jobs with next-run times and copy buttons. On the development machine 12 jobs are configured (6 prompt, 6 command; 10 enabled): daily test fix, README update, cost audit, model update, knowledge refresh, two weekly rsi7d jobs, a Slack gateway every minute, a 4-hourly sync of `sorcar.db` and memories to a shared machine, a nightly work index, and two paused reinstall jobs. 180 top-level tasks mention cron; 109 `cron_job` calls are recorded.
 
-## 19. Installation, deployment, Docker and release
+## 20. Installation, deployment, Docker and release
 
 - **`install.sh`** (73,902 bytes): re-executes under `setsid`, takes a cross-process `flock` (dead holders no longer block retries **NEW**), five steps (git, Node **v22.23.3** **NEW pin**, VS Code CLI, extension build, extension install), installs the `rsorcar` and `sorcar-docker` launchers, applies the `.brand/` overlay **NEW**, and finally waits up to 900 s for the daemon and opens the web app (`kiss-web --trust-ca`, tunnel URL on a remote) **NEW**; `KISS_SKIP_LAUNCH`, `KISS_NONINTERACTIVE`, `KISS_CODE_CLI` control it. The Python package is `kiss-agent-framework` on PyPI; the extension is `ksenxx.kiss-sorcar` on the Marketplace.
 - **`rsorcar user@host`** (57,275 bytes), ten steps: ssh check and prerequisites, refuse to restart a remote with a running task unless `SORCAR_FORCE_RESTART=1`, disk headroom check, copy `~/.ssh` (never `authorized_keys`), two-way repository sync through `origin` (never force-push, never a `kiss/wt-*` branch), API keys only to a remote that has none with a probe that fails closed **NEW**, two-way `sorcar.db` merge, **memory sync with tombstones and clock-skew tolerance** **NEW**, sync of `AUTOROUTER.md` and `MODEL_DECISIONS.md` **NEW**, remote `install.sh` (code-server when no `code` CLI), `kiss-web` as a lingering systemd user service, Cloudflare tunnel with ntfy notification, GitHub credentials over stdin, public-URL verification, local `install.sh`. Thirteen `SORCAR_*` environment overrides.
@@ -328,19 +355,13 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 - **Release** (`scripts/release.sh`, 13 steps): purge private paths from public history, bump the version in `_version.py`, README, SYSTEM.md and `package.json`, build the VSIX into the release commit, push filtered history and tag to `ksenxx/kiss_ai`, GitHub release, PyPI publish (100 MiB per-file check before upload; sdist restricted to `src/kiss` and `projects/swedefend` **NEW**), Marketplace publish, local reinstall.
 - **Windows**: MinGit 2.55.0.5 and uv installed by the extension; the 2026-09-24 Windows test run fixed cross-platform bugs in memoryfield, `sorcar_md`, and channel tests.
 
-## 20. Developer tooling and tests
+## 21. Developer tooling and tests
 
 - `uv run check --full`: `uv sync`, `generate-api-docs`, `compileall`, `ruff`, `mypy`, then `pyright` and, when the extension's `node_modules` and npm are present, `npm run typecheck` and `npm run lint` (eslint, stylelint, htmlhint); failed stages are listed at the end with their output. `--no-clean` and `--clean-only` flags; the extension version is synced first.
 - **Tests**: 1,360 `test_*.py` files with 10,682 test functions (382,938 lines across the 1,405 Python files under `src/kiss/tests/`), 369 JavaScript test files under `src/kiss/agents/vscode/test/` (`node test/run-all.js`); the suite disables the worktree pool and the classifier, raises the open-file soft limit to 4,096, and pins `pytest>=9.0.3,<9.1`.
 - **Subprocess reaper** **NEW** (`kiss.tests.subprocess_reaper`): wraps `Popen` so every child is attributed to the running test, fixture or session and swept with SIGTERM, 5 s, SIGKILL, emitting `LeakedSubprocessWarning` with the command; written after a run left 529 detached `muse_auth.daemon` processes.
 - **Testing policy** (SYSTEM.md): end-to-end tests only, no mocks or structural tests, 100% branch coverage of new code where reachable, test splits run in parallel with `run_commands_parallel` on `cores - 2` workers, a load-dependent flake is named rather than chased.
 - **Repository hygiene**: worktree tasks get `node_modules` symlinks and must compile the extension once; the Bash tool refuses commands naming the main checkout path from inside a worktree; `tmp/` for scratch files; `reports/` for deliverables.
-
-## 21. Research drivers and website
-
-**Prompt-level drivers** in SYSTEM.md: the 7-step AI discovery loop (baseline → SOTA search → `tmp/ideas.md` → pairwise judging → implement and evaluate → `tmp/explored-ideas.md` → repeat until the metric is met with a held-out check), adversarial testing (one sub-task breaks, another fixes), adversarial training (iterated adversarial datasets), Deep Work (read the target state fully, concrete values, planned changes, a verification per change), and the 10-site web research rule.
-
-**Website** (`website/kisssorcar.github.io/`): 11 docs pages, 6 blog pages, `privacy.html` **NEW**, `llms.txt` / `llms-full.txt`, sitemap.
 
 ## 22. What the trajectories show
 
