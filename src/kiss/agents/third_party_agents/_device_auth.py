@@ -17,10 +17,13 @@ reach the agent's host:
 * Nextcloud's Login Flow v2 — needs no client registration at all.
 
 Both work the same way: ``authenticate_<service>()`` starts a session,
-opens the sign-in URL in the USER's default browser when this machine
-has one, and hands back that URL (plus a short code where the provider
-does not pre-fill it) so the user can also open it by hand; a background
-thread polls the provider until the approval lands; and
+opens the sign-in URL for the USER (in the Browser tab streamed to every
+KISS surface when the kiss-web daemon runs this agent, else in the
+user's default browser on this machine; see
+:mod:`kiss.core.browser_handoff`), and hands back that URL (plus a
+short code where the provider does not pre-fill it) so the agent can
+relay it when no page could be shown; a background thread polls the
+provider until the approval lands; and
 ``finish_<service>_auth()`` collects the result and enrolls the
 credential.  The sign-in page itself is never driven by the agent, and
 the user's password or second factor is never requested.
@@ -42,7 +45,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 import requests
 
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import BROWSER_TAB, DEFAULT_BROWSER, open_for_user
 
 DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 USER_AGENT = PRODUCT_NAME
@@ -613,7 +616,7 @@ def _origin(url: str) -> tuple[str, str, int | None]:
 
 
 def consent_instructions(
-    service: str, label: str, session: ConsentSession, browser_opened: bool = False
+    service: str, label: str, session: ConsentSession, opened_in: str = ""
 ) -> str:
     """Build the agent-facing hand-off text for a started session.
 
@@ -621,28 +624,47 @@ def consent_instructions(
         service: Connector service name (used in the finish tool name).
         label: Human-readable service label.
         session: The session whose URL and code the user needs.
-        browser_opened: Whether the sign-in page was already opened in
-            the user's default browser on this machine.
+        opened_in: Where :func:`~kiss.core.browser_handoff.open_for_user`
+            put the sign-in page: ``BROWSER_TAB`` (the streamed Browser
+            tab every KISS surface switched to), ``DEFAULT_BROWSER``
+            (the user's browser on this machine) or ``""`` (nowhere).
 
     Returns:
-        Step-by-step instructions: the user signs in and approves in
-        their OWN browser (already open when *browser_opened*), the agent
-        shows the URL and code regardless, then calls the finish tool.
+        Step-by-step instructions: the USER signs in and approves; in the
+        Browser tab the agent must not hand out the URL at all, otherwise
+        it shows the URL and code, then it calls the finish tool.
     """
     code_step = ""
     if session.user_code and session.code_prefilled:
         code_step = f" and confirm the code shown is {session.user_code}"
     elif session.user_code:
         code_step = f" and enter the code {session.user_code} when the page asks for it"
-    if browser_opened:
+    minutes = max(session.expires_in // 60, 1)
+    if opened_in == BROWSER_TAB:
+        return (
+            f"Connect {label} the way the Muse app does: the USER signs in and "
+            "approves; you only tell them what to do. The sign-in page is already "
+            "open in the Browser tab that every KISS surface (web app and VS Code) "
+            "has just switched to, so the user is looking at it now: do NOT ask "
+            "them to open a URL and do NOT give them the URL to open; do NOT open "
+            f"this URL or any {label} sign-in page in your built-in browser, and "
+            "never ask for or type the user's password or 2FA code. Steps: 1) Call "
+            f"ask_user_question() telling the user to sign in to {label} in the "
+            f"Browser tab that just opened{code_step}, approve the access request, "
+            f"and reply here when done (the page is valid for about {minutes} "
+            "minutes); only if they answer that they cannot see the page, give "
+            f"them {session.verification_uri} to open themselves. 2) Call "
+            f"finish_{service}_auth(); if it returns 'pending', wait a few seconds "
+            "and call it again. Nothing has to be pasted back."
+            + _loopback_step(session)
+        )
+    if opened_in == DEFAULT_BROWSER:
         opened = (
             "The sign-in page has just been opened in the user's default browser "
             "on this machine; "
         )
     else:
-        opened = (
-            "No browser could be opened from this machine (headless or remote); "
-        )
+        opened = "No browser could be opened from this machine (headless or remote); "
     return (
         f"Connect {label} the way the Muse app does: the USER signs in and "
         f"approves; you only relay the link and code. {opened}do NOT open this "
@@ -651,10 +673,9 @@ def consent_instructions(
         "ask_user_question() giving the user this exact URL to open in their "
         f"OWN browser if no window appeared: {session.verification_uri} — tell "
         f"them to sign in to {label}{code_step}, approve the access request, and "
-        "reply here when done (the link is valid for about "
-        f"{max(session.expires_in // 60, 1)} minutes). 2) Call "
-        f"finish_{service}_auth(); if it returns 'pending', wait a few seconds "
-        "and call it again. Nothing has to be pasted back."
+        f"reply here when done (the link is valid for about {minutes} minutes). "
+        f"2) Call finish_{service}_auth(); if it returns 'pending', wait a few "
+        "seconds and call it again. Nothing has to be pasted back."
         + _loopback_step(session)
     )
 
@@ -682,11 +703,12 @@ def _loopback_step(session: ConsentSession) -> str:
 def consent_required(service: str, label: str, session: ConsentSession) -> dict[str, Any]:
     """Build the ``authenticate_<service>()`` answer for a started session.
 
-    The verification page is opened in the user's default browser when
-    this process can reach one (see
-    :func:`~kiss.core.browser_handoff.open_in_default_browser`);
-    the URL and code are returned in every case so the agent can show
-    them for a manual sign-in.
+    The verification page is opened for the user by
+    :func:`~kiss.core.browser_handoff.open_for_user`: in the streamed
+    Browser tab when the kiss-web daemon runs this agent, else in the
+    user's default browser when this machine has one.  The URL and code
+    are returned in every case so the agent can relay them when the
+    user cannot see the page.
 
     Args:
         service: Connector service name.
@@ -695,18 +717,21 @@ def consent_required(service: str, label: str, session: ConsentSession) -> dict[
 
     Returns:
         A JSON-ready dict with ``status: consent_required``, the URL, the
-        code (empty when pre-filled), the expiry, whether the page was
-        opened in the user's browser, and the instructions.
+        code (empty when pre-filled), the expiry, where the page was
+        opened (``opened_in``: ``browser_tab``, ``default_browser`` or
+        ``""``), ``browser_opened`` (whether it was opened anywhere), and
+        the instructions.
     """
-    browser_opened = open_in_default_browser(session.verification_uri)
+    opened_in = open_for_user(session.verification_uri)
     return {
         "ok": True,
         "status": "consent_required",
         "verification_uri": session.verification_uri,
         "user_code": session.user_code,
         "expires_in": session.expires_in,
-        "browser_opened": browser_opened,
-        "instructions": consent_instructions(service, label, session, browser_opened),
+        "opened_in": opened_in,
+        "browser_opened": bool(opened_in),
+        "instructions": consent_instructions(service, label, session, opened_in),
     }
 
 
@@ -823,15 +848,19 @@ def connect_prompt(service: str, label: str, start_call: str, prerequisite: str)
         "never re-run authentication over a valid credential.\n"
         f"2. To connect, call {start_call}. {prerequisite} It returns "
         "status 'consent_required' with a verification URL (and a short code when "
-        "the provider does not pre-fill it) and tries by itself to open that URL in "
-        "the user's default browser on this machine ('browser_opened' tells you "
-        "whether it could).\n"
+        "the provider does not pre-fill it) and opens that page for the user by "
+        "itself: 'opened_in' is 'browser_tab' when it is already showing in the "
+        "Browser tab on every KISS surface, 'default_browser' when it opened in the "
+        "user's browser on this machine, or empty when nothing could be opened.\n"
         "3. The USER completes the sign-in, exactly like clicking Connect in the "
-        "Muse app: ALWAYS call ask_user_question() with that URL (and code) so they "
-        f"can open it in their OWN browser if no window appeared, sign in to {label}, "
-        "approve, and reply when done. Do NOT open the URL or any sign-in page in "
-        "your built-in browser, do not retry or relaunch the browser, and never ask "
-        "for or type the user's password or 2FA code. Nothing is pasted back.\n"
+        "Muse app, and you follow the tool's 'instructions': when the page is in "
+        "the Browser tab, call ask_user_question() telling the user to sign in to "
+        f"{label} there (and the code, if any) and reply when done — never ask them "
+        "to open a URL; otherwise call ask_user_question() with the URL (and code) "
+        "so they can open it in their OWN browser. Do NOT open the URL or any "
+        "sign-in page in your built-in browser, do not retry or relaunch the "
+        "browser, and never ask for or type the user's password or 2FA code. "
+        "Nothing is pasted back.\n"
         f"4. Then call finish_{service}_auth(); if it returns 'pending', wait a few "
         "seconds and call it again. Confirm the result with "
         f"check_{service}_auth()."

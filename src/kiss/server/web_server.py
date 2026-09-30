@@ -95,6 +95,7 @@ from kiss.agents.sorcar.persistence import (
     _queue_chat_event,
 )
 from kiss.core.brand import BRAND, PRODUCT_NAME
+from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
@@ -9725,6 +9726,12 @@ class RemoteAccessServer:
             await self._bind_uds()
 
         try:
+            # Sign-in pages that connectors hand to the user open in the
+            # streamed Browser tab, focused on every surface, while this
+            # daemon is up (kiss.core.browser_handoff.open_for_user).
+            # Inside the rollback scope: a setup that fails or is
+            # cancelled unregisters it again in _close_partial_setup.
+            set_browser_tab_opener(self._vscode_server.browser_tabs.open_for_user)
             await self._setup_server_after_uds()
         except BaseException:
             # Rollback (F4-04): a TLS/WSS/tunnel failure or a
@@ -9865,6 +9872,9 @@ class RemoteAccessServer:
 
     def _close_partial_setup(self) -> None:
         """Tear down listeners bound by a failed/cancelled ``_setup_server``."""
+        # No surfaces will ever attach to this server: sign-in pages
+        # must not be sent to its Browser tab.
+        set_browser_tab_opener(None)
         if self._uds_server is not None:
             self._uds_server.close()
             self._uds_server = None
@@ -10626,6 +10636,9 @@ class RemoteAccessServer:
             # (e.g. a briefly unwritable KISS dir); no-op when the
             # last save succeeded.
             self._vscode_server.tab_registry.flush()
+            # The Browser tab dies with this server: a later hand-off in
+            # this process must fall back to the default browser.
+            set_browser_tab_opener(None)
             # Also stop the SEA registry watcher on the blocking
             # start() cleanup path (KeyboardInterrupt / pre-loop
             # SIGTERM).  The async ``stop_async`` path unhooks it via
@@ -10770,6 +10783,7 @@ class RemoteAccessServer:
             await self._voice_wake.stop_all()
             # The streamed browser (if one was opened) is a child of this
             # daemon: close it so no orphan browser survives shutdown.
+            set_browser_tab_opener(None)
             await asyncio.to_thread(self._vscode_server.browser_tabs.shutdown)
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is

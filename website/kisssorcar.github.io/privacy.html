@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy Policy - KISS Sorcar</title>
-  <meta name="description" content="How KISS Sorcar handles your data, including Google user data accessed through Gmail and Google Workspace connectors.">
+  <meta name="description" content="How KISS Sorcar handles your data, including Google user data reached through Composio by the Gmail, Google Calendar, Drive, Docs, Sheets and Chat agents.">
   <link rel="canonical" href="https://kisssorcar.github.io/privacy.html">
   <style>
     body { font-family: Roboto, system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.6; color: #1f2328; }
@@ -13,36 +13,70 @@
     .updated { color: #57606a; margin-top: 0; }
     a { color: #0969da; }
     code { font-family: "Roboto Mono", monospace; font-size: 0.92em; background: #f6f8fa; padding: 0 0.25em; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95em; }
+    th, td { border: 1px solid #d0d7de; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+    th { background: #f6f8fa; }
   </style>
 </head>
 <body>
   <p><a href="/">&larr; KISS Sorcar</a></p>
   <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: September 26, 2026</p>
+  <p class="updated">Last updated: September 30, 2026</p>
 
-  <p>KISS Sorcar is an open-source AI agent framework (<a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a>) that you install and run on your own computer. This policy explains what happens to your data when you use it, in particular when you connect a Google account through its Gmail, Google Calendar, Google Drive, Google Docs or Google Sheets connectors.</p>
+  <p>KISS Sorcar is an open-source AI agent framework (<a href="https://github.com/ksenxx/kiss_ai">github.com/ksenxx/kiss_ai</a>) that you install and run on your own computer. This policy explains what happens to your data when you use it, in particular when you connect a Google account so that its Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets or Google Chat agent can act for you. Those six agents reach Google through <a href="https://composio.dev">Composio</a>, a third-party service that holds the Google credentials and forwards the API calls. (The one exception is the Google Chat agent's bot mode, which calls Google directly with a service-account key you supply; see below.) This page describes that arrangement so you can judge whether it suits you.</p>
 
   <h2>Who operates KISS Sorcar</h2>
-  <p>KISS Sorcar is developed by Koushik Sen. There is no KISS Sorcar server or hosted service: the software runs entirely on your machine, and the developer does not receive, collect, store or have access to your data.</p>
+  <p>KISS Sorcar is developed by Koushik Sen. There is no KISS Sorcar server or hosted service: the software runs on your machine, and the developer does not receive, collect, store or have access to your data. Composio is operated by Sampark Inc. under its own <a href="https://composio.dev/privacy">privacy policy</a> and <a href="https://composio.dev/terms">terms</a>; you sign up with Composio directly, and the KISS Sorcar developer has no account of yours there and no access to your Composio project.</p>
 
-  <h2>Google user data we access</h2>
-  <p>When you connect a Google account, you grant the copy of KISS Sorcar on your machine an OAuth token for the scopes shown on Google's consent screen. For Gmail this is <code>https://www.googleapis.com/auth/gmail.modify</code>, which allows reading, composing, sending, labeling and moving email to the trash. It does not allow permanently deleting email. Other connectors request access to Calendar, Drive, Docs or Sheets.</p>
+  <h2>How a Google account is connected</h2>
+  <p>Google only lets verified OAuth applications request Gmail, Drive and similar scopes from arbitrary users, so KISS Sorcar does not ship a Google OAuth app of its own. Instead:</p>
+  <ol>
+    <li>You create a Composio project and give KISS Sorcar its API key, either as the <code>COMPOSIO_API_KEY</code> environment variable (which is read but never copied to disk) or once as a tool argument, in which case it is saved in <code>~/.kiss/third_party_agents/google/composio_api_key.json</code>, readable only by your user account. This key authorises the copy of KISS Sorcar on your machine to act on the Google accounts connected to your project; treat it like a password.</li>
+    <li>When you ask an agent to connect a service, it requests a <em>Connect Link</em> from Composio and shows you the URL (opening it in your default browser when the machine has one). You sign in to Google there and click Allow on Google's consent screen. The agent never asks for your Google password or a two-factor code, and the link expires after about ten minutes.</li>
+    <li>Google issues the access and refresh tokens to Composio, which stores them encrypted on its servers. KISS Sorcar never receives them: Composio redacts credential fields in every API answer. On your machine the agent records only the identifier of the connected account, in <code>~/.kiss/third_party_agents/&lt;service&gt;/composio.json</code>.</li>
+    <li>Every later Google API call is sent to Composio's proxy, which adds the Google token, forwards the request to Google and returns Google's response to your machine. Composio therefore sees the content of each request and response, for example the text of an email you asked the agent to read or send.</li>
+  </ol>
+  <p>Which Google application appears on the consent screen, and which scopes it asks for, is decided by the Composio <em>auth config</em> the connection goes through, not by KISS Sorcar. Unless <code>KISS_COMPOSIO_AUTH_CONFIG_&lt;SERVICE&gt;</code> names one, KISS Sorcar reuses the newest auth config for that service in your project, and creates a Composio-managed one, using Composio's own Google application and its scope set, when the project has none. The scopes are listed on the consent screen before you click Allow. If you would rather have the consent screen name an OAuth client you registered yourself, with scopes you chose, create a custom auth config in your Composio project and point KISS Sorcar at it with that variable (Google Chat requires this, because Composio has no managed Chat application). Composio still stores and uses the tokens in that case.</p>
 
-  <h2>How the data is used</h2>
+  <h2>What the agents do with Google data</h2>
+  <p>Regardless of the scopes granted, the agents only call the Google APIs needed for the tasks you give them:</p>
+  <table>
+    <tr><th>Agent</th><th>Operations</th></tr>
+    <tr><td>Gmail</td><td>Read the mailbox profile; list, search and read messages, threads and attachments; send and reply to email; create drafts; list and create labels and change the labels on a message; move messages to the trash and back. It has no tool that permanently deletes email.</td></tr>
+    <tr><td>Google Calendar</td><td>List calendars; list, read, create, update and delete events.</td></tr>
+    <tr><td>Google Drive</td><td>Search, read, download, upload, move and share files; create folders; move files to the trash.</td></tr>
+    <tr><td>Google Docs</td><td>Create, list, read and edit documents.</td></tr>
+    <tr><td>Google Sheets</td><td>Create, list and inspect spreadsheets; read, write, append and clear cell ranges; add sheets; apply Sheets API batch updates (formatting, resizing, charts, deleting sheets).</td></tr>
+    <tr><td>Google Chat</td><td>List, inspect and create spaces; list members; list, read, post, update and delete messages.</td></tr>
+  </table>
   <ul>
-    <li>Google data is accessed only to carry out tasks you give the agent, such as searching, summarizing, drafting or sending email.</li>
-    <li>To perform a task, the agent may send relevant content (for example the text of an email) to the large language model provider you have configured, such as Anthropic, OpenAI or Google. That transfer is governed by your agreement with that provider.</li>
-    <li>Google data is not sold, not used for advertising, and not used by the developer to train AI models.</li>
+    <li>Google data is accessed only to carry out a task you gave the agent or a schedule you set up yourself (for example a Google Chat gateway that polls a space at an interval you chose). Nothing is fetched otherwise.</li>
+    <li>To perform a task, the agent may send relevant content (for example the text of an email or a spreadsheet range) to the large language model provider you have configured, such as Anthropic, OpenAI or Google. That transfer is governed by your agreement with that provider.</li>
+    <li>Google data is not sold, not used for advertising, and not used by the developer to train AI models. The developer never sees it.</li>
   </ul>
 
-  <h2>Storage and security</h2>
-  <p>OAuth tokens are stored locally on your computer, in a local credential vault or in a file readable only by your user account (<code>~/.kiss/</code>). Task history is kept in a local database on your machine. Nothing is uploaded to the developer.</p>
+  <h2>What Composio stores</h2>
+  <p>Because Composio sits between KISS Sorcar and Google, its handling of your data matters as much as ours. According to Composio's own documentation at the time of writing:</p>
+  <ul>
+    <li>Composio stores the Google access and refresh tokens, encrypted at rest, and refreshes them itself (<a href="https://docs.composio.dev/docs/security/token-custody">token custody architecture</a>).</li>
+    <li>Composio keeps an execution log for every proxied call. By default that log includes the <strong>request arguments and the response data</strong>, not just metadata, and is retained for up to one year (<a href="https://docs.composio.dev/docs/security/data-retention">data retention</a>). Turning on <em>Zero Data Retention</em> in your project settings makes new logs keep metadata only; Composio offers it on paid plans. Files that pass through a tool call are staged in Composio's temporary storage for up to 24 hours.</li>
+    <li>Composio states that it does not use Google user data to train models, sell it or share it beyond what is needed to run its service, and that it follows Google's Limited Use requirements (<a href="https://composio.dev/privacy">Composio privacy policy</a>). Its sub-processor list and compliance reports are published at <a href="https://trust.composio.dev">trust.composio.dev</a>.</li>
+  </ul>
+  <p>These are Composio's commitments, which the KISS Sorcar developer cannot enforce or verify. If you cannot accept a third party holding your Google tokens and seeing your Google data in transit, do not connect a Google account through these agents; the <a href="https://github.com/ksenxx/kiss_ai/blob/main/connectors/README.md">MCP connector catalog</a> includes a Google Workspace server that runs locally with an OAuth client you register yourself and caches tokens on your machine.</p>
+
+  <h2>What stays on your computer</h2>
+  <p>KISS Sorcar keeps its state under <code>~/.kiss/</code> (or the directory named by <code>KISS_HOME</code>): a Composio API key passed as a tool argument, the connected-account identifier of each Google service, and the task history in a local database (your prompts, the agent's replies and tool results, which may include Google content the agent retrieved). If you configured the Google Chat agent as a bot with a Google service account instead of a Composio connection, a copy of that service account's key file is stored there too and the agent calls Google Chat directly with it. The Google agents store no Google OAuth token on your machine; the separate Google Workspace MCP connector mentioned above does cache its own tokens locally. Nothing is uploaded to the developer.</p>
 
   <h2>Sharing</h2>
-  <p>Your data is not shared with anyone except the model provider you choose, as described above, and Google itself when the agent calls Google APIs on your behalf.</p>
+  <p>Your data is shared with nobody except Composio, which relays the Google API calls as described above; Google itself, which serves them; and the model provider you chose, which receives what the agent decides to put into a prompt. A task that sends an email, posts to a Chat space or shares a Drive file discloses that content to the recipients you named.</p>
 
   <h2>Revoking access and deleting data</h2>
-  <p>You can revoke KISS Sorcar's access at any time at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. Deleting the <code>~/.kiss/</code> directory removes all locally stored tokens and task history.</p>
+  <ul>
+    <li>Ask the agent to clear its authentication (each Google agent has a <code>clear_&lt;service&gt;_auth</code> tool). This forgets the connection locally (for Google Chat, it also removes the stored service-account key copy) and asks Composio to delete the connected account; that remote deletion is attempted once and a failure is not reported, so check the Composio dashboard. Deleting the connected account does not by itself withdraw Google's grant, so also:</li>
+    <li>Revoke the grant at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>. It is listed under Composio's application name, or under your own application's name if you used a custom auth config.</li>
+    <li>Remove execution logs and connected accounts in the <a href="https://dashboard.composio.dev">Composio dashboard</a>, or ask Composio to delete your data as its privacy policy describes.</li>
+    <li>Delete the <code>~/.kiss/</code> directory (or your <code>KISS_HOME</code>) to remove the locally stored API key, connection identifiers and task history, and unset <code>COMPOSIO_API_KEY</code> if you configured the key that way.</li>
+  </ul>
 
   <h2>Google API Services User Data Policy</h2>
   <p>KISS Sorcar's use of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>

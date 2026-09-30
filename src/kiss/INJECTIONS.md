@@ -12,7 +12,7 @@ Can you git pull origin/<current-branch>, merge with <current-branch>, and push?
 
 ## Trick
 
-Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. The channel's authentication tools open the sign-in page or developer portal in my default browser when they can and return its URL (and code): always show me that URL and code with ask_user_question so I can finish in my OWN browser if no window appeared. Never drive sign-in pages or developer portals with your own browser tools, do not retry or relaunch the browser, and never ask for or type my password or 2FA code. When I paste back a token or redirect URL, finish the authentication with the channel's tools and verify with its check tool.
+Authenticate on my behalf using claude-fable-5-1 as the model. Check the channel's existing credentials first and stop if they are valid. The channel's authentication tools open the sign-in page or developer portal for me by themselves and say where it went ('opened_in'): when it is in the Browser tab, tell me with ask_user_question to finish there (and the code, if any) and never ask me to open a URL; only when it opened in my default browser or nowhere, show me the URL and code with ask_user_question so I can finish in my OWN browser. Never drive sign-in pages or developer portals with your own browser tools, do not retry or relaunch the browser, and never ask for or type my password or 2FA code. When I paste back a token or redirect URL, finish the authentication with the channel's tools and verify with its check tool.
 
 ## Trick
 

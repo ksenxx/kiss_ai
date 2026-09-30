@@ -6195,7 +6195,7 @@
       '',
       'Make it as autonomous as possible, like a one-tap OAuth connect:',
       '- Reuse anything already on this machine first (existing tokens, CLI logins, config files, environment variables).',
-      '- Prefer an OAuth consent or device-code flow: open the sign-in / approval page in my default browser yourself and poll or listen for completion, so all I do is sign in and click Approve.',
+      '- Prefer an OAuth consent or device-code flow: the authentication tools open the sign-in / approval page for me (in the Browser tab I am looking at, else my default browser) and poll or listen for completion, so all I do is sign in and click Approve. Never ask me to open a URL when the page is already in the Browser tab.',
       '- When the service needs a developer app, API key or token, open the exact console page for it and walk me through it one step at a time; read values back from the page when you can.',
       '- Ask me only for what cannot be automated (signing in, 2FA, CAPTCHA, approving consent, a secret only I can see), one short question at a time. Never ask for my password in chat.',
       '',

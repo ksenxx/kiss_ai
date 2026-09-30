@@ -963,7 +963,7 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 16 bundled SEA folders register
+  folder can shadow them.  The 17 bundled SEA folders register
   these commands: `/ask` (answers a question about the current task
   from a digest of its persisted events; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
@@ -991,7 +991,10 @@ class TaskResult:
   (runs the command with the `bash` tool profile), `/skillopt`
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),
-  `/write_paper` (writes or revises a research paper), and `/dummy`
+  `/write` (writes prose for a general audience in concise, professional
+  American English that reads as human-written; its only getters are
+  `description()` and `add_to_system_prompt()`), `/write_paper` (writes
+  or revises a research paper), and `/dummy`
   (`seas/dummy/dummy_sea.py`, an SEA whose only getter is
   `description()`, is what `run_agent` runs when its `agent` argument
   is empty).  The other modules in that package
