@@ -28,24 +28,55 @@ import re
 from pathlib import Path
 
 #: ``_END`` closes a shell word: whitespace, end of command, a separator, a
-#: redirection or a comment.  ``_CMD`` is where a command name may start: the
-#: beginning or a separator, then optional ``sudo`` or environment assignments
-#: and an optional directory prefix.
+#: redirection or a comment.  ``_WORD`` is one argument of a simple command:
+#: it stops at a separator, a redirection or a newline and cannot start a
+#: comment, so ``_ARGS`` (zero or more arguments) never crosses into the next
+#: command or a trailing ``# comment``.  ``_CMD`` is where a command name may
+#: start: the beginning or a separator, then optional environment assignments,
+#: one ``sudo`` or ``env`` wrapper with its own arguments (``sudo -n``, ``sudo
+#: -u root``, ``env DEBUG=1``) and an optional directory prefix.  Each group
+#: tokenises the text in exactly one way (words are delimited by blanks and
+#: assignments contain ``=``), so matching stays linear in the command length;
+#: a repeated wrapper (``sudo -n sudo -n …``) is absorbed by the single
+#: wrapper's argument list instead of a nested repetition, which backtracked
+#: exponentially.
 _END = r"(?=\s|$|[;&|)\"'>#])"
-_CMD = r"(?:^|[;&|(\n])\s*(?:sudo\s+|\w+=\S*\s+)*(?:\S*/)?"
+_WORD = r"[^\s;&|<>()#][^\s;&|<>()]*"
+_ARGS = r"(?:" + _WORD + r"[ \t]+)*"
+_ARGS_LAZY = r"(?:" + _WORD + r"[ \t]+)*?"
+_CMD = (
+    r"(?:^|[;&|(\n])\s*(?:\w+=\S*[ \t]+)*(?:(?:sudo|env)(?:[ \t]+" + _WORD + r")*?[ \t]+)?"
+    r"(?:\S*/)?"
+)
+#: A path operand: quoted on both sides or not at all, so ``"/work backup"`` is
+#: not read as ``/work``; the ``{path}`` placeholder takes the path pattern.
+_QUOTED_OR_BARE = r"(?:'{path}'|\"{path}\"|{path})"
 
 #: Template of the destructive-command pattern; ``{workdir}`` is the escaped
-#: working directory without its trailing slash (``/`` for the root).  The
-#: ``rm`` operand may follow options and other operands of the same shell
-#: command (``rm -rf a b /``; ``_OPERAND`` stops at a separator, a redirection
-#: or a newline), with an optional trailing ``/``, ``*`` or ``/*``.  The
-#: patterns are plain regexes on the command text: a quoted mention such as
+#: working directory without its trailing slash (``/`` for the root).
+#:
+#: * ``kill -1`` targets every process unless ``-1`` is the signal of a
+#:   ``kill -1 <pid>``: a following pid, ``$var``, ``%job`` or backquote
+#:   (optionally quoted) exempts ``-1`` only when it is the first argument
+#:   (after ``kill -9 -1 1234`` the signal is taken, so ``-1`` is the
+#:   all-processes target).
+#: * ``pkill -f .`` may carry options before and after ``-f``, and ``-f`` may
+#:   be combined with other short flags (``pkill -ef .``).
+#: * The ``rm`` operand may follow options and other operands of the same
+#:   command (``rm -rf a b /``), with an optional trailing ``/``, ``*`` or
+#:   ``/*``.
+#:
+#: The patterns are plain regexes on the command text: a quoted mention such as
 #: ``echo 'a; rm -rf /'`` is refused too, and the model rephrases it.
-_OPERAND = r"(?:[^\s;&|<>()]+[ \t]+)*"
+_PKILL_FULL = r"(?:-[a-zA-Z0-9]*f[a-zA-Z0-9]*|--full)"
 DESTRUCTIVE_COMMANDS = (
-    _CMD + r"(?:kill\s+(?:\S+\s+)*?-1" + _END + r"(?!\s+[\d$%`])"
-    + r"|pkill\s+(?:-\S+\s+)*(?:-f|--full)\s+['\"]?\.(?:\*)?['\"]?" + _END
-    + r"|rm[ \t]+" + _OPERAND + r"['\"]?(?:/|{workdir})/?\*?['\"]?" + _END + r")"
+    _CMD + r"(?:kill[ \t]+(?:-1" + _END + r"(?![ \t]+['\"]?[\d$%`])|" + _WORD + r"[ \t]+"
+    + _ARGS + r"-1" + _END + r")"
+    # The words before the first ``-f`` are matched greedily with a lookahead
+    # that stops at it, so the split is unique and the match stays linear.
+    + r"|pkill[ \t]+(?:(?!" + _PKILL_FULL + r"[ \t])" + _WORD + r"[ \t]+)*" + _PKILL_FULL
+    + r"[ \t]+" + _ARGS_LAZY + _QUOTED_OR_BARE.format(path=r"\.(?:\*)?") + _END
+    + r"|rm[ \t]+" + _ARGS + _QUOTED_OR_BARE.format(path=r"(?:/|{workdir})/?\*?") + _END + r")"
 )
 
 #: Text the model sees instead of running a destructive command.
@@ -56,11 +87,13 @@ DESTRUCTIVE_VERDICT = (
     "only files you created."
 )
 
-#: Commands whose runtime is dominated by package managers or compilers.
+#: Commands whose runtime is dominated by package managers or compilers.  Any
+#: arguments may separate the tool from its subcommand (``pip --cache-dir
+#: /tmp/pip install``, ``uv pip install``, ``npm run build``).
 INSTALL_COMMANDS = re.compile(
-    _CMD + r"(?:(?:apt-get|apt|dpkg|pip3?|python3?\s+-m\s+pip|uv\s+pip|uv|conda|mamba|npm|yarn|"
-    r"pnpm|cargo|gem|go)\s+(?:-\S+\s+)*(?:run\s+)?"
-    r"(?:install|ci|sync|add|update|upgrade|build|configure)"
+    _CMD + r"(?:(?:apt-get|apt|dpkg|pip3?|python3?[ \t]+-m[ \t]+pip|uv|conda|mamba|npm|yarn|"
+    r"pnpm|cargo|gem|go)[ \t]+" + _ARGS_LAZY
+    + r"(?:install|ci|sync|add|update|upgrade|build|configure)"
     + _END + r"|(?:make|cmake|ninja)" + _END + r")"
 )
 

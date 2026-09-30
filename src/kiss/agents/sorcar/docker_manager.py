@@ -17,7 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any
 
 import docker
@@ -103,7 +103,7 @@ def _join_demuxed(stdout_parts: list[bytes], stderr_parts: list[bytes]) -> str:
 
 
 def _drain_exec_stream(
-    output_gen: Iterator[Any],
+    output_gen: Any,
     out_queue: "queue.Queue[tuple[bool, str] | None]",
 ) -> None:
     """Decode a docker exec stream onto *out_queue* until it ends.
@@ -113,7 +113,8 @@ def _drain_exec_stream(
     their own incremental decoder because their frames interleave.
 
     Args:
-        output_gen: The demuxed generator from ``exec_start``.
+        output_gen: The demuxed ``CancellableStream`` from ``exec_start``
+            (typed ``Any`` because the SDK exposes no stub for it).
         out_queue: Receives ``(is_stderr, text)`` items and a final
             ``None`` sentinel marking end of stream.
     """
@@ -133,6 +134,10 @@ def _drain_exec_stream(
     except Exception:  # pragma: no cover — docker socket error mid-stream
         logger.debug("docker exec stream failed", exc_info=True)
     finally:
+        # Close the HTTP response, not the stream, for the reasons given in
+        # ``DockerManager._exec``: the SDK leaves it to the caller and the
+        # stream's own ``close()`` keeps the socket descriptor until GC.
+        getattr(output_gen, "_response", output_gen).close()
         for is_stderr, decoder in decoders.items():
             trailing = decoder.decode(b"", True)
             if trailing:

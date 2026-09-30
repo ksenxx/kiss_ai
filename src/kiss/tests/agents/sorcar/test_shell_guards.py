@@ -52,6 +52,18 @@ BLOCKED = [
     "rm -rf /tmp/one {wd}",
     "rm -rf /*",
     "rm -rf {wd}*",
+    "kill -9 -1 1234",
+    "kill -s TERM -1",
+    "pkill -f -9 .",
+    "sudo -n rm -rf {wd}",
+    "sudo -u root rm -rf /",
+    "cd {wd} && sudo -n kill -9 -1",
+    "pkill -ef .",
+    "env DEBUG=1 rm -rf {wd}",
+    "sudo env DEBUG=1 rm -rf /",
+    "sudo -n sudo -n rm -rf {wd}",
+    'rm -rf "{wd}"',
+    "rm -rf \"some dir\" {wd}",
 ]
 
 ALLOWED = [
@@ -73,6 +85,18 @@ ALLOWED = [
     "rm file.txt\nprintf '%s' {wd}",
     "rm -f out.log > {wd}/log.txt",
     "rm -rf ./build | tee {wd}/log.txt",
+    "kill -0 $$; printf %s -1",
+    "kill -0 $$ && echo -1",
+    "rm -f missing # {wd}",
+    "rm -f missing # /",
+    "pkill -f myserver; echo .",
+    "sudo -n true; echo -1",
+    'kill -1 "1234"',
+    "kill -1 '$PID'",
+    'rm -rf "{wd} backup"',
+    "rm -rf '/ backup'",
+    "pkill -f '. server'",
+    "env DEBUG=1 rm -rf {wd}/build",
 ]
 
 
@@ -94,17 +118,42 @@ def test_destructive_guard_protects_root_and_work_dir(tmp_path: Path) -> None:
     assert destructive_command_guard(f"rm -rf {tmp_path}", None) is None
 
 
+def test_guards_stay_linear_on_long_commands() -> None:
+    """Repeated wrappers and assignments must not make the patterns backtrack exponentially.
+
+    A 20 kB command of repeated ``sudo -n`` (or ``X=1``) words ran for over a
+    second with nested wrapper repetitions; the single-wrapper prefix keeps it
+    in milliseconds.
+    """
+    long_commands = [
+        "sudo -n " * 2499 + "true #xx",
+        "sudo -n " + "X=1 " * 4996 + " true #x",
+        "kill " + "-9 " * 5000 + "1234",
+        "pkill " + "-f " * 3000 + "myserver",
+        "rm -rf " + "./a " * 4000 + "./b",
+        "npm " + "--flag " * 3000 + "test",
+    ]
+    for command in long_commands:
+        started = time.monotonic()
+        destructive_command_guard(command, "/work")
+        lift_install_timeout(command, 30)
+        assert time.monotonic() - started < 1, command[:40]
+
+
 def test_install_timeout_lift() -> None:
     """Installs and builds get at least 900 s; other commands keep their timeout."""
     for command in ["pip install requests", "python3 -m pip install -e .", "uv sync",
                     "uv pip install x", "sudo apt-get install -y gcc", "npm install",
                     "pnpm add lodash", "cargo build --release", "cd src && make -j8",
                     "cmake --build .", "go build ./...", "npm ci", "npm run build",
-                    "echo prepare\nmake"]:
+                    "echo prepare\nmake", "sudo -n apt-get install gcc",
+                    "pip --cache-dir /tmp/pip install requests", "npm --prefix app install",
+                    "sudo -u root -- apt install -y git"]:
         assert lift_install_timeout(command, 30) == INSTALL_TIMEOUT_SECONDS, command
         assert lift_install_timeout(command, 1800) == 1800, command
     for command in ["uv run pytest", "npm get registry", "grep -R make .", "go test ./...",
-                    "pip list", "echo make"]:
+                    "pip list", "echo make", "uv run pytest tests/test_build.py",
+                    "npm test # not a build", "go run build.go"]:
         assert lift_install_timeout(command, 30) == 30, command
 
 
