@@ -82,7 +82,34 @@ os.environ["BROWSER"] = "true"
 # monkeypatch.setenv("KISS_MUSE_AUTH", "1").
 os.environ["KISS_MUSE_AUTH"] = "0"
 
+def _seed_voice_models(test_home: str, real_home: Path) -> None:
+    """Link the developer's downloaded voice models into the test home.
+
+    The voice tests (``kiss.server.voice_wake`` and the browser
+    wake-word pipeline) fetch 40-80 MB of Vosk models into
+    ``$KISS_HOME/models`` on first use.  With the session-wide
+    temporary ``KISS_HOME`` below, every pytest process re-downloaded
+    them from alphacephei.com and ccoreilly.github.io, and under a
+    parallel full run the TLS handshake regularly timed out.  Each
+    entry of the real cache is symlinked individually, so a download
+    that does happen lands in the temporary home and never touches
+    the real cache (``_atomic_publish`` replaces the symlink, not its
+    target).  Nothing is seeded when the real cache is absent.
+    """
+    # Absolute, or a relative KISS_HOME would yield links resolved
+    # against the temporary models dir instead of the working directory.
+    real_models = (real_home / "models").absolute()
+    if not real_models.is_dir():
+        return
+    test_models = Path(test_home, "models")
+    test_models.mkdir()
+    for entry in real_models.iterdir():
+        if not entry.name.startswith("."):
+            (test_models / entry.name).symlink_to(entry)
+
+
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
+_seed_voice_models(_test_kiss_home, Path(os.environ.get("KISS_HOME") or Path.home() / ".kiss"))
 os.environ["KISS_HOME"] = _test_kiss_home
 # The chat page auto-opens the Tips window once per version in every
 # fresh browser context (web_server._build_html sends ``show: true``).

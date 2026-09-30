@@ -223,6 +223,15 @@ const countCloseAux = from =>
 async function runTests() {
   let failures = 0;
 
+  // Every stage reads the update marker from kissHomeDir() at activation,
+  // and the stubbed ensureDependencies never consumes it.  Point the
+  // extension at a private KISS home so a real ~/.kiss/.extension-updated
+  // left by install.sh on the developer's machine cannot re-arm the
+  // auto-open and fail the idempotency stage.
+  const kissHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-home-'));
+  const prevKissHome = process.env.KISS_HOME;
+  process.env.KISS_HOME = kissHome;
+
   const globalState = makeMemento();
   const ws1State = makeMemento();
   const ctx1 = makeContext(ws1State, globalState);
@@ -334,13 +343,7 @@ async function runTests() {
   // The update marker re-arms the auto-open (shouldAutoOpen) on an
   // already-initialized workspace; the aux-bar close belongs to the
   // genuine first launch only.
-  const kissHome = path.join(os.tmpdir(), `kiss-home-${process.pid}`);
-  fs.mkdirSync(path.join(kissHome, '.kiss'), {recursive: true});
-  const prevHome = process.env.HOME;
-  const prevProfile = process.env.USERPROFILE;
-  process.env.HOME = kissHome;
-  process.env.USERPROFILE = kissHome;
-  const marker = path.join(kissHome, '.kiss', '.extension-updated');
+  const marker = path.join(kissHome, '.extension-updated');
   fs.writeFileSync(marker, new Date().toISOString() + '\n');
   const ws3State = makeMemento({firstLaunchDone: true, sidebarWidened: true});
   const ctx3 = makeContext(ws3State, globalState);
@@ -369,8 +372,8 @@ async function runTests() {
   }
   extension.deactivate();
   disposeContext(ctx3);
-  process.env.HOME = prevHome;
-  process.env.USERPROFILE = prevProfile;
+  if (prevKissHome === undefined) delete process.env.KISS_HOME;
+  else process.env.KISS_HOME = prevKissHome;
   fs.rmSync(kissHome, {recursive: true, force: true});
 
   return failures;

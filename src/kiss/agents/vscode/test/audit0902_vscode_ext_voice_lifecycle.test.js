@@ -128,8 +128,10 @@ fs.writeFileSync(
     `  echo overlap >> "${overlapFile}"\n` +
     '  exit 1\n' +
     'fi\n' +
-    `echo "$$" >> "${pidFile}"\n` +
+    // argv first: the tests wait on the pid count and then read the
+    // argv, so the pid must be the LAST thing the listener records.
     `echo "$@" >> "${argsFile}"\n` +
+    `echo "$$" >> "${pidFile}"\n` +
     'echo READY\n' +
     'while :; do sleep 0.1; done\n',
   {mode: 0o755},
