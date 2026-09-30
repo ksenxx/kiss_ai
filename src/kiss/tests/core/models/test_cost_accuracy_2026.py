@@ -429,6 +429,30 @@ class TestGpt6LongContextTier:
         assert twin_cost == pytest.approx(expected)
 
 
+class TestGpt61SolPricing:
+    """gpt-6.1-sol $2/$0.10/$2.50/$10 -> $4/$0.20/$5/$15 above 272k prompt
+    tokens; cached input is 5% of input
+    (https://developers.openai.com/api/docs/models/gpt-6.1-sol)."""
+
+    def test_catalog_rates(self):
+        for name in ("gpt-6.1-sol", "gpt-6.1-sol-high", "openrouter/openai/gpt-6.1-sol"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(0.10), name
+            assert info.cache_write_price_per_1M == pytest.approx(2.50), name
+
+    def test_short_context(self):
+        cost = calculate_cost("gpt-6.1-sol", 100_000, 10_000, 100_000, 50_000)
+        expected = (100_000 * 2.0 + 100_000 * 0.10 + 50_000 * 2.5 + 10_000 * 10.0) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_long_context_uplift(self):
+        cost = calculate_cost("gpt-6.1-sol", 100_000, 10_000, 150_000, 50_000)
+        expected = (100_000 * 4.0 + 150_000 * 0.20 + 50_000 * 5.0 + 10_000 * 15.0) / 1e6
+        assert cost == pytest.approx(expected)
+        alias = calculate_cost("gpt-6.1-sol-medium", 100_000, 10_000, 150_000, 50_000)
+        assert alias == pytest.approx(expected)
+
+
 class TestTogetherCachedInputPrices:
     """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input`` (2026-09)."""
 
