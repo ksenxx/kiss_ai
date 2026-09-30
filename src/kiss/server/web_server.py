@@ -7625,23 +7625,33 @@ class RemoteAccessServer:
         Handles the ``gitShow`` command the remote Source Control graph
         sends for its commit context menu: "Open Changes" (the whole
         commit, or one file of it when ``path`` is given), "Open File"
-        (``mode: "file"`` — the file's content at that commit) and
-        "Compare with..." (``base`` given — ``git diff base sha``).
+        (``mode: "file"`` — the file's content at that commit),
+        "Compare with..." (``base`` given — ``git diff base sha``) and a
+        click on a file row (``mode: "diff"`` — both sides of that
+        file's change, see :func:`kiss.server.explorer.git_file_diff`).
         The reply goes directly to the requesting *endpoint* with the
         shape::
 
             {"type": "gitShow", "workDir", "tabId", "token", "sha",
              "path", "base", "mode", "repo", "subject"?, "text",
              "truncated"}                          # on success
+            {"type": "gitShow", ..., "mode": "diff", "original",
+             "modified", "originalMissing", "modifiedMissing",
+             "parent", "originalPath", "truncated"}
             {"type": "gitShow", ..., "error": <message>}
 
         Args:
             cmd: The parsed ``gitShow`` command (``sha``, optional
-                ``path``, ``base``, ``mode``, ``workDir``, ``tabId``,
-                ``token``).
+                ``path``, ``origPath``, ``base``, ``mode``, ``workDir``,
+                ``tabId``, ``token``).
             endpoint: The requesting WSS connection.
         """
-        from kiss.server.explorer import git_compare, git_file_at, git_show
+        from kiss.server.explorer import (
+            git_compare,
+            git_file_at,
+            git_file_diff,
+            git_show,
+        )
 
         work_dir = self._cmd_work_dir(cmd)
         sha = self._cmd_str(cmd, "sha")
@@ -7664,6 +7674,17 @@ class RemoteAccessServer:
             reply.update(
                 await asyncio.to_thread(
                     self._git_provider_result, git_compare, work_dir, base, sha,
+                )
+            )
+        elif mode == "diff":
+            # Both sides of one file's change (``mode: "diff"``): the
+            # commit against its parent, or the working tree against
+            # HEAD when ``sha`` is empty; ``origPath`` is the name
+            # before a rename.
+            reply.update(
+                await asyncio.to_thread(
+                    self._git_provider_result, git_file_diff, work_dir, sha,
+                    path, self._cmd_str(cmd, "origPath"),
                 )
             )
         elif mode == "file":

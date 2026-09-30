@@ -2382,10 +2382,21 @@
     }
     if (tab.contentEditor) {
       try {
+        // Monaco keeps a disposed diff editor listed in
+        // getDiffEditors(); detaching its models first lets their
+        // text go.
+        if (tab.contentDiffModels) tab.contentEditor.setModel(null);
         tab.contentEditor.dispose();
       } catch (_e) {}
       tab.contentEditor = null;
     }
+    // A diff editor does not own its two models.
+    (tab.contentDiffModels || []).forEach(model => {
+      try {
+        model.dispose();
+      } catch (_e) {}
+    });
+    tab.contentDiffModels = null;
     if (tab.browserView) {
       tab.browserView.dispose();
       tab.browserView = null;
@@ -2699,6 +2710,106 @@
     ensureMonaco().then(onMonaco, onCdnFailure);
   }
 
+  /**
+   * Show one file's change in a read-only side-by-side Monaco diff
+   * editor (VS Code's diff editor): `ev.diffOriginal` on the left,
+   * `ev.content` on the right, both highlighted by the file's language.
+   * A side that did not exist (an added or deleted file) is empty.
+   * When the Monaco CDN is unreachable, a unified line-by-line diff of
+   * the two texts is shown as plain text instead.
+   */
+  function renderDiffContent(tab, holder, ev) {
+    const language = languageFromPath(
+      String(ev.languageName || ev.name || '').toLowerCase(),
+    );
+    const original = ev.diffOriginal || '';
+    const modified = ev.content || '';
+    function onMonaco(monaco) {
+      if (!holder.isConnected || tab.contentEditor) return;
+      const editor = monaco.editor.createDiffEditor(holder, {
+        readOnly: true,
+        originalEditable: false,
+        automaticLayout: true,
+        renderSideBySide: true,
+        minimap: {enabled: false},
+        scrollBeyondLastLine: false,
+        theme: applyContentMonacoTheme(monaco),
+      });
+      const models = [
+        monaco.editor.createModel(original, language),
+        monaco.editor.createModel(modified, language),
+      ];
+      editor.setModel({original: models[0], modified: models[1]});
+      tab.contentEditor = editor;
+      tab.contentDiffModels = models;
+      appendContentMenuBar(tab, holder, false);
+    }
+    function onCdnFailure() {
+      if (!holder.isConnected || holder.firstChild) return;
+      const pre = document.createElement('pre');
+      pre.className = 'content-code-fallback';
+      const code = document.createElement('code');
+      code.textContent = unifiedDiffText(original, modified);
+      pre.appendChild(code);
+      holder.appendChild(pre);
+    }
+    ensureMonaco().then(onMonaco, onCdnFailure);
+  }
+
+  /**
+   * A plain unified diff of two texts (longest-common-subsequence over
+   * lines), for the no-Monaco fallback of renderDiffContent.
+   */
+  function unifiedDiffText(original, modified) {
+    const a = original.split('\n');
+    const b = modified.split('\n');
+    const n = a.length;
+    const m = b.length;
+    // Guard the O(n*m) table: very large files get the two texts one
+    // after the other instead of a diff.
+    if (n * m > 4000000) {
+      return '--- original\n' + original + '\n+++ modified\n' + modified;
+    }
+    // lcs[i][j] = length of the longest common subsequence of a[i..]
+    // and b[j..]; the last row and column stay zero.
+    const lcs = [];
+    for (let i = 0; i <= n; i++) lcs.push(new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        lcs[i][j] =
+          a[i] === b[j]
+            ? lcs[i + 1][j + 1] + 1
+            : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) {
+        out.push(' ' + a[i]);
+        i++;
+        j++;
+      } else if (i < n && (j >= m || lcs[i + 1][j] >= lcs[i][j + 1])) {
+        // Removed lines come before the lines added in their place.
+        out.push('-' + a[i]);
+        i++;
+      } else {
+        out.push('+' + b[j]);
+        j++;
+      }
+    }
+    return out.join('\n');
+  }
+
+  /** The code editor a content tab's menu items act on (the right-hand side of a diff). */
+  function contentActionEditor(tab) {
+    const editor = tab.contentEditor;
+    return editor && editor.getModifiedEditor
+      ? editor.getModifiedEditor()
+      : editor;
+  }
+
   // The menus of a content tab's Monaco editor, laid out like VS Code's
   // menu bar. Monaco by itself only has a right-click menu with a few
   // entries, which a phone cannot even open. An item runs either a
@@ -2960,7 +3071,7 @@
     if (item.edits && !editable) return false;
     if (item.enabled) return item.enabled(tab);
     if (!item.id) return true;
-    const action = tab.contentEditor.getAction(item.id);
+    const action = contentActionEditor(tab).getAction(item.id);
     return action ? action.isSupported() : true;
   }
 
@@ -2971,7 +3082,7 @@
   }
 
   function runContentMenuItem(item, tab) {
-    const editor = tab.contentEditor;
+    const editor = contentActionEditor(tab);
     if (!editor) return;
     editor.focus();
     if (item.run) item.run(tab, editor);
@@ -3004,7 +3115,7 @@
       const check = document.createElement('span');
       check.className = 'content-menu-check';
       if (item.checked) {
-        const on = !!item.checked(tab.contentEditor);
+        const on = !!item.checked(contentActionEditor(tab));
         row.setAttribute('aria-checked', String(on));
         check.textContent = on ? '\u2713' : '';
       }
@@ -3685,6 +3796,10 @@
       const holder = document.createElement('div');
       holder.className = 'content-monaco-holder';
       view.appendChild(holder);
+      if (ev.isDiff) {
+        renderDiffContent(tab, holder, ev);
+        return;
+      }
       renderCodeContent(
         tab,
         holder,
@@ -7612,6 +7727,96 @@
     else openWorkspaceFile(row.dataset.explorerPath, explorerRowRoot(row));
   }
 
+  // ---- Explorer selection ----
+  //
+  // VS Code's multi-select: a plain click or arrow key selects one
+  // row, Ctrl/Cmd toggles a row, Shift selects the visible rows from
+  // the anchor (the last plainly selected row) to the target, Ctrl+A
+  // selects every visible row and Escape clears.  The selection lives
+  // on the rows themselves (`is-selected`), which survive a re-listing
+  // of their folder; a context-menu action on a selected row applies
+  // to the whole selection.
+  let explorerAnchorRow = null;
+
+  /** The selected Explorer rows, in tree order. */
+  function explorerSelectedRows() {
+    return explorerTree
+      ? Array.from(explorerTree.querySelectorAll('.explorer-row.is-selected'))
+      : [];
+  }
+
+  function setExplorerRowSelected(row, on) {
+    row.classList.toggle('is-selected', on);
+    row.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+
+  function clearExplorerSelection() {
+    explorerSelectedRows().forEach(r => setExplorerRowSelected(r, false));
+  }
+
+  /**
+   * Apply a click or key on *row* to the selection.
+   *
+   * @param {HTMLElement} row The row clicked or moved to.
+   * @param {{ctrl?: boolean, shift?: boolean}} mods Modifier keys held
+   *   (`ctrl` covers Cmd on macOS).
+   */
+  function selectExplorerRow(row, mods) {
+    if (mods.shift && explorerAnchorRow && explorerAnchorRow.isConnected) {
+      const rows = visibleTreeItems(explorerTree, '.explorer-row');
+      const a = rows.indexOf(explorerAnchorRow);
+      const b = rows.indexOf(row);
+      if (a >= 0 && b >= 0) {
+        // Like VS Code's list: the run of selected rows around the
+        // anchor is replaced by the anchor..target range; rows selected
+        // elsewhere (with Ctrl) stay selected.
+        const isOn = i => rows[i].classList.contains('is-selected');
+        let lo = a;
+        let hi = a;
+        while (lo > 0 && isOn(lo - 1)) lo--;
+        while (hi < rows.length - 1 && isOn(hi + 1)) hi++;
+        for (let i = lo; i <= hi; i++) setExplorerRowSelected(rows[i], false);
+        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+          setExplorerRowSelected(rows[i], true);
+        }
+        return;
+      }
+    }
+    if (mods.ctrl) {
+      setExplorerRowSelected(row, !row.classList.contains('is-selected'));
+    } else {
+      clearExplorerSelection();
+      setExplorerRowSelected(row, true);
+    }
+    explorerAnchorRow = row;
+  }
+
+  function selectAllExplorerRows() {
+    visibleTreeItems(explorerTree, '.explorer-row').forEach(r => {
+      if (!r.classList.contains('is-editing')) setExplorerRowSelected(r, true);
+    });
+  }
+
+  /**
+   * The rows an action started on *row* applies to: the whole
+   * selection when *row* is one of several selected rows, else *row*
+   * alone.  A row inside another selected folder is dropped (deleting
+   * or moving the folder takes it along).
+   */
+  function explorerActionRows(row) {
+    const selected = explorerSelectedRows();
+    if (selected.length < 2 || selected.indexOf(row) < 0) return [row];
+    return selected.filter(r => {
+      return !selected.some(other => {
+        return (
+          other !== r &&
+          other.classList.contains('is-dir') &&
+          pathWithin(r.dataset.explorerPath, other.dataset.explorerPath)
+        );
+      });
+    });
+  }
+
   // ---- Source Control ----
   //
   // Both halves (Changes and Graph) reload together; replies carrying
@@ -7622,6 +7827,11 @@
   let scmLog = null;
   let scmRefreshTimer = null;
   const scmExpanded = new Set();
+  // Worktree paths whose section of the Changes list the user folded;
+  // a fold survives the periodic re-render.
+  const scmWorktreeCollapsed = new Set();
+  // The focusable rows of the Source Control view (roving tabindex).
+  const SCM_ITEMS = '.scm-commit, .scm-row, .scm-worktree-hdr';
   const SCM_LANE_W = 14;
   const SCM_ROW_H = 24;
   const SCM_MAX_LANES = 24;
@@ -7751,6 +7961,7 @@
       change.absPath || (repo ? joinPath(repo, change.path) : change.path);
     row.dataset.scmPath = abs;
     row.dataset.scmRelPath = change.path;
+    row.dataset.scmOrigPath = change.origPath || '';
     row.dataset.scmStatus = status;
     row.title =
       (change.origPath ? change.origPath + ' \u2192 ' : '') +
@@ -7820,21 +8031,28 @@
     // One repository (worktree) at a time: the current worktree's
     // changes come first, then every other worktree of the repository
     // under its own header (VS Code lists multiple repositories the
-    // same way).  A single worktree keeps the flat list.
+    // same way), which folds the worktree's rows.  A single worktree
+    // keeps the flat list.
     worktrees.forEach(wt => {
       const changes = Array.isArray(wt.changes) ? wt.changes : [];
       let depth = 0;
+      let body = scmChangesList;
       if (worktrees.length > 1) {
         scmChangesList.appendChild(createScmWorktreeHeader(wt, changes.length));
+        body = document.createElement('div');
+        body.className = 'scm-worktree-body';
+        body.setAttribute('role', 'group');
+        body.hidden = scmWorktreeCollapsed.has(wt.path);
+        scmChangesList.appendChild(body);
         depth = 1;
       }
       if (wt.error) {
-        explorerNote(scmChangesList, depth, String(wt.error));
+        explorerNote(body, depth, String(wt.error));
         return;
       }
       if (!changes.length) {
         if (worktrees.length > 1) {
-          explorerNote(scmChangesList, depth, 'No changes');
+          explorerNote(body, depth, 'No changes');
         }
         return;
       }
@@ -7849,17 +8067,45 @@
           hdr.className = 'scm-group-hdr';
           hdr.style.setProperty('--depth', String(depth));
           hdr.textContent = SCM_GROUP_LABELS[g] + ' (' + rows.length + ')';
-          scmChangesList.appendChild(hdr);
+          body.appendChild(hdr);
           rowDepth = depth + 1;
         }
         rows.forEach(c => {
           const row = createScmFileRow(c, wt.path, rowDepth);
           row.dataset.scmWorktree = wt.path;
-          scmChangesList.appendChild(row);
+          body.appendChild(row);
         });
       });
     });
-    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+    rovingFocus(scmBodyEl, SCM_ITEMS);
+  }
+
+  /**
+   * Fold or unfold one worktree's section of the Changes list (a click
+   * or Enter on its header, Left/Right arrows).
+   *
+   * @param {HTMLElement} hdr The .scm-worktree-hdr row.
+   * @param {boolean} [open] Force open (true) or folded (false).
+   */
+  function toggleScmWorktree(hdr, open) {
+    const path = hdr.dataset.scmWorktree || '';
+    const body =
+      hdr.nextElementSibling &&
+      hdr.nextElementSibling.classList.contains('scm-worktree-body')
+        ? hdr.nextElementSibling
+        : null;
+    if (!body) return;
+    const wasOpen = !body.hidden;
+    const next = typeof open === 'boolean' ? open : !wasOpen;
+    if (next === wasOpen) return;
+    if (next) scmWorktreeCollapsed.delete(path);
+    else scmWorktreeCollapsed.add(path);
+    body.hidden = !next;
+    hdr.classList.toggle('expanded', next);
+    hdr.setAttribute('aria-expanded', next ? 'true' : 'false');
+    // A folded section may have held the focused row: the header
+    // takes the tab stop back.
+    rovingFocus(scmBodyEl, SCM_ITEMS, hdr);
   }
 
   /**
@@ -7884,12 +8130,26 @@
     return rows.filter(wt => wt.current).concat(rows.filter(wt => !wt.current));
   }
 
-  /** The "<worktree folder> <branch>" header above one worktree's rows. */
+  /**
+   * The "<worktree folder> <branch>" header above one worktree's rows:
+   * a tree item with a chevron that folds the rows below it (see
+   * toggleScmWorktree).
+   */
   function createScmWorktreeHeader(wt, count) {
     const hdr = document.createElement('div');
     hdr.className = 'scm-group-hdr scm-worktree-hdr';
     if (wt.current) hdr.classList.add('is-current');
     hdr.title = wt.path;
+    hdr.dataset.scmWorktree = wt.path;
+    hdr.setAttribute('role', 'treeitem');
+    hdr.tabIndex = -1;
+    const open = !scmWorktreeCollapsed.has(wt.path);
+    hdr.classList.toggle('expanded', open);
+    hdr.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const chevron = document.createElement('span');
+    chevron.className = 'explorer-chevron';
+    chevron.appendChild(svgIcon('', ICON_CHEVRON));
+    hdr.appendChild(chevron);
     const name = document.createElement('span');
     name.className = 'scm-worktree-name';
     name.textContent = wt.name || pathBaseName(wt.path);
@@ -8203,7 +8463,7 @@
         createScmCommitRow(row, layouts[i], lanesShown, repo),
       );
     });
-    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+    rovingFocus(scmBodyEl, SCM_ITEMS);
   }
 
   function createScmCommitRow(commit, layout, lanesShown, repo) {
@@ -8294,6 +8554,7 @@
     files.forEach(f => {
       const row = createScmFileRow(f, commit.worktreePath || repo, 1);
       row.dataset.scmCommit = commit.isWorktree ? '' : commit.sha;
+      row.dataset.scmWorktree = commit.worktreePath || '';
       container.appendChild(row);
     });
   }
@@ -8328,14 +8589,44 @@
   }
 
   function onScmActivate(target) {
+    const wtHdr = target.closest('.scm-worktree-hdr');
+    if (wtHdr) {
+      toggleScmWorktree(wtHdr);
+      return;
+    }
     const commit = target.closest('.scm-commit');
     if (commit) {
       toggleScmCommit(commit);
       return;
     }
     const file = target.closest('.scm-row');
-    if (!file || file.dataset.scmStatus === 'D') return;
-    openWorkspaceFile(file.dataset.scmPath, scmWorkDir);
+    if (!file) return;
+    if (file.closest('#scm-graph')) {
+      // A file of the graph opens as a diff, as in VS Code: the commit
+      // against its parent, or the working tree against HEAD for the
+      // "Uncommitted changes" row.
+      openScmFileDiff(file);
+      return;
+    }
+    if (file.dataset.scmStatus === 'D') return;
+    openWorkspaceFile(
+      file.dataset.scmPath,
+      file.dataset.scmWorktree || scmWorkDir,
+    );
+  }
+
+  /** Request the side-by-side diff of a graph file row (see handleGitShow). */
+  function openScmFileDiff(row) {
+    const workDir = row.dataset.scmWorktree || scmWorkDir || sidebarWorkDir();
+    sendGitShow(
+      {
+        sha: row.dataset.scmCommit || '',
+        path: row.dataset.scmRelPath || '',
+        origPath: row.dataset.scmOrigPath || '',
+        mode: 'diff',
+      },
+      {workDir: workDir, tabId: activeTabId},
+    );
   }
 
   /** The visible (rendered) items matching *selector* under *root*. */
@@ -8420,8 +8711,9 @@
   const treeMenu = window.TreeContextMenu || null;
   const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || '');
   const IS_LINUX = /Linux|X11/.test(navigator.platform || '') && !IS_MAC;
-  // Cut / Copy remember one Explorer entry until Paste (or another
-  // Cut / Copy) replaces it, like VS Code's Explorer clipboard.
+  // Cut / Copy remember the Explorer entries ({paths, cut}) until Paste
+  // (or another Cut / Copy) replaces them, like VS Code's Explorer
+  // clipboard.
   let explorerClipboard = null;
   // "Select for Compare" remembers a file until "Compare with Selected".
   let explorerCompareWith = '';
@@ -8634,16 +8926,17 @@
     // The tree changed on disk: re-list every listed folder (the rows
     // of entries still present survive, so expansion state is kept)
     // and let the Source Control view know.
-    // Only the Cut this move consumed is spent: a NEWER Cut made while the
-    // move reply was in flight must survive, or the user's pending Paste
-    // silently loses its entry.
+    // Only the Cut entry this move consumed is spent: a NEWER Cut made
+    // while the move reply was in flight must survive, or the user's
+    // pending Paste silently loses its entries.
     if (
       request.action === 'move' &&
       explorerClipboard &&
       explorerClipboard.cut &&
-      explorerClipboard.path === request.path
+      explorerClipboard.paths.indexOf(request.path) >= 0
     ) {
-      explorerClipboard = null;
+      const left = explorerClipboard.paths.filter(p => p !== request.path);
+      explorerClipboard = left.length ? {paths: left, cut: true} : null;
     }
     refreshExplorer(true);
     scmDirty = true;
@@ -8815,7 +9108,131 @@
     });
   }
 
+  /**
+   * The menu for several selected rows (VS Code's Explorer menu with a
+   * multi-selection): Open to the Side for files, Compare Selected for
+   * exactly two files, Cut / Copy / Copy Path / Copy Relative Path /
+   * Delete on every row.  Items that only make sense for one entry
+   * (New File, Paste, Rename, Find in Folder) are left out.
+   */
+  function explorerMultiMenuItems(rows) {
+    const paths = rows.map(r => r.dataset.explorerPath);
+    const files = rows.filter(r => !r.classList.contains('is-dir'));
+    const hasRoot = rows.some(r => {
+      return (
+        r.classList.contains('is-root') ||
+        r.dataset.explorerPath === explorerRowRoot(r)
+      );
+    });
+    const items = [];
+    if (files.length) {
+      items.push({
+        id: 'open-to-side',
+        label: 'Open to the Side',
+        key: keyLabel('Ctrl+Enter', '\u2303Enter'),
+        run: () => {
+          files.forEach(r => {
+            openWorkspaceFileToSide(r.dataset.explorerPath, explorerRowRoot(r));
+          });
+        },
+      });
+      items.push({separator: true});
+    }
+    if (files.length === 2 && rows.length === 2) {
+      items.push({
+        id: 'compare-selected',
+        label: 'Compare Selected',
+        run: () => {
+          sendFsAction({
+            action: 'compare',
+            path: files[0].dataset.explorerPath,
+            dest: files[1].dataset.explorerPath,
+            root: explorerRowRoot(files[0]),
+          });
+        },
+      });
+      items.push({separator: true});
+    }
+    items.push({
+      id: 'cut',
+      label: 'Cut',
+      key: keyLabel('Ctrl+X', '\u2318X'),
+      enabled: !hasRoot,
+      run: () => {
+        explorerClipboard = {paths: paths, cut: true};
+      },
+    });
+    items.push({
+      id: 'copy',
+      label: 'Copy',
+      key: keyLabel('Ctrl+C', '\u2318C'),
+      enabled: !hasRoot,
+      run: () => {
+        explorerClipboard = {paths: paths, cut: false};
+      },
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'copy-path',
+      label: 'Copy Path',
+      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+      run: () => copyTextToClipboard(paths.join('\n')),
+    });
+    items.push({
+      id: 'copy-relative-path',
+      label: 'Copy Relative Path',
+      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+      run: () =>
+        copyTextToClipboard(
+          rows
+            .map(r => {
+              return (
+                explorerRelativePath(
+                  r.dataset.explorerPath,
+                  explorerRowRoot(r),
+                ) || '.'
+              );
+            })
+            .join('\n'),
+        ),
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      key: keyLabel('Delete', '\u2318\u232B'),
+      enabled: !hasRoot,
+      run: () => {
+        confirmAction({
+          id: 'fs-delete',
+          message:
+            'Delete ' +
+            rows.length +
+            ' items? The server has no trash, so they cannot be restored.',
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep',
+          danger: true,
+          onConfirm: function () {
+            rows.forEach(r => {
+              sendFsAction({
+                action: 'delete',
+                path: r.dataset.explorerPath,
+                root: explorerRowRoot(r),
+              });
+            });
+          },
+        });
+      },
+    });
+    return items;
+  }
+
   function explorerMenuItems(row) {
+    const rows = explorerActionRows(row);
+    if (rows.length > 1) return explorerMultiMenuItems(rows);
+    // A selection of a folder and rows inside it reduces to the folder:
+    // the single-row menu is that folder's.
+    row = rows[0];
     const path = row.dataset.explorerPath;
     const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
@@ -8919,7 +9336,7 @@
       key: keyLabel('Ctrl+X', '\u2318X'),
       enabled: !isRoot,
       run: () => {
-        explorerClipboard = {path: path, cut: true};
+        explorerClipboard = {paths: [path], cut: true};
       },
     });
     items.push({
@@ -8928,7 +9345,7 @@
       key: keyLabel('Ctrl+C', '\u2318C'),
       enabled: !isRoot,
       run: () => {
-        explorerClipboard = {path: path, cut: false};
+        explorerClipboard = {paths: [path], cut: false};
       },
     });
     items.push({
@@ -8938,11 +9355,13 @@
       enabled: !!explorerClipboard,
       run: () => {
         if (!explorerClipboard) return;
-        sendFsAction({
-          action: explorerClipboard.cut ? 'move' : 'copy',
-          path: explorerClipboard.path,
-          dest: parent,
-          root: root,
+        explorerClipboard.paths.forEach(src => {
+          sendFsAction({
+            action: explorerClipboard.cut ? 'move' : 'copy',
+            path: src,
+            dest: parent,
+            root: root,
+          });
         });
       },
     });
@@ -9127,6 +9546,7 @@
     api.gitShow({
       sha: request.sha,
       path: request.path || '',
+      origPath: request.origPath || '',
       base: request.base || '',
       mode: request.mode || 'patch',
       workDir: at.workDir,
@@ -9170,6 +9590,10 @@
       return;
     }
     const short = String(ev.sha || request.sha).slice(0, 7);
+    if (ev.mode === 'diff') {
+      openGitDiffTab(ev);
+      return;
+    }
     const text =
       (ev.text || '') + (ev.truncated ? '\n[... output truncated ...]\n' : '');
     if (ev.base) {
@@ -9206,6 +9630,45 @@
             : ''),
       text,
       'x.diff',
+    );
+  }
+
+  /**
+   * Open a gitShow "diff" reply in a side-by-side diff tab, titled as
+   * VS Code titles a history item's file — "name (parent7 ↔ sha7)" (a
+   * root commit has no parent: "name (sha7)") — or "name (Working
+   * Tree)" for a file of the "Uncommitted changes" row.  Opening the
+   * same file of the same commit again brings the existing tab forward.
+   */
+  function openGitDiffTab(ev) {
+    const name = pathBaseName(ev.path);
+    const short = String(ev.sha || '').slice(0, 7);
+    const parent = String(ev.parent || '').slice(0, 7);
+    const label = ev.sha
+      ? name + ' (' + (parent ? parent + ' \u2194 ' : '') + short + ')'
+      : name + ' (Working Tree)';
+    const suffix = ev.truncated ? '\n[... output truncated ...]\n' : '';
+    handleFileContent(
+      {
+        path:
+          'git-diff://' +
+          (ev.repo || '') +
+          '/' +
+          (ev.sha || 'worktree') +
+          ':' +
+          ev.path,
+        name: label,
+        content: (ev.modified || '') + suffix,
+        diffOriginal: (ev.original || '') + suffix,
+        languageName: name,
+        isVirtual: true,
+        isDiff: true,
+      },
+      true,
+      // The tab that asked for the diff owns it (the reply echoes the
+      // request's tabId), so a reply landing after a tab switch opens
+      // in that tab's workspace, not the current one's.
+      ev.tabId || activeTabId,
     );
   }
 
@@ -9326,12 +9789,13 @@
     const relPath = row.dataset.scmRelPath || '';
     const absPath = row.dataset.scmPath || '';
     if (sha) {
-      // A file of a commit (MenuId.SCMHistoryItemChangeContext).
+      // A file of a commit (MenuId.SCMHistoryItemChangeContext): Open
+      // Changes is the same side-by-side diff a click opens.
       return [
         {
           id: 'open-changes',
           label: 'Open Changes',
-          run: () => sendGitShow({sha: sha, path: relPath}),
+          run: () => openScmFileDiff(row),
         },
         {
           id: 'open-file',
@@ -9341,9 +9805,10 @@
         },
       ];
     }
-    // A working-tree change (of any worktree).
+    // A working-tree change (of any worktree); under the graph's
+    // "Uncommitted changes" row it also offers the diff a click opens.
     const deleted = row.dataset.scmStatus === 'D';
-    return [
+    const items = [
       {
         id: 'open-file',
         label: 'Open File',
@@ -9365,6 +9830,14 @@
         run: () => copyTextToClipboard(relPath),
       },
     ];
+    if (row.closest('#scm-graph')) {
+      items.unshift({
+        id: 'open-changes',
+        label: 'Open Changes',
+        run: () => openScmFileDiff(row),
+      });
+    }
+    return items;
   }
 
   function onScmContextMenu(e) {
@@ -10052,12 +10525,20 @@
         // The buttons on a top-level folder row act on their own.
         if (e.target.closest('.explorer-root-actions')) return;
         const row = e.target.closest('.explorer-row');
-        if (row && !row.classList.contains('is-editing'))
-          onExplorerActivate(row);
+        if (!row || row.classList.contains('is-editing')) return;
+        const ctrl = e.ctrlKey || e.metaKey;
+        selectExplorerRow(row, {ctrl: ctrl, shift: e.shiftKey});
+        // A modified click only changes the selection.
+        if (!ctrl && !e.shiftKey) onExplorerActivate(row);
       });
       explorerTree.addEventListener('contextmenu', e => {
         const row = e.target.closest('.explorer-row');
         if (row && !row.classList.contains('is-editing')) {
+          // Right-clicking outside the selection selects that row
+          // alone; inside it, the menu acts on the whole selection.
+          if (!row.classList.contains('is-selected')) {
+            selectExplorerRow(row, {});
+          }
           showTreeMenu(e, explorerMenuItems(row), row);
         }
       });
@@ -10068,10 +10549,34 @@
       explorerTree.addEventListener('keydown', e => {
         const row = e.target.closest('.explorer-row');
         if (!row || row.classList.contains('is-editing')) return;
-        if (treeArrowNav(e, explorerTree, '.explorer-row', row)) return;
+        if (treeArrowNav(e, explorerTree, '.explorer-row', row)) {
+          // The arrow keys move the selection with the focus; Shift
+          // extends it from the anchor.
+          const focused = document.activeElement
+            ? document.activeElement.closest('.explorer-row')
+            : null;
+          if (focused) selectExplorerRow(focused, {shift: e.shiftKey});
+          return;
+        }
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          !e.altKey &&
+          !e.shiftKey &&
+          String(e.key).toLowerCase() === 'a'
+        ) {
+          e.preventDefault();
+          selectAllExplorerRows();
+          return;
+        }
+        if (e.key === 'Escape' && explorerSelectedRows().length) {
+          e.preventDefault();
+          clearExplorerSelection();
+          return;
+        }
         if (explorerShortcut(e, row)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
+          selectExplorerRow(row, {});
           onExplorerActivate(row);
           return;
         }
@@ -10092,6 +10597,7 @@
           if (first) {
             rovingFocus(explorerTree, '.explorer-row', first);
             first.focus();
+            selectExplorerRow(first, {});
           }
           return;
         }
@@ -10104,6 +10610,7 @@
         if (parent) {
           rovingFocus(explorerTree, '.explorer-row', parent);
           parent.focus();
+          selectExplorerRow(parent, {});
         }
       });
     }
@@ -10124,13 +10631,21 @@
       });
       scmBody.addEventListener('contextmenu', onScmContextMenu);
       scmBody.addEventListener('focusin', e => {
-        const item = e.target.closest('.scm-commit, .scm-row');
-        if (item) rovingFocus(scmBody, '.scm-commit, .scm-row', item);
+        const item = e.target.closest(SCM_ITEMS);
+        if (item) rovingFocus(scmBody, SCM_ITEMS, item);
       });
       scmBody.addEventListener('keydown', e => {
-        const item = e.target.closest('.scm-commit, .scm-row');
+        const item = e.target.closest(SCM_ITEMS);
         if (!item) return;
-        if (treeArrowNav(e, scmBody, '.scm-commit, .scm-row', item)) return;
+        if (treeArrowNav(e, scmBody, SCM_ITEMS, item)) return;
+        if (
+          item.classList.contains('scm-worktree-hdr') &&
+          (e.key === 'ArrowRight' || e.key === 'ArrowLeft')
+        ) {
+          e.preventDefault();
+          toggleScmWorktree(item, e.key === 'ArrowRight');
+          return;
+        }
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
         onScmActivate(item);
