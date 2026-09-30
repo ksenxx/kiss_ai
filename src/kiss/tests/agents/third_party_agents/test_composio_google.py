@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -135,8 +136,12 @@ def composio(isolated_kiss_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     thread.start()
     monkeypatch.setenv("COMPOSIO_BASE_URL", server.base)
     monkeypatch.setenv("COMPOSIO_API_KEY", "test-project-key")
-    for name in ("KISS_COMPOSIO_USER_ID", "KISS_COMPOSIO_AUTH_CONFIG_GMAIL"):
-        monkeypatch.delenv(name, raising=False)
+    # A developer's shell may pin auth configs for any service
+    # (KISS_COMPOSIO_AUTH_CONFIG_GOOGLE_CALENDAR=ac_...); every override
+    # must go so the tests exercise the list/create path.
+    monkeypatch.delenv("KISS_COMPOSIO_USER_ID", raising=False)
+    for name in [n for n in os.environ if n.startswith("KISS_COMPOSIO_AUTH_CONFIG_")]:
+        monkeypatch.delenv(name)
     try:
         yield server
     finally:

@@ -370,13 +370,17 @@ def test_click_travels_a_curved_path_and_holds_the_button(tool, server):
     ev = _ev(tool)
     assert ev["clicked"] == 1
     assert len(ev["moves"]) >= 6, "a glide, not a teleport"
-    # Not a straight line: the intermediate points bow away from the chord.
-    (x0, y0), (x1, y1) = ev["moves"][0], ev["moves"][-1]
+    # Not a straight line: the recorded points bow away from the chord.  The
+    # chord starts at the pointer's known start, not at ev.moves[0]: a busy
+    # renderer coalesces the leading mousemove events into one, so the
+    # first recorded point can already sit on the nearly straight tail of
+    # the curve.
+    (x0, y0), (x1, y1) = (5.0, 5.0), ev["moves"][-1]
     chord = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
     max_dev = max(
-        abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / chord for x, y in ev["moves"][1:-1]
+        abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / chord for x, y in ev["moves"][:-1]
     )
-    assert max_dev > 2.0
+    assert max_dev > 2.0, ev["moves"]
     assert 40 <= ev["up"] - ev["down"] <= 400, "button held like a finger press"
     assert tool._mouse_xy is not None
 

@@ -14464,7 +14464,11 @@
   // background must not yank the caret out of the promptlet search box
   // (or drop focus on a textbox hidden behind the settings sheet).
   // `force` is for the user's own request to focus the composer (the
-  // host's focusInput / appendToInput commands).
+  // host's focusInput / appendToInput commands).  It wins at once, but
+  // its deferred retries yield like any other: the daemon sends
+  // focusInput on every (re)connect, and by 100 ms the user may have
+  // opened a sheet and put the caret in its textbox (the "Working
+  // directory" box), which a retry must not pull it out of mid-typing.
   function focusInputWithRetry(force) {
     cancelInputFocusRetry();
     if (isMobileRemote) return;
@@ -14472,7 +14476,7 @@
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
-        if (!force && composerFocusWouldSteal()) return;
+        if (composerFocusWouldSteal()) return;
         inp.focus();
       }, ms),
     );
