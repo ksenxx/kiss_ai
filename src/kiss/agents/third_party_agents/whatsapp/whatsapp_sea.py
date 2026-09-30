@@ -53,7 +53,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import BROWSER_TAB, DEFAULT_BROWSER, open_for_user
 from kiss.core.config import kiss_home
 from kiss.core.processes import kill_process_group, popen_process_group
 from kiss.core.processes import pid_alive as _pid_alive
@@ -1075,18 +1075,29 @@ def _write_qr_html(qr_text: str) -> Path:
 def _qr_handoff(page: Path) -> dict[str, Any]:
     """Open the QR pairing page for the user and describe the next step.
 
-    The page is opened in the user's default browser when this machine
-    has one; the agent is told either way where the page is and how to
-    show it (``show_browser()`` + ``go_to_url``) when no window appeared.
+    The page is opened for the user by
+    :func:`~kiss.core.browser_handoff.open_for_user`: in the Browser tab
+    streamed to every KISS surface when the kiss-web daemon runs this
+    agent (the user then already sees it and must not be told to open
+    anything), else in the user's default browser when this machine has
+    one; the agent is told either way where the page is and how to show
+    it (``show_browser()`` + ``go_to_url``) when no window appeared.
 
     Args:
         page: Path of the written QR pairing page.
 
     Returns:
-        ``qr_page``, ``browser_opened`` and an agent-facing ``message``.
+        ``qr_page``, ``opened_in``, ``browser_opened`` and an agent-facing
+        ``message``.
     """
-    opened = open_in_default_browser(page.as_uri())
-    if opened:
+    opened_in = open_for_user(page.as_uri())
+    if opened_in == BROWSER_TAB:
+        shown = (
+            "The QR page is already open in the Browser tab that every KISS surface "
+            "has just switched to, so the user is looking at it: do NOT ask them to "
+            "open a URL or a file."
+        )
+    elif opened_in == DEFAULT_BROWSER:
         shown = (
             f"The QR page file://{page} has just been opened in the user's default "
             "browser on this machine. If the user says no window appeared, call "
@@ -1099,7 +1110,8 @@ def _qr_handoff(page: Path) -> dict[str, Any]:
         )
     return {
         "qr_page": str(page),
-        "browser_opened": opened,
+        "opened_in": opened_in,
+        "browser_opened": bool(opened_in),
         "message": (
             f"Pairing needed. {shown} Ask the user to scan the QR code with WhatsApp "
             "on their phone (Settings -> Linked devices -> Link a device), then "
@@ -1150,9 +1162,11 @@ class WhatsAppAgent(BaseChannelAgent):
         "WhatsApp pairing flow (only when check_whatsapp_auth() reports "
         "not paired): call authenticate_whatsapp() to clone and build the "
         "bridge, then start_whatsapp_bridge(). If it reports a QR page, it has "
-        "already tried to open that page in the user's default browser on this "
-        "machine ('browser_opened'); when it could not, or the user sees no "
-        "window, call show_browser() and open the page with "
+        "already opened that page for the user: 'opened_in' is 'browser_tab' when "
+        "it is showing in the Browser tab on every KISS surface (then never ask "
+        "the user to open a URL or file), 'default_browser' when it opened in the "
+        "user's browser on this machine, or empty; when it could not, or the user "
+        "sees no window, call show_browser() and open the page with "
         "go_to_url('file://...'). Ask the user to scan the QR code with their "
         "phone (WhatsApp -> Settings -> Linked devices -> Link a device), and "
         "call wait_for_whatsapp_pairing() until it reports success. Message "

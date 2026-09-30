@@ -1219,6 +1219,15 @@ body.ask-answering #input-container {
 .tr.warn { background: color-mix(in srgb, var(--warning) 4%, transparent); border-color: color-mix(in srgb, var(--warning) 20%, transparent); }
 .tr.warn strong { color: var(--warning); }
 
+/* The launch-phase line ("Classifying task…", "Preparing worktree…"):
+   a dim, spinner-led status line at the end of the transcript while the
+   daemon works before the agent's first output. */
+.launch-phase {
+  display: flex; align-items: center; gap: var(--space-1-5);
+  padding: var(--space-1) var(--space-2-5); color: var(--dim);
+  font-size: var(--fs-md); font-style: italic;
+}
+
 .tr .rl {
   font-size: var(--fs-sm); font-weight: 400; text-transform: uppercase;
   letter-spacing: .04em; margin-bottom: var(--space-1);
@@ -3616,12 +3625,122 @@ body.sidebar-chat-mode #meta-info-content {
   overflow: auto;
 }
 
-.content-pdf-frame {
+/* The pdf.js viewer (pdfView.js): a toolbar over a scrolling box of
+   page canvases.  The box is the only scroller, and touch-action leaves
+   one-finger panning to the browser while the viewer's own touch
+   handlers take the two-finger pinch. */
+.pdf-viewer {
   flex: 1 1 auto;
-  width: 100%;
   min-height: 0;
-  border: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pdf-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.pdf-toolbar button,
+.pdf-toolbar .pdf-download {
+  box-sizing: border-box;
+  min-width: var(--space-8);
+  height: var(--space-6);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.pdf-toolbar button:hover,
+.pdf-toolbar .pdf-download:hover { background: var(--surface2); }
+
+/* The Download link looks like the buttons; it is an <a> so the browser
+   saves the blob: URL itself (in VS Code it calls the extension). */
+.pdf-toolbar .pdf-download {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* "Page [N] of M": pushed to the right, before the Download link. */
+.pdf-status {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The page number is a field (its width is set per document, from the
+   number of digits in the page count); Enter jumps to the typed page. */
+.pdf-page-input {
+  box-sizing: border-box;
+  height: var(--space-6);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.pdf-scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  background: var(--bg2);
+}
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+}
+
+.pdf-page {
+  flex: 0 0 auto;
+  box-shadow: var(--shadow-sm);
+  background: white;
+}
+
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The VS Code PDF preview panel (src/pdfPreview.ts): the viewer is the
+   whole page, without the webview's default body padding. */
+body.pdf-preview-body {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
 }
 
 .content-image {
@@ -4079,7 +4198,7 @@ body.sidebar-chat-mode #meta-info-content {
 }
 
 /* The line under the chat header: when the chat's latest task was
-   launched, in the task panels' "launched ... ago" style. Indented to
+   launched, in the task panels' "... ago" age-label style. Indented to
    the header's title column; empty until the daemon's stamp arrives. */
 .history-chat-launched {
   display: flex;
@@ -4287,9 +4406,9 @@ body.remote-chat .running-item.history-active-task:hover {
 .running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
 .running-item.collapsed > .running-item-info { display: none; }
 
-/* "launched 3 hours ago" — the task's age, next to the show-details
-   chevron of a history task panel. Muted and small so it reads as
-   metadata; it may shrink (with an ellipsis) but never wraps. */
+/* "3 hours ago" — the task's age, right after the show-details chevron
+   of a history task panel. Muted and small so it reads as metadata; it
+   may shrink (with an ellipsis) but never wraps. */
 .sidebar-item-launched {
   flex-shrink: 1;
   min-width: 0;
@@ -4302,9 +4421,9 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-/* The task's tags ("work · coding"), right before its "launched ..."
-   label and in the same muted style, so the two read as one line of
-   metadata. */
+/* The task's tags ("work · coding") and agent script, right after its
+   "3 hours ago" label and in the same muted style, so they read as one
+   line of metadata. */
 .sidebar-item-tags,
 .sidebar-item-sea {
   flex-shrink: 1;
@@ -4318,9 +4437,9 @@ body.remote-chat .running-item.history-active-task:hover {
   text-overflow: ellipsis;
 }
 
-.sidebar-item-tags + .sidebar-item-sea::before,
-.sidebar-item-tags + .sidebar-item-launched::before,
-.sidebar-item-sea + .sidebar-item-launched::before {
+.sidebar-item-launched + .sidebar-item-tags::before,
+.sidebar-item-launched + .sidebar-item-sea::before,
+.sidebar-item-tags + .sidebar-item-sea::before {
   content: '•';
   margin-right: var(--space-0-5);
 }

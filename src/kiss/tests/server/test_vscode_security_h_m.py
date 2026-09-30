@@ -109,7 +109,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
                 f"no populated reply after the gate opened: {broadcasts}",
             )
             self.assertEqual(populated[0]["prefix"], "a")
-            self.assertEqual([f["text"] for f in populated[0]["files"]], ["a.py"])
+            self.assertEqual([f["text"] for f in populated[0]["files"]], ["./a.py"])
         finally:
             registry.stop()
             shutil.rmtree(tmpdir, ignore_errors=True)

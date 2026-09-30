@@ -267,7 +267,7 @@ class TestMalformedFields(unittest.TestCase):
         assert files_events and files_events[0].get("loading"), files_events
         assert populated, f"the picker never received its reply: {self.events}"
         assert populated[0]["prefix"] == ""
-        assert [f["text"] for f in populated[0]["files"]] == ["a.py"]
+        assert [f["text"] for f in populated[0]["files"]] == ["./a.py"]
 
 
 if __name__ == "__main__":

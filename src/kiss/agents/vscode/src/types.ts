@@ -544,6 +544,14 @@ type ToWebviewMessageBody =
       workDir?: string;
     }
   | {
+      // A path-only `submit` (a prompt that is just the path of an
+      // existing file) opened that file instead of starting a task; sent
+      // by the extension host (SorcarSidebarView `submit`) and by the
+      // daemon (web_server.py _handle_submit) so the webview lifts the
+      // task claim it stamped on the submitting tab.
+      type: 'promptOpened';
+    }
+  | {
       // Reply to `openFile` (web_server.py _handle_open_file), sent only
       // to the requesting connection: `content` on success, `error`
       // otherwise; `tabId` echoes the request's (possibly '').
@@ -972,6 +980,10 @@ type ToWebviewMessageBody =
   // Daemon: a plain informational line for one connection (e.g. "an
   // update is already running").
   | {type: 'notice'; text: string}
+  // Daemon (transient, per tab): what a launch is doing before the
+  // agent's first output ("Classifying task…", "Preparing worktree…");
+  // an empty text removes the line.
+  | {type: 'launch_phase'; text: string; tabId: string}
   // Host (editor-tabs mode): open the webview's settings panel — the
   // editor-title gear button's action.
   | {type: 'openSettings'}

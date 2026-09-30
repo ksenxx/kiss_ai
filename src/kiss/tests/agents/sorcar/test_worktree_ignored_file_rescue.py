@@ -85,6 +85,7 @@ def _make_repo(path: Path) -> Path:
     (path / "README.md").write_text("# Test\n")
     (path / ".gitignore").write_text(
         "data/\n.env\n__pycache__/\n.venv/\n*.log\n"
+        "*.vsix\n.coverage*\n*.pyc\n*.pyo\n*.tsbuildinfo\n"
     )
     _git(path, "add", ".")
     _git(path, "commit", "-q", "-m", "initial")
@@ -184,6 +185,61 @@ class TestIgnoredFileRescueAgent:
         assert not (self.repo / "__pycache__").exists()
         assert not (self.repo / ".venv").exists()
         assert (self.repo / _IGNORED_REL).is_file()
+
+    def test_merge_skips_regenerable_artifact_patterns(self) -> None:
+        """Build artifacts matched by name are neither rescued nor sibling'd.
+
+        A rebuilt ``*.vsix``, pytest-cov's ``.coverage`` data files and
+        stray ``*.pyc`` outside ``__pycache__`` differ from the main
+        tree on every worktree run; before the basename skip list each
+        teardown landed a ``<stem>.kiss-rescued-<ns><ext>`` sibling.
+        """
+        main_vsix = self.repo / "ext" / "kiss-sorcar.vsix"
+        main_vsix.parent.mkdir()
+        main_vsix.write_bytes(b"real build")
+        main_cov = self.repo / ".coverage"
+        main_cov.write_bytes(b"main coverage")
+        agent = self._run_task({
+            "tracked.txt": "tracked\n",
+            "ext/kiss-sorcar.vsix": "worktree build",
+            ".coverage": "worktree coverage",
+            ".coverage.host.123.456": "parallel coverage shard",
+            "pkg/mod.pyc": "bytecode",
+            "pkg/old.pyo": "bytecode",
+            "ext/tsconfig.tsbuildinfo": "{}",
+            _IGNORED_REL: _IGNORED_CONTENT,
+        })
+        msg = agent.merge()
+        assert "Successfully merged" in msg, msg
+        siblings = sorted(
+            p.relative_to(self.repo)
+            for p in self.repo.rglob("*.kiss-rescued-*")
+        )
+        assert siblings == [], f"artifacts rescued as siblings: {siblings}"
+        assert main_vsix.read_bytes() == b"real build"
+        assert main_cov.read_bytes() == b"main coverage"
+        for rel in (
+            ".coverage.host.123.456", "pkg/mod.pyc", "pkg/old.pyo",
+            "ext/tsconfig.tsbuildinfo",
+        ):
+            assert not (self.repo / rel).exists(), f"{rel} was rescued"
+        # Genuine ignored output next to the artifacts is still rescued.
+        assert (self.repo / _IGNORED_REL).read_text() == _IGNORED_CONTENT
+
+    def test_rescue_reports_ok_when_only_artifacts_are_skipped(self) -> None:
+        """Skipped artifacts count as safe: the fail-closed flag stays True."""
+        wt = Path(self.tmpdir) / "wt"
+        _git(self.repo, "worktree", "add", "-q", str(wt), "-b", "wt-branch")
+        (wt / "kiss-sorcar.vsix").write_bytes(b"build")
+        (wt / ".coverage").write_bytes(b"cov")
+        (wt / "mod.pyc").write_bytes(b"pyc")
+        (wt / "keep.log").write_text("task log\n")
+        rescued, ok = GitWorktreeOps.rescue_ignored_files(wt, self.repo)
+        assert (rescued, ok) == (1, True)
+        assert (self.repo / "keep.log").read_text() == "task log\n"
+        assert not (self.repo / "kiss-sorcar.vsix").exists()
+        assert not (self.repo / ".coverage").exists()
+        assert not (self.repo / "mod.pyc").exists()
 
     def test_release_on_next_run_rescues_ignored_file(self) -> None:
         """The auto-release before a new task rescues ignored output."""

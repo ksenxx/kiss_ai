@@ -299,13 +299,14 @@ class TestDirectMoonshotCachePricing:
         # input, $0.30 cache read = 0.29x).  The updater prices each
         # OpenRouter row independently, so the alias is not tied to the
         # kimi-k3 entry either.  What must hold is that the explicit
-        # OpenRouter cache price was kept: a positive discount on the input
-        # price that is not the 0.25x direct-Moonshot default.
+        # OpenRouter cache price was kept: a positive price no higher than
+        # the input price (2026-09-29: $0.40 input, $0.40 cache read, i.e. no
+        # discount published) that is not the 0.25x direct-Moonshot default.
         latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
         assert latest.input_price_per_1M > 0
         cache_read = latest.cache_read_price_per_1M
         assert cache_read is not None
-        assert 0 < cache_read < latest.input_price_per_1M
+        assert 0 < cache_read <= latest.input_price_per_1M
         assert cache_read != pytest.approx(latest.input_price_per_1M * 0.25)
 
 
@@ -426,6 +427,30 @@ class TestGpt6LongContextTier:
             300_000 * twin.input_price_per_1M * 2.0 + 5_000 * twin.output_price_per_1M * 1.5
         ) / 1e6
         assert twin_cost == pytest.approx(expected)
+
+
+class TestGpt61SolPricing:
+    """gpt-6.1-sol $2/$0.10/$2.50/$10 -> $4/$0.20/$5/$15 above 272k prompt
+    tokens; cached input is 5% of input
+    (https://developers.openai.com/api/docs/models/gpt-6.1-sol)."""
+
+    def test_catalog_rates(self):
+        for name in ("gpt-6.1-sol", "gpt-6.1-sol-high", "openrouter/openai/gpt-6.1-sol"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(0.10), name
+            assert info.cache_write_price_per_1M == pytest.approx(2.50), name
+
+    def test_short_context(self):
+        cost = calculate_cost("gpt-6.1-sol", 100_000, 10_000, 100_000, 50_000)
+        expected = (100_000 * 2.0 + 100_000 * 0.10 + 50_000 * 2.5 + 10_000 * 10.0) / 1e6
+        assert cost == pytest.approx(expected)
+
+    def test_long_context_uplift(self):
+        cost = calculate_cost("gpt-6.1-sol", 100_000, 10_000, 150_000, 50_000)
+        expected = (100_000 * 4.0 + 150_000 * 0.20 + 50_000 * 5.0 + 10_000 * 15.0) / 1e6
+        assert cost == pytest.approx(expected)
+        alias = calculate_cost("gpt-6.1-sol-medium", 100_000, 10_000, 150_000, 50_000)
+        assert alias == pytest.approx(expected)
 
 
 class TestTogetherCachedInputPrices:

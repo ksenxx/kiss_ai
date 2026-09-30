@@ -806,40 +806,698 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         context.close()
 
 
+_PDF_VIEWER = ".content-tab-view .pdf-viewer"
+_PDF_PAGE = _PDF_VIEWER + " .pdf-page"
+
+# Geometry of the viewer: [scroller client width, first page box width,
+# page count, zoom label, scroller scrollHeight, scroller clientHeight].
+_PDF_GEOMETRY_JS = """() => {
+  const scroller = document.querySelector('.content-tab-view .pdf-scroller');
+  const pages = document.querySelectorAll('.content-tab-view .pdf-page');
+  const box = pages[0].getBoundingClientRect();
+  const styles = getComputedStyle(scroller.querySelector('.pdf-pages'));
+  const padding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+  return {
+    avail: scroller.clientWidth - padding,
+    pageWidth: box.width,
+    pageCount: pages.length,
+    zoom: document.querySelector('.content-tab-view .pdf-zoom-level').textContent,
+    scrollHeight: scroller.scrollHeight,
+    clientHeight: scroller.clientHeight,
+    touchAction: getComputedStyle(scroller).touchAction,
+  };
+}"""
+
+# The toolbar's page indicator as the user reads it: "Page N of M" with N
+# taken from the page field ("Loading…" before the document is open).
+_PDF_STATUS_JS = """() => {
+  const status = document.querySelector('.content-tab-view .pdf-status');
+  const input = status.querySelector('.pdf-page-input');
+  return [...status.childNodes]
+    .map(node => (node === input ? input.value : node.textContent))
+    .join('');
+}"""
+
+# The 1-based page under the vertical middle of the view (the next page
+# when the middle falls in a gap; the last page past the end).
+_PDF_MIDDLE_PAGE_JS = """() => {
+  const s = document.querySelector('.content-tab-view .pdf-scroller');
+  const middle = s.getBoundingClientRect().top + s.clientHeight / 2;
+  const pages = [...document.querySelectorAll('.content-tab-view .pdf-page')];
+  const i = pages.findIndex(p => p.getBoundingClientRect().bottom > middle);
+  return (i < 0 ? pages.length : i + 1);
+}"""
+
+
+def _pdf_status(page) -> str:
+    return str(page.evaluate(_PDF_STATUS_JS))
+
+
+def _wait_pdf_status(page, text: str) -> None:
+    page.wait_for_function(
+        "text => (" + _PDF_STATUS_JS + ")() === text", arg=text, timeout=10000
+    )
+
+
+_PDFJS_MODULE = (
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/legacy/build/pdf.min.mjs"
+)
+
+
+def _wait_pdf_rendered(page) -> None:
+    """Wait for the pdf.js viewer to draw the first page.  A viewer error
+    fails the test unless the pdf.js CDN really is unreachable from the
+    browser (then there is no viewer to test and the test skips)."""
+    page.wait_for_function(
+        """() => document.querySelector('.content-tab-view .pdf-page canvas')
+             || document.querySelector('.content-tab-view .pdf-scroller .content-binary-note')""",
+        timeout=60000,
+    )
+    if page.locator(_PDF_PAGE + " canvas").count() > 0:
+        return
+    note = page.locator(".content-tab-view .content-binary-note").first.inner_text()
+    cdn_ok = page.evaluate(
+        "url => fetch(url, {method: 'HEAD'}).then(r => r.ok).catch(() => false)",
+        _PDFJS_MODULE,
+    )
+    if cdn_ok:
+        pytest.fail("pdf.js viewer failed with the CDN reachable: " + note)
+    pytest.skip("pdf.js CDN unreachable: " + note)
+
+
+def _inject_file_link(page, path: str, link_id: str) -> None:
+    """Append a ``span.kiss-filelink[data-path]`` for *path* to the chat
+    output, the link a linkified tool output would carry."""
+    page.evaluate(
+        """([path, linkId]) => {
+          const span = document.createElement('span');
+          span.className = 'kiss-filelink';
+          span.id = linkId;
+          span.dataset.path = path;
+          span.textContent = path;
+          document.getElementById('output').appendChild(span);
+        }""",
+        [path, link_id],
+    )
+
+
+def _pdf_bytes(pages: int) -> bytes:
+    """A minimal *pages*-page PDF of 200x100pt pages (no xref table;
+    pdf.js rebuilds it, like it does for damaged files)."""
+    kids = " ".join(f"{3 + i} 0 R" for i in range(pages))
+    body = (
+        b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        + f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {pages} >> endobj\n".encode()
+    )
+    for i in range(pages):
+        body += (
+            f"{3 + i} 0 obj << /Type /Page /Parent 2 0 R"
+            " /MediaBox [0 0 200 100] >> endobj\n"
+        ).encode()
+    return body + b"trailer << /Root 1 0 R >>\n%%EOF\n"
+
+
+def _pinch(page, factor: float) -> None:
+    """Dispatch a two-finger pinch on the viewer's scroller that spreads
+    the fingers by *factor* (synthetic TouchEvents: Playwright drives one
+    pointer at a time)."""
+    page.evaluate(
+        """factor => {
+          const scroller = document.querySelector('.content-tab-view .pdf-scroller');
+          const rect = scroller.getBoundingClientRect();
+          const cx = rect.left + 100, cy = rect.top + 100;
+          const mk = (id, x, y) =>
+            new Touch({identifier: id, target: scroller, clientX: x, clientY: y});
+          const fire = (type, touches) => scroller.dispatchEvent(new TouchEvent(type, {
+            touches, targetTouches: touches, changedTouches: touches,
+            bubbles: true, cancelable: true,
+          }));
+          fire('touchstart', [mk(1, cx - 50, cy), mk(2, cx + 50, cy)]);
+          fire('touchmove', [mk(1, cx - 50 * factor, cy), mk(2, cx + 50 * factor, cy)]);
+          fire('touchend', []);
+        }""",
+        factor,
+    )
+
+
 def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
+    """A PDF opens in the in-app pdf.js viewer: its single page is drawn
+    on a canvas at fit-width scale, the toolbar zooms in and out and
+    back to fit width, and the viewer goes with its tab."""
     context, page, frames = _open_page(browser, harness)
     try:
         _open_explorer(page)
         tabs_before = page.locator(".chat-tab").count()
         _explorer_row(page, "report.pdf").click()
         _wait_tab_count(page, tabs_before + 1)
-        frame = page.locator(".content-tab-view iframe.content-pdf-frame")
-        frame.wait_for(timeout=15000)
-        src = frame.get_attribute("src") or ""
-        assert src.startswith("blob:")
-        assert frame.get_attribute("sandbox") is None
-        assert frame.get_attribute("title") == "report.pdf"
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        assert page.locator(".content-tab-view iframe").count() == 0
+        _wait_pdf_rendered(page)
         # No error toast: the reply carried the bytes, not an error.
-        assert "Cannot display binary file" not in page.locator("body").inner_text()
-        # The bytes the frame shows are the file's.
-        size = page.evaluate(
-            "src => fetch(src).then(r => r.blob()).then(b => [b.size, b.type])", src,
+        assert "Cannot display" not in page.locator("body").inner_text()
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        assert geo["pageCount"] == 1
+        assert _pdf_status(page) == "Page 1 of 1"
+        # The toolbar's Download link saves the file's own bytes under its name.
+        download_link = page.locator(_PDF_VIEWER + " .pdf-download")
+        assert download_link.inner_text() == "Download"
+        assert (download_link.get_attribute("href") or "").startswith("blob:")
+        with page.expect_download() as download_info:
+            download_link.click()
+        download = download_info.value
+        assert download.suggested_filename == "report.pdf"
+        saved = harness.work_dir / "downloaded-copy.pdf"
+        download.save_as(str(saved))
+        assert saved.read_bytes() == (harness.work_dir / "report.pdf").read_bytes()
+        # A host without a URL (the VS Code panel) passes onDownload
+        # instead: the link then calls it and does not navigate.
+        callback_calls = page.evaluate(
+            """async () => {
+              const href = document.querySelector('.content-tab-view .pdf-download').href;
+              const buf = await fetch(href).then(r => r.arrayBuffer());
+              const holder = document.createElement('div');
+              document.body.appendChild(holder);
+              let calls = 0;
+              const viewer = window.mountPdfViewer(holder, new Uint8Array(buf), {
+                name: 'callback.pdf',
+                onDownload: () => { calls++; },
+              });
+              const link = holder.querySelector('.pdf-download');
+              const before = location.href;
+              link.click();
+              const result = {calls, navigated: location.href !== before,
+                              title: link.title};
+              viewer.dispose();
+              holder.remove();
+              return result;
+            }""",
         )
-        assert size == [len((harness.work_dir / "report.pdf").read_bytes()), "application/pdf"]
+        assert callback_calls == {"calls": 1, "navigated": False, "title": "Download callback.pdf"}
+        # Fit width: the 200pt-wide page fills the box (within a pixel of
+        # rounding), and the label shows that scale.
+        assert abs(geo["pageWidth"] - geo["avail"]) <= 1.5
+        fit_width = geo["pageWidth"]
+        assert geo["zoom"] == f"{round(fit_width / 200 * 100)}%"
+        # Zoom in: a quarter larger, re-drawn at the new size.
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width * 1.25}) <= 1.5",
+            timeout=10000,
+        )
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
+            timeout=15000,
+        )
+        # Zoom out twice: a quarter smaller than fit width.
+        page.click(_PDF_VIEWER + " .pdf-zoom-out")
+        page.click(_PDF_VIEWER + " .pdf-zoom-out")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width / 1.25}) <= 1.5",
+            timeout=10000,
+        )
+        # The percentage button returns to fit width.
+        page.click(_PDF_VIEWER + " .pdf-zoom-level")
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width}) <= 1.5",
+            timeout=10000,
+        )
+        # Ctrl + wheel zooms too (a trackpad pinch on a desktop).
+        page.hover(_PDF_PAGE)
+        page.keyboard.down("Control")
+        page.mouse.wheel(0, -100)
+        page.keyboard.up("Control")
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" > {fit_width * 1.5}",
+            timeout=10000,
+        )
+        # Clicking the open PDF again reloads it in the same tab: the old
+        # viewer (and its worker) go, a fresh one draws the page.
+        _explorer_row(page, "report.pdf").click()
+        page.wait_for_function(
+            f"""() => {{
+              const p = document.querySelector('{_PDF_PAGE}');
+              return document.querySelectorAll('.pdf-viewer').length === 1 && !!p
+                && Math.abs(p.getBoundingClientRect().width - {fit_width}) <= 1.5
+                && !!p.querySelector('canvas');
+            }}""",
+            timeout=15000,
+        )
+        _wait_tab_count(page, tabs_before + 1)
         # An image opens as a picture.
         _explorer_row(page, "dot.png").click()
         _wait_tab_count(page, tabs_before + 2)
         img = page.locator(".content-tab-view img.content-image")
         img.wait_for(timeout=15000)
         assert (img.get_attribute("src") or "").startswith("blob:")
-        # Closing the PDF tab releases its blob URL.
+        # A second PDF has its own pdf.js worker: closing the first tab
+        # (which frees that document) leaves the second one drawing.
+        second = harness.work_dir / "report2.pdf"
+        second.write_bytes((harness.work_dir / "report.pdf").read_bytes())
+        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        page.wait_for_selector("#output", state="visible", timeout=15000)
+        _inject_file_link(page, str(second), "lnk-pdf2")
+        page.click("#lnk-pdf2")
+        _wait_tab_count(page, tabs_before + 3)
+        _wait_pdf_rendered(page)
         page.locator(".chat-tab", has_text="report.pdf").first.click()
         page.locator(".chat-tab.active .chat-tab-close").click()
-        _wait_tab_count(page, tabs_before + 1)
-        revoked = page.evaluate(
-            "src => fetch(src).then(() => false).catch(() => true)", src,
+        _wait_tab_count(page, tabs_before + 2)
+        page.locator(".chat-tab", has_text="report2.pdf").first.click()
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE} canvas').width >= {fit_width * 1.25 - 2}",
+            timeout=15000,
         )
-        assert revoked is True
+        # Closing a PDF tab removes its viewer.
+        page.locator(".chat-tab.active .chat-tab-close").click()
+        _wait_tab_count(page, tabs_before + 1)
+        assert page.locator(".pdf-viewer").count() == 0
+    finally:
+        context.close()
+
+
+def test_pdf_scrolls_and_pinch_zooms_on_a_phone(browser, harness, worktree):
+    """In mobile mode the PDF fits the screen width, the page list is a
+    real scroller (one finger pans it, the browser is told so through
+    touch-action) and a two-finger pinch zooms it."""
+    context = browser.new_context(
+        ignore_https_errors=True,
+        viewport={"width": 390, "height": 740},
+        is_mobile=True,
+        has_touch=True,
+    )
+    page = context.new_page()
+    try:
+        goto_retrying_network_change(page, harness.base_url + "/")
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        page.wait_for_selector(".chat-tab", timeout=30000)
+        assert page.locator("body.remote-desktop").count() == 0
+        _inject_file_link(page, str(harness.work_dir / "report.pdf"), "lnk-pdf")
+        page.click("#lnk-pdf")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        # Fit to the phone's width: no horizontal overflow.
+        assert abs(geo["pageWidth"] - geo["avail"]) <= 1.5
+        assert geo["pageWidth"] <= 390
+        assert geo["touchAction"] == "pan-x pan-y"
+        fit_width = geo["pageWidth"]
+        # Pinch out: the page quadruples (the 2:1 test page is then
+        # taller than the phone too), overflows the phone in both
+        # directions and the scroller (not the document) carries it.
+        _pinch(page, 4.0)
+        page.wait_for_function(
+            f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" - {fit_width * 4}) <= 3",
+            timeout=10000,
+        )
+        scrolled = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              s.scrollLeft = 10000; s.scrollTop = 10000;
+              return {left: s.scrollLeft, top: s.scrollTop,
+                      overflowX: s.scrollWidth - s.clientWidth,
+                      overflowY: s.scrollHeight - s.clientHeight,
+                      pageScrolled: document.scrollingElement.scrollTop};
+            }""",
+        )
+        assert scrolled["overflowX"] > fit_width * 0.9
+        assert scrolled["overflowY"] > 0
+        assert scrolled["left"] == scrolled["overflowX"]
+        assert scrolled["top"] == scrolled["overflowY"]
+        assert scrolled["pageScrolled"] == 0
+        # Pinch in from 4x: a fifth of that is below fit width.
+        _pinch(page, 0.2)
+        page.wait_for_function(
+            f"() => document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+            f" < {fit_width}",
+            timeout=10000,
+        )
+    finally:
+        context.close()
+
+
+def test_pdf_zoom_keeps_the_point_under_the_gesture(browser, harness, worktree):
+    """Zooming a multi-page PDF anchors the document point at the centre
+    of the view (the gaps between pages do not scale, so page 5 must be
+    anchored on page 5, not on a scaled scroll offset), pages that
+    scroll a screen away give their canvas back, and the toolbar's page
+    indicator follows the page under the middle of the view."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        assert page.locator(_PDF_PAGE).count() == 8
+        assert _pdf_status(page) == "Page 1 of 8"
+        # Scrolling to the end puts the last page under the middle.
+        page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 1e6"
+        )
+        _wait_pdf_status(page, "Page 8 of 8")
+        # Scroll so that page 5 sits 40px below the top of the view.
+        page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              s.scrollTop = p.getBoundingClientRect().top - s.getBoundingClientRect().top
+                            + s.scrollTop - 40;
+            }""",
+        )
+        # The indicator names the page under the middle of the view (page
+        # 5 when it is taller than half the view, otherwise a later one).
+        expected_page = page.evaluate(_PDF_MIDDLE_PAGE_JS)
+        assert expected_page >= 5
+        _wait_pdf_status(page, f"Page {expected_page} of 8")
+        # Pages 1-2 are more than a screen above: no canvas any more,
+        # while page 5 is drawn.
+        page.wait_for_function(
+            """() => {
+              const pages = document.querySelectorAll('.content-tab-view .pdf-page');
+              return !pages[0].querySelector('canvas') && !!pages[4].querySelector('canvas');
+            }""",
+            timeout=15000,
+        )
+        before = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              const r = p.getBoundingClientRect(), b = s.getBoundingClientRect();
+              return {cy: s.clientHeight / 2, top: r.top - b.top, width: r.width};
+            }""",
+        )
+        page.click(_PDF_VIEWER + " .pdf-zoom-in")
+        after = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[4];
+              const r = p.getBoundingClientRect(), b = s.getBoundingClientRect();
+              return {cy: s.clientHeight / 2, top: r.top - b.top, width: r.width};
+            }""",
+        )
+        ratio = after["width"] / before["width"]
+        assert abs(ratio - 1.25) < 0.02
+        # The point of page 5 at the view's centre is still at the centre.
+        assert abs((after["cy"] - after["top"]) - (before["cy"] - before["top"]) * ratio) <= 2
+        # The zoom kept the same page under the middle.
+        assert _pdf_status(page) == f"Page {expected_page} of 8"
+        # Growing the view (the zoom is manual now, so the pages stay put)
+        # moves its middle down without a scroll event: put the middle
+        # 40px above page 4's bottom, then add 200px of height and the
+        # middle lands on page 5.
+        page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              const p = document.querySelectorAll('.content-tab-view .pdf-page')[3];
+              s.scrollTop = p.getBoundingClientRect().bottom - s.getBoundingClientRect().top
+                            + s.scrollTop - 40 - s.clientHeight / 2;
+            }""",
+        )
+        _wait_pdf_status(page, "Page 4 of 8")
+        size = page.viewport_size
+        scroll_top = page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
+        )
+        page.set_viewport_size({"width": size["width"], "height": size["height"] + 200})
+        _wait_pdf_status(page, "Page 5 of 8")
+        assert (
+            page.evaluate(
+                "document.querySelector('.content-tab-view .pdf-scroller').scrollTop"
+            )
+            == scroll_top
+        )
+    finally:
+        context.close()
+
+
+# Where page *n* (1-based) starts relative to the top of the view, the
+# view's scroll offset, and the margin above the first page at offset 0.
+_PDF_PAGE_TOP_JS = """n => {
+  const s = document.querySelector('.content-tab-view .pdf-scroller');
+  const p = document.querySelectorAll('.content-tab-view .pdf-page')[n - 1];
+  return {
+    top: p.getBoundingClientRect().top - s.getBoundingClientRect().top,
+    scrollTop: s.scrollTop,
+    padding: parseFloat(getComputedStyle(s.querySelector('.pdf-pages')).paddingTop),
+    focused: document.activeElement === document.querySelector('.pdf-page-input'),
+  };
+}"""
+
+
+def test_pdf_page_field_jumps_to_the_typed_page(browser, harness, worktree):
+    """The page number in the toolbar is a field: a number typed into it
+    and Enter scrolls that page to the top of the view (out-of-range
+    numbers go to the first or last page, a non-number goes nowhere),
+    scrolling leaves a number being typed alone, and Escape abandons
+    the edit."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        field = page.locator(_PDF_VIEWER + " .pdf-page-input")
+        assert _pdf_status(page) == "Page 1 of 8"
+        assert field.get_attribute("inputmode") == "numeric"
+        assert field.get_attribute("enterkeyhint") == "go"
+        # Focusing the field selects the number, so typing replaces it.
+        field.click()
+        assert page.evaluate(
+            """() => {
+              const f = document.activeElement;
+              return f.className === 'pdf-page-input'
+                && f.selectionStart === 0 && f.selectionEnd === f.value.length;
+            }"""
+        )
+        page.keyboard.type("5")
+        page.keyboard.press("Enter")
+        # Page 5 starts at the top of the view, under the same margin as
+        # the first page at offset 0; the field is left, showing the
+        # page under the middle again (page 5 or, if the pages are
+        # shorter than half the view, a later one).
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 5)
+        assert abs(geo["top"] - geo["padding"]) <= 1.5
+        assert geo["focused"] is False
+        middle_page = page.evaluate(_PDF_MIDDLE_PAGE_JS)
+        assert middle_page >= 5
+        _wait_pdf_status(page, f"Page {middle_page} of 8")
+        # A number past the end goes to the last page (the view cannot
+        # scroll that far, so it ends at the bottom).
+        field.fill("99")
+        page.keyboard.press("Enter")
+        _wait_pdf_status(page, "Page 8 of 8")
+        assert page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              return s.scrollTop + s.clientHeight === s.scrollHeight;
+            }"""
+        )
+        # Zero goes to the first page: back at the very top.
+        field.fill("0")
+        page.keyboard.press("Enter")
+        _wait_pdf_status(page, "Page 1 of 8")
+        assert page.evaluate(_PDF_PAGE_TOP_JS, 1)["scrollTop"] == 0
+        # A non-number goes nowhere; the field shows the real page again.
+        field.fill("abc")
+        page.keyboard.press("Enter")
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 1)
+        assert geo["scrollTop"] == 0
+        assert geo["focused"] is False
+        assert _pdf_status(page) == "Page 1 of 8"
+        # A number being typed survives a scroll (the field only catches
+        # up once it is left), and Escape abandons it without scrolling.
+        field.click()
+        page.keyboard.type("3")
+        page.evaluate(
+            "document.querySelector('.content-tab-view .pdf-scroller').scrollTop = 1e6"
+        )
+        # Two frames: the indicator refresh runs on the next one.
+        page.evaluate(
+            "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))"
+        )
+        assert field.input_value() == "3"
+        assert page.evaluate(_PDF_PAGE_TOP_JS, 8)["focused"] is True
+        scroll_top = page.evaluate(_PDF_PAGE_TOP_JS, 8)["scrollTop"]
+        page.keyboard.press("Escape")
+        geo = page.evaluate(_PDF_PAGE_TOP_JS, 8)
+        assert geo["focused"] is False
+        assert geo["scrollTop"] == scroll_top
+        assert _pdf_status(page) == "Page 8 of 8"
+    finally:
+        context.close()
+
+
+def _pdf_scroll_top(page) -> float:
+    return float(page.evaluate(_PDF_PAGE_TOP_JS, 1)["scrollTop"])
+
+
+def _assert_pdf_page_at_top(page, n: int) -> None:
+    """Page *n* starts at the top of the view, under the margin the
+    first page has at scroll offset 0."""
+    geo = page.evaluate(_PDF_PAGE_TOP_JS, n)
+    assert abs(geo["top"] - geo["padding"]) <= 1.5, geo
+
+
+def _scroll_pdf_into_page(page, n: int, offset: int) -> None:
+    """Scroll so that page *n* starts *offset* pixels above the view's top."""
+    page.evaluate(
+        """([n, offset]) => {
+          const s = document.querySelector('.content-tab-view .pdf-scroller');
+          const p = document.querySelectorAll('.content-tab-view .pdf-page')[n - 1];
+          s.scrollTop = p.getBoundingClientRect().top - s.getBoundingClientRect().top
+                        + s.scrollTop + offset;
+        }""",
+        [n, offset],
+    )
+
+
+def _wait_pdf_page_width(page, width: float) -> None:
+    page.wait_for_function(
+        f"() => Math.abs(document.querySelector('{_PDF_PAGE}').getBoundingClientRect().width"
+        f" - {width}) <= 1.5",
+        timeout=10000,
+    )
+
+
+def test_pdf_keyboard_shortcuts_move_pages_and_zoom(browser, harness, worktree):
+    """With the viewer on screen and nothing focused, PageDown / ArrowRight
+    and PageUp / ArrowLeft move one page forward and back, Home / End go
+    to the first / last page, Ctrl/Cmd+0 fits the width and Ctrl/Cmd
+    with + / - zooms.  The keys are left alone while typed into the page
+    field, with Shift or Alt held, while the viewer's tab is hidden, and
+    the arrows pan instead once the pages are wider than the view."""
+    pdf = harness.work_dir / "pages8.pdf"
+    pdf.write_bytes(_pdf_bytes(8))
+    context, page, frames = _open_page(browser, harness)
+    errors: list[str] = []
+    page.on("pageerror", lambda err: errors.append(str(err)))
+    try:
+        _inject_file_link(page, str(pdf), "lnk-pdf8")
+        page.click("#lnk-pdf8")
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        _wait_pdf_rendered(page)
+        assert _pdf_status(page) == "Page 1 of 8"
+        # No click into the viewer first: the keys work as soon as the
+        # viewer is shown.
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        page.keyboard.press("ArrowRight")
+        _assert_pdf_page_at_top(page, 3)
+        page.keyboard.press("PageUp")
+        _assert_pdf_page_at_top(page, 2)
+        page.keyboard.press("ArrowLeft")
+        assert _pdf_scroll_top(page) == 0
+        # Before the first page there is nothing to go to.
+        page.keyboard.press("ArrowLeft")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("End")
+        _wait_pdf_status(page, "Page 8 of 8")
+        at_bottom = page.evaluate(
+            """() => {
+              const s = document.querySelector('.content-tab-view .pdf-scroller');
+              return s.scrollTop + s.clientHeight === s.scrollHeight;
+            }"""
+        )
+        assert at_bottom
+        bottom = _pdf_scroll_top(page)
+        page.keyboard.press("PageDown")
+        assert _pdf_scroll_top(page) == bottom
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        _wait_pdf_status(page, "Page 1 of 8")
+        # From inside page 3 (its top 40px above the view), forward goes
+        # to the top of page 4 and back to the top of page 2.
+        _scroll_pdf_into_page(page, 3, 40)
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 4)
+        _scroll_pdf_into_page(page, 3, 40)
+        page.keyboard.press("PageUp")
+        _assert_pdf_page_at_top(page, 2)
+        # Zoom: Ctrl+= a quarter larger, Ctrl+- back, Ctrl+Shift+= (the
+        # + key) in again, Cmd+0 back to fit width.
+        geo = page.evaluate(_PDF_GEOMETRY_JS)
+        fit_width = geo["pageWidth"]
+        assert abs(fit_width - geo["avail"]) <= 1.5
+        page.keyboard.press("Control+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Control+Minus")
+        _wait_pdf_page_width(page, fit_width)
+        page.keyboard.press("Control+Shift+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Meta+0")
+        _wait_pdf_page_width(page, fit_width)
+        # Zoomed in past the view's width the arrows are the browser's
+        # (they pan); PageDown still turns the page.
+        page.keyboard.press("Home")
+        page.keyboard.press("Control+Equal")
+        _wait_pdf_page_width(page, fit_width * 1.25)
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("ArrowRight")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        # Ctrl+0 restores fit-width mode, so the pages follow a resize.
+        page.keyboard.press("Control+0")
+        _wait_pdf_page_width(page, fit_width)
+        size = page.viewport_size
+        page.set_viewport_size({"width": size["width"] - 200, "height": size["height"]})
+        page.wait_for_function(
+            "() => { const g = (" + _PDF_GEOMETRY_JS + ")();"
+            " return Math.abs(g.pageWidth - g.avail) <= 1.5 && g.pageWidth < "
+            + str(fit_width - 100)
+            + "; }",
+            timeout=10000,
+        )
+        page.set_viewport_size(size)
+        _wait_pdf_page_width(page, fit_width)
+        page.keyboard.press("Home")
+        assert _pdf_scroll_top(page) == 0
+        # Keys typed into the page field are the field's.
+        page.locator(_PDF_VIEWER + " .pdf-page-input").click()
+        page.keyboard.press("PageDown")
+        assert _pdf_scroll_top(page) == 0
+        page.keyboard.press("Escape")
+        # Shift or Alt combinations are not the viewer's.
+        page.keyboard.press("Shift+PageDown")
+        page.keyboard.press("Alt+ArrowRight")
+        assert _pdf_scroll_top(page) == 0
+        # A hidden viewer (another tab is shown) leaves the keys alone,
+        # and comes back at the same place (its zero-size box while
+        # hidden must not re-fit the width).
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 2)
+        page_two = _pdf_scroll_top(page)
+        page.evaluate("document.querySelector('.chat-tab:not(.content-tab)').click()")
+        page.wait_for_selector("#output", state="visible", timeout=15000)
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        page.locator(".chat-tab", has_text="pages8.pdf").first.click()
+        page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+        assert _pdf_scroll_top(page) == page_two
+        _assert_pdf_page_at_top(page, 2)
+        page.evaluate("document.activeElement.blur()")
+        page.keyboard.press("PageDown")
+        _assert_pdf_page_at_top(page, 3)
+        # Closing the tab takes the listener with it: the key is nobody's.
+        page.locator(".chat-tab.active .chat-tab-close").click()
+        page.wait_for_function(
+            "() => document.querySelectorAll('.pdf-viewer').length === 0", timeout=15000
+        )
+        page.keyboard.press("PageDown")
+        page.keyboard.press("Control+0")
+        assert errors == []
     finally:
         context.close()
 

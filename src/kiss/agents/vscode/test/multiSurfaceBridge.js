@@ -391,7 +391,13 @@ function handle(cmd) {
       out({op: 'posted', name: cmd.name});
       break;
     case 'click': {
-      const el = doc.querySelector(cmd.selector);
+      // `text` narrows the match to the first element whose text
+      // contains it (history rows carry no id attribute).
+      const el = cmd.text
+        ? Array.from(doc.querySelectorAll(cmd.selector)).find(e =>
+            (e.textContent || '').includes(cmd.text),
+          )
+        : doc.querySelector(cmd.selector);
       if (el) el.click();
       out({op: 'clicked', name: cmd.name, found: !!el});
       break;

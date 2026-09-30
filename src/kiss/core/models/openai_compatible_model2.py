@@ -853,7 +853,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             for key, value in self.model_config.items()
             if key not in FRAMEWORK_ONLY_CONFIG_KEYS
         }
-        system_instruction = self.model_config.get("system_instruction")
+        system_instruction = self.system_instruction_text()
         reasoning_effort = kwargs.pop("reasoning_effort", None)
 
         max_tokens = kwargs.pop("max_tokens", None)

@@ -589,7 +589,9 @@ class ServerBackend(Protocol):
         self, cmd: dict[str, Any], websocket: Any,
     ) -> None: ...
 
-    async def _handle_submit(self, cmd: dict[str, Any]) -> None: ...
+    async def _handle_submit(
+        self, cmd: dict[str, Any], endpoint: Any = None,
+    ) -> None: ...
 
     async def _send_welcome_info(self) -> None: ...
 
@@ -1049,13 +1051,17 @@ class ServerApi:
 
         The backend translates the webview ``submit`` into a ``run``
         (path resolution, running-tab tracking) exactly as the VS Code
-        TypeScript extension would.
+        TypeScript extension would, including its path-only shortcut: a
+        prompt that is just the path of an existing file is answered
+        with that file's ``fileContent`` on the submitting connection
+        and starts no task.
 
         Args:
             cmd: The ``submit`` command.
-            ctx: The transport context of the current call (unused).
+            ctx: The transport context of the current call; its
+                endpoint receives a path-only prompt's ``fileContent``.
         """
-        await self._backend._handle_submit(cmd)
+        await self._backend._handle_submit(cmd, ctx.endpoint)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Serve a file's content to a remote-web client.

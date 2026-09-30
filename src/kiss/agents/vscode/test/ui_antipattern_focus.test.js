@@ -99,6 +99,27 @@ async function main() {
     win.close();
   });
 
+  await test("focusInput's retries do not pull the caret out of the workdir box", async () => {
+    // The daemon sends focusInput on every (re)connect; a user who then
+    // opens the "Working directory" sheet and starts typing its path
+    // must keep the caret (the 100 / 300 ms retries used to take it).
+    const {win} = h.makeWebview();
+    h.send(win, {type: 'focusInput'});
+    assert.strictEqual(win.document.activeElement, h.byId(win, 'task-input'), 'precondition');
+    h.click(win, h.byId(win, 'more-btn'));
+    h.click(win, h.byId(win, 'workdir-btn'));
+    const box = h.byId(win, 'workdir-input');
+    box.focus();
+    assert.strictEqual(win.document.activeElement, box, 'precondition');
+    await h.sleep(350);
+    assert.strictEqual(
+      win.document.activeElement,
+      box,
+      'a forced request must not keep stealing focus after the fact',
+    );
+    win.close();
+  });
+
   await test('a finished background tab is not raised after the user interacted', () => {
     const {win} = h.makeWebview();
     const tabA = win._testApi.getActiveTabId();

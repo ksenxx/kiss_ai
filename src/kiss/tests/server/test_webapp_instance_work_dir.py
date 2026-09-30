@@ -369,15 +369,15 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
 
         await self._send(ws_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
-            ws_a, self._files_event_with("alpha.txt"),
+            ws_a, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("beta.txt", _file_names(ev_a))
+        self.assertNotIn("./beta.txt", _file_names(ev_a))
 
         await self._send(ws_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
-            ws_b, self._files_event_with("beta.txt"),
+            ws_b, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("alpha.txt", _file_names(ev_b))
+        self.assertNotIn("./alpha.txt", _file_names(ev_b))
 
     async def test_reconnect_replay_restores_instance_work_dir(self) -> None:
         """A reconnecting instance that replays ``setWorkDir`` (exactly
@@ -399,9 +399,9 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         )
         await self._send(ws_a2, {"type": "getFiles", "prefix": ""})
         ev = await self._drain_until(
-            ws_a2, self._files_event_with("alpha.txt"),
+            ws_a2, self._files_event_with("./alpha.txt"),
         )
-        self.assertNotIn("beta.txt", _file_names(ev))
+        self.assertNotIn("./beta.txt", _file_names(ev))
 
     async def test_get_config_reports_instance_pin_over_persisted(
         self,

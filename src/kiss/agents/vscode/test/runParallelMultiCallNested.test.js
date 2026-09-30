@@ -1047,32 +1047,31 @@ function testLateSpawnUnderFinishedParentOpensUnderAncestor() {
   console.log('  ok - late spawn under finished parent opens under ancestor');
 }
 
-// A copy that missed subagentDone learns the terminal state from the
-// daemon's replayed announcement / mirrored close and becomes closable.
-function testReplayedCompletionReconcilesStaleRunningTab() {
+// A running sub-agent's tab stays open unless the USER closes it: a
+// hand close removes it and is echoed to the daemon (which mirrors it
+// to every other surface), and a close mirrored from another surface
+// removes a running tab here without echoing it back.
+function testUserCloseOfRunningSubagentTab() {
   const {win, posted, rootId} = bootRunningRoot();
   const [x, y] = runParallelCall(win, posted, rootId, ['x', 'y'], 'S ');
-  clickClose(win, x);
-  assert.deepStrictEqual(openSubTabIds(win), [x, y].sort(), 'running tab refuses close');
-
-  send(win, {
-    type: 'openSubagentTab',
-    tab_id: x,
-    parent_tab_id: rootId,
-    description: 'S 1',
-    task_id: 'x',
-    taskIndex: 0,
-    isDone: true,
-  });
   const closes = posted.filter(m => m.type === 'closeTab').length;
   clickClose(win, x);
-  assert.deepStrictEqual(openSubTabIds(win), [y], 'finished tab closes by hand');
-  assert.strictEqual(posted.filter(m => m.type === 'closeTab').length, closes + 1);
+  assert.deepStrictEqual(openSubTabIds(win), [y], 'running tab closes by hand');
+  assert.deepStrictEqual(
+    posted.filter(m => m.type === 'closeTab').slice(closes).map(m => m.tabId),
+    [x],
+    'the hand close is echoed to the daemon',
+  );
 
   send(win, {type: 'closeSubagentTab', tab_id: y});
   assert.strictEqual(subagentTabEls(win).length, 0, 'mirrored close wins');
+  assert.strictEqual(
+    posted.filter(m => m.type === 'closeTab').length,
+    closes + 1,
+    'a mirrored close is not echoed back',
+  );
   win.close();
-  console.log('  ok - replayed completion reconciles a stale running tab');
+  console.log('  ok - user close of a running sub-agent tab');
 }
 
 async function main() {
@@ -1091,7 +1090,7 @@ async function main() {
     testUnregisteredTabAdoptsIntoNewestPanelOnly,
     testFinishedAncestorKeepsLiveDescendants,
     testLateSpawnUnderFinishedParentOpensUnderAncestor,
-    testReplayedCompletionReconcilesStaleRunningTab,
+    testUserCloseOfRunningSubagentTab,
   ];
   for (const t of tests) {
     await t();

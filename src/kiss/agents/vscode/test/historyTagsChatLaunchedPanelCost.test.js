@@ -7,7 +7,7 @@
 // chat.html + main.js + panelCopy.js in JSDOM:
 //
 //  * every task panel in the task-history list shows its classification
-//    tags ("work · coding") right before its "launched ... ago" label;
+//    tags ("work · coding") right after its "... ago" age label;
 //  * every collapsible chat panel carries a "last launched ... ago" line
 //    under its header, fed by the daemon's `chat_last_launched` stamp
 //    (falling back to the newest row loaded) and kept current by the
@@ -122,7 +122,7 @@ function groups(win) {
   );
 }
 
-function testTagsBeforeLaunched() {
+function testTagsAfterLaunched() {
   const {win} = makeWebview();
   const now = Date.now();
   loadHistory(win, [
@@ -154,15 +154,24 @@ function testTagsBeforeLaunched() {
   assert.strictEqual(tagged.title, 'Tags: work, coding, testing');
   const launched = list[0].querySelector('.sidebar-item-launched');
   assert.strictEqual(
-    tagged.nextElementSibling,
-    launched,
-    'the tags sit immediately before the "launched ..." label',
+    launched.nextElementSibling,
+    tagged,
+    'the tags sit immediately after the "... ago" age label',
   );
-  assert.strictEqual(launched.textContent, 'launched 2 hours ago');
+  assert.strictEqual(
+    list[0].querySelector('.sidebar-item-collapse').nextElementSibling,
+    launched,
+    'the age label follows the last button of the strip',
+  );
+  assert.strictEqual(launched.textContent, '2 hours ago');
+  assert.ok(
+    launched.title.indexOf('Launched ') === 0,
+    'the tooltip still spells out the launch instant',
+  );
   assert.strictEqual(
     tagged.parentElement,
     list[0].querySelector('.sidebar-item-actions'),
-    'the tags live in the action strip like the launched label',
+    'the tags live in the action strip like the age label',
   );
   for (let i = 1; i < 4; i++) {
     assert.strictEqual(
@@ -173,7 +182,7 @@ function testTagsBeforeLaunched() {
     assert.ok(list[i].querySelector('.sidebar-item-launched'));
   }
   win.close();
-  console.log('  ok - task rows show their tags before the launched label');
+  console.log('  ok - task rows show their tags after the age label');
 }
 
 function testChatLastLaunchedLine() {
@@ -335,8 +344,8 @@ function testRefreshSweepKeepsPrefix() {
   ).map(el => el.textContent);
   assert.deepStrictEqual(
     after.sort(),
-    ['last launched 7 hours ago', 'launched 7 hours ago'],
-    "the sweep keeps each label's own leading words",
+    ['7 hours ago', 'last launched 7 hours ago'],
+    "the sweep keeps each label's own leading words (none for a task row)",
   );
   win.close();
   console.log("  ok - the 30 s sweep keeps the chat line's prefix");
@@ -572,7 +581,7 @@ function testFormatCallCost() {
 }
 
 (async () => {
-  testTagsBeforeLaunched();
+  testTagsAfterLaunched();
   testChatLastLaunchedLine();
   testRefreshSweepKeepsPrefix();
   await testThoughtsPanelCostLive();

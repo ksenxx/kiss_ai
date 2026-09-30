@@ -38,6 +38,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost, model
+from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 LIVE_ANSWERS: dict[str, Any] = {
     "is_bug": {"type": "noul", "noul": 0.97},
@@ -376,8 +377,19 @@ def test_decide_tool_schema_exposes_both_arguments() -> None:
     assert "Example:" in questions_doc
 
 
-def test_agent_offers_decide_when_openrouter_key_is_configured(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.fixture
+def jev_home() -> Iterator[IsolatedKissHome]:
+    """An isolated ``KISS_HOME`` whose settings have "Use Jev" ticked."""
+    isolated = IsolatedKissHome("kiss-decide-tool-")
+    isolated.write_config(classify_with_decisions=True)
+    try:
+        yield isolated
+    finally:
+        isolated.cleanup()
+
+
+def test_agent_offers_decide_when_setting_on_and_key_configured(
+    jev_home: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key")
     assert decisions_tool_available()
@@ -388,10 +400,44 @@ def test_agent_offers_decide_when_openrouter_key_is_configured(
     assert decide(STATE, "not json").startswith("Error: questions is not valid JSON")
 
 
-def test_agent_hides_decide_without_openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_hides_decide_without_openrouter_key(
+    jev_home: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
     assert not decisions_tool_available()
     assert "decide" not in _tool_names(_make_agent()._get_tools())
+
+
+def test_agent_hides_decide_when_use_jev_setting_is_off(
+    jev_home: IsolatedKissHome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unticking "Use Jev" removes the tool even with a key: the setting is the switch.
+
+    The regression: the tool was offered on the key alone, so an agent kept
+    classifying with Jev after the user had turned the setting off.
+    """
+    monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key")
+    assert decisions_tool_available()
+    jev_home.write_config(classify_with_decisions=False)
+    assert not decisions_tool_available()
+    for profile in ("", "review"):
+        agent = _make_agent()
+        agent._tool_profile_name = profile
+        assert "decide" not in _tool_names(agent._get_tools())
+    # Ticking it again offers the tool to the next run, no restart needed.
+    jev_home.write_config(classify_with_decisions=True)
+    assert "decide" in _tool_names(_make_agent()._get_tools())
+
+
+def test_use_jev_setting_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh config has no ``classify_with_decisions`` key: Jev stays off."""
+    isolated = IsolatedKissHome("kiss-decide-tool-default-")
+    try:
+        monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key")
+        assert not decisions_tool_available()
+        assert "decide" not in _tool_names(_make_agent()._get_tools())
+    finally:
+        isolated.cleanup()
 
 
 def test_decide_is_reserved_against_mcp_name_collisions() -> None:

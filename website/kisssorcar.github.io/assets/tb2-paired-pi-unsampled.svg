@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 760 170' width='100%' role='img' aria-label='Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks' font-family='Georgia,serif'>
+<line x1='60.0' y1='47' x2='60.0' y2='63' stroke='#9aa3ad'/>
+<text x='60.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>-5</text>
+<line x1='163.3' y1='47' x2='163.3' y2='63' stroke='#9aa3ad'/>
+<text x='163.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+0</text>
+<line x1='266.7' y1='47' x2='266.7' y2='63' stroke='#9aa3ad'/>
+<text x='266.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+5</text>
+<line x1='370.0' y1='47' x2='370.0' y2='63' stroke='#9aa3ad'/>
+<text x='370.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+10</text>
+<line x1='473.3' y1='47' x2='473.3' y2='63' stroke='#9aa3ad'/>
+<text x='473.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+15</text>
+<line x1='576.7' y1='47' x2='576.7' y2='63' stroke='#9aa3ad'/>
+<text x='576.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+20</text>
+<line x1='680.0' y1='47' x2='680.0' y2='63' stroke='#9aa3ad'/>
+<text x='680.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+25</text>
+<line x1='60.0' y1='55' x2='680.0' y2='55' stroke='#9aa3ad'/>
+<line x1='163.3' y1='33' x2='163.3' y2='67' stroke='#a03030' stroke-dasharray='4 3'/>
+<text x='163.3' y='28' font-size='11' text-anchor='middle' fill='#a03030'>no difference</text>
+<line x1='223.3' y1='55' x2='549.8' y2='55' stroke='#2456a6' stroke-width='6'/>
+<polygon points='380.3,48 387.3,55 380.3,62 373.3,55' fill='#2456a6'/>
+<text x='380.3' y='41' font-size='13' font-weight='bold' text-anchor='middle' fill='#2456a6'>+10.5 points  [+2.9, +18.7]</text>
+<text x='60' y='103' font-size='13' fill='#1e2430'>Success gap, KISS Sorcar minus Pi, on the 57 unsampled tasks (percentage points; 95% paired bootstrap)</text>
+<rect x='60.0' y='130' width='163.2' height='22' fill='#2456a6'/>
+<text x='141.6' y='146' font-size='12' text-anchor='middle' fill='white'>KISS Sorcar higher: 15</text>
+<rect x='223.2' y='130' width='424.2' height='22' fill='#9aa3ad'/>
+<text x='435.3' y='146' font-size='12' text-anchor='middle' fill='white'>tie: 39</text>
+<rect x='647.4' y='130' width='32.6' height='22' fill='#1e7a46'/>
+<text x='686' y='146' font-size='12' text-anchor='start' fill='#1e7a46'>Pi higher: 3</text>
+<text x='60' y='122' font-size='13' fill='#1e2430'>Per-task tally over the 57 tasks (exact sign test p = 0.008)</text>
+</svg>

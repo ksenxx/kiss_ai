@@ -2111,21 +2111,19 @@
         }
       }
     }
-    // A live child's tab is its question/answer surface. User/panel closes
-    // cannot remove it. On completion, remove the finished ancestor but
-    // keep any still-running descendants under their nearest surviving parent.
-    const liveChildren = tabs.filter(
-      t => toClose.has(t.id) && t.isSubagentTab && t.isRunning,
-    );
-    if (liveChildren.length) {
-      if (
-        !agentInitiated ||
-        !tabs[origIdx].isSubagentTab ||
-        !tabs[origIdx].isDone
-      )
-        return;
-      for (const child of liveChildren) toClose.delete(child.id);
-      for (const child of liveChildren) {
+    // A running sub-agent's tab stays open unless the USER closes it (a
+    // user's close takes every descendant along, running ones
+    // included, and the daemon mirrors each to every surface).  A close
+    // the agent performs by itself — a finished ancestor's subagentDone,
+    // a close mirrored from another surface — keeps the running
+    // descendants under their nearest surviving ancestor.
+    if (agentInitiated) {
+      const liveDescendants = tabs.filter(
+        t =>
+          toClose.has(t.id) && t.id !== tabId && t.isSubagentTab && t.isRunning,
+      );
+      for (const child of liveDescendants) toClose.delete(child.id);
+      for (const child of liveDescendants) {
         if (!toClose.has(child.parentTabId)) continue;
         while (toClose.has(child.parentTabId))
           child.parentTabId = getTab(child.parentTabId).parentTabId;
@@ -2391,6 +2389,10 @@
     if (tab.browserView) {
       tab.browserView.dispose();
       tab.browserView = null;
+    }
+    if (tab.pdfViewer) {
+      tab.pdfViewer.dispose();
+      tab.pdfViewer = null;
     }
     if (tab.contentViewEl && tab.contentViewEl.parentNode) {
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
@@ -3669,10 +3671,8 @@
       return;
     }
     // pdfview-coverage:start
-    // A PDF or an image the daemon served as bytes: the browser's own
-    // viewer shows the PDF (a blob: URL in an UNsandboxed frame -- a
-    // sandboxed one has an opaque origin Chromium refuses to navigate
-    // to a blob of), an <img> the picture.
+    // A PDF or an image the daemon served as bytes: pdfView.js draws
+    // the PDF's pages, an <img> shows the picture.
     if (ev.binary) {
       renderBinaryContent(tab, view, ev);
       return;
@@ -3752,8 +3752,8 @@
   // pdfview-coverage:start
   /**
    * Show a binary file's bytes (base64 in *ev*) in *view*: a PDF in the
-   * browser's PDF viewer, an image as a picture, anything else as a
-   * download link.  The blob: URL is released when the tab is disposed.
+   * pdf.js viewer (pdfView.js), an image as a picture, anything else as
+   * a download link.  The blob: URL is released when the tab is disposed.
    */
   function renderBinaryContent(tab, view, ev) {
     const mime = String(ev.mime || 'application/octet-stream');
@@ -3778,11 +3778,16 @@
       return;
     }
     if (mime === 'application/pdf') {
-      const frame = document.createElement('iframe');
-      frame.className = 'content-pdf-frame';
-      frame.title = ev.name || 'PDF';
-      frame.src = url;
-      holder.appendChild(frame);
+      // pdfView.js draws the pages itself (see its header for why the
+      // browser's PDF plugin is not used); pdf.js takes the byte buffer
+      // over, so decode the bytes again rather than share the blob's.
+      const raw = window.atob(String(ev.base64 || ''));
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      tab.pdfViewer = window.mountPdfViewer(holder, bytes, {
+        name: ev.name || 'PDF',
+        downloadUrl: url,
+      });
       return;
     }
     if (mime.indexOf('image/') === 0) {
@@ -6190,7 +6195,7 @@
       '',
       'Make it as autonomous as possible, like a one-tap OAuth connect:',
       '- Reuse anything already on this machine first (existing tokens, CLI logins, config files, environment variables).',
-      '- Prefer an OAuth consent or device-code flow: open the sign-in / approval page in my default browser yourself and poll or listen for completion, so all I do is sign in and click Approve.',
+      '- Prefer an OAuth consent or device-code flow: the authentication tools open the sign-in / approval page for me (in the Browser tab I am looking at, else my default browser) and poll or listen for completion, so all I do is sign in and click Approve. Never ask me to open a URL when the page is already in the Browser tab.',
       '- When the service needs a developer app, API key or token, open the exact console page for it and walk me through it one step at a time; read values back from the page when you can.',
       '- Ask me only for what cannot be automated (signing in, 2FA, CAPTCHA, approving consent, a secret only I can see), one short question at a time. Never ask for my password in chat.',
       '',
@@ -12163,11 +12168,13 @@
       for (const en of entries) {
         const openTab = en.tabId ? getTab(en.tabId) : null;
         if (collapsed && openTab) {
-          // The tab stays this panel's until the close actually lands:
+          // A collapse folds finished children away; a running one
+          // keeps its tab (only the user may close that).  The tab
+          // stays this panel's until the close actually lands:
           // rpAfterTabsClosed does the bookkeeping, and a tab whose
           // close is still queued must keep looking owned so another
           // panel's adoption pass cannot claim it as unowned.
-          rpCloseSubagentTab(en.tabId);
+          if (!openTab.isRunning) rpCloseSubagentTab(en.tabId);
         } else if (collapsed) {
           en.userClosed = false;
         } else if (!openTab && en.taskId !== '' && !en.userClosed) {
@@ -12219,8 +12226,9 @@
             en.tabId = '';
             // Only a close the user asked for keeps this sub-agent shut
             // while its panel stays expanded; collapsing the panel
-            // reopens every sub-agent when it is expanded again.
-            en.userClosed = !_rpSyncing;
+            // reopens every sub-agent when it is expanded again — so
+            // does a close made while the panel is already collapsed.
+            en.userClosed = !_rpSyncing && !p.classList.contains('collapsed');
           }
         }
         panels.add(p);
@@ -14456,7 +14464,11 @@
   // background must not yank the caret out of the promptlet search box
   // (or drop focus on a textbox hidden behind the settings sheet).
   // `force` is for the user's own request to focus the composer (the
-  // host's focusInput / appendToInput commands).
+  // host's focusInput / appendToInput commands).  It wins at once, but
+  // its deferred retries yield like any other: the daemon sends
+  // focusInput on every (re)connect, and by 100 ms the user may have
+  // opened a sheet and put the caret in its textbox (the "Working
+  // directory" box), which a retry must not pull it out of mid-typing.
   function focusInputWithRetry(force) {
     cancelInputFocusRetry();
     if (isMobileRemote) return;
@@ -14464,7 +14476,7 @@
     inp.focus();
     inputFocusRetryTimers = [100, 300].map(ms =>
       setTimeout(() => {
-        if (!force && composerFocusWouldSteal()) return;
+        if (composerFocusWouldSteal()) return;
         inp.focus();
       }, ms),
     );
@@ -14924,6 +14936,22 @@
         echoed.unackedAttachments = [];
       }
     }
+    // A prompt that was just the path of an existing file opened that
+    // file instead of starting a task (the extension host's and the
+    // daemon's `submit` shortcut): acknowledged, and there is no task
+    // for the tab to own, so the claim sendMessage() stamped is lifted
+    // — left in place it would let the tab adopt the next bare task id
+    // off the wire (mayAdoptTaskId) and a reload would put the path
+    // back into the composer as an unsent draft.
+    if (t === 'promptOpened') {
+      const opened = getTab(ev.tabId || activeTabId);
+      if (opened) {
+        opened.unackedPrompt = '';
+        opened.unackedAttachments = [];
+        if (!opened.currentTaskId) opened.pendingTaskId = null;
+      }
+      return;
+    }
     switch (t) {
       // browser-tab-coverage:start
       case 'openBrowserTab':
@@ -15165,6 +15193,17 @@
       }
       case 'status': {
         const evTab = findTabByEvt(ev);
+        if (!ev.running) {
+          // A task that failed before its agent started never cleared
+          // its launch-phase line; the end of the task does.  An
+          // addressed event whose tab is gone (closed while its task
+          // ran) belongs to nobody on screen and clears nothing.
+          let phaseHome = null;
+          if (evTab)
+            phaseHome = evTab.id === activeTabId ? O : evTab.outputFragment;
+          else if (!isAddressed(ev)) phaseHome = O;
+          if (phaseHome) setLaunchPhase(phaseHome, '');
+        }
         if (evTab) {
           setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
@@ -15500,6 +15539,24 @@
         addNotice(ev.text);
         if (!isAddressed(ev)) relayUpdateStatus(ev.text, false);
         break;
+      case 'launch_phase': {
+        // What the daemon is doing between the prompt echo and the
+        // agent's first output ("Classifying task…", "Preparing
+        // worktree…"): one line at the end of the transcript, replaced
+        // by each later phase and removed by an empty text.  A
+        // background tab's line lives in its parked output fragment,
+        // so it travels with the transcript on a tab switch.
+        let phaseContainer = O;
+        if (isAddressed(ev) && !isForActiveTab(ev)) {
+          const phaseTab = findTabByEvt(ev);
+          if (!phaseTab) break;
+          if (!phaseTab.outputFragment)
+            phaseTab.outputFragment = document.createDocumentFragment();
+          phaseContainer = phaseTab.outputFragment;
+        }
+        setLaunchPhase(phaseContainer, ev.text || '');
+        break;
+      }
       case 'warning': {
         // tableak-coverage:start
         if (isAddressed(ev) && !isForActiveTab(ev)) {
@@ -16452,16 +16509,7 @@
         // Another client closed this sub-agent tab; mirror the close.
         // Applied without echoing `closeTab` back to the daemon (the
         // origin client already sent it) — see closeTab(fromServer).
-        const mirrored = getTab(ev.tab_id);
-        if (mirrored) {
-          // The daemon only mirrors closes of finished tabs; a copy that
-          // missed the completion must not refuse the close as "live".
-          if (mirrored.isSubagentTab) {
-            mirrored.isDone = true;
-            setTabRunning(mirrored, false);
-          }
-          closeTab(ev.tab_id, true, true);
-        }
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
         break;
       }
       case 'openTabRejected': {
@@ -16810,6 +16858,30 @@
 
   function addNotice(text) {
     return addBanner('note', 'Note:', text);
+  }
+
+  /**
+   * Show `text` as the transcript's launch-phase line (see the
+   * `launch_phase` event), keeping it the last child of `container`
+   * — the live output or a background tab's parked fragment; an empty
+   * `text` removes the line.
+   */
+  function setLaunchPhase(container, text) {
+    let line = container.querySelector('.launch-phase');
+    if (!text) {
+      if (line) line.remove();
+      return;
+    }
+    if (!line) {
+      line = mkEl('div', 'ev launch-phase');
+      const ring = document.createElement('span');
+      ring.className = 'status-spinner';
+      line.appendChild(ring);
+      line.appendChild(document.createElement('span'));
+    }
+    line.lastChild.textContent = text;
+    container.appendChild(line);
+    if (container === O) autoScrollLatestEventPanel(line);
   }
 
   function addWarning(text) {
@@ -20424,10 +20496,10 @@
     return btn;
   }
 
-  // "launched 3 hours ago" label shown next to the show-details
+  // "3 hours ago" launch-age label shown right after the show-details
   // chevron of every task panel in the task-history panel. The unit
   // ladder is minutes -> hours -> days -> weeks -> months -> years;
-  // anything under a minute reads "launched just now".
+  // anything under a minute reads "just now".
 
   function launchedAgoUnit(count, unit) {
     return count + ' ' + unit + (count === 1 ? '' : 's') + ' ago';
@@ -20470,21 +20542,33 @@
   }
 
   /**
-   * A "launched 3 hours ago" label for the instant *ms*, refreshed by
-   * the 30 s sweep below; *prefix* replaces the leading word ("last
-   * launched" for a chat panel).  Null for an unusable instant.
+   * The text of a launched-ago label: "3 hours ago", led by *prefix*
+   * ("last launched") when one is given.
+   */
+  function launchedAgoLabelText(ms, prefix) {
+    const ago = taskLaunchedAgoText(ms);
+    return prefix ? prefix + ' ' + ago : ago;
+  }
+
+  /**
+   * A "3 hours ago" label for the instant *ms*, refreshed by the 30 s
+   * sweep below; *prefix* adds a leading phrase ("last launched" for a
+   * chat panel; a task panel shows the bare age).  The tooltip spells
+   * out "Launched <local date>" (or "<Prefix> <local date>").  Null for
+   * an unusable instant.
    */
   function makeLaunchedAgoLabelFor(ms, prefix) {
     if (!isFinite(ms)) return null;
-    const lead = prefix || 'launched';
+    const lead = prefix || '';
     const span = document.createElement('span');
     span.className = 'sidebar-item-launched';
     span.dataset.launchTs = String(ms);
     span.dataset.launchPrefix = lead;
-    span.textContent = lead + ' ' + taskLaunchedAgoText(ms);
+    span.textContent = launchedAgoLabelText(ms, lead);
+    const tip = lead || 'launched';
     span.title =
-      lead.charAt(0).toUpperCase() +
-      lead.slice(1) +
+      tip.charAt(0).toUpperCase() +
+      tip.slice(1) +
       ' ' +
       new Date(ms).toLocaleString();
     scheduleLaunchedAgoRefresh();
@@ -20492,12 +20576,12 @@
   }
 
   function makeLaunchedAgoLabel(session) {
-    return makeLaunchedAgoLabelFor(taskLaunchMs(session), 'launched');
+    return makeLaunchedAgoLabelFor(taskLaunchMs(session), '');
   }
 
   /**
    * The task's classification tags ("work · coding"), shown right
-   * before its "launched ..." label; null when the row has none (a
+   * after its "3 hours ago" label; null when the row has none (a
    * task still running, or a daemon predating the `tags` column).
    */
   function makeTaskTagsLabel(session) {
@@ -20561,7 +20645,7 @@
     hfSea.value = selected;
   }
 
-  // Keep every on-screen "launched ... ago" label current: history
+  // Keep every on-screen "... ago" launch-age label current: history
   // re-renders only happen on daemon broadcasts, so without this sweep
   // a quiet panel would keep saying "just now" forever. The sweep is a
   // 30 s timeout CHAIN, not a permanent interval: it is armed when a
@@ -20582,8 +20666,7 @@
     labels.forEach(el => {
       const ms = Number(el.dataset.launchTs);
       if (!isFinite(ms) || ms < 0) return;
-      const lead = el.dataset.launchPrefix || 'launched';
-      const text = lead + ' ' + taskLaunchedAgoText(ms);
+      const text = launchedAgoLabelText(ms, el.dataset.launchPrefix || '');
       if (el.textContent !== text) el.textContent = text;
     });
     if (labels.length > 0) scheduleLaunchedAgoRefresh();
@@ -21664,12 +21747,13 @@
       }
 
       actions.appendChild(makeSidebarCollapseToggle(div, s));
+      // After the buttons: the task's age, then its tags and agent script.
+      const launchedAgo = makeLaunchedAgoLabel(s);
+      if (launchedAgo) actions.appendChild(launchedAgo);
       const tagsLabel = makeTaskTagsLabel(s);
       if (tagsLabel) actions.appendChild(tagsLabel);
       const seaLabel = makeTaskSeaLabel(s);
       if (seaLabel) actions.appendChild(seaLabel);
-      const launchedAgo = makeLaunchedAgoLabel(s);
-      if (launchedAgo) actions.appendChild(launchedAgo);
       div.appendChild(actions);
 
       const info = document.createElement('div');
@@ -23664,11 +23748,14 @@
       return;
     }
     const atMatch = getAtCtx();
-    const searchQ = atMatch ? atMatch.query : '';
+    // Item texts are complete mentions ("./src/a.py" inside the work
+    // dir, "~/Documents/x.md" elsewhere under home); a leading "./" or
+    // "~/" in the query only scopes the search, so highlight without it.
+    const searchQ = atMatch ? atMatch.query.replace(/^(\.\/|~\/?)/, '') : '';
     renderAcDropdown(
       data,
-      ['frequent', 'file'],
-      {frequent: 'Frequent', file: 'Files'},
+      ['frequent', 'file', 'home'],
+      {frequent: 'Frequent', file: 'Files', home: 'Home'},
       item =>
         searchQ && searchQ.length > 0
           ? hlMatch(item.text, searchQ)
@@ -23683,7 +23770,8 @@
       const before = inp.value.substring(0, atCtx.start);
       const after = inp.value.substring(inp.selectionStart || inp.value.length);
       const sep = /^\s/.test(after) ? '' : ' ';
-      const mention = './' + file;
+      // The daemon already prefixed the mention ("./" or "~/").
+      const mention = file;
       inp.value = before + mention + sep + after;
       syncClearBtn();
       const np = before.length + mention.length + sep.length;

@@ -1007,7 +1007,8 @@ class _CommandsMixin:
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
         """Record a file access for usage-based sorting.
 
-        Usage counts are stored as workspace-relative paths in a
+        Usage counts are stored by mention text (``./path`` relative to
+        the tab's work dir, ``~/path`` below the home directory) in a
         single shared SQLite table; the ``workDir`` (if any) on the
         command is currently informational — the ranking still applies
         across every tab.  Accepting the field keeps the message shape
@@ -1442,6 +1443,8 @@ class _CommandsMixin:
             except Exception as exc:
                 if isinstance(exc, daemon_client.StoppedOnTimeoutError):
                     spent = exc.result
+                else:
+                    spent = getattr(exc, "task_result", None)
                 # A crashed side-channel MUST NOT bring down the
                 # daemon: the interactive tab keeps running.  The
                 # exception goes to the daemon log for triage, and

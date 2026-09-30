@@ -8,6 +8,9 @@ test/**
 .DS_Store
 **/.DS_Store
 *.vsix
+# Collision siblings landed by the worktree teardown rescue
+# (GitWorktreeOps.rescue_ignored_files); never runtime content.
+**/*.kiss-rescued-*
 
 # Python bytecode
 **/__pycache__/**

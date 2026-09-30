@@ -171,16 +171,16 @@ def test_file_index_refreshes_after_task_completion(
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": wd},
     )
-    warm = _wait_for_files_event(events, must_contain="old_file.py")
+    warm = _wait_for_files_event(events, must_contain="./old_file.py")
     warm_names = _names(warm["files"])
-    assert "old_file.py" in warm_names
-    assert "new_file.py" not in warm_names
+    assert "./old_file.py" in warm_names
+    assert "./new_file.py" not in warm_names
 
     # Coarse filesystem mtime clocks: make sure the directory's mtime
     # after the edit differs from the one the warm scan recorded.
     time.sleep(0.02)
-    (Path(wd) / "new_file.py").write_text("# new\n")
-    (Path(wd) / "old_file.py").unlink()
+    (Path(wd) / "./new_file.py").write_text("# new\n")
+    (Path(wd) / "./old_file.py").unlink()
 
     events.clear()
     server._refresh_files_after_task(wd)
@@ -196,10 +196,10 @@ def test_file_index_refreshes_after_task_completion(
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": wd},
     )
-    second = _wait_for_files_event(events, must_contain="new_file.py")
+    second = _wait_for_files_event(events, must_contain="./new_file.py")
     second_names = _names(second["files"])
-    assert "new_file.py" in second_names
-    assert "old_file.py" not in second_names
+    assert "./new_file.py" in second_names
+    assert "./old_file.py" not in second_names
 
 
 def test_refresh_is_silent_when_no_files_added_or_removed(
@@ -217,7 +217,7 @@ def test_refresh_is_silent_when_no_files_added_or_removed(
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": wd},
     )
-    _wait_for_files_event(events, must_contain="old_file.py")
+    _wait_for_files_event(events, must_contain="./old_file.py")
 
     time.sleep(0.02)
     (Path(wd) / "old_file.py").write_text("# modified\n")

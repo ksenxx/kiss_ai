@@ -1058,8 +1058,9 @@ class DiscordAgent(BaseChannelAgent):
             if not agent._backend._token:  # pragma: no branch
                 return (
                     "Not authenticated with Discord. Call authenticate_discord() to "
-                    "start the browser sign-in: the user signs in to Discord in their "
-                    "OWN browser, picks a server and channel, and clicks Authorize; "
+                    "start the browser sign-in and follow its 'instructions': the user "
+                    "signs in to Discord on the page it opened for them, picks a server "
+                    "and channel, and clicks Authorize; "
                     "then call finish_discord_auth(). Never ask for the user's Discord "
                     "password or 2FA code."
                 )
@@ -1094,8 +1095,8 @@ class DiscordAgent(BaseChannelAgent):
 
             Without ``bot_token`` this starts the OAuth sign-in (PKCE, KISS's
             public Discord app, scopes ``identify guilds webhook.incoming``)
-            and returns a ``consent_required`` answer: give the user the URL
-            (ask_user_question) to open in their OWN browser, where they
+            and returns a ``consent_required`` answer whose ``instructions``
+            say how to hand the page to the user (ask_user_question); they
             sign in, pick a server and channel, and click Authorize; then
             call finish_discord_auth().  A ``bot_token`` is the advanced
             path, only for bot-only features (reading messages, channel

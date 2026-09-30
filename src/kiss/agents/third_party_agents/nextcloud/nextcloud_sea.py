@@ -643,8 +643,8 @@ class NextcloudTalkAgent(BaseChannelAgent):
                 return (
                     "Not authenticated with Nextcloud Talk. Call "
                     "authenticate_nextcloud(url=...) with the server URL (e.g. "
-                    "'https://cloud.example.com'): it returns a sign-in link the "
-                    "user opens in their OWN browser to log in and grant access, "
+                    "'https://cloud.example.com'): it opens a sign-in page for the "
+                    "user (follow its 'instructions') to log in and grant access, "
                     "then finish_nextcloud_auth() stores the app password the "
                     "server issued. Never ask for the user's password; only if the "
                     "server lacks Login Flow v2 may the user hand you an app "
@@ -668,8 +668,8 @@ class NextcloudTalkAgent(BaseChannelAgent):
 
             With only ``url`` this starts Nextcloud's Login Flow v2 and
             returns a ``consent_required`` answer carrying the sign-in
-            URL: give it to the user (ask_user_question) to open in their
-            OWN browser, where they log in and click "Grant access"; then
+            URL and ``instructions`` on how to hand the page to the user
+            (ask_user_question); they log in and click "Grant access"; then
             call finish_nextcloud_auth().  No password is ever typed into
             the agent.  Passing ``username`` and ``password`` (an app
             password) instead stores those credentials directly.

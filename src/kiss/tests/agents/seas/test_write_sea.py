@@ -1,0 +1,118 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+"""End-to-end tests of the bundled ``/write`` agent (:mod:`kiss.agents.seas.write.write_sea`).
+
+The SEA defines ``description()`` and ``add_to_system_prompt()`` only, so
+the tests check the two things that matter: the slash command and the
+``run_agent`` loader resolve to this file and stage its protocol as an
+addition to the system prompt, and a real :class:`ChatSorcarAgent` run
+configured that way (against the scripted local chat-completions server)
+sends the default system prompt with the protocol added, never replaced.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from kiss.agents.seas.write import write_sea
+from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.server.agent_file import apply_agent_overrides
+from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
+
+_SEA_PATH = Path(write_sea.__file__).resolve()
+
+
+def test_protocol_bans_the_tells_and_fixes_the_register() -> None:
+    """The added protocol carries the user's constraints in words the model can act on."""
+    protocol = write_sea.add_to_system_prompt()
+    assert protocol == write_sea.SYSTEM_PROMPT
+    assert protocol.startswith("## Writing protocol (write)")
+    for phrase in (
+        "general reader",
+        "American English",
+        "Be concise",
+        "read as if a careful person wrote it",
+        "No em dashes",
+        "No emoji",
+        "delve, leverage",
+        "moreover, furthermore",
+        "Do not invent facts",
+        "check every line against the lists above",
+    ):
+        assert phrase in protocol, phrase
+    # The protocol practices what it preaches: the only "---" is the quoted token it bans.
+    assert "\u2014" not in protocol
+    assert protocol.count("---") == protocol.count('"---"') == 1
+
+
+def test_description_is_one_sentence_naming_the_command() -> None:
+    """``/write help`` returns the description without running the SEA."""
+    text = write_sea.description()
+    assert text.count(". ") == 0 and text.endswith(".")
+    assert "/write" in text
+    assert sea_commands.help_text_if_command("/write help") == text.strip()
+
+
+def test_slash_write_resolves_to_the_bundled_sea() -> None:
+    """``/write <task>`` is rewritten into a ``run_agent`` directive on this file."""
+    assert sea_commands.get_command("write") == _SEA_PATH
+    rewritten = sea_commands.rewrite_prompt_if_command("/write a release note from CHANGELOG.md")
+    assert rewritten is not None
+    prompt, path = rewritten
+    assert path == _SEA_PATH
+    assert f'agent = "{_SEA_PATH}"' in prompt
+    assert prompt.endswith("TASK TEXT FOR run_agent:\na release note from CHANGELOG.md")
+
+
+def test_loader_adds_the_protocol_after_the_callers_suffix() -> None:
+    """The daemon-side loader stages the protocol as an addition, touching nothing else."""
+    cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "appendToSystemPrompt": "CALLER"}
+    assert apply_agent_overrides(cmd) == {"appendToSystemPrompt"}
+    assert cmd["appendToSystemPrompt"] == "CALLER\n\n" + write_sea.SYSTEM_PROMPT
+    cmd = {"agentPath": str(_SEA_PATH)}
+    apply_agent_overrides(cmd)
+    assert cmd["appendToSystemPrompt"] == write_sea.SYSTEM_PROMPT
+
+
+def test_agent_run_sends_the_default_prompt_with_the_protocol_added(tmp_path: Path) -> None:
+    """A run configured as the daemon configures it keeps the default prompt and adds the protocol.
+
+    The scripted model finishes at once with a paragraph; the test checks
+    the system message of the real request: the default Sorcar prompt
+    (``<identity>``) comes first, the writing protocol follows, and the
+    prose reaches the summary untouched.
+    """
+    cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH)}
+    apply_agent_overrides(cmd)
+    prose = "<p>The port was in use, so the test failed. Free it and rerun.</p>"
+    with serve([finish_body(prose, prompt_tokens=500)]) as (url, requests):
+        agent = ChatSorcarAgent("write-sea-test")
+        result = agent.run(
+            prompt_template="Explain in one paragraph why the test failed.",
+            model_name=MODEL,
+            work_dir=str(tmp_path),
+            max_steps=3,
+            max_budget=1.0,
+            model_config={"base_url": url, "api_key": "local"},
+            system_prompt=cmd["appendToSystemPrompt"],
+            web_tools=False,
+            use_memory=False,
+            is_parallel=False,
+            verbose=False,
+        )
+    parsed = yaml.safe_load(result)
+    assert parsed["success"] is True
+    assert parsed["summary"] == prose
+
+    agentic = [r for r in requests if r.get("tools")]
+    assert len(agentic) == 1, [list(r) for r in requests]
+    system = str(next(m for m in agentic[0]["messages"] if m["role"] == "system")["content"])
+    assert system.lstrip().startswith("<identity>"), system[:200]
+    assert write_sea.SYSTEM_PROMPT in system
+    assert system.index("<identity>") < system.index("## Writing protocol (write)")

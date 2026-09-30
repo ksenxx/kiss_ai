@@ -251,7 +251,8 @@ def test_genuine_timeout_of_running_command_still_reported(
     )
     elapsed = time.monotonic() - start
     assert elapsed < 12, f"timeout kill took {elapsed:.1f}s"
-    assert out == "Error: Command execution timeout"
+    assert out.startswith("Error: Command execution timeout after 1s. Output before the timeout:")
+    assert "started" in out
 
 
 def test_fast_command_streams_and_returns_output(tmp_path: Path) -> None:

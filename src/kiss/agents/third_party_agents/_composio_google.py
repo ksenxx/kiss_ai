@@ -44,7 +44,7 @@ import requests
 from requests.structures import CaseInsensitiveDict
 
 from kiss.agents.third_party_agents._channel_agent_utils import write_private_file
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import BROWSER_TAB, open_for_user
 from kiss.core.config import kiss_home
 
 # KISS service name -> Composio toolkit slug.
@@ -200,19 +200,33 @@ def start_connect(service: str, label: str) -> dict[str, Any]:
     state["pending_id"] = str(request.id)
     write_private_file(_state_path(service), json.dumps(state))
     url = str(request.redirect_url or "")
-    opened = open_in_default_browser(url)
+    opened_in = open_for_user(url)
+    if opened_in == BROWSER_TAB:
+        step_one = (
+            "The Google sign-in page is already open in the Browser tab that every "
+            "KISS surface has just switched to, so the user is looking at it: do NOT "
+            "ask them to open a URL. 1) Call ask_user_question() telling the user to "
+            "sign in to Google in that Browser tab, click Allow, and reply here when "
+            "done (valid for about 10 minutes); only if they cannot see the page, "
+            f"give them {url} to open themselves."
+        )
+    else:
+        step_one = (
+            "1) Call ask_user_question() with this exact URL for the user to open in "
+            f"their OWN browser if no window appeared: {url} (valid for about 10 "
+            "minutes)."
+        )
     return {
         "ok": True,
         "status": "consent_required",
         "verification_uri": url,
-        "browser_opened": opened,
+        "opened_in": opened_in,
+        "browser_opened": bool(opened_in),
         "instructions": (
             f"Connect {label} through Composio: the USER signs in to Google and "
-            "clicks Allow; you only relay the link. Do NOT open it in your "
-            "built-in browser and never ask for the user's Google password or 2FA "
-            "code. 1) Call ask_user_question() with this exact URL for the user to "
-            f"open in their OWN browser if no window appeared: {url} (valid for "
-            f"about 10 minutes). 2) Then call finish_{service}_auth(); if it "
+            "clicks Allow; you only tell them what to do. Do NOT open the page in "
+            "your built-in browser and never ask for the user's Google password or "
+            f"2FA code. {step_one} 2) Then call finish_{service}_auth(); if it "
             "returns 'pending', wait a few seconds and call it again."
         ),
     }

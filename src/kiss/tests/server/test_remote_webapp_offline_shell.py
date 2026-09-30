@@ -375,25 +375,31 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             page.goto(url, wait_until="domcontentloaded")
             # 1. Connected: the app is on screen and the worker has
             #    precached the shell and taken control of this page.
-            _wait_for(
-                page,
-                "document.getElementById('app').style.display === ''",
-            )
+            app_shown = "document.getElementById('app').style.display === ''"
+            controlled = "navigator.serviceWorker && !!navigator.serviceWorker.controller"
+            _wait_for(page, app_shown)
             try:
-                _wait_for(
-                    page,
-                    "navigator.serviceWorker && !!navigator.serviceWorker.controller",
-                )
-            except PlaywrightTimeoutError as exc:
+                _wait_for(page, controlled)
+            except PlaywrightTimeoutError:
                 # Registration is best effort in the page (the shim
-                # swallows failures), so name the worker's state: an
-                # install aborted by a host network change (Docker
-                # veth churn -> ERR_NETWORK_CHANGED) leaves the
-                # registration without an active worker.
-                state = page.evaluate(_SW_REGISTRATION_STATE_JS)
-                raise AssertionError(
-                    f"worker never took control of the page: {state!r}"
-                ) from exc
+                # swallows failures).  An install aborted by a host
+                # network change (Docker veth churn ->
+                # ERR_NETWORK_CHANGED, which makes Chromium drop every
+                # in-flight shell fetch) discards the registration; the
+                # next page load registers again through the page's own
+                # shim, so one more visit is the user's recovery too (a
+                # navigation, not a reload: step 3 below asserts that
+                # the outage did not reload the page).  A second miss
+                # names the worker's state and fails.
+                page.goto(url, wait_until="domcontentloaded")
+                _wait_for(page, app_shown)
+                try:
+                    _wait_for(page, controlled)
+                except PlaywrightTimeoutError as exc:
+                    state = page.evaluate(_SW_REGISTRATION_STATE_JS)
+                    raise AssertionError(
+                        f"worker never took control of the page: {state!r}"
+                    ) from exc
             _, _, sw_body = live_server.get("/sw.js")
             manifest = re.search(r"const SHELL = (\{.*?\});", sw_body.decode())
             assert manifest, sw_body[:400]
@@ -401,6 +407,12 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
             cached = page.evaluate(_CACHE_KEYS_JS)
             assert cached.get("keys") == sorted(shell["urls"]), cached
             page.evaluate("window.__offline_shell_marker = 'before-outage'")
+            # The document's own navigation type: 'navigate', or
+            # 'reload' when the shim's one-time recovery from a page
+            # script lost to a host network change already reloaded
+            # the page at boot.  Whatever it is, an in-place reconnect
+            # must leave it (and the marker above) unchanged.
+            nav_type = page.evaluate(_UI_STATE_JS)["navType"]
             # A registered tab (the boot placeholder is not in the shared
             # registry and would not come back after a reload).
             page.evaluate(_OPEN_TAB_JS % ("draft-tab", "draft"))
@@ -445,7 +457,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 timeout_ms=60_000,
             )
             after = page.evaluate(_UI_STATE_JS)
-            assert after["navType"] == "navigate", (
+            assert after["navType"] == nav_type, (
                 "a reconnect must not reload the page; " + repr(after)
             )
             assert after["marker"] == "before-outage", (
@@ -480,7 +492,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 timeout_ms=60_000,
             )
             again = page.evaluate(_UI_STATE_JS)
-            assert again["navType"] == "navigate", again
+            assert again["navType"] == nav_type, again
             assert again["marker"] == "before-outage", again
 
             # 3a. Keep-alive: a raw authenticated client gets the app-level

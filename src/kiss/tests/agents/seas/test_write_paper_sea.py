@@ -141,7 +141,7 @@ def test_sea_getters_follow_the_user_contract() -> None:
     prompt = write_paper_sea.append_to_system_prompt()
     assert prompt == write_paper_sea.SYSTEM_PROMPT
     assert "William Strunk Jr. and E. B. White" in prompt
-    assert write_paper_sea.REVIEWER_MODEL in prompt
+    assert "Independent review: run the reviewer model read-only" in prompt
     assert "`check_paper`" in prompt and "`build_paper`" in prompt
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt

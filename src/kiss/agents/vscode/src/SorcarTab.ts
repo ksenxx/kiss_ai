@@ -195,7 +195,14 @@ export function getNonce(): string {
     .slice(0, 32);
 }
 
-function mediaAssetVersion(extensionUri: vscode.Uri, name: string): string {
+/**
+ * Content hash of the packaged media asset *name*, the `?v=` value that
+ * busts a webview's cache when the file changes under the same path.
+ */
+export function mediaAssetVersion(
+  extensionUri: vscode.Uri,
+  name: string,
+): string {
   const file = vscode.Uri.joinPath(extensionUri, 'media', name).fsPath;
   const bytes = fs.readFileSync(file);
   return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
@@ -396,6 +403,9 @@ export function buildChatHtml(
   const subs: Record<string, string> = {
     VIEWPORT: 'width=device-width, initial-scale=1.0',
     CSP_META: csp,
+    // The webview loads its assets from the extension's own files:
+    // the remote page's asset-load reload guard has nothing to do here.
+    HEAD_SCRIPT: '',
     STYLE_HREF: u('main.css'),
     BRAND_STYLE_HREF: u('brand.css'),
     WELCOME_LOGO_SRC: u('welcome-logo.png'),
@@ -426,6 +436,7 @@ export function buildChatHtml(
     CTX_MENU_SRC: u('contentContextMenu.js'),
     TREE_MENU_SRC: u('treeContextMenu.js'),
     BROWSER_TAB_SRC: u('browserTab.js'),
+    PDF_VIEW_SRC: u('pdfView.js'),
     MAIN_SRC: u('main.js'),
     SHIM_SCRIPT:
       `<script nonce="${nonce}">window.__HLJS_THEME_CSS__ = ` +

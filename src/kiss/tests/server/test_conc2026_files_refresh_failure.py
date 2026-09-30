@@ -264,7 +264,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         populated = self._populated(conn_id)
         self.assertTrue(populated, "no populated files reply arrived")
         names = [f.get("text", str(f)) for f in populated[-1].get("files", [])]
-        self.assertIn("hello.py", names)
+        self.assertIn("./hello.py", names)
 
     def test_post_task_refresh_survives_a_corrupt_gitignore(self) -> None:
         """``_refresh_files_after_task`` must never raise into the task
@@ -355,7 +355,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         populated = self._populated(conn_id)
         self.assertTrue(populated, "no populated files reply arrived")
         names = [f.get("text", str(f)) for f in populated[-1]["files"]]
-        self.assertIn("x_marker.py", names)
+        self.assertIn("./x_marker.py", names)
 
         # Same connection, a fresh cold root, broken database: the
         # reply fails on the worker but the token is still released.

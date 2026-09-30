@@ -112,6 +112,16 @@ memory writes, run_parallel, run_agent, ...) do not apply here: do not attempt
 them. Report everything in finish(summary_in_html=...).
 """
 
+WEB_TOOLS_OFF_NOTE = """
+
+# Web tools are off
+The user disabled web tools in the settings: there is no browser tool
+(go_to_url, click, type_text, screenshot, get_page_content, show_browser).
+The Web Research rules above do not apply: do not attempt Internet research
+through them or through curl/wget substitutes; answer from local files and
+your own knowledge, and say so when a fact could be outdated.
+"""
+
 
 def summary(description: str) -> str:
     """Every 10 steps: summarize your steps since the last `summary` call.
@@ -1620,12 +1630,16 @@ class SorcarAgent(RelentlessAgent):
         has arrived — has no viewer registered yet, and parenting its
         children under the synthetic id would keep every surface from
         opening their tabs.  Once viewers ARE registered in the
-        printer's fan-out registry they are authoritative: a parent
-        chat reopened under another tab id shows this sub-agent as
-        ``{new_tab}__sub_{task_id}``, which only the registry knows.
-        The agent's own synthetic id is never a candidate (a
-        ``run_agent`` dispatch registers it as a subscriber too, see
-        ``register_task_ui``).
+        printer's fan-out registry they are authoritative, for a
+        top-level agent as much as for a sub-agent: the registry lists
+        the OPEN tabs showing this agent's task (a closed tab is
+        unsubscribed at once, see ``_drop_tab_state``), so a chat the
+        user closed while it ran and reopened from history under
+        another tab id parents later spawns under that new tab — the
+        one every surface shows — and a sub-agent of such a chat is
+        addressed as ``{new_tab}__sub_{task_id}``.  A sub-agent's own
+        synthetic id is never a candidate (a ``run_agent`` dispatch
+        registers it as a subscriber too, see ``register_task_ui``).
 
         Returns:
             The tab id, or ``""`` when running headless.
@@ -1633,17 +1647,20 @@ class SorcarAgent(RelentlessAgent):
         tab_id = str(getattr(self, "_tab_id", "") or "")
         info = getattr(self, "_subagent_info", None)
         own_task_id = _persisted_task_id(self)
-        if info is None or not own_task_id:
+        if not own_task_id:
             return tab_id
-        parent_tab_id = str(info.get("parent_tab_id") or "") or "task"
-        derived = f"{parent_tab_id}__sub_{own_task_id}"
+        if info is None:
+            own = tab_id
+        else:
+            parent_tab_id = str(info.get("parent_tab_id") or "") or "task"
+            own = f"{parent_tab_id}__sub_{own_task_id}"
         fanout = getattr(self.printer, "_fanout_targets", None)
         viewer_ids = sorted(
             str(v) for v in (fanout(own_task_id) if fanout else [])
-            if v and v != tab_id
+            if v and (v != tab_id or info is None)
         )
-        if not viewer_ids or derived in viewer_ids:
-            return derived
+        if not viewer_ids or own in viewer_ids:
+            return own
         return viewer_ids[0]
 
 
@@ -2277,11 +2294,12 @@ class SorcarAgent(RelentlessAgent):
         tools.append(talk)
         tools.append(set_model)
         # Typed classification / routing / scoring through OpenRouter's
-        # decisions endpoint (Jev).  Offered only when it can actually
-        # run: an OpenRouter key is configured and the catalog has the
-        # model, otherwise every call would fail and the tool would
-        # only cost prompt tokens.  Its spend folds into this task's
-        # accounting like ``talk``'s synthesis.
+        # decisions endpoint (Jev).  Offered only when the settings
+        # panel's "Use Jev" checkbox (``classify_with_decisions``) is on
+        # and it can actually run: an OpenRouter key is configured and
+        # the catalog has the model, otherwise every call would fail and
+        # the tool would only cost prompt tokens.  Its spend folds into
+        # this task's accounting like ``talk``'s synthesis.
         if decisions_tool_available():
             tools.append(make_decide_tool(self))
         # No-op tool letting the model periodically condense its recent
@@ -2806,6 +2824,12 @@ class SorcarAgent(RelentlessAgent):
                 system_instructions += RESTRICTED_PROFILE_NOTE.format(
                     profile=profile, tools=", ".join(sorted(offered)),
                 )
+            elif self._append_basic_tools and not web_tools:
+                # The settings panel's "Use web tools" is off: the
+                # browser tools are not built (:meth:`_get_tools`), so
+                # the static Web Research rules above must not send the
+                # model after go_to_url() or a curl substitute.
+                system_instructions += WEB_TOOLS_OFF_NOTE
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,

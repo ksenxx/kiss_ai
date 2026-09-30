@@ -151,18 +151,20 @@ Each channel's `check_<service>_auth` returns setup instructions when unconfigur
 and several channels go further with a guided sign-in. Three styles exist, and in
 every one the sign-in itself stays in your hands — the agent never types or asks for
 your password or 2FA code. In every style the agent first does what it can by itself:
-when it runs on your machine (the usual kiss-web / VS Code setup) it opens the sign-in
-page or developer portal in your **default browser**, so you only approve or copy a
-token; and it always shows you the URL (plus the short code, where the provider uses
-one) in the chat, so you can finish by hand when no window appeared — the agent runs
-on a remote or headless host, say. `$BROWSER` picks the browser; `KISS_HEADLESS=1`
-turns the automatic opening off.
+under the kiss-web daemon (the usual web app / VS Code setup) it opens the sign-in
+page or developer portal in the **Browser tab** that every KISS surface switches to,
+so you approve or copy a token right there and are never asked to open a URL —
+wherever the daemon runs, a remote or headless host included. Without the daemon it
+opens the page in your **default browser** on that machine and shows you the URL
+(plus the short code, where the provider uses one) in the chat, so you can finish by
+hand when no window appeared. `$BROWSER` picks the default browser; `KISS_HEADLESS=1`
+turns that fallback off.
 
 - **Connect-style browser sign-in** (GitHub, Microsoft Teams, Slack, Discord, Twitch,
   Nextcloud Talk, Matrix, Signal). `authenticate_<service>` starts the sign-in, opens
-  the link in your default browser when it can, and returns it — for Signal, a QR code
-  to scan like Signal Desktop, also opened as a black-on-white page — that you open
-  and approve in your *own* browser or on your phone, while the agent polls in the
+  the page for you (Browser tab, else default browser), and returns it — for Signal, a
+  QR code to scan like Signal Desktop, also opened as a black-on-white page — that you
+  approve in the browser you see or scan from your phone, while the agent polls in the
   background; `finish_<service>_auth` collects the credential (answering `pending`
   until your approval lands). WhatsApp has its own variant of this:
   `start_whatsapp_bridge` + `get_whatsapp_qr_code` open a pairing QR page that you
@@ -197,7 +199,7 @@ turns the automatic opening off.
   `COMPOSIO_API_KEY` is configured; create a *project* API key (`ak_...`) at
   https://dashboard.composio.dev/~/project/settings/api-keys — the older `ck_...`
   consumer keys are rejected; the key is saved once in `google/composio_api_key.json`
-  and shared by all six Google agents) returns a Composio Connect Link and opens it in your default browser when it can;
+  and shared by all six Google agents) returns a Composio Connect Link and opens it for you (Browser tab, else default browser);
   you sign in to Google and click Allow there, and `finish_<service>_auth` records the
   connection (answering `pending` until you approve). Every API call then goes through
   Composio's proxy, which adds the Google token, so no Google token is stored locally.
@@ -209,9 +211,10 @@ turns the automatic opening off.
   Notion's REST agent, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
   Overleaf, which has no OAuth or public API, is the same flow with the
   `overleaf_session2` browser cookie pasted back instead of a token).
-  `check_<service>_auth` opens the provider's developer portal in your default
-  browser and tells the agent the steps to relay; you create the key in your own
-  browser and paste it back. The agent never drives the portal with its built-in
+  `check_<service>_auth` opens the provider's developer portal for you (the
+  Browser tab under the kiss-web daemon, else your default browser, as above)
+  and tells the agent the steps to relay; you create the key there and paste
+  it back. The agent never drives the portal with its built-in
   browser.
 
 Do interactive auth from a chat surface — the agent may need to ask you questions,

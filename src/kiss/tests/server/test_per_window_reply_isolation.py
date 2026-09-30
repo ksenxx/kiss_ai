@@ -231,7 +231,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
             lambda m: m.get("type") == "files" and not m.get("loading"),
         )
         names = [f.get("text", "") for f in ranked.get("files", [])]
-        self.assertIn("hello_world.py", names)
+        self.assertIn("./hello_world.py", names)
         self.assertNotIn("connId", ranked)
 
         await self._assert_no_reply_leak(reader_b, writer_b)

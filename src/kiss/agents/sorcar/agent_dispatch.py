@@ -89,6 +89,7 @@ from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.sea_commands import sea_script_in
 from kiss.agents.sorcar.useful_tools import rewrite_parent_repo_paths
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
+from kiss.core.vscode_config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -464,9 +465,10 @@ def _attribute_dispatch_usage(parent_agent: Any, result: Any) -> None:
         parent_agent: The agent that called ``run_agent``; ``None``
             (standalone tools-file use, where no calling agent
             exists) attributes nothing.
-        result: The dispatched sub-task's ``TaskResult``.
+        result: The dispatched sub-task's ``TaskResult``; ``None``
+            (an aborted wait that saw no spend) attributes nothing.
     """
-    if parent_agent is None:
+    if parent_agent is None or result is None:
         return
     try:
         from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
@@ -673,12 +675,22 @@ def dispatch_result(
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /
-    # auto-commit request in the pinned-off modes).
+    # auto-commit request in the pinned-off modes).  In the git
+    # lifecycle (path mode) the defaults are the user's persisted
+    # "Use worktree" / "Auto commit" settings — the same values a
+    # task submitted from the chat panel runs with — not a hard-coded
+    # ``True`` that would ignore a user who turned them off.
+    if git_lifecycle:
+        cfg = load_config()  # fills every key from DEFAULTS
+        default_worktree = bool(cfg["is_worktree"])
+        default_auto_commit = bool(cfg["auto_commit_mode"])
+    else:
+        default_worktree = default_auto_commit = False
     use_worktree = (
-        git_lifecycle if options.use_worktree is None else options.use_worktree
+        default_worktree if options.use_worktree is None else options.use_worktree
     )
     auto_commit = (
-        git_lifecycle if options.auto_commit is None else options.auto_commit
+        default_auto_commit if options.auto_commit is None else options.auto_commit
     )
     classify_tasks = (
         (None if classify else False)
@@ -730,8 +742,15 @@ def dispatch_result(
             f"`timeout` argument."
         )
     except Exception as e:
+        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None))
         logger.warning("agent dispatch failed", exc_info=True)
         return f"Error: the {name} agent task could not run: {e}"
+    except BaseException as e:
+        # The calling task was stopped (an injected KeyboardInterrupt)
+        # while waiting: the sub-task is stopped too, and what it spent
+        # so far still counts towards the caller's cost.
+        _attribute_dispatch_usage(parent_agent, getattr(e, "task_result", None))
+        raise
     _attribute_dispatch_usage(parent_agent, result)
     return result
 
