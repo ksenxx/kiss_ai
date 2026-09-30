@@ -36,6 +36,7 @@ import {
   showWarningNotification,
 } from './WebviewNotifications';
 import {PRODUCT_NAME} from './brand';
+import {INSTALL_PROGRESS_FILE, InstallProgressWatcher} from './installProgress';
 
 let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
@@ -776,6 +777,12 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     } catch {}
   }
+
+  // While ./install.sh runs (Update button, a terminal, the daemon) show
+  // its current step as a non-blocking progress notification.
+  context.subscriptions.push(
+    new InstallProgressWatcher(path.join(kissHomeDir(), INSTALL_PROGRESS_FILE)),
+  );
 
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   const markerPath = path.join(kissHomeDir(), '.extension-updated');
