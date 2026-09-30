@@ -211,9 +211,10 @@ turns that fallback off.
   Notion's REST agent, Firecrawl, Twilio, LINE, Feishu, QQ, Weixin, Zalo, Telegram;
   Overleaf, which has no OAuth or public API, is the same flow with the
   `overleaf_session2` browser cookie pasted back instead of a token).
-  `check_<service>_auth` opens the provider's developer portal in your default
-  browser and tells the agent the steps to relay; you create the key in your own
-  browser and paste it back. The agent never drives the portal with its built-in
+  `check_<service>_auth` opens the provider's developer portal for you (the
+  Browser tab under the kiss-web daemon, else your default browser, as above)
+  and tells the agent the steps to relay; you create the key there and paste
+  it back. The agent never drives the portal with its built-in
   browser.
 
 Do interactive auth from a chat surface — the agent may need to ask you questions,

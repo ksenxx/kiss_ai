@@ -980,7 +980,7 @@ class TaskResult:
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
   `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
-  a venue), `/revise_and_review_paper` (writes a paper with
+  a venue, scoring seven dimensions from 1 to 10), `/revise_and_review_paper` (writes a paper with
   `/write_paper`, has `/review_paper` review it fresh, and repeats until
   strong accept or no further improvement; task text carries `Writing:`
   and `Review:` instructions), `/rsi7d` (7-day self-improvement of the

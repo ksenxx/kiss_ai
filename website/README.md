@@ -33,14 +33,20 @@ LLM/coding-assistant indexing") and verified live:
   `/revise_and_review_paper`, `/git_extract_knowledge`, `/remember`, and
   `/forget` commands).
 - `index.html.md` — plain-Markdown twin of the homepage.
-- `privacy.html` — standalone privacy policy written for Google OAuth
-  verification of the Gmail and Google Workspace connectors. It names the
-  `gmail.modify` scope but still describes the pre-Composio flow: entirely
-  local operation, Google tokens stored and deleted under `~/.kiss/`, and
-  data shared only with the model provider and Google. The connectors now
-  go through Composio (`src/kiss/agents/third_party_agents/_composio_google.py`),
-  which holds the Google token and proxies every Google API call, so the
-  operation, storage, deletion and sharing sections need a revision.
+- `privacy.html` — standalone privacy policy for the Gmail and Google
+  Workspace connectors, last updated September 30, 2026. It describes the
+  Composio flow the code implements
+  (`src/kiss/agents/third_party_agents/_composio_google.py`): the Composio
+  API key from `COMPOSIO_API_KEY` or `~/.kiss/third_party_agents/google/composio_api_key.json`,
+  the Connect Link sign-in, Google tokens held encrypted by Composio and never
+  received by KISS Sorcar, only the connected-account id stored locally under
+  `~/.kiss/third_party_agents/<service>/composio.json`, every Google API call
+  proxied through Composio, the auth config that decides the consent screen
+  (`KISS_COMPOSIO_AUTH_CONFIG_<SERVICE>`), and revocation through the
+  `clear_<service>_auth` tools, Google's permissions page and the Composio
+  dashboard. One residual gap: it says the
+  Connect Link opens in your default browser, while the code prefers the
+  Browser tab of a running kiss-web daemon (`kiss.core.browser_handoff`).
   Linked from the `index.html` footer and listed in `sitemap.xml`; not in
   `llms.txt` or `llms-full.txt`.
 - `robots.txt` — allows all crawlers, references llms.txt and the sitemap.
@@ -135,7 +141,7 @@ remain in the markup but are hidden (`display: none`).
   `.nojekyll` (the LLM-indexing files described above), plus
   `privacy.html`.
 - `kisssorcar.github.io/assets/` — images and paper PDFs linked from the
-  homepage and `llms.txt`; `kisssorcar.github.io/blog/` — the five blog
+  homepage and `llms.txt`; `kisssorcar.github.io/blog/` — the six blog
   posts listed in `llms.txt` and `sitemap.xml`.
 
 ## How to push

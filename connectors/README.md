@@ -116,7 +116,9 @@ endpoints; any other name needs its URL. A server that is not yet configured
 is written to `~/.kiss/mcp.json` first (user scope). Sorcar then registers
 itself with the server's authorization server as a public PKCE client (Client
 ID Metadata Document or Dynamic Client Registration), opens the authorization
-URL in your default browser and also returns it, and waits for the redirect on
+URL in the Browser tab that every KISS surface switches to when the kiss-web
+daemon can open it (else in your default browser), says where it went and
+also returns the URL, and waits for the redirect on
 the fixed loopback address `http://localhost:53683/callback`. You sign in and
 click Allow; `finish_mcp_server_connect` reports `pending` until then and the
 sign-in gives up after 10 minutes. One sign-in runs at a time (starting
