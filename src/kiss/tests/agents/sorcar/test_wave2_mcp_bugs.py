@@ -283,7 +283,8 @@ def test_bash_streaming_genuine_timeout_still_reported(tmp_path: Path) -> None:
     lines: list[str] = []
     tools = UsefulTools(stream_callback=lines.append, work_dir=str(tmp_path))
     out = tools.Bash("echo started; sleep 30", "timeout case", timeout_seconds=1)
-    assert out == "Error: Command execution timeout"
+    assert out.startswith("Error: Command execution timeout after 1s. Output before the timeout:")
+    assert "started" in out
 
 
 def test_bash_streaming_completed_command_returns_output(tmp_path: Path) -> None:

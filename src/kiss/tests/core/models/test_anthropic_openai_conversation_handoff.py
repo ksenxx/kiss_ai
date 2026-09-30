@@ -28,8 +28,15 @@ import copy
 from typing import Any
 
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.core.models.model import SYSTEM_CACHE_BREAK, strip_system_cache_break
 from kiss.core.models.model_info import model
 from kiss.tests.conftest import requires_anthropic_api_key
+
+
+def _cached(text: str) -> list[dict[str, object]]:
+    """The ``system`` block list the adapter sends with prompt caching on."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
 
 _OPENAI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "system", "content": "You are a concise assistant."},
@@ -104,7 +111,7 @@ class TestHandoffNormalization:
         m = _make_offline_model()
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
         kwargs = m._build_create_kwargs()
-        assert kwargs["system"] == "You are a concise assistant."
+        assert kwargs["system"] == _cached("You are a concise assistant.")
 
     def test_system_message_is_merged_with_system_instruction(self) -> None:
         m = AnthropicModel(
@@ -114,7 +121,7 @@ class TestHandoffNormalization:
         )
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
         kwargs = m._build_create_kwargs()
-        assert kwargs["system"] == "Always be polite.\n\nYou are a concise assistant."
+        assert kwargs["system"] == _cached("Always be polite.\n\nYou are a concise assistant.")
 
     def test_duplicate_system_message_is_not_repeated(self) -> None:
         m = AnthropicModel(
@@ -124,7 +131,30 @@ class TestHandoffNormalization:
         )
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
         kwargs = m._build_create_kwargs()
-        assert kwargs["system"] == "You are a concise assistant."
+        assert kwargs["system"] == _cached("You are a concise assistant.")
+
+    def test_marked_instruction_is_not_repeated_after_handoff(self) -> None:
+        # An OpenAI-schema adapter stores the configured instruction in
+        # its conversation with the cache marker stripped; on handoff
+        # the Anthropic adapter must recognise that copy as the same
+        # text, not append a second full prompt to the uncached tail.
+        marked = f"You are a concise assistant.\n{SYSTEM_CACHE_BREAK}\nWork dir: /tmp/x"
+        m = AnthropicModel(
+            model_name="claude-sonnet-4-20250514",
+            api_key="test-key",
+            model_config={"system_instruction": marked},
+        )
+        m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
+        m.conversation[0]["content"] = strip_system_cache_break(marked)
+        kwargs = m._build_create_kwargs()
+        assert kwargs["system"] == [
+            {
+                "type": "text",
+                "text": "You are a concise assistant.\n",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": "\nWork dir: /tmp/x"},
+        ]
 
     def test_consecutive_tool_messages_merge_into_one_user_turn(self) -> None:
         m = _make_offline_model()

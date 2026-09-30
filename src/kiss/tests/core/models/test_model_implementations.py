@@ -396,11 +396,24 @@ class TestCachePricing:
         assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
         assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
 
-    def test_gpt_oss_openrouter_uses_openrouter_cache_read_price(self):
-        """gpt-oss has no OpenAI-native cache rule; OpenRouter lists $0.075 read on $0.15 input."""
+    def test_gpt_oss_openrouter_takes_only_the_published_cache_price(self):
+        """gpt-oss has no OpenAI-native cache rule: only OpenRouter's published price applies.
+
+        The literal price is not pinned: openrouter.ai listed $0.075 cache read
+        on $0.15 input in 2026-08 and no cache read at all on $0.037 input in
+        2026-09, and ``update_models.py`` tracks the live row.  What must hold
+        is that the entry carries the published read price or ``None`` (billed
+        at the full input price), never an OpenAI multiple, and that no write
+        price is synthesized.
+        """
         info = MODEL_INFO["openrouter/openai/gpt-oss-120b"]
-        assert info.cache_read_price_per_1M == pytest.approx(0.075)
+        cache_read = info.cache_read_price_per_1M
+        assert cache_read is None or 0 < cache_read <= info.input_price_per_1M
         assert info.cache_write_price_per_1M is None
+        fresh = _mi_for_test(131_072, 0.15, 0.6)
+        _apply_cache_pricing("openrouter/openai/gpt-oss-120b", fresh)
+        assert fresh.cache_read_price_per_1M is None
+        assert fresh.cache_write_price_per_1M is None
 
     def test_undocumented_providers_have_no_cache_pricing(self):
         for name in ("glm-4-32b-0414-128k", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):

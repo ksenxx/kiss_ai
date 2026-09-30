@@ -342,7 +342,12 @@ The parameters without getters:
   `scope_work_dir`.
 - **`use_web_tools()`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
-  "Use web tools" checkbox, persisted as `use_web_browser`).
+  "Use web tools" checkbox, persisted as `use_web_browser`).  Under
+  the daemon the browser tools include `show_browser()`, which moves
+  the page the agent is browsing into the Browser tab on every surface
+  (the daemon's `BrowserTabService`, passed to the run as
+  `live_browser` and forwarded to its sub-agents) so the user can
+  watch and act on it; there is no getter for it.
 - **`classify_tasks()`** — per-run pre-run task classification.
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as
@@ -958,7 +963,7 @@ class TaskResult:
   precedence over `SEAS.md` folders, later `SEAS.md` lines beat
   earlier ones, and the bundled Sorcar-extending SEAs in
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
-  folder can shadow them.  The 16 bundled SEA folders register
+  folder can shadow them.  The 17 bundled SEA folders register
   these commands: `/ask` (answers a question about the current task
   from a digest of its persisted events; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
@@ -975,7 +980,7 @@ class TaskResult:
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
   `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
-  a venue), `/revise_and_review_paper` (writes a paper with
+  a venue, scoring seven dimensions from 1 to 10), `/revise_and_review_paper` (writes a paper with
   `/write_paper`, has `/review_paper` review it fresh, and repeats until
   strong accept or no further improvement; task text carries `Writing:`
   and `Review:` instructions), `/rsi7d` (7-day self-improvement of the
@@ -986,7 +991,10 @@ class TaskResult:
   (runs the command with the `bash` tool profile), `/skillopt`
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),
-  `/write_paper` (writes or revises a research paper), and `/dummy`
+  `/write` (writes prose for a general audience in concise, professional
+  American English that reads as human-written; its only getters are
+  `description()` and `add_to_system_prompt()`), `/write_paper` (writes
+  or revises a research paper), and `/dummy`
   (`seas/dummy/dummy_sea.py`, an SEA whose only getter is
   `description()`, is what `run_agent` runs when its `agent` argument
   is empty).  The other modules in that package

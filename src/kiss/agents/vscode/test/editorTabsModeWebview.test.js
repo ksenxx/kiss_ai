@@ -247,7 +247,8 @@ function testSubagentTabs() {
   );
 
   // Closing the ROOT strip closes the whole panel (retiring the chat)
-  // instead of stacking a replacement chat.
+  // instead of stacking a replacement chat — a running sub-agent does
+  // not stop the user from closing the chat's tab.
   const rootClose = win.document.querySelector(
     '#tab-list .chat-tab .chat-tab-close',
   );
@@ -255,11 +256,8 @@ function testSubagentTabs() {
   rootClose.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),
   );
-  assert.strictEqual(byType(posted, 'closePanel').length, 0, 'running child keeps its panel open');
-  send(win, {type: 'subagentDone', tab_id: 'sub-2'});
-  win.document.querySelector('#tab-list .chat-tab .chat-tab-close').click();
   const closes = byType(posted, 'closePanel');
-  assert.strictEqual(closes.length, 1, 'after child completion, root close asks the host to close');
+  assert.strictEqual(closes.length, 1, 'root close asks the host to close');
   assert.strictEqual(closes[0].retire, true, 'user close retires the chat');
   assert.strictEqual(
     byType(posted, 'openChatPanel').length,

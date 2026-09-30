@@ -5,16 +5,17 @@
 
 'use strict';
 
-// A7 forced reload (audit-extension H3): after an in-place update the
-// window is never reloaded behind the user's back.  Drives the real
-// `.extension-updated` watcher in out/extension.js (fs.watchFile on a
-// temp $KISS_HOME) with a reloadGuard that reports the bundle ready:
-//  - the settle logic ends in ONE non-modal toast
-//    'KISS Sorcar was updated.' with 'Reload now' / 'Later';
-//  - 'Later' (and closing the toast) leaves the window alone;
-//  - 'Reload now' runs workbench.action.reloadWindow, and only then;
-//  - the prompt is shown once per activation even when the marker keeps
-//    changing (reloadTriggered).
+// After ./install.sh replaces the extension on disk, the window must
+// reload on its own: no 'KISS Sorcar was updated. Reload now / Later'
+// toast that leaves the update stuck until someone clicks it.  Drives
+// the real `.extension-updated` watcher in out/extension.js
+// (fs.watchFile on a temp $KISS_HOME) with a reloadGuard that reports
+// the bundle ready:
+//  - the settle logic ends in workbench.action.reloadWindow with no
+//    notification of any kind;
+//  - the reload runs once per activation even when the marker keeps
+//    changing (reloadTriggered);
+//  - an activation whose marker never changes does not reload.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -55,49 +56,55 @@ function reloads() {
 }
 
 function updatedToasts() {
-  return h.notifications.filter(n => n.message === 'KISS Sorcar was updated.');
+  return h.notifications.filter(n => /was updated/.test(n.message));
 }
 
-async function scenario(answer) {
+async function markerWrittenReloadsOnce() {
   fs.rmSync(markerPath, {force: true});
   const ctx = h.makeContext();
   h.extension.activate(ctx);
   // Let fs.watchFile take its baseline before the marker appears.
   await sleep(300);
-  const before = updatedToasts().length;
+  const reloadsBefore = reloads();
+  const toastsBefore = updatedToasts().length;
   fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
   // watchFile polls every 2 s, the settle timer every 0.5 s.
   await waitFor(
-    () => updatedToasts().length === before + 1,
-    'the update marker must end in a "was updated" toast',
+    () => reloads() === reloadsBefore + 1,
+    'the update marker must end in workbench.action.reloadWindow',
     400,
   );
-  const toast = updatedToasts()[before];
-  assert.strictEqual(toast.kind, 'info', 'a non-modal information toast');
-  assert.deepStrictEqual(toast.actions, ['Reload now', 'Later']);
-  const reloadsBefore = reloads();
-  // Nothing reloads while the toast is open.
-  await sleep(200);
-  assert.strictEqual(reloads(), reloadsBefore, 'no reload before the answer');
-  // The marker changing again must not stack a second prompt.
+  assert.strictEqual(
+    updatedToasts().length,
+    toastsBefore,
+    'the reload must not be gated behind a "was updated" toast',
+  );
+  // The marker changing again must not stack a second reload.
   fs.writeFileSync(markerPath, new Date().toISOString() + 'x\n');
   await sleep(2600);
   assert.strictEqual(
-    updatedToasts().length,
-    before + 1,
-    'the prompt is shown once per activation',
+    reloads(),
+    reloadsBefore + 1,
+    'the reload runs once per activation',
   );
-  toast.resolve(answer);
-  await sleep(100);
   h.extension.deactivate();
   h.disposeContext(ctx);
-  return reloads() - reloadsBefore;
+}
+
+async function noMarkerNoReload() {
+  fs.rmSync(markerPath, {force: true});
+  const ctx = h.makeContext();
+  h.extension.activate(ctx);
+  const reloadsBefore = reloads();
+  await sleep(2600);
+  assert.strictEqual(reloads(), reloadsBefore, 'no marker, no reload');
+  h.extension.deactivate();
+  h.disposeContext(ctx);
 }
 
 async function runTest() {
-  assert.strictEqual(await scenario('Later'), 0, "'Later' must not reload");
-  assert.strictEqual(await scenario(undefined), 0, 'closing must not reload');
-  assert.strictEqual(await scenario('Reload now'), 1, "'Reload now' reloads");
+  await markerWrittenReloadsOnce();
+  await noMarkerNoReload();
   fs.rmSync(tmpHome, {recursive: true, force: true});
   console.log('\nAll ui_antipattern_reload_prompt tests passed');
 }

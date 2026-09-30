@@ -43,7 +43,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.core.brand import PRODUCT_NAME
-from kiss.core.browser_handoff import open_in_default_browser
+from kiss.core.browser_handoff import BROWSER_TAB, DEFAULT_BROWSER, open_for_user
 from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
@@ -348,7 +348,7 @@ def _single_account(signal_cli: str) -> str:
     return numbers[0] if len(numbers) == 1 else ""
 
 
-def _link_instructions(session: SignalLinkSession, browser_opened: bool = False) -> str:
+def _link_instructions(session: SignalLinkSession, opened_in: str = "") -> str:
     """Build the agent-facing hand-off text for a started link session.
 
     The QR code is included as a fenced code block so that Markdown
@@ -356,10 +356,32 @@ def _link_instructions(session: SignalLinkSession, browser_opened: bool = False)
 
     Args:
         session: The pending link session.
-        browser_opened: Whether the black-on-white QR page was already
-            opened in the user's default browser on this machine.
+        opened_in: Where :func:`~kiss.core.browser_handoff.open_for_user`
+            put the black-on-white QR page: ``BROWSER_TAB`` (streamed to
+            every KISS surface), ``DEFAULT_BROWSER`` (on this machine)
+            or ``""`` (nowhere).
     """
-    if browser_opened:
+    minutes = max(session.expires_in // 60, 1)
+    scan = (
+        "Ask them to open Signal on their phone > Settings > Linked devices > Link "
+        "new device, scan the code, and reply here when done (the code is valid for "
+        f"about {minutes} minutes). 2) Call finish_signal_auth(); if it returns "
+        "'pending', wait a few seconds and call it again. Nothing has to be pasted "
+        "back.\n\n```text\n" + session.qr_text + "\n```"
+    )
+    if opened_in == BROWSER_TAB:
+        return (
+            "Connect Signal the way Signal Desktop links: the USER scans a QR code "
+            "with their phone; you only tell them where it is. Never ask for the "
+            "user's phone number, PIN, or a verification code. The QR page is already "
+            "open, black on white, in the Browser tab that every KISS surface has just "
+            "switched to, so the user is looking at it: do NOT ask them to open a URL "
+            "or a file. Steps: 1) Call ask_user_question() telling the user to scan the "
+            "QR code shown in the Browser tab, and include the same QR code below "
+            "EXACTLY as given inside the same fenced code block as a fallback (it must "
+            f"stay monospaced with every row intact). {scan}"
+        )
+    if opened_in == DEFAULT_BROWSER:
         opened = (
             f"The QR page {session.page} has just been opened in the user's default "
             "browser on this machine, black on white and ready to scan. "
@@ -374,11 +396,7 @@ def _link_instructions(session: SignalLinkSession, browser_opened: bool = False)
         "inside the same fenced code block (it must stay monospaced with every row "
         "intact; if the chat uses a dark theme and the phone cannot read it, tell "
         f"the user to open {session.page} on this computer, which shows it black on "
-        "white). Ask them to open Signal on their phone > Settings > Linked devices "
-        "> Link new device, scan the code, and reply here when done (the code is "
-        f"valid for about {max(session.expires_in // 60, 1)} minutes). 2) Call "
-        "finish_signal_auth(); if it returns 'pending', wait a few seconds and call "
-        "it again. Nothing has to be pasted back.\n\n```text\n" + session.qr_text + "\n```"
+        f"white). {scan}"
     )
 
 
@@ -636,12 +654,16 @@ class SignalAgent(BaseChannelAgent):
         "re-run authentication over a working configuration.\n"
         "2. To connect, call authenticate_signal() with no phone number. It runs "
         "`signal-cli link` and returns status 'consent_required' with a QR code "
-        "(monospace text, also written to link-qr.html, which it opens in the user's "
-        "default browser on this machine when it can) and its sgnl:// URI.\n"
-        "3. The USER completes the linking, exactly like linking Signal Desktop: call "
-        "ask_user_question() showing the QR code, telling them to open Signal on their "
-        "phone > Settings > Linked devices > Link new device, scan it, and reply when "
-        "done. Never ask for the user's phone number, Signal PIN, or an SMS "
+        "(monospace text, also written to link-qr.html, which it opens for the user "
+        "by itself: in the Browser tab on every KISS surface when 'opened_in' is "
+        "'browser_tab', else in the user's default browser on this machine when it "
+        "can) and its sgnl:// URI.\n"
+        "3. The USER completes the linking, exactly like linking Signal Desktop: "
+        "follow the tool's 'instructions' and call ask_user_question() telling them "
+        "to scan the QR code (in the Browser tab when it is open there — never ask "
+        "them to open a URL or file — and always also shown in the chat), by opening "
+        "Signal on their phone > Settings > Linked devices > Link new device, then "
+        "reply when done. Never ask for the user's phone number, Signal PIN, or an SMS "
         "verification code, and never run `signal-cli register` or `verify`.\n"
         "4. Then call finish_signal_auth(); if it returns 'pending', wait a few seconds "
         "and call it again. Confirm the result with check_signal_auth(). Only when "
@@ -741,7 +763,7 @@ class SignalAgent(BaseChannelAgent):
             except Exception as e:
                 return json.dumps({"ok": False, "error": str(e)})
             session.register()
-            browser_opened = open_in_default_browser(session.page.as_uri())
+            opened_in = open_for_user(session.page.as_uri())
             return json.dumps(
                 {
                     "ok": True,
@@ -750,8 +772,9 @@ class SignalAgent(BaseChannelAgent):
                     "qr_page": str(session.page),
                     "qr_text": session.qr_text,
                     "expires_in": session.expires_in,
-                    "browser_opened": browser_opened,
-                    "instructions": _link_instructions(session, browser_opened),
+                    "opened_in": opened_in,
+                    "browser_opened": bool(opened_in),
+                    "instructions": _link_instructions(session, opened_in),
                 }
             )
 

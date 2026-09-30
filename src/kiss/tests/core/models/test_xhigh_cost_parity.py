@@ -96,33 +96,41 @@ def test_xhigh_alias_calculate_cost_matches_base(
 
 
 # The rolling OpenRouter ``~openai`` latest aliases track GPT-5.6/GPT-6
-# snapshots (astra -> gpt-6-astra, luna/sol/terra -> gpt-5.6-*) and must
-# therefore share the snapshot families' absolute pricing rules: the 0.10x
-# cache-read discount, the 1.25x billed cache writes, and the 2x/1.5x
-# long-context uplift above 272k prompt tokens.  Alias/base parity tests
-# above cannot catch an absolute error when base and alias are BOTH wrong,
-# so these checks pin the absolute rules per family.
-_ROLLING_LATEST_BASES = (
-    "openrouter/~openai/gpt-astra-latest",
-    "openrouter/~openai/gpt-luna-latest",
-    "openrouter/~openai/gpt-sol-latest",
-    "openrouter/~openai/gpt-terra-latest",
-)
+# snapshots (astra -> gpt-6-astra, luna/terra -> gpt-5.6-*, sol ->
+# gpt-6.1-sol) and must therefore share the snapshot families' absolute
+# pricing rules: the cache-read discount (0.10x, except gpt-6.1-sol which
+# OpenRouter bills at 0.05x: $0.10 cache read on a $2.00 input), the 1.25x
+# billed cache writes, and the 2x/1.5x long-context uplift above 272k
+# prompt tokens.  Alias/base parity tests above cannot catch an absolute
+# error when base and alias are BOTH wrong, so these checks pin the
+# absolute rules per family.  OpenRouter's ``pricing.input_cache_read``
+# is the billing authority for ``openrouter/*`` entries (see
+# ``update_models.openrouter_cache_prices``); re-check it there when a
+# discount here needs changing.
+_ROLLING_LATEST_CACHE_READ_DISCOUNT = {
+    "openrouter/~openai/gpt-astra-latest": 0.10,
+    "openrouter/~openai/gpt-luna-latest": 0.10,
+    "openrouter/~openai/gpt-sol-latest": 0.05,
+    "openrouter/~openai/gpt-terra-latest": 0.10,
+}
+_ROLLING_LATEST_BASES = tuple(_ROLLING_LATEST_CACHE_READ_DISCOUNT)
 
 
 @pytest.mark.parametrize("base", _ROLLING_LATEST_BASES)
 def test_rolling_latest_cache_read_uses_openai_gpt5_discount(base: str) -> None:
-    """Rolling latest entries and their -xhigh aliases read cache at 0.10x.
+    """Rolling latest entries and their -xhigh aliases read cache at the
+    tracked snapshot's discount (0.10x, or 0.05x for gpt-6.1-sol).
 
     Regression: before the September 2026 catalog rename these fell
     through to the default 0.50x multiplier, billing 5x too much for
     cache reads.
     """
+    discount = _ROLLING_LATEST_CACHE_READ_DISCOUNT[base]
     for name in (base, f"{base}-xhigh"):
         assert name in MODEL_INFO, f"{name} missing from MODEL_INFO"
         info = MODEL_INFO[name]
         assert info.cache_read_price_per_1M == pytest.approx(
-            info.input_price_per_1M * 0.10
+            info.input_price_per_1M * discount
         ), name
 
 

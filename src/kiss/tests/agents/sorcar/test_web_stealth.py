@@ -370,13 +370,17 @@ def test_click_travels_a_curved_path_and_holds_the_button(tool, server):
     ev = _ev(tool)
     assert ev["clicked"] == 1
     assert len(ev["moves"]) >= 6, "a glide, not a teleport"
-    # Not a straight line: the intermediate points bow away from the chord.
-    (x0, y0), (x1, y1) = ev["moves"][0], ev["moves"][-1]
+    # Not a straight line: the recorded points bow away from the chord.  The
+    # chord starts at the pointer's known start, not at ev.moves[0]: a busy
+    # renderer coalesces the leading mousemove events into one, so the
+    # first recorded point can already sit on the nearly straight tail of
+    # the curve.
+    (x0, y0), (x1, y1) = (5.0, 5.0), ev["moves"][-1]
     chord = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
     max_dev = max(
-        abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / chord for x, y in ev["moves"][1:-1]
+        abs((x1 - x0) * (y0 - y) - (x0 - x) * (y1 - y0)) / chord for x, y in ev["moves"][:-1]
     )
-    assert max_dev > 2.0
+    assert max_dev > 2.0, ev["moves"]
     assert 40 <= ev["up"] - ev["down"] <= 400, "button held like a finger press"
     assert tool._mouse_xy is not None
 
@@ -558,6 +562,37 @@ def test_page_read_survives_a_navigation_landing_under_it(tool, server):
         tool._page.evaluate(f"() => setTimeout(() => location.replace('/hop-{i}'), 1)")
         assert tool._read_page(tool._page, "() => [document.title]") == ["inert"]
         tool._page.wait_for_url(f"**/hop-{i}")
+        tool._page.wait_for_load_state("domcontentloaded")
+
+
+_CHAIN_READ = """
+() => {
+  const hops = Number(location.pathname.split('/').pop());
+  if (hops > 0) {
+    setTimeout(() => location.replace('/chain/' + (hops - 1) + location.search), 0);
+  }
+  return [document.title];
+}
+"""
+
+
+def test_page_read_survives_a_chain_of_navigations(tool, server):
+    """A page that navigates twice in a row under a read is still read.
+
+    The live journals.sagepub.com run of 2026-09-30 destroyed the context
+    of the re-read too (the challenge reloaded into the real page, which
+    redirected once more), so a single repeat was not enough: ``go_to_url``
+    answered the same ``Execution context was destroyed`` error.  Here the
+    read expression itself schedules the next hop of ``/chain/2`` ->
+    ``/chain/1`` -> ``/chain/0`` the moment it resolves, so every hop but
+    the last lands in the gap before ``json_value``; with a single repeat
+    the read fails on the first attempt.
+    """
+    tool.go_to_url(f"{server}/chain/0")
+    for i in range(1, 41):
+        tool._page.goto(f"{server}/chain/2?a={i}")
+        assert tool._read_page(tool._page, _CHAIN_READ) == ["inert"]
+        tool._page.wait_for_url(f"**/chain/0?a={i}")
         tool._page.wait_for_load_state("domcontentloaded")
 
 

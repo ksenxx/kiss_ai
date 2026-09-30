@@ -177,13 +177,20 @@ class RunAgentChildAskAllSurfacesTest(DaemonUdsHarness):
             self._assert_question_shown(name, child_tab)
 
         # Collapsing a transcript panel must not hide a running task, including
-        # a child blocked on a question. A tab close must not strand it either.
+        # a child blocked on a question.
         self.bridge.call("activateTab", name="sidebar", tabId=parent_tab)
         clicked = self.bridge.call("click", name="sidebar", selector=".tc-run-parallel .tc-h")
         assert clicked["found"], clicked
         for name in ("sidebar", "remote"):
             self._wait_child_tab(name, child_tab)
+        # The user closing the child's tab on one surface closes it on every
+        # surface (the child keeps running); expanding the parent's fan-out
+        # panel reopens it everywhere, question included.
         self.bridge.call("closeTab", name="remote", tabId=child_tab)
+        for name in ("sidebar", "remote"):
+            self._wait_child_tab(name, child_tab, False)
+        clicked = self.bridge.call("click", name="sidebar", selector=".tc-run-parallel .tc-h")
+        assert clicked["found"], clicked
         for name in ("sidebar", "remote"):
             self._wait_child_tab(name, child_tab)
             self._assert_question_shown(name, child_tab)
@@ -208,11 +215,6 @@ class RunAgentChildAskAllSurfacesTest(DaemonUdsHarness):
         for name in SURFACES:
             self._wait_child_tab(name, child_tab)
             self._assert_question_shown(name, child_tab)
-
-        for name in ("sidebar", "remote", "editor"):
-            assert self.bridge.call("closeTab", name=name, tabId=parent_tab)["found"]
-            self._wait_child_tab(name, child_tab)
-            assert any(t["id"] == parent_tab for t in self.bridge.tabs(name))
 
         # Reload one surface while the child is waiting; existing answer boxes
         # and pending question panels must remain intact on the others.

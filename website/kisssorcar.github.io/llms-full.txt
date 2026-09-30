@@ -13,10 +13,11 @@
 ## Contents
 
 - [Overview](https://kisssorcar.github.io/docs/overview.md) — What KISS Sorcar is, the name, and how it compares to Claude Code and Cursor
+- [Terminal-Bench 2.0 Benchmark](https://kisssorcar.github.io/docs/benchmarks.md) — KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 tasks and seven models (75.6% vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5, the 59 unsampled tasks, caveats, and how to reproduce
 - [Installation](https://kisssorcar.github.io/docs/installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [Client Interfaces](https://kisssorcar.github.io/docs/cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](https://kisssorcar.github.io/docs/api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
-- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 661-model catalog across 9 provider categories
+- [Supported Models](https://kisssorcar.github.io/docs/models.md) — 695-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](https://kisssorcar.github.io/docs/messaging-agents.md) — 32 messaging-channel agents and 10 service agents, plus infrastructure agents, the Govee smart-home CLI, and Muse-auth credential isolation
 - [Slash Commands for SEAs](https://kisssorcar.github.io/docs/sea-commands.md) — Every SEA folder `xxx/xxx_sea.py` is a chat command `/xxx` and `/xxx help` prints its `description()`; `~/.kiss/SEAS.md` syntax for adding your own SEA folders, precedence, and the dispatch flow
 - [Sample Tasks](https://kisssorcar.github.io/docs/sample-tasks.md) — Ready-to-use example prompts
@@ -67,7 +68,7 @@ print(result.text)
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
 
-- **Version:** 2026.9.14
+- **Version:** 2026.9.27
 - **License:** Apache-2.0
 - **Python:** 3.13+
 - **Website:** <https://kisssorcar.github.io/>
@@ -84,14 +85,18 @@ print(result.text)
 | Multiple models from multiple vendors in the same task | Yes — mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | No — Anthropic Claude models only | No — one model per task |
 | Primary focus | Quality — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | Core agents lines of code | ~3000 | Unknown | Unknown |
-| Models in bundled catalog | 661 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| Models in bundled catalog | 695 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | Bring your own API key / endpoint | Yes — keys stay on your machine | Anthropic key | Routed through Cursor backend |
 | Open source | Yes — Apache-2.0 | Proprietary | Proprietary |
 | Price | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | Run on top of Claude Code / Codex CLI | Yes — `cc/*` and `codex/*` namespaces | N/A | No |
-| Messaging and communication channels | 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| Messaging and communication channels | 44 third-party agents: 32 messaging channels (Slack, Gmail, Email (IMAP/SMTP), Phone Control, SMS, WhatsApp, Home Assistant, …) plus service agents for GitHub, Notion, Overleaf, Postgres, Brave Search, Firecrawl, and Google Workspace | Slack, mobile Remote Control, and research-preview channels; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
 | Scheduled automations | Natural-language cron agent | — | — |
-| Wake word for voice interaction | Sorcar | N/A | N/A |
+| Wake word for voice interaction | "Hey Sorcar" | N/A | N/A |
+
+## Terminal-Bench 2.0
+
+On the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models, KISS Sorcar solved 75.6% of attempts against 70.0% for Pi, 65.7% for Codex CLI, and 65.1% for Claude Code, with the best point estimate on every model; paired reruns of Pi on Claude Fable 5 put it 11.1 points ahead on the study's tasks and 10.5 points ahead on 57 unsampled tasks. Table, figures, caveats, and reproduction pointers: [Terminal-Bench 2.0 Benchmark](https://kisssorcar.github.io/docs/benchmarks.md); full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html).
 
 ## Unique Features
 
@@ -100,7 +105,7 @@ print(result.text)
 - **Multi-model orchestration in one task.** Ask one model to implement and another to review — expressed entirely in the prompt, e.g. "Use claude-fable-5 for development and gpt-5.6-sol for review."
 - **Dynamic model switching and steering.** A running agent can change its own LLM mid-task (`set_model`), and you can inject user messages into a running agent to steer it on the fly.
 - **Git-worktree task isolation.** Each interactive task runs on an isolated git worktree branch that is auto-committed and squash-merged back when it finishes.
-- **Voice interaction.** With the `sorcar` wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
+- **Voice interaction.** With the "Hey Sorcar" wake word, KISS Sorcar behaves like a super-intelligent Alexa; it distinguishes among different speakers.
 - **44 third-party agents.** 32 messaging channels — Slack, Gmail, Email (IMAP/SMTP), WhatsApp, SMS, iMessage, Telegram, Discord, Signal, phone control, Home Assistant, and more — plus service agents for GitHub, Notion, PostgreSQL, Brave Search, Firecrawl, and Google Workspace (Calendar, Drive, Docs, Sheets).
 - **Pre-run task classification.** Normally one fast non-agentic model call (structured output, with one plain-text retry if that fails) detects whether a task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. Toggleable in the Settings panel.
 - **Persistent agent memory.** On by default: standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks. Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index, and a run inside a git repository also gets that repository's own memory in `~/.kiss/memories/<repo>/`; toggle it in the Settings panel or set `KISS_USE_MEMORY=0`.
@@ -123,6 +128,102 @@ print(result.text)
   url           = {https://arxiv.org/abs/2604.23822}
 }
 ```
+
+---
+
+<!-- Source: https://kisssorcar.github.io/docs/benchmarks.md -->
+
+# Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI, and Claude Code
+
+> KISS Sorcar on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models: 75.6% of attempts solved against 70.0% for Pi, 65.7% for Codex CLI, and 65.1% for Claude Code, with the best point estimate on every model; paired reruns of Pi on Claude Fable 5 put KISS Sorcar 11.1 points ahead on the study's tasks and 10.5 points ahead on 57 unsampled tasks. Full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html).
+
+## The study
+
+The [HarnessTax](https://harnesstax.github.io/) study (Melissa Pan, Shuo Yang, Negar Arabzadeh, Wei-Lin Chiang, Ion Stoica, and Matei Zaharia; UC Berkeley and Arena Intelligence) separates the coding model from the harness around it. It takes seven models (Claude Fable 5, Opus 4.8, Sonnet 4.6, Haiku 4.5, GPT-5.6 Sol, GPT-5.6 Luna, and Kimi K3), runs each under three harnesses (Claude Code, Codex CLI, and Pi), and scores them on 30 tasks sampled from SWE-bench Lite and 30 from Terminal-Bench 2.0, three attempts per task, graded by each benchmark's official verifier, under a 100-turn cap and "high" reasoning effort. Its central finding: on Terminal-Bench 2.0 switching harness shifts the success rate by about ±5 points on average, while Claude Code costs around 1.5× what Pi does. The name is the conclusion: accept a coding agent's default harness without trying the alternatives and you probably pay more for the same result.
+
+KISS Sorcar was built on the opposite hunch, that a prompt full of engineering rules backed by a little code changes what the model gets right as well as what it costs. The study publishes its task list, per-model numbers, and protocol, which is what a head-to-head needs.
+
+## What we ran
+
+The same 30 Terminal-Bench 2.0 tasks, the same seven models, three attempts per task, graded by the Terminal-Bench 2.0 verifier. For the benchmark the general-purpose material was stripped from the system prompt, leaving 727 words of coding rules ([`papers/kisssorcar/evidence/tb2_prompt.txt`](https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/evidence/tb2_prompt.txt)) instead of the 3,851 words of the full `SYSTEM.md`. Two settings differ from the study's: no turn cap and no wall-clock limit (an attempt ends when the agent calls `finish` or has spent $50), and the providers' default request parameters rather than high effort. A task's three attempts are averaged first, then the 30 tasks; the pooled figure averages the seven per-model results; intervals are percentile bootstraps over 10,000 resamples of the tasks. All 630 attempts ran on 25 September 2026 and every one of them is counted.
+
+The six rules of the prompt, paraphrased:
+
+1. Understand the task before acting: list what "done" means for every item it names.
+2. Look before you change; never modify the task's input files, and experiment on copies instead.
+3. Work in small verified steps; reproduce a bug before fixing it; never replace something that works with something unverified.
+4. Verify before you finish, from a fresh shell, requirement by requirement; never weaken a test or threshold to pass a check.
+5. Leave the environment as the task expects to find it.
+6. Be honest at the end: `success=True` only when every requirement is met and checked.
+
+## Results on the study's 30 tasks
+
+| Model | KISS Sorcar solved | $/att. | Pi solved | $/att. | Codex CLI solved | $/att. | Claude Code solved | $/att. |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Claude Fable 5 | **80.0** | 1.50 | 71.1 | 1.08 | 72.2 | 0.98 | 75.6 | 1.55 |
+| Claude Opus 4.8 | **74.4** | 1.21 | 72.2 | 0.76 | 72.2 | 0.85 | 68.9 | 0.90 |
+| Claude Sonnet 4.6 | **76.7** | 2.23 | 65.6 | 0.61 | 63.3 | 0.55 | 62.2 | 0.67 |
+| Claude Haiku 4.5 | **51.1** | 0.39 | 47.8 | 0.25 | 31.1 | 0.21 | 41.1 | 0.26 |
+| GPT-5.6 Sol | **85.6** | 0.69 | 83.3 | 0.42 | 78.9 | 0.76 | 71.1 | 1.35 |
+| GPT-5.6 Luna | **78.9** | 0.05 | 76.7 | 0.04 | 72.2 | 0.06 | 70.0 | 0.10 |
+| Kimi K3 | **82.2** | 1.14 | 73.3 | 0.38 | 70.0 | 0.45 | 66.7 | 0.52 |
+| **Mean of 7 models** | **75.6** | 1.03 | 70.0 | 0.51 | 65.7 | 0.55 | 65.1 | 0.77 |
+
+*Table 1. Terminal-Bench 2.0, the study's 30-task sample, three attempts per task: percentage of attempts solved and cost per attempt in USD. KISS Sorcar: 630 attempts, no turn cap, $50 budget. The other three: as published, 100-turn cap, high effort, priced on a 1 September list. Bold marks the best point estimate per row.*
+
+![Percentage of attempts solved per model under four harnesses](https://kisssorcar.github.io/assets/tb2-success-by-model.svg)
+
+*Figure 1. The success column of Table 1 as bars. KISS Sorcar (blue) has the highest point estimate on each of the seven models. The gap over Pi is largest on Sonnet 4.6 (+11.1) and Kimi K3 (+8.9) and smallest on Opus 4.8 and Luna (+2.2 each) and Sol (+2.3).*
+
+Averaged over the seven models, KISS Sorcar solved 75.6% of attempts, with a 95% interval over tasks of 63.8 to 85.9: 5.6 points above Pi and 10.5 above Claude Code. Treating the solves that took more than 100 turns as failures, to approximate the study's cap, gives 74.1%, still above the other three.
+
+Thirty tasks is not a lot. A per-model interval spans 27 points on average, the pooled interval contains all three published means, and the comparison with the published table differs in date, price list, turn cap, and prompt at once. No cost ratio is drawn from Table 1: the study priced its runs on a 1 September list and ours are priced with the framework's own table, which for Kimi K3 mixes two providers.
+
+## Pi rerun on the same model, paired
+
+Harbor's Pi agent (Pi 0.87.1) ran on Claude Fable 5 on 26 September 2026 on the same 30 tasks, three attempts each, at the study's high-effort setting, with no turn cap and no wall-clock limit (Pi has no budget cap), priced with the same table as ours. All 90 attempts count; one killed after two hours while waiting on a training command it had started is counted as failed with its spend.
+
+Pi solved 62 of 90 attempts, 68.9% (interval 52.2 to 84.4), at $1.45 and 14.5 turns per attempt. KISS Sorcar on the same model solved 80.0% at $1.50 and 15.3 turns. Both harnesses tried every task, so the comparison is paired: tasks are resampled once and the same resample applied to both. The success gap is **11.1 points in KISS Sorcar's favor, 95% interval +3.3 to +20.0**; the cost difference is five cents per attempt, interval −$0.71 to +$0.70.
+
+![Paired gap of KISS Sorcar over Pi on Claude Fable 5](https://kisssorcar.github.io/assets/tb2-paired-pi-sampled.svg)
+
+*Figure 2. The paired comparison on Claude Fable 5. Top: the success gap and its bootstrap interval, which excludes zero. Bottom: KISS Sorcar has the higher task mean on 7 tasks, Pi on none, and 23 are ties, 20 of them solved by both on every attempt.*
+
+Pi's three attempts on `feal-linear-cryptanalysis` all died with an API error (two on a Pi client bug on a mid-output model fallback, one on a content filter). Without that task the gap is +8.0 points (6 tasks to 0, sign test *p* = 0.031). Codex CLI and Claude Code were not rerun, so the paired claim is about Pi, on one model.
+
+## The 59 tasks the study left out
+
+A harness tuned on a public sample can look good on that sample and nowhere else. The same agent and frozen prompt ran on Claude Fable 5 on the 59 Terminal-Bench 2.0 tasks the study did not sample, three attempts each, under the same protocol. It solved 79.1% of attempts on the unsampled tasks and 79.4% across all 89 (counting one stopped attempt on `extract-moves-from-video` as failed). On the 176 attempts that ran to completion the unsampled tasks come out at 79.7% (70.1 to 88.1) against 80.0% on the study's 30; the interval on that difference, −15.8 to +15.4, is far too wide to call a gap. These tasks cost $1.60 per attempt against $1.50 and ran longer (17.2 turns against 15.3).
+
+Pi then ran the same 59 tasks on 29 and 30 September under the terms of the first rerun. Two tasks, `qemu-startup` and `qemu-alpine-ssh`, are out of the head-to-head: their test script installs curl from a Debian 11 repository that now answers 404, the verifier failed all six of our attempts before running a test, and a repair added for Pi's installer left the verifier working inside Pi's containers, so the two harnesses were not scored alike there (our six attempts still count as failures in the 79.1%).
+
+On the other 57 tasks Pi solved 123 of 171 attempts, 71.9% (61.4 to 81.9), at $1.00 and 12.3 turns per attempt; KISS Sorcar solved 82.5% at $1.63 and 17.3 turns. The paired gap is **10.5 points, 95% interval +2.9 to +18.7**: KISS Sorcar has the higher task mean on 15 tasks, Pi on 3, and 39 are ties (sign test *p* = 0.008). Counting our stopped attempt as failed, the gap is 9.9 points (+1.8 to +18.1, *p* = 0.019); with the two qemu tasks kept, 6.8 points (−2.3 to +15.8, *p* = 0.041). Here the cost difference does not straddle zero: KISS Sorcar paid 63 cents more per attempt (+$0.31 to +$1.03), spent on turns.
+
+![Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks](https://kisssorcar.github.io/assets/tb2-paired-pi-unsampled.svg)
+
+*Figure 3. The paired comparison on the 57 unsampled tasks the verifier scored alike for both harnesses. Top: the success gap and its bootstrap interval. Bottom: KISS Sorcar has the higher task mean on 15 tasks, Pi on 3, and 39 are ties, 32 of them solved by both on every attempt.*
+
+## What the trajectories look like
+
+The average attempt took 27.9 turns (the longest, 276) and 17.2 minutes. Twenty-eight attempts went past the study's 100-turn cap and 9 of those were solved. Three attempts cost more than $15 (the most expensive, $33.64) and two of those were solved. Of the 630 attempts, 250 received at least one harness note about a still-running process or a changed input file, 901 notes in total: Terminal-Bench tasks routinely start a server, a build, or a training job that is still running when the agent reads the next result, and the verifier looks at files the agent may have brushed against by accident. The harness refused 15 tool calls in 15 different attempts, 14 of them `run_agent` calls that have no channel agent to reach inside a container.
+
+## Where this leaves the harness tax
+
+HarnessTax puts the harness effect on Terminal-Bench 2.0 within about ±5 points. The pooled gap over Pi is 5.6 points, at the edge of that band; the paired gaps on one model are 11 points on the study's tasks and 10.5 on 57 of the others, both with intervals that leave out zero. The study stands; the band a fourth harness draws is wider than the one three harnesses drew. KISS Sorcar's harness sends the model little more than Pi does; what it adds is a short account of how to work and a one-line note whenever the model cannot see something important in a shell result. Whether those two things are what moved the numbers has not been tested: settling it means varying the prompt, the notes, and the guard one at a time with everything else held fixed.
+
+## Things to keep in mind
+
+- Only Pi was rerun, on one model, at high effort with its own prompt and no budget cap, after our runs.
+- The pooled seven-model comparison changes effort, turn cap, and date at once; the paired runs leave effort and prompt tangled together.
+- Two of the 59 unsampled tasks are out of the head-to-head because the verifier did not treat the two harnesses alike; with them in, that gap shrinks to 6.8 points.
+- The benchmark exercises the loop, six tools, and the coding rules. The discovery and adversarial-testing procedures, the memory, the reviewer, and the IDE features were switched off.
+
+## Reproducing
+
+- Runners and the Pi subclass: [`benchmarkings/harnesstax/`](https://github.com/ksenxx/kiss_ai/tree/main/benchmarkings/harnesstax) (`tb2_runner.py` launches one Harbor job per model over the 30 sampled tasks; `pi_agent.py` is Harbor's built-in Pi agent pinned to the current `@earendil-works/pi-coding-agent` package; `results/pi/README.md` records the Pi rerun command).
+- Per-attempt records of all four runs (`main`, `heldout`, `pi`, `pi_heldout`): [`papers/kisssorcar/evidence/tb2_trials.json`](https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/evidence/tb2_trials.json); the benchmark prompt: [`tb2_prompt.txt`](https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/evidence/tb2_prompt.txt).
+- Method, intervals, and the rest of the evidence: [KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant](https://kisssorcar.github.io/assets/kiss_sorcar.pdf), Section 5.
+- Terminal-Bench 2.0: Merrill et al., [arXiv:2601.11868](https://arxiv.org/abs/2601.11868). Pi: [github.com/earendil-works/pi](https://github.com/earendil-works/pi). HarnessTax: [harnesstax.github.io](https://harnesstax.github.io/).
 
 ---
 
@@ -226,15 +327,16 @@ kiss-web --url
 
 Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and type or speak your task. The chat interface provides:
 
-- `@` file/folder mentions with ranked project-file completion.
+- `@` file/folder mentions with ranked file completion over the working directory (`./path` items) and the rest of your home directory (`~/path` items), served from a persistent file index that is refreshed in the background. In a tab that is neither running a task nor waiting for an answer, a one-line message that is just the path of an existing file opens that file in the editor or a content tab instead of starting a task.
 - Per-task **git worktree isolation** — worktrees are pre-warmed in the background for fast task start, with auto-commit and merge on success, or an interactive merge/discard prompt — toggle both in the Settings panel.
-- A pre-run **task classifier** that detects whether the task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Classify with Jev" (`classify_with_decisions`; unticked pins the LLM classifier).
+- A pre-run **task classifier** that detects whether the task may create or modify files in the project (code, docs, reports, presentations, data — anything that could become git-tracked) and so needs a worktree — tasks that write no files (questions, Internet answers given in the reply, git-only operations) skip worktree isolation, and simple tasks get a lite system prompt for faster starts. With an `OPENROUTER_API_KEY` and "Use Jev (decisions model)" ticked it asks the `~typesafe/jev-latest` decisions model one typed question (about 0.2 s and $0.00003 per task; on a 415-prompt benchmark it matched hand labels more often than the LLM classifiers, see `benchmarkings/task_classifier/`); otherwise, or if that call fails, it falls back to one fast non-agentic call on the run's own model (structured output, with one plain-text retry if that fails; skipped for `cc/*` and `codex/*` models). Both are Settings-panel checkboxes: "Classify tasks before running" (`classify_tasks`) and "Use Jev (decisions model)" (`classify_with_decisions`, off by default). The Jev checkbox is the one switch for the decisions model: ticked, the classifier asks Jev first and every agent gets the `decide` tool; unticked, the LLM classifier answers and no task calls Jev.
 - A model picker, per-task budget caps, chat history with resume (filtered to the current workspace by default), an agent dashboard (burger menu, bottom-left), and inline rendering of tool-generated images in the chat panels.
 - **Image and PDF attachments**: attach files to a task via the picker, paste, or drag-and-drop — images (HEIC/HEIF converted, oversized ones re-encoded) and PDFs are sent to the model along with the prompt.
 - **Persistent agent memory** (on by default): standard Sorcar runs get seven `memory_*` tools (search, pull, read, write, list, refresh, delete) and a memory protocol, so agents recall lessons, preferences, and decisions across tasks (not for Docker runs, `cc/*`/`codex/*` models, runs that drop the built-in toolset, or runs whose `model_config` supplies its own `system_instruction`). Pages are Markdown files under `~/.kiss/memories` with a SQLite vector index (OpenAI embeddings when an `OPENAI_API_KEY` is available, otherwise a fully offline hashed embedder). Toggle it in the Settings panel or set `KISS_USE_MEMORY=0`; a custom directory goes in the `memory_dir` key of `~/.kiss/config.json`. A run whose working directory is inside a git repository also gets that repository's own memory, the sub-directory `~/.kiss/memories/<repo>/` named after the repository directory (shared by a main checkout and its linked worktrees; independent clones share it only when their directory names match): its pages are addressed as `<repo>/<page>`, `memory_search` covers every memory unless narrowed with `memory=`, and the protocol tells the agent to keep repository knowledge there and cross-project lessons in the general memory.
-- Wake-word voice chat ("sorcar, …") via the mic button, including steering a running agent by voice.
+- Wake-word voice chat ("Hey Sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent, or switch its model mid-run. Wrapping the message in `<task>…</task>` tags instead queues it as a follow-up task that runs sequentially after the current task finishes.
-- Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory, and sub-agents dispatched with `run_agent` open their own tab in the calling workspace.
+- Tab mirroring — every VS Code window and web client opened on the same workspace shows the same tabs with the same contents; the tab bar is scoped to the client's workspace directory. A sub-agent dispatched with `run_agent` or `run_parallel` opens a nested tab of its own on every client viewing the parent task, which is closed everywhere when the sub-agent finishes; closing it by hand while the sub-agent runs closes it on every surface until you reopen it from its history row or by collapsing and expanding the fan-out panel.
+- In the remote web app, file links in a transcript open in **content tabs**: text files in a Monaco editor, Markdown and HTML with preview and source views, images in the browser's viewer, and PDFs in a bundled pdf.js viewer (fit-to-width pages, pinch or Ctrl/Cmd + wheel zoom, an editable "Page N of M" field, a Download link and keyboard paging) that the VS Code extension also uses for `.pdf` links.
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (also runnable from the shell as `kiss-cron`) creates, lists, pauses, resumes, or removes the schedule. A job runs an unattended LLM task or a plain shell command and can deliver its result to an authenticated messaging channel (25 of the 32 channels support delivery, e.g. `telegram:123456`, `email:user@example.com`).
 - API keys, a custom model endpoint, custom HTTP headers, budget limits, and the remote-access password, all set in the Settings panel.
 
@@ -365,7 +467,7 @@ Agent with both coding tools and browser automation for web + code tasks.
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
-- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight model call: a typed question to a decisions model when an OpenRouter key is configured and the `classify_with_decisions` setting — the settings panel's "Classify with Jev" checkbox — is on, else a non-agentic call on the run's own LLM) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
+- **classify_task_for_run** — `classify_task_for_run(model_name, task, model_config=None, enabled=None) -> TaskClassification | None`. Classify the task now (one lightweight model call: a typed question to a decisions model when an OpenRouter key is configured and the `classify_with_decisions` setting — the settings panel's "Use Jev" checkbox — is on, else a non-agentic call on the run's own LLM) and pre-seed the verdict for the coming run, so an external driver can know the run's effective worktree mode before calling `run` — the verdict decides worktree gating and lite-vs-full system prompt selection. `enabled` is a per-run override of the persisted `classify_tasks` setting (`True` forces classification, `False` skips it, `None` follows the config); the `KISS_DISABLE_TASK_CLASSIFIER` environment kill switch wins over any override. Returns `None` when classification is disabled or failed.
 - **run** — Adds on top of `RelentlessAgent.run`: `web_tools: bool = True` (set False for terminal-only), `is_parallel: bool = True` (enables the `run_parallel` tool for spawning parallel sub-agents), `current_editor_file` (path appended to the prompt), `ask_user_question_callback` (collects a text response from the user), `base_system_prompt` (replaces the default system prompt for this agent and its `run_parallel` sub-agents), `append_basic_tools` (set False to run with only `finish` plus the caller's tools), `llm_call_hook`, `tool_call_hook` (forwarded to every sub-session's `KISSAgent`), `use_memory: bool | None = None` (per-run persistent-memory toggle: `True` gives the run the `memory_*` tools and the memory protocol prompt block, `False` withholds them, `None` follows the `KISS_USE_MEMORY` environment variable / stored setting; forwarded to every `run_parallel` sub-agent, and a boolean never bypasses the memory hard gates — stripped basic tools, Docker runs, `cc/*`/`codex/*` models, a caller-supplied `model_config["system_instruction"]`). Returns YAML with `success` and `summary`.
 
 ### Module helpers
@@ -429,7 +531,7 @@ SorcarAgent that isolates every task in a git worktree.
 
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **661 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
+> KISS Sorcar ships a catalog of **695 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI.
 
@@ -437,21 +539,22 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 102 |
-| Anthropic | 14 |
-| Gemini | 24 |
+| OpenAI | 106 |
+| Anthropic | 16 |
+| Gemini | 20 |
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 378 |
-| Claude Code CLI (`cc/*`) | 14 |
-| Codex CLI (`codex/*`) | 8 |
+| OpenRouter | 407 |
+| Claude Code CLI (`cc/*`) | 16 |
+| Codex CLI (`codex/*`) | 9 |
 
 ## Capability Totals
 
-- **641** generation-capable models
-- **483** function-calling-capable models
-- **11** embedding models
+- **676** generation-capable models
+- **509** function-calling-capable models
+- **7** embedding models
+- **4** decision models
 
 ## Configuring Model Access
 
@@ -472,7 +575,7 @@ Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (378 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (407 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 
@@ -492,7 +595,7 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 661 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
+The full per-model list (all 695 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
 
 ---
 
@@ -626,7 +729,7 @@ Any file that is a valid SEA works: a bundled channel agent, or a file of your o
 The daemon builds the command list from three sources:
 
 1. **Bundled channel agents** in `src/kiss/agents/third_party_agents/` of the installed package. These always win a name clash.
-2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules of `templates/write_paper_prompt.md`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and the reviewer model, and the agent gets `check_paper`, which runs the template's AI-slop and consistency gates on the prose, and `build_paper`, which runs pdflatex and bibtex and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path, the word limit and the cutoff date for related work, and the agent gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers), and `/revise_and_review_paper` (`/revise_and_review_paper Writing: <...> Review: <...>` runs the two as a loop: the coordinator writes the paper with `/write_paper` from the writing instructions, stages a copy of the built PDF and has `/review_paper` review it as a fresh, memory-free session that sees no earlier review or notes and ends with a `Recommendation:` line, then revises against the review, running experiments, ablations or the AI-discovery loop on the benchmarks the writing instructions allow when the review asks for evidence; it stops at strong accept, at the round cap (default 6) or when two rounds in a row fail to raise the verdict, and keeps every review and a per-round log under `reports/`), and `/git_extract_knowledge` (`/git_extract_knowledge <repo>` builds the durable memory of a git repository given as a local path or a clone URL: `index_repo` indexes every tracked file, 80-line chunk, symbol definition, commit, per-file change with its patch, tag, branch, contributor and directory as full-text blocks in `~/.kiss/memories/<repo>/knowledge.sqlite3`, incrementally after the first run; the agent then writes curated pages — overview, domain glossary and concepts, architecture, conventions, history, one page per module, FAQ — into the repository's domain memory, where every Sorcar run inside that repository finds them with `memory_search`, plus a `knowledge-lookup` page with the shell command that queries the block store, `python -m kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea search <repo> "<query>"`; the first run schedules a cron job that runs `update <repo>` every morning (04:00 America/Los_Angeles when scheduled; the cron hour is fixed in the daemon's local time, so it moves by one hour across daylight-saving changes unless that clock is on Pacific time), and `ask <repo> <question>` answers from the memory), and `/remember` and `/forget` (`/remember <instruction>` appends the instruction as a bullet line to `~/.kiss/SORCAR.md`, the file appended to the system prompt of every task, so every later task follows it, creating the file on first use and leaving hand-written text alone; `/forget <instruction>` removes the stored line that matches ignoring case and spacing, or lists the stored instructions and removes the one you meant). Any `SEAS.md` folder may shadow these.
+2. **Bundled Sorcar-extending agents** in `src/kiss/agents/seas/` of the installed package, such as `/merge` (the merge-conflict resolver the auto-commit worktree merge also runs on its own) and `/sh` (runs the command you type — `/sh git status --short` — with the `Bash` tool alone, directly in the tab's working directory, and returns its output), and `/task_update` (`/task_update <task_id>` reports what that task has done so far and its partial results from its persisted transcript; the task-info panel runs the same agent for the running task every 10 minutes and on its refresh button), and `/write_paper` (`/write_paper <instructions>` writes or revises a research paper under the rules embedded in `write_paper_sea.py`; the instructions name the venue, the `.tex` path, the topic, the sources of truth and optionally the writer and reviewer models, the agent reads the highly cited related work of the last two or three years before writing, and it gets `check_paper`, which runs the AI-slop and consistency gates on the prose and flags fabricated-looking references in the `.bib` file, and `build_paper`, which runs pdflatex and bibtex or biber and summarizes the log), and `/review_paper` (`/review_paper <instructions>` reviews a paper (PDF, .tex, .md or .txt) for any venue as a careful human reviewer would; the instructions name the paper, the venue, the output path and the cutoff date for related work, and optionally the word limit (700 by default) and a second model that checks the review; the agent searches at least 20 related-work sources and judges the novelty against recent papers of the venue, and it gets `read_paper`, which returns the paper's text page by page with the template's margin line numbers removed, and `check_review`, which checks the review's structure, word limit and AI-slop and reviewer-boilerplate gates with line numbers), and `/revise_and_review_paper` (`/revise_and_review_paper Writing: <...> Review: <...>` runs the two as a loop: the coordinator writes the paper with `/write_paper` from the writing instructions, stages a copy of the built PDF and has `/review_paper` review it as a fresh, memory-free session that sees no earlier review or notes and ends with a `Recommendation:` line, then revises against the review, running experiments, ablations or the AI-discovery loop on the benchmarks the writing instructions allow when the review asks for evidence; it stops at strong accept, at the round cap (default 6) or when two rounds in a row fail to raise the verdict, and keeps every review and a per-round log under `reports/`), and `/git_extract_knowledge` (`/git_extract_knowledge <repo>` builds the durable memory of a git repository given as a local path or a clone URL: `index_repo` indexes every tracked file, 80-line chunk, symbol definition, commit, per-file change with its patch, tag, branch, contributor and directory as full-text blocks in `~/.kiss/memories/<repo>/knowledge.sqlite3`, incrementally after the first run; the agent then writes curated pages — overview, domain glossary and concepts, architecture, conventions, history, one page per module, FAQ — into the repository's domain memory, where every Sorcar run inside that repository finds them with `memory_search`, plus a `knowledge-lookup` page with the shell command that queries the block store, `python -m kiss.agents.seas.git_extract_knowledge.git_extract_knowledge_sea search <repo> "<query>"`; the first run schedules a cron job that runs `update <repo>` every morning (04:00 America/Los_Angeles when scheduled; the cron hour is fixed in the daemon's local time, so it moves by one hour across daylight-saving changes unless that clock is on Pacific time), and `ask <repo> <question>` answers from the memory), and `/remember` and `/forget` (`/remember <instruction>` appends the instruction as a bullet line to `~/.kiss/SORCAR.md`, the file appended to the system prompt of every task, so every later task follows it, creating the file on first use and leaving hand-written text alone; `/forget <instruction>` removes the stored line that matches ignoring case and spacing, or lists the stored instructions and removes the one you meant). Any `SEAS.md` folder may shadow these.
 3. **Your folders** listed in `~/.kiss/SEAS.md` (or `$KISS_HOME/SEAS.md` when `KISS_HOME` is set).
 
 The command name is the SEA's folder name: `deploy/deploy_sea.py` is `/deploy`, `pr-review/pr-review_sea.py` is `/pr-review`. A folder is registered only when it directly contains a regular file named `<folder>_sea.py` and the folder name uses ASCII letters, digits, `_`, or `-` only. `release.notes/` (a dot) or `my agent/` (a space) is skipped silently because the command could not be typed, and so is a folder whose script has another name (`deploy/main_sea.py`). A leading underscore is allowed: `_scratch/_scratch_sea.py` is `/_scratch`. A loose `xxx_sea.py` placed directly in a listed folder is not a command: every SEA needs its own folder, which is also where its helper modules, prompts and data files live.
@@ -981,7 +1084,7 @@ In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the ch
 
 ## Task Classifier
 
-KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task); deselect "Classify with Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models).
+KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected, the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" (the default) to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
 
 ## Sorcar Extension Agents (SEAs)
 

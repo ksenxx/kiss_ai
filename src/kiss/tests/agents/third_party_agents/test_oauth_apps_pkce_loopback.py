@@ -525,7 +525,9 @@ def test_loopback_step_only_for_loopback_sessions(token_server: _TokenServer, se
     step = _loopback_step(session)
     assert "ANOTHER device" in step
     assert "curl -s '<pasted URL>'" in step
-    text = consent_instructions(service, "Slack", session, browser_opened=True)
+    text = consent_instructions(service, "Slack", session, opened_in="default_browser")
+    assert text.endswith(step)
+    text = consent_instructions(service, "Slack", session, opened_in="browser_tab")
     assert text.endswith(step)
     assert session.verification_uri in text
     assert f"finish_{service}_auth()" in text

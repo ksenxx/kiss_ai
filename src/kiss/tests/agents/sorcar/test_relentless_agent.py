@@ -24,6 +24,7 @@ from kiss.agents.sorcar.relentless_agent import (
     finish,
 )
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.model import strip_system_cache_break
 from kiss.tests.conftest import requires_gemini_api_key
 
 TEST_MODEL = "gemini-2.5-flash"
@@ -66,7 +67,12 @@ class TestTemplateConstants(unittest.TestCase):
         """An empty work_dir_line leaves no blank line or dangling label."""
         formatted = IMPORTANT_INSTRUCTIONS.format(work_dir_line="", current_pid="7")
         self.assertNotIn("Work dir", formatted)
-        self.assertIn("as HTML.\n- Current process PID: 7", formatted)
+        # The prompt-cache marker sits between the static bullets and the
+        # per-task ones; providers that do not split on it strip it and
+        # see the two bullets adjacent, with no blank line.
+        self.assertIn(
+            "as HTML.\n- Current process PID: 7", strip_system_cache_break(formatted),
+        )
 
     def test_continuation_prompt_placeholders(self) -> None:
         """CONTINUATION_PROMPT has progress_text and continuation_number."""

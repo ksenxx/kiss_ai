@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import enum
+import fnmatch
 import logging
 import os
 import re
@@ -605,6 +606,40 @@ _RESCUE_SKIP_COMPONENTS = frozenset({
     ".DS_Store",
 })
 
+# Basename glob patterns (``fnmatch``) whose files are never rescued
+# either: regenerable build artifacts that do not live under a skipped
+# directory.  Without this list every worktree that rebuilt one of
+# them (a fresh ``kiss-sorcar.vsix``, pytest-cov's ``.coverage`` data,
+# stray ``*.pyc``) differed from the main-tree copy and landed a
+# ``<stem>.kiss-rescued-<ns><ext>`` sibling on each teardown.
+_RESCUE_SKIP_PATTERNS = (
+    "*.vsix",
+    ".coverage",
+    ".coverage.*",
+    "*.pyc",
+    "*.pyo",
+    "*.tsbuildinfo",
+)
+
+
+def _rescue_skipped(rel: str) -> bool:
+    """Whether the ignored worktree file *rel* is a regenerable artifact.
+
+    True when any path component is in :data:`_RESCUE_SKIP_COMPONENTS`
+    or the basename matches one of :data:`_RESCUE_SKIP_PATTERNS`; such
+    files are left to die with the worktree instead of being rescued
+    (see :meth:`GitWorktreeOps.rescue_ignored_files`).
+
+    Args:
+        rel: Path of the file relative to the worktree root.
+    """
+    parts = Path(rel).parts
+    if any(p in _RESCUE_SKIP_COMPONENTS for p in parts):
+        return True
+    name = parts[-1] if parts else rel
+    return any(fnmatch.fnmatch(name, pat) for pat in _RESCUE_SKIP_PATTERNS)
+
+
 # Repo-local (info/exclude) ignore pattern covering every collision
 # sibling the rescue can generate — ``<stem>.kiss-rescued-<ns><ext>``
 # and ``<name>.kiss-rescued-<ns>`` alike.  Extension preservation alone
@@ -845,13 +880,23 @@ class GitWorktreeOps:
         return branch
 
     @staticmethod
-    def create(repo: Path, branch: str, wt_dir: Path) -> bool:
+    def create(repo: Path, branch: str, wt_dir: Path, *, checkout: bool = True) -> bool:
         """Create a new worktree with a new branch.
 
         Args:
             repo: Git repo root path.
             branch: New branch name to create.
             wt_dir: Directory for the new worktree.
+            checkout: ``False`` registers the worktree with
+                ``--no-checkout`` — milliseconds instead of the full
+                checkout, which on a large repository takes many
+                seconds under both locks below — and leaves populating
+                it to the caller (``reset_worktree_to(wt_dir,
+                "HEAD")``), which can then run without holding any
+                lock.  Until that reset completes the worktree's index
+                is empty, so every file shows as deleted: callers must
+                keep such a worktree out of the orphan reclaim's reach
+                (see :mod:`kiss.agents.sorcar.worktree_pool`).
 
         The new worktree is registered with ``git worktree add`` and
         stamped with this process's pid (:meth:`save_owner_pid`) under
@@ -888,8 +933,9 @@ class GitWorktreeOps:
         # ``sweep_orphaned_state`` (repo_lock -> flock) and deadlock.
         # ``repo_lock`` is an RLock, so callers already holding it are
         # unaffected.
+        add_args = ["worktree", "add"] + ([] if checkout else ["--no-checkout"])
         with repo_lock(repo), _reclaim_process_lock(repo):
-            result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
+            result = _git(*add_args, "-b", branch, str(wt_dir), cwd=repo)
             if result.returncode != 0:
                 logger.warning(
                     "Failed to create worktree: %s", result.stderr.strip(),
@@ -1537,6 +1583,45 @@ class GitWorktreeOps:
         GitWorktreeOps._append_info_line(repo, "exclude", ".kiss-worktrees/")
 
     @staticmethod
+    def enable_untracked_cache(repo: Path) -> None:
+        """Turn on git's untracked cache for *repo* unless already configured.
+
+        Worktree setup, spare validation and dirty-state copying each
+        run ``git status`` or ``ls-files --others`` over the whole
+        tree, and on a repository with 100k+ tracked files every such
+        walk costs about half a second when the directory cache is
+        cold.  ``core.untrackedCache=true`` makes git record directory
+        mtimes in the index so a later walk re-reads only directories
+        that changed.  The setting lives in the repository's local
+        config, which its worktrees share, and is written once; a
+        value the user already set (``true`` or ``false``) is kept.
+        ``core.fsmonitor`` is deliberately not touched: the builtin
+        fsmonitor daemon is unsupported on Linux, where enabling it
+        makes every ``git status`` fail.
+
+        Args:
+            repo: Git repo root path.
+        """
+        if _git("config", "--get", "core.untrackedCache", cwd=repo).returncode == 0:
+            return
+        result = _git("config", "core.untrackedCache", "true", cwd=repo)
+        if result.returncode != 0:
+            logger.warning(
+                "Could not enable core.untrackedCache in %s: %s",
+                repo, result.stderr.strip(),
+            )
+
+    @staticmethod
+    def prepare_repo(repo: Path) -> None:
+        """One-time repository setup before worktree work: exclude + untracked cache.
+
+        Args:
+            repo: Git repo root path.
+        """
+        GitWorktreeOps.ensure_excluded(repo)
+        GitWorktreeOps.enable_untracked_cache(repo)
+
+    @staticmethod
     def link_node_modules(repo: Path, wt_dir: Path) -> list[Path]:
         """Symlink the main checkout's ``node_modules`` directories into *wt_dir*.
 
@@ -1992,11 +2077,14 @@ class GitWorktreeOps:
         means an external writer put it there — and every path that
         would destroy a spare (consuming it, discarding the pool,
         reclaiming an orphaned spare) must apply the SAME probe and
-        preserve it instead.  ``list_ignored_files`` is part of the
-        probe because porcelain status omits ignored files: a fresh
-        spare checkout has none, so any present were written
-        externally.  ``None`` (git could not enumerate them) counts as
-        content — unenumerable state is preserved, never destroyed.
+        preserve it instead.  The probe is one ``git status --porcelain
+        --ignored`` walk: it reports staged, unstaged and untracked
+        changes AND ignored files, which plain porcelain status omits
+        — a fresh spare checkout has none, so any present were written
+        externally.  One walk instead of two matters on the submit
+        path, where a spare is validated before it is consumed.  A
+        failed status counts as content: unenumerable state is
+        preserved, never destroyed.
 
         Args:
             repo: Git repo root path.
@@ -2005,15 +2093,24 @@ class GitWorktreeOps:
 
         Returns:
             True when the spare has uncommitted changes, ignored files
-            (or they could not be listed), or commits unique to its
+            (or git could not enumerate them), or commits unique to its
             branch; False when it is contentless plumbing.
         """
-        ignored = GitWorktreeOps.list_ignored_files(wt_dir)
-        return (
-            GitWorktreeOps.has_uncommitted_changes(wt_dir)
-            or ignored is None
-            or bool(ignored)
-            or not GitWorktreeOps._branch_is_expendable(repo, branch)
+        # ``--untracked-files`` is explicit: a repo-level
+        # ``status.showUntrackedFiles=no`` would otherwise silence the
+        # untracked AND ignored listing and make a written-to spare
+        # look empty.
+        status = _git(
+            "status", "--porcelain", "--ignored", "--untracked-files=normal", cwd=wt_dir,
+        )
+        if status.returncode != 0:
+            logger.warning(
+                "git status failed in spare %s (rc=%s): %s; treating as content",
+                wt_dir, status.returncode, status.stderr.strip(),
+            )
+            return True
+        return bool(status.stdout.strip()) or not GitWorktreeOps._branch_is_expendable(
+            repo, branch
         )
 
     @staticmethod
@@ -2063,9 +2160,13 @@ class GitWorktreeOps:
           pointing elsewhere must not let the rescue write outside
           the repository.
         * Paths with a component in :data:`_RESCUE_SKIP_COMPONENTS`
-          (``__pycache__``, ``.venv``, ``node_modules``, ...) are
-          skipped: they are regenerable build/cache artifacts, and a
-          copied virtualenv would carry broken absolute paths anyway.
+          (``__pycache__``, ``.venv``, ``node_modules``, ...) or a
+          basename matching :data:`_RESCUE_SKIP_PATTERNS` (``*.vsix``,
+          ``.coverage``, ``.coverage.*``, ``*.pyc``, ...; deliberately
+          not ``.coverage*``, which would discard a ``.coveragerc``)
+          are skipped: they are
+          regenerable build/cache artifacts, and a copied virtualenv
+          would carry broken absolute paths anyway.
         * The rescue FAILS CLOSED: enumeration failure or any file
           that could not be landed makes the returned flag ``False``,
           and callers must then PRESERVE the worktree instead of
@@ -2089,12 +2190,7 @@ class GitWorktreeOps:
                 wt_dir,
             )
             return (0, False)
-        candidates = [
-            rel for rel in ignored
-            if not any(
-                p in _RESCUE_SKIP_COMPONENTS for p in Path(rel).parts
-            )
-        ]
+        candidates = [rel for rel in ignored if not _rescue_skipped(rel)]
         # The exclusion must be in place BEFORE anything lands: a
         # collision sibling is auto-commit bait from the instant it
         # exists (see _RESCUE_EXCLUDE_PATTERN).
@@ -3127,7 +3223,7 @@ class GitWorktreeOps:
             # tracked file) idempotently, so a reclaim can be called
             # standalone (without the ``ensure_excluded`` that
             # ``_try_setup_worktree`` normally runs just before it).
-            GitWorktreeOps.ensure_excluded(repo)
+            GitWorktreeOps.prepare_repo(repo)
             GitWorktreeOps.prune(repo)
             current = GitWorktreeOps.current_branch(repo)
             if current is None:

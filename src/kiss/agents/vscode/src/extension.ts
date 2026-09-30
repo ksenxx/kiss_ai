@@ -784,12 +784,14 @@ export function activate(context: vscode.ExtensionContext): void {
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
 
-  // The update finished and the new bundle is stable: OFFER the reload
-  // instead of yanking the window away from the user (who may be
-  // mid-edit or reading a task's output).  Only 'Reload now' reloads;
-  // 'Later' or dismissing keeps the window as it is — the new code is
-  // picked up by whatever reload the user does next, and the marker
-  // consumed at the next activation replays the chat open.
+  // The update finished and the new bundle is stable: reload the window
+  // right away, without asking.  An extension replaced on disk is
+  // half-dead until the reload (the old host keeps running stale code
+  // while VS Code's own "please reload" toast waits for a click that
+  // may never come — e.g. when the toast lands in a hidden chat
+  // webview), so a prompt here only leaves the update stuck.  Open
+  // editors survive a window reload, and the marker consumed at the
+  // next activation replays the chat open.
   const doReload = () => {
     if (reloadTriggered) return;
     reloadTriggered = true;
@@ -798,15 +800,7 @@ export function activate(context: vscode.ExtensionContext): void {
       settleTimer = undefined;
     }
     fs.unwatchFile(markerPath);
-    void showInformationNotification(
-      `${PRODUCT_NAME} was updated.`,
-      'Reload now',
-      'Later',
-    ).then(action => {
-      if (action === 'Reload now') {
-        void vscode.commands.executeCommand('workbench.action.reloadWindow');
-      }
-    });
+    void vscode.commands.executeCommand('workbench.action.reloadWindow');
   };
 
   const RELOAD_SETTLE_INTERVAL_MS = 500;

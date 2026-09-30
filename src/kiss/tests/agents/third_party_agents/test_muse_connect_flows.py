@@ -1754,7 +1754,7 @@ def test_matrix_oauth_device_flow_registers_client_and_refreshes(
     agent = MatrixAgent()
     tools = auth_tools(agent)
     unauth = tools["check_matrix_auth"]()
-    assert "finish_matrix_auth" in unauth and "OWN browser" in unauth
+    assert "finish_matrix_auth" in unauth and "opens a sign-in page for the user" in unauth
     assert tools["authenticate_matrix"]("  ") == "homeserver_url cannot be empty."
     assert json.loads(tools["authenticate_matrix"]("not a url"))["ok"] is False
 

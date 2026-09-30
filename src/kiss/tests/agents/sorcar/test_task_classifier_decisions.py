@@ -39,7 +39,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
+from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL, decisions_tool_available
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_classifier import (
     _DECISIONS_CRITERIA,
@@ -55,7 +55,6 @@ from kiss.agents.sorcar.task_classifier import (
     cached_classification,
     classify_task,
     clear_classification_cache,
-    decisions_classification_enabled,
 )
 from kiss.core import config as config_module
 from kiss.core.models.model_info import calculate_cost
@@ -416,7 +415,7 @@ def test_without_openrouter_key_the_llm_classifies(
 ) -> None:
     """No ``OPENROUTER_API_KEY`` means the decide tool is never called."""
     monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "")
-    assert decisions_classification_enabled() is False
+    assert decisions_tool_available() is False
     llm = StandInModelServer(_llm_responder('{"is_simple": true, "is_development": false}'))
     try:
         outcome = classify_task(
@@ -431,9 +430,9 @@ def test_without_openrouter_key_the_llm_classifies(
 
 def test_config_key_off_uses_the_llm(env: IsolatedKissHome) -> None:
     """``classify_with_decisions: false`` pins the LLM classifier even with a key."""
-    assert decisions_classification_enabled() is True
+    assert decisions_tool_available() is True
     env.write_config(classify_with_decisions=False)
-    assert decisions_classification_enabled() is False
+    assert decisions_tool_available() is False
     llm = StandInModelServer(_llm_responder('{"is_simple": false, "is_development": false}'))
     try:
         outcome = classify_task(

@@ -3,7 +3,7 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end (jsdom) tests for the "launched N units ago" label that
+// End-to-end (jsdom) tests for the "N units ago" launch-age label that
 // every task panel in the task-history panel shows next to its
 // show-details chevron (``.sidebar-item-collapse``).
 //
@@ -128,19 +128,19 @@ function testUnitLadder(remote) {
   // One session per rung of the ladder, oldest first so each maps to a
   // distinct rendered row (renderHistory keeps the given order).
   const cases = [
-    {ago: 30 * 1000, text: 'launched just now'},
-    {ago: 5 * MINUTE_MS, text: 'launched 5 minutes ago'},
-    {ago: 1 * MINUTE_MS, text: 'launched 1 minute ago'},
-    {ago: 3 * HOUR_MS, text: 'launched 3 hours ago'},
-    {ago: 1 * HOUR_MS, text: 'launched 1 hour ago'},
-    {ago: 2 * DAY_MS, text: 'launched 2 days ago'},
-    {ago: 1 * DAY_MS, text: 'launched 1 day ago'},
-    {ago: 8 * DAY_MS, text: 'launched 1 week ago'},
-    {ago: 22 * DAY_MS, text: 'launched 3 weeks ago'},
-    {ago: 45 * DAY_MS, text: 'launched 1 month ago'},
-    {ago: 200 * DAY_MS, text: 'launched 6 months ago'},
-    {ago: 400 * DAY_MS, text: 'launched 1 year ago'},
-    {ago: 800 * DAY_MS, text: 'launched 2 years ago'},
+    {ago: 30 * 1000, text: 'just now'},
+    {ago: 5 * MINUTE_MS, text: '5 minutes ago'},
+    {ago: 1 * MINUTE_MS, text: '1 minute ago'},
+    {ago: 3 * HOUR_MS, text: '3 hours ago'},
+    {ago: 1 * HOUR_MS, text: '1 hour ago'},
+    {ago: 2 * DAY_MS, text: '2 days ago'},
+    {ago: 1 * DAY_MS, text: '1 day ago'},
+    {ago: 8 * DAY_MS, text: '1 week ago'},
+    {ago: 22 * DAY_MS, text: '3 weeks ago'},
+    {ago: 45 * DAY_MS, text: '1 month ago'},
+    {ago: 200 * DAY_MS, text: '6 months ago'},
+    {ago: 400 * DAY_MS, text: '1 year ago'},
+    {ago: 800 * DAY_MS, text: '2 years ago'},
   ];
   const sessions = cases.map((c, i) =>
     makeSession({
@@ -232,12 +232,12 @@ function testTimestampSources() {
   const rows = historyRows(win);
   assert.strictEqual(
     rows[0].querySelector('.sidebar-item-launched').textContent,
-    'launched 2 hours ago',
+    '2 hours ago',
     'startTs (ms) takes precedence over the row timestamp',
   );
   assert.strictEqual(
     rows[1].querySelector('.sidebar-item-launched').textContent,
-    'launched 3 days ago',
+    '3 days ago',
     'timestamp (epoch seconds) is the fallback launch instant',
   );
   assert.strictEqual(
@@ -248,7 +248,7 @@ function testTimestampSources() {
   const epochYears = Math.floor(Math.floor(now / DAY_MS) / 365);
   assert.strictEqual(
     rows[3].querySelector('.sidebar-item-launched').textContent,
-    'launched ' + epochYears + ' years ago',
+    String(epochYears) + ' years ago',
     'an epoch-zero launch instant is valid and renders in years',
   );
   [4, 5].forEach(i => {
@@ -274,7 +274,7 @@ function testFutureClockSkew() {
   loadHistory(win, [makeSession({startTs: Date.now() + 5 * MINUTE_MS})]);
   assert.strictEqual(
     historyRows(win)[0].querySelector('.sidebar-item-launched').textContent,
-    'launched just now',
+    'just now',
     'a launch instant in the future must clamp, not go negative',
   );
   win.close();
@@ -292,7 +292,7 @@ function testPeriodicRefresh() {
     makeSession({startTs: now - 45 * 1000}), // "just now" at render time
   ]);
   const ago = historyRows(win)[0].querySelector('.sidebar-item-launched');
-  assert.strictEqual(ago.textContent, 'launched just now');
+  assert.strictEqual(ago.textContent, 'just now');
   // Age the label past the minute boundary by rewinding its stored
   // launch instant, then let the sweep run (jsdom timers are real).
   // At check time (~31 s from now) the age is ~121 s -> "2 minutes".
@@ -301,7 +301,7 @@ function testPeriodicRefresh() {
     setTimeout(() => {
       assert.strictEqual(
         ago.textContent,
-        'launched 2 minutes ago',
+        '2 minutes ago',
         'the periodic sweep must refresh on-screen labels in place',
       );
       win.close();

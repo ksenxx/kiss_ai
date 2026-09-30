@@ -586,8 +586,11 @@ def merge_system_texts(
     model, e.g. via the Sorcar ``set_model`` tool — so their text is
     hoisted here instead.  The configured instruction comes first,
     conversation system messages follow in order, duplicates of an
-    already-collected text are skipped, and content-part lists contribute
-    only their ``text`` parts.
+    already-collected text are skipped (compared with any
+    :data:`SYSTEM_CACHE_BREAK` marker removed, since a conversation
+    handed off from another adapter holds the stripped copy of the
+    configured instruction), and content-part lists contribute only
+    their ``text`` parts.
 
     Args:
         configured: The ``model_config["system_instruction"]`` value, if any.
@@ -598,6 +601,7 @@ def merge_system_texts(
         neither source contributed any text.
     """
     system_texts: list[str] = [configured] if configured else []
+    seen = {strip_system_cache_break(text) for text in system_texts}
     for msg in messages:
         if msg.get("role") != "system":
             continue
@@ -608,9 +612,52 @@ def merge_system_texts(
                 for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
             )
-        if isinstance(content, str) and content.strip() and content not in system_texts:
+        if not isinstance(content, str) or not content.strip():
+            continue
+        stripped = strip_system_cache_break(content)
+        if stripped not in seen:
+            seen.add(stripped)
             system_texts.append(content)
     return "\n\n".join(system_texts) if system_texts else None
+
+
+# Boundary, inside a system instruction, between the prefix that is
+# byte-identical across runs (framework prompt, tool guidance, repository
+# conventions) and a per-run tail (work directory, task settings,
+# deadlines).  The Anthropic adapter sends the two halves as separate
+# ``system`` blocks with an explicit prompt-cache breakpoint on the prefix,
+# so every task and sub-agent sharing that prefix reads it from the cache
+# instead of paying a full cache write on its first call; every other
+# adapter strips the marker.  Callers put it on its own line:
+# ``prefix + "\n" + SYSTEM_CACHE_BREAK + "\n" + tail``.
+SYSTEM_CACHE_BREAK = "<!-- kiss:system-cache-break -->"
+
+
+def split_system_cache_break(text: str) -> tuple[str, str]:
+    """Split a system instruction at its first :data:`SYSTEM_CACHE_BREAK`.
+
+    Args:
+        text: The system instruction, with or without markers.
+
+    Returns:
+        ``(prefix, tail)``: the text before the first marker and the
+        text after it with any further markers removed; ``tail`` is
+        ``""`` when the text carries no marker.
+    """
+    prefix, _sep, tail = text.partition(SYSTEM_CACHE_BREAK)
+    return prefix, tail.replace(SYSTEM_CACHE_BREAK, "")
+
+
+def strip_system_cache_break(text: str) -> str:
+    """Return *text* with every :data:`SYSTEM_CACHE_BREAK` marker removed.
+
+    Args:
+        text: The system instruction, with or without markers.
+
+    Returns:
+        The instruction as a single provider-neutral string.
+    """
+    return text.replace(SYSTEM_CACHE_BREAK, "")
 
 
 # model_config keys the framework itself consumes: they configure this
@@ -708,6 +755,21 @@ class Model(ABC):
         # model_config keys already reported as unsupported, so a long run
         # is told once rather than on every step.
         self._reported_unsupported_config_keys: set[str] = set()
+
+    def system_instruction_text(self) -> str | None:
+        """Return ``model_config["system_instruction"]`` as provider-neutral text.
+
+        Strips every :data:`SYSTEM_CACHE_BREAK` marker; only the
+        Anthropic adapter, which turns the marker into a prompt-cache
+        breakpoint, reads the raw value.
+
+        Returns:
+            The system instruction, or ``None`` when none is configured.
+        """
+        system_instruction = self.model_config.get("system_instruction")
+        if not system_instruction:
+            return None
+        return strip_system_cache_break(system_instruction)
 
     def _keep_supported_request_params(
         self,
@@ -1433,7 +1495,7 @@ class CLITextModel(Model):
             The assembled prompt string.
         """
         task = self._task_text()
-        system_instruction = self.model_config.get("system_instruction")
+        system_instruction = self.system_instruction_text()
         if system_instruction:
             return f"{task}{CLI_SYSTEM_PROMPT_HEADER}{system_instruction}"
         return task

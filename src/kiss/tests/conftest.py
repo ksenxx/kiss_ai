@@ -42,6 +42,7 @@ the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
 body runs.
 """
 
+import atexit
 import contextlib
 import functools
 import os
@@ -62,6 +63,7 @@ from kiss.agents.sorcar import persistence as _th
 from kiss.core import stop_signal, vscode_config
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
+from kiss.tests import subprocess_reaper
 
 # Generous: a sweep only walks the sentinel rows of one temporary
 # database, so it finishes in milliseconds unless the machine is badly
@@ -82,7 +84,78 @@ os.environ["BROWSER"] = "true"
 # monkeypatch.setenv("KISS_MUSE_AUTH", "1").
 os.environ["KISS_MUSE_AUTH"] = "0"
 
+def _seed_voice_models(test_home: str, real_home: Path) -> None:
+    """Link the developer's downloaded voice models into the test home.
+
+    The voice tests (``kiss.server.voice_wake`` and the browser
+    wake-word pipeline) fetch 40-80 MB of Vosk models into
+    ``$KISS_HOME/models`` on first use.  With the session-wide
+    temporary ``KISS_HOME`` below, every pytest process re-downloaded
+    them from alphacephei.com and ccoreilly.github.io, and under a
+    parallel full run the TLS handshake regularly timed out.  Each
+    entry of the real cache is symlinked individually, so a download
+    that does happen lands in the temporary home and never touches
+    the real cache (``_atomic_publish`` replaces the symlink, not its
+    target).  Nothing is seeded when the real cache is absent.
+    """
+    # Absolute, or a relative KISS_HOME would yield links resolved
+    # against the temporary models dir instead of the working directory.
+    real_models = (real_home / "models").absolute()
+    if not real_models.is_dir():
+        return
+    test_models = Path(test_home, "models")
+    test_models.mkdir()
+    for entry in real_models.iterdir():
+        if not entry.name.startswith("."):
+            (test_models / entry.name).symlink_to(entry)
+
+
+def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
+    """Delete the session ``KISS_HOME`` when the process that made it exits.
+
+    Every pytest process (each split of a parallel run, each
+    ``uv run pytest file.py``, ``--collect-only``, IDE discovery)
+    imports this module and makes its own directory; before this
+    handler existed nothing removed it, and 1,700 ``kiss_test_*``
+    trees (6 GB) piled up in one month.  Registered with :mod:`atexit`
+    rather than ``pytest_sessionfinish`` so it also fires for a plain
+    import of the module and for a run cut short by ``pytest.exit`` or
+    Ctrl-C.
+
+    atexit runs handlers newest-first, so the three import-time
+    handlers that still write into the home — persistence's event
+    drain (``_drain_events_at_exit`` reopens ``sorcar.db`` and
+    recreates the directory for a queued event) and owner-marker
+    release, and the subprocess reaper's last-resort sweep (the test
+    bucket of a run cut short by ``pytest.exit`` never reached
+    teardown) — would run *after* this one.  They are idempotent, so
+    this handler runs them first and their own atexit calls find
+    nothing left to do.  The database connection is deliberately left
+    open: closing it while an ``orphan-task-sweep`` thread is inside
+    ``execute`` is the SIGSEGV described in the module docstring, and
+    unlinking an open SQLite file is harmless on POSIX.
+
+    A child forked from the pytest process inherits the atexit table;
+    the pid check keeps such a child from deleting its parent's home
+    when it exits through ``sys.exit`` instead of ``os._exit``.
+    Errors are ignored: a still-open ``sorcar.db`` on Windows is not
+    worth failing the exit for.
+
+    Args:
+        home: The temporary ``KISS_HOME`` created at import.
+        owner_pid: The pid of the process that created it.
+    """
+    if os.getpid() != owner_pid:
+        return
+    subprocess_reaper._sweep_at_exit()
+    _th._drain_events_at_exit()
+    _th._release_owner_marker()
+    shutil.rmtree(home, ignore_errors=True)
+
+
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
+atexit.register(_remove_test_kiss_home, _test_kiss_home, os.getpid())
+_seed_voice_models(_test_kiss_home, Path(os.environ.get("KISS_HOME") or Path.home() / ".kiss"))
 os.environ["KISS_HOME"] = _test_kiss_home
 # The chat page auto-opens the Tips window once per version in every
 # fresh browser context (web_server._build_html sends ``show: true``).
@@ -377,6 +450,17 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     The navigation is retried up to three times for that error only; any
     other error, or a third failure, propagates unchanged.
 
+    The same event can also strike the remote webapp's self-reload: when
+    one of the page's scripts fails to load, the shim in
+    ``web_server._WS_SHIM_JS`` reloads the page once, and when that reload's
+    own document request is aborted too, Chromium shows its error page
+    (``chrome-error://chromewebdata/``, an empty DOM). ``page.goto`` tracked
+    the first navigation and returns normally, so the caller's first
+    ``wait_for_selector`` would sit out its full timeout. That case is
+    retried under the same rule: only when the failed navigation reported
+    ``net::ERR_NETWORK_CHANGED``; any other reason raises an
+    ``AssertionError`` naming it, so a real server fault stays visible.
+
     Args:
         page: A ``playwright.sync_api.Page``.
         url: The address to open.
@@ -384,14 +468,33 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
     """
     from playwright.sync_api import Error as PlaywrightError
 
-    for attempt in range(3):
-        try:
-            page.goto(url, **goto_kwargs)
-            return
-        except PlaywrightError as exc:
-            if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
-                raise
+    failures: list[str] = []
+
+    def note_failed_navigation(request) -> None:
+        if request.is_navigation_request():
+            failures.append(f"{request.url}: {request.failure}")
+
+    page.on("requestfailed", note_failed_navigation)
+    try:
+        for attempt in range(3):
+            failures.clear()
+            try:
+                page.goto(url, **goto_kwargs)
+            except PlaywrightError as exc:
+                if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(1.0)
+                continue
+            if not page.url.startswith("chrome-error://"):
+                return
+            network_changed = any("net::ERR_NETWORK_CHANGED" in f for f in failures)
+            if not network_changed or attempt == 2:
+                raise AssertionError(
+                    f"{url} ended on {page.url}; failed navigations: {failures}"
+                )
             time.sleep(1.0)
+    finally:
+        page.remove_listener("requestfailed", note_failed_navigation)
 
 
 def pytest_addoption(parser):

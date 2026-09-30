@@ -269,5 +269,52 @@ class TestShutdownReapsMcpChildren(_DaemonHarness):
         )
 
 
+class TestBrowserTabHandoffRegistration(_DaemonHarness):
+    """Connector sign-in pages reach the daemon's Browser tab only while it serves."""
+
+    config: dict[str, Any] = {}
+
+    async def test_opener_is_registered_while_serving_and_cleared_on_stop(self) -> None:
+        """start_async registers the Browser-tab opener; stop_async clears it."""
+        from kiss.core import browser_handoff
+
+        self.assertIsNone(browser_handoff._browser_tab_opener)
+        await self.server.start_async()
+        opener = browser_handoff._browser_tab_opener
+        self.assertIsNotNone(opener, "a served daemon must hand sign-in pages to its tab")
+        assert opener is not None
+        self.assertEqual(
+            opener.__func__,  # type: ignore[attr-defined]
+            type(self.server._vscode_server.browser_tabs).open_for_user,
+        )
+        self.assertIs(
+            opener.__self__,  # type: ignore[attr-defined]
+            self.server._vscode_server.browser_tabs,
+        )
+        await self._stop()
+        self.assertIsNone(
+            browser_handoff._browser_tab_opener,
+            "a stopped daemon's tab has no surfaces: hand-offs must fall back",
+        )
+
+    async def test_failed_setup_leaves_no_opener_behind(self) -> None:
+        """A setup that fails after registering rolls the registration back too."""
+        from kiss.core import browser_handoff
+
+        # Occupy the daemon's port so binding the WSS listener fails at once.
+        blocker = socket.socket()
+        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        blocker.bind(("127.0.0.1", self.server.port))
+        blocker.listen(1)
+        try:
+            with self.assertRaises(SystemExit):  # "cannot bind" is fatal for the daemon
+                await self.server.start_async()
+        finally:
+            blocker.close()
+        self._stopped = True
+        self.assertIsNone(self.server._ws_server)
+        self.assertIsNone(browser_handoff._browser_tab_opener)
+
+
 if __name__ == "__main__":  # pragma: no cover — manual runs
     unittest.main()

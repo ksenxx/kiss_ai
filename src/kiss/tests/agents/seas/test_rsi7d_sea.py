@@ -943,7 +943,9 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
     assert {t.__name__ for t in sea.tools()} <= names
-    assert {"Bash", "run_agent", "decide", "finish"} <= names
+    # ``decide`` is not expected: the Jev tool follows the "Use Jev"
+    # setting (off in the test KISS_HOME), not the SEA's tool list.
+    assert {"Bash", "run_agent", "finish"} <= names
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
     assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
     listing, refused, patched = _tool_results(agentic)
