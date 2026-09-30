@@ -639,11 +639,9 @@
 
   /**
    * Whether to open the tips now without a click.  `cfg.show` is the
-   * host's verdict (the VS Code extension claims the popup once per
-   * version in $KISS_HOME; the remote server says yes unless the user
-   * opted out), the opt-out checkbox overrides it, and `cfg.version`,
-   * when the host sends one, limits the auto-open to once per version
-   * per browser.
+   * daemon's verdict (yes unless the user opted out), the opt-out
+   * checkbox overrides it, and `cfg.version`, when the daemon sends
+   * one, limits the auto-open to once per version per browser profile.
    */
   function shouldAutoShow(cfg) {
     if (!cfg || !cfg.show || readOptOut()) return false;
@@ -652,9 +650,19 @@
     return !cfg.version || readSeenVersion() !== cfg.version;
   }
 
-  const cfg = window.__TIPS__;
-  if (shouldAutoShow(cfg)) {
+  /**
+   * Install the tips bootstrap `{tips, show, version}` and auto-open
+   * the window when due.  Called at load with the config the remote
+   * page embeds, and again from main.js for every `tipsData` event the
+   * daemon sends on `ready` (the VS Code webview's only source).
+   */
+  function applyTipsConfig(cfg) {
+    window.__TIPS__ = cfg;
+    if (!shouldAutoShow(cfg)) return;
     showTipsPanel(cfg.tips);
     if (cfg.version) writeSeenVersion(cfg.version);
   }
+
+  window.__kissApplyTipsConfig = applyTipsConfig;
+  applyTipsConfig(window.__TIPS__);
 })();

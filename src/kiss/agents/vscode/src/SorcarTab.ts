@@ -8,16 +8,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import {findKissProject} from './kissPaths';
-import {ensureUserAssetFromDefault, kissHomeDir} from './userAssets';
 import {readVersionPy} from './UpdateChecker';
-import {BRAND, renderBrand} from './brand';
-
-export const MY_INJECTION_DEFAULT_BODY =
-  'Write end-to-end 100% coverage tests for the feature first.' +
-  '  Then implement the feature.';
-
-export const DEFAULT_MY_INJECTION =
-  '## Trick\n\n' + MY_INJECTION_DEFAULT_BODY + '\n';
+import {BRAND} from './brand';
 
 export function getVersion(): string {
   const kissRoot = findKissProject();
@@ -26,165 +18,6 @@ export function getVersion(): string {
     readVersionPy(path.join(kissRoot, 'src', 'kiss', 'core', '_version.py')) ||
     ''
   );
-}
-
-function unescapeMarkdown(s: string): string {
-  return s.replace(/\\([\\`*_{}[\]()#+\-.!<>|~"'$%&,/:;=?@^])/g, '$1');
-}
-
-function readMarkdownSections(markdownFile: string, heading: string): string[] {
-  let text: string;
-  try {
-    text = fs.readFileSync(markdownFile, 'utf-8');
-  } catch {
-    return [];
-  }
-  const items: string[] = [];
-  const sections = text.split(/^##\s+/m);
-  for (let i = 1; i < sections.length; i++) {
-    const section = sections[i];
-    const newline = section.indexOf('\n');
-    if (newline < 0) continue;
-    const title = section.slice(0, newline).trim();
-    if (title !== heading) continue;
-    const body = unescapeMarkdown(section.slice(newline + 1).trim());
-    if (body) items.push(body);
-  }
-  return items;
-}
-
-/**
- * The Inject promptlet list plus how many leading entries the user owns.
- *
- * `tricks` is ~/.kiss/MY_INJECTION.md's `## Trick` sections followed by
- * the bundled INJECTIONS.md ones; `userCount` is the length of the first
- * part, the rows the panel shows a delete button on.  Same shape as the
- * daemon's `tricksData` event.
- */
-export function getTricksData(): {tricks: string[]; userCount: number} {
-  const items: string[] = [];
-
-  const myInjectionPath = ensureUserAssetFromDefault(
-    'MY_INJECTION.md',
-    DEFAULT_MY_INJECTION,
-  );
-  if (myInjectionPath !== null) {
-    items.push(...readMarkdownSections(myInjectionPath, 'Trick'));
-  }
-  const userCount = items.length;
-
-  const bundledOverride = process.env.KISS_INJECTIONS_PATH;
-  let bundledPath: string | null = bundledOverride || null;
-  if (!bundledPath) {
-    const kissRoot = findKissProject();
-    if (kissRoot) {
-      bundledPath = path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md');
-    }
-  }
-  if (bundledPath) {
-    items.push(...readMarkdownSections(bundledPath, 'Trick'));
-  }
-
-  return {tricks: items, userCount};
-}
-
-/** The Inject promptlet list alone (see `getTricksData`). */
-export function getTricks(): string[] {
-  return getTricksData().tricks;
-}
-
-function parseTipSections(text: string): string[] {
-  const tips: string[] = [];
-  const sections = text.split(/^# Tip.*$/m);
-  for (let i = 1; i < sections.length; i++) {
-    const body = sections[i].trim();
-    if (body) tips.push(body);
-  }
-  return tips;
-}
-
-export function getTips(): string[] {
-  let tipsPath: string | null = process.env.KISS_TIPS_PATH || null;
-  if (!tipsPath) {
-    const kissRoot = findKissProject();
-    if (kissRoot) tipsPath = path.join(kissRoot, 'src', 'kiss', 'TIPS.md');
-  }
-  if (!tipsPath) return [];
-  let text: string;
-  try {
-    text = fs.readFileSync(tipsPath, 'utf-8');
-  } catch {
-    return [];
-  }
-  return parseTipSections(renderBrand(text));
-}
-
-/** The persisted "don't show tips again" flag, under `$KISS_HOME`. */
-function tipsOptOutPath(): string {
-  return path.join(kissHomeDir(), 'TIPS_DISABLED');
-}
-
-/** Whether the user opted out of the tips window ("Don't show again"). */
-export function tipsDisabled(): boolean {
-  return fs.existsSync(tipsOptOutPath());
-}
-
-/**
- * Persist the user's "don't show tips again" choice — the host side of
- * the webview's `{type: 'tipsOptOut'}` message (tips.js).  Idempotent;
- * an unwritable `$KISS_HOME` is ignored (the in-session tips window is
- * already closed, the choice simply is not remembered).
- */
-export function recordTipsOptOut(): void {
-  try {
-    fs.mkdirSync(kissHomeDir(), {recursive: true});
-    fs.writeFileSync(tipsOptOutPath(), new Date().toISOString() + '\n');
-  } catch {
-    // Nothing to do: see the docstring.
-  }
-}
-
-/** Forget a persisted "don't show tips again" choice (tips.js unticks the box). */
-export function clearTipsOptOut(): void {
-  fs.rmSync(tipsOptOutPath(), {force: true});
-}
-
-/** `$KISS_HOME/TIPS_SHOWN-<version>`: the popup was opened for `version`. */
-function tipsShownMarker(version: string): string {
-  const safe = version.replace(/[^A-Za-z0-9.]/g, '_') || 'unknown';
-  return path.join(kissHomeDir(), 'TIPS_SHOWN-' + safe);
-}
-
-/**
- * Claim the tips popup for the running version.  The popup opens once
- * per `$KISS_HOME` for every version: on the first run and again after
- * each update, so the user sees what changed.  A persisted opt-out
- * (recordTipsOptOut) keeps it closed for good.
- *
- * @returns true for the single caller that may open the popup.
- */
-export function claimTipsPopup(): boolean {
-  if (tipsDisabled()) return false;
-  const marker = tipsShownMarker(getVersion());
-  // audit0903-coverage:start
-  try {
-    fs.mkdirSync(path.dirname(marker), {recursive: true});
-    // 'wx' claims the marker atomically.  An existsSync-then-write check
-    // raced: two windows activating at once both passed the check before
-    // either wrote, and the popup opened in both.  With 'wx' exactly one
-    // writer wins; every other caller (a concurrent window, a later run,
-    // or an unwritable ~/.kiss) lands in the catch and stays quiet.
-    fs.writeFileSync(marker, new Date().toISOString() + '\n', {flag: 'wx'});
-  } catch {
-    return false;
-  }
-  // audit0903-coverage:end
-  // The pre-2026.10 unversioned `TIPS_SHOWN` is spent: retire it.  The
-  // claims of other versions stay, so two installations of different
-  // versions sharing one home (KISS_PROJECT_PATH override, a bundled
-  // copy) cannot erase each other's claim and reopen the popup.
-  fs.rmSync(path.join(path.dirname(marker), 'TIPS_SHOWN'), {force: true});
-  return true;
 }
 
 export function getNonce(): string {
@@ -357,14 +190,6 @@ export function buildChatHtml(
 ): string {
   const nonce = getNonce();
   const version = getVersion();
-  const tricksData = getTricksData();
-  const tricksJson = JSON.stringify(tricksData.tricks).replace(/<\//g, '<\\/');
-  const tips = getTips();
-  const tipsJson = JSON.stringify({
-    tips,
-    show: tips.length > 0 && claimTipsPopup(),
-    version,
-  }).replace(/<\//g, '<\\/');
   const mod = process.platform === 'darwin' ? '⌘' : 'Ctrl+';
 
   const tplPath = vscode.Uri.joinPath(
@@ -448,9 +273,12 @@ export function buildChatHtml(
         light: u('highlight-vscode-light.css'),
       }).replace(/<\//g, '<\\/') +
       ';</script>',
-    TRICKS_JSON: tricksJson,
-    MY_TRICKS_COUNT: String(tricksData.userCount),
-    TIPS_JSON: tipsJson,
+    // The daemon owns the Inject promptlets and the tips: it answers
+    // the webview's `ready` with `tricksData` and `tipsData`, so the
+    // page starts empty here (the remote page embeds them at load).
+    TRICKS_JSON: '[]',
+    MY_TRICKS_COUNT: '0',
+    TIPS_JSON: '{"tips":[],"show":false,"version":""}',
     TIPS_SRC: u('tips.js'),
     VOICE_SRC: u('voice.js'),
     // voskSrc/modelUrl/nonce power the in-page capture fallback: when

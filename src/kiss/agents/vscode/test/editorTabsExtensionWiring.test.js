@@ -345,11 +345,11 @@ class FakePanelManager {
     calls.manager.openSettings += 1;
     return Promise.resolve();
   }
-  enterMode(entries, workspaceDir) {
-    calls.manager.enterMode.push({entries, workspaceDir});
+  enterMode(entries) {
+    calls.manager.enterMode.push({entries});
   }
-  adoptRegistryTabs(entries, workspaceDir, listed) {
-    calls.manager.adoptRegistryTabs.push({entries, workspaceDir, listed});
+  adoptRegistryTabs(entries, listed) {
+    calls.manager.adoptRegistryTabs.push({entries, listed});
   }
   closeAll() {
     calls.manager.closeAll += 1;
@@ -600,7 +600,6 @@ async function runTest() {
   await fireConfigChange();
   assert.strictEqual(calls.manager.enterMode.length, 1);
   assert.deepStrictEqual(calls.manager.enterMode[0].entries, registryEntries);
-  assert.strictEqual(calls.manager.enterMode[0].workspaceDir, '/ws/project');
   assert.ok(
     executedCommands.some(
       e => e.cmd === 'kissSorcar.metaViewSecondary.focus',
@@ -623,7 +622,6 @@ async function runTest() {
   );
   assert.deepStrictEqual(calls.manager.adoptRegistryTabs[0], {
     entries: remoteEntries,
-    workspaceDir: '/ws/project',
     listed: remoteListed,
   });
 

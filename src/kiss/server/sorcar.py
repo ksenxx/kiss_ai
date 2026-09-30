@@ -1595,11 +1595,11 @@ class ServerApi:
     async def tips_opt_out(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Persist, or forget, the "Don't show tips again" choice.
 
-        Services the tips window's checkbox on the remote page.  The
-        choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` — the
-        same file the VS Code extension writes and reads
-        (``SorcarTab.recordTipsOptOut`` / ``tipsDisabled``), so a
-        choice made on one surface holds on every surface.  ``optOut``
+        Services the tips window's checkbox on both surfaces (the VS
+        Code host forwards the webview's ``tipsOptOut`` here).  The
+        choice is the marker file ``$KISS_HOME/TIPS_DISABLED`` that
+        ``tips_data`` reads, so a choice made on one surface holds on
+        every surface.  ``optOut``
         ``false`` (checkbox unticked again) removes the marker; absent
         or any other value opts out.
 

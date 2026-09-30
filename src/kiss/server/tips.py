@@ -4,13 +4,13 @@
 # add your name here
 """Load the tips shown by the chat webview.
 
-Python counterpart to ``getTips`` / ``tipsDisabled`` in
-``SorcarTab.ts``: parses the bundled ``src/kiss/TIPS.md`` into a list
-of markdown tip strings, one per ``# Tip`` section, and reads the
-"don't show tips again" marker shared with the extension.  The remote
-webapp builder (``web_server._build_html``) injects both as
-``window.__TIPS__`` so the shared ``media/chat.html`` template never
-contains an unsubstituted ``{{TIPS_JSON}}`` placeholder.
+Parses the bundled ``src/kiss/TIPS.md`` into a list of markdown tip
+strings, one per ``# Tip`` section, and reads the "don't show tips
+again" marker.  The daemon is the only reader: the remote webapp
+builder (``web_server._build_html``) injects :func:`tips_data` as
+``window.__TIPS__`` at page load, and the ``ready`` handler sends the
+same dict as a ``tipsData`` event to every (re)connecting client, so
+the VS Code extension paints tips without parsing anything itself.
 
 The file path can be overridden via the ``KISS_TIPS_PATH`` environment
 variable, which the test suite uses to pin deterministic tips.
@@ -34,9 +34,9 @@ TIPS_OPT_OUT_MARKER = "TIPS_DISABLED"
 def tips_disabled() -> bool:
     """Whether the user opted out of the tips window on any surface.
 
-    The marker ``$KISS_HOME/TIPS_DISABLED`` is written by the VS Code
-    extension (``SorcarTab.recordTipsOptOut``) and by the server's
-    ``tips_opt_out`` API alike, so one choice holds everywhere.
+    The marker ``$KISS_HOME/TIPS_DISABLED`` is written by the daemon's
+    ``tipsOptOut`` API, which both the VS Code webview and the remote
+    webapp call, so one choice holds everywhere.
     """
     return (kiss_home() / TIPS_OPT_OUT_MARKER).exists()
 
@@ -70,3 +70,22 @@ def read_tips() -> list[str]:
         return []
     sections = _TIP_DELIMITER.split(render_brand(text))
     return [body.strip() for body in sections[1:] if body.strip()]
+
+
+def tips_data(version: str) -> dict[str, object]:
+    """The tips bootstrap both surfaces paint from (``window.__TIPS__``).
+
+    ``show`` allows the auto-open unless the user opted out; the client
+    (``tips.js``) then opens the window once per *version* per browser
+    profile, i.e. on first use and again after every update.
+
+    Args:
+        version: The running version, sent so the client can key its
+            once-per-version guard.
+    """
+    tips = read_tips()
+    return {
+        "tips": tips,
+        "show": bool(tips) and not tips_disabled(),
+        "version": version,
+    }

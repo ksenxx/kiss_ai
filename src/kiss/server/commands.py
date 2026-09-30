@@ -1818,7 +1818,16 @@ class _CommandsMixin:
                     chat_id = state.chat_id
                 if not chat_id:
                     chat_id = self._tab_chat_views.get(tab_id, "")
-            if active_file:
+            if active_file == "":
+                # An explicit empty path means "no file open" (the
+                # browser client closed its last file tab): forget the
+                # snapshot rather than completing against a file the
+                # user no longer has open.  An *absent* ``activeFile``
+                # still keeps it (focus inside the webview).
+                self._last_active_file.pop(conn_id, None)
+                self._last_active_content.pop(conn_id, None)
+                active_content = None
+            elif active_file:
                 if (
                     active_content is None
                     and active_file != self._last_active_file.get(conn_id, "")
