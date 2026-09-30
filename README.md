@@ -26,6 +26,8 @@
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
+**Features:** the complete feature inventory, checked against the source tree, is in [FEATURES.md](FEATURES.md).
+
 ______________________________________________________________________
 
 <details>
