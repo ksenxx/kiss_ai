@@ -95,7 +95,7 @@ The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chi
 *Terminal-Bench 2.0, the study's 30-task sample, three attempts per task: percentage of attempts solved and cost per attempt in USD. KISS Sorcar: 630 attempts run on 25 September 2026, no turn cap, $50 budget per attempt, providers' default request parameters. The other three columns are the study's published numbers (100-turn cap, high reasoning effort, priced on a 1 September list). Bold marks the best point estimate per row.*
 
 <div align="center">
-  <img src="assets/tb2-success-by-model.svg" alt="Percentage of Terminal-Bench 2.0 attempts solved per model under KISS Sorcar, Pi, Codex CLI, and Claude Code" width="100%">
+  <img src="assets/tb2-success-by-model.png" alt="Percentage of Terminal-Bench 2.0 attempts solved per model under KISS Sorcar, Pi, Codex CLI, and Claude Code" width="100%">
 </div>
 
 Thirty tasks is a small sample: the pooled 95% interval over tasks, 63.8 to 85.9, contains all three published means, and the comparison with the published table also differs in date, price list, turn cap, and prompt. So we reran Pi ourselves, paired, on the same model and the same tasks:
@@ -104,8 +104,8 @@ Thirty tasks is a small sample: the pooled 95% interval over tasks, 63.8 to 85.9
 - **The 59 tasks the study did not sample.** The same frozen prompt on Claude Fable 5 solved 79.1% of attempts (79.4% over all 89 tasks), so the sampled-task result is not an artifact of tuning on the sample. Pi on 57 of those tasks (two `qemu` tasks were dropped because the verifier did not score the two harnesses alike) solved 71.9% at $1.00 and 12.3 turns; KISS Sorcar solved 82.5% at $1.63 and 17.3 turns. The paired gap is **+10.5 points, interval +2.9 to +18.7** (15 tasks to 3, 39 ties, *p* = 0.008); here KISS Sorcar paid 63 cents more per attempt.
 
 <div align="center">
-  <img src="assets/tb2-paired-pi-sampled.svg" alt="Paired gap of KISS Sorcar over Pi on Claude Fable 5, study's 30 tasks" width="72%">
-  <img src="assets/tb2-paired-pi-unsampled.svg" alt="Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks" width="78%">
+  <img src="assets/tb2-paired-pi-sampled.png" alt="Paired gap of KISS Sorcar over Pi on Claude Fable 5, study's 30 tasks" width="72%">
+  <img src="assets/tb2-paired-pi-unsampled.png" alt="Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks" width="78%">
 </div>
 
 What to keep in mind: only Pi was rerun, on one model, at high effort with its own prompt and no budget cap; the pooled seven-model comparison changes effort, turn cap, and date at once, and the paired runs leave effort and prompt tangled together. The benchmark exercises the loop, six tools, and the coding rules; the discovery and adversarial-testing procedures, the memory, the reviewer, and the IDE features were switched off. The HarnessTax study stands: the band a fourth harness draws is wider than the one three harnesses drew. The runners, the Pi subclass, and the per-attempt records are in `benchmarkings/harnesstax/` (`tb2_runner.py`, `pi_agent.py`, `results/pi/README.md`) and `papers/kisssorcar/evidence/tb2_trials.json`.
