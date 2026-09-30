@@ -32,11 +32,13 @@ Then open the KISS Sorcar sidebar in VS Code, or the remote web app URL from the
 
 - [Documentation index](docs/index.md)
 - [Overview & comparison vs Claude Code / Cursor](docs/overview.md)
+- [Terminal-Bench 2.0 benchmark vs Pi, Codex CLI, Claude Code](docs/benchmarks.md)
 - [Installation](docs/installation.md)
 - [Client interfaces](docs/cli.md)
 - [Python API reference](docs/api.md)
 - [Supported models](docs/models.md)
 - [Messaging & third-party agents](docs/messaging-agents.md)
+- [Slash commands for SEAs](docs/sea-commands.md)
 - [Sample tasks](docs/sample-tasks.md)
 - [Prompt tricks](docs/prompt-tricks.md)
 - [Tips](docs/tips.md)

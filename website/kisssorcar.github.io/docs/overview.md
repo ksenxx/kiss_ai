@@ -32,6 +32,10 @@
 | Scheduled automations | Natural-language cron agent | — | — |
 | Wake word for voice interaction | "Hey Sorcar" | N/A | N/A |
 
+## Terminal-Bench 2.0
+
+On the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models, KISS Sorcar solved 75.6% of attempts against 70.0% for Pi, 65.7% for Codex CLI, and 65.1% for Claude Code, with the best point estimate on every model; paired reruns of Pi on Claude Fable 5 put it 11.1 points ahead on the study's tasks and 10.5 points ahead on 57 unsampled tasks. Table, figures, caveats, and reproduction pointers: [Terminal-Bench 2.0 Benchmark](benchmarks.md); full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html).
+
 ## Unique Features
 
 - **AI discovery and auto research via prompt.** Describe a discovery or optimization goal in a paragraph; Sorcar iterates over ideas, tracks what worked, and doesn't stop until the target metrics are met.

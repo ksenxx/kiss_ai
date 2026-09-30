@@ -778,6 +778,14 @@
     table.compare .yes { color: var(--accent); font-weight: 600; }
     table.compare .no  { color: #c62828; font-weight: 600; }
     table.compare .warn { color: #ef6c00; font-weight: 600; }
+    table.compare.bench th.n, table.compare.bench td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    table.compare.bench th.cap { width: auto; white-space: nowrap; }
+    table.compare.bench thead th { text-align: center; }
+    .bench-caption, .bench-fig figcaption { color: var(--text-dim); font-size: 0.86rem; line-height: 1.55; margin: 0.7rem 0 0; }
+    .bench-fig figcaption { color: #5b6572; }
+    .bench-text { color: var(--text); font-size: 0.95rem; line-height: 1.6; margin: 1.2rem 0; }
+    .bench-fig { margin: 1.2rem 0; padding: 0.8rem; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+    .bench-fig svg { display: block; width: 100%; height: auto; }
     table.compare small { color: var(--text-dim); font-weight: 400; }
 
     /* CLI options table */
@@ -966,7 +974,7 @@
     }
 
     /* ========================================================== */
-    /* PROMPT DECK — § 02 "All you need is a short prompt".        */
+    /* PROMPT DECK — § 03 "All you need is a short prompt".        */
     /* Each panel: title, 1–2 sentence description, scrollable     */
     /* prompt area with a fade-out, and a "more …" toggle.         */
     /* ========================================================== */
@@ -1916,6 +1924,7 @@
       <ul class="links">
         <li><a href="#">Demo</a></li>
         <li><a href="#compare">Compare</a></li>
+        <li><a href="#benchmarks">Benchmark</a></li>
         <li><a href="#prompts">Prompts</a></li>
         <li><a href="#papers">Papers</a></li>
         <li><a href="#blog">Blog</a></li>
@@ -2136,10 +2145,230 @@
   </section>
   </div>
 
-  <!-- ================ § 02 — All you need is a short prompt ================ -->
+  <!-- ================ § 02 — Terminal-Bench 2.0 ================ -->
+  <div class="section-wrap">
+  <section id="benchmarks" class="section-card">
+    <span class="num">§ 02 — Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI and Claude Code</span>
+    <h2>📊 Terminal-Bench 2.0.<a href="#benchmarks" class="anchor">¶</a></h2>
+    <p class="sub">The <a href="https://harnesstax.github.io/">HarnessTax</a> study (UC Berkeley and Arena Intelligence) held the model fixed, swapped the harness between Claude Code, Codex CLI and Pi, and found that the harness moves cost far more than it moves what gets solved. We added KISS Sorcar to their Terminal-Bench 2.0 table: the same 30 sampled tasks, the same seven models, three attempts per task, graded by the official verifier, with 727 words of coding rules as the system prompt. Averaged over the seven models it solved <strong>75.6%</strong> of attempts; Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%, with the best point estimate on every model. Full write-up: <a href="blog/harness-tax-terminal-bench-blog.html">The Harness Tax, Audited</a>; Markdown twin: <a href="docs/benchmarks.md">docs/benchmarks.md</a>.</p>
+    <div class="section-body">
+      <div class="compare-wrap">
+        <table class="compare bench">
+          <thead>
+            <tr>
+              <th class="cap" rowspan="2">Model</th>
+              <th class="kiss" colspan="2">KISS Sorcar</th>
+              <th colspan="2">Pi</th>
+              <th colspan="2">Codex CLI</th>
+              <th colspan="2">Claude Code</th>
+            </tr>
+            <tr>
+              <th class="kiss n">solved</th><th class="kiss n">$/att.</th>
+              <th class="n">solved</th><th class="n">$/att.</th>
+              <th class="n">solved</th><th class="n">$/att.</th>
+              <th class="n">solved</th><th class="n">$/att.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><th class="cap">Claude Fable 5</th><td class="kiss n"><strong>80.0</strong></td><td class="kiss n">1.50</td><td class="n">71.1</td><td class="n">1.08</td><td class="n">72.2</td><td class="n">0.98</td><td class="n">75.6</td><td class="n">1.55</td></tr>
+            <tr><th class="cap">Claude Opus 4.8</th><td class="kiss n"><strong>74.4</strong></td><td class="kiss n">1.21</td><td class="n">72.2</td><td class="n">0.76</td><td class="n">72.2</td><td class="n">0.85</td><td class="n">68.9</td><td class="n">0.90</td></tr>
+            <tr><th class="cap">Claude Sonnet 4.6</th><td class="kiss n"><strong>76.7</strong></td><td class="kiss n">2.23</td><td class="n">65.6</td><td class="n">0.61</td><td class="n">63.3</td><td class="n">0.55</td><td class="n">62.2</td><td class="n">0.67</td></tr>
+            <tr><th class="cap">Claude Haiku 4.5</th><td class="kiss n"><strong>51.1</strong></td><td class="kiss n">0.39</td><td class="n">47.8</td><td class="n">0.25</td><td class="n">31.1</td><td class="n">0.21</td><td class="n">41.1</td><td class="n">0.26</td></tr>
+            <tr><th class="cap">GPT-5.6 Sol</th><td class="kiss n"><strong>85.6</strong></td><td class="kiss n">0.69</td><td class="n">83.3</td><td class="n">0.42</td><td class="n">78.9</td><td class="n">0.76</td><td class="n">71.1</td><td class="n">1.35</td></tr>
+            <tr><th class="cap">GPT-5.6 Luna</th><td class="kiss n"><strong>78.9</strong></td><td class="kiss n">0.05</td><td class="n">76.7</td><td class="n">0.04</td><td class="n">72.2</td><td class="n">0.06</td><td class="n">70.0</td><td class="n">0.10</td></tr>
+            <tr><th class="cap">Kimi K3</th><td class="kiss n"><strong>82.2</strong></td><td class="kiss n">1.14</td><td class="n">73.3</td><td class="n">0.38</td><td class="n">70.0</td><td class="n">0.45</td><td class="n">66.7</td><td class="n">0.52</td></tr>
+            <tr><th class="cap"><strong>Mean of 7 models</strong></th><td class="kiss n"><strong>75.6</strong></td><td class="kiss n">1.03</td><td class="n">70.0</td><td class="n">0.51</td><td class="n">65.7</td><td class="n">0.55</td><td class="n">65.1</td><td class="n">0.77</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="bench-caption">Table 1. Terminal-Bench 2.0, the study&rsquo;s 30-task sample, three attempts per task: percentage of attempts solved and cost per attempt in USD. KISS Sorcar: 630 attempts run on 25 September 2026, no turn cap, $50 budget per attempt, providers&rsquo; default request parameters. The other three: as published, 100-turn cap, high effort, priced on a 1 September list. Bold marks the best point estimate per row.</p>
+      <figure class="bench-fig">
+        <svg viewBox='0 0 970 350' width='100%' role='img' aria-label='Percentage of attempts solved per model under four harnesses' font-family='Georgia,serif'>
+        <line x1='70' y1='280.0' x2='950' y2='280.0' stroke='#d8dde4'/>
+        <text x='62' y='284.0' font-size='12' text-anchor='end' fill='#5b6572'>0%</text>
+        <line x1='70' y1='228.0' x2='950' y2='228.0' stroke='#d8dde4'/>
+        <text x='62' y='232.0' font-size='12' text-anchor='end' fill='#5b6572'>20%</text>
+        <line x1='70' y1='176.0' x2='950' y2='176.0' stroke='#d8dde4'/>
+        <text x='62' y='180.0' font-size='12' text-anchor='end' fill='#5b6572'>40%</text>
+        <line x1='70' y1='124.0' x2='950' y2='124.0' stroke='#d8dde4'/>
+        <text x='62' y='128.0' font-size='12' text-anchor='end' fill='#5b6572'>60%</text>
+        <line x1='70' y1='72.0' x2='950' y2='72.0' stroke='#d8dde4'/>
+        <text x='62' y='76.0' font-size='12' text-anchor='end' fill='#5b6572'>80%</text>
+        <line x1='70' y1='20.0' x2='950' y2='20.0' stroke='#d8dde4'/>
+        <text x='62' y='24.0' font-size='12' text-anchor='end' fill='#5b6572'>100%</text>
+        <rect x='77.0' y='72.0' width='20' height='208.0' fill='#2456a6' opacity='1'/>
+        <text x='87.0' y='69.0' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>80</text>
+        <rect x='100.0' y='95.1' width='20' height='184.9' fill='#1e7a46' opacity='0.8'/>
+        <text x='110.0' y='92.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>71</text>
+        <rect x='123.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+        <text x='133.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+        <rect x='146.0' y='83.4' width='20' height='196.6' fill='#7a3b8f' opacity='0.8'/>
+        <text x='156.0' y='80.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>76</text>
+        <text x='121.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Fable 5</text>
+        <rect x='187.0' y='86.6' width='20' height='193.4' fill='#2456a6' opacity='1'/>
+        <text x='197.0' y='83.6' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>74</text>
+        <rect x='210.0' y='92.3' width='20' height='187.7' fill='#1e7a46' opacity='0.8'/>
+        <text x='220.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+        <rect x='233.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+        <text x='243.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+        <rect x='256.0' y='100.9' width='20' height='179.1' fill='#7a3b8f' opacity='0.8'/>
+        <text x='266.0' y='97.9' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>69</text>
+        <text x='231.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Opus 4.8</text>
+        <rect x='297.0' y='80.6' width='20' height='199.4' fill='#2456a6' opacity='1'/>
+        <text x='307.0' y='77.6' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>77</text>
+        <rect x='320.0' y='109.4' width='20' height='170.6' fill='#1e7a46' opacity='0.8'/>
+        <text x='330.0' y='106.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>66</text>
+        <rect x='343.0' y='115.4' width='20' height='164.6' fill='#a05a1c' opacity='0.8'/>
+        <text x='353.0' y='112.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>63</text>
+        <rect x='366.0' y='118.3' width='20' height='161.7' fill='#7a3b8f' opacity='0.8'/>
+        <text x='376.0' y='115.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>62</text>
+        <text x='341.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Sonnet 4.6</text>
+        <rect x='407.0' y='147.1' width='20' height='132.9' fill='#2456a6' opacity='1'/>
+        <text x='417.0' y='144.1' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>51</text>
+        <rect x='430.0' y='155.7' width='20' height='124.3' fill='#1e7a46' opacity='0.8'/>
+        <text x='440.0' y='152.7' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>48</text>
+        <rect x='453.0' y='199.1' width='20' height='80.9' fill='#a05a1c' opacity='0.8'/>
+        <text x='463.0' y='196.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>31</text>
+        <rect x='476.0' y='173.1' width='20' height='106.9' fill='#7a3b8f' opacity='0.8'/>
+        <text x='486.0' y='170.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>41</text>
+        <text x='451.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Haiku 4.5</text>
+        <rect x='517.0' y='57.4' width='20' height='222.6' fill='#2456a6' opacity='1'/>
+        <text x='527.0' y='54.4' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>86</text>
+        <rect x='540.0' y='63.4' width='20' height='216.6' fill='#1e7a46' opacity='0.8'/>
+        <text x='550.0' y='60.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>83</text>
+        <rect x='563.0' y='74.9' width='20' height='205.1' fill='#a05a1c' opacity='0.8'/>
+        <text x='573.0' y='71.9' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>79</text>
+        <rect x='586.0' y='95.1' width='20' height='184.9' fill='#7a3b8f' opacity='0.8'/>
+        <text x='596.0' y='92.1' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>71</text>
+        <text x='561.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>GPT-5.6 Sol</text>
+        <rect x='627.0' y='74.9' width='20' height='205.1' fill='#2456a6' opacity='1'/>
+        <text x='637.0' y='71.9' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>79</text>
+        <rect x='650.0' y='80.6' width='20' height='199.4' fill='#1e7a46' opacity='0.8'/>
+        <text x='660.0' y='77.6' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>77</text>
+        <rect x='673.0' y='92.3' width='20' height='187.7' fill='#a05a1c' opacity='0.8'/>
+        <text x='683.0' y='89.3' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>72</text>
+        <rect x='696.0' y='98.0' width='20' height='182.0' fill='#7a3b8f' opacity='0.8'/>
+        <text x='706.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+        <text x='671.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>GPT-5.6 Luna</text>
+        <rect x='737.0' y='66.3' width='20' height='213.7' fill='#2456a6' opacity='1'/>
+        <text x='747.0' y='63.3' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>82</text>
+        <rect x='760.0' y='89.4' width='20' height='190.6' fill='#1e7a46' opacity='0.8'/>
+        <text x='770.0' y='86.4' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>73</text>
+        <rect x='783.0' y='98.0' width='20' height='182.0' fill='#a05a1c' opacity='0.8'/>
+        <text x='793.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+        <rect x='806.0' y='106.6' width='20' height='173.4' fill='#7a3b8f' opacity='0.8'/>
+        <text x='816.0' y='103.6' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>67</text>
+        <text x='781.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Kimi K3</text>
+        <rect x='847.0' y='83.4' width='20' height='196.6' fill='#2456a6' opacity='1'/>
+        <text x='857.0' y='80.4' font-size='9.5' text-anchor='middle' font-weight='bold' fill='#1e2430'>76</text>
+        <rect x='870.0' y='98.0' width='20' height='182.0' fill='#1e7a46' opacity='0.8'/>
+        <text x='880.0' y='95.0' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>70</text>
+        <rect x='893.0' y='109.2' width='20' height='170.8' fill='#a05a1c' opacity='0.8'/>
+        <text x='903.0' y='106.2' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>66</text>
+        <rect x='916.0' y='110.7' width='20' height='169.3' fill='#7a3b8f' opacity='0.8'/>
+        <text x='926.0' y='107.7' font-size='9.5' text-anchor='middle' font-weight='normal' fill='#1e2430'>65</text>
+        <text x='891.5' y='298' font-size='12' text-anchor='middle' fill='#1e2430'>Mean of 7</text>
+        <rect x='70' y='318' width='14' height='14' fill='#2456a6'/>
+        <text x='89' y='330' font-size='12' fill='#1e2430'>KISS Sorcar</text>
+        <rect x='188' y='318' width='14' height='14' fill='#1e7a46'/>
+        <text x='207' y='330' font-size='12' fill='#1e2430'>Pi</text>
+        <rect x='234' y='318' width='14' height='14' fill='#a05a1c'/>
+        <text x='253' y='330' font-size='12' fill='#1e2430'>Codex CLI</text>
+        <rect x='336' y='318' width='14' height='14' fill='#7a3b8f'/>
+        <text x='355' y='330' font-size='12' fill='#1e2430'>Claude Code</text>
+        </svg>
+
+        <figcaption>Figure 1. The success column of Table 1 as bars. KISS Sorcar (blue) has the highest point estimate on each of the seven models. The gap over Pi is largest on Sonnet 4.6 (+11.1) and Kimi K3 (+8.9) and smallest on Opus 4.8 and Luna (+2.2 each) and Sol (+2.3).</figcaption>
+      </figure>
+      <p class="bench-text">Thirty tasks is a small sample: the pooled 95% interval over tasks, 63.8 to 85.9, contains all three published means, and the comparison with the published table also differs in date, price list, turn cap and prompt. So we reran Pi ourselves, paired, on the same model and the same tasks.</p>
+      <div class="papers-grid">
+        <div class="inner-card paper-card" style="--i:0">
+          <div class="k">The study&rsquo;s 30 tasks &middot; Claude Fable 5</div>
+          <h3>+11.1 points over Pi, 95% interval +3.3 to +20.0</h3>
+          <p>Harbor&rsquo;s Pi agent (Pi 0.87.1) at the study&rsquo;s high-effort setting, no turn cap, no wall-clock limit, three attempts per task, priced with the same table as ours. Pi solved 68.9% of attempts at $1.45 and 14.5 turns per attempt; KISS Sorcar solved 80.0% at $1.50 and 15.3 turns. Five cents more per attempt (interval &minus;$0.71 to +$0.70). KISS Sorcar has the higher task mean on 7 tasks, Pi on none, 23 are ties. Without <code>feal-linear-cryptanalysis</code>, where all three Pi attempts died on API errors, the gap is +8.0 points (sign test <em>p</em> = 0.031).</p>
+        </div>
+        <div class="inner-card paper-card" style="--i:1">
+          <div class="k">57 of the 59 tasks the study did not sample &middot; Claude Fable 5</div>
+          <h3>+10.5 points over Pi, 95% interval +2.9 to +18.7</h3>
+          <p>The same frozen prompt solved 79.1% of attempts on the 59 unsampled tasks (79.4% over all 89), so the result is not an artifact of tuning on the sample. Pi on 57 of them (two <code>qemu</code> tasks were dropped because the verifier did not score the two harnesses alike) solved 71.9% at $1.00 and 12.3 turns; KISS Sorcar solved 82.5% at $1.63 and 17.3 turns. 15 tasks to 3, 39 ties (<em>p</em> = 0.008); here KISS Sorcar paid 63 cents more per attempt, spent on turns.</p>
+        </div>
+      </div>
+      <figure class="bench-fig">
+        <svg viewBox='0 0 760 170' width='100%' role='img' aria-label='Paired gap of KISS Sorcar over Pi on Claude Fable 5' font-family='Georgia,serif'>
+        <line x1='60.0' y1='47' x2='60.0' y2='63' stroke='#9aa3ad'/>
+        <text x='60.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>-5</text>
+        <line x1='163.3' y1='47' x2='163.3' y2='63' stroke='#9aa3ad'/>
+        <text x='163.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+0</text>
+        <line x1='266.7' y1='47' x2='266.7' y2='63' stroke='#9aa3ad'/>
+        <text x='266.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+5</text>
+        <line x1='370.0' y1='47' x2='370.0' y2='63' stroke='#9aa3ad'/>
+        <text x='370.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+10</text>
+        <line x1='473.3' y1='47' x2='473.3' y2='63' stroke='#9aa3ad'/>
+        <text x='473.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+15</text>
+        <line x1='576.7' y1='47' x2='576.7' y2='63' stroke='#9aa3ad'/>
+        <text x='576.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+20</text>
+        <line x1='680.0' y1='47' x2='680.0' y2='63' stroke='#9aa3ad'/>
+        <text x='680.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+25</text>
+        <line x1='60.0' y1='55' x2='680.0' y2='55' stroke='#9aa3ad'/>
+        <line x1='163.3' y1='33' x2='163.3' y2='67' stroke='#a03030' stroke-dasharray='4 3'/>
+        <text x='163.3' y='28' font-size='11' text-anchor='middle' fill='#a03030'>no difference</text>
+        <line x1='231.5' y1='55' x2='576.7' y2='55' stroke='#2456a6' stroke-width='6'/>
+        <polygon points='392.73333333333335,48 399.73333333333335,55 392.73333333333335,62 385.73333333333335,55' fill='#2456a6'/>
+        <text x='392.7' y='41' font-size='13' font-weight='bold' text-anchor='middle' fill='#2456a6'>+11.1 points  [+3.3, +20.0]</text>
+        <text x='60' y='103' font-size='13' fill='#1e2430'>Success gap, KISS Sorcar minus Pi, on the 30 tasks (percentage points; 95% paired bootstrap)</text>
+        <rect x='60.0' y='130' width='144.7' height='22' fill='#2456a6'/>
+        <text x='132.3' y='146' font-size='12' text-anchor='middle' fill='white'>KISS Sorcar higher: 7</text>
+        <rect x='204.7' y='130' width='475.3' height='22' fill='#9aa3ad'/>
+        <text x='442.3' y='146' font-size='12' text-anchor='middle' fill='white'>tie: 23</text>
+        <text x='680' y='146' font-size='12' text-anchor='start' fill='#1e7a46'> Pi higher: 0</text>
+        <text x='60' y='122' font-size='13' fill='#1e2430'>Per-task tally over the 30 tasks (exact sign test p = 0.016)</text>
+        </svg>
+
+        <figcaption>Figure 2. The paired comparison on Claude Fable 5, the study&rsquo;s 30 tasks. Top: the success gap and its bootstrap interval, which excludes zero. Bottom: KISS Sorcar has the higher task mean on 7 tasks, Pi on none, and 23 are ties, 20 of them solved by both on every attempt.</figcaption>
+      </figure>
+      <figure class="bench-fig">
+        <svg viewBox='0 0 760 170' width='100%' role='img' aria-label='Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks' font-family='Georgia,serif'>
+        <line x1='60.0' y1='47' x2='60.0' y2='63' stroke='#9aa3ad'/>
+        <text x='60.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>-5</text>
+        <line x1='163.3' y1='47' x2='163.3' y2='63' stroke='#9aa3ad'/>
+        <text x='163.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+0</text>
+        <line x1='266.7' y1='47' x2='266.7' y2='63' stroke='#9aa3ad'/>
+        <text x='266.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+5</text>
+        <line x1='370.0' y1='47' x2='370.0' y2='63' stroke='#9aa3ad'/>
+        <text x='370.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+10</text>
+        <line x1='473.3' y1='47' x2='473.3' y2='63' stroke='#9aa3ad'/>
+        <text x='473.3' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+15</text>
+        <line x1='576.7' y1='47' x2='576.7' y2='63' stroke='#9aa3ad'/>
+        <text x='576.7' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+20</text>
+        <line x1='680.0' y1='47' x2='680.0' y2='63' stroke='#9aa3ad'/>
+        <text x='680.0' y='81' font-size='12' text-anchor='middle' fill='#5b6572'>+25</text>
+        <line x1='60.0' y1='55' x2='680.0' y2='55' stroke='#9aa3ad'/>
+        <line x1='163.3' y1='33' x2='163.3' y2='67' stroke='#a03030' stroke-dasharray='4 3'/>
+        <text x='163.3' y='28' font-size='11' text-anchor='middle' fill='#a03030'>no difference</text>
+        <line x1='223.3' y1='55' x2='549.8' y2='55' stroke='#2456a6' stroke-width='6'/>
+        <polygon points='380.3,48 387.3,55 380.3,62 373.3,55' fill='#2456a6'/>
+        <text x='380.3' y='41' font-size='13' font-weight='bold' text-anchor='middle' fill='#2456a6'>+10.5 points  [+2.9, +18.7]</text>
+        <text x='60' y='103' font-size='13' fill='#1e2430'>Success gap, KISS Sorcar minus Pi, on the 57 unsampled tasks (percentage points; 95% paired bootstrap)</text>
+        <rect x='60.0' y='130' width='163.2' height='22' fill='#2456a6'/>
+        <text x='141.6' y='146' font-size='12' text-anchor='middle' fill='white'>KISS Sorcar higher: 15</text>
+        <rect x='223.2' y='130' width='424.2' height='22' fill='#9aa3ad'/>
+        <text x='435.3' y='146' font-size='12' text-anchor='middle' fill='white'>tie: 39</text>
+        <rect x='647.4' y='130' width='32.6' height='22' fill='#1e7a46'/>
+        <text x='686' y='146' font-size='12' text-anchor='start' fill='#1e7a46'>Pi higher: 3</text>
+        <text x='60' y='122' font-size='13' fill='#1e2430'>Per-task tally over the 57 tasks (exact sign test p = 0.008)</text>
+        </svg>
+
+        <figcaption>Figure 3. The paired comparison on the 57 unsampled tasks the verifier scored alike for both harnesses. Top: the success gap and its bootstrap interval. Bottom: KISS Sorcar has the higher task mean on 15 tasks, Pi on 3, and 39 are ties, 32 of them solved by both on every attempt.</figcaption>
+      </figure>
+      <p class="bench-text">What to keep in mind: only Pi was rerun, on one model, at high effort with its own prompt and no budget cap; the pooled seven-model comparison changes effort, turn cap and date at once, and the paired runs leave effort and prompt tangled together. The benchmark exercises the loop, six tools and the coding rules; the discovery and adversarial-testing procedures, the memory, the reviewer and the IDE features were switched off. The HarnessTax study stands: the band a fourth harness draws is wider than the one three harnesses drew. Runners, the Pi subclass and per-attempt records: <a href="https://github.com/ksenxx/kiss_ai/tree/main/benchmarkings/harnesstax"><code>benchmarkings/harnesstax/</code></a> and <a href="https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/evidence/tb2_trials.json"><code>papers/kisssorcar/evidence/tb2_trials.json</code></a>; method and intervals in <a href="assets/kiss_sorcar.pdf">the paper</a>, Section 5.</p>
+    </div>
+  </section>
+  </div>
+
+  <!-- ================ § 03 — All you need is a short prompt ================ -->
   <div class="section-wrap">
   <section id="prompts" class="section-card">
-    <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
+    <span class="num">§ 03 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
     <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your own tricks at <code>~/.kiss/MY_INJECTION.md</code>.</p>
     <div class="section-body">
@@ -2442,10 +2671,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 03 — Papers ================ -->
+  <!-- ================ § 04 — Papers ================ -->
   <div class="section-wrap">
   <section id="papers" class="section-card">
-    <span class="num">§ 03 — Papers</span>
+    <span class="num">§ 04 — Papers</span>
     <h2>📑 Papers.<a href="#papers" class="anchor">¶</a></h2>
     <p class="sub">Read the research behind KISS Sorcar &mdash; the system, how it built itself, how it wrote its own paper, and the systems, defenses, and test generators it produced.</p>
     <div class="section-body">
@@ -2503,10 +2732,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 04 — Blog ================ -->
+  <!-- ================ § 05 — Blog ================ -->
   <div class="section-wrap">
   <section id="blog" class="section-card">
-    <span class="num">§ 04 — Blog</span>
+    <span class="num">§ 05 — Blog</span>
     <h2>✍️ Blog.<a href="#blog" class="anchor">¶</a></h2>
     <p class="sub">Write-ups of real optimization and discovery runs performed end-to-end by KISS Sorcar, with reproducible numbers.</p>
     <div class="section-body">
@@ -2564,10 +2793,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 05 — AI Software Engineering ================ -->
+  <!-- ================ § 06 — AI Software Engineering ================ -->
   <div class="section-wrap">
   <section id="ai-software-engineering" class="section-card">
-    <span class="num">§ 05 — AI Software Engineering</span>
+    <span class="num">§ 06 — AI Software Engineering</span>
     <h2>🛠️ AI Software Engineering.<a href="#ai-software-engineering" class="anchor">¶</a></h2>
     <p class="sub">Talks, demos, and case studies on doing real software engineering with KISS Sorcar.</p>
     <div class="section-body">
@@ -2622,10 +2851,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 06 — What is in the Name ================ -->
+  <!-- ================ § 07 — What is in the Name ================ -->
   <div class="section-wrap">
   <section id="name" class="section-card">
-    <span class="num">§ 06 — What is in the Name</span>
+    <span class="num">§ 07 — What is in the Name</span>
     <h2>What is in the Name?<a href="#name" class="anchor">¶</a></h2>
     <p class="sub">Two names. One principle. A nod to a Bengali magician.</p>
     <div class="section-body">
@@ -2645,10 +2874,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 07 — Installation ================ -->
+  <!-- ================ § 08 — Installation ================ -->
   <div class="section-wrap">
   <section id="install" class="section-card">
-    <span class="num">§ 07 — Installation</span>
+    <span class="num">§ 08 — Installation</span>
     <h2>Install in one line.<a href="#install" class="anchor">¶</a></h2>
     <p class="sub">Pick the install path that fits you &mdash; full source, Python package, or the VS Code extension. All you need is at least one API key from a major LLM provider. <strong>The one-line install script below is the recommended way to install the full KISS Sorcar stack.</strong></p>
     <div class="section-body">
@@ -2697,10 +2926,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 08 — Python client API (condensed) ================ -->
+  <!-- ================ § 09 — Python client API (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 08 — Python API in 30 seconds</span>
+    <span class="num">§ 09 — Python API in 30 seconds</span>
     <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar.run</code> Python API.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
       The <code>kiss-web</code> daemon serves every client — the VS Code sidebar, the remote web/mobile app, and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
@@ -2736,10 +2965,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 09 — Messaging & Third-Party Agents ================ -->
+  <!-- ================ § 10 — Messaging & Third-Party Agents ================ -->
   <div class="section-wrap">
   <section id="agents" class="section-card">
-    <span class="num">§ 09 — Messaging &amp; Third-Party Agents</span>
+    <span class="num">§ 10 — Messaging &amp; Third-Party Agents</span>
     <h2>💬 Reach the agent from anywhere.<a href="#agents" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar includes <strong>44 third-party agents</strong> that act on messaging services, mailboxes, devices, and web services on your behalf &mdash; <strong>32 messaging-channel agents</strong> and <strong>10 service agents</strong> &mdash; plus two infrastructure agents: an <strong>A2A agent</strong> (<code>kiss-a2a</code>) exposing Sorcar over the agent-to-agent protocol and an <strong>OpenAI-compatible server</strong> (<code>kiss-oai</code>) that serves Sorcar behind an OpenAI-style HTTP API. It also ships a <strong>Govee smart-home CLI</strong> for controlling IoT lights (on/off, brightness, color, and color temperature) via the Govee Developer API. Channels also work inbound: a recurring gateway tick turns a messaging channel into a prompt surface of its own, with thread continuity, sender allow-lists, and an optional pairing handshake. These agents live in <code>src/kiss/agents/third_party_agents/</code>.</p>
     <div class="section-body">
@@ -2809,10 +3038,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 10 — Models Supported ================ -->
+  <!-- ================ § 11 — Models Supported ================ -->
   <div class="section-wrap">
   <section id="models" class="section-card">
-    <span class="num">§ 10 — Models Supported</span>
+    <span class="num">§ 11 — Models Supported</span>
     <h2>🤖 695 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar ships a catalog of <strong>695 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>. Models are grouped by the provider that routes them (i.e., whose API key or CLI serves the model); open-weight <code>openai/gpt-oss-*</code> and <code>google/gemma-*</code> models are served via Together AI.</p>
 
@@ -2857,10 +3086,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 11 — Contributing ================ -->
+  <!-- ================ § 12 — Contributing ================ -->
   <div class="section-wrap">
   <section id="contributing" class="section-card">
-    <span class="num">§ 11 — Contributing</span>
+    <span class="num">§ 12 — Contributing</span>
     <h2>🤗 Contributing.<a href="#contributing" class="anchor">¶</a></h2>
     <p class="sub">Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.</p>
     <div class="section-body">
@@ -2880,10 +3109,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 12 — License ================ -->
+  <!-- ================ § 13 — License ================ -->
   <div class="section-wrap">
   <section id="license" class="section-card">
-    <span class="num">§ 12 — License</span>
+    <span class="num">§ 13 — License</span>
     <h2>📄 License.<a href="#license" class="anchor">¶</a></h2>
     <p class="sub">KISS Sorcar is released under a permissive open-source license.</p>
     <div class="section-body">
@@ -2896,10 +3125,10 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 13 — Citation ================ -->
+  <!-- ================ § 14 — Citation ================ -->
   <div class="section-wrap">
   <section id="citation" class="section-card">
-    <span class="num">§ 13 — Citation</span>
+    <span class="num">§ 14 — Citation</span>
     <h2>📚 Cite the paper.<a href="#citation" class="anchor">¶</a></h2>
     <p class="sub">If you use KISS Sorcar in your research, please cite:</p>
     <div class="section-body">

@@ -16,6 +16,7 @@ Key facts for assistants and coding agents:
 
 - [Documentation index](https://kisssorcar.github.io/docs/index.md): Table of contents for all Markdown documentation
 - [Overview](https://kisssorcar.github.io/docs/overview.md): What KISS Sorcar is, the name, and a feature comparison vs Claude Code and Cursor
+- [Terminal-Bench 2.0 benchmark](https://kisssorcar.github.io/docs/benchmarks.md): KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 Terminal-Bench 2.0 tasks and seven models (75.6% of attempts solved vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5 (+11.1 and +10.5 points), the 59 unsampled tasks, caveats, and reproduction pointers
 - [Installation](https://kisssorcar.github.io/docs/installation.md): Install from source, pipx/uv, model API-key configuration, VS Code extension, Docker
 - [Client interfaces](https://kisssorcar.github.io/docs/cli.md): The `kiss-web` daemon, the VS Code extension and web/mobile app features, and the Python client API `kiss.server.sorcar.run`
 - [Python API reference](https://kisssorcar.github.io/docs/api.md): KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, and GitWorktreeOps

@@ -5,6 +5,7 @@
 ## Contents
 
 - [Overview](overview.md) — What KISS Sorcar is, the name, and how it compares to Claude Code and Cursor
+- [Terminal-Bench 2.0 Benchmark](benchmarks.md) — KISS Sorcar vs Pi, Codex CLI, and Claude Code on the HarnessTax study's 30 tasks and seven models (75.6% vs 70.0 / 65.7 / 65.1), paired Pi reruns on Claude Fable 5, the 59 unsampled tasks, caveats, and how to reproduce
 - [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps

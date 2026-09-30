@@ -19,11 +19,15 @@ LLM/coding-assistant indexing") and verified live:
   (update both when adding a docs page).
 - `llms-full.txt` — all Markdown docs concatenated for single-fetch ingestion,
   live at <https://kisssorcar.github.io/llms-full.txt>.
-- `docs/*.md` — 11 pure-Markdown pages: `index.md`, `overview.md`,
-  `installation.md`, `cli.md`, `api.md`, `models.md`, `messaging-agents.md`,
-  `sea-commands.md`, `sample-tasks.md`, `prompt-tricks.md`, `tips.md`
-  (content sourced from `README.md`, `API.md`, `src/kiss/SAMPLE_TASKS.md`,
-  `src/kiss/INJECTIONS.md`, and `src/kiss/TIPS.md`; `sea-commands.md`
+- `docs/*.md` — 12 pure-Markdown pages: `index.md`, `overview.md`,
+  `benchmarks.md`, `installation.md`, `cli.md`, `api.md`, `models.md`,
+  `messaging-agents.md`, `sea-commands.md`, `sample-tasks.md`,
+  `prompt-tricks.md`, `tips.md` (content sourced from `README.md`, `API.md`,
+  `src/kiss/SAMPLE_TASKS.md`, `src/kiss/INJECTIONS.md`, and `src/kiss/TIPS.md`;
+  `benchmarks.md` is the Markdown twin of the homepage's Terminal-Bench 2.0
+  section and of `blog/harness-tax-terminal-bench-blog.html`, with its
+  figures as standalone SVGs `assets/tb2-*.svg`, also copied to the repo's
+  top-level `assets/` for `README.md`; `sea-commands.md`
   documents `src/kiss/agents/sorcar/sea_commands.py` and describes the
   bundled `/merge`, `/sh`, `/task_update`, `/write_paper`, `/review_paper`,
   `/revise_and_review_paper`, `/git_extract_knowledge`, `/remember`, and
@@ -41,7 +45,7 @@ LLM/coding-assistant indexing") and verified live:
   `llms.txt` or `llms-full.txt`.
 - `robots.txt` — allows all crawlers, references llms.txt and the sitemap.
 - `sitemap.xml` — lists the HTML homepage, `index.html.md`, `llms.txt`,
-  `llms-full.txt`, the 11 `docs/*.md` pages, the five `blog/*.html`
+  `llms-full.txt`, the 12 `docs/*.md` pages, the six `blog/*.html`
   posts, and `privacy.html` (not `robots.txt` or `.well-known/llms.txt`).
 - `.nojekyll` — ensures GitHub Pages serves all files verbatim.
 - `index.html` — gained `<link rel="alternate" type="text/markdown">` and

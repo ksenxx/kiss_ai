@@ -77,6 +77,39 @@ ______________________________________________________________________
 | **Scheduled automations** | ✅ natural-language cron agent | ❌ | ❌ |
 | **Wake word for voice interaction** | "Hey Sorcar" | N/A | N/A|
 
+## Terminal-Bench 2.0: KISS Sorcar vs Pi, Codex CLI, and Claude Code
+
+The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chiang, Stoica, Zaharia; UC Berkeley and Arena Intelligence) holds the model fixed, swaps the harness between Claude Code, Codex CLI, and Pi, and finds that the harness moves cost far more than it moves what gets solved. We added KISS Sorcar to their Terminal-Bench 2.0 table: the same 30 sampled tasks, the same seven models, three attempts per task, graded by the official Terminal-Bench 2.0 verifier. For the benchmark the general-purpose material was stripped from the system prompt, leaving 727 words of coding rules (`papers/kisssorcar/evidence/tb2_prompt.txt`) instead of the 3,851 words of the full `SYSTEM.md`. Averaged over the seven models, **KISS Sorcar solved 75.6% of attempts; Pi 70.0%, Codex CLI 65.7%, Claude Code 65.1%**, with the best point estimate on every one of the seven models. Full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html); method and intervals: [the paper](https://kisssorcar.github.io/assets/kiss_sorcar.pdf), Section 5.
+
+| Model | KISS Sorcar solved | $/att. | Pi solved | $/att. | Codex CLI solved | $/att. | Claude Code solved | $/att. |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Claude Fable 5 | **80.0** | 1.50 | 71.1 | 1.08 | 72.2 | 0.98 | 75.6 | 1.55 |
+| Claude Opus 4.8 | **74.4** | 1.21 | 72.2 | 0.76 | 72.2 | 0.85 | 68.9 | 0.90 |
+| Claude Sonnet 4.6 | **76.7** | 2.23 | 65.6 | 0.61 | 63.3 | 0.55 | 62.2 | 0.67 |
+| Claude Haiku 4.5 | **51.1** | 0.39 | 47.8 | 0.25 | 31.1 | 0.21 | 41.1 | 0.26 |
+| GPT-5.6 Sol | **85.6** | 0.69 | 83.3 | 0.42 | 78.9 | 0.76 | 71.1 | 1.35 |
+| GPT-5.6 Luna | **78.9** | 0.05 | 76.7 | 0.04 | 72.2 | 0.06 | 70.0 | 0.10 |
+| Kimi K3 | **82.2** | 1.14 | 73.3 | 0.38 | 70.0 | 0.45 | 66.7 | 0.52 |
+| **Mean of 7 models** | **75.6** | 1.03 | 70.0 | 0.51 | 65.7 | 0.55 | 65.1 | 0.77 |
+
+*Terminal-Bench 2.0, the study's 30-task sample, three attempts per task: percentage of attempts solved and cost per attempt in USD. KISS Sorcar: 630 attempts run on 25 September 2026, no turn cap, $50 budget per attempt, providers' default request parameters. The other three columns are the study's published numbers (100-turn cap, high reasoning effort, priced on a 1 September list). Bold marks the best point estimate per row.*
+
+<div align="center">
+  <img src="assets/tb2-success-by-model.svg" alt="Percentage of Terminal-Bench 2.0 attempts solved per model under KISS Sorcar, Pi, Codex CLI, and Claude Code" width="100%">
+</div>
+
+Thirty tasks is a small sample: the pooled 95% interval over tasks, 63.8 to 85.9, contains all three published means, and the comparison with the published table also differs in date, price list, turn cap, and prompt. So we reran Pi ourselves, paired, on the same model and the same tasks:
+
+- **Study's 30 tasks, Claude Fable 5.** Harbor's Pi agent (Pi 0.87.1) at the study's high-effort setting, no turn cap, no wall-clock limit, three attempts per task, priced with the same table as ours. Pi solved 68.9% of attempts at $1.45 and 14.5 turns per attempt; KISS Sorcar solved 80.0% at $1.50 and 15.3 turns. Resampling tasks jointly for both harnesses, the gap is **+11.1 points in KISS Sorcar's favor, 95% interval +3.3 to +20.0**, for five cents more per attempt (interval −$0.71 to +$0.70). KISS Sorcar has the higher task mean on 7 tasks, Pi on none, and 23 are ties. All three Pi attempts on `feal-linear-cryptanalysis` died with API errors; without that task the gap is +8.0 points (sign test *p* = 0.031).
+- **The 59 tasks the study did not sample.** The same frozen prompt on Claude Fable 5 solved 79.1% of attempts (79.4% over all 89 tasks), so the sampled-task result is not an artifact of tuning on the sample. Pi on 57 of those tasks (two `qemu` tasks were dropped because the verifier did not score the two harnesses alike) solved 71.9% at $1.00 and 12.3 turns; KISS Sorcar solved 82.5% at $1.63 and 17.3 turns. The paired gap is **+10.5 points, interval +2.9 to +18.7** (15 tasks to 3, 39 ties, *p* = 0.008); here KISS Sorcar paid 63 cents more per attempt.
+
+<div align="center">
+  <img src="assets/tb2-paired-pi-sampled.svg" alt="Paired gap of KISS Sorcar over Pi on Claude Fable 5, study's 30 tasks" width="72%">
+  <img src="assets/tb2-paired-pi-unsampled.svg" alt="Paired gap of KISS Sorcar over Pi on 57 unsampled Terminal-Bench 2.0 tasks" width="78%">
+</div>
+
+What to keep in mind: only Pi was rerun, on one model, at high effort with its own prompt and no budget cap; the pooled seven-model comparison changes effort, turn cap, and date at once, and the paired runs leave effort and prompt tangled together. The benchmark exercises the loop, six tools, and the coding rules; the discovery and adversarial-testing procedures, the memory, the reviewer, and the IDE features were switched off. The HarnessTax study stands: the band a fourth harness draws is wider than the one three harnesses drew. The runners, the Pi subclass, and the per-attempt records are in `benchmarkings/harnesstax/` (`tb2_runner.py`, `pi_agent.py`, `results/pi/README.md`) and `papers/kisssorcar/evidence/tb2_trials.json`.
+
 ## What is in the Name
 
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
