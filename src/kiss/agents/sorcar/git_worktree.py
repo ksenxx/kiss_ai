@@ -1038,8 +1038,30 @@ class GitWorktreeOps:
                     "worktree remove failed: %s; deleting directory directly",
                     result.stderr.strip(),
                 )
-                shutil.rmtree(str(wt_dir), ignore_errors=True)
+                GitWorktreeOps._rmtree_reporting_leftovers(wt_dir)
                 GitWorktreeOps.prune(repo)
+
+    @staticmethod
+    def _rmtree_reporting_leftovers(path: Path) -> None:
+        """Delete the directory *path*, logging an error for whatever survives.
+
+        ``shutil.rmtree(ignore_errors=True)`` swallows every failure,
+        so a directory the current user cannot delete (root-owned
+        output a Docker container wrote into a bind-mounted worktree)
+        used to linger silently under ``.kiss-worktrees/``.  The error
+        names the directory so the user knows it needs ``sudo rm -rf``.
+
+        Args:
+            path: Directory to delete.
+        """
+        shutil.rmtree(str(path), ignore_errors=True)
+        if path.exists():
+            logger.error(
+                "Could not delete %s completely; files remain (not owned "
+                "by this user, e.g. written by a root container) — remove "
+                "them by hand with sudo rm -rf",
+                path,
+            )
 
     @staticmethod
     def prune(repo: Path) -> None:
@@ -3072,6 +3094,12 @@ class GitWorktreeOps:
         could still want).  Config sections are only purged once their
         branch is gone.
 
+        A fourth kind of debris is a *husk*: a ``kiss_wt-*`` directory
+        under ``.kiss-worktrees/`` that git does not know about — a
+        finished task's directory re-created by a stray ``mkdir`` or
+        by a lingering daemon, or the undeletable remnant of a failed
+        removal.  Those are deleted too (:meth:`_remove_husk_dirs`).
+
         Args:
             repo: Git repo root path.
 
@@ -3102,7 +3130,44 @@ class GitWorktreeOps:
             for name in GitWorktreeOps._config_branch_sections(repo):
                 if not GitWorktreeOps.branch_exists(repo, name):
                     GitWorktreeOps._remove_branch_config_section(repo, name)
+            GitWorktreeOps._remove_husk_dirs(repo)
             return deleted
+
+    @staticmethod
+    def _remove_husk_dirs(repo: Path) -> None:
+        """Delete unregistered ``kiss_wt-*`` directories under ``.kiss-worktrees/``.
+
+        A directory is a husk when git lists no worktree at its path
+        AND it carries no ``.git`` link file.  Both conditions are
+        required: a registered worktree is live (a running task or a
+        pool spare — ``--no-checkout`` spares are registered before
+        they are populated), and a ``.git`` link marks a real checkout
+        git may still re-register (a detached-HEAD worktree, which
+        :meth:`registered_worktrees` skips).  Must be called under
+        ``repo_lock`` and :func:`_reclaim_process_lock`, which
+        :meth:`create` also holds while ``git worktree add`` writes
+        the new directory and its ``.git`` file — so a worktree in the
+        making is never mistaken for a husk.
+
+        Args:
+            repo: Git repo root path.
+        """
+        root = repo / _WORKTREE_SUBDIR
+        if not root.is_dir():
+            return
+        registered = {
+            wt_dir.resolve()
+            for wt_dir, _branch in GitWorktreeOps.registered_worktrees(repo)
+        }
+        for entry in root.iterdir():
+            if not entry.name.startswith(_WORKTREE_SLUG_PREFIX):
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            if entry.resolve() in registered or (entry / ".git").exists():
+                continue
+            logger.info("Removing unregistered worktree husk %s", entry)
+            GitWorktreeOps._rmtree_reporting_leftovers(entry)
 
     @staticmethod
     def registered_worktrees(repo: Path) -> list[tuple[Path, str]]:
