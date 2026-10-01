@@ -374,6 +374,27 @@ def _wait_for_log_text(log: Path, needle: str, timeout: float = 10.0) -> str:
     return text
 
 
+def _group_survivors(pgid: int, timeout: float = 3.0) -> str:
+    """Return ``ps`` lines of processes still in session/group *pgid*.
+
+    Polls for up to *timeout* seconds because a just-killed child may
+    still be listed as a zombie until init reaps it; a genuinely leaked
+    process (a heartbeat subshell or its ``sleep``) stays listed for the
+    whole loop and is returned, after which the caller should kill it.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        survivors = subprocess.run(
+            ["ps", "-o", "pid=,args=", "-g", str(pgid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if not survivors or time.monotonic() > deadline:
+            return survivors
+        time.sleep(0.1)
+
+
 @pytest.mark.process_killer
 @posix_only("runs the bash heartbeat helpers and sends SIGINT")
 def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
@@ -544,6 +565,61 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
         "the second-signal branch of handle_interrupt did not run — its "
         f"diagnostic is missing.  Output:\n{stdout}"
     )
+    # The abort must take the heartbeat subshell down too; otherwise it
+    # outlives the installer for up to one HEARTBEAT_INTERVAL.
+    survivors = _group_survivors(proc.pid)
+    if survivors:
+        os.killpg(proc.pid, signal.SIGKILL)
+    assert not survivors, (
+        f"abort left processes in the harness's group:\n{survivors}\n"
+        f"Output:\n{stdout}"
+    )
+
+
+@posix_only("runs the bash heartbeat helpers")
+def test_run_with_heartbeat_leaves_no_sleep_behind(tmp_path: Path) -> None:
+    """Stopping the heartbeat must also stop the ``sleep`` it is blocked in.
+
+    ``run_with_heartbeat`` ends its heartbeat subshell with SIGTERM.  A
+    bash subshell that is waiting on a *foreground* ``sleep`` dies on
+    SIGTERM but leaves the ``sleep`` running, so every wrapped command
+    used to orphan one ``sleep HEARTBEAT_INTERVAL`` process.  The harness
+    runs in its own process group; once it has exited, nothing of that
+    group may remain.
+    """
+    helpers = _extract_signal_helpers(INSTALL_SCRIPT)
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "#!/bin/bash\n"
+        "set -eo pipefail\n"
+        "export KISS_HEARTBEAT_INTERVAL=60\n"
+        + helpers
+        + '\nrun_with_heartbeat "quick" sleep 0.2\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.Popen(
+        ["bash", str(harness)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        cwd=str(tmp_path),
+        text=True,
+    )
+    # An orphaned ``sleep 60`` inherits the stdout pipe, so ``communicate``
+    # would block on it long after bash itself has exited.
+    try:
+        stdout, _ = proc.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        stdout = ""
+    survivors = _group_survivors(proc.pid)
+    if survivors:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+    assert not survivors, (
+        "run_with_heartbeat left processes in the harness's group:\n"
+        f"{survivors}\nOutput:\n{stdout}"
+    )
+    assert proc.returncode == 0, f"harness exited {proc.returncode}: {stdout}"
 
 
 @pytest.mark.skipif(shutil.which("npm") is None, reason="npm not installed")

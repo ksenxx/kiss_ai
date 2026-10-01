@@ -354,7 +354,9 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
             "  exit 7\n"
             "fi\n"
             "echo 'INF https://m5-ok.trycloudflare.com' >&2\n"
-            "sleep 30\n"
+            # exec: SIGTERM to the tracked pid must end the whole fake
+            # cloudflared, not orphan a ``sleep`` child.
+            "exec sleep 30\n"
         )
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
