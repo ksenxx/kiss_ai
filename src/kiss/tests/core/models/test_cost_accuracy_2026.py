@@ -406,9 +406,9 @@ class TestAnthropicCacheReadFamilies:
     def test_fable_5_and_older_opus_keep_ten_percent(self):
         for name in ("claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"):
             info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(
-                info.input_price_per_1M * 0.1
-            ), name
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1), (
+                name
+            )
 
     def test_openrouter_opus_55_passthrough_carries_the_same_rate(self):
         info = MODEL_INFO["openrouter/anthropic/claude-opus-5.5"]
@@ -471,11 +471,15 @@ class TestGpt61SolPricing:
 
 
 class TestTogetherCachedInputPrices:
-    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input`` (2026-09)."""
+    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input``.
+
+    Kimi-K3 was $3.00/$15.00 with $0.30 cached input until 2026-09; Together
+    cut it to $2.70/$13.50/$0.27 (``/v1/models`` on 2026-10-01).
+    """
 
     def test_together_models_carry_published_cache_read_prices(self):
         expected = {
-            "moonshotai/Kimi-K3": 0.30,
+            "moonshotai/Kimi-K3": 0.27,
             "zai-org/GLM-5.3": 0.26,
             "zai-org/GLM-5.3-Flash": 0.03,
             "deepseek-ai/DeepSeek-V4-Pro-0813": 0.13,
@@ -487,7 +491,7 @@ class TestTogetherCachedInputPrices:
 
     def test_together_kimi_k3_cache_hit_is_not_billed_as_input(self):
         cost = calculate_cost("moonshotai/Kimi-K3", 90, 20, 3_012, 0)
-        assert cost == pytest.approx((90 * 3.0 + 20 * 15.0 + 3_012 * 0.30) / 1e6)
+        assert cost == pytest.approx((90 * 2.7 + 20 * 13.5 + 3_012 * 0.27) / 1e6)
 
     def test_together_models_without_a_published_cache_price_bill_hits_as_input(self):
         info = MODEL_INFO["meta-llama/Llama-3.3-70B-Instruct-Turbo"]

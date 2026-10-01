@@ -1,6 +1,6 @@
 # Models in the bundled catalog
 
-KISS Sorcar ships a catalog of **708 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
+KISS Sorcar ships a catalog of **709 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); `uv run python -m kiss.scripts.update_models` refreshes that file and rewrites the counts and lists below, so do not edit them by hand. Models are grouped by the provider that routes them (whose API key or CLI serves the model); open-weight `openai/gpt-oss-*` and `google/gemma-*` models are served via Together AI. How costs are computed from these prices is described in [README.md](README.md#models-supported).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -10,14 +10,14 @@ KISS Sorcar ships a catalog of **708 models** across **9 provider categories**, 
 | Together AI | 103 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 414 |
+| OpenRouter | 415 |
 | Claude Code CLI (`cc/*`) | 16 |
 | Codex CLI (`codex/*`) | 10 |
 
 Current catalog capability totals:
 
-- **688** generation-capable models
-- **525** function-calling-capable models
+- **689** generation-capable models
+- **526** function-calling-capable models
 - **7** embedding models
 - **5** decision models
 
@@ -328,7 +328,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (414)</strong></summary>
+<summary><strong>OpenRouter (415)</strong></summary>
 
 - `openrouter/aion-labs/aion-2.0`
 - `openrouter/aion-labs/aion-3.0`
@@ -667,6 +667,7 @@ Full model list:
 - `openrouter/togethercomputer/tev1-4b-experimental`
 - `openrouter/typesafe/jev-1.13`
 - `openrouter/unbiased/pareto`
+- `openrouter/unbiased/pareto-26.10-preview`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-decide`
 - `openrouter/upstage/solar-mini4`
