@@ -743,6 +743,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._daemonConnected = false;
       this._sendToWebview({type: 'daemonStatus', connected: false});
       this._resolveAllWorktreeActions();
+      // A commit-message request already sent to the daemon that died
+      // gets no `commitMessage` or `status` back; settle it now rather
+      // than after the 30 s safety timer in generateCommitMessage().
+      // (`fire` settles the waiter, which removes the id from the set.)
+      for (const tabId of [...this._commitPendingTabs]) {
+        this._onCommitMessage.fire({
+          message: '',
+          error: 'The agent was unreachable',
+          tabId,
+        });
+      }
     });
     client.on(
       'commandDropped',
@@ -852,6 +863,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : this._ownTabs.has(subMsg.tab_id))
         ) {
           this._ownTabs.add(subMsg.tab_id);
+        }
+      }
+      if (msg.type === 'closeSubagentTab' || msg.type === 'subagentDone') {
+        // A sub-agent tab closes on every surface as soon as the
+        // sub-agent finishes; it never appears in `tabs_state`, so this
+        // is the only place its host-side bookkeeping is released
+        // (otherwise stopTask() would later `stop` a tab that is gone).
+        if (msg.tab_id) {
+          this._ownTabs.delete(msg.tab_id);
+          this._cleanupTabResources(msg.tab_id);
         }
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {

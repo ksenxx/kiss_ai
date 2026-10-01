@@ -21,7 +21,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import threading
 import time
@@ -31,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
-from kiss.core.processes import kill_process_group, popen_process_group
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 from kiss.core.utils import atomic_write_text, read_bytes_waiting_for_writer
 
 logger = logging.getLogger(__name__)
@@ -1143,7 +1142,7 @@ def _source_rc_for_keys(wanted: set[str]) -> dict[str, str]:
                 # descendants holding the pipes, and the follow-up
                 # communicate() would block on them without a timeout.
                 try:
-                    kill_process_group(proc.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    kill_process_group(proc.pid, SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
                     proc.kill()
                 logger.warning(

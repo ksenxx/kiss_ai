@@ -924,6 +924,12 @@
   }
 
   let isRunning = false;
+  // The daemon's reachability as last reported by `daemonStatus`.
+  // Pollers (requestTaskUpdate, the sidebar-panels tick) and the
+  // submit/save paths stop posting while it is false: the host/shim
+  // would only queue the commands and burst them out on reconnect,
+  // ahead of the `ready` whose replay the user is waiting for.
+  let daemonConnected = true;
   // The model the user last picked in the picker. It is what a submit
   // runs with and what the picker shows, EXCEPT while a running agent
   // has switched models on itself -- that transient override lives in
@@ -2134,7 +2140,10 @@
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
-      if (!fromServer) api.closeTab({tabId: id});
+      if (!fromServer) {
+        armCloseShield(id);
+        api.closeTab({tabId: id});
+      }
     }
     rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
@@ -3432,7 +3441,7 @@
     const editor = tab.contentEditor;
     if (!editor || tab.contentSaving || !tab.contentPath) return;
     if (!tab.contentDirty && !force) return;
-    if (daemonWasDown) {
+    if (!daemonConnected) {
       // The post would never arrive; the tab stays dirty so the user
       // can save again once the connection is back.
       setContentSaveStatus(
@@ -4542,6 +4551,25 @@
   // expires after PENDING_OPEN_MAX_MISSES missed snapshots.
   const pendingOpenTabs = new Map();
   const PENDING_OPEN_MAX_MISSES = 3;
+  // The mirror image for closes: tab ids this client just removed and
+  // told the daemon to close (`closeTab`), mapped to {hits, at}: how
+  // many snapshots have since arrived WITH the id, and when the close
+  // was issued. A snapshot broadcast before the daemon processed the
+  // close still lists the tab and must not resurrect it (empty
+  // transcript, one round trip of flicker). The shield lifts as soon as
+  // a snapshot omits the id, on the PENDING_OPEN_MAX_MISSES-th snapshot
+  // that still lists it (the daemon kept the tab, so it is shown
+  // again), or PENDING_CLOSE_TTL_MS after the close: a stale snapshot
+  // is a matter of milliseconds, and a shield that outlives that would
+  // hide a tab another surface legitimately re-opened with the same id
+  // when this client missed the close-confirming snapshot (outage).
+  // armCloseShield / reconnect (`daemonStatus`) own the entries.
+  const pendingCloseTabs = new Map();
+  const PENDING_CLOSE_TTL_MS = 5000;
+
+  function armCloseShield(tabId) {
+    pendingCloseTabs.set(tabId, {hits: 0, at: Date.now()});
+  }
 
   // Announce a locally created chat tab to the daemon's shared tab
   // registry so every other client opens the same tab.
@@ -4672,8 +4700,23 @@
     // buggy snapshot might still carry (keep-first, deterministic on
     // every client).
     const seenChats = new Set();
+    const listedClosed = new Set();
     list.forEach(e => {
       if (!e || !e.tabId || inSnapshot.has(e.tabId)) return;
+      const shield = pendingCloseTabs.get(e.tabId);
+      if (shield) {
+        shield.hits += 1;
+        if (
+          shield.hits < PENDING_OPEN_MAX_MISSES &&
+          Date.now() - shield.at < PENDING_CLOSE_TTL_MS
+        ) {
+          listedClosed.add(e.tabId);
+          return;
+        }
+        // The daemon kept the tab, or the close is old enough that
+        // this is a new tab with the same id: it is shown again (below).
+        pendingCloseTabs.delete(e.tabId);
+      }
       // The daemon listed the id, so its `openTab` is confirmed —
       // clear the pending shield even when the entry is dropped as a
       // duplicate below, or the local duplicate tab would survive
@@ -4714,6 +4757,10 @@
       if (inSnapshot.has(id)) return;
       if (misses + 1 >= PENDING_OPEN_MAX_MISSES) pendingOpenTabs.delete(id);
       else pendingOpenTabs.set(id, misses + 1);
+    });
+    // A snapshot without the id confirms the close: the shield lifts.
+    pendingCloseTabs.forEach((_shield, id) => {
+      if (!listedClosed.has(id)) pendingCloseTabs.delete(id);
     });
 
     // A removed registry tab takes its local sub-agent descendants
@@ -5572,7 +5619,7 @@
    *   refresh button) instead of waiting out its 10-minute interval.
    */
   function requestTaskUpdate(refresh) {
-    if (!metaInfoContent) return;
+    if (!metaInfoContent || !daemonConnected) return;
     // Only a RUNNING task has an update worth showing; an idle tab's
     // subpanel stays empty and costs the daemon nothing.  The POLLED
     // tab's own flag decides, not the module-level isRunning: that one
@@ -5978,7 +6025,7 @@
   function ensureSidebarPanelsPoll() {
     if (sidebarPanelsTimer) return;
     sidebarPanelsTimer = setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || !daemonConnected) return;
       const now = Date.now();
       for (const [name, at] of appsAwaitingAuth) {
         if (now - at > APP_AUTH_WAIT_MS) appsAwaitingAuth.delete(name);
@@ -12430,6 +12477,7 @@
     // own -- a stale one keeps the host matching merges against a tab
     // that is gone.
     if (reportedChatTabId === oldId) reportChatTab(newTabId);
+    armCloseShield(oldId);
     api.closeTab({tabId: oldId});
   }
 
@@ -15052,24 +15100,39 @@
       player.onended = done;
       player.onerror = done;
       player.onabort = done;
+      // There is no pause control, so a `pause` is terminal: the user
+      // agent paused the clip (tab backgrounded, incoming call, audio
+      // focus lost) and `ended` will never follow -- without this the
+      // queue stays busy and every later `talk` is swallowed for the
+      // life of the page.  The paused player is retired before the
+      // queue moves on: its source is dropped, so a user-agent resume
+      // (audio focus regained) cannot play it on top of the next clip.
+      // Natural completion fires `pause` just before `ended`; `done`
+      // is idempotent and the cleared handlers ignore the `ended`.
+      player.onpause = () => {
+        clearTalkPlayer(player);
+        player.src = '';
+        done();
+      };
       const played = player.play();
       if (played && typeof played.catch === 'function') {
         played.catch(() => {
-          player.onended = null;
-          player.onerror = null;
-          player.onabort = null;
+          clearTalkPlayer(player);
           done();
         });
       }
       return true;
     } catch (_e) {
-      if (player) {
-        player.onended = null;
-        player.onerror = null;
-        player.onabort = null;
-      }
+      if (player) clearTalkPlayer(player);
       return false;
     }
+  }
+
+  function clearTalkPlayer(player) {
+    player.onended = null;
+    player.onerror = null;
+    player.onabort = null;
+    player.onpause = null;
   }
 
   // tableak-coverage:start
@@ -15320,9 +15383,20 @@
   };
   // tableak-coverage:end
 
-  // Raised while the daemon is unreachable so the reconnect can
-  // re-announce `ready` (tab-registry sync + transcript replay).
+  // Whether this page has ever seen the daemon up.  A cold start
+  // (`connected:false` before the first `connected:true`, the normal
+  // VS Code start where the extension launches the daemon) is not an
+  // outage: the boot `ready` is queued by the host/shim and flushed on
+  // auth, so re-sending it would replay every transcript twice.
+  let daemonEverConnected = false;
+  // Raised when a daemon that HAD been up went away, so the reconnect
+  // re-announces `ready` (tab-registry sync + transcript replay).
   let daemonWasDown = false;
+  // When the last `ready` was posted.  The VS Code host drops a queued
+  // command older than READY_QUEUE_TTL_MS as `expired` without telling
+  // the webview, so a first connect that late re-sends the boot ready.
+  let readySentAt = 0;
+  const READY_QUEUE_TTL_MS = 10000;
   // True while the outage keeps the chat on screen under the reconnect
   // banner (the remote shim's `reconnecting` flag): the user could go on
   // reading and tapping, so the reconnect is not a launch (see
@@ -15417,10 +15491,14 @@
               severity: 'error',
             });
           }
-          daemonWasDown = true;
+          daemonConnected = false;
+          daemonWasDown = daemonEverConnected;
           chatStayedOnScreen = ev.reconnecting === true;
         }
         if (ev.connected) {
+          const firstConnect = !daemonEverConnected;
+          daemonConnected = true;
+          daemonEverConnected = true;
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
           // starts here (see beginLaunch) -- unless the chat never left
@@ -15438,6 +15516,25 @@
           // here survive and only the server's updates come in.
           if (daemonWasDown) {
             daemonWasDown = false;
+            // The `ready` reply's snapshot is authoritative: a close
+            // issued before the outage was either processed (the id is
+            // gone) or lost with the socket (the tab is back), and a
+            // shield left armed would hide a tab another surface
+            // re-opened under that id while this one was away.
+            pendingCloseTabs.clear();
+            sendReady();
+          } else if (
+            firstConnect &&
+            readySentAt > 0 &&
+            !document.body.classList.contains('remote-chat') &&
+            Date.now() - readySentAt > READY_QUEUE_TTL_MS
+          ) {
+            // VS Code only (the remote shim's queue never expires): the
+            // boot `ready` sat in the host's queue long enough to have
+            // been dropped as expired, and without a fresh one the
+            // daemon never syncs the tabs or replays the transcripts.
+            // (readySentAt is 0 while the boot `ready` is still ahead
+            // of us: it goes out connected, so nothing is re-sent.)
             sendReady();
           }
           // modelpick-coverage:start
@@ -18774,6 +18871,7 @@
     const root = EDITOR_TAB_MODE ? editorRootTab() : null;
     if (root) ready.singleTabId = root.id;
     api.ready(ready);
+    readySentAt = Date.now();
     reportedChatTabId = chatTabId;
     // readychat-coverage:end
   }
@@ -20386,7 +20484,7 @@
     // would arrive out of order with the reconnect's replay.  Keep the
     // prompt in the composer instead; the user sends it once the
     // banner is gone.
-    if (daemonWasDown) return;
+    if (!daemonConnected) return;
 
     // The agent is blocked in ask_user_question: the composer text is
     // its answer, not a new prompt, and photos are not part of it (they
@@ -20433,7 +20531,7 @@
       if (
         !ready ||
         activeTabId !== waitTab.id ||
-        daemonWasDown ||
+        !daemonConnected ||
         waitTab.askPendingQuestion !== null
       )
         return;

@@ -314,14 +314,9 @@ def _load(info: dict) -> tuple:
 def _reset_config(mod) -> None:
     """Clear any leftover persisted config so the agent starts unauthenticated.
 
-    Handles both config styles used by channel agent modules: a legacy
-    module-level ``_clear_config()`` function, and the ``ChannelConfig``
-    object exposed as module-level ``_config``.
+    Every channel agent module exposes its ``ChannelConfig`` as the
+    module-level ``_config``; googlechat keeps no config and is skipped.
     """
-    clear_fn = getattr(mod, "_clear_config", None)
-    if clear_fn is not None:
-        clear_fn()
-        return
     config = getattr(mod, "_config", None)
     if config is not None:
         config.clear()
@@ -363,18 +358,12 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
 def test_config_roundtrip(info: dict) -> None:
     """Config save/load/clear works on real filesystem."""
     mod, _, _ = _load(info)
-    config_path_fn = getattr(mod, "_config_path", None)
-    load_fn = getattr(mod, "_load_config", None)
-    clear_fn = getattr(mod, "_clear_config", None)
-    if config_path_fn and load_fn and clear_fn:
-        path = config_path_fn()
-    else:
-        config = getattr(mod, "_config", None)
-        if config is None:
-            pytest.skip(f"No standard config functions in {info['module']}")
-        path = config.path
-        load_fn = config.load
-        clear_fn = config.clear
+    config = getattr(mod, "_config", None)
+    if config is None:
+        pytest.skip(f"{info['module']} keeps no module-level ChannelConfig")
+    path = config.path
+    load_fn = config.load
+    clear_fn = config.clear
     backup = None
     if path.exists():
         backup = path.read_text()

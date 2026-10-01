@@ -237,12 +237,26 @@ class TestPostgresLive:
     @pytest.fixture(scope="class")
     def pg_uri(self):
         """Start a disposable PostgreSQL container; yield its connection URI."""
-        subprocess.run(
-            ["docker", "pull", "postgres:17-alpine"],
-            check=True,
+        image = "postgres:17-alpine"
+        cached = subprocess.run(
+            ["docker", "image", "inspect", image],
             capture_output=True,
-            timeout=900,
+            timeout=60,
+            check=False,
         )
+        if cached.returncode != 0:
+            # Only contact the registry when the image is absent; without
+            # outbound network (or a rate-limited Hub) skip instead of
+            # erroring every live test after a 900 s wait.
+            pulled = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            if pulled.returncode != 0:
+                pytest.skip(f"cannot pull {image}: {pulled.stderr.strip()[-200:]}")
         # Pre-generate the container name so cleanup can target it even if
         # `docker run` times out after the daemon has created the container,
         # and let Docker pick the host port (`::5432`) to avoid the

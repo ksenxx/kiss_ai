@@ -6,7 +6,7 @@
 'use strict';
 
 // E2E tests for AgentClient's behaviour across a daemon outage, driven
-// against a REAL unix domain socket (no mocks):
+// against a REAL local WebSocket daemon stand-in (no mocks):
 //
 // 1. Reconnects must back off. Every open VS Code window runs one of
 //    these against ~/.kiss/sorcar-local.json, so a fixed 500 ms retry meant N

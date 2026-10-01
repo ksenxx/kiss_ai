@@ -37,6 +37,7 @@ entry.
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import hashlib
 import json
@@ -830,6 +831,7 @@ def _load_listings(path: Path, root: str) -> Listings:
 def _save_listings(path: Path, root: str, listings: Listings) -> None:
     """Atomically persist *listings* of *root* to *path* (best effort)."""
     payload = {"version": _CACHE_VERSION, "root": root, "listings": listings}
+    tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         # A private temporary file: two daemons persisting the same root
@@ -840,6 +842,9 @@ def _save_listings(path: Path, root: str, listings: Listings) -> None:
         os.replace(tmp, path)
     except OSError:
         logger.debug("cannot persist file index to %s", path, exc_info=True)
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 class FileIndexRegistry:
@@ -1021,7 +1026,9 @@ class FileIndexRegistry:
         from kiss.core.config import kiss_home
 
         base = self._cache_dir if self._cache_dir is not None else kiss_home() / "file-index"
-        return base / (hashlib.sha1(root.encode("utf-8")).hexdigest()[:16] + ".json")
+        # ``fsencode`` round-trips surrogate-escaped (undecodable) path
+        # bytes that ``str.encode("utf-8")`` would reject.
+        return base / (hashlib.sha1(os.fsencode(root)).hexdigest()[:16] + ".json")
 
     def _build(self, root: str) -> None:
         """Scan *root* (reusing cached listings) and publish the index."""
@@ -1060,7 +1067,11 @@ class FileIndexRegistry:
                 self._pending.discard(root)
                 current = self._indexes.get(root)
             if current is None or current.built_at < queued_at:
-                self._build(root)
+                # The only worker: one failing build must not end it.
+                try:
+                    self._build(root)
+                except Exception:
+                    logger.exception("file index build of %s failed", root)
             if on_ready is not None:
                 try:
                     on_ready()

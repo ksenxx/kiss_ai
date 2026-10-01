@@ -7,8 +7,10 @@
 The caller of :func:`kiss.server.sorcar.run` supplies its extra agent
 tools as a *file path* to a Python module rather than as live callables
 — the client never serializes Python functions.  The client validates
-and resolves the path (:func:`resolve_tools_file`) and sends it on the
-``run`` command's ``toolsFile`` field; the daemon imports the file and
+and resolves the path
+(:func:`kiss.agents.sorcar.daemon_client.resolve_tools_file`) and
+sends it on the ``run`` command's ``toolsFile`` field; the daemon
+imports the file and
 calls its required top-level ``get_tools()`` function — or, when the
 module defines none, its ``tools()`` function (the agent-script
 spelling, so an SEA can double as its own tools file) — which returns
@@ -29,14 +31,6 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-
-# The client-side validator lives in the sorcar layer (the daemon
-# client ``kiss.agents.sorcar.daemon_client.run`` uses it under the
-# layering invariant); re-exported here unchanged as the public
-# ``kiss.server.tools_file.resolve_tools_file``.
-from kiss.agents.sorcar.daemon_client import (
-    resolve_tools_file as resolve_tools_file,
-)
 
 logger = logging.getLogger("kiss-vscode")
 
@@ -153,9 +147,6 @@ def execute_python_file(
     finally:
         sys.modules.pop(module_name, None)
     return module.__dict__
-
-
-
 
 
 def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:

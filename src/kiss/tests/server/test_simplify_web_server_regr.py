@@ -355,7 +355,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         )
         msg = await self._drain_until(reader, "notice")
         self.assertEqual(msg.get("text"), "hello")
-        self.server._printer.remove_local_client(writers[0])
+        self.server._printer.remove_client(writers[0])
         self.server._printer.broadcast(
             {"type": "notice", "text": "gone", "tabId": "t1"},
         )

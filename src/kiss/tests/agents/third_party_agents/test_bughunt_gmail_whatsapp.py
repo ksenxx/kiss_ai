@@ -18,55 +18,16 @@ Bugs covered (the WhatsApp ones re-targeted at the QR-paired bridge backend):
 
 from __future__ import annotations
 
-import json
 import sqlite3
-import threading
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
 
+import httplib2  # type: ignore[import-untyped]
 import pytest
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.gmail.gmail_sea import GmailChannelBackend
 from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import WhatsAppChannelBackend
-
-
-class _BridgeHandler(BaseHTTPRequestHandler):
-    """Records POST requests and replies with the server's canned JSON body.
-
-    Speaks the whatsapp-mcp bridge REST protocol (POST-only /api/send).
-    """
-
-    def do_POST(self) -> None:  # noqa: N802 - http.server API
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
-        self.server.recorded_requests.append(  # type: ignore[attr-defined]
-            (self.path, json.loads(body or b"{}"))
-        )
-        payload = json.dumps(self.server.response_body).encode()  # type: ignore[attr-defined]
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
-
-
-def _start_bridge_server(response_body: dict[str, Any]) -> tuple[ThreadedHTTPServer, int]:
-    """Start a local HTTP server standing in for the whatsapp-mcp bridge."""
-    server = ThreadedHTTPServer(("127.0.0.1", 0), _BridgeHandler)
-    server.response_body = response_body  # type: ignore[attr-defined]
-    server.recorded_requests = []  # type: ignore[attr-defined]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, server.server_address[1]
+from kiss.tests.agents.third_party_agents.whatsapp_bridge import bridge_server
 
 
 def _make_db(repo_dir: Path) -> None:
@@ -93,12 +54,33 @@ def _make_db(repo_dir: Path) -> None:
         "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me,"
         " media_type) VALUES (?,?,?,?,?,?,?)",
         [
-            ("m1", "111@s.whatsapp.net", "111@s.whatsapp.net", "from-111-a",
-             "2026-01-01 00:00:01+00:00", 0, ""),
-            ("m2", "222@s.whatsapp.net", "222@s.whatsapp.net", "from-222",
-             "2026-01-01 00:00:02+00:00", 0, ""),
-            ("m3", "111@s.whatsapp.net", "111@s.whatsapp.net", "from-111-b",
-             "2026-01-01 00:00:03+00:00", 0, ""),
+            (
+                "m1",
+                "111@s.whatsapp.net",
+                "111@s.whatsapp.net",
+                "from-111-a",
+                "2026-01-01 00:00:01+00:00",
+                0,
+                "",
+            ),
+            (
+                "m2",
+                "222@s.whatsapp.net",
+                "222@s.whatsapp.net",
+                "from-222",
+                "2026-01-01 00:00:02+00:00",
+                0,
+                "",
+            ),
+            (
+                "m3",
+                "111@s.whatsapp.net",
+                "111@s.whatsapp.net",
+                "from-111-b",
+                "2026-01-01 00:00:03+00:00",
+                0,
+                "",
+            ),
         ],
     )
     conn.commit()
@@ -109,24 +91,20 @@ class TestWhatsAppSendMessage:
     """Bug (E): send_message must raise when the bridge reports failure."""
 
     def test_send_message_raises_on_bridge_error(self, tmp_path: Path) -> None:
-        server, port = _start_bridge_server({"success": False, "message": "bad recipient"})
-        try:
+        with bridge_server({"success": False, "message": "bad recipient"}) as server:
+            port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             with pytest.raises(RuntimeError, match="bad recipient"):
                 backend.send_message("+14155238886", "hello")
-        finally:
-            stop_http_server(server, None)
 
     def test_send_message_succeeds_without_error(self, tmp_path: Path) -> None:
-        server, port = _start_bridge_server({"success": True, "message": "sent"})
-        try:
+        with bridge_server({"success": True, "message": "sent"}) as server:
+            port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             backend.send_message("+14155238886", "hello")
-            path, body = server.recorded_requests[0]  # type: ignore[attr-defined]
-            assert path == "/api/send"
-            assert body == {"recipient": "14155238886", "message": "hello"}
-        finally:
-            stop_http_server(server, None)
+            assert server.requests == [
+                {"path": "/api/send", "json": {"recipient": "14155238886", "message": "hello"}}
+            ]
 
 
 class TestWhatsAppPollMessages:
@@ -145,9 +123,7 @@ class TestWhatsAppPollMessages:
         assert [m["text"] for m in messages] == ["from-111-a", "from-111-b"]
         assert cursor == "2026-01-01 00:00:03+00:00"
 
-    def test_poll_messages_empty_channel_id_returns_all_senders(
-        self, tmp_path: Path
-    ) -> None:
+    def test_poll_messages_empty_channel_id_returns_all_senders(self, tmp_path: Path) -> None:
         _make_db(tmp_path)
         backend = WhatsAppChannelBackend(repo_dir=str(tmp_path))
         messages, _ = backend.poll_messages("", "0", limit=10)
@@ -170,15 +146,33 @@ class TestGmailSendMessage:
     """Bug (C): send_message must not address mail to a non-email channel_id."""
 
     @staticmethod
-    def _backend() -> GmailChannelBackend:
+    def _backend(refusing_port: int) -> GmailChannelBackend:
+        """Real Gmail service whose API endpoint refuses every connection.
+
+        ``send_message`` resolves ``thread_ts`` with a live
+        ``threads().get`` call before validating the recipient; pointing
+        the service at a refusing loopback port (with a short socket
+        timeout) keeps that call off the network and instant.
+        """
         backend = GmailChannelBackend()
-        backend._service = build("gmail", "v1", developerKey="test", static_discovery=True)
+        backend._service = build(
+            "gmail",
+            "v1",
+            developerKey="test",
+            static_discovery=True,
+            client_options={"api_endpoint": f"http://127.0.0.1:{refusing_port}/"},
+            http=httplib2.Http(timeout=2),
+        )
         return backend
 
-    def test_send_message_rejects_label_id_recipient(self) -> None:
+    def test_send_message_rejects_label_id_recipient(self, refusing_port: int) -> None:
         with pytest.raises(ValueError, match="email address"):
-            self._backend().send_message("INBOX", "hello")
+            self._backend(refusing_port).send_message("INBOX", "hello")
 
-    def test_send_message_rejects_label_id_when_thread_unresolvable(self) -> None:
+    def test_send_message_rejects_label_id_when_thread_unresolvable(
+        self, refusing_port: int
+    ) -> None:
         with pytest.raises(ValueError, match="email address"):
-            self._backend().send_message("INBOX", "hello", thread_ts="nonexistent-thread")
+            self._backend(refusing_port).send_message(
+                "INBOX", "hello", thread_ts="nonexistent-thread"
+            )

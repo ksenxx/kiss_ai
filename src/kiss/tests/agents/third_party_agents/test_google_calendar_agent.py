@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -28,10 +27,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.gcal.gcal_sea as gcal_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.gcal.gcal_sea import (
     _SERVICE,
     GoogleCalendarAgent,
@@ -43,6 +38,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = TOKEN
 
@@ -109,7 +105,7 @@ class _CalendarRequestHandler(BaseHTTPRequestHandler):
             return None
 
     def _record(self, body: dict[str, Any] | None) -> None:
-        cast(_CalendarServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -175,14 +171,6 @@ class _CalendarRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _CalendarServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _CalendarRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture(autouse=True)
 def _fresh_state():
     """Start and end every test with no recorded google_calendar connection."""
@@ -199,28 +187,22 @@ def composio(monkeypatch):
 
 @pytest.fixture()
 def gcal_server():
-    """Start the emulated Calendar server on a free port; yield (base_url, server)."""
-    server = _CalendarServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Calendar server on a free port; yield the recording server."""
+    yield from serve_recording(_CalendarRequestHandler)
 
 
 @pytest.fixture()
 def backend(gcal_server, composio):
     """A connected backend pointed at the emulated Calendar server."""
-    base_url, server = gcal_server
+    server = gcal_server
+    base_url = server.base_url
     connect(composio, _SERVICE)
     b = GoogleCalendarChannelBackend()
     b._base_url = base_url
     return b, server
 
 
-def _last(server: _CalendarServer) -> dict[str, Any]:
+def _last(server: RecordingServer) -> dict[str, Any]:
     return server.requests[-1]
 
 

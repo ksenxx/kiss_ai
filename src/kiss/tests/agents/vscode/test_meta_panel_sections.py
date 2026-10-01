@@ -49,7 +49,7 @@ import math
 import threading
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from playwright.sync_api import Browser, Locator, Page, sync_playwright
@@ -274,14 +274,31 @@ def _deliver(page: Page, data: dict[str, object]) -> None:
     )
 
 
+def _start_running_task(page: Page) -> dict[str, Any]:
+    """Mark the task running and return its first ``getTaskUpdate`` poll.
+
+    The page has no WebSocket server behind it, so the shim keeps
+    reporting ``daemonStatus connected:false`` on every failed attempt
+    and main.js holds its pollers back while the daemon is down.  The
+    connected report and the ``status`` are dispatched in ONE evaluate
+    so no shim report can land between them."""
+    poll = page.evaluate(
+        """() => {
+          const deliver = data =>
+            window.dispatchEvent(new MessageEvent('message', {data}));
+          deliver({type: 'daemonStatus', connected: true});
+          deliver({type: 'status', running: true});
+          return window.__posted.filter(m => m.type === 'getTaskUpdate').pop() || null;
+        }"""
+    )
+    assert poll is not None, "a running task must start the getTaskUpdate poll"
+    return cast(dict[str, Any], poll)
+
+
 def _show_task_update(page: Page, html: str) -> None:
     """Run a task and answer its getTaskUpdate poll with ``html``."""
     _deliver(page, {"type": "configData", "config": {}, "apiKeys": {}})
-    _deliver(page, {"type": "status", "running": True})
-    poll = page.evaluate(
-        "() => window.__posted.filter(m => m.type === 'getTaskUpdate').pop() || null"
-    )
-    assert poll is not None, "a running task must start the getTaskUpdate poll"
+    poll = _start_running_task(page)
     _deliver(
         page,
         {
@@ -637,11 +654,7 @@ def test_long_error_status_scrolls_instead_of_pushing_the_report_out(
     try:
         page.wait_for_selector("body.remote-desktop", state="attached")
         _deliver(page, {"type": "configData", "config": {}, "apiKeys": {}})
-        _deliver(page, {"type": "status", "running": True})
-        poll = page.evaluate(
-            "() => window.__posted.filter(m => m.type === 'getTaskUpdate').pop() || null"
-        )
-        assert poll is not None
+        poll = _start_running_task(page)
         _deliver(
             page,
             {

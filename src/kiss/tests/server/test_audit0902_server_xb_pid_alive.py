@@ -6,7 +6,7 @@
 
 ``web_server._is_pid_alive`` was one of three divergent copies of the
 "is this pid alive" probe; it now delegates to
-:func:`kiss.agents.sorcar._concurrency.pid_alive`.  The behaviour the
+:func:`kiss.core.processes.pid_alive`.  The behaviour the
 server relies on is exercised end to end through the cloudflared
 pidfile adoption path (:func:`_try_adopt_existing_cloudflared`),
 which must decline a pidfile that names a dead or non-positive pid
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar._concurrency import pid_alive
+from kiss.core.processes import pid_alive
 from kiss.server import web_server as ws
 
 

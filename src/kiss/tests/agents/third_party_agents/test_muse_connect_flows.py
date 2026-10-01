@@ -29,7 +29,6 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import _device_auth
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents._device_auth import (
     ConsentSession,
     DeviceFlowProvider,
@@ -65,6 +64,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 from kiss.tests.conftest import IS_WINDOWS, install_cli_script
 
 _MS_TENANT = "contoso.onmicrosoft.com"
@@ -83,7 +83,7 @@ class _DeviceState:
         self.polls = 0
 
 
-class _AuthServer(ThreadedHTTPServer):
+class _AuthServer(RecordingServer):
     """Emulates GitHub / Twitch / Microsoft device flows plus their APIs.
 
     Behaviour knobs (set by tests before the flow runs):
@@ -95,8 +95,8 @@ class _AuthServer(ThreadedHTTPServer):
     * ``omit_code``: device answers carry no ``verification_uri``.
     """
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _AuthHandler)
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         self.devices: dict[str, _DeviceState] = {}
         self.access_tokens: dict[str, str] = {}
         self.refresh_tokens: dict[str, str] = {}
@@ -121,7 +121,6 @@ class _AuthServer(ThreadedHTTPServer):
         self.refresh_hook: Any = None
         self.matrix_registrations: list[dict[str, Any]] = []
         self.revoked: list[str] = []
-        self.requests: list[dict[str, Any]] = []
         self._counters: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -433,11 +432,11 @@ class _AuthHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not_found"})
 
 
-class _NextcloudServer(ThreadedHTTPServer):
+class _NextcloudServer(RecordingServer):
     """Emulates Nextcloud Login Flow v2 and the Talk ``/room`` read."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _NextcloudHandler)
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         self.flows: dict[str, bool] = {}
         self.app_passwords: dict[str, str] = {}
         self.login_name = "alice@example.com"
@@ -448,7 +447,6 @@ class _NextcloudServer(ThreadedHTTPServer):
         # ``server`` reported by the poll answer (defaults to the base URL).
         self.reported_server = ""
         self.revoked: list[str] = []
-        self.requests: list[dict[str, Any]] = []
 
     def base(self) -> str:
         """Return the emulator's base URL."""
@@ -570,21 +568,13 @@ class _NextcloudHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def auth_server() -> Any:
     """Run the device-flow emulator on a loopback port."""
-    server = _AuthServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_AuthHandler, _AuthServer)
 
 
 @pytest.fixture()
 def nextcloud_server() -> Any:
     """Run the Nextcloud emulator on a loopback port."""
-    server = _NextcloudServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_NextcloudHandler, _NextcloudServer)
 
 
 @pytest.fixture()
@@ -771,9 +761,7 @@ def test_github_denied_and_rejected_client(
     assert "github" not in ConsentSession._active
 
     monkeypatch.setenv("KISS_GITHUB_CLIENT_ID", "kiss-app")
-    assert json.loads(tools["authenticate_github"]())["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_github"]())["status"] == ("consent_required")
     auth_server.deny()
     denied = _finish(tools["finish_github_auth"])
     assert denied == {
@@ -1034,9 +1022,7 @@ def test_msteams_device_code_requires_refresh_token_and_muse(
     assert not vault_has_credentials("msteams")
     # The tenant rides on the session, so a config.json edited while the
     # sign-in is pending cannot redirect the finish step.
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == ("consent_required")
     ms_config.path.parent.mkdir(parents=True, exist_ok=True)
     ms_config.path.write_text(json.dumps({"tenant_id": "bad/tenant"}))
     auth_server.approve()
@@ -1621,9 +1607,7 @@ def test_device_polling_ignores_ambient_proxy_settings(
     agent = GitHubAgent()
     agent._backend._base_url = auth_server.base()
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_github"]())["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_github"]())["status"] == ("consent_required")
     auth_server.approve()
     done = _finish(tools["finish_github_auth"])
     assert done["ok"] is True and done["login"] == "octocat"
@@ -1640,9 +1624,7 @@ def test_msteams_graph_permission_verdicts_and_superseding(
     agent = MSTeamsAgent()
     agent._backend._graph_base = f"{auth_server.base()}/v1.0"
     tools = auth_tools(agent)
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == ("consent_required")
     auth_server.approve()
     result = _finish(tools["finish_msteams_auth"])
     assert result == {
@@ -1653,16 +1635,12 @@ def test_msteams_graph_permission_verdicts_and_superseding(
     assert agent._is_authenticated() is False
     # A 403 (token fine, permission missing) counts as proof of the exchange.
     auth_server.graph_status = 403
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == ("consent_required")
     auth_server.approve()
     assert _finish(tools["finish_msteams_auth"])["ok"] is True
     assert vault_has_credentials("msteams")
     # A newer sign-in supersedes a pending one.
-    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == (
-        "consent_required"
-    )
+    assert json.loads(tools["authenticate_msteams"](_MS_TENANT))["status"] == ("consent_required")
     pending = ConsentSession._active["msteams"]
     tools["authenticate_msteams"](_MS_TENANT)
     assert pending._cancelled is True and ConsentSession._active["msteams"] is not pending

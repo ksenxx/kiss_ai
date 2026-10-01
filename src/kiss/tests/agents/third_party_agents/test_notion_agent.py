@@ -25,7 +25,6 @@ import json
 import shutil
 import stat
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -33,15 +32,12 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.notion.notion_sea as notion_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.notion.notion_sea import (
     NotionAgent,
     NotionChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = "ntn_test_token"
 
@@ -169,7 +165,7 @@ class _NotionRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _record(self, body: dict[str, Any] | None) -> None:
-        cast(_NotionServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -282,31 +278,17 @@ class _NotionRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _NotionServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _NotionRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def notion_server():
-    """Start the emulated Notion API on a free port; yield (base_url, server)."""
-    server = _NotionServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Notion API on a free port; yield the recording server."""
+    yield from serve_recording(_NotionRequestHandler)
 
 
 @pytest.fixture()
 def backend(notion_server):
     """A backend pointed at the emulated server with the valid token."""
-    base_url, server = notion_server
+    server = notion_server
+    base_url = f"{server.base_url}/v1"
     b = NotionChannelBackend()
     b._base_url = base_url
     b._token = _TOKEN
@@ -634,9 +616,7 @@ def test_notion_create_page_under_page(backend) -> None:
     assert (req["method"], req["path"]) == ("POST", "/v1/pages")
     assert req["body"] == {
         "parent": {"page_id": "page-1"},
-        "properties": {
-            "title": {"title": [{"type": "text", "text": {"content": "Child Page"}}]}
-        },
+        "properties": {"title": {"title": [{"type": "text", "text": {"content": "Child Page"}}]}},
     }
 
 
@@ -891,7 +871,7 @@ def test_page_id_is_encoded_as_single_path_segment(backend) -> None:
 
 def test_unauthorized_token_returns_ok_false(notion_server) -> None:
     """A 401 from the API yields ok:false JSON from every tool — no exception."""
-    base_url, _ = notion_server
+    base_url = f"{notion_server.base_url}/v1"
     b = NotionChannelBackend()
     b._base_url = base_url
     b._token = "wrong-token"

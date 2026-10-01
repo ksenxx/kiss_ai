@@ -6,7 +6,7 @@
 
 SEA style, mirroring ``test_muse_auth_messaging.py``: a REAL Muse-auth
 daemon subprocess plus a REAL local HTTP server (stdlib
-``ThreadedHTTPServer``) emulating the Azure AD token endpoint, the
+``RecordingServer``) emulating the Azure AD token endpoint, the
 Microsoft Graph API, and the Telegram Bot API — no mocks, patches, or
 fakes.  The emulated APIs record every request arriving at the
 "network" so tests can prove the two NEW mechanisms:
@@ -91,7 +91,7 @@ from urllib.parse import parse_qs, quote
 import pytest
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.msteams.msteams_sea import MSTeamsAgent, MSTeamsChannelBackend
 from kiss.agents.third_party_agents.msteams.msteams_sea import _config as ms_config
 from kiss.agents.third_party_agents.msteams.msteams_sea import _make_backend as ms_make_backend
@@ -126,6 +126,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _REAL_TG_TOKEN = "7000000001:AAtelegram-real-secret_x"
 _REAL_MS_SECRET = "msteams-real-client-secret"
@@ -195,9 +196,7 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             )
             return
         if "/v1.0/" in path:
-            auth = next(
-                (v for k, v in self.headers.items() if k.lower() == "authorization"), ""
-            )
+            auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
             if not auth.startswith("Bearer graph-tok-") or self.server.graph_always_401:
                 self._reply(
                     401, json.dumps({"error": {"code": "InvalidAuthenticationToken"}}).encode()
@@ -217,9 +216,7 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
             if self.command == "POST":
                 self._reply(200, json.dumps({"id": "M1"}).encode())
                 return
-            self._reply(
-                200, json.dumps({"value": [{"id": "T1", "displayName": "Team"}]}).encode()
-            )
+            self._reply(200, json.dumps({"value": [{"id": "T1", "displayName": "Team"}]}).encode())
             return
         segments = [s for s in path.split("/") if s]
         if not (segments and segments[0].startswith("bot")):
@@ -352,12 +349,11 @@ class _TokenXApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _TokenXApiServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records requests for verification."""
+class _TokenXApiServer(RecordingServer):
+    """Recording server with per-test behaviour knobs."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _TokenXApiHandler)
-        self.requests: list[dict[str, Any]] = []
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         self.token_requests: list[dict[str, str]] = []
         # May be set to a non-numeric value to exercise the vault's
         # malformed-expires_in fallback.
@@ -384,21 +380,13 @@ class _TokenXApiServer(ThreadedHTTPServer):
 @pytest.fixture()
 def api_server() -> Any:
     """Run the emulated token/Graph/Telegram API on a loopback port."""
-    server = _TokenXApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_TokenXApiHandler, _TokenXApiServer)
 
 
 @pytest.fixture()
 def rogue_server() -> Any:
     """Run a second emulator on a different origin for redirect tests."""
-    server = _TokenXApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_TokenXApiHandler, _TokenXApiServer)
 
 
 @pytest.fixture()
@@ -539,9 +527,7 @@ def test_msteams_token_endpoint_down_is_a_safe_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A dead token endpoint reports class + URL, never form contents."""
-    store_credentials(
-        "msteams", _client_credential_info(f"http://127.0.0.1:{refusing_port}"), []
-    )
+    store_credentials("msteams", _client_credential_info(f"http://127.0.0.1:{refusing_port}"), [])
     backend = _ms_backend(api_server)
     assert backend.connect() is False
     assert "ConnectionError" in backend._connection_info
@@ -1039,9 +1025,7 @@ def test_agents_construct_and_fail_closed(
     assert "No MS Teams credential" in ms_agent._backend._connection_info
 
 
-def test_telegram_adapter_and_scrub_edges(
-    muse_env: Path, api_server: _TokenXApiServer
-) -> None:
+def test_telegram_adapter_and_scrub_edges(muse_env: Path, api_server: _TokenXApiServer) -> None:
     """Non-JSON/non-dict envelopes raise; scrub keeps non-secret keys."""
     tg_config.save({"bot_token": _REAL_TG_TOKEN, "note": "keep-me"})
     backend = _tg_backend(api_server)
@@ -1073,9 +1057,7 @@ def test_telegram_adapter_and_scrub_edges(
     _scrub_config_token()  # no file: a no-op
 
 
-def test_telegram_connect_failure_paths(
-    muse_env: Path, api_server: _TokenXApiServer
-) -> None:
+def test_telegram_connect_failure_paths(muse_env: Path, api_server: _TokenXApiServer) -> None:
     """connect() fails closed on missing credentials and rejected tokens."""
     backend = _tg_backend(api_server)
     assert backend.connect() is False
@@ -1161,9 +1143,7 @@ def test_daemon_refuses_a_tampered_unsafe_path_credential(
         )
 
 
-def test_transport_failures_redact_url_credentials(
-    muse_env: Path, refusing_port: int
-) -> None:
+def test_transport_failures_redact_url_credentials(muse_env: Path, refusing_port: int) -> None:
     """Refused connections report class + credential-free URL only."""
     port = refusing_port
     # Path placement: the message shows the redacted path form.
@@ -1207,7 +1187,7 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
     muse_env: Path, api_server: _TokenXApiServer
 ) -> None:
     """A hop to a host off every allowlist follows bodyless and redacted."""
-    rogue = _TokenXApiServer(("127.0.0.2", 0))
+    rogue = _TokenXApiServer(("127.0.0.2", 0), _TokenXApiHandler)
     thread = threading.Thread(target=rogue.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1217,9 +1197,7 @@ def test_offsite_redirect_to_unallowlisted_host_is_audited_and_redacted(
         grant("telegram", "write", "session")
         surrogate = backend._bot.token
         # 127.0.0.2 is NOT in the telegram allowlist (only 127.0.0.1 is).
-        api_server.offsite_location = (
-            f"http://127.0.0.2:{rogue.port}/bot{_REAL_TG_TOKEN}/getMe"
-        )
+        api_server.offsite_location = f"http://127.0.0.2:{rogue.port}/bot{_REAL_TG_TOKEN}/getMe"
         resp = MuseBoundarySession("telegram").request(
             "GET",
             f"{api_server.base()}/bot{surrogate}/redirectOffsite",
@@ -1274,7 +1252,9 @@ def test_vault_client_credentials_cache_edges(
 
 
 def test_token_exchange_refuses_redirecting_endpoint(
-    muse_env: Path, api_server: _TokenXApiServer, rogue_server: _TokenXApiServer,
+    muse_env: Path,
+    api_server: _TokenXApiServer,
+    rogue_server: _TokenXApiServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 307 from the token endpoint never forwards the secret-bearing POST."""
@@ -1314,9 +1294,7 @@ def test_token_exchange_rejects_nonfinite_expiry(
     _ms_enroll(api_server)
     backend = _ms_backend(api_server)
     assert backend.connect() is True
-    cached = json.loads((muse_auth_dir() / "vault" / "msteams.json").read_text())[
-        "cached_token"
-    ]
+    cached = json.loads((muse_auth_dir() / "vault" / "msteams.json").read_text())["cached_token"]
     expires_at = float(cached["expires_at"])
     assert expires_at < time.time() + 3700  # finite, bounded fallback
 
@@ -1344,9 +1322,7 @@ def test_failed_rotations_keep_the_prior_credential(
     assert tg_backend.connect() is True
     tg_agent = TelegramAgent.__new__(TelegramAgent)
     tg_agent._backend = tg_backend
-    rejected = json.loads(
-        auth_tools(tg_agent)["authenticate_telegram"]("1:rotated-but-wrong")
-    )
+    rejected = json.loads(auth_tools(tg_agent)["authenticate_telegram"]("1:rotated-but-wrong"))
     assert rejected["ok"] is False
     assert vault_has_credentials("telegram")
     assert not vault_has_credentials("telegram-pending")
@@ -1420,18 +1396,14 @@ def test_reply_echoes_are_normalized_to_the_surrogate(
     session = MuseBoundarySession("telegram")
     headers = {"Authorization": f"Bearer {surrogate}"}
     # An ordinary API error echoing the credentialed request path.
-    resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/echoBody", headers=headers
-    )
+    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/echoBody", headers=headers)
     assert resp.status_code == 404
     assert _REAL_TG_TOKEN not in resp.text
     assert quote(_REAL_TG_TOKEN, safe="") not in resp.text
     assert surrogate in resp.text  # the echo is normalized, not dropped
     # A chain longer than the redirect limit: the returned (still
     # redirecting) response's Location is normalized too.
-    resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/chain1", headers=headers
-    )
+    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/chain1", headers=headers)
     assert resp.status_code == 302
     location = resp.headers.get("Location", "")
     assert _REAL_TG_TOKEN not in location
@@ -1565,18 +1537,14 @@ def test_odd_encoded_response_echoes_are_scrubbed(
     session = MuseBoundarySession("telegram")
     headers = {"Authorization": f"Bearer {surrogate}"}
     # Body, header, and reason all echo the token with a %41 escape.
-    resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/echoOdd", headers=headers
-    )
+    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/echoOdd", headers=headers)
     assert resp.status_code == 418
     odd = _REAL_TG_TOKEN.replace("A", "%41", 1)
     for surface in (resp.text, resp.reason, resp.headers.get("X-Echoed-Path", "")):
         assert _REAL_TG_TOKEN not in surface
         assert odd not in surface
     # The terminal Location of an over-limit chain is scrubbed too.
-    resp = session.request(
-        "GET", f"{api_server.base()}/bot{surrogate}/oddChain1", headers=headers
-    )
+    resp = session.request("GET", f"{api_server.base()}/bot{surrogate}/oddChain1", headers=headers)
     assert resp.status_code == 302
     location = resp.headers.get("Location", "")
     assert _REAL_TG_TOKEN not in location
@@ -1640,11 +1608,17 @@ def test_atomic_store_if_absent_never_clobbers(
     from kiss.agents.third_party_agents.muse_auth.client import store_credentials
 
     # First store creates the entry.
-    assert store_credentials("telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [],
-                             only_if_absent=True) is True
+    assert (
+        store_credentials(
+            "telegram", {"kind": "path", "token": _REAL_TG_TOKEN}, [], only_if_absent=True
+        )
+        is True
+    )
     # A second store-if-absent with a different token is a no-op.
-    assert store_credentials("telegram", {"kind": "path", "token": "9:other"}, [],
-                             only_if_absent=True) is False
+    assert (
+        store_credentials("telegram", {"kind": "path", "token": "9:other"}, [], only_if_absent=True)
+        is False
+    )
     stored = json.loads((muse_auth_dir() / "vault" / "telegram.json").read_text())
     assert stored["authorized_user_info"]["token"] == _REAL_TG_TOKEN
     # Auto-migration therefore cannot overwrite it: a stale config
@@ -1919,9 +1893,7 @@ def test_config_lock_makes_scrub_a_compare_and_swap(muse_env: Path) -> None:
         assert not scrubbed.wait(0.4)
         # A concurrent writer (holding the lock, as all writers do)
         # lands a newer token.
-        write_private_file(
-            tg_config.path, json.dumps({"bot_token": "9:newer-token"}, indent=2)
-        )
+        write_private_file(tg_config.path, json.dumps({"bot_token": "9:newer-token"}, indent=2))
     thread.join(10.0)
     assert scrubbed.is_set()
     # The scrub read the newer value under the lock and backed off.

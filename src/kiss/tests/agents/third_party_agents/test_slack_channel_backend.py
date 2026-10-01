@@ -15,50 +15,27 @@ raises ``SlackApiError`` deterministically without network access.
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, ClassVar
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler
+from typing import Any
 
 import pytest
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.third_party_agents.slack.slack_sea import (
-    SlackChannelBackend,
-    _save_token,
+from kiss.agents.third_party_agents.slack.slack_sea import SlackChannelBackend
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    recording_server,
+    serve_recording,
 )
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
 
 
-class _InvalidAuthHandler(BaseHTTPRequestHandler):
-    """Slack Web API emulator answering ``invalid_auth`` to every call.
-
-    Records the path of every request in ``server.requests``.
-    """
-
-    server: Any
-
-    def _respond(self) -> None:
-        self.server.requests.append(self.path.split("?", 1)[0])
-        length = int(self.headers.get("Content-Length") or 0)
-        if length:
-            self.rfile.read(length)
-        data = json.dumps({"ok": False, "error": "invalid_auth"}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self) -> None:  # noqa: N802
-        """Handle GET requests (e.g. conversations.list)."""
-        self._respond()
-
-    def do_POST(self) -> None:  # noqa: N802
-        """Handle POST requests (e.g. chat.postMessage)."""
-        self._respond()
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+@pytest.fixture(scope="module")
+def invalid_auth_server() -> Iterator[RecordingServer]:
+    """One loopback ``invalid_auth`` Slack API for the whole module."""
+    yield from serve_recording(InvalidAuthHandler)
 
 
 def _send_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
@@ -77,33 +54,17 @@ def _send_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None
 class TestSlackChannelBackendMethods:
     """Tests for SlackChannelBackend methods with invalid token."""
 
-    server: ClassVar[ThreadingHTTPServer]
-    thread: ClassVar[threading.Thread]
+    server: RecordingServer
+    backend: SlackChannelBackend
 
-    @classmethod
-    def setup_class(cls) -> None:
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _InvalidAuthHandler)
-        cls.server.requests = []  # type: ignore[attr-defined]
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.thread.join(timeout=5)
-
-    def setup_method(self) -> None:
-        self.server.requests.clear()  # type: ignore[attr-defined]
-        _save_token("xoxb-invalid-test-token-for-methods")
-        port = self.server.server_address[1]
+    @pytest.fixture(autouse=True)
+    def _fresh_backend(self, invalid_auth_server: RecordingServer) -> None:
+        """A backend whose client talks to the module's ``invalid_auth`` server."""
+        self.server = invalid_auth_server
+        self.server.requests.clear()
         self.backend = SlackChannelBackend()
-        self.backend._client = WebClient(
-            token="xoxb-invalid-test-token-for-methods",
-            base_url=f"http://127.0.0.1:{port}/",
-            retry_handlers=[],
-        )
         self.backend._bot_user_id = "U_BOT_TEST"
+        self._use_server(invalid_auth_server)
 
     def test_find_channel_returns_none_on_api_error(self) -> None:
         """find_channel raises SlackApiError with invalid token."""
@@ -115,25 +76,10 @@ class TestSlackChannelBackendMethods:
         with pytest.raises(SlackApiError):
             self.backend.find_user("nobody")
 
-    @staticmethod
-    def _serve(
-        handler: type[BaseHTTPRequestHandler],
-    ) -> tuple[ThreadingHTTPServer, threading.Thread]:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server, thread
-
-    @staticmethod
-    def _stop(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-    def _use_server(self, server: ThreadingHTTPServer) -> None:
+    def _use_server(self, server: RecordingServer) -> None:
         self.backend._client = WebClient(
             token="xoxb-invalid-test-token-for-methods",
-            base_url=f"http://127.0.0.1:{server.server_address[1]}/",
+            base_url=f"{server.base_url}/",
             retry_handlers=[],
         )
 
@@ -146,7 +92,7 @@ class TestSlackChannelBackendMethods:
         """
         requests: list[str] = []
 
-        class _InfoOkHandler(_InvalidAuthHandler):
+        class _InfoOkHandler(InvalidAuthHandler):
             def _respond(self) -> None:
                 method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
                 requests.append(method)
@@ -155,14 +101,11 @@ class TestSlackChannelBackendMethods:
                     return
                 _send_json(self, {"ok": True, "channel": {"id": "x"}})
 
-        server, thread = self._serve(_InfoOkHandler)
-        try:
+        with recording_server(_InfoOkHandler) as server:
             self._use_server(server)
             assert self.backend.find_channel("C0AKYSNLB7W") == "C0AKYSNLB7W"
             assert self.backend.find_channel("G012ABCDEFG") == "G012ABCDEFG"
             assert self.backend.find_channel("D012ABCDEFG") == "D012ABCDEFG"
-        finally:
-            self._stop(server, thread)
         assert requests == ["conversations.info"] * 3
 
     def test_find_channel_unverifiable_id_falls_back_to_name_lookup(self) -> None:
@@ -174,7 +117,7 @@ class TestSlackChannelBackendMethods:
         """
         requests: list[str] = []
 
-        class _InfoFailsListOkHandler(_InvalidAuthHandler):
+        class _InfoFailsListOkHandler(InvalidAuthHandler):
             def _respond(self) -> None:
                 method = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
                 requests.append(method)
@@ -192,12 +135,9 @@ class TestSlackChannelBackendMethods:
                 else:
                     super()._respond()
 
-        server, thread = self._serve(_InfoFailsListOkHandler)
-        try:
+        with recording_server(_InfoFailsListOkHandler) as server:
             self._use_server(server)
             assert self.backend.find_channel("C0AKYSNLB7W") == "C_BY_NAME"
-        finally:
-            self._stop(server, thread)
         assert requests == ["conversations.info", "conversations.list"]
 
     def test_find_channel_unverifiable_id_raises_when_name_lookup_fails(self) -> None:
@@ -207,12 +147,14 @@ class TestSlackChannelBackendMethods:
         tried first and ``conversations.list`` second for each ID prefix.
         """
         for ident in ("C0AKYSNLB7W", "G012ABCDEFG", "D012ABCDEFG"):
-            self.server.requests.clear()  # type: ignore[attr-defined]
+            self.server.requests.clear()
             with pytest.raises(SlackApiError):
                 self.backend.find_channel(ident)
-            assert self.server.requests == [  # type: ignore[attr-defined]
-                "/conversations.info",
-                "/conversations.list",
+            # slack_sdk's urllib transport sends every Web API call as POST and
+            # carries GET-style parameters in the query string.
+            assert self.server.requests == [
+                {"method": "POST", "path": "/conversations.info"},
+                {"method": "POST", "path": "/conversations.list"},
             ]
 
     def test_find_user_passes_user_id_through(self) -> None:

@@ -6,7 +6,7 @@
 
 SEA style, mirroring ``test_muse_auth_devices.py``: a REAL Muse-auth
 daemon subprocess plus a REAL local HTTP server (stdlib
-``ThreadedHTTPServer``) emulating the Mattermost / Twitch / Zalo /
+``RecordingServer``) emulating the Mattermost / Twitch / Zalo /
 LINE / Nextcloud Talk / BlueBubbles / Synology Chat APIs — no mocks,
 patches, or fakes.  The emulated API records every request arriving at
 the "network" so tests can prove the boundary swap for each credential
@@ -49,7 +49,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -58,7 +57,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import BlueBubblesChannelBackend
 from kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea import _config as bb_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
@@ -94,6 +92,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _REAL_MM_TOKEN = "mm-real-secret"
 _REAL_TWITCH_TOKEN = "twitch-real-secret"
@@ -145,9 +144,7 @@ class _MessagingApiHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         auth = next((v for k, v in self.headers.items() if k.lower() == "authorization"), "")
-        zalo_token = next(
-            (v for k, v in self.headers.items() if k.lower() == "access_token"), ""
-        )
+        zalo_token = next((v for k, v in self.headers.items() if k.lower() == "access_token"), "")
         credential = auth or zalo_token
         if credential.startswith("Basic "):
             credential = base64.b64decode(credential[6:]).decode("utf-8", errors="replace")
@@ -200,9 +197,7 @@ class _MessagingApiHandler(BaseHTTPRequestHandler):
         elif path.endswith("/helix/chat/messages"):
             payload = json.dumps({"data": [{"message_id": "tm1"}]}).encode()
         elif path.endswith("/getoa"):
-            payload = json.dumps(
-                {"error": 0, "data": {"name": "kiss-oa", "oa_id": "OA1"}}
-            ).encode()
+            payload = json.dumps({"error": 0, "data": {"name": "kiss-oa", "oa_id": "OA1"}}).encode()
         elif path.endswith("/message/text") and "/v2.0/oa" in path:
             payload = json.dumps({"error": 0, "data": {"message_id": "Z1"}}).encode()
         elif path.endswith("/upload/image"):
@@ -315,12 +310,11 @@ class _MessagingApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _MessagingApiServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records requests for verification."""
+class _MessagingApiServer(RecordingServer):
+    """Recording server with per-test behaviour knobs."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _MessagingApiHandler)
-        self.requests: list[dict[str, Any]] = []
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         # Redirect target served by /redirect-offsite.
         self.offsite_location: str = ""
 
@@ -332,19 +326,6 @@ class _MessagingApiServer(ThreadedHTTPServer):
     def base(self, suffix: str = "") -> str:
         """Return the server's loopback base URL plus *suffix*."""
         return f"http://127.0.0.1:{self.port}{suffix}"
-
-    def header(self, name: str, index: int = -1) -> str:
-        """Return a recorded request header (case-insensitive).
-
-        Args:
-            name: Header name.
-            index: Which recorded request to inspect (default: last).
-
-        Returns:
-            The header value, or ``""`` when absent.
-        """
-        headers = self.requests[index]["headers"]
-        return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
 
     def query(self, index: int = -1) -> dict[str, list[str]]:
         """Return a recorded request's parsed query parameters.
@@ -361,21 +342,13 @@ class _MessagingApiServer(ThreadedHTTPServer):
 @pytest.fixture()
 def api_server() -> Any:
     """Run the emulated messaging REST API on a loopback port."""
-    server = _MessagingApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_MessagingApiHandler, _MessagingApiServer)
 
 
 @pytest.fixture()
 def rogue_server() -> Any:
     """Run a second, off-allowlist emulator for redirect tests."""
-    server = _MessagingApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_MessagingApiHandler, _MessagingApiServer)
 
 
 @pytest.fixture()
@@ -502,11 +475,14 @@ def test_mattermost_muse_authenticate_rotation_rollback_clear(
     assert result["ok"] is False
     assert "not a valid" in result["error"]
     # Re-enroll, then clear.
-    assert json.loads(
-        tools["authenticate_mattermost"](
-            "127.0.0.1", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
-        )
-    )["ok"] is True
+    assert (
+        json.loads(
+            tools["authenticate_mattermost"](
+                "127.0.0.1", _REAL_MM_TOKEN, port=api_server.port, scheme="http"
+            )
+        )["ok"]
+        is True
+    )
     assert "cleared" in tools["clear_mattermost_auth"]()
     assert not vault_has_credentials("mattermost")
     assert agent._backend._muse is False
@@ -579,17 +555,15 @@ def test_twitch_muse_authenticate_rollback_and_clear(
     assert stored == {"client_id": "cid1", "channel_name": "kisscaster"}
     assert vault_has_credentials("twitch")
     assert json.loads(tools["check_twitch_auth"]())["ok"] is True
-    result = json.loads(
-        tools["authenticate_twitch"]("cid1", "", "twitch-rotated-invalid", "")
-    )
+    result = json.loads(tools["authenticate_twitch"]("cid1", "", "twitch-rotated-invalid", ""))
     assert result["ok"] is False
     # A rejected rotation is probed before it is stored: the working
     # credential stays enrolled and usable.
     assert vault_has_credentials("twitch")
     assert json.loads(tools["check_twitch_auth"]())["ok"] is True
-    assert json.loads(
-        tools["authenticate_twitch"]("cid1", "", _REAL_TWITCH_TOKEN, "")
-    )["ok"] is True
+    assert (
+        json.loads(tools["authenticate_twitch"]("cid1", "", _REAL_TWITCH_TOKEN, ""))["ok"] is True
+    )
     assert "cleared" in tools["clear_twitch_auth"]()
     assert not vault_has_credentials("twitch")
 
@@ -604,9 +578,7 @@ def test_twitch_wire_failure_and_off_allowlist(
     # Enroll, then aim the backend at a host missing from the twitch
     # allowlist (the policy allows 127.0.0.1; use localhost instead).
     twitch_config.save({"client_id": "cid1", "access_token": _REAL_TWITCH_TOKEN})
-    backend = TwitchChannelBackend(
-        helix_base=f"http://localhost:{rogue_server.port}/helix"
-    )
+    backend = TwitchChannelBackend(helix_base=f"http://localhost:{rogue_server.port}/helix")
     assert backend.connect() is False
     assert "not in the 'twitch' connector's allowlist" in backend._connection_info
     assert not rogue_server.requests
@@ -615,9 +587,7 @@ def test_twitch_wire_failure_and_off_allowlist(
 # --------------------------------------------------------------------- Zalo
 
 
-def test_zalo_header_kind_swap_and_scrub(
-    muse_env: Path, api_server: _MessagingApiServer
-) -> None:
+def test_zalo_header_kind_swap_and_scrub(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """The surrogate bearer becomes Zalo's real ``access_token`` header."""
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN, "oa_id": "OA1"})
     backend = ZaloChannelBackend(api_base=api_server.base("/v2.0/oa"))
@@ -707,12 +677,11 @@ def test_line_muse_adapter_reads_and_writes(
     assert json.loads(backend.push_text_message("U1", "hello"))["ok"] is True
     sent = json.loads(api_server.requests[-1]["body"])
     assert sent == {"to": "U1", "messages": [{"type": "text", "text": "hello"}]}
-    assert json.loads(
-        backend.reply_message("rt1", '[{"type":"text","text":"pong"}]')
-    )["ok"] is True
-    assert json.loads(backend.push_image_message("U1", "http://i/1.png", "http://i/2.png"))[
-        "ok"
-    ] is True
+    assert json.loads(backend.reply_message("rt1", '[{"type":"text","text":"pong"}]'))["ok"] is True
+    assert (
+        json.loads(backend.push_image_message("U1", "http://i/1.png", "http://i/2.png"))["ok"]
+        is True
+    )
     assert json.loads(backend.leave_group("G1"))["ok"] is True
     assert api_server.requests[-1]["path"].endswith("/v2/bot/group/G1/leave")
 
@@ -756,13 +725,9 @@ def _nc_expected_basic() -> str:
     return "Basic " + base64.b64encode(f"bot:{_REAL_NC_PASSWORD}".encode()).decode()
 
 
-def test_nextcloud_basic_swap_and_scrub(
-    muse_env: Path, api_server: _MessagingApiServer
-) -> None:
+def test_nextcloud_basic_swap_and_scrub(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """The surrogate bearer becomes the real ``Authorization: Basic``."""
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is True
     assert backend._muse is True
@@ -783,9 +748,7 @@ def test_nextcloud_join_is_read_and_writes_need_grants(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """participants/active is a state-changing join: a write, like posting."""
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is True
     api_server.requests.clear()
@@ -839,9 +802,12 @@ def test_nextcloud_muse_authenticate_rollback_and_clear(
     )
     assert result["ok"] is False
     assert "not a valid" in result["error"]
-    assert json.loads(
-        tools["authenticate_nextcloud"](api_server.base(), "bot", _REAL_NC_PASSWORD)
-    )["ok"] is True
+    assert (
+        json.loads(tools["authenticate_nextcloud"](api_server.base(), "bot", _REAL_NC_PASSWORD))[
+            "ok"
+        ]
+        is True
+    )
     assert "cleared" in tools["clear_nextcloud_auth"]()
     assert not vault_has_credentials("nextcloud")
 
@@ -1064,9 +1030,7 @@ def test_query_kind_store_validation(muse_env: Path) -> None:
     """Malformed query-kind credentials are refused at enrollment."""
     ensure_daemon()
     with pytest.raises(MuseAuthError, match="query parameter name"):
-        store_credentials(
-            "bluebubbles", {"kind": "query", "param": "bad name!", "token": "pw"}, []
-        )
+        store_credentials("bluebubbles", {"kind": "query", "param": "bad name!", "token": "pw"}, [])
     with pytest.raises(MuseAuthError, match="token value"):
         store_credentials(
             "bluebubbles", {"kind": "query", "param": "password", "token": "bad\nvalue"}, []
@@ -1095,9 +1059,7 @@ def test_daemon_protocol_is_current(muse_env: Path) -> None:
 
 def test_underscore_header_kind_accepted(muse_env: Path) -> None:
     """Zalo's ``access_token`` header name (with underscore) enrolls fine."""
-    store_credentials(
-        "zalo", {"kind": "header", "header": "access_token", "token": "tok"}, []
-    )
+    store_credentials("zalo", {"kind": "header", "header": "access_token", "token": "tok"}, [])
     assert mint_surrogate("zalo") is not None
     clear_credentials("zalo")
 
@@ -1105,13 +1067,15 @@ def test_underscore_header_kind_accepted(muse_env: Path) -> None:
 # -------------------------------------------------------------- CLI imports
 
 
-def test_cli_import_messaging_services(
-    muse_env: Path, api_server: _MessagingApiServer
-) -> None:
+def test_cli_import_messaging_services(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """``muse_auth import`` migrates every messaging connector's secrets."""
     mm_config.save(
-        {"url": "127.0.0.1", "token": _REAL_MM_TOKEN, "port": str(api_server.port),
-         "scheme": "http"}
+        {
+            "url": "127.0.0.1",
+            "token": _REAL_MM_TOKEN,
+            "port": str(api_server.port),
+            "scheme": "http",
+        }
     )
     assert muse_cli.main(["import", "mattermost"]) == 0
     assert vault_has_credentials("mattermost")
@@ -1134,9 +1098,7 @@ def test_cli_import_messaging_services(
     assert muse_cli.main(["import", "line"]) == 0
     assert json.loads(line_config.path.read_text()) == {"channel_secret": "cs1"}
 
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
     assert muse_cli.main(["import", "nextcloud"]) == 0
     stored = json.loads(nc_config.path.read_text())
     assert "password" not in stored
@@ -1151,9 +1113,7 @@ def test_cli_import_messaging_services(
     assert muse_cli.main(["import", "synology"]) == 0
     stored = json.loads(syno_config.path.read_text())
     assert "token=" not in stored["webhook_url"]
-    for service in (
-        "mattermost", "twitch", "zalo", "line", "nextcloud", "bluebubbles", "synology"
-    ):
+    for service in ("mattermost", "twitch", "zalo", "line", "nextcloud", "bluebubbles", "synology"):
         assert vault_has_credentials(service)
     # The imported credentials are actually spendable: a Synology send
     # succeeds against the emulator (which validates the real token).
@@ -1196,9 +1156,7 @@ def test_cli_import_rejects_malformed_configs(muse_env: Path) -> None:
 # --------------------------------------------------- legacy mode unchanged
 
 
-def test_legacy_mode_unchanged(
-    isolated_kiss_home: Path, api_server: _MessagingApiServer
-) -> None:
+def test_legacy_mode_unchanged(isolated_kiss_home: Path, api_server: _MessagingApiServer) -> None:
     """With Muse off, every connector still sends its credential directly."""
     assert os.environ.get("KISS_MUSE_AUTH") == "0"  # pinned by tests/conftest.py
     # Mattermost: the typing indicator posts the real bearer directly.
@@ -1221,9 +1179,7 @@ def test_legacy_mode_unchanged(
     assert api_server.header("access_token") == _REAL_ZALO_TOKEN
     assert backend_z._headers() == {"access_token": _REAL_ZALO_TOKEN}
     # Nextcloud: requests derives the Basic header from the auth tuple.
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
     backend_nc = NextcloudTalkChannelBackend()
     assert backend_nc.connect() is True
     assert backend_nc._muse is False
@@ -1237,9 +1193,7 @@ def test_legacy_mode_unchanged(
     assert backend_bb._headers() == {}
     # Synology: the token-bearing webhook URL is posted directly.
     backend_sy = SynologyChatChannelBackend()
-    backend_sy._webhook_url = api_server.base(
-        f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}"
-    )
+    backend_sy._webhook_url = api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")
     backend_sy.send_message("", "legacy hello")
     assert api_server.query().get("token") == [_REAL_SYNO_TOKEN]
     # LINE: the SDK is not installed here, so the legacy constructor
@@ -1333,9 +1287,7 @@ def test_embedded_token_helper(muse_env: Path) -> None:
 # ------------------------------------------------------ coverage completion
 
 
-def test_connect_failure_paths_under_muse(
-    muse_env: Path, api_server: _MessagingApiServer
-) -> None:
+def test_connect_failure_paths_under_muse(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """connect() fails closed without credentials or with a bad token."""
     assert MattermostChannelBackend().connect() is False
     assert ZaloChannelBackend(api_base=api_server.base("/v2.0/oa")).connect() is False
@@ -1375,9 +1327,7 @@ def test_make_backends_muse_mode(
     _mm_config(api_server)
     zalo_config.save({"access_token": _REAL_ZALO_TOKEN})
     line_config.save({"channel_access_token": _REAL_LINE_TOKEN})
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": _REAL_NC_PASSWORD})
     bb_config.save({"server_url": api_server.base(), "password": _REAL_BB_PASSWORD})
     syno_config.save(
         {"webhook_url": api_server.base(f"/webapi/entry.cgi?api=X&token={_REAL_SYNO_TOKEN}")}
@@ -1390,9 +1340,7 @@ def test_make_backends_muse_mode(
     assert synology_sea._make_backend()._muse is True
 
 
-def test_mattermost_login_and_reaction(
-    muse_env: Path, api_server: _MessagingApiServer
-) -> None:
+def test_mattermost_login_and_reaction(muse_env: Path, api_server: _MessagingApiServer) -> None:
     """The shim's login() read and create_reaction write work at the boundary."""
     _mm_config(api_server)
     backend = MattermostChannelBackend()
@@ -1436,9 +1384,7 @@ def test_line_send_message_and_legacy_paths(
     assert sent["messages"][0]["text"] == "direct send"
 
 
-def test_line_legacy_sdk_missing(
-    isolated_kiss_home: Path, api_server: _MessagingApiServer
-) -> None:
+def test_line_legacy_sdk_missing(isolated_kiss_home: Path, api_server: _MessagingApiServer) -> None:
     """Without the SDK, legacy LINE construction fails soft (or raises in poll mode)."""
     from kiss.agents.third_party_agents.line import line_sea
     from kiss.agents.third_party_agents.line.line_sea import LineAgent
@@ -1544,6 +1490,7 @@ def test_nextcloud_scrub_edge_cases(muse_env: Path) -> None:
     _scrub_config_password()  # only the secret was stored
     assert not nc_config.path.exists()
 
+
 # ------------------------------------------------ review round-1 regressions
 
 
@@ -1560,9 +1507,7 @@ def test_query_kind_allowlisted_cross_origin_redirect_drops_credential(
     backend = _bb_backend(api_server)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}
-        },
+        "services": {"bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}},
     }
     (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
     api_server.offsite_location = rogue_server.base("/api/v1/server/info")
@@ -1711,9 +1656,7 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     """An HTTP 401 with an OCS failure envelope is a failure, not a success."""
     from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkAgent
 
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": "nc-bad-invalid"}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": "nc-bad-invalid"})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is False
     assert "HTTP 401" in backend._connection_info
@@ -1721,9 +1664,7 @@ def test_nextcloud_ocs_error_envelope_is_rejected(
     nc_config.clear()
     agent = NextcloudTalkAgent()
     tools = auth_tools(agent)
-    result = json.loads(
-        tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-bad-invalid")
-    )
+    result = json.loads(tools["authenticate_nextcloud"](api_server.base(), "bot", "nc-bad-invalid"))
     assert result["ok"] is False
     assert "401" in result["error"]
     assert not vault_has_credentials("nextcloud")
@@ -1736,9 +1677,7 @@ def test_cli_import_mattermost_rejects_non_string_url(muse_env: Path) -> None:
     assert muse_cli.main(["import", "mattermost"]) == 1
     assert not vault_has_credentials("mattermost")
     assert json.loads(mm_config.path.read_text())["token"] == "tok"
-    mm_config.path.write_text(
-        json.dumps({"url": "chat.example.com", "port": True, "token": "tok"})
-    )
+    mm_config.path.write_text(json.dumps({"url": "chat.example.com", "port": True, "token": "tok"}))
     assert muse_cli.main(["import", "mattermost"]) == 1
     assert not vault_has_credentials("mattermost")
     mm_config.path.write_text(
@@ -1752,9 +1691,7 @@ def test_nextcloud_non_json_failure_is_rejected(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A 5xx with a non-JSON body fails validation instead of crashing."""
-    nc_config.save(
-        {"url": api_server.base(), "username": "bot", "password": "nc-bad-nonjson"}
-    )
+    nc_config.save({"url": api_server.base(), "username": "bot", "password": "nc-bad-nonjson"})
     backend = NextcloudTalkChannelBackend()
     assert backend.connect() is False
     assert "HTTP 500" in backend._connection_info
@@ -1781,13 +1718,12 @@ def test_synology_marker_with_empty_vault_falls_back_direct(
     muse_env: Path, api_server: _MessagingApiServer
 ) -> None:
     """A scrubbed config whose vault entry is gone degrades to direct mode."""
-    syno_config.save(
-        {"webhook_url": api_server.base("/webapi/entry.cgi?api=X"), "muse": "1"}
-    )
+    syno_config.save({"webhook_url": api_server.base("/webapi/entry.cgi?api=X"), "muse": "1"})
     backend = SynologyChatChannelBackend()
     assert backend._wire_muse() is True
     assert backend._muse is False
     assert backend._http is requests
+
 
 # ------------------------------------------------ review round-2 regressions
 
@@ -1804,9 +1740,7 @@ def test_query_kind_two_hop_allowlisted_chain_never_regains_credential(
     backend = _bb_backend(api_server)
     policy = {
         "defaults": {"read": "allow", "write": "ask"},
-        "services": {
-            "bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}
-        },
+        "services": {"bluebubbles": {"extra_hosts": [f"127.0.0.1:{rogue_server.port}"]}},
     }
     (muse_auth_dir() / "policy.json").write_text(json.dumps(policy))
     api_server.offsite_location = rogue_server.base("/chain-middle")
@@ -1868,9 +1802,7 @@ def test_cli_import_mattermost_rejects_float_port(muse_env: Path) -> None:
         assert not vault_has_credentials("mattermost")
         assert json.loads(mm_config.path.read_text())["token"] == "tok"
     # A plain JSON integer port stays importable.
-    mm_config.path.write_text(
-        json.dumps({"url": "chat.example.com", "port": 8065, "token": "tok"})
-    )
+    mm_config.path.write_text(json.dumps({"url": "chat.example.com", "port": 8065, "token": "tok"}))
     assert muse_cli.main(["import", "mattermost"]) == 0
     assert vault_has_credentials("mattermost")
     clear_credentials("mattermost")

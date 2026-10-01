@@ -123,6 +123,20 @@ class TestAppendMyInjectionTrick(_TricksHome):
         )
         self.assertEqual(self.user_text(), before)
 
+    def test_crlf_body_is_the_same_trick_as_its_lf_twin(self) -> None:
+        # Edit/delete already normalise CRLF; a Windows client's add must
+        # not duplicate an existing LF section (nor store ``\r`` bytes).
+        self.assertIsNone(tricks.append_my_injection_trick("Line one.\nLine two."))
+        before = self.user_text()
+        self.assertEqual(
+            tricks.append_my_injection_trick("Line one.\r\nLine two.\r\n"),
+            "That promptlet is already in ~/.kiss/MY_INJECTION.md",
+        )
+        self.assertEqual(self.user_text(), before)
+        self.assertIsNone(tricks.append_my_injection_trick("Fresh.\r\nBody."))
+        self.assertNotIn("\r", self.user_text())
+        self.assertIn("Fresh.\nBody.", tricks.read_tricks())
+
     def test_markdown_escapes_round_trip_verbatim(self) -> None:
         # The reader strips CommonMark backslash escapes, so the writer
         # doubles the backslashes that would be stripped: the panel

@@ -56,7 +56,6 @@ from kiss.core.models.model import (
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
-    _ToolCallFilteredStream,
 )
 
 logger = logging.getLogger(__name__)
@@ -625,13 +624,8 @@ class ClaudeCodeModel(CLITextModel):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        original_config = self._install_tools_prompt_in_system_instruction(function_map)
-        self.model_config["system_instruction"] += _KISS_TOOLS_ARE_NOT_NATIVE_NOTE
-        try:
-            with _ToolCallFilteredStream(self):
-                content, response = self.generate()
-        finally:
-            self.model_config = original_config
+        with self._tools_prompt_installed(function_map, _KISS_TOOLS_ARE_NOT_NATIVE_NOTE):
+            content, response = self.generate()
 
         all_sources = [content]
         if self._pre_result_content:

@@ -42,7 +42,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from kiss.agents.sorcar import web_stealth
-from kiss.agents.sorcar._concurrency import pid_alive as _pid_alive
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import (
     _absolutize,
@@ -51,6 +50,7 @@ from kiss.agents.sorcar.useful_tools import (
     _stale_worktree_fallback,
 )
 from kiss.core.processes import SIGKILL
+from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
 
 logger = logging.getLogger(__name__)

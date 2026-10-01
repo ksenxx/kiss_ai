@@ -120,8 +120,8 @@ class TestM1GitHasTimeout(unittest.TestCase):
     """``_git`` must abort a hung git instead of blocking forever.
 
     Asserted through behaviour rather than through the shape of the
-    subprocess call: the helper now delegates to the single hardened
-    runner in ``git_worktree`` (which uses ``Popen`` + ``killpg``), so
+    subprocess call: the server modules call the single hardened
+    runner ``git_worktree._git`` (``Popen`` + ``killpg``) directly, so
     a test that spied on ``subprocess.run``'s keyword arguments was
     pinning an implementation that no longer exists.
     """
@@ -139,7 +139,6 @@ class TestM1GitHasTimeout(unittest.TestCase):
     def test_hanging_git_is_abandoned_within_the_timeout(self) -> None:
         """A hung git yields returncode 124 well before it exits."""
         from kiss.agents.sorcar import git_worktree
-        from kiss.server import diff_merge as dm
 
         tmpdir = tempfile.mkdtemp(prefix="kiss-m1-timeout-")
         try:
@@ -150,7 +149,7 @@ class TestM1GitHasTimeout(unittest.TestCase):
             git_worktree._GIT_TIMEOUT_SECONDS = 1.0
             try:
                 start = time.monotonic()
-                result = dm._git(tmpdir, "status")
+                result = git_worktree._git("status", cwd=tmpdir)
                 elapsed = time.monotonic() - start
             finally:
                 os.environ["PATH"] = saved_path
@@ -166,13 +165,13 @@ class TestM1GitHasTimeout(unittest.TestCase):
 
     def test_normal_git_still_succeeds(self) -> None:
         """The timeout protection does not disturb a healthy command."""
-        from kiss.server import diff_merge as dm
+        from kiss.agents.sorcar.git_worktree import _git
 
         tmpdir = tempfile.mkdtemp(prefix="kiss-m1-ok-")
         try:
-            self.assertEqual(dm._git(tmpdir, "init", "-q").returncode, 0)
+            self.assertEqual(_git("init", "-q", cwd=tmpdir).returncode, 0)
             self.assertEqual(
-                dm._git(tmpdir, "status", "--porcelain").returncode, 0,
+                _git("status", "--porcelain", cwd=tmpdir).returncode, 0,
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

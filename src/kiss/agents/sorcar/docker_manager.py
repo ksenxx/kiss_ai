@@ -137,7 +137,13 @@ def _drain_exec_stream(
         # Close the HTTP response, not the stream, for the reasons given in
         # ``DockerManager._exec``: the SDK leaves it to the caller and the
         # stream's own ``close()`` keeps the socket descriptor until GC.
-        getattr(output_gen, "_response", output_gen).close()
+        # Guarded so the ``None`` sentinel below is always queued: a
+        # ``close()`` that raises would otherwise leave the consumer
+        # waiting out the whole deadline for a command that finished.
+        try:
+            getattr(output_gen, "_response", output_gen).close()
+        except Exception:
+            logger.debug("closing docker exec response failed", exc_info=True)
         for is_stderr, decoder in decoders.items():
             trailing = decoder.decode(b"", True)
             if trailing:

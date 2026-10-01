@@ -262,8 +262,9 @@ def test_agent_unauthenticated_exposes_only_auth_tools() -> None:
     assert [t.__name__ for t in agent._get_tools()] == _AUTH_TOOL_NAMES
 
 
-def test_check_auth_unauthenticated_explains_setup() -> None:
+def test_check_auth_unauthenticated_explains_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     """check_google_drive_auth explains how to set up credentials."""
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
     agent = GoogleDriveAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
     msg = tools["check_google_drive_auth"]()

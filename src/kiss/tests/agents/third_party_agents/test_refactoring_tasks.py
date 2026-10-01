@@ -2,16 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for refactoring tasks: ChannelConfig, _find_tool_call_ids,
-_build_openai_tools_schema, _resolve_openai_tools_schema,
-_build_text_based_tools_prompt, _parse_text_based_tool_calls,
-and related helpers.
+"""``ChannelConfig`` save/load/clear round trip on a real temp directory.
 
-The ``_ArtifactDirProxy`` tests moved to
-``tests/core/test_refactoring_tasks.py``: they depend only on
-``kiss.core.config``.
-
-No mocks, patches, fakes, or any form of test doubles.
+The model-helper tests (``_find_tool_call_ids`` & co.) live in
+``tests/core/models/test_refactoring_tasks.py`` and the
+``_ArtifactDirProxy`` tests in ``tests/core/test_refactoring_tasks.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +17,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import ChannelConfig
 
 
 class TestChannelConfig:
-    """Integration tests for ChannelConfig: save, load, clear, missing keys, permissions."""
+    """ChannelConfig writes, reads back and removes its JSON file."""
 
     def test_save_load_clear(self, tmp_path: Path) -> None:
         cfg = ChannelConfig(tmp_path, ("token",))

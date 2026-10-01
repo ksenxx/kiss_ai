@@ -280,6 +280,9 @@ function testReadySendsCanonicalWorkDir() {
   const {win, posted} = makeWebview();
   send(win, {type: 'tabs_state', tabs: [entry('b1', '/ws/b', 'chat-1')]});
   send(win, {type: 'tabs_state', tabs: [entry('b1', '', 'chat-1')]});
+  // A real outage (the daemon had been up), not a cold start: only
+  // the former re-announces ready.
+  send(win, {type: 'daemonStatus', connected: true});
   send(win, {type: 'daemonStatus', connected: false});
   send(win, {type: 'daemonStatus', connected: true});
   const readies = posted.filter(m => m && m.type === 'ready');

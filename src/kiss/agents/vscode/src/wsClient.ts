@@ -49,12 +49,13 @@ export interface WsClientOptions {
   maxMessageBytes?: number;
 }
 
-export type WsReadyState = 'connecting' | 'open' | 'closing' | 'closed';
+type WsReadyState = 'connecting' | 'open' | 'closing' | 'closed';
 
 /**
- * One WebSocket connection.  Events: `open`, `message` (string),
- * `close` ({code, reason}), `error` (Error).  `error` is always followed
- * by `close`; `close` fires exactly once.
+ * One WebSocket connection, single-use: `connect()` once, then
+ * `destroy()`; a closed instance cannot be reconnected.  Events: `open`,
+ * `message` (string), `close` ({code, reason}), `error` (Error).  `error`
+ * is always followed by `close`; `close` fires exactly once.
  */
 export class WsClient extends EventEmitter {
   private _socket: net.Socket | null = null;
@@ -84,13 +85,11 @@ export class WsClient extends EventEmitter {
       options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
   }
 
-  get readyState(): WsReadyState {
-    return this._state;
-  }
-
   /** Open the TCP/TLS connection and start the WebSocket handshake. */
   connect(): void {
-    if (this._socket) return;
+    // Once closed, `_handshakeDone` is left set: a second connect would
+    // skip the HTTP handshake and parse the response as frames.
+    if (this._socket || this._state !== 'connecting') return;
     const secure = this._url.protocol === 'wss:';
     if (!secure && this._url.protocol !== 'ws:') {
       this._fail(new Error(`unsupported URL scheme ${this._url.protocol}`));
@@ -132,21 +131,6 @@ export class WsClient extends EventEmitter {
     if (this._state !== 'open' || !this._socket) return false;
     this._socket.write(this._frame(OP_TEXT, Buffer.from(text, 'utf8')));
     return true;
-  }
-
-  /**
-   * Start the closing handshake.  The socket is destroyed once the
-   * server echoes the close frame or after a short grace period.
-   */
-  close(code = 1000, reason = ''): void {
-    if (this._state === 'closed' || this._state === 'closing') return;
-    if (this._state === 'connecting' || !this._socket) {
-      this.destroy();
-      return;
-    }
-    this._state = 'closing';
-    this._sendClose(code, reason);
-    this._closeTimer = setTimeout(() => this.destroy(), CLOSE_GRACE_MS);
   }
 
   /** Tear the connection down immediately, without a closing handshake. */
@@ -292,15 +276,11 @@ export class WsClient extends EventEmitter {
         this._protocolError(1009, 'message too big');
         return;
       }
-      const maskLen = masked ? 4 : 0;
-      if (buf.length < offset + maskLen + len) return;
-      let payload = buf.subarray(offset + maskLen, offset + maskLen + len);
-      if (masked) {
-        const mask = buf.subarray(offset, offset + 4);
-        payload = Buffer.from(payload);
-        for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
-      }
-      this._buf = buf.subarray(offset + maskLen + len);
+      // Server frames are never masked (rejected above), so the payload
+      // starts right after the length bytes.
+      if (buf.length < offset + len) return;
+      const payload = buf.subarray(offset, offset + len);
+      this._buf = buf.subarray(offset + len);
       this._handleFrame(fin, opcode, payload);
     }
   }
