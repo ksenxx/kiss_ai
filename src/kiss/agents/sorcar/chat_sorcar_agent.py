@@ -436,6 +436,7 @@ class ChatSorcarAgent(SorcarAgent):
         prompt: str,
         result_raw: str,
         result_summary: str,
+        usage: tuple[float, int, int] | None = None,
     ) -> None:
         """Persist a minimal replayable event stream when none was recorded.
 
@@ -465,6 +466,9 @@ class ChatSorcarAgent(SorcarAgent):
             result_raw: The raw YAML result string returned by the run
                 (used to recover ``success`` / ``is_continue``).
             result_summary: The extracted human-readable summary text.
+            usage: One coherent ``(budget_used, total_tokens_used,
+                total_steps)`` triple to stamp on the ``result`` event;
+                taken from :meth:`usage_snapshot` when ``None``.
         """
         if _task_has_transcript_events(task_id):
             return
@@ -473,12 +477,13 @@ class ChatSorcarAgent(SorcarAgent):
             _append_chat_event(
                 {"type": "prompt", "text": prompt_text}, task_id=task_id,
             )
+        cost, tokens, steps = usage if usage is not None else self.usage_snapshot()
         event: dict[str, object] = {
             "type": "result",
             "text": result_summary or "(no result)",
-            "total_tokens": int(getattr(self, "total_tokens_used", 0) or 0),
-            "cost": f"${float(getattr(self, 'budget_used', 0.0) or 0.0):.4f}",
-            "step_count": int(getattr(self, "total_steps", 0) or 0),
+            "total_tokens": tokens,
+            "cost": f"${cost:.4f}",
+            "step_count": steps,
         }
         parsed = parse_result_yaml(result_raw) if result_raw else None
         if parsed:
@@ -764,9 +769,10 @@ class ChatSorcarAgent(SorcarAgent):
                         or resolved_model
                     )
                     final_is_parallel = self._is_parallel
-                    final_tokens = int(getattr(self, "total_tokens_used", 0) or 0)
-                    final_cost = float(getattr(self, "budget_used", 0.0) or 0.0)
-                    final_steps = int(getattr(self, "total_steps", 0) or 0)
+                    # One coherent triple (see usage_snapshot): three
+                    # property reads could tear across a concurrent
+                    # abandoned-subagent reclaim.
+                    final_cost, final_tokens, final_steps = self.usage_snapshot()
                 else:
                     final_model = resolved_model
                     final_is_parallel = run_is_parallel
@@ -791,4 +797,5 @@ class ChatSorcarAgent(SorcarAgent):
                     prompt=agent_prompt,
                     result_raw=result_raw,
                     result_summary=result_summary,
+                    usage=(final_cost, final_tokens, final_steps),
                 )

@@ -7,7 +7,7 @@
 Covers, over REAL objects (no mocks, patches, or fakes):
 
 * F1: ``WebPrinter._send_locks`` must not be re-populated for an
-  endpoint that ``_remove_endpoint`` already dropped — the re-insert
+  endpoint that ``remove_client`` already dropped — the re-insert
   race leaked one ``asyncio.Lock`` per lost race for the daemon's
   lifetime.
 * F2: ``RemoteAccessServer._auth_failures`` must not grow without
@@ -146,7 +146,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         writer = await self._server_side_writer()
         with printer._ws_lock:
             self.assertIn(writer, printer._pending_sends)
-        printer.remove_local_client(writer)
+        printer.remove_client(writer)
         with printer._ws_lock:
             self.assertNotIn(writer, printer._send_locks)
             self.assertNotIn(writer, printer._pending_sends)
@@ -178,7 +178,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
             t = threading.Thread(target=hammer)
             t.start()
             await asyncio.sleep(random.uniform(0.0, 0.01))
-            printer.remove_local_client(writer)
+            printer.remove_client(writer)
             await asyncio.to_thread(t.join)
         await asyncio.sleep(0.3)
         with printer._ws_lock:

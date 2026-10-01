@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonAgent, _config
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import recording_server
 from kiss.tests.agents.third_party_agents.test_new_channel_agents import (
     _CHANNEL_AGENTS,
 )
@@ -56,32 +57,13 @@ class _ShipHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _ConfigBackup:
-    """Back up and restore the tlon config file around a test."""
-
-    def __init__(self) -> None:
-        self._backup: str | None = None
-        if _config.path.exists():
-            self._backup = _config.path.read_text()
-
-    def restore(self) -> None:
-        """Restore the original config file state."""
-        if self._backup is not None:
-            _config.path.parent.mkdir(parents=True, exist_ok=True)
-            _config.path.write_text(self._backup)
-        elif _config.path.exists():
-            _config.path.unlink()
-
-
 def test_channel_config_path_honours_kiss_home_lazily(tmp_path: Path) -> None:
     """ChannelConfig.path follows $KISS_HOME changes made after import."""
     saved = os.environ.get("KISS_HOME")
     try:
         os.environ["KISS_HOME"] = str(tmp_path / "kiss_home_a")
         path_a = _config.path
-        assert path_a == (
-            tmp_path / "kiss_home_a" / "third_party_agents" / "tlon" / "config.json"
-        )
+        assert path_a == (tmp_path / "kiss_home_a" / "third_party_agents" / "tlon" / "config.json")
         _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
         assert path_a.exists()
         loaded = _config.load()
@@ -106,30 +88,20 @@ def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None
     config referencing it is saved before the auth-check test runs.  The
     test must clear that state and still report unauthenticated.
     """
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _ShipHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    backup = _ConfigBackup()
-    try:
-        base = f"http://127.0.0.1:{server.server_address[1]}"
-        _config.save({"ship_url": base, "code": "lidlut-tabwed", "ship": "~zod"})
+    with recording_server(_ShipHandler) as server:
+        with config_backup(_config.path):
+            _config.save({"ship_url": server.base_url, "code": "lidlut-tabwed", "ship": "~zod"})
 
-        agent = TlonAgent()
-        tools = {t.__name__: t for t in agent._get_tools()}
-        assert json.loads(tools["check_tlon_auth"]())["ok"] is True
+            agent = TlonAgent()
+            tools = {t.__name__: t for t in agent._get_tools()}
+            assert json.loads(tools["check_tlon_auth"]())["ok"] is True
 
-        _run_check_auth_unauthenticated(_TLON_INFO)
-    finally:
-        backup.restore()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+            _run_check_auth_unauthenticated(_TLON_INFO)
 
 
 def test_clear_tlon_auth_resets_backend_and_config() -> None:
     """clear_tlon_auth removes the config file and in-memory ship state."""
-    backup = _ConfigBackup()
-    try:
+    with config_backup(_config.path):
         _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
         agent = TlonAgent()
         assert agent._is_authenticated()
@@ -139,5 +111,3 @@ def test_clear_tlon_auth_resets_backend_and_config() -> None:
         assert _config.load() is None
         assert not agent._is_authenticated()
         assert "not configured" in tools["check_tlon_auth"]().lower()
-    finally:
-        backup.restore()

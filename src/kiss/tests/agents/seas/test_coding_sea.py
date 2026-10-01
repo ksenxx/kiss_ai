@@ -43,20 +43,20 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
         container_name = live.id
     except Exception:
         pass
-    config = tmp_path / "config.json"
-    config.write_text(
-        json.dumps(
-            {
-                "container": container_name,
-                "workdir": "/app",
-                "prompt": "p",
-                "model": MODEL,
-                "trajectory": str(tmp_path / "trajectory.jsonl"),
-            }
-        )
-    )
-    harness = coding_sea.ContainerHarness(str(config))
     try:
+        config = tmp_path / "config.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "container": container_name,
+                    "workdir": "/app",
+                    "prompt": "p",
+                    "model": MODEL,
+                    "trajectory": str(tmp_path / "trajectory.jsonl"),
+                }
+            )
+        )
+        harness = coding_sea.ContainerHarness(str(config))
         for expected in range(1, 202):
             assert harness.on_llm_call([{"role": "user", "content": "x"}]) == [
                 {"role": "user", "content": "x"}
@@ -407,9 +407,25 @@ def _live_container(image: str, setup: str) -> Any:
     except Exception:
         return None
     live = client.containers.run(image, "sleep infinity", detach=True)
-    exit_code, out = live.exec_run(["sh", "-c", setup])
-    assert exit_code == 0, out
+    try:
+        exit_code, out = live.exec_run(["sh", "-c", setup])
+        assert exit_code == 0, out
+    except BaseException:
+        live.remove(force=True)
+        raise
     return live
+
+
+def _wait_until(harness: Any, wanted: str, present: bool, deadline: float = 30.0) -> None:
+    """Poll the container's process table until a command starting with *wanted* is (not) there."""
+    end = time.monotonic() + deadline
+    while True:
+        cmds = [cmd for _pid, cmd in harness.process_snapshot().values()]
+        if any(cmd.startswith(wanted) for cmd in cmds) == present:
+            return
+        state = "did not appear" if present else "did not exit"
+        assert time.monotonic() < end, f"{wanted!r} {state}: {cmds}"
+        time.sleep(0.1)
 
 
 def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None:
@@ -430,12 +446,12 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
     )
     if live is None:
         pytest.skip("Docker is not available")
-    config = tmp_path / "config.json"
-    config.write_text(json.dumps({
-        "container": live.id, "workdir": "/app", "prompt": "Do the task.", "model": MODEL,
-        "trajectory": str(tmp_path / "trajectory.jsonl"),
-    }))
     try:
+        config = tmp_path / "config.json"
+        config.write_text(json.dumps({
+            "container": live.id, "workdir": "/app", "prompt": "Do the task.", "model": MODEL,
+            "trajectory": str(tmp_path / "trajectory.jsonl"),
+        }))
         harness = coding_sea.ContainerHarness(str(config))
         # The task statement carries the workdir listing; the model cannot be switched.
         prompt = harness.prompt()
@@ -449,9 +465,13 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
             "/app/data.csv", "/app/sub/keep.txt", "/app/gone.txt", "/app/mine.py",
             "/app/real.txt", "/app/extra.txt", "/app/last.txt"}
 
-        def shell(command: str) -> dict[str, Any]:
+        def shell(command: str, exited: str | None = None) -> dict[str, Any]:
+            """Run *command* as one tool call; *exited* names a process that must be gone
+            from the container before the post-call snapshot is taken."""
             assert harness.on_tool_call("Bash", {"command": command}) == "OK"
             live.exec_run(["sh", "-c", command])
+            if exited is not None:
+                _wait_until(harness, exited, present=False)
             result = {"role": "tool", "content": "ran"}
             harness.on_llm_call([result])
             return result
@@ -486,19 +506,25 @@ def test_shell_notes_report_survivors_and_changed_inputs(tmp_path: Path) -> None
         # A child born between turns is adopted at the next call's start, so it stays
         # tracked when its parent exits during that call and is orphaned to pid 1; a
         # tracked shell that exec()s the program keeps its (pid, start time) identity.
-        # Timeline (t = 0 at the nohup): sleep 303 is born at 1.5 s, after this
-        # call returned but before the next one starts at ~2 s; its parent exits
-        # at 3 s, inside that next call (~2 s to ~3.5 s).  The 1.5 s head start
-        # covers a slow call return on a loaded host.
+        # The two background shells block on marker files, so the test decides
+        # exactly when sleep 303 is born (between turns) and when its parent exits
+        # (inside the next call, before that call's post-call snapshot, so the
+        # snapshot cannot adopt sleep 303 through a still-live parent) instead of
+        # racing wall-clock sleeps.
+        wait_go1 = "while [ ! -f /tmp/go1 ]; do sleep 0.05; done"
+        wait_go2 = "while [ ! -f /tmp/go2 ]; do sleep 0.05; done"
         result = shell(
-            "cd /app && nohup sh -c 'sleep 1.5; exec sleep 302' >/dev/null 2>&1 & "
-            "cd /app && nohup sh -c 'sleep 1.5; sleep 303 & sleep 1.5' >/dev/null 2>&1 &"
+            f"cd /app && nohup sh -c '{wait_go1}; exec sleep 302' >/dev/null 2>&1 & "
+            f"cd /app && nohup sh -c '{wait_go1}; sleep 303 & {wait_go2}' >/dev/null 2>&1 &"
         )
         assert "started by your last shell command(s)" in result["content"]
         assert not [cmd for _pid, cmd in harness.process_snapshot().values()
                     if cmd.startswith("sleep 303")]
-        time.sleep(2.0)
-        assert shell("sleep 1.5")["content"] == "ran"
+        live.exec_run(["touch", "/tmp/go1"])
+        _wait_until(harness, "sleep 303", present=True)
+        _wait_until(harness, "sleep 302", present=True)
+        result = shell("touch /tmp/go2", exited="sh -c while [ ! -f /tmp/go1 ]")
+        assert result["content"] == "ran"
         assert [cmd for _pid, cmd in harness.process_snapshot().values()
                 if cmd.startswith("sleep 303")]
         result = shell("kill 999999 2>/dev/null; true")

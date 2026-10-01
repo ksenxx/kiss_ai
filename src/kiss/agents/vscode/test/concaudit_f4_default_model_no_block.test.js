@@ -31,13 +31,14 @@ const path = require('path');
 const Module = require('module');
 const {createFakeDaemon} = require('./fakeDaemon');
 
+if (process.platform === 'win32') {
+  console.log('SKIP: the fake `uv` below is a POSIX shell script');
+  process.exit(0);
+}
+
 const OUT_VIEW = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
 if (!fs.existsSync(OUT_VIEW)) {
   console.log('SKIP: out/SorcarSidebarView.js missing — run `npm run compile`');
-  process.exit(0);
-}
-if (process.platform === 'win32') {
-  console.log('SKIP: Unix domain sockets only');
   process.exit(0);
 }
 

@@ -16,7 +16,7 @@
 // the extension host kept a dead connection open per disposed view.
 //
 // This test runs the REAL compiled AgentClient in a child process
-// against a Unix socket server in this process that never reads.  The
+// against a local WebSocket server in this process that never reads.  The
 // child sends a 64 MiB command, disposes the client and then has
 // nothing else keeping its event loop alive -- so it exits promptly
 // only if dispose() really destroyed the socket.  A regressed build
@@ -34,10 +34,6 @@ const {createFakeDaemon} = require('./fakeDaemon');
 const OUT_AGENT_CLIENT = path.join(__dirname, '..', 'out', 'AgentClient.js');
 if (!fs.existsSync(OUT_AGENT_CLIENT)) {
   console.log('SKIP: out/AgentClient.js missing — run `npm run compile`');
-  process.exit(0);
-}
-if (process.platform === 'win32') {
-  console.log('SKIP: Unix domain sockets only');
   process.exit(0);
 }
 

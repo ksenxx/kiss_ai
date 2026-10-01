@@ -682,13 +682,20 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert autorouter_sea.NO_EVIDENCE in prompt and "{observed_evidence()}" not in prompt
     table = "| model | tasks |\n|---|---|\n| model-x | 12 |\n\n- model-x: no failures in 12 tasks."
+    # The SEA stamps the file with its own UTC date; a call straddling midnight
+    # may legitimately carry either day's stamp, but the file and the report
+    # must carry the same one.
+    before = time.strftime("%Y-%m-%d", time.gmtime())
     report = sea.write_autorouter_evidence(table)
-    stamp = time.strftime("%Y-%m-%d", time.gmtime())
+    after = time.strftime("%Y-%m-%d", time.gmtime())
     written = (home / "AUTOROUTER.md").read_text(encoding="utf-8")
-    assert written == f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{table}\n"
-    assert report == (
-        f"Wrote {home / 'AUTOROUTER.md'} (5 lines, {len(written)} chars, refreshed {stamp})"
-    )
+    assert (written, report) in {
+        (
+            f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{table}\n",
+            f"Wrote {home / 'AUTOROUTER.md'} (5 lines, {len(written)} chars, refreshed {stamp})",
+        )
+        for stamp in (before, after)
+    }
     assert path.read_text(encoding="utf-8") == source
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert written.strip() in prompt and autorouter_sea.NO_EVIDENCE not in prompt
@@ -723,7 +730,7 @@ def test_write_autorouter_evidence_rewrites_the_kiss_home_file(
     refused = sea.write_autorouter_evidence(f"| model | tasks |\n|---|---|\n{rows}")
     assert refused.startswith("Error: the evidence is ") and "at most 2500" in refused
     assert "word word" in (home / "AUTOROUTER.md").read_text(encoding="utf-8")
-    stamped = f"{sea.STAMP_PREFIX}, refreshed {stamp} by /rsi7d._\n\n{rows}\n"
+    stamped = f"{sea.STAMP_PREFIX}, refreshed {after} by /rsi7d._\n\n{rows}\n"
     assert len(stamped) > sea.EVIDENCE_MAX_CHARS
     (home / "AUTOROUTER.md").write_text(stamped, encoding="utf-8")
     prompt = sea._execute_sea(path)["add_to_system_prompt"]()

@@ -57,7 +57,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
     shell commands."""
 
     def test_fuzz_cwd_paths_with_metacharacters(self) -> None:
-        from kiss.server import diff_merge as dm
+        from kiss.agents.sorcar.git_worktree import _git
 
         rng = random.Random(0x617)
         marker = Path(tempfile.gettempdir()) / f"git-pwned-{os.getpid()}"
@@ -71,7 +71,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
                 subprocess.run(["git", "init", "-q", str(tmpdir)],
                                capture_output=True, timeout=20)
                 bad_name = f"$(touch '{marker}')"
-                cp = dm._git(str(tmpdir), "status", "--porcelain")
+                cp = _git("status", "--porcelain", cwd=str(tmpdir))
                 self.assertEqual(cp.returncode, 0,
                                  msg=cp.stderr)
                 self.assertFalse(marker.exists(),
@@ -90,7 +90,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
         its own NUL-separated argv, so the property holds whatever
         subprocess primitive the helper uses internally.
         """
-        from kiss.server import diff_merge as dm
+        from kiss.agents.sorcar.git_worktree import _git
 
         tmpdir = Path(tempfile.mkdtemp(prefix="kiss-git-argv-"))
         argv_file = tmpdir / "argv"
@@ -115,7 +115,7 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
         try:
             for _ in range(20):
                 arg = _rng_payload(rng, forbid="\0")
-                dm._git(str(tmpdir), "log", arg, "--oneline")
+                _git("log", arg, "--oneline", cwd=str(tmpdir))
                 argv = argv_file.read_text().split("\0")[:-1]
                 self.assertIn("log", argv)
                 self.assertIn("--oneline", argv)

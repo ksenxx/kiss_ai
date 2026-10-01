@@ -88,6 +88,10 @@ function openReport(win, name) {
 }
 
 function reconnect(win) {
+  // A real outage: the daemon had been up before it dropped (a cold
+  // start, connected:false first, does not re-ready -- the boot ready
+  // is still queued in the host).
+  send(win, {type: 'daemonStatus', connected: true});
   send(win, {type: 'daemonStatus', connected: false});
   send(win, {type: 'daemonStatus', connected: true});
 }

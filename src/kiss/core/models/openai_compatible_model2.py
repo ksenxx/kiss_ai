@@ -25,9 +25,12 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+import httpx
+from openai import APITimeoutError
 from openai.resources.responses import Responses
 from openai.types.responses import response_create_params
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -41,13 +44,14 @@ from kiss.core.models.model import (
     accepted_request_params,
 )
 from kiss.core.models.openai_compatible_model import (
+    _CONNECT_TIMEOUT,
     OPENAI_INPUT_AUDIO_FORMATS,
     OPENAI_INPUT_IMAGE_MIME_TYPES,
     OpenAICompatibleBase,
     OpenAICompatibleModel,
     _extract_deepseek_reasoning,
 )
-from kiss.core.models.stream_abort import stop_aware_events
+from kiss.core.models.stream_abort import stall_error, stop_aware_events, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +182,19 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._reset_stream_indexes()
         if self.token_callback is not None:
             kwargs["stream"] = True
-            return self._consume_stream(self.client.responses.create(**kwargs))
+            # Bounds the wait for the response headers, which the watchdog
+            # inside ``_consume_stream`` cannot see (see ``_CONNECT_TIMEOUT``
+            # in ``openai_compatible_model``); both clocks raise the same
+            # retryable stall error.
+            kwargs["timeout"] = httpx.Timeout(
+                self._stream_stall_timeout, connect=_CONNECT_TIMEOUT
+            )
+            try:
+                return self._consume_stream(self.client.responses.create(**kwargs))
+            except (httpx.TimeoutException, APITimeoutError) as err:
+                if stop_signal.stop_requested():
+                    raise stop_error() from err
+                raise stall_error(self._stream_stall_timeout) from err
         response = self.client.responses.create(**kwargs)
         self._raise_for_failed_response(response)
         content, tool_calls = self._parse_non_streaming(response)

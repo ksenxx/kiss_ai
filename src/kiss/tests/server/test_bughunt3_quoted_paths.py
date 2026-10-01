@@ -9,7 +9,7 @@ double-quote, backslash, or control character — in ``diff --git``
 headers, ``--name-only`` output, ``ls-files --others`` output, and
 ``status --porcelain`` output.  Reproduces real bugs:
 
-* ``diff_merge._capture_untracked``: returned the quoted string, which
+* ``merge_flow._capture_untracked``: returned the quoted string, which
   does not exist on disk, making the file invisible to callers.
 * ``merge_flow._main_dirty_files``: ``.strip('"')`` removed the quotes
   but never unescaped ``\\"`` / ``\\\\``.
@@ -32,7 +32,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
-from kiss.server.diff_merge import _capture_untracked
+from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import posix_only
 
@@ -63,7 +63,7 @@ def _make_repo(tmpdir: str) -> str:
 
 
 class TestQuotedPathParsing(unittest.TestCase):
-    """diff_merge parse sites must return real (unquoted) file names."""
+    """merge_flow parse sites must return real (unquoted) file names."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-quoted-")

@@ -5,7 +5,7 @@
 
 // End-to-end tests for editor-tabs mode's host side
 // (out/SorcarPanelManager.js + out/SorcarSidebarView.js) against a
-// REAL Unix-domain-socket daemon stub:
+// REAL local-WSS daemon stub:
 //  - openNewChat creates a WebviewPanel whose chat HTML is pinned to a
 //    fresh root tab (editor-tab-mode body class + data-kiss-tab-id);
 //  - the webview's `panelTitle` message retitles the editor tab;

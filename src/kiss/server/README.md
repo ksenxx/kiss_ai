@@ -171,7 +171,7 @@ except `append_basic_tools`, whose getter is
 | `if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
 | `append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
 | `append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
-| `scope_work_dir()`       | `str`                           | `""` (scope = work dir)   | `tabScopeWorkDir`   |
+| `scope_work_dir()`       | `str`                           | `""` (= work dir)         | `tabScopeWorkDir`   |
 | `use_web_tools()`        | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
 | `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
 | `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
@@ -270,7 +270,9 @@ The parameters without getters:
 - **`stop_on_timeout`** — whether a `timeout` expiry also stops the
   task, awaiting the stop's confirmation (default `False`: the task
   keeps running); a client-side choice the script must not override.
-- **`endpoint_file`** — selects which daemon to connect to; the script
+- **`endpoint_file`** — selects which daemon to connect to (default:
+  `$KISS_SORCAR_LOCAL`, else `$KISS_HOME/sorcar-local.json`, the file the
+  daemon writes with its WSS URL and per-start local token); the script
   already runs on that daemon.
 - **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
   CALLING task's identity (how `run_agent` nests a dispatched run under
@@ -335,11 +337,12 @@ The parameters without getters:
   than turned into an "open this file" request, as it is for a path
   typed into a chat box.  The appended text becomes part of the
   recorded prompt in chat history.
-- **`scope_work_dir()`** — the workspace directory the run's tab is
-  scoped to in clients' tab bars, when different from the execution
-  `work_dir`.  An empty string scopes the tab to the run's work
-  directory (the default scoping), like an empty client-sent
-  `scope_work_dir`.
+- **`scope_work_dir()`** — the calling workspace recorded on the run's
+  tab in the daemon's shared tab registry, when different from the
+  execution `work_dir`.  Informational only: every client shows every
+  registry tab whatever folder it runs in.  An empty string from the
+  getter replaces any client-sent scope with the run's effective work
+  directory (an absent getter leaves the client-sent value alone).
 - **`use_web_tools()`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
   "Use web tools" checkbox, persisted as `use_web_browser`).  Under

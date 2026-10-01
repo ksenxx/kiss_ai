@@ -6,7 +6,7 @@
 
 SEA style, mirroring ``test_muse_auth_channels.py``: a REAL Muse-auth
 daemon subprocess plus a REAL local HTTP server (stdlib
-``ThreadedHTTPServer``) emulating the Discord / Home Assistant / ntfy /
+``RecordingServer``) emulating the Discord / Home Assistant / ntfy /
 Govee REST APIs — no mocks, patches, or fakes.  The emulated API
 asserts every request arriving at the "network" carries the REAL
 credential in the right header and scheme (proving the boundary swap
@@ -67,7 +67,7 @@ import pytest
 import requests
 
 from kiss.agents.third_party_agents import govee
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend
 from kiss.agents.third_party_agents.discord.discord_sea import _config as discord_config
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
@@ -97,6 +97,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _REAL_DISCORD_TOKEN = "discord-real-secret"
 _REAL_HA_TOKEN = "ha-real-secret"
@@ -129,8 +130,7 @@ class _DeviceApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.connection.close()
             return
-        if self.server.rotate_before_redirect and self.command == "POST" \
-                and path == "/t-rotate":
+        if self.server.rotate_before_redirect and self.command == "POST" and path == "/t-rotate":
             # The vault is rotated (new generation) between the initial
             # request and the redirect hop the daemon is about to follow.
             self.server.rotate_before_redirect()
@@ -160,9 +160,7 @@ class _DeviceApiHandler(BaseHTTPRequestHandler):
         elif path.endswith("/users/@me/guilds"):
             payload = json.dumps([{"id": "G1", "name": "kiss-guild"}]).encode()
         elif path.endswith("/users/@me"):
-            payload = json.dumps(
-                {"id": "B1", "username": "kissbot", "discriminator": "0"}
-            ).encode()
+            payload = json.dumps({"id": "B1", "username": "kissbot", "discriminator": "0"}).encode()
         elif "/channels/" in path and path.endswith("/messages"):
             payload = json.dumps({"id": "M1", "content": "sent"}).encode()
         elif path.endswith("/api/states"):
@@ -230,12 +228,11 @@ class _DeviceApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _DeviceApiServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records requests for verification."""
+class _DeviceApiServer(RecordingServer):
+    """Recording server with per-test behaviour knobs."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _DeviceApiHandler)
-        self.requests: list[dict[str, Any]] = []
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         # Paths that record the request then kill the connection with no
         # response (ambiguous-failure / replay-safety tests).
         self.drop_after_recording: set[str] = set()
@@ -243,28 +240,11 @@ class _DeviceApiServer(ThreadedHTTPServer):
         # rotate the vault mid-request (generation-abort tests).
         self.rotate_before_redirect: Any = None
 
-    def header(self, name: str, index: int = -1) -> str:
-        """Return a recorded request header (case-insensitive).
-
-        Args:
-            name: Header name.
-            index: Which recorded request to inspect (default: last).
-
-        Returns:
-            The header value, or ``""`` when absent.
-        """
-        headers = self.requests[index]["headers"]
-        return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
-
 
 @pytest.fixture()
 def api_server() -> Any:
     """Run the emulated device REST API on a loopback port."""
-    server = _DeviceApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_DeviceApiHandler, _DeviceApiServer)
 
 
 def _local_ip() -> str:
@@ -291,7 +271,7 @@ def lan_api_server() -> Any:
     ip = _local_ip()
     if not ip:
         pytest.skip("machine has no non-loopback IPv4 address")
-    server = _DeviceApiServer(("0.0.0.0", 0))
+    server = _DeviceApiServer(("0.0.0.0", 0), _DeviceApiHandler)
     server.lan_ip = ip  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -447,9 +427,7 @@ def test_discord_authenticate_rotation_rollback_clear(
     assert not discord_config.path.exists()
     assert api_server.header("Authorization") == "Bot tok-first"
     audit = (muse_auth_dir() / "audit.jsonl").read_text()
-    assert any(
-        json.loads(line)["service"] == "discord" for line in audit.splitlines()
-    )
+    assert any(json.loads(line)["service"] == "discord" for line in audit.splitlines())
     assert json.loads(tools["check_discord_auth"]())["ok"] is True
 
     # Rotation: the second token replaces the first at the boundary.
@@ -488,9 +466,7 @@ def test_homeassistant_insecure_host_consent(muse_env: Path, lan_api_server: Any
 
     # An allowlisted-but-not-insecure host refuses plaintext: enroll the
     # host WITHOUT the insecure flag and watch the Sentinel deny http.
-    store_credentials(
-        "homeassistant", {"kind": "bearer", "token": _REAL_HA_TOKEN}, [], hosts=(ip,)
-    )
+    store_credentials("homeassistant", {"kind": "bearer", "token": _REAL_HA_TOKEN}, [], hosts=(ip,))
     handle = mint_surrogate("homeassistant")
     assert handle is not None
     session = MuseBoundarySession("homeassistant")
@@ -765,9 +741,7 @@ def test_cli_import_devices(
 
     # A userinfo-bearing self-hosted URL is refused (no password
     # migrated, nothing stored).
-    firecrawl_config.save(
-        {"api_key": "fc-secret", "base_url": "https://alice:pw@fc.example"}
-    )
+    firecrawl_config.save({"api_key": "fc-secret", "base_url": "https://alice:pw@fc.example"})
     assert muse_cli.main(["import", "firecrawl"]) == 1
     assert not vault_has_credentials("firecrawl")
     assert firecrawl_config.path.exists()  # plaintext left for the user to fix
@@ -907,9 +881,7 @@ def test_discord_legacy_mode_unchanged(
     assert not discord_config.path.exists()
 
 
-def test_discord_muse_connect_failure_paths(
-    muse_env: Path, api_server: _DeviceApiServer
-) -> None:
+def test_discord_muse_connect_failure_paths(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A vault-enrolled but invalid token fails connect() with the API error."""
     discord_config.save({"bot_token": "tok-invalid"})
     backend = _discord_backend(api_server)
@@ -983,9 +955,7 @@ def test_vault_direct_reads(muse_env: Path) -> None:
     """
     from kiss.agents.third_party_agents.muse_auth.vault import CredentialVault
 
-    store_credentials(
-        "govee", {"kind": "header", "header": "Govee-API-Key", "token": "gk"}, []
-    )
+    store_credentials("govee", {"kind": "header", "header": "Govee-API-Key", "token": "gk"}, [])
     vault = CredentialVault()
     # No generation pin: the header credential resolves without a check.
     assert vault.resolve_credential("govee") == ("header", "Govee-API-Key", "gk")
@@ -1011,9 +981,7 @@ def test_store_rejects_invalid_insecure_hosts(muse_env: Path) -> None:
     assert not vault_has_credentials("homeassistant")
 
 
-def test_failed_enrollment_is_transactional(
-    muse_env: Path, api_server: _DeviceApiServer
-) -> None:
+def test_failed_enrollment_is_transactional(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A rejected enrollment leaves the old credential and config intact."""
     from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import HomeAssistantAgent
     from kiss.agents.third_party_agents.ntfy.ntfy_sea import NtfyAgent
@@ -1163,8 +1131,9 @@ def test_store_rejects_malformed_credential_values(muse_env: Path) -> None:
 
     for bad in (" leading-space", "trail ", "new\nline", "tab\tchar", ""):
         with pytest.raises(MuseAuthError, match="invalid credential token value"):
-            store_credentials("govee", {"kind": "header", "header": "Govee-API-Key",
-                                        "token": bad}, [])
+            store_credentials(
+                "govee", {"kind": "header", "header": "Govee-API-Key", "token": bad}, []
+            )
         with pytest.raises(MuseAuthError, match="invalid credential token value"):
             store_credentials("ntfy", {"kind": "bearer", "token": bad}, [])
     assert not vault_has_credentials("govee")
@@ -1210,9 +1179,7 @@ def test_redirect_hops_reauthorized_per_generation(
     assert api_server.requests[-1]["path"].endswith("/t307")
 
 
-def test_ntfy_credential_is_port_origin_bound(
-    muse_env: Path, api_server: _DeviceApiServer
-) -> None:
+def test_ntfy_credential_is_port_origin_bound(muse_env: Path, api_server: _DeviceApiServer) -> None:
     """A token enrolled for one port is refused on another port of the host."""
     server_url = f"http://127.0.0.1:{api_server.server_address[1]}"
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
@@ -1406,10 +1373,10 @@ def test_govee_daemon_reply_loss_not_replayed(
     api_server.drop_after_recording = {"/router/api/v1/device/control"}
     before = len(api_server.requests)
     with pytest.raises((SystemExit, MuseAuthError)):
-        govee.control({"sku": "H6008", "device": "AA:BB"},
-                      "devices.capabilities.on_off", "powerSwitch", 1)
-    controls = [r for r in api_server.requests[before:]
-                if r["path"].endswith("/device/control")]
+        govee.control(
+            {"sku": "H6008", "device": "AA:BB"}, "devices.capabilities.on_off", "powerSwitch", 1
+        )
+    controls = [r for r in api_server.requests[before:] if r["path"].endswith("/device/control")]
     assert len(controls) == 1
 
 
@@ -1504,9 +1471,7 @@ def test_firecrawl_is_origin_bound(muse_env: Path) -> None:
         "firecrawl", "https://firecrawl.private.example:7443/v2/scrape"
     )
     # The self-host key can NOT be spent against the public cloud API.
-    assert not daemon.sentinel.origin_allowed(
-        "firecrawl", "https://api.firecrawl.dev/v2/scrape"
-    )
+    assert not daemon.sentinel.origin_allowed("firecrawl", "https://api.firecrawl.dev/v2/scrape")
 
 
 def test_ntfy_explicit_tokenless_overrides_stale_vault(
@@ -1520,9 +1485,7 @@ def test_ntfy_explicit_tokenless_overrides_stale_vault(
     ntfy_config.save({"topic": "t1", "server": server_url, "token": _REAL_NTFY_TOKEN})
     assert NtfyChannelBackend().connect()
     assert vault_has_credentials("ntfy")
-    ntfy_config.path.write_text(
-        json.dumps({"topic": "t1", "server": server_url, "token": ""})
-    )
+    ntfy_config.path.write_text(json.dumps({"topic": "t1", "server": server_url, "token": ""}))
 
     backend = NtfyChannelBackend()
     assert backend.connect()
@@ -1555,9 +1518,7 @@ def test_leading_zero_and_fqdn_port_entries_match(muse_env: Path) -> None:
 
     # A port-pinned FQDN policy entry matches its canonical request form.
     policy = muse_auth_dir() / "policy.json"
-    policy.write_text(
-        json.dumps({"services": {"govee": {"extra_hosts": ["Example.COM.:443"]}}})
-    )
+    policy.write_text(json.dumps({"services": {"govee": {"extra_hosts": ["Example.COM.:443"]}}}))
     assert daemon.sentinel.origin_allowed("govee", "https://example.com/x")
     assert daemon.sentinel.origin_allowed("govee", "https://example.com.:443/x")
 
@@ -1613,9 +1574,7 @@ def test_authenticate_accepts_terminal_dot_host(
     port = api_server.server_address[1]
     agent = HomeAssistantAgent()
     tools = auth_tools(agent)
-    result = json.loads(
-        tools["authenticate_homeassistant"](f"http://127.0.0.1.:{port}", "ha-fqdn")
-    )
+    result = json.loads(tools["authenticate_homeassistant"](f"http://127.0.0.1.:{port}", "ha-fqdn"))
     assert result["ok"] is True
     assert vault_has_credentials("homeassistant")
 
@@ -1765,9 +1724,7 @@ def test_multiple_trailing_dot_hosts_rejected(
     assert json.loads(ha_config.path.read_text())["token"] == _REAL_HA_TOKEN
 
 
-def test_cli_import_url_requirements(
-    muse_env: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_import_url_requirements(muse_env: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Null/absent URLs default only where a default exists; falsy junk fails.
 
     A null/absent server for the optional ntfy URL selects the public
@@ -1812,9 +1769,7 @@ def test_cli_import_url_requirements(
     falsy: Any
     for falsy in (False, 0, []):
         firecrawl_config.path.parent.mkdir(parents=True, exist_ok=True)
-        firecrawl_config.path.write_text(
-            json.dumps({"api_key": "fc-secret", "base_url": falsy})
-        )
+        firecrawl_config.path.write_text(json.dumps({"api_key": "fc-secret", "base_url": falsy}))
         assert muse_cli.main(["import", "firecrawl"]) == 1
         assert "not a valid http(s):// URL" in capsys.readouterr().err
         assert not vault_has_credentials("firecrawl")
@@ -1853,9 +1808,7 @@ def test_connect_rejects_malformed_legacy_urls(muse_env: Path) -> None:
 
     ntfy_config.path.parent.mkdir(parents=True, exist_ok=True)
     ntfy_config.path.write_text(
-        json.dumps(
-            {"topic": "t1", "server": "http://bad..example:8080", "token": _REAL_NTFY_TOKEN}
-        )
+        json.dumps({"topic": "t1", "server": "http://bad..example:8080", "token": _REAL_NTFY_TOKEN})
     )
     ntfy_backend = NtfyChannelBackend()
     assert not ntfy_backend.connect()

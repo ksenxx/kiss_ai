@@ -22,7 +22,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -30,16 +29,13 @@ from urllib.parse import urlparse
 import pytest
 
 import kiss.agents.third_party_agents.firecrawl.firecrawl_sea as fc_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import (
     _DEFAULT_BASE_URL,
     FirecrawlAgent,
     FirecrawlChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _API_KEY = "fc-test-key"
 _CRAWL_ID = "c0ffee00-1234-5678-9abc-def012345678"
@@ -123,7 +119,7 @@ class _FirecrawlRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _record(self, body: dict[str, Any] | None) -> None:
-        cast(_FirecrawlServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -199,31 +195,17 @@ class _FirecrawlRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _FirecrawlServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _FirecrawlRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def fc_server():
-    """Start the emulated Firecrawl server on a free port; yield (base_url, server)."""
-    server = _FirecrawlServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Firecrawl server on a free port; yield the recording server."""
+    yield from serve_recording(_FirecrawlRequestHandler)
 
 
 @pytest.fixture()
 def backend(fc_server):
     """A backend pointed at the emulated server with the valid API key."""
-    base_url, server = fc_server
+    server = fc_server
+    base_url = server.base_url
     b = FirecrawlChannelBackend()
     b._base_url = base_url
     b._api_key = _API_KEY
@@ -301,9 +283,7 @@ def test_authenticate_stores_optional_base_url() -> None:
     """A self-hosted base_url is persisted and applied to the backend."""
     agent = FirecrawlAgent()
     tools = {t.__name__: t for t in agent._get_tools()}
-    result = json.loads(
-        tools["authenticate_firecrawl"](_API_KEY, "http://firecrawl.internal:3002")
-    )
+    result = json.loads(tools["authenticate_firecrawl"](_API_KEY, "http://firecrawl.internal:3002"))
     assert result["ok"] is True
     saved = json.loads(_config.path.read_text(encoding="utf-8"))
     assert saved == {"api_key": _API_KEY, "base_url": "http://firecrawl.internal:3002"}
@@ -635,7 +615,7 @@ def test_non_object_json_response_returns_ok_false(backend) -> None:
 
 def test_unauthorized_key_returns_ok_false(fc_server) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = fc_server
+    base_url = fc_server.base_url
     b = FirecrawlChannelBackend()
     b._base_url = base_url
     b._api_key = "wrong-key"

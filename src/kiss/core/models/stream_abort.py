@@ -243,6 +243,22 @@ def _stop_requested(
     return stop_event is not None and stop_event.is_set()
 
 
+def stop_error() -> KeyboardInterrupt:
+    """Build the error for a request the user stopped.
+
+    A user stop must NOT surface as the retryable :class:`TimeoutError`
+    a stall produces, or the agentic loop would re-ask the model and the
+    task would keep running.  ``KeyboardInterrupt`` is the same signal
+    ``_check_stop`` raises, so the whole stack unwinds into the normal
+    "Task stopped by user" path.  Every transport raises this one object
+    so the wording lives here once.
+
+    Returns:
+        The ``KeyboardInterrupt`` for the caller to raise.
+    """
+    return KeyboardInterrupt("Agent stop requested")
+
+
 def stall_error(stall_timeout: float | None) -> TimeoutError:
     """Build the retryable error for a stream the watchdog aborted as stalled.
 
@@ -340,7 +356,7 @@ def stop_aware_events(
         if _stop_requested(watchdog, stop_event):
             if on_abort is not None:
                 on_abort()
-            raise KeyboardInterrupt("Agent stop requested") from None
+            raise stop_error() from None
         if watchdog.stalled:
             if on_abort is not None:
                 on_abort()
@@ -354,7 +370,7 @@ def stop_aware_events(
         # to be reported after the loop as well.
         if on_abort is not None:
             on_abort()
-        raise KeyboardInterrupt("Agent stop requested")
+        raise stop_error()
     if watchdog.stalled:
         # Same for a stall: without this the caller would keep whatever
         # partial text it accumulated and report it as a completion.

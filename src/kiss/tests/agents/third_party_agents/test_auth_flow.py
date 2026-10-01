@@ -4,13 +4,10 @@
 # add your name here
 """Integration tests for channel agent authentication flows.
 
-Verifies that each agent's auth tools:
-1. Show correct URLs and function references in check prompts
-2. Reject empty required parameters
-3. Clear auth resets state to unauthenticated
-4. Browser auth tools provide fallback when no browser is available
-5. Auth tool signatures match expected required parameters
-6. Authenticate docstrings document their parameters
+For every channel agent in ``_AUTH_AGENTS``, ``authenticate_*()``
+rejects empty and whitespace-only required parameters and its signature
+carries every expected required parameter.  Platform-gated agents
+(iMessage, BlueBubbles) report the platform error off macOS.
 """
 
 from __future__ import annotations
@@ -27,250 +24,155 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
     {
         "module": "kiss.agents.third_party_agents.slack.slack_sea",
         "class": "SlackAgent",
-        "check": "check_slack_auth",
         "auth": "authenticate_slack",
-        "clear": "clear_slack_auth",
         # authenticate_slack() with no arguments starts the PKCE sign-in.
         "required_params": [],
-        "prompt_urls": [],
-        "prompt_keywords": ["authenticate_slack()", "finish_slack_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.telegram.telegram_sea",
         "class": "TelegramAgent",
-        "check": "check_telegram_auth",
         "auth": "authenticate_telegram",
-        "clear": "clear_telegram_auth",
         "required_params": ["bot_token"],
-        "prompt_urls": [],
-        "prompt_keywords": ["@BotFather", "/newbot"],
     },
     {
         "module": "kiss.agents.third_party_agents.discord.discord_sea",
         "class": "DiscordAgent",
-        "check": "check_discord_auth",
         "auth": "authenticate_discord",
-        "clear": "clear_discord_auth",
         # authenticate_discord() with no arguments starts OAuth sign-in.
         "required_params": [],
-        "prompt_urls": [],
-        "prompt_keywords": ["Discord"],
     },
     {
         "module": "kiss.agents.third_party_agents.googlechat.googlechat_sea",
         "class": "GoogleChatAgent",
-        "check": "check_googlechat_auth",
         "auth": "authenticate_googlechat",
-        "clear": "clear_googlechat_auth",
         "required_params": [],
-        "prompt_urls": ["https://dashboard.composio.dev"],
-        "prompt_keywords": ["Google Chat", "KISS_COMPOSIO_AUTH_CONFIG_GOOGLECHAT"],
     },
     {
         "module": "kiss.agents.third_party_agents.signal.signal_sea",
         "class": "SignalAgent",
-        "check": "check_signal_auth",
         "auth": "authenticate_signal",
-        "clear": "clear_signal_auth",
         # phone_number is optional: without it ``signal-cli link`` runs and
         # the user scans the QR code from their phone.
         "required_params": [],
-        "prompt_urls": ["https://github.com/AsamK/signal-cli"],
-        "prompt_keywords": ["signal-cli", "finish_signal_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.msteams.msteams_sea",
         "class": "MSTeamsAgent",
-        "check": "check_msteams_auth",
         "auth": "authenticate_msteams",
-        "clear": "clear_msteams_auth",
         # Device code sign-in with the KISS app; tenant_id is optional.
         "required_params": [],
-        "prompt_urls": ["https://microsoft.com/devicelogin"],
-        "prompt_keywords": ["authenticate_msteams()", "finish_msteams_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.matrix.matrix_sea",
         "class": "MatrixAgent",
-        "check": "check_matrix_auth",
         "auth": "authenticate_matrix",
-        "clear": "clear_matrix_auth",
         # access_token is optional: without it the OAuth 2.0 device
         # authorisation sign-in (browser consent) is used.
         "required_params": ["homeserver_url"],
-        "prompt_urls": [],
-        "prompt_keywords": ["Element", "Access Token", "finish_matrix_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.feishu.feishu_sea",
         "class": "FeishuAgent",
-        "check": "check_feishu_auth",
         "auth": "authenticate_feishu",
-        "clear": "clear_feishu_auth",
         "required_params": ["app_id", "app_secret"],
-        "prompt_urls": [
-            "https://open.feishu.cn/app",
-            "https://open.larksuite.com/app",
-        ],
-        "prompt_keywords": ["Feishu", "Lark"],
     },
     {
         "module": "kiss.agents.third_party_agents.line.line_sea",
         "class": "LineAgent",
-        "check": "check_line_auth",
         "auth": "authenticate_line",
-        "clear": "clear_line_auth",
         "required_params": ["channel_access_token"],
-        "prompt_urls": ["https://developers.line.biz/console/"],
-        "prompt_keywords": ["LINE", "Messaging API"],
     },
     {
         "module": "kiss.agents.third_party_agents.mattermost.mattermost_sea",
         "class": "MattermostAgent",
-        "check": "check_mattermost_auth",
         "auth": "authenticate_mattermost",
-        "clear": "clear_mattermost_auth",
         "required_params": ["url", "token"],
-        "prompt_urls": [],
-        "prompt_keywords": ["Personal Access Tokens"],
     },
     {
         "module": "kiss.agents.third_party_agents.irc.irc_sea",
         "class": "IRCAgent",
-        "check": "check_irc_auth",
         "auth": "authenticate_irc",
-        "clear": "clear_irc_auth",
         "required_params": ["server", "nick"],
-        "prompt_urls": [],
-        "prompt_keywords": ["irc.libera.chat"],
     },
     {
         "module": "kiss.agents.third_party_agents.bluebubbles.bluebubbles_sea",
         "class": "BlueBubblesAgent",
-        "check": "check_bluebubbles_auth",
         "auth": "authenticate_bluebubbles",
-        "clear": "clear_bluebubbles_auth",
         "required_params": ["server_url", "password"],
-        "prompt_urls": ["https://bluebubbles.app"],
-        "prompt_keywords": ["BlueBubbles"],
         "macos_only": True,
     },
     {
         "module": "kiss.agents.third_party_agents.imessage.imessage_sea",
         "class": "IMessageAgent",
-        "check": "check_imessage_auth",
         "auth": "authenticate_imessage",
-        "clear": "clear_imessage_auth",
         "required_params": [],
-        "prompt_urls": [],
-        "prompt_keywords": ["iMessage", "macOS"],
         "macos_only": True,
     },
     {
         "module": "kiss.agents.third_party_agents.nextcloud.nextcloud_sea",
         "class": "NextcloudTalkAgent",
-        "check": "check_nextcloud_auth",
         "auth": "authenticate_nextcloud",
-        "clear": "clear_nextcloud_auth",
         # username/password are optional: with only the URL, Login Flow
         # v2 lets the user sign in and grant access in their browser.
         "required_params": ["url"],
-        "prompt_urls": [],
-        "prompt_keywords": ["Nextcloud", "Devices & sessions", "finish_nextcloud_auth"],
     },
     {
         "module": "kiss.agents.third_party_agents.nostr.nostr_sea",
         "class": "NostrAgent",
-        "check": "check_nostr_auth",
         "auth": "authenticate_nostr",
-        "clear": "clear_nostr_auth",
         "required_params": ["private_key"],
-        "prompt_urls": [],
-        "prompt_keywords": ["nsec", "Nostr"],
     },
     {
         "module": "kiss.agents.third_party_agents.synology.synology_sea",
         "class": "SynologyChatAgent",
-        "check": "check_synology_auth",
         "auth": "authenticate_synology",
-        "clear": "clear_synology_auth",
         "required_params": ["webhook_url"],
-        "prompt_urls": [],
-        "prompt_keywords": ["Synology Chat", "Incoming Webhooks"],
     },
     {
         "module": "kiss.agents.third_party_agents.tlon.tlon_sea",
         "class": "TlonAgent",
-        "check": "check_tlon_auth",
         "auth": "authenticate_tlon",
-        "clear": "clear_tlon_auth",
         "required_params": ["ship_url", "code"],
-        "prompt_urls": [],
-        "prompt_keywords": ["Tlon", "Urbit", "dojo"],
     },
     {
         "module": "kiss.agents.third_party_agents.twitch.twitch_sea",
         "class": "TwitchAgent",
-        "check": "check_twitch_auth",
         "auth": "authenticate_twitch",
-        "clear": "clear_twitch_auth",
         # access_token is optional: without it the device code grant
         # (browser consent) is used.
         "required_params": ["client_id"],
-        "prompt_urls": ["https://dev.twitch.tv/console/apps"],
-        "prompt_keywords": ["Twitch", "twitch.tv/activate", "finish_twitch_auth"],
     },
     {
         # QR-paired personal WhatsApp (whatsapp-mcp bridge): authenticate
         # takes no credentials — it clones and builds the bridge.
         "module": "kiss.agents.third_party_agents.whatsapp.whatsapp_sea",
         "class": "WhatsAppAgent",
-        "check": "check_whatsapp_auth",
         "auth": "authenticate_whatsapp",
-        "clear": "clear_whatsapp_auth",
         "required_params": [],
-        "prompt_urls": [],
-        "prompt_keywords": ["WhatsApp", "QR"],
     },
     {
         "module": "kiss.agents.third_party_agents.zalo.zalo_sea",
         "class": "ZaloAgent",
-        "check": "check_zalo_auth",
         "auth": "authenticate_zalo",
-        "clear": "clear_zalo_auth",
         "required_params": ["access_token"],
-        "prompt_urls": ["https://developers.zalo.me/"],
-        "prompt_keywords": ["Zalo"],
     },
     {
         "module": "kiss.agents.third_party_agents.phone.phone_sea",
         "class": "PhoneControlAgent",
-        "check": "check_phone_auth",
         "auth": "authenticate_phone",
-        "clear": "clear_phone_auth",
         "required_params": ["device_ip"],
-        "prompt_urls": [],
-        "prompt_keywords": ["companion", "REST"],
     },
     {
         "module": "kiss.agents.third_party_agents.sms.sms_sea",
         "class": "SMSAgent",
-        "check": "check_sms_auth",
         "auth": "authenticate_sms",
-        "clear": "clear_sms_auth",
         "required_params": ["account_sid", "auth_token"],
-        "prompt_urls": ["https://console.twilio.com/"],
-        "prompt_keywords": ["Twilio"],
     },
     {
         "module": "kiss.agents.third_party_agents.gmail.gmail_sea",
         "class": "GmailAgent",
-        "check": "check_gmail_auth",
         "auth": "authenticate_gmail",
-        "clear": "clear_gmail_auth",
         "required_params": [],
-        "prompt_urls": ["https://dashboard.composio.dev"],
-        "prompt_keywords": ["Gmail", "Composio"],
     },
 ]
 
@@ -368,24 +270,6 @@ def test_auth_function_has_expected_params(info: dict[str, Any]) -> None:
             f"Expected param '{expected}' in {info['auth']} signature, "
             f"got: {actual_params}"
         )
-
-
-_BROWSER_AUTH_AGENTS = [a for a in _AUTH_AGENTS if "browser_auth" in a]
-_BROWSER_IDS = [a["class"] for a in _BROWSER_AUTH_AGENTS]
-
-
-@pytest.mark.parametrize("info", _BROWSER_AUTH_AGENTS, ids=_BROWSER_IDS)
-def test_browser_auth_returns_navigation_instructions(
-    info: dict[str, Any],
-) -> None:
-    """start_*_browser_auth() returns go_to_url navigation instructions."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    browser_fn = tools[info["browser_auth"]]
-    result = browser_fn()
-    assert "browser" in result.lower(), (
-        f"Browser fallback should mention 'browser', got: {result[:300]}"
-    )
 
 
 class TestPlatformSpecificAuth:

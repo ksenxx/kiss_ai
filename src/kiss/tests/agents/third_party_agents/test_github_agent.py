@@ -26,7 +26,6 @@ import base64
 import json
 import subprocess
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -34,16 +33,13 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.github.github_sea as gh_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents._oauth_apps import missing_client_id_error
 from kiss.agents.third_party_agents.github.github_sea import (
     GitHubAgent,
     GitHubChannelBackend,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = "test-gh-token"
 _DIFF_ACCEPT = "application/vnd.github.v3.diff"
@@ -149,7 +145,7 @@ class _GHRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _record(self, body: dict[str, Any] | None) -> None:
-        cast(_GHServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -286,31 +282,17 @@ class _GHRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _GHServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _GHRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def gh_server():
-    """Start the emulated GitHub REST server on a free port; yield (base_url, server)."""
-    server = _GHServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated GitHub REST server on a free port; yield the recording server."""
+    yield from serve_recording(_GHRequestHandler)
 
 
 @pytest.fixture()
 def backend(gh_server):
     """A backend pointed at the emulated server with the valid token."""
-    base_url, server = gh_server
+    server = gh_server
+    base_url = server.base_url
     b = GitHubChannelBackend()
     b._base_url = base_url
     b._token = _TOKEN
@@ -959,15 +941,12 @@ def test_nested_file_path_keeps_slashes(backend) -> None:
     """File paths keep '/' separators but encode other special characters."""
     b, server = backend
     json.loads(b.gh_get_file_contents("octo", "hello", "src/a b.py"))
-    assert (
-        urlparse(server.requests[-1]["path"]).path
-        == "/repos/octo/hello/contents/src/a%20b.py"
-    )
+    assert urlparse(server.requests[-1]["path"]).path == "/repos/octo/hello/contents/src/a%20b.py"
 
 
 def test_unauthorized_token_returns_ok_false_for_every_tool(gh_server) -> None:
     """A 401 yields ok:false JSON from every tool — no exception."""
-    base_url, _ = gh_server
+    base_url = gh_server.base_url
     b = GitHubChannelBackend()
     b._base_url = base_url
     b._token = "wrong-token"

@@ -716,17 +716,22 @@ def test_daily_schedule_is_four_in_the_morning_pacific() -> None:
         assert 0 < next_run - now <= 24 * 3600
 
 
+def _remove_cron_jobs_named(*names: str) -> None:
+    """Remove every cron job called one of *names* from this process's cron store."""
+    for job in load_jobs():
+        if job["name"] in names:
+            cron_job("remove", job_id=job["id"])
+
+
 def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
     """The daily job is a run_agent directive to this SEA; a second call does not duplicate it."""
     name = sea.JOB_NAME_PREFIX + "ledger"
     assert not [job for job in load_jobs() if job["name"] == name]
-    other = yaml.safe_load(
-        cron_job("create", name="unrelated", command="true", schedule="every 1d")
-    )
-    # Scheduling from a sub-directory stores the checkout's root, never the raw spec.
-    created = yaml.safe_load(sea.schedule_daily_update(str(repo / "docs"), max_budget=2.5))
-    job_id = created["created"]["id"]
     try:
+        cron_job("create", name="unrelated", command="true", schedule="every 1d")
+        # Scheduling from a sub-directory stores the checkout's root, never the raw spec.
+        created = yaml.safe_load(sea.schedule_daily_update(str(repo / "docs"), max_budget=2.5))
+        job_id = created["created"]["id"]
         jobs = [job for job in load_jobs() if job["name"] == name]
         assert len(jobs) == 1
         job = jobs[0]
@@ -787,10 +792,8 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         assert renewed.startswith(f"Removed outdated job(s) {short['created']['id']}.\ncreated:")
         jobs = [job for job in load_jobs() if job["name"] == name]
         assert len(jobs) == 1 and jobs[0]["timeout"] == sea.DAILY_UPDATE_TIMEOUT_SECONDS
-        job_id = jobs[0]["id"]
     finally:
-        cron_job("remove", job_id=job_id)
-        cron_job("remove", job_id=other["created"]["id"])
+        _remove_cron_jobs_named(name, "unrelated")
 
 
 def test_cli_drives_the_same_tools(repo: Path, tmp_path: Path) -> None:
@@ -855,11 +858,13 @@ def test_cli_in_process_covers_every_subcommand(
     assert sea.main(["read-page", str(repo), "faq"]) == 0
     assert sea.main(["delete-page", str(repo), "faq"]) == 0
     assert sea.main(["read-page", str(repo), "faq"]) == 1
-    assert sea.main(["schedule", str(repo)]) == 0
-    out = capsys.readouterr().out
-    scheduled = [job for job in load_jobs() if job["name"] == sea.JOB_NAME_PREFIX + "ledger"]
-    assert len(scheduled) == 1
-    cron_job("remove", job_id=scheduled[0]["id"])
+    try:
+        assert sea.main(["schedule", str(repo)]) == 0
+        out = capsys.readouterr().out
+        scheduled = [job for job in load_jobs() if job["name"] == sea.JOB_NAME_PREFIX + "ledger"]
+        assert len(scheduled) == 1
+    finally:
+        _remove_cron_jobs_named(sea.JOB_NAME_PREFIX + "ledger")
     assert "mode: full" in out and "1. file:" in out and "Wrote ledger/faq.md" in out
     with pytest.raises(SystemExit):
         sea.main([])

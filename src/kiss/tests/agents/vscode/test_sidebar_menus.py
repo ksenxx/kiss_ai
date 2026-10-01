@@ -37,7 +37,10 @@ from kiss.tests.agents.vscode.test_activity_bar import (
     _explorer_row_sel,
     _sent,
 )
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import (
+    TRANSIENT_REPLACE_READ_ERRORS,
+    goto_retrying_network_change,
+)
 from kiss.tests.server.test_scm_worktrees_and_actions import (
     harness,  # noqa: F401  (module fixture used by param name)
     worktree,  # noqa: F401
@@ -469,9 +472,15 @@ def test_copy_paste_cut_and_conflict_prompt(browser, harness, worktree):
         _explorer_row(page, "dir").click(button="right")
         _menu_item(page, "Paste").click()
         _answer_confirm(page, "fs-overwrite", accept=True)
+        # The server renames the old file aside and copies the new one in;
+        # a read landing inside that window finds no file or, on Windows,
+        # a copy still holding the target exclusively.  Neither is torn.
         for _ in range(50):
-            if (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n":
-                break
+            try:
+                if (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n":
+                    break
+            except TRANSIENT_REPLACE_READ_ERRORS:
+                pass
             page.wait_for_timeout(100)
         assert (harness.work_dir / "dir" / "main-only.txt").read_text() == "m\n"
         # Cut + Paste moves.

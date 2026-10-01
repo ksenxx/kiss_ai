@@ -41,6 +41,7 @@ import threading
 from pathlib import Path
 from typing import TypedDict
 
+from kiss.core.utils import atomic_write_text
 from kiss.server.user_assets import ensure_user_asset_from_default
 
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
@@ -237,7 +238,9 @@ def delete_my_injection_trick(text: str) -> str | None:
         # one newline keeps add/delete cycles from growing the file.
         rest = "".join(kept)
         rest = rest.rstrip("\n") + "\n" if rest.strip() else ""
-        user_path.write_text(rest, encoding="utf-8", newline="\n")  # LF on every platform
+        # Atomic: readers (panel, completions, bootstrap) take no lock
+        # and must never observe a truncated file.
+        atomic_write_text(user_path, rest)
     return None
 
 
@@ -325,7 +328,7 @@ def edit_my_injection_trick(text: str, new_text: str) -> str | None:
         trailing = "\n" * max(1, old[len(old.rstrip("\r\n")) :].count("\n"))
         escaped = _MARKDOWN_ESCAPABLE_BACKSLASH.sub(r"\\\\", new_body)
         sections[index] = "## Trick\n\n" + escaped + trailing
-        user_path.write_text(preamble + "".join(sections), encoding="utf-8", newline="\n")
+        atomic_write_text(user_path, preamble + "".join(sections))
     return None
 
 
@@ -354,7 +357,7 @@ def append_my_injection_trick(text: str) -> str | None:
         file that is not UTF-8 text.  ``OSError`` from the read or
         write propagates to the caller.
     """
-    body = text.strip()
+    body = text.replace("\r\n", "\n").strip()
     if (error := _reject_new_body(body)) is not None:
         return error
     with _APPEND_LOCK:

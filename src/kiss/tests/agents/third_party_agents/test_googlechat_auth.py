@@ -15,16 +15,14 @@ from __future__ import annotations
 
 import json
 import stat
-import threading
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
 from kiss.agents.third_party_agents.googlechat.googlechat_sea import (
     _SERVICE,
     GoogleChatAgent,
@@ -36,21 +34,23 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 from kiss.tests.conftest import IS_WINDOWS
 
 
 class _ChatHandler(BaseHTTPRequestHandler):
     """Serves spaces.list for the Composio-injected token, else 401."""
 
-    server: Any
-
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         """Answer GET /v1/spaces."""
-        self.server.requests.append((self.path, self.headers.get("Authorization")))
+        cast(RecordingServer, self.server).requests.append(
+            {"path": self.path, "authorization": self.headers.get("Authorization")}
+        )
         ok = self.headers.get("Authorization") == f"Bearer {TOKEN}"
         body = json.dumps(
             {"spaces": [{"name": "spaces/A", "displayName": "Team", "type": "ROOM"}]}
-            if ok else {"error": {"code": 401, "message": "Invalid Credentials"}}
+            if ok
+            else {"error": {"code": 401, "message": "Invalid Credentials"}}
         ).encode()
         self.send_response(200 if ok else 401)
         self.send_header("Content-Type", "application/json")
@@ -80,18 +80,10 @@ def chat(monkeypatch):
         ``(composio, chat_server)``, with chat.googleapis.com rerouted
         to the local Chat server.
     """
-    server = ThreadedHTTPServer(("127.0.0.1", 0), _ChatHandler)
-    server.requests = []  # type: ignore[attr-defined]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with recording_server(_ChatHandler) as server:
         for composio in start_fake_composio(monkeypatch):
-            composio.upstream_overrides["https://chat.googleapis.com"] = (
-                f"http://127.0.0.1:{server.server_address[1]}"
-            )
+            composio.upstream_overrides["https://chat.googleapis.com"] = server.base_url
             yield composio, server
-    finally:
-        stop_http_server(server, thread)
 
 
 def _write_service_account_key(path: Path) -> None:
@@ -102,15 +94,19 @@ def _write_service_account_key(path: Path) -> None:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode()
-    path.write_text(json.dumps({
-        "type": "service_account",
-        "project_id": "kiss-test",
-        "private_key_id": "k1",
-        "private_key": pem,
-        "client_email": "bot@kiss-test.iam.gserviceaccount.com",
-        "client_id": "1",
-        "token_uri": "https://oauth2.googleapis.com/token",
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "kiss-test",
+                "private_key_id": "k1",
+                "private_key": pem,
+                "client_email": "bot@kiss-test.iam.gserviceaccount.com",
+                "client_id": "1",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        )
+    )
 
 
 def _tools(agent: GoogleChatAgent) -> dict[str, Any]:
@@ -145,7 +141,7 @@ def test_connect_link_flow_builds_composio_service(chat) -> None:
     assert agent._is_authenticated() is True
     result = json.loads(agent._backend.list_spaces())
     assert result["spaces"] == [{"name": "spaces/A", "display_name": "Team", "type": "ROOM"}]
-    assert server.requests[-1][1] == f"Bearer {TOKEN}"
+    assert server.requests[-1]["authorization"] == f"Bearer {TOKEN}"
     # A new agent picks the recorded connection up on its own.
     assert GoogleChatAgent()._backend._service is not None
 

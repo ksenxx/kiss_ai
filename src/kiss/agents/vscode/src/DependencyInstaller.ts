@@ -31,7 +31,8 @@ import {PRODUCT_NAME} from './brand';
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 // The daemon resolves its state directory from $KISS_HOME (see
 // kiss/core/config.py), so everything the extension shares with it —
-// sockets, config.json, markers, logs — must live under the same root.
+// the endpoint file (sorcar-local.json), config.json, markers, logs —
+// must live under the same root.
 const LOG_DIR = kissHomeDir();
 const LOG_FILE = path.join(LOG_DIR, 'install.log');
 
@@ -1640,6 +1641,13 @@ function offerForcedRestart(
     'Restart now',
     'Keep waiting',
   ).then(choice => {
+    if (choice === undefined) {
+      // No answer: the toast was dismissed, or its webview poster was
+      // replaced (a re-created sidebar resolves every pending toast
+      // with undefined).  Unlatch so the next retry can offer again.
+      forcedRestartOffered = false;
+      return;
+    }
     if (choice !== 'Restart now') return;
     log('user chose to restart kiss-web despite reported active tasks');
     forceRestartKissWebDaemon(kissProjectPath, workDir).catch(err => {

@@ -22,6 +22,7 @@ needs root, so that fallback is not exercised here.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import socket
@@ -117,22 +118,46 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _port(session: LoopbackPkceSession) -> int:
+    """Return the loopback port a session's redirect URI is bound to."""
+    return int(urlsplit(session.redirect_uri).port or 80)
+
+
 def _start(
-    service: str, server: _TokenServer, port: int, path: str = "/callback", lifetime: float = 30.0
+    service: str,
+    server: _TokenServer,
+    port: int | None = None,
+    path: str = "/callback",
+    lifetime: float = 30.0,
 ) -> LoopbackPkceSession:
+    """Register a PKCE session bound to a loopback redirect server.
+
+    With ``port=None`` a free port is picked and, because another process
+    may grab it between the probe and the bind, ``EADDRINUSE`` is retried
+    with a fresh port a bounded number of times.  An explicit ``port`` is
+    bound exactly once so tests about port conflicts see the real error.
+    """
     provider = PkceProvider(
         authorize_url=f"{server.base}/authorize", token_url=f"{server.base}/token"
     )
-    session = LoopbackPkceSession(
-        service,
-        provider,
-        "public-client-id",
-        f"http://localhost:{port}{path}",
-        {"scope": "chat:write users:read", "user_scope": "chat:write"},
-        lifetime=lifetime,
-    )
-    session.register()
-    return session
+    for attempt in range(5):
+        chosen = _free_port() if port is None else port
+        try:
+            session = LoopbackPkceSession(
+                service,
+                provider,
+                "public-client-id",
+                f"http://localhost:{chosen}{path}",
+                {"scope": "chat:write users:read", "user_scope": "chat:write"},
+                lifetime=lifetime,
+            )
+        except OSError as exc:
+            if port is not None or exc.errno != errno.EADDRINUSE or attempt == 4:
+                raise
+            continue
+        session.register()
+        return session
+    raise AssertionError("unreachable")
 
 
 def _query(session: LoopbackPkceSession) -> dict[str, str]:
@@ -190,8 +215,8 @@ def test_missing_client_id_error_names_env_var() -> None:
 
 
 def test_pkce_happy_path(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     query = _query(session)
     assert session.verification_uri.startswith(f"{token_server.base}/authorize?")
     assert query["response_type"] == "code"
@@ -236,8 +261,7 @@ def test_pkce_happy_path(token_server: _TokenServer, service: str) -> None:
 
 
 def test_pkce_state_mismatch_refused(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    _start(service, token_server, port)
+    port = _port(_start(service, token_server))
     requests.get(
         f"http://127.0.0.1:{port}/callback", params={"code": "c", "state": "forged"}, timeout=10
     )
@@ -248,8 +272,8 @@ def test_pkce_state_mismatch_refused(token_server: _TokenServer, service: str) -
 
 
 def test_pkce_access_denied_redirect(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     requests.get(
         f"http://127.0.0.1:{port}/callback",
         params={
@@ -267,8 +291,8 @@ def test_pkce_access_denied_redirect(token_server: _TokenServer, service: str) -
 
 def test_pkce_slack_style_ok_false(token_server: _TokenServer, service: str) -> None:
     token_server.reply = (200, {"ok": False, "error": "invalid_code"})
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     requests.get(
         f"http://127.0.0.1:{port}/callback",
         params={"code": "bad", "state": _query(session)["state"]},
@@ -283,8 +307,8 @@ def test_pkce_slack_style_ok_false(token_server: _TokenServer, service: str) -> 
 def test_pkce_slack_style_ok_true_is_success(token_server: _TokenServer, service: str) -> None:
     body = {"ok": True, "authed_user": {"access_token": "xoxp-1"}}
     token_server.reply = (200, body)
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     requests.get(
         f"http://127.0.0.1:{port}/callback",
         params={"code": "good", "state": _query(session)["state"]},
@@ -304,8 +328,8 @@ def test_pkce_http_error_and_200_error_field(token_server: _TokenServer) -> None
     ]:
         name = f"pkce_{uuid.uuid4().hex[:8]}"
         token_server.reply = reply
-        port = _free_port()
-        session = _start(name, token_server, port)
+        session = _start(name, token_server)
+        port = _port(session)
         requests.get(
             f"http://127.0.0.1:{port}/callback",
             params={"code": "c", "state": _query(session)["state"]},
@@ -319,8 +343,8 @@ def test_pkce_http_error_and_200_error_field(token_server: _TokenServer) -> None
 def test_pkce_wrong_path_404_then_callback_completes(
     token_server: _TokenServer, service: str
 ) -> None:
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     wrong = requests.get(f"http://127.0.0.1:{port}/not-the-callback?code=x", timeout=10)
     assert wrong.status_code == 404
     finished, status = ConsentSession.finish(service, wait_seconds=1.0)
@@ -338,8 +362,8 @@ def test_pkce_wrong_path_404_then_callback_completes(
 
 
 def test_pkce_redirect_uri_without_path_uses_root(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    session = _start(service, token_server, port, path="")
+    session = _start(service, token_server, path="")
+    port = _port(session)
     assert _query(session)["redirect_uri"] == f"http://localhost:{port}"
     requests.get(
         f"http://127.0.0.1:{port}/",
@@ -352,8 +376,8 @@ def test_pkce_redirect_uri_without_path_uses_root(token_server: _TokenServer, se
 
 
 def test_pkce_cancel_releases_port(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    first = _start(service, token_server, port)
+    first = _start(service, token_server)
+    port = _port(first)
     assert LoopbackPkceSession._port_owner is first
     first.cancel()
     assert LoopbackPkceSession._port_owner is None
@@ -376,8 +400,8 @@ def test_pkce_cancel_releases_port(token_server: _TokenServer, service: str) -> 
 
 
 def test_pkce_second_session_replaces_first(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    first = _start(service, token_server, port)
+    first = _start(service, token_server)
+    port = _port(first)
     other = f"{service}_b"
     try:
         # A second session on the same fixed port (another service) takes
@@ -413,8 +437,7 @@ def test_pkce_port_in_use_raises_oserror(token_server: _TokenServer, service: st
 
 
 def test_pkce_expires_without_redirect(token_server: _TokenServer, service: str) -> None:
-    port = _free_port()
-    _start(service, token_server, port, lifetime=1.0)
+    port = _port(_start(service, token_server, lifetime=1.0))
     finished, status = ConsentSession.finish(service, wait_seconds=15)
     assert finished is None
     assert status == "the sign-in request expired before it was approved"
@@ -424,8 +447,8 @@ def test_pkce_expires_without_redirect(token_server: _TokenServer, service: str)
 def test_pkce_half_open_connection_does_not_pin_the_port(
     token_server: _TokenServer, service: str
 ) -> None:
-    port = _free_port()
-    session = _start(service, token_server, port)
+    session = _start(service, token_server)
+    port = _port(session)
     # A browser that opens the connection but never finishes its request:
     # the handler's socket timeout must return the serving thread to its
     # stop check instead of blocking on the missing headers forever.
@@ -521,7 +544,7 @@ def test_loopback_step_only_for_loopback_sessions(token_server: _TokenServer, se
     plain.verification_uri = "https://example.test/device"
     assert "curl" not in consent_instructions("plain", "Plain", plain)
 
-    session = _start(service, token_server, _free_port())
+    session = _start(service, token_server)
     step = _loopback_step(session)
     assert "ANOTHER device" in step
     assert "curl -s '<pasted URL>'" in step

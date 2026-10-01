@@ -32,6 +32,7 @@ import socket
 import ssl
 import threading
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -99,17 +100,16 @@ def _make_ssl_context(tmp_path: Path) -> ssl.SSLContext:
     return context
 
 
-class _ImapLiteServer:
-    """Threaded IMAP4rev1-subset server over TLS with one mailbox.
+class _TlsLiteServer:
+    """Loopback TLS listener that serves each connection on its own thread.
 
-    Supports exactly what ``EmailChannelBackend`` uses: CAPABILITY,
-    LOGIN, SELECT, SEARCH UNSEEN, SEARCH HEADER Message-ID, FETCH
-    (BODY.PEEK[] / RFC822), STORE +FLAGS \\Seen, and LOGOUT.
+    Subclasses implement ``_serve(conn)``.  ``close()`` wakes the accept
+    thread with ``shutdown(SHUT_RDWR)`` (closing the fd alone does not
+    interrupt a blocked ``accept()`` on Linux) and joins it, so no test
+    leaves a thread parked on a dead socket.
     """
 
     def __init__(self, ssl_context: ssl.SSLContext) -> None:
-        self.messages: list[dict[str, Any]] = []
-        self.stored_flags: list[str] = []
         self._ssl_context = ssl_context
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.bind(("127.0.0.1", 0))
@@ -119,18 +119,13 @@ class _ImapLiteServer:
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
 
-    def add_message(self, raw: bytes, message_id: str) -> None:
-        """Add an unread message to the mailbox."""
-        self.messages.append({"raw": raw, "id": message_id, "seen": False})
-
-    def unseen(self) -> list[int]:
-        """Return 1-based sequence numbers of unread messages."""
-        return [i + 1 for i, m in enumerate(self.messages) if not m["seen"]]
-
     def close(self) -> None:
-        """Stop accepting connections."""
+        """Stop accepting connections and join the accept thread."""
         self._stopping.set()
+        with suppress(OSError):
+            self._sock.shutdown(socket.SHUT_RDWR)
         self._sock.close()
+        self._thread.join(timeout=5)
 
     def _accept_loop(self) -> None:
         """Accept and serve connections until closed."""
@@ -142,6 +137,32 @@ class _ImapLiteServer:
             threading.Thread(
                 target=self._serve, args=(conn,), daemon=True
             ).start()
+
+    def _serve(self, conn: socket.socket) -> None:
+        """Serve one accepted connection (protocol-specific)."""
+        raise NotImplementedError
+
+
+class _ImapLiteServer(_TlsLiteServer):
+    """Threaded IMAP4rev1-subset server over TLS with one mailbox.
+
+    Supports exactly what ``EmailChannelBackend`` uses: CAPABILITY,
+    LOGIN, SELECT, SEARCH UNSEEN, SEARCH HEADER Message-ID, FETCH
+    (BODY.PEEK[] / RFC822), STORE +FLAGS \\Seen, and LOGOUT.
+    """
+
+    def __init__(self, ssl_context: ssl.SSLContext) -> None:
+        self.messages: list[dict[str, Any]] = []
+        self.stored_flags: list[str] = []
+        super().__init__(ssl_context)
+
+    def add_message(self, raw: bytes, message_id: str) -> None:
+        """Add an unread message to the mailbox."""
+        self.messages.append({"raw": raw, "id": message_id, "seen": False})
+
+    def unseen(self) -> list[int]:
+        """Return 1-based sequence numbers of unread messages."""
+        return [i + 1 for i, m in enumerate(self.messages) if not m["seen"]]
 
     def _serve(self, conn: socket.socket) -> None:
         """Serve one IMAP connection."""
@@ -217,35 +238,12 @@ class _ImapLiteServer:
         return f"* SEARCH{listing}\r\n".encode()
 
 
-class _SmtpLiteServer:
+class _SmtpLiteServer(_TlsLiteServer):
     """Threaded SMTP-subset server over implicit TLS recording deliveries."""
 
     def __init__(self, ssl_context: ssl.SSLContext) -> None:
         self.deliveries: list[bytes] = []
-        self._ssl_context = ssl_context
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(8)
-        self.port = self._sock.getsockname()[1]
-        self._stopping = threading.Event()
-        self._thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._thread.start()
-
-    def close(self) -> None:
-        """Stop accepting connections."""
-        self._stopping.set()
-        self._sock.close()
-
-    def _accept_loop(self) -> None:
-        """Accept and serve connections until closed."""
-        while not self._stopping.is_set():
-            try:
-                conn, _ = self._sock.accept()
-            except OSError:
-                return
-            threading.Thread(
-                target=self._serve, args=(conn,), daemon=True
-            ).start()
+        super().__init__(ssl_context)
 
     def _serve(self, conn: socket.socket) -> None:
         """Serve one SMTP connection."""

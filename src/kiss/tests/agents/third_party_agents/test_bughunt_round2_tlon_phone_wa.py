@@ -22,9 +22,7 @@ agent now uses the QR-paired whatsapp-mcp bridge and has no Meta webhook.)
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 from urllib.parse import urlparse
 
@@ -34,6 +32,8 @@ from kiss.agents.third_party_agents.phone.phone_sea import PhoneControlChannelBa
 from kiss.agents.third_party_agents.phone.phone_sea import _config as _phone_config
 from kiss.agents.third_party_agents.tlon.tlon_sea import TlonChannelBackend
 from kiss.agents.third_party_agents.tlon.tlon_sea import _config as _tlon_config
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import recording_server
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -75,9 +75,7 @@ class _RecordingHandler(BaseHTTPRequestHandler):
                 },
             )
         else:
-            self._respond_json(
-                200, {"verified_name": "Test Biz", "display_phone_number": "+1555"}
-            )
+            self._respond_json(200, {"verified_name": "Test Biz", "display_phone_number": "+1555"})
 
     def do_POST(self) -> None:  # noqa: N802
         """Serve Eyre login and legacy poke endpoints."""
@@ -101,63 +99,26 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-def _start_server() -> tuple[ThreadingHTTPServer, str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, f"http://127.0.0.1:{server.server_address[1]}"
-
-
 def _channel_requests() -> list[dict[str, Any]]:
-    return [
-        r for r in _RecordingHandler.requests_seen if r["path"].startswith("/~/channel")
-    ]
-
-
-class _ConfigBackup:
-    """Back up and restore a ChannelConfig JSON file around a test."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self._backup: str | None = None
-
-    def save(self) -> None:
-        """Record the current config contents (if any)."""
-        self._backup = self._path.read_text() if self._path.exists() else None
-
-    def restore(self) -> None:
-        """Restore the original config contents (or remove the file)."""
-        if self._backup is not None:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(self._backup)
-        elif self._path.exists():
-            self._path.unlink()
+    return [r for r in _RecordingHandler.requests_seen if r["path"].startswith("/~/channel")]
 
 
 class TestTlonPokeProtocol:
     """Tlon poke must follow the Eyre channel protocol with the configured ship."""
 
-    def setup_method(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _connected(self):
+        """Recording ship server, isolated config with a ship, connected backend."""
         _RecordingHandler.requests_seen = []
-        self._server, self.base = _start_server()
-        self._cfg = _ConfigBackup(_tlon_config.path)
-        self._cfg.save()
-        try:
-            _tlon_config.save(
-                {"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
-            )
-            self.backend = TlonChannelBackend()
-            assert self.backend.connect() is True
-        except BaseException:
-            # pytest skips teardown_method when setup_method raises; restore
-            # the config (and stop the server) ourselves so nothing leaks.
-            self.teardown_method()
-            raise
-
-    def teardown_method(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._cfg.restore()
+        with config_backup(_tlon_config.path):
+            with recording_server(_RecordingHandler) as server:
+                self.base = server.base_url
+                _tlon_config.save(
+                    {"ship_url": self.base, "code": "lidlut-tabwed", "ship": "~sampel-palnet"}
+                )
+                self.backend = TlonChannelBackend()
+                assert self.backend.connect() is True
+                yield
 
     def test_poke_uses_eyre_put_with_uid_array_and_ship(self) -> None:
         """poke must PUT a one-element JSON array to /~/channel/{uid}."""
@@ -208,25 +169,17 @@ class TestTlonPokeProtocol:
 class TestTlonPokeWithoutShip:
     """poke must raise RuntimeError when no ship is configured (legacy config)."""
 
-    def setup_method(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _connected(self):
+        """Recording ship server, isolated legacy config (no ship), connected backend."""
         _RecordingHandler.requests_seen = []
-        self._server, self.base = _start_server()
-        self._cfg = _ConfigBackup(_tlon_config.path)
-        self._cfg.save()
-        try:
-            _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed"})
-            self.backend = TlonChannelBackend()
-            assert self.backend.connect() is True, "config without 'ship' must still load"
-        except BaseException:
-            # pytest skips teardown_method when setup_method raises; restore
-            # the config (and stop the server) ourselves so nothing leaks.
-            self.teardown_method()
-            raise
-
-    def teardown_method(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._cfg.restore()
+        with config_backup(_tlon_config.path):
+            with recording_server(_RecordingHandler) as server:
+                self.base = server.base_url
+                _tlon_config.save({"ship_url": self.base, "code": "lidlut-tabwed"})
+                self.backend = TlonChannelBackend()
+                assert self.backend.connect() is True, "config without 'ship' must still load"
+                yield
 
     def test_poke_without_ship_raises_runtime_error(self) -> None:
         """poke without a configured ship must raise instead of sending junk."""
@@ -238,26 +191,17 @@ class TestTlonPokeWithoutShip:
 class TestPhoneControlSenderFilter:
     """poll_messages must only return SMS from the requested channel_id sender."""
 
-    def setup_method(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _connected(self):
+        """Recording device server, isolated phone config, connected backend."""
         _RecordingHandler.requests_seen = []
-        self._server, self.base = _start_server()
-        self._cfg = _ConfigBackup(_phone_config.path)
-        self._cfg.save()
-        try:
-            port = self._server.server_address[1]
-            _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
-            self.backend = PhoneControlChannelBackend()
-            assert self.backend.connect() is True
-        except BaseException:
-            # pytest skips teardown_method when setup_method raises; restore
-            # the config (and stop the server) ourselves so nothing leaks.
-            self.teardown_method()
-            raise
-
-    def teardown_method(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._cfg.restore()
+        with config_backup(_phone_config.path):
+            with recording_server(_RecordingHandler) as server:
+                port = server.server_address[1]
+                _phone_config.save({"device_ip": "127.0.0.1", "device_port": str(port)})
+                self.backend = PhoneControlChannelBackend()
+                assert self.backend.connect() is True
+                yield
 
     def test_poll_filters_to_requested_sender(self) -> None:
         """poll_messages('SENDER_A', '') must not return SENDER_B's SMS."""

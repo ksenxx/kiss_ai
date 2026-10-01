@@ -381,11 +381,12 @@ class TestDeleteTrickCommand(_TricksHome):
     @posix_only("directory and file permission bits")
     @unittest.skipIf(is_root(), "root ignores file permissions")
     def test_os_error_on_write_answers_error_not_crash(self) -> None:
-        self.user_file.chmod(stat.S_IRUSR)
+        # Unwritable directory: the atomic rewrite cannot stage its temp file.
+        self.kiss_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
         try:
             self.server._cmd_delete_trick({"text": "First mine.", "connId": "c2"})
         finally:
-            self.user_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            self.kiss_dir.chmod(stat.S_IRWXU)
         err = self.server.last("error")
         assert err is not None
         self.assertEqual(err["connId"], "c2")

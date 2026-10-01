@@ -73,7 +73,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from http import HTTPStatus
@@ -82,12 +82,12 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlsplit
 
 import websockets
+from websockets.asyncio.server import Server as WebSocketServer
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 from kiss.agents.sorcar import cron_agent, local_endpoint
-from kiss.agents.sorcar._concurrency import pid_alive as _is_pid_alive
 from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
     _load_chat_events_by_task_id,
@@ -101,6 +101,7 @@ from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
 from kiss.core.processes import find_bash
+from kiss.core.processes import pid_alive as _is_pid_alive
 from kiss.core.processes import process_identity as _process_identity
 from kiss.core.utils import is_root_dir, replace_waiting_for_readers
 from kiss.core.vscode_config import (
@@ -349,9 +350,10 @@ _SHUTDOWN_SIGNALS: tuple[int, ...] = tuple(
 _SEND_TIMEOUT = 30.0
 """Seconds a client may leave its socket unread before it is dropped.
 
-The listeners run without a ping watchdog, so a peer that stops reading
-would otherwise hold its send lock forever while every later broadcast
-queues another pending send for it without bound.
+The watchdog's 15 s ping only detects a dead peer, not one that merely
+stops reading, so such a peer would otherwise hold its send lock forever
+while every later broadcast queues another pending send for it without
+bound.
 """
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
@@ -2429,10 +2431,11 @@ class WebPrinter(JsonPrinter):
 
     def __init__(self) -> None:
         super().__init__()
-        self._ws_clients: set[ServerConnection] = set()
+        # Remote peers: password-authenticated browsers on other devices.
+        self._remote_clients: set[ServerConnection] = set()
         # Local peers (token-authenticated loopback connections: VS
         # Code extension windows, ``daemon_client`` runs) are kept
-        # apart from ``_ws_clients`` because talk arbitration sends
+        # apart from ``_remote_clients`` because talk arbitration sends
         # them muted copies when the daemon plays a clip itself.
         self._local_clients: set[ServerConnection] = set()
         # Local talk bookkeeping.  This printer owns two facts:
@@ -2448,7 +2451,7 @@ class WebPrinter(JsonPrinter):
         self._local_tab_sets: dict[str, set[str]] = {}
         self._local_webview_conns: set[str] = set()
         self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
-        self._conn_endpoints: dict[str, Any] = {}
+        self._conn_endpoints: dict[str, ServerConnection] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self.work_dir: str = ""
@@ -3005,7 +3008,7 @@ class WebPrinter(JsonPrinter):
         for tab_id in targets:
             tab_suffix = f', "tabId": {json.dumps(tab_id)}}}'
             if daemon_plays and tab_id in local_tabs_shown:
-                self._send_to_wss_clients(base + tab_suffix)
+                self._send_to_remote_clients(base + tab_suffix)
                 self._send_to_local_clients(muted_base + tab_suffix)
             else:
                 self._send_to_ws_clients(base + tab_suffix)
@@ -3044,19 +3047,20 @@ class WebPrinter(JsonPrinter):
             logger.exception("daemon-side talk clip playback failed")
             return False
 
-    def _send_to_wss_clients(self, data: Payload) -> None:
-        """Send a pre-serialised JSON payload to WSS clients only.
+    def _send_to_remote_clients(self, data: Payload) -> None:
+        """Send a pre-serialised JSON payload to remote clients only.
 
-        WSS peers are remote browsers — separate devices from the
-        daemon machine — so talk arbitration sends them the playable
-        copy while the same-machine local peers get the muted one.
+        Remote peers (password-authenticated browsers) are separate
+        devices from the daemon machine, so talk arbitration sends
+        them the playable copy while the same-machine local peers get
+        the muted one.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
         """
         with self._ws_lock:
-            endpoints = list(self._ws_clients)
+            endpoints = list(self._remote_clients)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
@@ -3090,8 +3094,8 @@ class WebPrinter(JsonPrinter):
         Factored out of :meth:`broadcast` so fan-out copies for
         subscribed viewer tab ids reuse the same dispatch and pending-
         future tracking as the primary broadcast.  Fans out to BOTH
-        remote WSS clients and local clients in lockstep by
-        delegating to :meth:`_send_to_wss_clients` and
+        remote and local clients in lockstep by
+        delegating to :meth:`_send_to_remote_clients` and
         :meth:`_send_to_local_clients` (per-endpoint FIFO order is
         preserved by each endpoint's ``send_lock``).
 
@@ -3102,7 +3106,7 @@ class WebPrinter(JsonPrinter):
                 global events); local delivery is narrowed to the
                 peers that can show it.
         """
-        self._send_to_wss_clients(data)
+        self._send_to_remote_clients(data)
         self._send_to_local_clients(data, tab_id)
 
     def _reserve_replay_send(
@@ -3171,7 +3175,7 @@ class WebPrinter(JsonPrinter):
 
     async def _locked_send(
         self,
-        endpoint: Any,
+        endpoint: ServerConnection,
         data: Payload,
         admit: Callable[[], bool] | None = None,
     ) -> None:
@@ -3206,7 +3210,7 @@ class WebPrinter(JsonPrinter):
                 return
             await self._timed_send(endpoint, text)
 
-    def _schedule_send(self, endpoint: Any, data: Payload) -> None:
+    def _schedule_send(self, endpoint: ServerConnection, data: Payload) -> None:
         """Schedule one payload send to one endpoint on the event loop.
 
         Shared by :meth:`_send_to_ws_clients` (fan-out) and
@@ -3247,8 +3251,9 @@ class WebPrinter(JsonPrinter):
         ``ServerConnection.send`` waits for the transport's write
         buffer to drain, so a peer that stops reading would otherwise
         hold its send lock forever while every later broadcast queued
-        one more pending send for it without bound (the listeners run
-        without a ping watchdog).  A send that does not complete within
+        one more pending send for it without bound (the watchdog's
+        15 s ping only detects a dead peer, not one that merely stops
+        reading).  A send that does not complete within
         :attr:`_send_timeout` removes the peer from both client sets
         and aborts its transport, which also ends its handler.
 
@@ -3261,56 +3266,47 @@ class WebPrinter(JsonPrinter):
         except Exception:
             logger.debug("Failed to write to client", exc_info=True)
             self.remove_client(endpoint)
-            self.remove_local_client(endpoint)
             transport = getattr(endpoint, "transport", None)
             if transport is not None:
                 transport.abort()
 
-    def _add_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
-        """Register *endpoint* in *collection* for broadcasting.
+    def add_client(self, ws: ServerConnection, local: bool = False) -> None:
+        """Register a WebSocket client for event broadcasting.
 
-        Shared body of :meth:`add_client` and :meth:`add_local_client`.
+        Args:
+            ws: The WebSocket server connection to add.
+            local: ``True`` for a token-authenticated local peer (VS
+                Code extension window, ``daemon_client`` run), which
+                joins ``_local_clients``; ``False`` for a remote,
+                password-authenticated browser.
         """
         with self._ws_lock:
-            collection.add(endpoint)
-            self._pending_sends.setdefault(endpoint, set())
+            (self._local_clients if local else self._remote_clients).add(ws)
+            self._pending_sends.setdefault(ws, set())
 
-    def _remove_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
-        """Remove *endpoint* and cancel its pending sends.
+    def remove_client(self, ws: ServerConnection) -> None:
+        """Remove a client (local or remote) and cancel its pending sends.
 
-        Shared body of :meth:`remove_client` and
-        :meth:`remove_local_client`.  Cancelling the pending
-        ``run_coroutine_threadsafe`` futures (M8) ensures a
-        permanently stuck send queue cannot keep the underlying
-        coroutine alive after the peer is gone.
+        Cancelling the pending ``run_coroutine_threadsafe`` futures
+        (M8) ensures a permanently stuck send queue cannot keep the
+        underlying coroutine alive after the peer is gone.  Safe to
+        call for an already removed connection.
+
+        Args:
+            ws: The WebSocket server connection to remove.
         """
         with self._ws_lock:
-            collection.discard(endpoint)
-            pending = self._pending_sends.pop(endpoint, set())
-            self._send_locks.pop(endpoint, None)
+            self._remote_clients.discard(ws)
+            self._local_clients.discard(ws)
+            pending = self._pending_sends.pop(ws, set())
+            self._send_locks.pop(ws, None)
         for fut in pending:
             try:
                 fut.cancel()
             except Exception:
                 logger.debug("Failed to cancel pending send", exc_info=True)
 
-    def add_client(self, ws: ServerConnection) -> None:
-        """Register a WebSocket client for event broadcasting.
-
-        Args:
-            ws: The WebSocket server connection to add.
-        """
-        self._add_endpoint(ws, self._ws_clients)
-
-    def remove_client(self, ws: ServerConnection) -> None:
-        """Remove a WebSocket client from event broadcasting.
-
-        Args:
-            ws: The WebSocket server connection to remove.
-        """
-        self._remove_endpoint(ws, self._ws_clients)
-
-    def bind_conn(self, conn_id: str, endpoint: Any) -> None:
+    def bind_conn(self, conn_id: str, endpoint: ServerConnection) -> None:
         """Associate a connection id with its transport endpoint.
 
         Called by the connection handler when a client connects, so
@@ -3334,23 +3330,9 @@ class WebPrinter(JsonPrinter):
         with self._ws_lock:
             self._conn_endpoints.pop(conn_id, None)
 
-    def add_local_client(self, ws: ServerConnection) -> None:
-        """Register a token-authenticated local connection for broadcasting.
-
-        Args:
-            ws: The local client's WebSocket server connection.
-        """
-        self._add_endpoint(ws, self._local_clients)
-
-    def remove_local_client(self, ws: ServerConnection) -> None:
-        """Remove a local connection from event broadcasting.
-
-        Args:
-            ws: The local client's WebSocket server connection.
-        """
-        self._remove_endpoint(ws, self._local_clients)
-
-    def _discard_pending_send(self, client: Any, fut: Any) -> None:
+    def _discard_pending_send(
+        self, client: ServerConnection, fut: ConcurrentFuture[None],
+    ) -> None:
         """Remove a completed send future from the per-client pending set.
 
         Called via :meth:`concurrent.futures.Future.add_done_callback`
@@ -5386,6 +5368,20 @@ async def _cancel_task(task: asyncio.Task[None] | None) -> None:
         pass
 
 
+def _close_orphaned_listener(bind: asyncio.Future[WebSocketServer]) -> None:
+    """Close a listener whose creator was cancelled while awaiting the bind.
+
+    Done-callback installed by :meth:`RemoteAccessServer._serve_wss` on
+    the shielded ``serve()`` future when the outer await is cancelled;
+    retrieving the exception also silences "exception never retrieved".
+
+    Args:
+        bind: The completed ``websockets.serve`` future.
+    """
+    if not bind.cancelled() and bind.exception() is None:
+        bind.result().close()
+
+
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
@@ -5530,6 +5526,12 @@ class RemoteAccessServer:
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._active_url: str | None = None
+        # Stamp of the latest ``remote_url`` publication; see
+        # :meth:`_broadcast_remote_url`.
+        self._url_publish_gen = 0
+        # The watchdog's in-flight LAN-URL republish (see
+        # :meth:`_republish_urls`); tracked so shutdown can cancel it.
+        self._republish_task: asyncio.Task[None] | None = None
         self._last_ips: frozenset[str] = frozenset()
         # PEM of the auto-generated server certificate the live SSL
         # context is serving; see :meth:`_refresh_tls_cert`.
@@ -5853,8 +5855,8 @@ class RemoteAccessServer:
 
         Published to same-machine clients through the endpoint file
         (:mod:`kiss.agents.sorcar.local_endpoint`), whose 0600 mode restricts
-        it to the owning user — the access rule local clients had
-        from the file mode of the former Unix socket.
+        it to the owning user: only that user's processes can act as
+        local clients.
         """
         return self._local_token
 
@@ -5897,10 +5899,7 @@ class RemoteAccessServer:
             return
         is_local = auth == "local"
 
-        if is_local:
-            self._printer.add_local_client(websocket)
-        else:
-            self._printer.add_client(websocket)
+        self._printer.add_client(websocket, local=is_local)
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -5951,14 +5950,13 @@ class RemoteAccessServer:
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
-            self._printer.remove_local_client(websocket)
 
     async def _dispatch_client_command(
         self,
         cmd: dict[str, Any],
-        endpoint: Any,
+        endpoint: ServerConnection,
         conn_state: dict[str, Any],
-        is_local: bool = False,
+        is_local: bool,
     ) -> None:
         """Hand one parsed client command to the server's code API.
 
@@ -6967,7 +6965,7 @@ class RemoteAccessServer:
         return None
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any, native: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any, is_local: bool = False,
     ) -> None:
         """Resolve the file an ``openFile`` names and reply for its client.
 
@@ -6978,7 +6976,7 @@ class RemoteAccessServer:
         ``workDir``, then the tab's pending worktree); what the reply
         carries depends on the client:
 
-        * *native* (a VS Code window over the Unix socket, whose
+        * *local* (a token-authenticated VS Code window, whose
           extension host opens files in real editor tabs) gets the
           resolved path as an ``openResolvedFile`` action::
 
@@ -7033,10 +7031,10 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``openFile`` command (``path``, optional
                 ``workDir``, ``tabId``, ``line``).
-            endpoint: The requesting connection (WSS or UDS).
-            native: ``True`` for a client that opens the resolved path
-                itself (the VS Code extension host); ``False`` for one
-                that needs the content.
+            endpoint: The requesting connection.
+            is_local: ``True`` for a client that opens the resolved
+                path itself (the VS Code extension host); ``False`` for
+                one that needs the content.
         """
         raw_path = self._cmd_str(cmd, "path")
         if not raw_path:
@@ -7047,7 +7045,7 @@ class RemoteAccessServer:
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             line = 0
 
-        def _resolve_native() -> dict[str, Any]:
+        def _resolve_local() -> dict[str, Any]:
             reply: dict[str, Any] = {
                 "type": "openResolvedFile",
                 "path": raw_path,
@@ -7062,8 +7060,8 @@ class RemoteAccessServer:
                 reply["path"] = str(path)
             return reply
 
-        if native:
-            reply = await asyncio.to_thread(_resolve_native)
+        if is_local:
+            reply = await asyncio.to_thread(_resolve_local)
             await self._reply_direct(endpoint, reply, "openFile")
             return
 
@@ -7469,8 +7467,8 @@ class RemoteAccessServer:
         """Tell a client which candidate file paths exist.
 
         Handles the ``checkPaths`` command sent by ``media/main.js``
-        (from a browser over WSS or, via the VS Code extension host,
-        over the Unix socket) after it linkifies file-path-looking
+        (from a remote browser or, via the VS Code extension host, a
+        local window) after it linkifies file-path-looking
         strings in event panel contents: a path is rendered as a
         clickable link ONLY when this check confirms it names an
         existing regular file or directory, i.e. that a subsequent
@@ -7488,7 +7486,7 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``checkPaths`` command (``paths``, optional
                 ``workDir``, ``tabId``).
-            endpoint: The requesting connection (WSS or UDS).
+            endpoint: The requesting connection.
         """
         raw_paths = cmd.get("paths")
         if not isinstance(raw_paths, list):
@@ -8193,23 +8191,25 @@ class RemoteAccessServer:
         Called on the event loop after the watchdog adopts a new
         LAN-IP baseline so the URL file's ``lan`` list and every open
         settings/welcome panel stop showing addresses the machine no
-        longer holds.  The disk write runs in the default executor to
-        keep the loop responsive; the broadcast happens immediately.
+        longer holds.  The disk write runs in the default executor and
+        the broadcast in a task (:meth:`_broadcast_remote_url` builds
+        its message off-thread) to keep the loop responsive.
         """
-        tunnel_url = (
-            self._active_url
-            if self._active_url and self._active_url != self._local_url
-            else None
-        )
-        asyncio.get_running_loop().run_in_executor(
-            None, self._write_url_file_logged, tunnel_url,
-        )
-        self._broadcast_remote_url(
+        tunnel_url = self._current_tunnel_url()
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, self._write_url_file_logged, tunnel_url)
+        self._republish_task = loop.create_task(self._broadcast_remote_url(
             self._active_url or self._local_url, bool(tunnel_url),
-        )
+        ))
 
-    def _broadcast_remote_url(self, url: str, tunnel_active: bool) -> None:
-        """Broadcast a ``remote_url`` event to every connected client.
+    def _current_tunnel_url(self) -> str | None:
+        """Return the active Cloudflare tunnel URL, or None when only the local URL is active."""
+        if self._active_url and self._active_url != self._local_url:
+            return self._active_url
+        return None
+
+    def _remote_url_message(self, url: str, tunnel_active: bool) -> dict[str, object]:
+        """Build the ``remote_url`` event every connected client receives.
 
         Includes the ``ntfyUrl`` field only when both *url* is
         non-empty and an ntfy topic is configured, matching the
@@ -8220,10 +8220,17 @@ class RemoteAccessServer:
         LAN) so the settings panel and the welcome page can show how
         to reach the webapp alongside the Cloudflare URL.
 
+        Blocking (reads the stored ntfy topic and, via
+        :meth:`_lan_urls`, the config file); callers on the event loop
+        go through :meth:`_broadcast_remote_url`.
+
         Args:
             url: The active URL (``""`` when none is known).
             tunnel_active: True only when a real Cloudflare tunnel
                 URL is in effect (not the local fallback).
+
+        Returns:
+            The event dict, ready for :meth:`WebPrinter.broadcast`.
         """
         ntfy_url = _get_ntfy_url() if url else ""
         msg: dict[str, object] = {
@@ -8236,7 +8243,44 @@ class RemoteAccessServer:
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
-        self._printer.broadcast(msg)
+        return msg
+
+    def _broadcast_remote_url(
+        self, url: str, tunnel_active: bool,
+    ) -> Coroutine[Any, Any, None]:
+        """Publish a ``remote_url`` event to every connected client.
+
+        Synchronous on purpose: it stamps the publication with a fresh
+        :attr:`_url_publish_gen` *now*, while the caller still holds
+        the loop and *url* is current, and returns the coroutine that
+        delivers it.  A publication queued with ``create_task`` thus
+        ranks by the state it captured, not by when it starts running,
+        so a stale snapshot can never mint a newer generation than a
+        publication made after it.  Callers ``await`` the result or
+        hand it to ``create_task``.
+
+        Args:
+            url: The active URL (``""`` when none is known).
+            tunnel_active: True only when a real Cloudflare tunnel
+                URL is in effect (not the local fallback).
+
+        Returns:
+            The coroutine that builds the message and broadcasts it.
+        """
+        self._url_publish_gen += 1
+        return self._deliver_remote_url(url, tunnel_active, self._url_publish_gen)
+
+    async def _deliver_remote_url(self, url: str, tunnel_active: bool, gen: int) -> None:
+        """Build the ``remote_url`` message off-thread and broadcast it.
+
+        Dropped when a newer publication (a higher
+        :attr:`_url_publish_gen`) was stamped while the message was
+        being built, so clients never see a superseded URL land after
+        its replacement.
+        """
+        msg = await asyncio.to_thread(self._remote_url_message, url, tunnel_active)
+        if gen == self._url_publish_gen:
+            self._printer.broadcast(msg)
 
     async def _broadcast_update_available(self) -> None:
         """Broadcast the cached PyPI ``update_available`` state.
@@ -8410,21 +8454,39 @@ class RemoteAccessServer:
             discovered = await loop.run_in_executor(
                 None, _discover_tunnel_url_from_metrics,
             )
-            if discovered:
+            # Re-check after the await: the watchdog's
+            # ``_restart_tunnel_url`` may have published this daemon's
+            # fresh tunnel URL meanwhile, which must not be clobbered
+            # by a URL the scan took from a dead or foreign tunnel.
+            # The claim happens on the loop with no await between the
+            # check and the assignment; the file write follows, and if
+            # a publisher overtook the claim during that write (its own
+            # write may have landed first) the file is rewritten from
+            # the current state.
+            if discovered and not self._active_url:
+                self._active_url = discovered
                 await loop.run_in_executor(
                     None, self._write_url_file_sync, discovered,
                 )
-                self._active_url = discovered
-                url = discovered
+                if self._active_url != discovered:
+                    await loop.run_in_executor(
+                        None, self._write_url_file_logged,
+                        self._current_tunnel_url(),
+                    )
+        # Revalidate after the awaits above: a tunnel (re)start or
+        # clear that landed during the file read or the scan has
+        # published the current URL, which must not be followed by the
+        # obsolete one the file or the scan returned.
+        url = self._active_url or url
         tunnel_active = bool(
             self.use_tunnel and url and url != self._local_url
         )
-        self._broadcast_remote_url(url or "", tunnel_active)
+        await self._broadcast_remote_url(url or "", tunnel_active)
         await self._broadcast_update_available()
 
     async def _endpoint_send(
         self,
-        endpoint: Any,
+        endpoint: ServerConnection,
         data: str,
         admit: Callable[[], bool] | None = None,
     ) -> None:
@@ -8615,7 +8677,7 @@ class RemoteAccessServer:
             await self._run_cmd(resume)
 
     async def _open_path_only_prompt(
-        self, cmd: dict[str, Any], endpoint: Any, native: bool,
+        self, cmd: dict[str, Any], endpoint: Any, is_local: bool,
     ) -> bool:
         """Open the file a path-only ``submit`` names; ``True`` when it did.
 
@@ -8626,7 +8688,7 @@ class RemoteAccessServer:
         ``promptOpened`` (the webview drops the prompt and the task
         claim it stamped on the tab, see ``main.js`` ``handleEvent``)
         and then the file, through :meth:`_handle_open_file`: the
-        resolved path (``openResolvedFile``) for a *native* client, the
+        resolved path (``openResolvedFile``) for a *local* client, the
         ``fileContent`` for a browser.  No task starts.
 
         A tab whose task is running, or that views a task blocked in
@@ -8638,7 +8700,7 @@ class RemoteAccessServer:
         Args:
             cmd: The ``submit`` message from the client.
             endpoint: The submitting connection.
-            native: Whether the client opens the resolved path itself
+            is_local: Whether the client opens the resolved path itself
                 (see :meth:`_handle_open_file`).
 
         Returns:
@@ -8659,8 +8721,9 @@ class RemoteAccessServer:
             if self._vscode_server._viewer_awaiting_answer(tab_id) is not None:
                 return False
         work_dir = self._cmd_work_dir(cmd)
-        path = self._resolve_tab_file(
-            trimmed, work_dir, tab_id, file_only=True,
+        # Path stats (and possibly a slow filesystem) stay off the loop.
+        path = await asyncio.to_thread(
+            self._resolve_tab_file, trimmed, work_dir, tab_id, True,
         )
         if path is None:
             return False
@@ -8670,7 +8733,7 @@ class RemoteAccessServer:
         await self._handle_open_file(
             {"path": str(path), "workDir": work_dir, "tabId": tab_id},
             endpoint,
-            native,
+            is_local,
         )
         return True
 
@@ -8678,13 +8741,13 @@ class RemoteAccessServer:
         self,
         cmd: dict[str, Any],
         endpoint: Any = None,
-        native: bool = False,
+        is_local: bool = False,
     ) -> None:
         """Translate a webview ``submit`` into a backend ``run``.
 
         The single submit path of every surface: the VS Code extension
-        host forwards its webview's ``submit`` here over the Unix
-        socket exactly as the remote webapp sends it over WSS.  The
+        host forwards its webview's ``submit`` here over the local WSS
+        endpoint exactly as the remote webapp does.  The
         translation includes the path-only shortcut: a single-line
         prompt that is nothing but the path of an existing regular file
         (relative to the tab's work dir or its pending worktree) is a
@@ -8698,13 +8761,13 @@ class RemoteAccessServer:
             endpoint: The submitting connection, which receives a
                 path-only prompt's ``promptOpened`` and file reply;
                 ``None`` disables the shortcut.
-            native: Whether the submitting client opens the resolved
+            is_local: Whether the submitting client opens the resolved
                 path itself (a VS Code window) rather than needing the
                 file's content (a browser).
         """
         tab_id = cmd.get("tabId", "")
         if endpoint is not None and await self._open_path_only_prompt(
-            cmd, endpoint, native,
+            cmd, endpoint, is_local,
         ):
             return
         if self._shutdown_initiated:
@@ -9254,7 +9317,7 @@ class RemoteAccessServer:
         """
         await asyncio.to_thread(self._write_url_file_sync, None)
         self._active_url = self._local_url
-        self._broadcast_remote_url(self._active_url, False)
+        await self._broadcast_remote_url(self._active_url, False)
         await self._post_url_if_changed()
 
     async def _restart_tunnel_url(self) -> None:
@@ -9312,7 +9375,7 @@ class RemoteAccessServer:
             self._tunnel_next_retry = time.monotonic() + delay
         await asyncio.to_thread(self._write_url_file_sync, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        self._broadcast_remote_url(self._active_url, bool(tunnel_url))
+        await self._broadcast_remote_url(self._active_url, bool(tunnel_url))
         await self._post_url_if_changed()
 
     def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
@@ -9654,23 +9717,31 @@ class RemoteAccessServer:
                     return True
         return False
 
-    def _close_ws_listeners(self) -> None:
+    def _close_ws_listeners(self, remove_endpoint_file: bool = True) -> None:
         """Stop accepting on the wildcard and loopback WSS listeners.
 
         ``close()`` only; callers that must wait for the sockets to be
         released (:meth:`stop_async`) await ``wait_closed()`` themselves.
         The wildcard server object is kept so its pending
         ``serve_forever()`` observes the close.
+
+        Args:
+            remove_endpoint_file: Also withdraw the local endpoint file
+                (inline; the sidecar flock wait is bounded by
+                ``local_endpoint._LOCK_TIMEOUT``).  :meth:`stop_async`
+                passes ``False`` and removes it off-loop instead.
         """
         if self._ws_server is not None:
             self._ws_server.close()
         if self._ws_loopback_server is not None:
             self._ws_loopback_server.close()
-        # Nothing can connect any more: the endpoint file must not keep
-        # advertising this daemon (a rebind publishes a fresh one).
-        local_endpoint.remove_endpoint_if_owned(
-            self._local_endpoint_file, self._local_token,
-        )
+        if remove_endpoint_file:
+            # Nothing can connect any more: the endpoint file must not
+            # keep advertising this daemon (a rebind publishes a fresh
+            # one).
+            local_endpoint.remove_endpoint_if_owned(
+                self._local_endpoint_file, self._local_token,
+            )
 
     async def _watchdog_ping_clients(self) -> None:
         """Ping every connected WSS client, closing unresponsive ones.
@@ -9912,15 +9983,22 @@ class RemoteAccessServer:
             self._ws_loopback_server.close()
             self._ws_loopback_server = None
 
-    async def _serve_wss(self, host: str) -> Any:
+    async def _serve_wss(self, host: str) -> WebSocketServer:
         """Start a WSS listener for this server on ``host:self.port``.
 
         Every listener (the wildcard one and the loopback alias of
         :meth:`_bind_loopback_alias`) is created here so they share the
         handler, TLS context and connection limits.  Raises ``OSError``
         when the address cannot be bound.
+
+        The bind is shielded: ``loop.create_server`` has a cancellation
+        point after the sockets are listening, so a cancel landing
+        there (a cancelled startup, or the watchdog's loopback reclaim
+        cancelled by :meth:`stop_async`) would otherwise drop the
+        ``Server`` object and leave the port bound until process exit.
+        On cancellation the listener is closed as soon as it exists.
         """
-        return await serve(
+        bind = asyncio.ensure_future(serve(
             self._ws_handler,
             host,
             self.port,
@@ -9931,7 +10009,12 @@ class RemoteAccessServer:
             ping_timeout=None,
             max_size=_MAX_LINE_BYTES,
             create_connection=_HeadAwareServerConnection,
-        )
+        ))
+        try:
+            return await asyncio.shield(bind)
+        except asyncio.CancelledError:
+            bind.add_done_callback(_close_orphaned_listener)
+            raise
 
     def _wants_loopback_alias(self) -> bool:
         """Whether this server should also bind ``127.0.0.1`` explicitly.
@@ -10328,7 +10411,12 @@ class RemoteAccessServer:
                     loop.call_soon_threadsafe(self._request_loop_shutdown)
                     return
                 except RuntimeError:
-                    pass  # Loop already closed: fall through and raise.
+                    pass  # Loop already closed: fall through.
+            if loop is not None:
+                # The loop already unwound (the Ctrl-C path): start()'s
+                # ``finally`` is running the cleanup, so there is
+                # nothing left to interrupt.
+                return
             raise KeyboardInterrupt(f"Received {sig_name}")
 
     def _request_loop_shutdown(self) -> None:
@@ -10853,16 +10941,21 @@ class RemoteAccessServer:
             self._update_when_idle_task = None
             await _cancel_task(self._update_models_watch_task)
             self._update_models_watch_task = None
-            for ws_server in (self._ws_server, self._ws_loopback_server):
-                if ws_server is None:
-                    continue
-                ws_server.close()
-                try:
+            await _cancel_task(self._republish_task)
+            self._republish_task = None
+            ws_servers = [
+                s for s in (self._ws_server, self._ws_loopback_server)
+                if s is not None
+            ]
+            self._close_ws_listeners(remove_endpoint_file=False)
+            for ws_server in ws_servers:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(ws_server.wait_closed(), timeout=2)
-                except TimeoutError:
-                    pass
-            self._ws_loopback_server = None
-            local_endpoint.remove_endpoint_if_owned(
+            self._ws_server = self._ws_loopback_server = None
+            # Off-loop: the sidecar flock wait is bounded (5 s) but
+            # would otherwise freeze the loop during shutdown.
+            await asyncio.to_thread(
+                local_endpoint.remove_endpoint_if_owned,
                 self._local_endpoint_file, self._local_token,
             )
             # Reap daemon-hosted wake-word listeners: their owning

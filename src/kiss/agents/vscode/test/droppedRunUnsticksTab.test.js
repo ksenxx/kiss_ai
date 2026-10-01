@@ -23,7 +23,7 @@
 // word to the user.
 //
 // Two levels are covered, both for real:
-//   1. the REAL compiled AgentClient over a REAL unix domain socket:
+//   1. the REAL compiled AgentClient over a REAL local WebSocket daemon stand-in:
 //      dropping a command must be announced;
 //   2. the REAL compiled SorcarSidebarView driving a webview: the
 //      announcement must settle the tab (`status running:false`) and

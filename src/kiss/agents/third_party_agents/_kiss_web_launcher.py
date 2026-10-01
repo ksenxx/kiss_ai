@@ -62,6 +62,7 @@ _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
 
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_ENDPOINT: str = ""
+_API_SERVER_THREAD: threading.Thread | None = None
 _API_SERVER_LOCK = threading.Lock()
 
 _ENDPOINT_FILE_OVERRIDE: str | None = None
@@ -81,7 +82,7 @@ def _ensure_api_server() -> str:
     Returns:
         The endpoint file path of the in-process daemon.
     """
-    global _API_SERVER, _API_SERVER_ENDPOINT
+    global _API_SERVER, _API_SERVER_ENDPOINT, _API_SERVER_THREAD
     with _API_SERVER_LOCK:
         if _API_SERVER is None:
             from kiss.server.web_server import RemoteAccessServer
@@ -123,14 +124,48 @@ def _ensure_api_server() -> str:
                 raise
             _API_SERVER = server
             _API_SERVER_ENDPOINT = endpoint_file
+            _API_SERVER_THREAD = thread
         return _API_SERVER_ENDPOINT
 
 
+def _stop_api_server() -> None:
+    """Stop the process-global daemon started by :func:`_ensure_api_server`.
+
+    Closes its listeners and endpoint file (``stop_async``), stops and
+    joins its loop thread, removes the private directory and resets the
+    globals so the next launch starts a fresh daemon.  A no-op when no
+    daemon is running.  The whole teardown runs under ``_API_SERVER_LOCK``
+    (like the startup in :func:`_ensure_api_server`), so a concurrent
+    launch cannot publish a replacement daemon while the old one is still
+    shutting down.  Tests that start the global daemon against a
+    temporary environment call this so later tests never reuse a daemon
+    wired to a deleted tmpdir.
+    """
+    global _API_SERVER, _API_SERVER_ENDPOINT, _API_SERVER_THREAD
+    with _API_SERVER_LOCK:
+        server, thread, endpoint = _API_SERVER, _API_SERVER_THREAD, _API_SERVER_ENDPOINT
+        _API_SERVER, _API_SERVER_THREAD, _API_SERVER_ENDPOINT = None, None, ""
+        if server is None or thread is None or server._loop is None:
+            return
+        _abort_api_server_startup(
+            server._loop, thread, server, None, str(Path(endpoint).parent),
+        )
+
+
 async def _stop_after_startup(server: RemoteAccessServer) -> None:
-    """Stop *server* once its (possibly cancelled) startup has settled."""
+    """Stop *server* once its (possibly cancelled) startup has settled.
+
+    Then cancels every other task still on the loop so that stopping the
+    loop afterwards destroys nothing while pending.
+    """
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     await server.stop_async()
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _stop_loop_after_pending_cancels() -> None:

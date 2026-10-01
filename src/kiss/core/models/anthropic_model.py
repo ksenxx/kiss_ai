@@ -35,7 +35,7 @@ from kiss.core.models.model import (
     strip_system_cache_break,
     transcribe_audio,
 )
-from kiss.core.models.stream_abort import StreamAbortWatchdog, stall_error
+from kiss.core.models.stream_abort import StreamAbortWatchdog, stall_error, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -972,7 +972,7 @@ class AnthropicModel(Model):
                     # it as a confusing "incomplete message" error.
                     watchdog.stop()
                     if watchdog.stopped:
-                        raise self._stop_error()
+                        raise stop_error()
                     if watchdog.stalled:
                         raise self._stall_error()
                     return stream.get_final_message()
@@ -981,14 +981,14 @@ class AnthropicModel(Model):
                     watchdog.stop()
         except (httpx2.TimeoutException, APITimeoutError) as exc:
             if self._stream_was_stopped(watchdog):
-                raise self._stop_error() from exc
+                raise stop_error() from exc
             raise self._stall_error() from exc
         except TimeoutError:
             # Already the stall error raised after the loop above.
             raise
         except Exception as exc:
             if self._stream_was_stopped(watchdog):
-                raise self._stop_error() from exc
+                raise stop_error() from exc
             if watchdog is not None and watchdog.stalled:
                 raise self._stall_error() from exc
             if _WORKSPACE_ID_REQUIRED_MARKER in str(exc):
@@ -1024,23 +1024,6 @@ class AnthropicModel(Model):
         if watchdog is not None and watchdog.stopped:
             return True
         return stop_signal.stop_requested()
-
-    @staticmethod
-    def _stop_error() -> KeyboardInterrupt:
-        """Build the stop error for a stream the user aborted.
-
-        A user stop must NOT surface as the retryable
-        :class:`TimeoutError` a stall produces — the agentic loop would
-        re-ask the model and the task would keep running.
-        ``KeyboardInterrupt`` is the same signal ``_check_stop`` raises,
-        so the whole stack unwinds into the normal "Task stopped by
-        user" path.  (The thinking bracket is closed by
-        :meth:`_create_message`'s ``finally``, for every exit alike.)
-
-        Returns:
-            The ``KeyboardInterrupt`` for the caller to raise.
-        """
-        return KeyboardInterrupt("Agent stop requested")
 
     def _stall_error(self) -> TimeoutError:
         """Build the retryable stall error.

@@ -93,30 +93,31 @@ class TestSignalRunnerForeignSender(unittest.TestCase):
 
     def setUp(self) -> None:
         """Install a destructive spool-based signal-cli on PATH."""
+        # Each mutation registers its undo immediately: ``addCleanup``
+        # callbacks run even when a later line of ``setUp`` raises, whereas
+        # ``tearDown`` would not, which could leave the destructive fake
+        # ``signal-cli`` first on PATH for every later test in the process.
         self._tmpdir = tempfile.mkdtemp(prefix="rr-review-signal-")
+        self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
         tmp = Path(self._tmpdir)
         install_cli_script(tmp / "signal-cli", _SPOOL_CLI)
         self._spool = tmp / "spool.jsonl"
         self._sends = tmp / "sends.log"
         self._spool.write_text("", encoding="utf-8")
         self._state_path = tmp / "channel_state.json"
-        self._old_path = os.environ["PATH"]
-        os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
+        old_path = os.environ["PATH"]
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+        os.environ["PATH"] = self._tmpdir + os.pathsep + old_path
+        self.addCleanup(os.environ.pop, "KISS_TEST_SPOOL", None)
         os.environ["KISS_TEST_SPOOL"] = str(self._spool)
+        self.addCleanup(os.environ.pop, "KISS_TEST_SENDS", None)
         os.environ["KISS_TEST_SENDS"] = str(self._sends)
         # The session conftest points KISS_HOME at a temp dir, so this
         # config write is sandboxed away from any real user config.
+        self.addCleanup(_config.clear)
         _config.save({"phone_number": "+1BOT"})
         self._backend = SignalChannelBackend()
         self._backend._phone_number = "+1BOT"
-
-    def tearDown(self) -> None:
-        """Restore PATH, clear the test config, and drop the temp dir."""
-        _config.clear()
-        os.environ["PATH"] = self._old_path
-        del os.environ["KISS_TEST_SPOOL"]
-        del os.environ["KISS_TEST_SENDS"]
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_runner(self) -> RecordingLaunchRunner:
         """Build a runner monitoring contact +1AAA with persistent state."""

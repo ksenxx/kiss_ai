@@ -9,7 +9,7 @@
 // onRegistryTabsState + out/SorcarPanelManager.js adoptRegistryTabs),
 // mirroring how sidebar mode's webview adopts the same tab into its
 // internal strip from the same `tabs_state` snapshot. Runs against a
-// REAL Unix-domain-socket daemon stub:
+// REAL local-WSS daemon stub:
 //  - the window's long-lived controller requests a baseline snapshot
 //    (`getTabsState`) on daemon connect; per-panel controllers do not;
 //  - a reloaded window (serialized chat placeholder present) filters

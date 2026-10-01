@@ -26,12 +26,16 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.test_remote_model_dropdown_mobile import (
     _start_live_server,
 )
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import (
+    goto_retrying_network_change,
+    reload_retrying_network_change,
+)
 
 
 @pytest.fixture
@@ -105,3 +109,35 @@ def test_a_self_reload_that_dies_is_reported_not_retried(page, base_url: str) ->
     assert documents == [base_url, base_url], documents
     assert page.url.startswith("chrome-error://")
     assert page.query_selector("#model-btn") is None
+
+
+def test_a_healthy_reload_returns_with_the_app_markup(page, base_url: str) -> None:
+    goto_retrying_network_change(page, base_url, wait_until="domcontentloaded")
+    page.evaluate("() => { window.__beforeReload = true; }")
+    reload_retrying_network_change(page, wait_until="domcontentloaded")
+    assert page.url == base_url
+    assert page.query_selector("#model-btn") is not None
+    assert page.evaluate("() => window.__beforeReload") is None
+
+
+def test_a_reload_that_dies_for_another_reason_is_raised_not_retried(
+    page, base_url: str
+) -> None:
+    documents: list[str] = []
+
+    def kill_the_reload(route) -> None:
+        documents.append(route.request.url)
+        if len(documents) == 1:
+            route.continue_()
+        else:
+            route.abort("connectionaborted")
+
+    page.route(base_url, kill_the_reload)
+    goto_retrying_network_change(page, base_url, wait_until="domcontentloaded")
+
+    with pytest.raises(PlaywrightError, match="net::ERR_CONNECTION_ABORTED"):
+        reload_retrying_network_change(page, wait_until="domcontentloaded")
+
+    # The first load plus exactly one reload attempt: no retry for a
+    # failure that is not a network change.
+    assert documents == [base_url, base_url], documents

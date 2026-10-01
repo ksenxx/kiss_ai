@@ -6,9 +6,8 @@
 
 Finding #1 (findings-6): ``git_worktree._git`` had NO timeout — a git
 process wedged in a hook or local repository operation blocked the
-agent thread forever.  ``vscode/diff_merge._git``
-already documents and carries this protection; this test pins the same
-guarantee for the sorcar-side wrapper.
+agent thread forever.  This test pins the bounded-wait guarantee of
+the shared git runner.
 
 The hang is reproduced with a REAL stub ``git`` executable placed
 first on ``PATH`` (a shell script that sleeps far longer than the

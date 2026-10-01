@@ -7,7 +7,7 @@
 Everything runs against the real JSON job store under an isolated
 ``KISS_HOME`` — no mocks or test doubles (``monkeypatch`` is used
 only to isolate environment variables, ``sys.argv``, and the
-module-level daemon-socket default between tests).  The only
+module-level daemon endpoint-file default between tests).  The only
 branches not exercised here are ``_run_prompt_job``'s successful /
 silent / timed-out LLM paths: they submit a task to the kiss-web
 daemon and require a live LLM endpoint, which is unavailable (and

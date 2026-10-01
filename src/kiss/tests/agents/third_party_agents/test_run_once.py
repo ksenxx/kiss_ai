@@ -10,45 +10,19 @@ integration for ``--channel``.
 
 from __future__ import annotations
 
-import json
 import sys
-import threading
-from http.server import BaseHTTPRequestHandler
 from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer
 from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 from kiss.agents.third_party_agents.slack.slack_sea import (
     SlackChannelBackend,
     _save_token,
     main,
 )
-
-
-class _InvalidAuthHandler(BaseHTTPRequestHandler):
-    """Local Slack Web API stand-in answering every call with ``invalid_auth``.
-
-    Returns exactly what ``https://slack.com/api/auth.test`` returns for a
-    bad token, so ``SlackChannelBackend.connect()`` follows its real
-    ``SlackApiError`` path without any network dependence.
-    """
-
-    def do_POST(self) -> None:
-        """Reply 200 with Slack's invalid-token error body."""
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        if length:
-            self.rfile.read(length)
-        body = json.dumps({"ok": False, "error": "invalid_auth"}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        """Silence request logging."""
+from kiss.tests.agents.third_party_agents.recording_http import recording_server
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
 
 
 class TestRunOnceConnectFailure:
@@ -69,9 +43,7 @@ class TestRunOnceConnectFailure:
 class TestHasBotReply:
     """Tests for ChannelRunner._has_bot_reply() logic."""
 
-    def _make_poller_with_poll_fn(
-        self, poll_fn: Any = None
-    ) -> ChannelRunner:
+    def _make_poller_with_poll_fn(self, poll_fn: Any = None) -> ChannelRunner:
         """Create a poller with a configurable poll_thread_fn."""
         backend = SlackChannelBackend()
         backend._bot_user_id = "U_BOT"
@@ -136,9 +108,7 @@ class TestHasBotReply:
 class TestCLIOneShotMode:
     """Tests for CLI integration of one-shot poll mode."""
 
-    def test_channel_without_token_exits(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_channel_without_token_exits(self, capsys: pytest.CaptureFixture[str]) -> None:
         """--channel without token exits when no token stored.
 
         The _make_backend factory calls sys.exit(1) when no token
@@ -161,9 +131,7 @@ class TestCLIOneShotMode:
         out = capsys.readouterr().out
         assert "Not authenticated" in out
 
-    def test_channel_with_invalid_token(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_channel_with_invalid_token(self, capsys: pytest.CaptureFixture[str]) -> None:
         """One-shot mode with invalid token prints checking message and raises.
 
         When a token exists but is invalid, _make_backend succeeds
@@ -174,33 +142,23 @@ class TestCLIOneShotMode:
         attribute, so the test is deterministic offline.
         """
         _save_token("xoxb-invalid-for-oneshot-test")
-        server = ThreadedHTTPServer(("127.0.0.1", 0), _InvalidAuthHandler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        base_url = f"http://127.0.0.1:{server.server_address[1]}/api/"
-        original_init = SlackChannelBackend.__init__
+        with recording_server(InvalidAuthHandler) as server:
+            base_url = f"{server.base_url}/api/"
+            original_init = SlackChannelBackend.__init__
 
-        def _init_with_local_api(
-            self: SlackChannelBackend, workspace: str = "default"
-        ) -> None:
-            original_init(self, workspace=workspace)
-            self._api_base_url = base_url
+            def _init_with_local_api(self: SlackChannelBackend, workspace: str = "default") -> None:
+                original_init(self, workspace=workspace)
+                self._api_base_url = base_url
 
-        original_argv = sys.argv
-        sys.argv = [
-            "kiss-slack",
-            "--channel",
-            "some-channel",
-            "-m",
-            "test-model",
-        ]
-        SlackChannelBackend.__init__ = _init_with_local_api  # type: ignore[method-assign]
-        try:
-            with pytest.raises(RuntimeError, match="Failed to connect"):
-                main()
-        finally:
-            SlackChannelBackend.__init__ = original_init  # type: ignore[method-assign]
-            sys.argv = original_argv
-            server.shutdown()
-            server.server_close()
+            original_argv = sys.argv
+            sys.argv = ["kiss-slack", "--channel", "some-channel", "-m", "test-model"]
+            SlackChannelBackend.__init__ = _init_with_local_api  # type: ignore[method-assign]
+            try:
+                with pytest.raises(RuntimeError, match="Failed to connect"):
+                    main()
+            finally:
+                SlackChannelBackend.__init__ = original_init  # type: ignore[method-assign]
+                sys.argv = original_argv
+            assert [r["path"] for r in server.requests] == ["/api/auth.test"]
         out = capsys.readouterr().out
         assert "Checking Slack channel for pending messages..." in out

@@ -16,7 +16,7 @@ divergent semantics:
   ``ProcessLookupError`` -> False, ``PermissionError`` -> True, other
   ``OSError`` -> False.
 
-The single :func:`kiss.agents.sorcar._concurrency.pid_alive` now
+The single :func:`kiss.core.processes.pid_alive` now
 carries the ``web_server`` semantics and the three call sites delegate
 to it.  These tests probe real processes: a live child, a reaped
 child, pid ``0`` / ``-1``, and (when not root) pid ``1`` for the
@@ -37,8 +37,8 @@ import sys
 import pytest
 
 from kiss.agents.sorcar import web_use_tool
-from kiss.agents.sorcar._concurrency import pid_alive
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.core.processes import pid_alive
 from kiss.server import web_server
 from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
 

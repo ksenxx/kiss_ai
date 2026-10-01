@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -28,10 +27,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.gsheets.gsheets_sea as gsheets_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.gsheets.gsheets_sea import (
     _SERVICE,
     GoogleSheetsAgent,
@@ -43,6 +38,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = TOKEN
 
@@ -112,7 +108,7 @@ class _SheetsRequestHandler(BaseHTTPRequestHandler):
 
     def _record(self, body: Any) -> None:
         parsed = urlparse(self.path)
-        cast(_SheetsServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": parsed.path,
@@ -172,9 +168,7 @@ class _SheetsRequestHandler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/spreadsheets":
-            sheets = (body or {}).get(
-                "sheets", [{"properties": {"title": "Sheet1"}}]
-            )
+            sheets = (body or {}).get("sheets", [{"properties": {"title": "Sheet1"}}])
             self._reply(
                 200,
                 json.dumps(
@@ -206,9 +200,7 @@ class _SheetsRequestHandler(BaseHTTPRequestHandler):
             for request in (body or {}).get("requests", []):
                 if "addSheet" in request:
                     title = request["addSheet"].get("properties", {}).get("title", "")
-                    replies.append(
-                        {"addSheet": {"properties": {"sheetId": 77, "title": title}}}
-                    )
+                    replies.append({"addSheet": {"properties": {"sheetId": 77, "title": title}}})
                 else:
                     replies.append({})
             self._reply(200, json.dumps({"spreadsheetId": "ss1", "replies": replies}))
@@ -223,31 +215,17 @@ class _SheetsRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _SheetsServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _SheetsRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def sheets_server():
-    """Start the emulated Sheets/Drive server on a free port; yield (base_url, server)."""
-    server = _SheetsServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Sheets/Drive server on a free port; yield the recording server."""
+    yield from serve_recording(_SheetsRequestHandler)
 
 
 @pytest.fixture()
 def backend(sheets_server, composio):
     """A connected backend pointed at the emulated server."""
-    base_url, server = sheets_server
+    server = sheets_server
+    base_url = server.base_url
     connect(composio, _SERVICE)
     b = GoogleSheetsChannelBackend()
     b._base_url = base_url
@@ -409,17 +387,13 @@ def test_get_values_quoted_sheet_name_encoded(backend) -> None:
     b, server = backend
     result = json.loads(b.gsheets_get_values("ss1", "'My Sheet'!A1"))
     assert result["ok"] is True
-    assert server.requests[-1]["path"] == (
-        "/spreadsheets/ss1/values/%27My%20Sheet%27%21A1"
-    )
+    assert server.requests[-1]["path"] == ("/spreadsheets/ss1/values/%27My%20Sheet%27%21A1")
 
 
 def test_update_values(backend) -> None:
     """gsheets_update_values PUTs the parsed 2D array with valueInputOption."""
     b, server = backend
-    result = json.loads(
-        b.gsheets_update_values("ss1", "Sheet1!A1:B2", '[["x", 1], ["y", 2]]')
-    )
+    result = json.loads(b.gsheets_update_values("ss1", "Sheet1!A1:B2", '[["x", 1], ["y", 2]]'))
     assert result == {"ok": True, "updated_range": "Sheet1!A1:B2", "updated_cells": 4}
     req = server.requests[-1]
     assert (req["method"], req["path"]) == (
@@ -537,8 +511,7 @@ def test_list_spreadsheets_escapes_query(backend) -> None:
     assert result["ok"] is True
     req = server.requests[-1]
     assert req["query"]["q"] == [
-        "mimeType='application/vnd.google-apps.spreadsheet'"
-        " and name contains 'Bob\\'s books'"
+        "mimeType='application/vnd.google-apps.spreadsheet' and name contains 'Bob\\'s books'"
     ]
     assert req["query"]["pageSize"] == ["3"]
 

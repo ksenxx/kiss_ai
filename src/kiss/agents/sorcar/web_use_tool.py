@@ -42,7 +42,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from kiss.agents.sorcar import web_stealth
-from kiss.agents.sorcar._concurrency import pid_alive as _pid_alive
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.useful_tools import (
     _absolutize,
@@ -51,6 +50,7 @@ from kiss.agents.sorcar.useful_tools import (
     _stale_worktree_fallback,
 )
 from kiss.core.processes import SIGKILL
+from kiss.core.processes import pid_alive as _pid_alive
 from kiss.core.processes import process_identity as _process_identity
 
 logger = logging.getLogger(__name__)
@@ -933,7 +933,7 @@ class WebUseTool:
                 # chrome-headless-shell.
                 "channel": web_stealth.chrome_channel(),
                 "args": [
-                    "--disable-blink-features=AutomationControlled",
+                    web_stealth.disabled_blink_features(unattended=self._headless),
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-breakpad",
@@ -1451,7 +1451,16 @@ class WebUseTool:
         )
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
-        self._ensure_browser()
+        """The numbered accessibility tree of the current page.
+
+        Reads the page the caller just acted on and nothing else: every
+        tool method ensures the browser before acting, and a page that
+        died during the action (a hung tab the daemon closed, a popup
+        that closed itself) must surface as that tool's error string
+        rather than be swapped for a fresh blank tab here, which would
+        report the action as a success on an empty page.  The next tool
+        call recovers through :meth:`_ensure_browser`.
+        """
         header = f"Page: {self._page_title(self._page)}\nURL: {self._page.url}\n\n"
         snapshot = self._page.locator("body").aria_snapshot(timeout=_PAGE_READ_TIMEOUT_MS)
         if not snapshot:

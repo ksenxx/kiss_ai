@@ -390,8 +390,8 @@ def _git(
 
     Always passes a timeout so a hung git process (e.g. waiting on a
     credential-helper prompt or a network remote) cannot block the
-    agent thread forever — the same protection
-    ``vscode/diff_merge._git`` documents.  On expiry a synthesized
+    agent thread forever — the one hardened runner every server-side
+    git call goes through.  On expiry a synthesized
     non-zero ``CompletedProcess`` (returncode 124, the timeout
     convention) is returned so callers keep working.
 

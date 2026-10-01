@@ -286,6 +286,10 @@ function testDotDisappearsLiveOnStatusRunningFalse() {
   let rows = rowsByTaskId(win);
   assert.ok(dotOf(rows['ending task']), 'dot must be present initially');
 
+  // The tab's task is running; only a status that FLIPS the running
+  // state refetches history (a replayed status that changes nothing
+  // must not fan out a getHistory per tab).
+  send(win, {type: 'status', running: true, tabId: undefined});
   posted.length = 0;
   send(win, {type: 'status', running: false, tabId: undefined});
   const sent = posted.find(m => m && m.type === 'getHistory');

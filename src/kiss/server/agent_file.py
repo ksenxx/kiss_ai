@@ -8,7 +8,8 @@ The caller of :func:`kiss.server.sorcar.run` may supply an *agent
 script* — a Sorcar Extension Agent (SEA), a Python file whose top-level
 ``X()`` functions compute the run's parameters — as a file path on
 the ``run`` command's ``agentPath`` field.  The client validates and resolves the path
-(:func:`resolve_agent_path`); the daemon imports the file and, for
+(:func:`kiss.agents.sorcar.daemon_client.resolve_agent_path`); the
+daemon imports the file and, for
 every ``run`` parameter ``X`` the script defines a top-level ``X()``
 function for, calls that function and overrides the command's
 corresponding wire field with its return value
@@ -30,12 +31,6 @@ import math
 import os
 from typing import Any
 
-# The client-side validator lives in the sorcar layer (the ``run_agent``
-# dispatch tool uses it under the layering invariant); re-exported here
-# unchanged as the public ``kiss.server.agent_file.resolve_agent_path``.
-from kiss.agents.sorcar.daemon_client import (
-    resolve_agent_path as resolve_agent_path,
-)
 from kiss.server.tools_file import _safe_message, execute_python_file
 
 logger = logging.getLogger("kiss-vscode")
@@ -167,8 +162,8 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     Args:
         raw_path: The agent-script path, for diagnostic messages.
         param: The getter name (:data:`PARAM_FIELDS` /
-            :data:`HOOK_FIELDS` first element) whose ``{param}()``
-            produced *value*.
+            :data:`HOOK_FIELDS` / :data:`ADD_FIELDS` first element)
+            whose ``{param}()`` produced *value*.
         value: The getter's return value.
 
     Returns:
@@ -327,16 +322,15 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     # ``ADD_FIELDS`` last: an addition applies on top of the value an
     # ``append_to_system_prompt()`` getter may have staged.
     for param, field in PARAM_FIELDS + HOOK_FIELDS + ADD_FIELDS:
-        getter_name = param
         # Membership (not ``.get() is None``) decides absence: a
         # DEFINED ``X = None`` is a broken getter, not a missing
         # one, and must stop the task like any other non-callable.
-        if getter_name not in namespace:
+        if param not in namespace:
             continue
-        getter = namespace[getter_name]
+        getter = namespace[param]
         if not callable(getter):
             raise AgentFileError(
-                f"{getter_name} of agent script {raw_path!r} must be a "
+                f"{param} of agent script {raw_path!r} must be a "
                 f"callable, got {type(getter).__name__}"
             )
         try:

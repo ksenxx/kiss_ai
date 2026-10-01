@@ -312,6 +312,114 @@ def test_watcher_picks_up_seas_md_change(tmp_path: Path) -> None:
         sea_commands.stop_registry_watcher()
 
 
+def _alive_watchers() -> list[threading.Thread]:
+    return [
+        t for t in threading.enumerate()
+        if t.name == "kiss-sea-registry-watcher" and t.is_alive()
+    ]
+
+
+@posix_only("FIFO-blocked read")
+def test_stopped_watcher_mid_scan_does_not_resume_beside_its_successor() -> None:
+    """A poller stopped while blocked in a scan must exit once the scan ends.
+
+    ``stop_registry_watcher`` unpublishes the thread and joins it with a
+    timeout; a poller still inside ``refresh_registry`` outlives a short
+    join.  With one module-wide stop event, the next ``start`` cleared
+    that event and the old poller resumed its loop beside the new one,
+    two pollers for ever.  Each poller now owns its stop event.
+
+    The old poller is held inside its scan by turning ``SEAS.md`` into a
+    FIFO with no writer: ``read_text`` blocks until this test opens the
+    write end and closes it (an empty file for the reader).
+    """
+    config = kiss_home() / "SEAS.md"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("", encoding="utf-8")
+    sea_commands.start_registry_watcher(poll_interval=0.1)
+    old = sea_commands._watcher_thread
+    assert old is not None
+    config.unlink()
+    os.mkfifo(config)
+    writer = None
+    try:
+        # A non-blocking open of the write end succeeds only once a
+        # reader (the poller's read_text) is blocked on the FIFO.
+        deadline = time.monotonic() + 10
+        while writer is None:
+            try:
+                writer = os.open(config, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                assert time.monotonic() < deadline, "poller never read SEAS.md"
+                time.sleep(0.01)
+        config.unlink()
+        config.write_text("", encoding="utf-8")
+        sea_commands.stop_registry_watcher(timeout=0.05)
+        assert old.is_alive(), "the old poller must still be inside its scan"
+        sea_commands.start_registry_watcher(poll_interval=0.1)
+        new = sea_commands._watcher_thread
+        assert new is not None and new is not old
+    finally:
+        if writer is not None:
+            os.close(writer)  # EOF: the old poller's read_text returns
+    old.join(timeout=5)
+    assert not old.is_alive(), "REGRESSION: stopped poller resumed beside its successor"
+    assert _alive_watchers() == [new]
+    sea_commands.stop_registry_watcher()
+    assert _alive_watchers() == []
+
+
+def test_watcher_start_and_stop_race_safely(tmp_path: Path) -> None:
+    """Overlapping start/stop calls never raise and never leak a poller.
+
+    ``start_registry_watcher`` used to publish the thread, release the
+    lock, run the synchronous first rescan and only then start the
+    thread.  A ``stop_registry_watcher`` in that window joined an
+    unstarted thread (``RuntimeError``) and a second start saw a
+    not-alive thread and spawned a second poller that nothing could
+    stop.  Hammering start and stop from several threads must end
+    with no error and at most one live poller, and none after the
+    final stop.
+    """
+    folder = tmp_path / "one"
+    _touch_sea(folder, "alpha")
+    _write_seas_md([str(folder)])
+    errors: list[BaseException] = []
+
+    def starter() -> None:
+        for _ in range(25):
+            try:
+                sea_commands.start_registry_watcher(poll_interval=0.1)
+            except BaseException as exc:  # noqa: BLE001 — recorded, asserted below
+                errors.append(exc)
+
+    def stopper() -> None:
+        for _ in range(25):
+            try:
+                sea_commands.stop_registry_watcher(timeout=5)
+            except BaseException as exc:  # noqa: BLE001 — recorded, asserted below
+                errors.append(exc)
+
+    threads = [threading.Thread(target=starter, name=f"starter{i}") for i in range(3)]
+    threads += [threading.Thread(target=stopper, name=f"stopper{i}") for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not any(t.is_alive() for t in threads)
+    assert errors == [], f"start/stop raced into an exception: {errors!r}"
+
+    # Pollers that were stopped exit within one poll interval; a leaked
+    # second poller would survive forever.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and len(_alive_watchers()) > 1:
+        time.sleep(0.05)
+    assert len(_alive_watchers()) <= 1, "a second registry poller was leaked"
+    sea_commands.stop_registry_watcher(timeout=5)
+    assert _alive_watchers() == [], "the registry poller survived stop_registry_watcher"
+    assert sea_commands._watcher_thread is None
+
+
 def test_seas_md_preserves_backslashes_in_folder_names(
     tmp_path: Path,
 ) -> None:

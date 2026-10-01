@@ -5,7 +5,7 @@
 
 // End-to-end tests for the host side of the history panel's
 // active-task relay (out/SorcarPanelManager.js +
-// out/SorcarSidebarView.js) against a REAL Unix-domain-socket daemon
+// out/SorcarSidebarView.js) against a REAL local-WSS daemon
 // stub:
 //  - setActiveTaskSink pushes the current state right away ('' ids
 //    when no panel reported yet);

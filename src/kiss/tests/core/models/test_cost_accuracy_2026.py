@@ -28,12 +28,13 @@ published pricing pages:
   billed at the full input rate.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.core.models.model_info import MODEL_INFO, calculate_cost
+from kiss.core.models.model_info import MODEL_INFO, PACKAGE_MODEL_INFO_PATH, calculate_cost
 
 
 class TestOpenAIGpt56CacheWritePricing:
@@ -270,17 +271,22 @@ class TestDirectMoonshotCachePricing:
         assert cost == pytest.approx(expected)
 
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
-        """OpenRouter kimi-k3 charges cache reads at 0.1x input on the base entry and every alias.
+        """OpenRouter kimi-k3 keeps its published cache price on the base entry and every alias.
 
-        The literal prices are not pinned: openrouter.ai repriced kimi-k3 from
-        $1.70 to $3.00 per 1M input tokens in 2026-09 and ``update_models.py``
-        tracks the live price.  What must hold is that no alias silently falls
-        back to the 0.25x Moonshot default for cache reads, and that the
-        thinking aliases bill exactly like the base model.
+        The literal prices are not pinned, and neither is the cache/input
+        ratio: ``update_models.py`` copies openrouter.ai's headline
+        listing, which is the cheapest endpoint's price.  On 2026-09-30 it
+        was 0.1x ($3.00 / $0.30); on 2026-10-01 the headline endpoint
+        (Relace) published $0.7072 input with an undiscounted $0.7072
+        cache read.  What must hold is that the catalog bills the explicit
+        published ``input_cache_read_price`` rather than the 0.25x
+        direct-Moonshot default, and that the thinking aliases bill
+        exactly like the base model.
         """
+        raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text())["openrouter/moonshotai/kimi-k3"]
         base = MODEL_INFO["openrouter/moonshotai/kimi-k3"]
         assert base.input_price_per_1M > 0
-        assert base.cache_read_price_per_1M == pytest.approx(base.input_price_per_1M * 0.1)
+        assert base.cache_read_price_per_1M == pytest.approx(raw["cache_read_price_per_1M"])
         for name in (
             "openrouter/moonshotai/kimi-k3-low",
             "openrouter/moonshotai/kimi-k3-high",
@@ -325,6 +331,16 @@ class TestDirectCatalogPricesMatchProviderPages:
         assert calculate_cost("gemini-3.7-flash", 1_000_000, 100_000, 500_000, 0) == pytest.approx(
             (1_000_000 * 0.75 + 100_000 * 3.75 + 500_000 * 0.075) / 1e6
         )
+
+    def test_gemini_tts_and_embedding_2_are_not_free(self):
+        """ai.google.dev pricing 2026-10: 3.1 Flash TTS $1 / $20, Embedding 2 $0.20 input.
+
+        Both entries had been left at $0 / $0, so any call showed $0.00.
+        """
+        assert calculate_cost("gemini-3.1-flash-tts-preview", 1_000, 2_000) == pytest.approx(
+            (1_000 * 1.0 + 2_000 * 20.0) / 1e6
+        )
+        assert calculate_cost("gemini-embedding-2", 1_000_000, 0) == pytest.approx(0.20)
 
     def test_gpt_audio_mini_audio_tokens_priced_separately(self):
         """developers.openai.com pricing 2026-09: audio $10 / $20, text $0.60 / $2.40."""
@@ -390,9 +406,9 @@ class TestAnthropicCacheReadFamilies:
     def test_fable_5_and_older_opus_keep_ten_percent(self):
         for name in ("claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"):
             info = MODEL_INFO[name]
-            assert info.cache_read_price_per_1M == pytest.approx(
-                info.input_price_per_1M * 0.1
-            ), name
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1), (
+                name
+            )
 
     def test_openrouter_opus_55_passthrough_carries_the_same_rate(self):
         info = MODEL_INFO["openrouter/anthropic/claude-opus-5.5"]
@@ -455,11 +471,15 @@ class TestGpt61SolPricing:
 
 
 class TestTogetherCachedInputPrices:
-    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input`` (2026-09)."""
+    """https://www.together.ai/pricing and ``/v1/models`` ``pricing.cached_input``.
+
+    Kimi-K3 was $3.00/$15.00 with $0.30 cached input until 2026-09; Together
+    cut it to $2.70/$13.50/$0.27 (``/v1/models`` on 2026-10-01).
+    """
 
     def test_together_models_carry_published_cache_read_prices(self):
         expected = {
-            "moonshotai/Kimi-K3": 0.30,
+            "moonshotai/Kimi-K3": 0.27,
             "zai-org/GLM-5.3": 0.26,
             "zai-org/GLM-5.3-Flash": 0.03,
             "deepseek-ai/DeepSeek-V4-Pro-0813": 0.13,
@@ -471,7 +491,7 @@ class TestTogetherCachedInputPrices:
 
     def test_together_kimi_k3_cache_hit_is_not_billed_as_input(self):
         cost = calculate_cost("moonshotai/Kimi-K3", 90, 20, 3_012, 0)
-        assert cost == pytest.approx((90 * 3.0 + 20 * 15.0 + 3_012 * 0.30) / 1e6)
+        assert cost == pytest.approx((90 * 2.7 + 20 * 13.5 + 3_012 * 0.27) / 1e6)
 
     def test_together_models_without_a_published_cache_price_bill_hits_as_input(self):
         info = MODEL_INFO["meta-llama/Llama-3.3-70B-Instruct-Turbo"]

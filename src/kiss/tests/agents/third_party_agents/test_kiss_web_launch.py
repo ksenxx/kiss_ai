@@ -86,6 +86,15 @@ class _ApiLaunchBase(unittest.TestCase):
         # when ``setUp`` itself fails partway, unlike ``tearDown``.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-api-launch-")
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        # The daemon re-executes each channel agent's module as the task's
+        # tools file, so credential paths are re-evaluated in that process:
+        # point HOME and KISS_HOME at this empty tmpdir so every test
+        # observes the deterministic "not authenticated" state and never
+        # the developer machine's real credentials.
+        self._saved_env = {k: os.environ.get(k) for k in ("HOME", "KISS_HOME")}
+        os.environ["HOME"] = self.tmpdir
+        os.environ["KISS_HOME"] = str(Path(self.tmpdir) / ".kiss")
+        self.addCleanup(self._restore_env)
         self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
@@ -132,6 +141,13 @@ class _ApiLaunchBase(unittest.TestCase):
         self._original_run = self._parent_class.run
         self.addCleanup(self._restore_run_and_discard_agents)
         self.stub_calls: list[dict[str, Any]] = []
+
+    def _restore_env(self) -> None:
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def _restore_endpoint_override(self) -> None:
         launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
@@ -320,26 +336,12 @@ class TestLaunchViaApi(_ApiLaunchBase):
             return "module tools loaded ok"
 
         self._install_stub(on_run=on_run)
-        # The channel agents persist credentials under ``~/.kiss`` (a
-        # ``Path.home()``-based path, re-evaluated when the daemon
-        # re-executes the module as the task's tools file), so point
-        # HOME at this test's empty tmpdir for the run: the tools must
-        # observe the deterministic "not authenticated" state, not the
-        # developer machine's real Slack credentials.
-        saved_home = os.environ.get("HOME")
-        os.environ["HOME"] = self.tmpdir
-        try:
-            result = run_agent_via_kiss_web(
-                agent,
-                "use the tools",
-                work_dir=self.repo,
-                endpoint_file=self.endpoint_file,
-            )
-        finally:
-            if saved_home is None:
-                os.environ.pop("HOME", None)
-            else:
-                os.environ["HOME"] = saved_home
+        result = run_agent_via_kiss_web(
+            agent,
+            "use the tools",
+            work_dir=self.repo,
+            endpoint_file=self.endpoint_file,
+        )
         assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
 
     def test_explicit_tools_file_overrides_agent_module(self) -> None:
@@ -801,8 +803,6 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
 
         self._install_stub(summary="global daemon ok")
         saved_override = launcher._ENDPOINT_FILE_OVERRIDE
-        saved_api_server = launcher._API_SERVER
-        saved_api_server_endpoint = launcher._API_SERVER_ENDPOINT
         launcher._ENDPOINT_FILE_OVERRIDE = None
         try:
             result = run_agent_via_kiss_web(
@@ -829,48 +829,16 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
             assert launcher._API_SERVER_ENDPOINT == first_endpoint
         finally:
             launcher._ENDPOINT_FILE_OVERRIDE = saved_override
-            created = launcher._API_SERVER
-            created_endpoint = launcher._API_SERVER_ENDPOINT
-            if created is not None and created is not saved_api_server:
-                # The process-global daemon was created against this
-                # test's temporary persistence/config environment; shut
-                # it down and restore the globals so later tests build
-                # their own instead of reusing a daemon wired to a
-                # deleted tmpdir (mirrors _ApiLaunchBase cleanup for
-                # the per-test server).
-                created_loop = created._loop
-                if created_loop is not None:
-
-                    async def _cancel_pending() -> None:
-                        pending = [
-                            t for t in asyncio.all_tasks()
-                            if t is not asyncio.current_task()
-                        ]
-                        for t in pending:
-                            t.cancel()
-                        if pending:
-                            await asyncio.gather(
-                                *pending, return_exceptions=True,
-                            )
-
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            _cancel_pending(), created_loop,
-                        ).result(timeout=5)
-                    except Exception:
-                        pass
-                    created_loop.call_soon_threadsafe(created_loop.stop)
-                    for thread in threading.enumerate():
-                        if thread.name == "kiss-tp-api-server":
-                            thread.join(timeout=5)
-                    if not created_loop.is_running():
-                        created_loop.close()
-                if created_endpoint:
-                    shutil.rmtree(
-                        Path(created_endpoint).parent, ignore_errors=True,
-                    )
-            launcher._API_SERVER = saved_api_server
-            launcher._API_SERVER_ENDPOINT = saved_api_server_endpoint
+            # The process-global daemon was created against this test's
+            # temporary persistence/config environment; stop it (listeners,
+            # endpoint file, loop thread, private dir) so later tests build
+            # their own instead of reusing a daemon wired to a deleted tmpdir.
+            launcher._stop_api_server()
+        assert launcher._API_SERVER is None
+        assert not Path(first_endpoint).exists(), (
+            "stopping the daemon must remove its endpoint file"
+        )
+        assert not any(t.name == "kiss-tp-api-server" for t in threading.enumerate())
 
 
 class TestCarrierAgentDirectRuns(_ApiLaunchBase):
@@ -1292,7 +1260,7 @@ class TestNoDirectRunCallSites(unittest.TestCase):
             / "third_party_agents"
         )
         offenders: list[str] = []
-        for py in sorted(tp_dir.glob("*.py")):
+        for py in sorted(tp_dir.rglob("*.py")):
             if py.name == "_kiss_web_launcher.py":
                 continue
             source = py.read_text(encoding="utf-8")

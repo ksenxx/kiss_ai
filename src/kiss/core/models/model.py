@@ -41,7 +41,7 @@ from kiss.core.models.heif import (
     heif_to_jpeg,
     is_heif,
 )
-from kiss.core.models.stream_abort import DEFAULT_STREAM_STALL_TIMEOUT
+from kiss.core.models.stream_abort import DEFAULT_STREAM_STALL_TIMEOUT, stop_error
 from kiss.core.processes import IS_WINDOWS, kill_process_group
 
 logger = logging.getLogger(__name__)
@@ -460,35 +460,15 @@ def _audio_mime_to_format(mime_type: str) -> str:
     return _AUDIO_MIME_TO_FORMAT.get(mime_type, fallback)
 
 
-def _is_transient_transcription_error(exc: Exception) -> bool:
-    """Return True when a transcription failure is worth retrying.
-
-    Retryable: rate limits (429), connection/timeout errors, and
-    server-side 5xx responses.  Not retryable: authentication,
-    invalid-request, and other deterministic client errors.
-
-    Args:
-        exc: The exception raised by the OpenAI transcription call.
-
-    Returns:
-        True when the error is transient and the call may be retried.
-    """
-    import openai
-
-    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
-        return True
-    if isinstance(exc, openai.APIStatusError):
-        return exc.status_code == 429 or exc.status_code >= 500
-    return False
-
-
 def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
     """Transcribe audio bytes to text using OpenAI's Whisper API.
 
     This is used as a fallback for model providers that do not support audio
-    attachments natively (e.g. Anthropic).  Transient API failures (rate
-    limits, connection errors, 5xx responses) are retried a couple of times
-    with a short backoff before giving up.
+    attachments natively (e.g. Anthropic).  The call runs synchronously while
+    a request is being built and is not stop-aware, so its wait is bounded
+    tightly: 10 s to connect, 120 s per attempt, and the SDK's own retry of
+    transient failures (connection errors, timeouts, 408/409/429 and 5xx)
+    at most twice.  That is the only retry policy; there is no loop here.
 
     Args:
         data: Raw audio file bytes.
@@ -503,6 +483,7 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
         ValueError: If no API key is available.
         RuntimeError: If the transcription API call fails.
     """
+    import httpx
     from openai import OpenAI
 
     key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -510,22 +491,18 @@ def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) ->
         raise ValueError("OpenAI API key is required for audio transcription")
 
     ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
-    client = OpenAI(api_key=key)
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=(f"audio{ext}", data, mime_type),
-                response_format="text",
-            )
-            return str(transcript).strip()
-        except Exception as exc:
-            if attempt < max_attempts and _is_transient_transcription_error(exc):
-                time.sleep(0.5 * attempt)
-                continue
-            raise RuntimeError(f"Audio transcription failed: {exc}") from exc
-    raise RuntimeError("Audio transcription failed")  # pragma: no cover - unreachable
+    client = OpenAI(
+        api_key=key, timeout=httpx.Timeout(120.0, connect=10.0), max_retries=2
+    )
+    try:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(f"audio{ext}", data, mime_type),
+            response_format="text",
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+    return str(transcript).strip()
 
 
 def flatten_content_to_text(content: Any) -> str:
@@ -1436,7 +1413,7 @@ class Model(ABC):
 
 # Separates the task from the appended system prompt in the single prompt
 # sent to a CLI-backed agent (see CLITextModel._build_prompt).
-CLI_SYSTEM_PROMPT_HEADER = "\n\n# You new system prompt follows:\n"
+CLI_SYSTEM_PROMPT_HEADER = "\n\n# Your new system prompt follows:\n"
 
 
 class CLITextModel(Model):
@@ -1569,32 +1546,37 @@ class CLITextModel(Model):
                 parts.append(f"[Tool Result]: {content}")
         return "\n\n".join(parts)
 
-    def _install_tools_prompt_in_system_instruction(
-        self, function_map: dict[str, Callable[..., Any]]
-    ) -> dict[str, Any]:
-        """Install a copied config containing the text-based tools prompt.
+    @contextlib.contextmanager
+    def _tools_prompt_installed(
+        self, function_map: dict[str, Callable[..., Any]], extra_note: str = ""
+    ) -> Iterator[None]:
+        """Run one text-based tool turn with the tools prompt installed.
 
-        Returns the original config so callers can restore it in their own
-        ``finally`` block.  Keeping restoration at the call site is
-        intentional: Codex historically installed the config *before*
-        reading or replacing its stream callbacks, then restored the config
-        *before* those callbacks.  A context manager necessarily changes one
-        of those exception/order semantics because nested contexts unwind in
-        reverse order.
+        The skeleton both CLI adapters' ``generate_and_process_with_tools``
+        share: a *copy* of ``model_config`` whose ``system_instruction``
+        carries the tools prompt (plus *extra_note*) is installed, the
+        stream callbacks are wrapped by :class:`_ToolCallFilteredStream`
+        (which holds the assistant text back until the turn ends so the
+        raw ``tool_calls`` block is never rendered), and on every exit the
+        callbacks are restored first and the original config last.
 
         Args:
             function_map: Dictionary mapping function names to callables.
-
-        Returns:
-            The original ``model_config`` object, unchanged.
+            extra_note: Text appended after the tools prompt.
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
         original_config = self.model_config
         config = dict(original_config)
         original_system = config.get("system_instruction", "")
-        config["system_instruction"] = (original_system + "\n\n" + tools_prompt).strip()
+        config["system_instruction"] = (
+            original_system + "\n\n" + tools_prompt
+        ).strip() + extra_note
         self.model_config = config
-        return original_config
+        try:
+            with _ToolCallFilteredStream(self):
+                yield
+        finally:
+            self.model_config = original_config
 
     def _emit_as_thinking(self, text: str) -> None:
         """Forward *text* to the token callback wrapped in a thinking block.
@@ -1768,10 +1750,14 @@ class _CLIProcess:
             raise KISSError(f"Failed to start {label}: {e}") from e
         self._stdout_lines: queue.Queue[str | None] = queue.Queue()
         self._stderr_chunks: list[str] = []
-        self._readers = (
-            self._start_reader(self._drain_stdout, "stdout"),
-            self._start_reader(self._drain_stderr, "stderr"),
-        )
+        readers: list[threading.Thread] = []
+        try:
+            readers.append(self._start_reader(self._drain_stdout, "stdout"))
+            readers.append(self._start_reader(self._drain_stderr, "stderr"))
+        except BaseException:
+            self._abort_start(readers)
+            raise
+        self._readers = (readers[0], readers[1])
         # The stdin writer, once send_prompt() has started it, and the
         # flag that tells it to give up: close() (and a Stop or deadline
         # in send_prompt) set the flag, join the thread, then close stdin.
@@ -1785,6 +1771,31 @@ class _CLIProcess:
     def __exit__(self, *exc_info: Any) -> None:
         """End the child's lifetime, however the ``with`` block finished."""
         self.close()
+
+    def _abort_start(self, readers: list[threading.Thread]) -> None:
+        """Kill, reap and release a child whose reader threads failed to start.
+
+        ``Thread.start()`` failing (thread exhaustion) inside ``__init__``
+        means the ``with`` block is never entered and ``close()`` never
+        runs, so the child would stay alive behind three open pipes.  Once
+        the child is dead a reader that did start drains its pipe to EOF
+        and exits; as in :meth:`close`, an output pipe is closed only
+        after its reader is gone, stdin unconditionally.
+
+        Args:
+            readers: The reader threads that did start, stdout's first.
+        """
+        self._proc.kill()
+        self._proc.wait()
+        for thread in readers:
+            thread.join(timeout=_REAP_GRACE_SECONDS)
+        owners = dict(zip((self._proc.stdout, self._proc.stderr), readers, strict=False))
+        for pipe in (self._proc.stdin, self._proc.stdout, self._proc.stderr):
+            owner = owners.get(pipe)
+            if owner is None or not owner.is_alive():
+                assert pipe is not None  # every pipe is subprocess.PIPE
+                with contextlib.suppress(OSError):
+                    pipe.close()
 
     def _start_reader(self, target: Callable[[], None], suffix: str) -> threading.Thread:
         """Start a daemon thread draining one of the child's pipes."""
@@ -1856,7 +1867,7 @@ class _CLIProcess:
                 raise _StreamReadTimeoutError()
             if stop_signal.stop_requested():
                 self._writer_cancel.set()
-                raise KeyboardInterrupt("Agent stop requested")
+                raise stop_error()
             writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
             if not writer.is_alive() or self._proc.poll() is not None:
                 return
@@ -1942,7 +1953,7 @@ class _CLIProcess:
             if remaining <= 0:
                 raise _StreamReadTimeoutError()
             if stop_signal.stop_requested():
-                raise KeyboardInterrupt("Agent stop requested")
+                raise stop_error()
             try:
                 line = self._stdout_lines.get(
                     timeout=min(remaining, _STOP_POLL_SECONDS)
@@ -1990,7 +2001,7 @@ class _CLIProcess:
         wait_until = time.monotonic() + min(remaining, _EXIT_GRACE_SECONDS)
         while True:
             if stop_signal.stop_requested():
-                raise KeyboardInterrupt("Agent stop requested")
+                raise stop_error()
             slice_ = min(wait_until - time.monotonic(), _STOP_POLL_SECONDS)
             status = self._reap(max(slice_, 0.0))
             if status is not None or slice_ <= 0:
