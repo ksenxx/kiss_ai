@@ -15771,7 +15771,14 @@
         break;
       case 'tipsData':
         // The daemon's tips bootstrap, sent on every `ready`: tips.js
-        // stores it and auto-opens the window when due.
+        // stores it and auto-opens the window when due.  Only a chat
+        // surface opens it (centered over the chat, as the remote
+        // webapp does): the History and Task Info sidebar views also
+        // connect and get this event, and each VS Code webview type has
+        // its own localStorage, so the once-per-version guard in
+        // tips.js cannot stop them from opening a second and third
+        // window of their own.
+        if (HISTORY_PANEL_MODE || META_PANEL_MODE) break;
         if (typeof window.__kissApplyTipsConfig === 'function') {
           window.__kissApplyTipsConfig({
             tips: Array.isArray(ev.tips) ? ev.tips : [],
