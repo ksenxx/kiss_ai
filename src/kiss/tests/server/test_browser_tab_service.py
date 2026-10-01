@@ -22,7 +22,6 @@ from __future__ import annotations
 import http.server
 import os
 import shutil
-import socketserver
 import stat
 import sys
 import tempfile
@@ -254,12 +253,32 @@ def test_family_name_and_mac_bundle_helper(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+# A sign-in page shaped like Duo's "Use your security key" prompt: on load
+# it asks the browser for a security key and offers an "Other options"
+# button at a fixed position.  The button retitles the page when clicked.
+_SECURITY_KEY_PAGE = b"""<html><head><title>Login</title></head>
+<body style='margin:0'>
+<script>
+if (window.PublicKeyCredential) {
+  const challenge = new Uint8Array(32);
+  navigator.credentials.get({publicKey: {challenge, timeout: 60000,
+    allowCredentials: [{type: 'public-key', id: new Uint8Array(16)}]}})
+    .catch(() => {});
+}
+</script>
+<button style='position:absolute;left:100px;top:100px;width:200px;height:50px'
+  onclick="document.title = 'Other options'">Other options</button>
+</body></html>"""
+
+
 class _Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         body = (
             b"<html><head><title>Tall</title></head><body style='margin:0'>"
             b"<input id='q' autofocus><div style='height:5000px'></div></body></html>"
         )
+        if self.path == "/security-key":
+            body = _SECURITY_KEY_PAGE
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(body)))
@@ -272,7 +291,10 @@ class _Page(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def page_server() -> Any:
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), _Page)
+    # Threaded with daemon handler threads: Chromium opens speculative
+    # connections it never writes to, and a single-threaded server would
+    # sit in that handler's readline while shutdown() waited for it.
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Page)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}/"
     httpd.shutdown()
@@ -479,6 +501,56 @@ def test_headless_environment_runs_a_headed_browser_on_xvfb(
     assert web_stealth.virtual_display() is not None, "the browser runs on the shared Xvfb"
 
 
+def _click_other_options(server: VSCodeServer, tab_id: str) -> None:
+    """Click the (100..300, 100..150) button through the streamed tab's input path."""
+    for action in ("mousePressed", "mouseReleased"):
+        server._handle_command(
+            {
+                "type": "browserInput",
+                "tab_id": tab_id,
+                "event": {
+                    "kind": "mouse",
+                    "action": action,
+                    "x": 200,
+                    "y": 125,
+                    "button": "left",
+                    "buttons": 1 if action == "mousePressed" else 0,
+                    "clickCount": 1,
+                },
+            }
+        )
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed")
+def test_security_key_prompt_does_not_wedge_the_streamed_tab(
+    daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str
+) -> None:
+    """A page asking for a security key stays clickable in the Browser tab.
+
+    Chrome answers ``navigator.credentials.get`` with a native modal
+    "Use your security key" dialog.  On an Xvfb display nobody sees it,
+    the screencast does not carry it, and it swallows every click on the
+    page underneath, so Duo's "Other options" button could not be
+    pressed.  An unattended browser therefore exposes no WebAuthn API:
+    the page skips the request and the click lands.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    web_stealth.stop_virtual_display()
+    assert service.open_for_user(page_server + "security-key") is True
+    tab_id = _events(printer, "openBrowserTab")[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Login"), "state")
+    assert web_stealth.virtual_display() is not None, "the browser runs headed on Xvfb"
+    assert _evaluate(service, tab_id, "typeof window.PublicKeyCredential") == "undefined"
+    _click_other_options(server, tab_id)
+    _wait(
+        lambda: _evaluate(service, tab_id, "document.title") == "Other options",
+        "the click to reach the page",
+    )
+
+
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
 def test_without_xvfb_the_tab_falls_back_to_masked_headless(
     daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str, tmp_path: Path
@@ -504,6 +576,8 @@ def test_without_xvfb_the_tab_falls_back_to_masked_headless(
     assert web_stealth.virtual_display() is None
     assert "HeadlessChrome" not in _evaluate(service, tab_id, "navigator.userAgent")
     assert _evaluate(service, tab_id, "navigator.webdriver") is False
+    # Headless Chrome shows the same invisible security-key dialog.
+    assert _evaluate(service, tab_id, "typeof window.PublicKeyCredential") == "undefined"
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")

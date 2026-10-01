@@ -73,6 +73,34 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
+@pytest.fixture()
+def captured_dispatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture every ``daemon_client.run`` call at the daemon-client boundary.
+
+    The real dispatch path runs up to that boundary; each call is recorded
+    as ``{"prompt": ..., **kwargs}`` and answered with a successful
+    ``TaskResult`` so the tool returns normally.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    captured: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        captured.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(text="ok", success=True, cost=0.0, tokens=0, steps=0)
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    return captured
+
+
+def _write_helper_script(caller: Path) -> Path:
+    """Create *caller* with a minimal ``helper.py`` agent script; return the script path."""
+    caller.mkdir()
+    script = caller / "helper.py"
+    script.write_text("def model() -> str:\n    return 'm'\n")
+    return script
+
+
 def test_available_channels_discovery() -> None:
     channels = available_channels()
     for expected in ("slack", "telegram", "discord", "email", "ntfy"):
@@ -105,9 +133,7 @@ def test_channel_name_is_normalized() -> None:
 
 
 def test_empty_task_error() -> None:
-    assert run_agent("   ", "slack") == (
-        "Error: task must be a non-empty string."
-    )
+    assert run_agent("   ", "slack") == ("Error: task must be a non-empty string.")
 
 
 def test_bad_budget_error() -> None:
@@ -115,10 +141,7 @@ def test_bad_budget_error() -> None:
     assert out == "Error: max_budget must be a number, got 'cheap'."
     for bad in ("nan", "inf", "0", "-2"):
         out = run_agent("say hi", "slack", max_budget=bad)
-        assert out == (
-            f"Error: max_budget must be a positive finite number, "
-            f"got {bad!r}."
-        )
+        assert out == (f"Error: max_budget must be a positive finite number, got {bad!r}.")
 
 
 def test_channel_alias_normalization() -> None:
@@ -131,9 +154,7 @@ def test_channel_alias_normalization() -> None:
     ):
         out = run_agent("say hi", alias)
         assert "unknown agent" not in out
-        assert out.startswith(
-            f"Error: the {canonical} agent task could not run:"
-        )
+        assert out.startswith(f"Error: the {canonical} agent task could not run:")
 
 
 def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
@@ -141,9 +162,7 @@ def test_hyphenated_alias_is_a_channel_not_a_path() -> None:
     # alias resolves to the channel even though "-" appears in it.
     out = run_agent("say hi", "home-assistant")
     assert "unknown agent" not in out
-    assert out.startswith(
-        "Error: the homeassistant agent task could not run:"
-    )
+    assert out.startswith("Error: the homeassistant agent task could not run:")
 
 
 def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
@@ -163,7 +182,7 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
 
 
 def test_dispatch_pins_tab_scope_to_calling_work_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """Every dispatch scopes the sub-task's tab to the CALLING work dir.
 
@@ -175,17 +194,6 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     only that boundary call is captured, to read the argument the
     dispatch computed.
     """
-    from kiss.agents.sorcar import daemon_client
-
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append(kwargs)
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
 
     caller = tmp_path / "caller_project"
     caller.mkdir()
@@ -197,41 +205,35 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     # tool's ``timeout`` argument is empty) and opts in to the
     # stop-on-timeout cascade — a timed-out channel sub-task must not
     # outlive its workspace reservation.
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", "ntfy")
-    assert captured[0]["work_dir"] == str(tmp_path / "channel_work")
-    assert captured[0]["scope_work_dir"] == str(caller)
-    assert (
-        captured[0]["timeout"]
-        == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    )
-    assert captured[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["work_dir"] == str(tmp_path / "channel_work")
+    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
+    assert captured_dispatch[0]["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    assert captured_dispatch[0]["stop_on_timeout"] is True
 
     # Cron mode: executes in the cron work dir, scoped to the caller;
     # an explicit ``timeout`` argument is parsed and forwarded.
-    captured.clear()
+    captured_dispatch.clear()
     tool("run 'echo hi' every 5 minutes", "cron", timeout="42.5")
-    assert captured[0]["work_dir"] == cron_agent.work_dir()
-    assert captured[0]["scope_work_dir"] == str(caller)
-    assert captured[0]["timeout"] == 42.5
-    assert captured[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["work_dir"] == cron_agent.work_dir()
+    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
+    assert captured_dispatch[0]["timeout"] == 42.5
+    assert captured_dispatch[0]["stop_on_timeout"] is True
 
     # Path mode: executes in the caller's project (scope == work_dir).
     script = caller / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", str(script))
-    assert captured[0]["work_dir"] == str(caller)
-    assert captured[0]["scope_work_dir"] == str(caller)
-    assert (
-        captured[0]["timeout"]
-        == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
-    )
-    assert captured[0]["stop_on_timeout"] is True
+    assert captured_dispatch[0]["work_dir"] == str(caller)
+    assert captured_dispatch[0]["scope_work_dir"] == str(caller)
+    assert captured_dispatch[0]["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    assert captured_dispatch[0]["stop_on_timeout"] is True
 
 
 def test_channel_and_cron_dispatch_skip_git_lifecycle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """Channel and cron dispatches run outside the project git lifecycle.
 
@@ -253,18 +255,6 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     real dispatch path is exercised up to the daemon-client boundary;
     only that boundary call is captured.
     """
-    from kiss.agents.sorcar import daemon_client
-
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append(kwargs)
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
-
     caller = tmp_path / "caller_project"
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
@@ -272,20 +262,20 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     # Channel mode: no worktree, no auto-commit; classification
     # follows the daemon's configured default (no per-run override).
     tool("say hi", "ntfy")
-    assert captured[0]["use_worktree"] is False
-    assert captured[0]["auto_commit"] is False
-    assert captured[0]["classify_tasks"] is None
+    assert captured_dispatch[0]["use_worktree"] is False
+    assert captured_dispatch[0]["auto_commit"] is False
+    assert captured_dispatch[0]["classify_tasks"] is None
 
     # Cron mode: the module getters already return False for
     # use_worktree/auto_commit, the wire fields agree with them, and
     # classification defaults off (an explicit ``classify_tasks``
     # argument can turn it on; see
     # ``test_run_options_are_forwarded_to_daemon``).
-    captured.clear()
+    captured_dispatch.clear()
     tool("run 'echo hi' every 5 minutes", "cron")
-    assert captured[0]["use_worktree"] is False
-    assert captured[0]["auto_commit"] is False
-    assert captured[0]["classify_tasks"] is False
+    assert captured_dispatch[0]["use_worktree"] is False
+    assert captured_dispatch[0]["auto_commit"] is False
+    assert captured_dispatch[0]["classify_tasks"] is False
 
     # Path mode: the standard task lifecycle (worktree + auto-commit
     # following the persisted "Use worktree" / "Auto commit" settings,
@@ -295,30 +285,30 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
     script.write_text("def model() -> str:\n    return 'm'\n")
     isolated = IsolatedKissHome("kiss-dispatch-lifecycle-")
     try:
-        captured.clear()
+        captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured[0]["use_worktree"] is True
-        assert captured[0]["auto_commit"] is True
-        assert captured[0]["classify_tasks"] is None
+        assert captured_dispatch[0]["use_worktree"] is True
+        assert captured_dispatch[0]["auto_commit"] is True
+        assert captured_dispatch[0]["classify_tasks"] is None
 
         # The user turned both settings off in the settings panel: a
         # path-mode sub-agent follows them like a chat-panel task would.
         isolated.write_config(is_worktree=False, auto_commit_mode=False)
-        captured.clear()
+        captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured[0]["use_worktree"] is False
-        assert captured[0]["auto_commit"] is False
+        assert captured_dispatch[0]["use_worktree"] is False
+        assert captured_dispatch[0]["auto_commit"] is False
 
         # Each setting is read on its own; explicit arguments still win.
         isolated.write_config(is_worktree=True, auto_commit_mode=False)
-        captured.clear()
+        captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured[0]["use_worktree"] is True
-        assert captured[0]["auto_commit"] is False
-        captured.clear()
+        assert captured_dispatch[0]["use_worktree"] is True
+        assert captured_dispatch[0]["auto_commit"] is False
+        captured_dispatch.clear()
         tool("say hi", str(script), auto_commit="true")
-        assert captured[0]["use_worktree"] is True
-        assert captured[0]["auto_commit"] is True
+        assert captured_dispatch[0]["use_worktree"] is True
+        assert captured_dispatch[0]["auto_commit"] is True
     finally:
         isolated.cleanup()
 
@@ -331,8 +321,13 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     is reported by name with the offending text.
     """
     for name in (
-        "use_worktree", "auto_commit", "use_web_tools", "classify_tasks",
-        "use_memory", "is_parallel", "append_basic_tools",
+        "use_worktree",
+        "auto_commit",
+        "use_web_tools",
+        "classify_tasks",
+        "use_memory",
+        "is_parallel",
+        "append_basic_tools",
     ):
         out = run_agent("say hi", "ntfy", **{name: "maybe"})
         assert out == f"Error: {name} must be 'true' or 'false', got 'maybe'."
@@ -340,9 +335,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "Error: model_config must be a JSON object, got '[1, 2]'."
     )
     out = run_agent("say hi", "ntfy", model_config="{not json")
-    assert out.startswith(
-        "Error: model_config must be a JSON object, got '{not json': "
-    )
+    assert out.startswith("Error: model_config must be a JSON object, got '{not json': ")
     missing = tmp_path / "no_such_tools.py"
     out = run_agent("say hi", "ntfy", tools=str(missing))
     assert out == f"Error: tools file '{missing}' does not exist"
@@ -353,7 +346,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 
 
 def test_channel_and_cron_refuse_worktree_and_auto_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """The channel/cron git-lifecycle pin cannot be overridden.
 
@@ -363,21 +356,7 @@ def test_channel_and_cron_refuse_worktree_and_auto_commit(
     so asking for one is refused; an explicit ``"false"`` agrees with
     the pin and dispatches normally.
     """
-    from kiss.agents.sorcar import daemon_client
-
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append(kwargs)
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
-
-    refused = (
-        "agent task always runs without a git worktree or auto-commit"
-    )
+    refused = "agent task always runs without a git worktree or auto-commit"
     for agent in ("ntfy", "cron"):
         for kwargs in (
             {"use_worktree": "true"},
@@ -386,15 +365,15 @@ def test_channel_and_cron_refuse_worktree_and_auto_commit(
         ):
             out = run_agent("say hi", agent, **kwargs)
             assert out.startswith(f"Error: the {agent} {refused}"), out
-    assert captured == []
+    assert captured_dispatch == []
 
     run_agent("say hi", "ntfy", use_worktree="false", auto_commit=" False ")
-    assert captured[0]["use_worktree"] is False
-    assert captured[0]["auto_commit"] is False
+    assert captured_dispatch[0]["use_worktree"] is False
+    assert captured_dispatch[0]["auto_commit"] is False
 
 
 def test_run_options_are_forwarded_to_daemon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """The optional arguments reach ``daemon_client.run`` as its keyword options.
 
@@ -405,31 +384,18 @@ def test_run_options_are_forwarded_to_daemon(
     task's work directory (the tool runs in the daemon process, whose
     working directory is unrelated).  The real dispatch path is
     exercised up to the daemon-client boundary; only that boundary
-    call is captured.
+    call is captured_dispatch.
     """
-    from kiss.agents.sorcar import daemon_client
-
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append(kwargs)
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
 
     caller = tmp_path / "caller_project"
-    caller.mkdir()
-    script = caller / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script = _write_helper_script(caller)
     tools_file = caller / "extra_tools.py"
     tools_file.write_text("def get_tools():\n    return []\n")
     tool = make_run_agent_tool(str(caller))
 
     # Nothing passed: the daemon's defaults decide.
     tool("say hi", str(script))
-    defaults = captured[0]
+    defaults = captured_dispatch[0]
     assert defaults["chat_id"] == ""
     assert defaults["system_prompt"] == ""
     assert defaults["tools"] is None
@@ -443,9 +409,10 @@ def test_run_options_are_forwarded_to_daemon(
 
     # Everything passed, in path mode: parsed and forwarded, with the
     # explicit git-lifecycle values replacing the path-mode defaults.
-    captured.clear()
+    captured_dispatch.clear()
     tool(
-        "say hi", str(script),
+        "say hi",
+        str(script),
         chat_id=" chat-123 ",
         system_prompt="You are a terse helper.",
         tools="extra_tools.py",
@@ -460,7 +427,7 @@ def test_run_options_are_forwarded_to_daemon(
         append_to_system_prompt="Answer in French.",
         append_to_prompt="Cite sources.",
     )
-    sent = captured[0]
+    sent = captured_dispatch[0]
     assert sent["chat_id"] == "chat-123"
     assert sent["system_prompt"] == "You are a terse helper."
     assert sent["tools"] == str(tools_file)
@@ -477,32 +444,32 @@ def test_run_options_are_forwarded_to_daemon(
 
     # An absolute tools path is kept as given (resolved); path mode
     # honours an explicit worktree request too.
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", str(script), tools=str(tools_file), use_worktree="true")
-    assert captured[0]["tools"] == str(tools_file)
-    assert captured[0]["use_worktree"] is True
+    assert captured_dispatch[0]["tools"] == str(tools_file)
+    assert captured_dispatch[0]["use_worktree"] is True
 
     # The standalone tool (no calling work dir) resolves a relative
     # tools path against the process working directory.
     monkeypatch.chdir(caller)
-    captured.clear()
+    captured_dispatch.clear()
     run_agent("say hi", str(script), tools="extra_tools.py")
-    assert captured[0]["tools"] == str(tools_file)
+    assert captured_dispatch[0]["tools"] == str(tools_file)
 
     # An explicit classify_tasks overrides the mode default in every
     # mode: cron's pinned-off classification and the channel/path
     # "daemon decides" default alike.
-    captured.clear()
+    captured_dispatch.clear()
     tool("run 'echo hi' every 5 minutes", "cron", classify_tasks="true")
-    assert captured[0]["classify_tasks"] is True
-    captured.clear()
+    assert captured_dispatch[0]["classify_tasks"] is True
+    captured_dispatch.clear()
     tool("say hi", "ntfy", classify_tasks="False", use_memory="false")
-    assert captured[0]["classify_tasks"] is False
-    assert captured[0]["use_memory"] is False
+    assert captured_dispatch[0]["classify_tasks"] is False
+    assert captured_dispatch[0]["use_memory"] is False
 
 
 def test_dispatch_forwards_parent_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """A dispatch on behalf of a calling task marks it as the parent.
 
@@ -518,23 +485,10 @@ def test_dispatch_forwards_parent_identity(
     persisting agent is a ``ChatSorcarAgent``, which always has the
     resolver, and covering it would need a fabricated stand-in object.
     """
-    from kiss.agents.sorcar import daemon_client
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append(kwargs)
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
-
     caller = tmp_path / "caller_project"
-    caller.mkdir()
-    script = caller / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script = _write_helper_script(caller)
 
     # A calling agent with a persisted task row: its task id and its
     # frontend tab id ride along, so the daemon runs the sub-task as
@@ -544,29 +498,29 @@ def test_dispatch_forwards_parent_identity(
     parent._tab_id = "webtab-7"
     tool = make_run_agent_tool(str(caller), parent)
     tool("say hi", str(script))
-    assert captured[0]["parent_task_id"] == "a" * 32
-    assert captured[0]["parent_tab_id"] == "webtab-7"
+    assert captured_dispatch[0]["parent_task_id"] == "a" * 32
+    assert captured_dispatch[0]["parent_tab_id"] == "webtab-7"
 
     # The same caller identity rides along in channel mode too.
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", "ntfy")
-    assert captured[0]["parent_task_id"] == "a" * 32
-    assert captured[0]["parent_tab_id"] == "webtab-7"
+    assert captured_dispatch[0]["parent_task_id"] == "a" * 32
+    assert captured_dispatch[0]["parent_tab_id"] == "webtab-7"
 
     # A calling agent that has not persisted a row yet (before its
     # first run) dispatches an ordinary top-level task.
     fresh = ChatSorcarAgent("Fresh parent")
     fresh._tab_id = "webtab-8"
-    captured.clear()
+    captured_dispatch.clear()
     make_run_agent_tool(str(caller), fresh)("say hi", str(script))
-    assert captured[0]["parent_task_id"] == ""
-    assert captured[0]["parent_tab_id"] == ""
+    assert captured_dispatch[0]["parent_task_id"] == ""
+    assert captured_dispatch[0]["parent_tab_id"] == ""
 
     # Standalone tools-file use: no calling agent at all.
-    captured.clear()
+    captured_dispatch.clear()
     make_run_agent_tool(str(caller))("say hi", str(script))
-    assert captured[0]["parent_task_id"] == ""
-    assert captured[0]["parent_tab_id"] == ""
+    assert captured_dispatch[0]["parent_task_id"] == ""
+    assert captured_dispatch[0]["parent_tab_id"] == ""
 
 
 def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
@@ -622,9 +576,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     script = tmp_path / "my_researcher.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     out = run_agent("say hi", str(script), workspace="ignored-ws")
-    assert out.startswith(
-        "Error: the my_researcher agent task could not run:"
-    )
+    assert out.startswith("Error: the my_researcher agent task could not run:")
     assert "no-daemon.json" in out
     # Path mode never touches the channel workspace env var.
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
@@ -634,7 +586,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
 
 
 def test_default_agent_is_the_bundled_dummy_sea(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """``run_agent(task)`` with no ``agent`` runs ``seas/dummy/dummy_sea.py`` in path mode.
 
@@ -643,7 +595,6 @@ def test_default_agent_is_the_bundled_dummy_sea(
     project; the sub-task runs in the calling task's work directory
     like every other path-named agent script.
     """
-    from kiss.agents.sorcar import daemon_client
     from kiss.agents.sorcar.agent_dispatch import DEFAULT_AGENT_PATH
 
     default = Path(DEFAULT_AGENT_PATH)
@@ -654,30 +605,21 @@ def test_default_agent_is_the_bundled_dummy_sea(
     assert apply_agent_overrides(cmd) == set()
     assert cmd == {"agentPath": DEFAULT_AGENT_PATH, "prompt": "say hi"}
 
-    captured: list[dict[str, Any]] = []
-
-    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
-        captured.append({"prompt": prompt, **kwargs})
-        return daemon_client.TaskResult(
-            text="ok", success=True, cost=0.0, tokens=0, steps=0,
-        )
-
-    monkeypatch.setattr(daemon_client, "run", capture_run)
     caller = tmp_path / "caller_project"
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
     tool("say hi")
-    assert captured[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
-    assert captured[0]["work_dir"] == str(caller)
-    assert captured[0]["prompt"] == "say hi"
+    assert captured_dispatch[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
+    assert captured_dispatch[0]["work_dir"] == str(caller)
+    assert captured_dispatch[0]["prompt"] == "say hi"
     # Whitespace counts as "not given", like every other option.
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", agent="   ")
-    assert captured[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
+    assert captured_dispatch[0]["extension_agent_path"] == DEFAULT_AGENT_PATH
     # An explicit agent still wins over the default.
-    captured.clear()
+    captured_dispatch.clear()
     tool("say hi", agent="ntfy")
-    assert captured[0]["extension_agent_path"].endswith("ntfy_sea.py")
+    assert captured_dispatch[0]["extension_agent_path"].endswith("ntfy_sea.py")
 
 
 def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
@@ -714,7 +656,7 @@ def test_path_mode_detected_by_py_suffix_and_separator(
 
 
 def test_relative_path_resolves_against_captured_work_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The tool runs in the daemon process, whose CWD is unrelated to
     # the user's project: a relative agent path must resolve against
@@ -753,7 +695,7 @@ def test_path_mode_runs_in_captured_work_dir(tmp_path: Path) -> None:
 
 
 def test_standalone_relative_path_resolves_against_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Without a captured work directory (standalone tool), a relative
     # path resolves against the process working directory.
@@ -802,7 +744,8 @@ def test_dispatch_uses_launcher_workspace_registry(
 
 
 def test_dispatch_uses_recorded_daemon_endpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Inside the kiss-web daemon the cron scheduler records the
     # daemon's own endpoint file at boot; the dispatch must target it
@@ -832,13 +775,12 @@ def test_every_channel_module_is_dispatchable() -> None:
     import importlib
 
     for channel in available_channels():
-        module = importlib.import_module(
-            f"kiss.agents.third_party_agents.{channel}.{channel}_sea"
-        )
+        module = importlib.import_module(f"kiss.agents.third_party_agents.{channel}.{channel}_sea")
         cls = _agent_class(module)
         assert cls is not None, channel
         assert isinstance(
-            getattr(cls, "channel_system_prompt", None), str,
+            getattr(cls, "channel_system_prompt", None),
+            str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
         assert callable(getattr(module, "tools", None)), channel
@@ -873,9 +815,8 @@ def test_get_tools_and_sorcar_wiring() -> None:
     # each dispatched sub-task's spend is folded into the calling
     # task's cost accounting.
     agent_source = Path(agent_dispatch.__file__).parent / "sorcar_agent.py"
-    assert (
-        'tools.append(make_run_agent_tool(self.work_dir or "", self))'
-        in agent_source.read_text(encoding="utf-8")
+    assert 'tools.append(make_run_agent_tool(self.work_dir or "", self))' in agent_source.read_text(
+        encoding="utf-8"
     )
     # The system prompt directs the agent to dispatch immediately.
     system_md = Path(agent_dispatch.__file__).parents[2] / "SYSTEM.md"

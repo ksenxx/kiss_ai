@@ -5,21 +5,22 @@
 """Integration tests for slack_sea — no mocks or test doubles.
 
 Tests token persistence, tool creation, SlackAgent construction,
-authentication workflows, and tool function signatures.
+authentication workflows, and tool function signatures.  Invalid-token
+scenarios run against a loopback Slack Web API emulator that answers
+``invalid_auth``, so no test contacts ``slack.com``.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
 import sys
-import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from slack_sdk import WebClient
 
 from kiss.agents.third_party_agents.slack.slack_sea import (
-    _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
     _delete_workspace,
@@ -30,6 +31,17 @@ from kiss.agents.third_party_agents.slack.slack_sea import (
     _token_path,
     main,
 )
+from kiss.tests.agents.third_party_agents.recording_http import (
+    RecordingServer,
+    serve_recording,
+)
+from kiss.tests.agents.third_party_agents.slack_invalid_auth import InvalidAuthHandler
+
+
+@pytest.fixture(scope="module")
+def invalid_auth_server() -> Iterator[RecordingServer]:
+    """One loopback ``invalid_auth`` Slack API for the whole module."""
+    yield from serve_recording(InvalidAuthHandler)
 
 
 class TestTokenPersistence:
@@ -51,42 +63,22 @@ class TestTokenPersistence:
 class TestWorkspaceTokenPaths:
     """Tests for workspace-keyed token storage and legacy migration."""
 
-    def setup_method(self) -> None:
-        self._created_dirs: list[Path] = []
-
-    def teardown_method(self) -> None:
-        for d in self._created_dirs:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_migrate_legacy_token(self) -> None:
-        """Legacy token at _SLACK_DIR/token.json migrates to default/."""
-        legacy = _SLACK_DIR / "token.json"
+    def test_migrate_legacy_token(self, _isolated_slack_dir: Path) -> None:
+        """Legacy token at <slack dir>/token.json migrates to default/."""
+        legacy = _isolated_slack_dir / "token.json"
         legacy.parent.mkdir(parents=True, exist_ok=True)
         legacy.write_text('{"access_token": "xoxb-legacy"}')
-        try:
-            _migrate_legacy_token()
-            assert not legacy.exists()
-            assert _load_token() == "xoxb-legacy"
-        finally:
-            if legacy.exists():
-                legacy.unlink()
+        _migrate_legacy_token()
+        assert not legacy.exists()
+        assert _load_token() == "xoxb-legacy"
 
 
 class TestWorkspaceSlackAgent:
     """Tests for SlackAgent and SlackChannelBackend with workspace parameter."""
 
-    def setup_method(self) -> None:
-        self._created_dirs: list[Path] = []
-
-    def teardown_method(self) -> None:
-        for d in self._created_dirs:
-            shutil.rmtree(d, ignore_errors=True)
-
     def test_clear_auth_uses_workspace(self) -> None:
         """clear_slack_auth clears only the agent's workspace token."""
         ws = "test-ws-clear-auth"
-        ws_dir = _SLACK_DIR / ws
-        self._created_dirs.append(ws_dir)
         _save_token("xoxb-to-clear-ws", workspace=ws)
         _save_token("xoxb-keep-default")
         agent = SlackAgent(workspace=ws)
@@ -117,48 +109,28 @@ class TestWorkspaceSlackAgent:
 class TestListWorkspaces:
     """Tests for _list_workspaces() and --list-workspaces CLI flag."""
 
-    def setup_method(self) -> None:
-        self._created_dirs: list[Path] = []
+    def test_no_slack_dir(
+        self, capsys: pytest.CaptureFixture[str], _isolated_slack_dir: Path
+    ) -> None:
+        """_list_workspaces() prints 'No workspaces found.' when the dir is missing."""
+        assert not _isolated_slack_dir.exists()
+        _list_workspaces()
+        assert "No workspaces found" in capsys.readouterr().out
 
-    def teardown_method(self) -> None:
-        for d in self._created_dirs:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
-        import kiss.agents.third_party_agents.slack.slack_sea as mod
-
-        original = mod._SLACK_DIR
-        mod._SLACK_DIR = Path(tempfile.mkdtemp()) / "nonexistent"
-        try:
-            _list_workspaces()
-            out = capsys.readouterr().out
-            assert "No workspaces found" in out
-        finally:
-            mod._SLACK_DIR = original
-
-    def test_empty_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_empty_slack_dir(
+        self, capsys: pytest.CaptureFixture[str], _isolated_slack_dir: Path
+    ) -> None:
         """_list_workspaces() prints 'No workspaces found.' when no workspace dirs."""
-        import kiss.agents.third_party_agents.slack.slack_sea as mod
-
-        original = mod._SLACK_DIR
-        empty_dir = Path(tempfile.mkdtemp())
-        mod._SLACK_DIR = empty_dir
-        try:
-            _list_workspaces()
-            out = capsys.readouterr().out
-            assert "No workspaces found" in out
-        finally:
-            mod._SLACK_DIR = original
-            shutil.rmtree(empty_dir, ignore_errors=True)
+        _isolated_slack_dir.mkdir(parents=True)
+        _list_workspaces()
+        assert "No workspaces found" in capsys.readouterr().out
 
     def test_workspace_with_no_token_value(
-        self, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str], _isolated_slack_dir: Path
     ) -> None:
         """_list_workspaces() shows 'no token' for empty/malformed token file."""
         ws = "test-ws-list-notoken"
-        ws_dir = _SLACK_DIR / ws
-        self._created_dirs.append(ws_dir)
+        ws_dir = _isolated_slack_dir / ws
         ws_dir.mkdir(parents=True, exist_ok=True)
         (ws_dir / "token.json").write_text("{}")
         _list_workspaces()
@@ -167,12 +139,16 @@ class TestListWorkspaces:
         assert "no token" in out
 
     def test_cli_list_workspaces_flag(
-        self, capsys: pytest.CaptureFixture[str]
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        invalid_auth_server: RecordingServer,
     ) -> None:
         """main() with --list-workspaces runs _list_workspaces() and returns."""
+        # Listing validates each stored token with auth.test; keep that call
+        # on the loopback emulator.
+        monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
         ws = "test-ws-cli-list"
-        ws_dir = _SLACK_DIR / ws
-        self._created_dirs.append(ws_dir)
         _save_token("xoxb-cli-list-test", workspace=ws)
         original_argv = sys.argv
         sys.argv = ["kiss-slack", "--list-workspaces"]
@@ -182,17 +158,11 @@ class TestListWorkspaces:
             sys.argv = original_argv
         out = capsys.readouterr().out
         assert ws in out
+        assert {"method": "POST", "path": "/api/auth.test"} in invalid_auth_server.requests
 
 
 class TestDeleteWorkspace:
     """Tests for _delete_workspace() and --delete-workspace CLI flag."""
-
-    def setup_method(self) -> None:
-        self._created_dirs: list[Path] = []
-
-    def teardown_method(self) -> None:
-        for d in self._created_dirs:
-            shutil.rmtree(d, ignore_errors=True)
 
     def test_delete_nonexistent_workspace(self) -> None:
         """_delete_workspace() exits with code 1 for missing workspace."""
@@ -201,20 +171,19 @@ class TestDeleteWorkspace:
         assert exc_info.value.code == 1
 
     def test_cli_delete_workspace_flag(
-        self, capsys: pytest.CaptureFixture[str]
+        self, capsys: pytest.CaptureFixture[str], _isolated_slack_dir: Path
     ) -> None:
         """main() with --delete-workspace removes the workspace."""
         ws = "test-ws-cli-del"
-        ws_dir = _SLACK_DIR / ws
-        self._created_dirs.append(ws_dir)
         _save_token("xoxb-cli-del", workspace=ws)
+        assert (_isolated_slack_dir / ws).is_dir()
         original_argv = sys.argv
         sys.argv = ["kiss-slack", "--delete-workspace", ws]
         try:
             main()
         finally:
             sys.argv = original_argv
-        assert not ws_dir.exists()
+        assert not (_isolated_slack_dir / ws).exists()
         out = capsys.readouterr().out
         assert "deleted" in out.lower()
 
@@ -256,18 +225,22 @@ class TestSlackTools:
 
     @pytest.mark.parametrize("tool_name,kwargs", _SLACK_TOOL_ERROR_CASES)
     def test_tool_returns_error_on_invalid_token(
-        self, tool_name: str, kwargs: dict
+        self, tool_name: str, kwargs: dict, invalid_auth_server: RecordingServer
     ) -> None:
         """Every Slack tool returns {ok: false, error: ...} with invalid token."""
-        from slack_sdk import WebClient
-
         backend = SlackChannelBackend()
-        backend._client = WebClient(token="xoxb-invalid-token-for-test")
+        backend._client = WebClient(
+            token="xoxb-invalid-token-for-test",
+            base_url=f"{invalid_auth_server.base_url}/",
+            retry_handlers=[],
+        )
         tools = backend.get_tool_methods()
         fn = next(t for t in tools if t.__name__ == tool_name)
+        before = len(invalid_auth_server.requests)
         result = json.loads(fn(**kwargs))
         assert result["ok"] is False
         assert "error" in result
+        assert len(invalid_auth_server.requests) > before
 
 
 class TestSlackAgent:
@@ -281,13 +254,14 @@ class TestSlackAgent:
         assert "Not authenticated" in result
         assert "authenticate_slack()" in result
 
-    def test_check_auth_with_invalid_token(self) -> None:
+    def test_check_auth_with_invalid_token(
+        self, monkeypatch: pytest.MonkeyPatch, invalid_auth_server: RecordingServer
+    ) -> None:
+        monkeypatch.setenv("KISS_SLACK_BASE_URL", invalid_auth_server.base_url)
         _save_token("xoxb-invalid-token")
         agent = SlackAgent()
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = json.loads(check())
         assert result["ok"] is False
-
-
-
+        assert {"method": "POST", "path": "/api/auth.test"} in invalid_auth_server.requests

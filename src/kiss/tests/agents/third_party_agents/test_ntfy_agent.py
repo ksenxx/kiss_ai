@@ -276,10 +276,15 @@ def test_poll_uses_channel_id_when_unconfigured(emulator: _NtfyEmulator) -> None
     assert [m["text"] for m in messages] == ["direct"]
 
 
-def test_poll_network_error_returns_empty(emulator: _NtfyEmulator) -> None:
+def test_poll_network_error_returns_empty(
+    emulator: _NtfyEmulator, refusing_port: int
+) -> None:
     """Poll failures are swallowed by poll_messages but reported by poll_topic."""
     agent = _authenticated_agent(emulator)
-    emulator.stop()
+    # A port that is bound but never accepts: unlike stopping the emulator
+    # (whose released port another process could be handed), it refuses
+    # deterministically.
+    agent._backend._server = f"http://127.0.0.1:{refusing_port}"
     assert agent._backend.poll_messages("", "5") == ([], "5")
     result = json.loads(agent._backend.poll_topic(since="5"))
     assert result["ok"] is False

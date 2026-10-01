@@ -10,9 +10,9 @@ per-tab state accessors, the command dispatcher, and the history /
 chat / commit-message helpers.
 
 ``VSCodeServer`` is consumed by :class:`RemoteAccessServer`
-(:mod:`kiss.server.web_server`), which owns the actual I/O
-transports (Unix-domain socket for the local VS Code extension and
-WebSocket for remote browser clients) and instantiates a
+(:mod:`kiss.server.web_server`), which owns the actual I/O transport
+(one WSS endpoint: token-authenticated for the local VS Code
+extension, password-authenticated for remote browsers) and instantiates a
 :class:`WebPrinter` whose ``broadcast`` method fans events out to
 every connected client.  No stdin/stdout transport remains: the old
 per-tab subprocess model has been fully replaced by the single

@@ -2410,9 +2410,10 @@ class _TaskRunnerMixin:
                 # One shared persistence body with the per-subtask
                 # path (C-R2).  ``cleanup=False``: this finally
                 # releases the printer's persist-agent itself, below,
-                # after the terminal broadcast (S3-08).
-                # ``reraise=True``: the interrupted-cleanup handler of
-                # this try decides what still runs on failure.
+                # after the terminal broadcast (S3-08).  A persistence
+                # failure is logged inside: the worktree presentation,
+                # ``main_tree_done`` and the file refresh below must
+                # still run.
                 self._persist_subtask_row(
                     state,
                     task_id=task_history_id,
@@ -2425,7 +2426,6 @@ class _TaskRunnerMixin:
                     end_event=task_end_event,
                     end_ms=end_ms,
                     cleanup=False,
-                    reraise=True,
                 )
                 if use_worktree and getattr(agent, "_wt_pending", False):
                     if task_failed:
@@ -2634,7 +2634,6 @@ class _TaskRunnerMixin:
         end_event: dict[str, Any] | None = None,
         end_ms: int | None = None,
         cleanup: bool = True,
-        reraise: bool = False,
     ) -> None:
         """Persist a completed subtask's (or the final run's) history row.
 
@@ -2648,12 +2647,12 @@ class _TaskRunnerMixin:
         The task-level cleanup ``finally`` in :meth:`_run_task_inner`
         shares this body for the LAST subtask's row (C-R2), with
         ``end_event`` carrying the run's real lifecycle event,
-        ``cleanup=False`` (the finally releases the printer's
-        persist-agent itself, after the terminal broadcast) and
-        ``reraise=True`` (its own interrupted-cleanup handler decides
-        what still runs).  In the default (non-final) mode failures
-        are logged and swallowed — a persistence hiccup for one
-        subtask must not abort the remaining subtasks.
+        and ``cleanup=False`` (the finally releases the printer's
+        persist-agent itself, after the terminal broadcast).  Failures
+        are logged and swallowed: a persistence hiccup for one subtask
+        must not abort the remaining subtasks, and one for the final
+        row must not skip the worktree presentation or the
+        ``main_tree_done`` bar.
 
         Args:
             state: The owning agent state.
@@ -2673,12 +2672,6 @@ class _TaskRunnerMixin:
             cleanup: Release the printer's per-task resources via
                 ``cleanup_task`` after persisting, also when persisting
                 fails.
-            reraise: Propagate persistence errors instead of logging
-                and swallowing them.
-
-        Raises:
-            Exception: Whatever persistence raised, when *reraise* is
-                true.
         """
         try:
             from kiss.core._version import __version__
@@ -2720,8 +2713,6 @@ class _TaskRunnerMixin:
                 result_summary[:200],
             )
         except Exception:
-            if reraise:
-                raise
             logger.warning(
                 "Failed to persist subtask row: task_id=%s",
                 task_id,

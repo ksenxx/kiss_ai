@@ -256,9 +256,9 @@ class TestTranscribeAudio(unittest.TestCase):
             thread.join(timeout=5)
         return result, handler_cls.request_count  # type: ignore[attr-defined]
 
-    def test_transient_rate_limit_retried_until_success(self) -> None:
-        """429 responses are retried (beyond the SDK's own retries) and the
-        call eventually succeeds once the endpoint recovers."""
+    @staticmethod
+    def _rate_limited_handler(failures: int) -> type:
+        """Build a handler that answers 429 *failures* times, then succeeds."""
         from http.server import BaseHTTPRequestHandler
 
         class Handler(BaseHTTPRequestHandler):
@@ -267,7 +267,7 @@ class TestTranscribeAudio(unittest.TestCase):
             def do_POST(self) -> None:  # noqa: N802 - http.server API
                 self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
                 Handler.request_count += 1
-                if Handler.request_count <= 4:
+                if Handler.request_count <= failures:
                     body = b'{"error": {"message": "rate limited", "type": "rate_limit_error"}}'
                     self.send_response(429)
                     self.send_header("Content-Type", "application/json")
@@ -286,9 +286,24 @@ class TestTranscribeAudio(unittest.TestCase):
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
-        result, count = self._run_against_local_server(Handler)
+        return Handler
+
+    def test_transient_rate_limit_retried_until_success(self) -> None:
+        """Two 429s are absorbed by the SDK's retries (``max_retries=2``)."""
+        result, count = self._run_against_local_server(self._rate_limited_handler(2))
         assert result == "hello from whisper"
-        assert count >= 5
+        assert count == 3
+
+    def test_single_retry_policy_gives_up_after_three_attempts(self) -> None:
+        """The SDK's retries are the only retry policy: no loop on top.
+
+        Three 429s exhaust ``max_retries=2`` and the call fails after
+        exactly three HTTP attempts instead of the nine a manual
+        three-attempt loop over the SDK's retries used to make.
+        """
+        result, count = self._run_against_local_server(self._rate_limited_handler(3))
+        assert result is None
+        assert count == 3
 
     def test_auth_error_not_retried(self) -> None:
         """A deterministic 401 fails immediately without any retry."""

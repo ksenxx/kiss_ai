@@ -265,15 +265,18 @@ class TestEditMyInjectionTrick(_TricksHome):
             self.kiss_dir.chmod(stat.S_IRWXU)
         self.assertFalse(self.user_file.exists())
 
-    @posix_only("file permission bits")
+    @posix_only("directory permission bits")
     @unittest.skipIf(is_root(), "root ignores file permissions")
-    def test_read_only_file_raises_os_error(self) -> None:
-        self.user_file.chmod(stat.S_IRUSR)
+    def test_unwritable_directory_raises_os_error(self) -> None:
+        # The rewrite is atomic (staged sibling + ``os.replace``), so a
+        # read-only FILE is replaced fine; an unwritable DIRECTORY is
+        # what makes the write fail.
+        self.kiss_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
         try:
             with self.assertRaises(OSError):
                 tricks.edit_my_injection_trick("First mine.", "Changed.")
         finally:
-            self.user_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            self.kiss_dir.chmod(stat.S_IRWXU)
         self.assertEqual(self.user_text(), _USER)
 
     def test_concurrent_edits_of_different_tricks_keep_both(self) -> None:
@@ -460,13 +463,14 @@ class TestEditTrickCommand(_TricksHome):
     @posix_only("directory and file permission bits")
     @unittest.skipIf(is_root(), "root ignores file permissions")
     def test_os_error_on_write_answers_error_not_crash(self) -> None:
-        self.user_file.chmod(stat.S_IRUSR)
+        # Unwritable directory: the atomic rewrite cannot stage its temp file.
+        self.kiss_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
         try:
             self.server._cmd_edit_trick(
                 {"text": "First mine.", "newText": "Changed.", "connId": "c3"}
             )
         finally:
-            self.user_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            self.kiss_dir.chmod(stat.S_IRWXU)
         err = self.server.last("error")
         assert err is not None
         self.assertEqual(err["connId"], "c3")

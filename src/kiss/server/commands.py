@@ -1263,19 +1263,8 @@ class _CommandsMixin:
         ans_state = agent_state.find_by_tab(ans_tab)
         if ans_state is not None and ans_state.user_answer_queue is not None:
             return ans_state
-        printer_lock = getattr(self.printer, "_lock", None)
-        subs_map = getattr(self.printer, "_subscribers", {})
-        if printer_lock is None:
-            return None
-        with printer_lock:
-            task_keys = [
-                self.printer._coerce_task_id(task_id)
-                for task_id, viewers in subs_map.items()
-                if ans_tab in viewers
-            ]
-        for task_key in task_keys:
-            state = agent_state.get(task_key)
-            if state is not None and state.user_answer_queue is not None:
+        for state in self._find_viewer_task_states(ans_tab):
+            if state.user_answer_queue is not None:
                 return state
         return None
 

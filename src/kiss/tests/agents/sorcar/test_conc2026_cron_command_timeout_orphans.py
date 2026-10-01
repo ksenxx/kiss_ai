@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import cron_agent
-from kiss.agents.sorcar._concurrency import pid_alive
+from kiss.core.processes import pid_alive
 from kiss.tests.conftest import IS_WINDOWS, posix_only
 
 # The pid the tests record and probe must be an OS pid.  Under Git bash on

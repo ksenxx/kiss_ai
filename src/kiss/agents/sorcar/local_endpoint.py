@@ -25,6 +25,7 @@ with a non-default ``KISS_HOME`` (tests, side-by-side installs).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import ssl
@@ -41,6 +42,8 @@ from websockets.sync.client import connect as _ws_connect
 
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
+
+logger = logging.getLogger(__name__)
 
 LOCAL_ENDPOINT_FILE = "sorcar-local.json"
 """File name of the endpoint file under ``$KISS_HOME``."""
@@ -200,7 +203,9 @@ def remove_endpoint_if_owned(path: Path, token: str) -> None:
                 return
             path.unlink()
     except OSError:
-        pass
+        # Includes the lock's TimeoutError: a stale endpoint file left
+        # behind makes every later client fail to connect, so say why.
+        logger.warning("could not remove endpoint file %s", path, exc_info=True)
 
 
 def client_ssl_context(endpoint: LocalEndpoint) -> ssl.SSLContext:
@@ -269,7 +274,7 @@ def connect(
             compression=None,
             max_size=max_size,
         )
-    except (OSError, InvalidHandshake, InvalidURI, TimeoutError) as exc:
+    except (OSError, InvalidHandshake, InvalidURI) as exc:
         raise ConnectionError(
             f"Cannot connect to the sorcar daemon at {endpoint.url}: {exc} "
             "— start it with `kiss-web`."

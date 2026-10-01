@@ -269,7 +269,7 @@ class TestFanoutSingleSerialization:
         async def _handler(ws: ServerConnection) -> None:
             # The daemon side: register the local peer and hold the
             # connection open until the client closes it.
-            printer.add_local_client(ws)
+            printer.add_client(ws, local=True)
             registered.set()
             await ws.wait_closed()
 

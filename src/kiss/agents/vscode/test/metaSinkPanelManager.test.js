@@ -5,7 +5,7 @@
 
 // End-to-end tests for the host side of the Task Info relay
 // (out/SorcarPanelManager.js + out/SorcarSidebarView.js) against a
-// REAL Unix-domain-socket daemon stub:
+// REAL local-WSS daemon stub:
 //  - setMetaSink pushes the current state right away (the (null, null)
 //    placeholders when no panel reported yet);
 //  - a panel webview's `metaUpdate` {values, taskUpdate} reaches the

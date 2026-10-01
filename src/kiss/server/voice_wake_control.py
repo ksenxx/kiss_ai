@@ -7,7 +7,7 @@
 Runs :mod:`kiss.server.voice_wake` as a child process of the
 ``kiss-web`` daemon on behalf of a connected client, so the VS Code
 extension host can start/stop the listener and receive its events
-through the same Unix-domain socket it already uses for every other
+through the same local WSS connection it already uses for every other
 command (the ``voiceWakeStart`` / ``voiceWakeStop`` commands of
 :data:`kiss.server.sorcar.API`) instead of spawning the listener
 process itself.
@@ -97,7 +97,8 @@ def parse_protocol_line(line: str) -> dict[str, Any] | None:
     """Translate one listener stdout line into a client event dict.
 
     Mirrors the line parsing of the extension host's
-    ``voiceWake.ts`` so both transports expose identical semantics.
+    ``voiceWake.ts`` so the daemon-hosted and the extension-hosted
+    listener expose identical semantics.
 
     Args:
         line: One stripped stdout line of ``kiss.server.voice_wake``.

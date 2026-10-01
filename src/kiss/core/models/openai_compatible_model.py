@@ -12,12 +12,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from openai import APIConnectionError, BadRequestError, OpenAI
+from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI
 from openai.resources.chat.completions import Completions
 
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     FRAMEWORK_ONLY_CONFIG_KEYS,
@@ -32,7 +33,7 @@ from kiss.core.models.model import (
     accepted_request_params,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import stop_aware_events
+from kiss.core.models.stream_abort import stall_error, stop_aware_events, stop_error
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,18 @@ _CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 # One retry keeps resilience against one-off connect failures while
 # bounding the duplication, matching ``anthropic_model._MAX_RETRIES``.
 _MAX_RETRIES = 1
+
+# Streaming requests get a per-request ``httpx.Timeout`` instead of the
+# client's scalar 1800 s: the scalar also bounds the wait for the response
+# headers, and ``stop_aware_events`` is armed only once ``create(stream=True)``
+# has returned them, so a gateway that accepted the TCP connection but never
+# answered parked the agent in ``recv()`` for 30 minutes per attempt, deaf
+# to Stop.  Headers that take longer than the stall timeout are, by the
+# watchdog's own policy, a stall.  Non-streaming calls keep the scalar: a
+# long reasoning turn with no token callback legitimately sends nothing for
+# minutes.  Same bound as ``anthropic_model`` and ``gemini_model``.
+_CONNECT_TIMEOUT = 10.0
+
 
 def _provider_model_name(model_name: str) -> str:
     """Return the upstream provider id for a KISS catalog ``model_name``.
@@ -1182,12 +1195,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         differ only in whether the request goes through the adaptive
         ``reasoning_effort`` probe.
 
-        ``stop_aware_events`` is used instead of a bare ``for chunk in
-        ...``: otherwise the thread sits in ``recv()`` on a quiet
-        connection for the client's full 1800s timeout, deaf to Stop,
-        because the flag is only read when the agent emits something and
-        an injected ``KeyboardInterrupt`` cannot reach a thread inside C
-        code (``reports/stop_button_delay_2026-08-05.html``).
+        Two clocks bound the wait for a silent provider.  After the
+        response headers arrive, ``stop_aware_events`` (instead of a bare
+        ``for chunk in ...``) aborts the socket on Stop or after
+        ``stream_stall_timeout`` seconds without an event; otherwise the
+        thread would sit in ``recv()`` for the client's full 1800s
+        timeout because the stop flag is only read when the agent emits
+        something and an injected ``KeyboardInterrupt`` cannot reach a
+        thread inside C code (``reports/stop_button_delay_2026-08-05.html``).
+        Before the headers arrive no watchdog exists yet, so the request
+        carries a per-request ``httpx.Timeout`` of the same stall timeout
+        (``_CONNECT_TIMEOUT`` to connect); either clock firing is reported
+        as the same retryable stall error.
 
         Args:
             kwargs: Fully built request arguments; ``stream`` and
@@ -1201,16 +1220,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
+        kwargs["timeout"] = httpx.Timeout(
+            self._stream_stall_timeout, connect=_CONNECT_TIMEOUT
+        )
         content = ""
         tool_calls_accum: dict[int, dict[str, str]] = {}
         response = None
         last_chunk = None
         finish_reason: str | None = None
-        stream = (
-            self._create_chat_completion_adaptive(kwargs)
-            if adaptive
-            else self.client.chat.completions.create(**kwargs)
-        )
+        events = None
         # The bracket is closed in `finally`, not after the loop:
         # `stop_aware_events` runs `on_abort` for a stop and for a stall
         # but re-raises every other transport failure untouched, and
@@ -1226,17 +1244,22 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         # runs its cleanup only when the traceback holding its frame is
         # released — until then a daemon watchdog thread stays alive and
         # armed over a connection that never returns to the pool.
-        events = stop_aware_events(
-            stream,
-            stall_timeout=self._stream_stall_timeout,
-            on_abort=self._close_thinking_if_open,
-            name=(
-                "openai-tools-stream-abort-watchdog"
-                if adaptive
-                else "openai-stream-abort-watchdog"
-            ),
-        )
         try:
+            stream = (
+                self._create_chat_completion_adaptive(kwargs)
+                if adaptive
+                else self.client.chat.completions.create(**kwargs)
+            )
+            events = stop_aware_events(
+                stream,
+                stall_timeout=self._stream_stall_timeout,
+                on_abort=self._close_thinking_if_open,
+                name=(
+                    "openai-tools-stream-abort-watchdog"
+                    if adaptive
+                    else "openai-stream-abort-watchdog"
+                ),
+            )
             for chunk in events:
                 last_chunk = chunk
                 if chunk.choices:
@@ -1261,6 +1284,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                             )
                 if chunk.usage is not None:
                     response = chunk
+        except (httpx.TimeoutException, APITimeoutError) as err:
+            # The per-request clock fired (no headers, or no bytes between
+            # events) before the watchdog did.  A Stop pressed while the
+            # headers were still pending has no watchdog to act on it, so
+            # ask the thread's stop signal before calling this a stall:
+            # a stall is retried, a stop must not be.
+            if stop_signal.stop_requested():
+                raise stop_error() from err
+            raise stall_error(self._stream_stall_timeout) from err
         except (httpx.HTTPError, APIConnectionError) as err:
             # A transport failure AFTER ``finish_reason`` arrived lost only
             # the stream's tail (the usage chunk / ``[DONE]``); the answer
@@ -1282,7 +1314,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 err,
             )
         finally:
-            events.close()
+            if events is not None:
+                events.close()
             self._close_thinking_if_open()
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
@@ -1404,9 +1437,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         ):
             return self._generate_with_tools_via_responses(function_map, tools)
 
-        kwargs = self._build_chat_kwargs(
-            self._normalize_conversation_for_api(self.conversation)
-        )
+        kwargs = self._build_chat_kwargs(self._normalized_conversation_checked())
         kwargs["tools"] = tools or None
 
         if (
