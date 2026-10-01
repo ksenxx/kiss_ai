@@ -933,7 +933,7 @@ class WebUseTool:
                 # chrome-headless-shell.
                 "channel": web_stealth.chrome_channel(),
                 "args": [
-                    "--disable-blink-features=AutomationControlled",
+                    web_stealth.disabled_blink_features(unattended=self._headless),
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--disable-breakpad",

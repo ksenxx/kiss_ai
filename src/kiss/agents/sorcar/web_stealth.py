@@ -115,6 +115,32 @@ def chrome_channel() -> str:
     return "chromium"
 
 
+def disabled_blink_features(unattended: bool) -> str:
+    """Return the ``--disable-blink-features=...`` switch for a Chromium launch.
+
+    ``AutomationControlled`` is always disabled: Chromium forces
+    ``navigator.webdriver`` on for any ``--remote-debugging-*`` flag and
+    only this switch clears it.  An *unattended* browser (headless, or
+    headed on an Xvfb display nobody looks at) also disables ``WebAuth``:
+    a security-key or passkey request there opens Chrome's native modal
+    dialog, which is neither streamed to the Browser tab nor visible to
+    the agent and which swallows every click on the page underneath
+    (Duo's "Use your security key" prompt wedged the Browser tab this
+    way).  No key can be plugged into such a browser anyway; without the
+    API, sign-in pages offer their other methods instead.
+
+    Args:
+        unattended: True when no human can see the browser's own window.
+
+    Returns:
+        The complete command-line switch.
+    """
+    features = ["AutomationControlled"]
+    if unattended:
+        features.append("WebAuth")
+    return "--disable-blink-features=" + ",".join(features)
+
+
 # ---------------------------------------------------------------------------
 # Virtual display (Xvfb)
 # ---------------------------------------------------------------------------

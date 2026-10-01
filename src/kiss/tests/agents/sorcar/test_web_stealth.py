@@ -261,6 +261,26 @@ def test_fingerprint_has_no_automation_tells(tool, server):
         assert probe["tz"] in ("UTC", "Etc/UTC")
 
 
+def test_unattended_browser_has_no_webauthn(tool, server):
+    """A security-key request would open a native dialog nobody can see or satisfy.
+
+    Chrome's modal "Use your security key" prompt is invisible in a
+    browser without a human-visible window and blocks every click on
+    the page beneath it, so such a browser exposes no WebAuthn API and
+    sign-in pages (Duo, Google) offer their other methods instead.  A
+    browser with a visible window keeps the API: its owner can see the
+    dialog and plug in the key.
+    """
+    tool.go_to_url(f"{server}/inert")
+    assert tool._page.evaluate("typeof window.PublicKeyCredential") == "undefined"
+    assert web_stealth.disabled_blink_features(unattended=True) == (
+        "--disable-blink-features=AutomationControlled,WebAuth"
+    )
+    assert web_stealth.disabled_blink_features(unattended=False) == (
+        "--disable-blink-features=AutomationControlled"
+    )
+
+
 def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, server):
     """Stopping the display kills Xvfb; without the binary the tool goes headless."""
     assert web_stealth.virtual_display() is not None

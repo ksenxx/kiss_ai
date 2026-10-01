@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-from kiss.agents.sorcar.web_stealth import virtual_display
+from kiss.agents.sorcar.web_stealth import disabled_blink_features, virtual_display
 from kiss.core.browser_handoff import is_headless_environment
 from kiss.core.default_browser import ResolvedBrowser, resolve_browser
 
@@ -404,10 +404,11 @@ class BrowserTabService:
             viewport={"width": width, "height": height},
             env={**os.environ, "DISPLAY": display} if display else None,
             args=[
-                # Chromium forces navigator.webdriver on for any
-                # --remote-debugging-* flag; only this explicit disable
-                # clears it (dropping --enable-automation is not enough).
-                "--disable-blink-features=AutomationControlled",
+                # Clears navigator.webdriver (dropping --enable-automation
+                # is not enough) and, when no one can see this browser's
+                # own window, WebAuthn: its native security-key dialog
+                # would block the streamed page invisibly.
+                disabled_blink_features(unattended=headless or display is not None),
                 "--no-first-run",
                 "--no-default-browser-check",
                 # The debugging port lets an agent attach a second CDP
