@@ -1749,9 +1749,13 @@ def _base_commit(repo: Path, task: str, start_ms: int) -> tuple[str, str]:
     the task.
     """
     start_s = start_ms // 1000
+    # git's object-header form "@<seconds> <tz>"; a bare "@<seconds>" is only
+    # read as a timestamp when it has 8+ digits, otherwise approxidate guesses
+    # (a lone "1" is the 1st of the current month).
+    start = f"@{start_s} +0000"
     wanted = _normalized(task)
     proc = _git(
-        "log", "--all", f"--since=@{start_s}", "--format=%H%x1f%ct%x1f%P%x1f%B%x1e", cwd=repo
+        "log", "--all", f"--since={start}", "--format=%H%x1f%ct%x1f%P%x1f%B%x1e", cwd=repo
     )
     matches: list[tuple[int, str, str]] = []
     for record in proc.stdout.split("\x1e"):
@@ -1765,7 +1769,7 @@ def _base_commit(repo: Path, task: str, start_ms: int) -> tuple[str, str]:
     if matches:
         _committed, sha, parent = min(matches)
         return parent, f"first parent of the task's auto-commit {sha[:12]}"
-    proc = _git("rev-list", "-1", "--first-parent", f"--before=@{start_s}", "HEAD", cwd=repo)
+    proc = _git("rev-list", "-1", "--first-parent", f"--before={start}", "HEAD", cwd=repo)
     sha = proc.stdout.strip()
     return sha, "HEAD of the repository when the task started" if sha else ""
 

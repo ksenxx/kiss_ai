@@ -25,22 +25,22 @@ real UDS connection.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_server_liveness_and_run_refusals import (
     _ServerHarness,
 )
 
 
 class TestUdsFileLinkResolution(_ServerHarness):
-    """``checkPaths`` / ``openFile`` from a UDS client are served."""
+    """``checkPaths`` / ``openFile`` from a local client are served."""
 
     async def _reply(
         self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
+        reader: LocalReader,
+        writer: LocalWriter,
         cmd: dict[str, Any],
         reply_type: str,
     ) -> dict[str, Any]:

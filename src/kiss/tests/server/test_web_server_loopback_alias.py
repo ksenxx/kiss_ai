@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -225,6 +226,7 @@ class TestSpecificHostNeedsNoAlias(IsolatedAsyncioTestCase):
 class TestDescribePortListeners(TestCase):
     """``_describe_port_listeners`` names foreign listeners and skips ourselves."""
 
+    @skipUnless(shutil.which("lsof"), "_describe_port_listeners reports nothing without lsof")
     def test_names_foreign_holder_and_skips_own_process(self) -> None:
         """A child holding the port is reported as ``name[pid]``; a free port gives ``""``."""
         port = _free_port()

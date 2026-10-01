@@ -185,6 +185,7 @@ fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const daemonCmds = [];
+const runningTabs = new Set();
 let lastServerSock = null;
 function daemonReply(obj) {
   if (lastServerSock) lastServerSock.write(JSON.stringify(obj) + '\n');
@@ -205,8 +206,12 @@ const server = createFakeDaemon(sock => {
         continue;
       }
       daemonCmds.push(cmd);
-      if (cmd.type === 'run') {
+      // The host forwards every submit unchanged; the daemon's one
+      // submit path decides whether it starts a task or steers a
+      // running one.  This fake starts a task for an idle tab.
+      if (cmd.type === 'submit' && !runningTabs.has(cmd.tabId)) {
         const tabId = cmd.tabId;
+        runningTabs.add(tabId);
         daemonReply({type: 'clear', chat_id: 'chat-1', tabId});
         daemonReply({
           type: 'status',
@@ -373,7 +378,7 @@ async function runTests() {
     '',
     'the input textbox must be cleared after the submit (like Send)',
   );
-  const runs1 = daemonCmds.filter(c => c.type === 'run');
+  const runs1 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs1.length,
     1,
@@ -418,6 +423,7 @@ async function runTests() {
   assert.strictEqual(appends[0].prompt, SEL2);
   assert.strictEqual(appends[0].tabId, TAB1);
 
+  runningTabs.delete(TAB1);
   daemonReply({type: 'status', running: false, tabId: TAB1});
   await sleep(80);
   daemonCmds.length = 0;
@@ -436,8 +442,9 @@ async function runTests() {
   );
   assert.strictEqual(inputValues.length, 0, 'nothing pasted for empty sel');
   assert.strictEqual(
-    daemonCmds.filter(c => c.type === 'run' || c.type === 'appendUserMessage')
-      .length,
+    daemonCmds.filter(
+      c => c.type === 'submit' || c.type === 'appendUserMessage',
+    ).length,
     0,
     'nothing submitted for empty selection / missing editor',
   );
@@ -445,8 +452,9 @@ async function runTests() {
   wvv1.webviewView.webview.postMessage({type: 'insertAndSubmit', text: ''});
   await sleep(100);
   assert.strictEqual(
-    daemonCmds.filter(c => c.type === 'run' || c.type === 'appendUserMessage')
-      .length,
+    daemonCmds.filter(
+      c => c.type === 'submit' || c.type === 'appendUserMessage',
+    ).length,
     0,
     'insertAndSubmit without text must not submit anything',
   );
@@ -500,7 +508,7 @@ async function runTests() {
       JSON.stringify(lateInputValues) +
       ')',
   );
-  const runs4 = daemonCmds.filter(c => c.type === 'run');
+  const runs4 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs4.length,
     1,
@@ -543,17 +551,26 @@ async function runTests() {
     provider3.resolveWebviewView(wvv3.webviewView, {}, {});
     wvv3.wire();
     setTimeout(() => {
-      evalWebviewScripts(ctx3.win);
+      // Listen before the scripts load: main.js posts `ready` while
+      // loading and the host answers synchronously with the held
+      // insertAndSubmit, so the paste happens inside this eval.
       const inp3 = ctx3.win.document.getElementById('task-input');
       inp3.addEventListener('input', () => slowInputValues.push(inp3.value));
+      evalWebviewScripts(ctx3.win);
     }, 600);
   };
 
   const SEL5 = 'summarize the selected code';
   vscodeStub.window.activeTextEditor = makeEditor(ws, SEL5);
   daemonCmds.length = 0;
+  // The command returns as soon as the chat is revealed; the host holds
+  // the prompt and posts it on the webview's `ready`, which this slow
+  // webview sends ~600 ms later.  Wait for that deferred paste.
   await registeredCommands.get('kissSorcar.runSelection')();
-  await sleep(500);
+  for (let i = 0; i < 40 && !slowInputValues.includes(SEL5); i++) {
+    await sleep(100);
+  }
+  await sleep(300);
 
   assert.ok(
     slowInputValues.includes(SEL5),
@@ -563,7 +580,7 @@ async function runTests() {
       JSON.stringify(slowInputValues) +
       ')',
   );
-  const runs5 = daemonCmds.filter(c => c.type === 'run');
+  const runs5 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs5.length,
     1,

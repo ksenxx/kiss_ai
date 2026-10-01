@@ -8,10 +8,11 @@
 // Starts the REAL Sorcar daemon (test/_real_daemon.py, a real
 // RemoteAccessServer) for an extension-host end-to-end test.
 //
-// The daemon listens on the Unix socket under `env.KISS_HOME`, which
-// must be the same temp home the test points the compiled extension
-// host at (kissHomeDir() -> sorcarSockPath()), so the host's AgentClient
-// connects to this daemon and nothing in between is faked.
+// The daemon publishes its loopback WSS URL and token in the local
+// endpoint file under `env.KISS_HOME`, which must be the same temp home
+// the test points the compiled extension host at (kissHomeDir() ->
+// sorcar-local.json), so the host's AgentClient connects to this daemon
+// and nothing in between is faked.
 
 const {spawn} = require('child_process');
 const path = require('path');

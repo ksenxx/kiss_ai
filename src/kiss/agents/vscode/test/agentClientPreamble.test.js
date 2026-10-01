@@ -5,8 +5,9 @@
 
 'use strict';
 
-// E2E tests for AgentClient.setPreamble(), driven against a REAL unix
-// domain socket (no mocks).
+// E2E tests for AgentClient.setPreamble(), driven against a real local
+// WebSocket daemon stand-in (test/fakeDaemon.js) found through its
+// endpoint file, exactly as the production client finds the daemon.
 //
 // The daemon pins a connection's workspace folder from `setWorkDir` and
 // stamps that pin on every later command sent without a workDir -- the
@@ -19,17 +20,13 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_AGENT_CLIENT = path.join(__dirname, '..', 'out', 'AgentClient.js');
 if (!fs.existsSync(OUT_AGENT_CLIENT)) {
   console.log('SKIP: out/AgentClient.js missing — run `npm run compile`');
-  process.exit(0);
-}
-if (process.platform === 'win32') {
-  console.log('SKIP: UDS tests require a POSIX platform');
   process.exit(0);
 }
 const {AgentClient} = require(OUT_AGENT_CLIENT);
@@ -56,7 +53,7 @@ function close(server) {
 // one array per connection, in arrival order.
 function recordingServer() {
   const connections = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     const frames = [];
     connections.push({conn, frames});
     let buf = '';
@@ -75,7 +72,7 @@ function recordingServer() {
 // 1. A command queued during an outage is delivered AFTER the preamble,
 //    and a command sent from the connect handler after both.
 async function testPreambleLeadsQueuedCommands() {
-  const sockPath = tmpSock('preamble.sock');
+  const sockPath = tmpSock('preamble.json');
   const client = new AgentClient(sockPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
@@ -113,7 +110,7 @@ async function testPreambleLeadsQueuedCommands() {
 // 2. Every reconnect repeats the (current) preamble: a fresh daemon
 //    connection starts with no pin.
 async function testPreambleRepeatsOnReconnect() {
-  const sockPath = tmpSock('preamble-again.sock');
+  const sockPath = tmpSock('preamble-again.json');
   const client = new AgentClient(sockPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
@@ -163,7 +160,7 @@ async function testPreambleRepeatsOnReconnect() {
 
 // 3. No preamble (or a cleared one): nothing extra is written.
 async function testClearedPreambleWritesNothing() {
-  const sockPath = tmpSock('no-preamble.sock');
+  const sockPath = tmpSock('no-preamble.json');
   const client = new AgentClient(sockPath, {pendingTtlMs: 5000});
   client.setPreamble({type: 'setWorkDir', workDir: '/ws/x'});
   client.setPreamble(null);
