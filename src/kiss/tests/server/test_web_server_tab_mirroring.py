@@ -51,7 +51,8 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -128,7 +129,7 @@ class TabMirroringBase(IsolatedAsyncioTestCase):
             certfile=str(self.certfile),
             keyfile=str(self.keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -641,7 +642,6 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         assert stt_b is not None
         self.assertEqual(stt_b.get("text"), "Mirror this task text")
 
-    @requires_unix_sockets
     async def test_api_run_task_text_arrives_after_tab_adoption(self) -> None:
         """[3b] A run that CREATES its tab re-echoes ``setTaskText``.
 
@@ -659,12 +659,10 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
         await self._ready(ws_b)
 
         # Submit exactly like ``kiss.server.sorcar.run``: raw
-        # newline-delimited JSON over the daemon's UDS, with a
+        # newline-delimited JSON over the daemon's local endpoint, with a
         # synthetic ``api-…`` tab no client knows about.
         tab_id = "api-panel-e2e"
-        reader, writer = await asyncio.open_unix_connection(
-            str(Path(self.tmpdir) / "sorcar.sock"),
-        )
+        reader, writer = await open_local_connection(self.server)
         try:
             writer.write(json.dumps({
                 "type": "run",
@@ -723,7 +721,6 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             except Exception:
                 pass
 
-    @requires_unix_sockets
     async def test_ready_replay_carries_prompt_before_history_row(
         self,
     ) -> None:
@@ -769,9 +766,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             tab_id = "api-panel-window"
             ws_a = await self._connect_ok()
             await self._ready(ws_a)
-            reader, writer = await asyncio.open_unix_connection(
-                str(Path(self.tmpdir) / "sorcar.sock"),
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(json.dumps({
                     "type": "run",

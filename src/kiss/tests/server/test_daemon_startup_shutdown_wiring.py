@@ -47,7 +47,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 #: A real MCP server: it records its pid, then serves the stdio
 #: transport for real.  Used to prove the daemon reaps its children.
@@ -92,7 +92,7 @@ def _wait_pid_dead(pid: int, timeout: float) -> bool:
 
 
 class _DaemonHarness(IsolatedAsyncioTestCase):
-    """A real daemon over a temp UDS socket, fully isolated from ``~/.kiss``."""
+    """A real daemon with a temp local endpoint, fully isolated from ``~/.kiss``."""
 
     #: Config written before the server is constructed.
     config: dict[str, Any] = {}
@@ -132,7 +132,7 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.tmpdir / "sorcar.sock",
+            local_endpoint_file=self.tmpdir / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         self._stopped = False
@@ -175,13 +175,10 @@ class TestStartupAppliesPersistedConfig(_DaemonHarness):
             "closed the settings panel",
         )
 
-    @requires_unix_sockets
     async def test_startup_and_save_config_agree(self) -> None:
         """The start-up path and the ``saveConfig`` path apply the same value."""
         await self.server.start_async()
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.tmpdir / "sorcar.sock"), limit=1 << 20,
-        )
+        reader, writer = await open_local_connection(self.server, limit=1 << 20)
         try:
             writer.write(
                 json.dumps(
@@ -213,7 +210,7 @@ class TestStartupAppliesPersistedConfig(_DaemonHarness):
             certfile=str(self.tmpdir / "cert.pem"),
             keyfile=str(self.tmpdir / "key.pem"),
             url_file=self.tmpdir / "remote-url-2.json",
-            uds_path=self.tmpdir / "sorcar-2.sock",
+            local_endpoint_file=self.tmpdir / "sorcar-local-2.json",
             work_dir=str(self.work_dir),
         )
         self.assertAlmostEqual(

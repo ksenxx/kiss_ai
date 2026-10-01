@@ -69,7 +69,7 @@ global.__kissVscodeStub = vscodeStub;
 // Keep the AgentClient pointed at a socket nothing listens on so the
 // view under test never talks to a real daemon.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-rrhi-focus-'));
-process.env.KISS_SORCAR_SOCK = path.join(tmpHome, 'no-daemon.sock');
+process.env.KISS_SORCAR_LOCAL = path.join(tmpHome, 'no-daemon.json');
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
 
 const projectRoot = path.resolve(__dirname, '..');

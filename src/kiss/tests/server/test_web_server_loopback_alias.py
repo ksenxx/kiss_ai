@@ -105,7 +105,7 @@ class _LoopbackAliasTestBase(IsolatedAsyncioTestCase):
             host="0.0.0.0",
             port=self.port,
             work_dir=self._tmpdir.name,
-            uds_path=f"{self._tmpdir.name}/sorcar.sock",
+            local_endpoint_file=f"{self._tmpdir.name}/sorcar-local.json",
         )
 
     async def asyncTearDown(self) -> None:
@@ -209,7 +209,7 @@ class TestSpecificHostNeedsNoAlias(IsolatedAsyncioTestCase):
                 host="127.0.0.1",
                 port=_free_port(),
                 work_dir=tmpdir,
-                uds_path=f"{tmpdir}/sorcar.sock",
+                local_endpoint_file=f"{tmpdir}/sorcar-local.json",
             )
             try:
                 await server._setup_server()

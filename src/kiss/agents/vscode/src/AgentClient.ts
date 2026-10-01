@@ -3,13 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-import * as net from 'net';
+import * as fs from 'fs';
 import {EventEmitter} from 'events';
-import {StringDecoder} from 'string_decoder';
 import {AgentCommand, ToWebviewMessage} from './types';
-import {sorcarSockPath} from './userAssets';
-
-const MAX_LINE_BUFFER_BYTES = 32 * 1024 * 1024;
+import {readLocalEndpoint, sorcarEndpointPath} from './userAssets';
+import {WsClient} from './wsClient';
 
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 15_000;
@@ -24,6 +22,20 @@ const MAX_PENDING_SENDS = 256;
 // the backoff on every accept, or it is hammered as hard as one that
 // never listens at all.
 const STABLE_CONNECTION_MS = 5_000;
+const CONNECT_TIMEOUT_MS = 10_000;
+/**
+ * Deadline for the daemon's `auth_ok` after the WebSocket opened.  The
+ * socket's own connect timer stops at the upgrade; a peer that upgrades
+ * and then never answers the auth frame would otherwise hold `_ws` for
+ * good and block every further connect attempt.
+ */
+const AUTH_TIMEOUT_MS = 10_000;
+// How often to re-read a missing endpoint file.  No socket is opened
+// while the file is absent -- the daemon has not published one -- so
+// this is a cheap stat, not a connect storm, and it stays fixed rather
+// than backing off: a daemon that has just been started publishes its
+// endpoint within milliseconds and every window should notice at once.
+const ENDPOINT_POLL_MS = 100;
 
 /** Tunables, so a test can exercise the timing without waiting on it. */
 export interface AgentClientOptions {
@@ -31,102 +43,141 @@ export interface AgentClientOptions {
   reconnectMaxMs?: number;
   pendingTtlMs?: number;
   maxPendingSends?: number;
+  endpointPollMs?: number;
+  /** Deadline for the daemon's `auth_ok` after the socket opened (tests). */
+  authTimeoutMs?: number;
 }
 
 /** Why a queued command was never delivered. */
 export type DroppedCommandReason = 'expired' | 'overflow';
 
 interface PendingSend {
-  line: string;
+  text: string;
   cmd: AgentCommand;
   at: number;
 }
 
+/**
+ * The extension host's connection to the kiss-web daemon.
+ *
+ * Reads the daemon's endpoint file on every connect attempt (the URL
+ * and local token change with each daemon start), opens the WSS
+ * connection with the daemon's CA pinned, completes the local `auth`
+ * handshake and only then reports `connect` and flushes queued
+ * commands.  Events: `connect`, `disconnect`, `message` (parsed daemon
+ * event), `commandDropped` (cmd, reason).
+ */
 export class AgentClient extends EventEmitter {
-  private _socket: net.Socket | null = null;
-  private _buffer: string = '';
+  private _ws: WsClient | null = null;
+  private _authenticated = false;
   private _pendingSends: PendingSend[] = [];
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _reconnectAttempts: number = 0;
   private _connectedAt: number = 0;
   private _disposed: boolean = false;
-  private _connecting: boolean = false;
-  private _sockPath: string;
+  private _endpointPath: string;
   private _reconnectBaseMs: number;
   private _reconnectMaxMs: number;
   private _pendingTtlMs: number;
   private _maxPendingSends: number;
+  private _endpointPollMs: number;
+  private _authTimeoutMs: number;
   private _preamble: AgentCommand | null = null;
 
-  constructor(sockPath?: string, options: AgentClientOptions = {}) {
+  constructor(endpointPath?: string, options: AgentClientOptions = {}) {
     super();
-    this._sockPath = sockPath ?? sorcarSockPath();
+    this._endpointPath = endpointPath ?? sorcarEndpointPath();
     this._reconnectBaseMs = options.reconnectBaseMs ?? RECONNECT_BASE_DELAY_MS;
     this._reconnectMaxMs = options.reconnectMaxMs ?? RECONNECT_MAX_DELAY_MS;
     this._pendingTtlMs = options.pendingTtlMs ?? PENDING_SEND_TTL_MS;
     this._maxPendingSends = options.maxPendingSends ?? MAX_PENDING_SENDS;
+    this._endpointPollMs = options.endpointPollMs ?? ENDPOINT_POLL_MS;
+    this._authTimeoutMs = options.authTimeoutMs ?? AUTH_TIMEOUT_MS;
+  }
+
+  /** The endpoint file this client reads on every connect attempt. */
+  get endpointPath(): string {
+    return this._endpointPath;
   }
 
   connect(): void {
-    if (this._socket || this._disposed || this._connecting) return;
-    this._connecting = true;
-    // Line-buffer state is connection-scoped: a partial line left over from
-    // a dead connection must not contaminate the next connection.
-    this._buffer = '';
-    const sock = net.createConnection({path: this._sockPath});
-    this._socket = sock;
-    sock.setNoDelay(true);
-    // A persistent decoder per connection keeps UTF-8 code points intact
-    // even when they are split across stream chunks.
-    const decoder = new StringDecoder('utf8');
-
-    sock.on('connect', () => {
-      if (this._disposed || this._socket !== sock) {
-        sock.destroy();
+    if (this._ws || this._disposed) return;
+    const endpoint = readLocalEndpoint(this._endpointPath);
+    if (!endpoint) {
+      // No daemon has published an endpoint (yet).
+      this._failAttempt(this._endpointPollMs);
+      return;
+    }
+    let ca: string | undefined;
+    if (endpoint.ca) {
+      try {
+        ca = fs.readFileSync(endpoint.ca, 'utf8');
+      } catch (err) {
+        console.error(
+          '[AgentClient] cannot read daemon CA ' +
+            `${endpoint.ca}: ${(err as Error).message}`,
+        );
+        this._failAttempt(this._endpointPollMs);
         return;
       }
-      this._connecting = false;
-      this._connectedAt = Date.now();
-      // The preamble goes out first: the daemon resolves every later
-      // command's missing workDir against the pin it carries, and the
-      // queue may hold commands that need it (a submit or a file link
-      // clicked during the outage).
-      if (this._preamble) sock.write(JSON.stringify(this._preamble) + '\n');
-      // Flush the queue BEFORE announcing the connection: a 'connect'
-      // handler immediately writes fresh commands (e.g. getModels), and
-      // if those went out ahead of older queued frames the daemon's
-      // reply to the fresh command could overwrite state a queued
-      // command (e.g. selectModel) was about to change.
-      const cutoff = Date.now() - this._pendingTtlMs;
-      const pending = this._pendingSends;
-      this._pendingSends = [];
-      for (const item of pending) {
-        if (item.at < cutoff) {
-          this._announceDropped(item, 'expired');
-          continue;
-        }
-        sock.write(item.line);
+    }
+    const ws = new WsClient({
+      url: endpoint.url,
+      ca,
+      connectTimeoutMs: CONNECT_TIMEOUT_MS,
+    });
+    this._ws = ws;
+    this._authenticated = false;
+    let authTimer: NodeJS.Timeout | null = null;
+
+    ws.on('open', () => {
+      if (this._disposed || this._ws !== ws) {
+        ws.destroy();
+        return;
       }
-      this.emit('connect');
+      ws.send(JSON.stringify({type: 'auth', token: endpoint.token}));
+      authTimer = setTimeout(() => {
+        authTimer = null;
+        if (this._ws !== ws || this._authenticated) return;
+        console.error('[AgentClient] daemon did not answer the auth frame');
+        ws.destroy();
+      }, this._authTimeoutMs);
     });
 
-    sock.on('data', (data: Buffer) => {
-      if (this._socket !== sock) return;
-      this._handleData(decoder.write(data));
+    ws.on('message', (text: string) => {
+      if (this._ws !== ws) return;
+      let msg: ToWebviewMessage;
+      try {
+        msg = JSON.parse(text) as ToWebviewMessage;
+      } catch {
+        console.warn(
+          '[AgentClient] non-JSON frame from daemon:',
+          text.slice(0, 200),
+        );
+        return;
+      }
+      if (!this._authenticated) {
+        this._handleAuthReply(ws, msg as unknown as Record<string, unknown>);
+        return;
+      }
+      this.emit('message', msg);
     });
 
-    sock.on('error', err => {
+    ws.on('error', (err: Error) => {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && code !== 'ECONNREFUSED') {
-        console.error('[AgentClient] socket error:', err.message);
+        console.error('[AgentClient] connection error:', err.message);
       }
     });
 
-    sock.on('close', () => {
-      if (this._socket !== sock) return;
-      this._connecting = false;
-      this._socket = null;
-      this._buffer = '';
+    ws.on('close', () => {
+      if (authTimer) {
+        clearTimeout(authTimer);
+        authTimer = null;
+      }
+      if (this._ws !== ws) return;
+      this._ws = null;
+      this._authenticated = false;
       if (
         this._connectedAt &&
         Date.now() - this._connectedAt >= STABLE_CONNECTION_MS
@@ -138,6 +189,70 @@ export class AgentClient extends EventEmitter {
       if (this._disposed) return;
       this._scheduleReconnect();
     });
+
+    ws.connect();
+  }
+
+  /**
+   * Report a connect attempt that failed before a socket was opened.
+   *
+   * Delivered on the next tick, like a socket's connection error, so
+   * `sendCommand()` never re-enters the caller's `disconnect` handler
+   * from inside the call.  The UI treats it like any other failed
+   * attempt (the daemon is down); the next read of the endpoint file
+   * is due after `retryMs`.
+   */
+  private _failAttempt(retryMs: number): void {
+    setImmediate(() => {
+      if (this._disposed || this._ws) return;
+      this.emit('disconnect');
+      if (this._reconnectTimer) return;
+      this._reconnectTimer = setTimeout(() => {
+        this._reconnectTimer = null;
+        if (!this._disposed) this.connect();
+      }, retryMs);
+    });
+  }
+
+  /**
+   * Consume the daemon's answer to the `auth` frame.
+   *
+   * `auth_ok` with `local: true` completes the connection: the
+   * preamble (see `setPreamble`) goes out first — the daemon resolves
+   * every later command's missing workDir against the pin it carries,
+   * and the queue may hold commands that need it (a submit or a file
+   * link clicked during the outage) — then queued commands are flushed
+   * BEFORE `connect` is announced, because a `connect` handler
+   * immediately writes fresh commands (e.g. getModels) whose replies
+   * could otherwise overwrite state a queued command (e.g.
+   * selectModel) was about to change.  Anything else means the token
+   * in the endpoint file is stale (a daemon restarted between the read
+   * and the handshake) or the peer is not our daemon: drop the
+   * connection and retry, re-reading the file.
+   */
+  private _handleAuthReply(ws: WsClient, msg: Record<string, unknown>): void {
+    if (msg.type === 'auth_ok' && msg.local === true) {
+      this._authenticated = true;
+      this._connectedAt = Date.now();
+      if (this._preamble) ws.send(JSON.stringify(this._preamble));
+      const cutoff = Date.now() - this._pendingTtlMs;
+      const pending = this._pendingSends;
+      this._pendingSends = [];
+      for (const item of pending) {
+        if (item.at < cutoff) {
+          this._announceDropped(item, 'expired');
+          continue;
+        }
+        ws.send(item.text);
+      }
+      this.emit('connect');
+      return;
+    }
+    console.error(
+      '[AgentClient] daemon did not accept the local token:',
+      JSON.stringify(msg).slice(0, 200),
+    );
+    ws.destroy();
   }
 
   /**
@@ -160,13 +275,10 @@ export class AgentClient extends EventEmitter {
   }
 
   sendCommand(cmd: AgentCommand): void {
-    const line = JSON.stringify(cmd) + '\n';
-    const sock = this._socket;
-    if (sock && !sock.connecting && sock.writable) {
-      sock.write(line);
-      return;
-    }
-    this._pendingSends.push({line, cmd, at: Date.now()});
+    const text = JSON.stringify(cmd);
+    const ws = this._ws;
+    if (ws && this._authenticated && ws.send(text)) return;
+    this._pendingSends.push({text, cmd, at: Date.now()});
     const surplus = this._pendingSends.length - this._maxPendingSends;
     if (surplus > 0) {
       for (const item of this._pendingSends.splice(0, surplus)) {
@@ -203,15 +315,18 @@ export class AgentClient extends EventEmitter {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
-    if (this._socket) {
-      // Disposal is cancellation, not a graceful goodbye: end() would
-      // keep the socket -- and whatever it still has buffered -- alive
-      // until the daemon reads it, which a wedged daemon never does.
+    if (this._ws) {
+      // Disposal is cancellation, not a graceful goodbye: a closing
+      // handshake would keep the socket -- and whatever it still has
+      // buffered -- alive until the daemon reads it, which a wedged
+      // daemon never does.
+      const ws = this._ws;
+      this._ws = null;
       try {
-        this._socket.destroy();
+        ws.destroy();
       } catch {}
-      this._socket = null;
     }
+    this._authenticated = false;
     this._pendingSends = [];
     this.removeAllListeners();
   }
@@ -220,7 +335,7 @@ export class AgentClient extends EventEmitter {
    * Retry the connection, backing off so a daemon restart is not met by
    * a connect storm.
    *
-   * Every open window runs one of these against the same socket, so a
+   * Every open window runs one of these against the same daemon, so a
    * fixed retry meant N windows hammered the daemon 2N times a second
    * for the whole of every outage -- exactly while it was trying to
    * bind.  The delay doubles up to a ceiling and carries jitter so the
@@ -238,33 +353,5 @@ export class AgentClient extends EventEmitter {
       this._reconnectTimer = null;
       if (!this._disposed) this.connect();
     }, delay);
-  }
-
-  private _handleData(chunk: string): void {
-    this._buffer += chunk;
-    if (this._buffer.length > MAX_LINE_BUFFER_BYTES) {
-      console.error(
-        '[AgentClient] line buffer exceeded limit ' +
-          `(${this._buffer.length} > ${MAX_LINE_BUFFER_BYTES}); ` +
-          'dropping connection.',
-      );
-      this._buffer = '';
-      if (this._socket) this._socket.destroy();
-      return;
-    }
-    const lines = this._buffer.split('\n');
-    this._buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const msg = JSON.parse(line) as ToWebviewMessage;
-        this.emit('message', msg);
-      } catch {
-        console.warn(
-          '[AgentClient] non-JSON line from daemon:',
-          line.slice(0, 200),
-        );
-      }
-    }
   }
 }

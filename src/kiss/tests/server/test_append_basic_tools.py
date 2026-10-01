@@ -5,7 +5,7 @@
 """End-to-end tests for ``kiss.server.sorcar.run``'s ``append_basic_tools``.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
-temporary Unix-domain socket and drive ``kiss.server.sorcar.run``
+loopback local endpoint and drive ``kiss.server.sorcar.run``
 against it.  The only replaced boundary is the LLM itself: the
 per-session executor's :meth:`kiss.core.kiss_agent.KISSAgent.run` is
 swapped for a stub that records the ``tools`` it was handed, so the
@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import socket
 import tempfile
 import textwrap
 import threading
@@ -35,23 +34,21 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.core import vscode_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_agent_path import _init_repo
-
-pytestmark = requires_unix_sockets
 
 
 class DaemonRunApiHarness(unittest.TestCase):
     """Shared real-daemon harness for ``sorcar.run`` end-to-end suites.
 
-    Owns the temporary repo + UDS daemon lifecycle, the recording
-    executor-LLM stub, and the raw-socket ``run`` driver.  Test suites
+    Owns the temporary repo + local daemon lifecycle, the recording
+    executor-LLM stub, and the raw local-connection ``run`` driver.  Test suites
     (this module's ``append_basic_tools`` tests, the
     ``append_to_system_prompt``/``append_to_prompt`` tests in
     ``test_append_to_prompts``) subclass it and add only test methods.
@@ -64,7 +61,7 @@ class DaemonRunApiHarness(unittest.TestCase):
         self.tmpdir = str(
             Path(tempfile.mkdtemp(prefix="sorcar_append_basic_")).resolve()
         )
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
@@ -92,16 +89,11 @@ class DaemonRunApiHarness(unittest.TestCase):
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
         self._original_executor_run = KISSAgent.run
 
@@ -118,15 +110,13 @@ class DaemonRunApiHarness(unittest.TestCase):
         agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            ws_server = self.server._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                await ws_server.wait_closed()
+            local_endpoint.remove_endpoint_if_owned(
+                self.server._local_endpoint_file, self.server._local_token,
+            )
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -309,7 +299,7 @@ class DaemonRunApiHarness(unittest.TestCase):
         extra_cmd: dict[str, Any],
         events_out: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Drive one raw ``run`` command over the UDS and wait for the end.
+        """Drive one raw ``run`` command over the local endpoint and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so an absent or
         malformed wire field (``appendBasicTools``,
@@ -323,10 +313,8 @@ class DaemonRunApiHarness(unittest.TestCase):
                 emitted for this run's tab, in order.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(60)
+        ws = local_endpoint.connect(Path(self.endpoint_file), open_timeout=60)
         try:
-            sock.connect(self.sock_path)
             cmd = {
                 "type": "run",
                 "prompt": "raw client task",
@@ -338,11 +326,10 @@ class DaemonRunApiHarness(unittest.TestCase):
                 "webTools": False,
                 **extra_cmd,
             }
-            sock.sendall(json.dumps(cmd).encode() + b"\n")
-            reader = sock.makefile("rb")
+            ws.send(json.dumps(cmd))
             started = False
             while True:
-                event = json.loads(reader.readline())
+                event = json.loads(ws.recv(timeout=60))
                 if event.get("tabId") != tab_id:
                     continue
                 if events_out is not None:
@@ -354,7 +341,7 @@ class DaemonRunApiHarness(unittest.TestCase):
                 elif started:
                     return
         finally:
-            sock.close()
+            ws.close()
 
 
 class AppendBasicToolsApiTest(DaemonRunApiHarness):
@@ -377,7 +364,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             tools=self._write_client_tools(),
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -407,7 +394,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             tools=self._write_client_tools(),
             append_basic_tools=False,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -422,7 +409,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             append_basic_tools=False,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -454,7 +441,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             tools=self._write_client_tools(),
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -480,7 +467,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
@@ -504,7 +491,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             append_basic_tools=False,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -533,7 +520,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True

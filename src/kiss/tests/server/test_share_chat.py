@@ -14,9 +14,9 @@ into a standalone page
 (``kiss.server.web_server._build_share_page``) and writes it to
 ``<workDir>/reports/chat-<title-slug>-<chatId>.html``.  These tests drive the REAL
 production path — a live :class:`RemoteAccessServer` dispatcher over a
-real Unix-domain socket, exactly how the VS Code extension host
-forwards the webview's commands, and over real WSS exactly like the
-remote webapp — against a real history database, and assert on the
+real local WSS connection, exactly how the VS Code extension host
+forwards the webview's commands, and over real remote WSS exactly like
+the remote webapp — against a real history database, and assert on the
 ``share_tasks`` / ``share_done`` replies and on the page written to
 disk.
 """
@@ -47,7 +47,7 @@ from kiss.server.web_server import (
     _SHARE_TASKS_MAX_REPLY_BYTES,
     RemoteAccessServer,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 _PASSWORD = "share-chat-test-password"
 
@@ -76,40 +76,33 @@ def _restore_db(saved: tuple[Any, Any, Any]) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-@requires_unix_sockets
-class _UdsServerTestCase(unittest.TestCase):
-    """Harness: a live UDS dispatcher exactly like the extension's."""
+class _LocalServerTestCase(unittest.TestCase):
+    """Harness: a live local-channel dispatcher exactly like the extension's."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.work_dir = os.path.join(self.tmp.name, "workspace")
         os.makedirs(self.work_dir)
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            host="127.0.0.1",
+            port=0,
+            work_dir=self.work_dir,
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
+            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
         )
-        self.server._printer._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=15)
 
     def tearDown(self) -> None:
-        async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
-
         concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)],
-            timeout=5,
+            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
+            timeout=10,
         )
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
@@ -119,12 +112,12 @@ class _UdsServerTestCase(unittest.TestCase):
     def _roundtrip(
         self, cmds: list[dict[str, Any]], want_type: str
     ) -> dict[str, Any]:
-        """Send *cmds* over one fresh UDS connection; return the first
+        """Send *cmds* over one fresh local connection; return the first
         received event of type *want_type*."""
 
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path,
+            reader, writer = await open_local_connection(
+                self.server,
                 # A share_tasks reply can approach the transport's own
                 # frame cap; the reader must accept what the daemon is
                 # allowed to send.
@@ -154,7 +147,7 @@ class _UdsServerTestCase(unittest.TestCase):
         )
 
 
-class TestShareChatOverUds(_UdsServerTestCase):
+class TestShareChatOverLocal(_LocalServerTestCase):
     """``shareChat`` writes the shared page and answers ``share_done``."""
 
     def _share(self, **fields: Any) -> dict[str, Any]:
@@ -309,7 +302,7 @@ class TestShareChatOverUds(_UdsServerTestCase):
         )
 
 
-class TestShareChatTasksOverUds(_UdsServerTestCase):
+class TestShareChatTasksOverLocal(_LocalServerTestCase):
     """``shareChatTasks`` lists every task of a chat, oldest first."""
 
     def setUp(self) -> None:
@@ -623,7 +616,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
                 "type": "shareChat",
                 "chatId": "wss-chat",
                 "title": "Remote chat",
-                "html": TestShareChatOverUds.BODY,
+                "html": TestShareChatOverLocal.BODY,
                 "tabId": "tab-wss",
             }))
             while True:
@@ -637,7 +630,7 @@ class TestShareChatOverWss(IsolatedAsyncioTestCase):
         out = Path(self._work_dir) / "reports" / "chat-remote-chat-wss-chat.html"
         self.assertEqual(event["path"], str(out))
         page = out.read_text(encoding="utf-8")
-        self.assertIn(TestShareChatOverUds.BODY, page)
+        self.assertIn(TestShareChatOverLocal.BODY, page)
         self.assertIn("<title>Remote chat</title>", page)
 
     async def test_share_chat_tasks_over_wss_lists_every_task(self) -> None:

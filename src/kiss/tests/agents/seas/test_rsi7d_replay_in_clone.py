@@ -5,7 +5,7 @@
 """E2E: rsi7d's ``replay_in_clone`` replays a past task through the real daemon in a clone.
 
 A real :class:`~kiss.server.web_server.RemoteAccessServer` on a temp
-Unix socket runs the replay; the model is a local HTTP stand-in
+local WSS endpoint runs the replay; the model is a local HTTP stand-in
 speaking the OpenAI wire format, reached through the daemon's
 ``custom_endpoint`` setting, so the child agent makes a genuine tool
 call: it writes a file into its work dir, which must be the clone at
@@ -33,7 +33,6 @@ from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.git_worktree import USER_PROMPT_HEADING
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.core import vscode_config
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     StandInModelServer,
@@ -41,9 +40,7 @@ from kiss.tests.server.parallel_agent_harness import (
     run_git,
     tool_call_response,
 )
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
-
-pytestmark = requires_unix_sockets
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 _DEMO_SEA = '''"""Demo SEA replayed in a clone."""
 
@@ -56,13 +53,14 @@ def system_prompt() -> str:
 '''
 
 
-class ReplayInCloneTest(DaemonUdsHarness):
+class ReplayInCloneTest(DaemonLocalHarness):
     """``replay_in_clone`` dispatches this checkout's SEA into a clone of the task's repo."""
 
     def setUp(self) -> None:
         super().setUp()
-        self._saved_sock = cron_agent._daemon_sock_path
-        cron_agent._daemon_sock_path = self.sock_path  # _dispatch goes through this daemon
+        self._saved_endpoint = cron_agent._daemon_endpoint_file
+        # _dispatch goes through this daemon.
+        cron_agent._daemon_endpoint_file = str(self.endpoint_file)
         self.requests: list[dict[str, Any]] = []
         self.standin = StandInModelServer(self._respond)
         vscode_config.CONFIG_PATH.write_text(
@@ -91,7 +89,7 @@ class ReplayInCloneTest(DaemonUdsHarness):
     def tearDown(self) -> None:
         os.chdir(self._saved_cwd)
         self.standin.stop()
-        cron_agent._daemon_sock_path = self._saved_sock
+        cron_agent._daemon_endpoint_file = self._saved_endpoint
         super().tearDown()
 
     def _respond(self, request: dict[str, Any]) -> dict[str, Any]:

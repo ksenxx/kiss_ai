@@ -7,7 +7,7 @@
 
 // End-to-end test of the path-only submit shortcut against a pending
 // worktree, through the REAL compiled extension host and the REAL
-// daemon (test/_real_daemon.py) over a real Unix socket: typing just
+// daemon (test/_real_daemon.py) over the real local WSS endpoint: typing just
 // `reports/analysis.html` and pressing Send must open the tab's worktree
 // copy of the file in the editor — not launch an unintended agent run.
 // The host forwards the webview's `submit` untouched; the daemon
@@ -116,14 +116,6 @@ process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
 fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  for (const dir of tmpDirs.slice().reverse()) {
-    fs.rmSync(dir, {recursive: true, force: true});
-  }
-  process.exit(0);
-}
 
 const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
 const UV = findUvPath();

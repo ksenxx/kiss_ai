@@ -169,14 +169,6 @@ process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
 fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  for (const dir of tmpDirs.slice().reverse()) {
-    fs.rmSync(dir, {recursive: true, force: true});
-  }
-  process.exit(0);
-}
-
 const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
 const UV = findUvPath();
 assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');

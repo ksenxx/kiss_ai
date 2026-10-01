@@ -6,7 +6,7 @@
 
 Invariant: any agent or UI activity in the chat webview of one VS Code
 window must not affect the behavior or UI of the chat webview in
-another window.  Each window owns exactly one UDS connection to the
+another window.  Each window owns exactly one local connection to the
 shared daemon; historically the daemon *broadcast* every request/reply
 event (``files``, ``ghost``, ``models``, ``history``, ``frequentTasks``,
 ``inputHistory``, ``configData``, unknown-command ``error``) to every
@@ -20,11 +20,11 @@ onto their reply events, and ``WebPrinter.broadcast`` delivers a
 ``connId``-stamped event ONLY to the connection that issued the
 request (stripping the stamp from the wire payload).
 
-These tests bind a temporary socket under a temp dir (not the
-production ``~/.kiss/sorcar.sock``) and open two real UDS client
-connections that simulate two windows.  The same
-``ServerApi.dispatch`` body serves both the UDS transport (VS Code
-windows) and the WSS transport (remote browser windows), so the
+These tests start a daemon with a temporary endpoint file (not the
+production ``~/.kiss/sorcar-local.json``) and open two real local
+client connections that simulate two windows.  The same
+``ServerApi.dispatch`` body serves both local clients (VS Code
+windows) and remote browser windows, so the
 invariant proven here holds identically for two browser windows and
 for a browser window next to a VS Code window:
 
@@ -56,7 +56,7 @@ from websockets.asyncio.client import connect
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 
 def _find_free_port() -> int:
@@ -103,9 +103,8 @@ def _has_type(reply_type: str) -> Callable[[dict[str, Any]], bool]:
     return _pred
 
 
-@requires_unix_sockets
 class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
-    """Two UDS connections (= two VS Code windows) sharing one daemon."""
+    """Two local connections (= two VS Code windows) sharing one daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -116,7 +115,6 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -124,10 +122,10 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[Any] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -144,24 +142,23 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS connection (simulates one VS Code window)."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
+    ) -> tuple[Any, Any]:
+        """Open one local connection (simulates one VS Code window)."""
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: Any, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: Any,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 10.0,
@@ -169,7 +166,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         """Read events until *predicate* matches or the budget expires."""
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -179,7 +176,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         )
 
     async def _assert_no_reply_leak(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: Any, writer: Any,
     ) -> None:
         """Probe a window and assert it saw no other window's replies.
 
@@ -405,7 +402,7 @@ class TestPerWindowReplyIsolation(IsolatedAsyncioTestCase):
         Browser window A's ``ready`` handshake replies (``models``,
         ``inputHistory``, ``configData``, ``focusInput``) must reach
         only window A — never browser window B, and never a VS Code
-        window (UDS connection) sharing the same daemon.  Global
+        window (local connection) sharing the same daemon.  Global
         system events (``remote_url``, ``update_available``) remain
         broadcast to everyone.
         """

@@ -29,6 +29,7 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_AGENT_CLIENT = path.join(__dirname, '..', 'out', 'AgentClient.js');
 if (!fs.existsSync(OUT_AGENT_CLIENT)) {
@@ -41,7 +42,7 @@ if (process.platform === 'win32') {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ac-dispose-'));
-const sockPath = path.join(tmpDir, 'daemon.sock');
+const endpointPath = path.join(tmpDir, 'daemon.json');
 
 const CHILD = `
 'use strict';
@@ -63,13 +64,13 @@ client.connect();
 
 async function main() {
   const connections = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     // A wedged daemon: accept, then never read a byte.
     conn.pause();
     conn.on('error', () => {});
     connections.push(conn);
   });
-  await new Promise(r => server.listen(sockPath, r));
+  await new Promise(r => server.listen(endpointPath, r));
 
   const started = Date.now();
   const result = await new Promise(resolve => {
@@ -78,7 +79,7 @@ async function main() {
       env: {
         ...process.env,
         KISS_TEST_MODULE: OUT_AGENT_CLIENT,
-        KISS_TEST_SOCK: sockPath,
+        KISS_TEST_SOCK: endpointPath,
       },
     });
     let out = '';

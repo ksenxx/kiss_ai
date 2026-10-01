@@ -1849,7 +1849,7 @@ class JsonPrinter(Printer):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Inject the thread-local taskId, record, and persist the event.
 
-        Subclasses that own a transport (WSS / UDS sockets, etc.) add
+        Subclasses that own a transport (WebSocket connections, etc.) add
         their own emission logic AFTER calling the recording /
         persistence path — see :class:`WebPrinter` in
         ``web_server.py``.  The default implementation here is

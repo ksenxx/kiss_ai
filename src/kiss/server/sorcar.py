@@ -10,10 +10,9 @@ This module is the single source of truth for the wire API of the
 **The server API** — :data:`API`, :func:`validate_command`, and
 :class:`ServerApi` define every command a user interface (a VS Code
 window, the remote webapp, or a Python client) may send to the
-daemon.  Both transports speak the same JSON commands, dispatched on
-the ``"type"`` field — framed as newline-delimited lines on the
-Unix-domain socket (UDS) and as one object per WebSocket frame on
-WSS.  The daemon routes every command through
+daemon.  Local and remote clients speak the same JSON commands over
+the daemon's WSS listener, dispatched on the ``"type"`` field, one
+object per WebSocket frame.  The daemon routes every command through
 :meth:`ServerApi.dispatch`, which validates it against the catalog
 (answering an invalid one with an ``{"type": "error", "text": ...}``
 event instead of processing it) and invokes the :class:`ServerApi`
@@ -78,12 +77,11 @@ underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
 :meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no
 :func:`run` parameter, since a callable cannot travel the wire.
 
-The function speaks the daemon's newline-delimited JSON protocol over
-its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
-``$KISS_HOME/sorcar.sock``) — the same transport the VS Code extension
-uses — so no HTTP server, password, or extra
-dependency is involved.  POSIX file permissions (mode 0o600) on the
-socket restrict access to the owning user.
+The function speaks the daemon's JSON protocol over its local WSS
+endpoint, found through ``$KISS_HOME/sorcar-local.json`` (or the file
+``$KISS_SORCAR_LOCAL`` names) — the same channel the VS Code extension
+uses.  The endpoint file's mode 0600 restricts the local token it
+carries to the owning user, so no password is involved.
 """
 
 from __future__ import annotations
@@ -96,7 +94,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 # The synchronous client half of this API lives in the sorcar layer
 # (``kiss.agents.sorcar.daemon_client``) so sorcar-layer code — the
@@ -115,7 +113,7 @@ from kiss.agents.sorcar.daemon_client import (
     _parse_cost as _parse_cost,
 )
 from kiss.agents.sorcar.daemon_client import (
-    _resolve_sock_path as _resolve_sock_path,
+    _resolve_endpoint_file as _resolve_endpoint_file,
 )
 from kiss.agents.sorcar.daemon_client import (
     _to_task_result as _to_task_result,
@@ -459,31 +457,34 @@ def passwords_equal(a: str, b: str) -> bool:
     return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
+AuthKind = Literal["local", "remote"]
+"""How a connection authenticated: local token or remote password."""
+
+
 @dataclass(frozen=True)
 class ApiContext:
     """Transport context of one in-flight server API call.
 
     Bundles the per-connection state a :class:`ServerApi` handler may
     need, so handler signatures stay uniform (``handler(cmd, ctx)``)
-    and the API layer never depends on which transport (WSS or UDS)
-    delivered the command.
+    and the API layer never depends on how the client authenticated.
 
     Attributes:
         endpoint: The client connection the command arrived on — a
-            ``websockets`` ``ServerConnection`` (remote browser) or an
-            :class:`asyncio.StreamWriter` (local VS Code extension).
-            Used for direct replies.
+            ``websockets`` ``ServerConnection``.  Used for direct
+            replies.
         conn_state: Per-connection mutable state holding at least the
             connection's ``work_dir`` (announced via ``setWorkDir``)
             and unique ``conn_id``.
-        is_uds: ``True`` when the command arrived over the local
-            Unix-domain socket (a VS Code window or a local Python
-            client), ``False`` for a remote WSS browser client.
+        is_local: ``True`` when the connection authenticated with the
+            daemon's local token from a loopback address (a VS Code
+            window or a local Python client), ``False`` for a remote
+            browser client that supplied the password.
     """
 
     endpoint: Any
     conn_state: dict[str, Any]
-    is_uds: bool
+    is_local: bool
 
 
 class ServerBackend(Protocol):
@@ -616,6 +617,12 @@ class ServerBackend(Protocol):
 
     def _record_auth_failure(self, ip: str) -> None: ...
 
+    @property
+    def local_token(self) -> str: ...
+
+    @property
+    def local_only(self) -> bool: ...
+
 
 class ServerApi:
     """The Sorcar server's code-level API.
@@ -623,8 +630,8 @@ class ServerApi:
     The actual code API every client command invokes.  Each catalog
     entry in :data:`API` names (via ``ApiCommand.handler``) the method
     of this class that services it, so the clients — the VS Code
-    extension (``src/SorcarApi.ts`` over UDS), the chat webview /
-    remote webapp (``media/api.js`` over WSS), and the Python
+    extension (``src/SorcarApi.ts``), the chat webview / remote
+    webapp (``media/api.js``), and the Python
     clients — call these methods remotely by sending the catalog's
     JSON commands.  The transport layer
     (``RemoteAccessServer._dispatch_client_command``) parses the JSON
@@ -718,7 +725,7 @@ class ServerApi:
             # Canonicalise ONCE, before validation and every handler:
             # ``TabRegistry`` strips ids it stores and broadcasts, so
             # a handler keying ``AgentState`` / ``_tab_chat_views`` /
-            # local-UDS counts by the raw string gave one wire tab two
+            # local-tab counts by the raw string gave one wire tab two
             # identities, and closing the canonical id leaked the rest.
             tab_id = tab_id.strip()
             cmd["tabId"] = tab_id
@@ -765,7 +772,7 @@ class ServerApi:
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        For local UDS peers, records the connection's INTEREST in the
+        For local peers, records the connection's INTEREST in the
         id with the printer's local-tab bookkeeping (talk-playback
         arbitration).  Interest is recorded before the handler runs
         and regardless of whether the tab currently exists: the talk
@@ -784,12 +791,35 @@ class ServerApi:
             tab_id: The non-empty frontend tab identifier.
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
-            self._backend._printer.register_local_uds_tab(
+        if ctx.is_local:
+            self._backend._printer.register_local_tab(
                 ctx.conn_state["conn_id"],
                 tab_id,
                 ctx.conn_state.setdefault("local_tabs", set()),
             )
+
+    def _is_local_auth(self, msg: Any, websocket: Any) -> bool:
+        """Whether *msg* is an ``auth`` frame carrying this daemon's local token.
+
+        Only a loopback peer can be local: the token travels in the
+        endpoint file, which never leaves the machine.
+
+        Args:
+            msg: The decoded first frame.
+            websocket: The connection it arrived on.
+
+        Returns:
+            True when the frame authenticates the peer as local.
+        """
+        if not isinstance(msg, dict) or msg.get("type") != "auth":
+            return False
+        token = msg.get("token", "")
+        return (
+            isinstance(token, str)
+            and bool(token)
+            and self._backend._peer_is_loopback(websocket)
+            and passwords_equal(self._backend.local_token, token)
+        )
 
     async def _refuse_no_password_remote(
         self, websocket: Any, ip: str,
@@ -821,19 +851,27 @@ class ServerApi:
         except Exception:
             pass
 
-    async def authenticate(self, websocket: Any) -> bool:
-        """Authenticate a remote WSS client with the ``auth`` handshake.
+    async def authenticate(self, websocket: Any) -> AuthKind | None:
+        """Authenticate a WSS client with the ``auth`` handshake.
 
-        The remote webapp's entry point into the API: before a browser
-        connection may issue any catalog command, its very first
-        frames must complete this handshake (the ``_WS_SHIM_JS`` shim
-        served with the webapp sends ``{"type": "auth", "password":
-        ...}`` as soon as the socket opens).  Local UDS clients (the
-        VS Code extension, Python clients) skip it — POSIX file
-        permissions on the socket already gate access to the owning
-        user.
+        Every client's entry point into the API: before a connection
+        may issue any catalog command, its very first frames must
+        complete this handshake.  The remote webapp's ``_WS_SHIM_JS``
+        shim sends ``{"type": "auth", "password": ...}`` as soon as
+        the socket opens; local clients (the VS Code extension, Python
+        clients) send ``{"type": "auth", "token": ...}`` with the
+        daemon's per-start local token read from the endpoint file
+        (:mod:`kiss.agents.sorcar.local_endpoint`), whose 0600 mode gates the
+        token to the owning user.
 
         Protocol serviced here, in order:
+
+        0. An ``auth`` frame carrying a ``token`` equal to the
+           backend's ``local_token`` (constant-time compare) from a
+           LOOPBACK peer is answered with ``auth_ok`` (``"local":
+           true``) and returns ``"local"``.  A token from a
+           non-loopback peer is never honoured, whatever the password
+           setting; a wrong token counts as a wrong guess.
 
         1. A source IP that is still rate-limited after too many
            failed logins is answered with ``auth_locked`` (carrying
@@ -864,17 +902,30 @@ class ServerApi:
            password prompt away from every visitor.
 
         Args:
-            websocket: The remote client's WebSocket connection.
+            websocket: The client's WebSocket connection.
 
         Returns:
-            ``True`` when the client authenticated; ``False`` when it
-            failed (the socket is then already closed).
+            ``"local"`` for a token-authenticated loopback client,
+            ``"remote"`` for a password-authenticated client, ``None``
+            when authentication failed (the socket is then already
+            closed).
         """
         backend = self._backend
         ip = backend._client_ip(websocket)
         lock_remaining = backend._auth_lock_remaining(ip)
         if lock_remaining > 0.0:
+            # The lockout is per IP, and every visitor relayed by the
+            # tunnel shares 127.0.0.1 with the extension and the Python
+            # clients: read one frame so a valid local token still gets
+            # through, then refuse everything else.
             logger.warning("Auth rate-limit hit for %s; closing socket", ip)
+            try:
+                msg = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
+                if self._is_local_auth(msg, websocket):
+                    await websocket.send(json.dumps({"type": "auth_ok", "local": True}))
+                    return "local"
+            except Exception:
+                logger.debug("Locked peer %s sent no usable frame", ip, exc_info=True)
             try:
                 await websocket.send(json.dumps({
                     "type": "auth_locked",
@@ -883,7 +934,7 @@ class ServerApi:
                 await websocket.close()
             except Exception:
                 pass
-            return False
+            return None
         password = load_config().get("remote_password", "")
         if not password and not backend._peer_is_loopback(websocket):
             # Defense in depth for the empty-password localhost-only
@@ -893,10 +944,29 @@ class ServerApi:
             # so clearing the password at ANY point before a frame is
             # examined refuses an already-admitted non-loopback peer.
             await self._refuse_no_password_remote(websocket, ip)
-            return False
+            return None
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
                 raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+                msg = json.loads(raw)
+                # The local token first: it is a 256-bit secret the
+                # lockout below exists to protect passwords from, and
+                # the lockout must never shut the machine's own
+                # clients out (see the pre-recv check above).
+                if self._is_local_auth(msg, websocket):
+                    await websocket.send(json.dumps({
+                        "type": "auth_ok", "local": True,
+                    }))
+                    return "local"
+                if backend.local_only:
+                    # The private daemon admits no password at all.
+                    await websocket.send(json.dumps({
+                        "type": "error",
+                        "code": "auth_failed",
+                        "text": "This daemon accepts local clients only.",
+                    }))
+                    await websocket.close()
+                    return None
                 # Re-check the lockout BEFORE comparing or accepting the
                 # submitted credential: a peer socket may have tripped
                 # the per-IP threshold while this already-admitted
@@ -915,7 +985,7 @@ class ServerApi:
                         "retry_after": math.ceil(lock_remaining),
                     }))
                     await websocket.close()
-                    return False
+                    return None
                 # Re-load the configured password before every compare
                 # so a change made while this connection awaited
                 # credentials takes effect NOW.  Without the reload, a
@@ -928,20 +998,24 @@ class ServerApi:
                     websocket,
                 ):
                     await self._refuse_no_password_remote(websocket, ip)
-                    return False
-                msg = json.loads(raw)
+                    return None
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
                     client_pw = ""
-                if msg.get("type") == "auth" and passwords_equal(
+                token = msg.get("token", "")
+                if not isinstance(token, str):
+                    token = ""
+                if msg.get("type") == "auth" and not token and passwords_equal(
                     password, client_pw,
                 ):
-                    await websocket.send(json.dumps({"type": "auth_ok"}))
-                    return True
+                    await websocket.send(json.dumps({
+                        "type": "auth_ok", "local": False,
+                    }))
+                    return "remote"
                 if not is_retry and msg.get("type") != "auth":
                     await websocket.close()
-                    return False
-                if client_pw:
+                    return None
+                if client_pw or token:
                     backend._record_auth_failure(ip)
                 # Re-check the lockout AFTER recording this failure so a
                 # wrong guess that crosses the brute-force threshold is
@@ -962,7 +1036,7 @@ class ServerApi:
                         "retry_after": math.ceil(lock_remaining),
                     }))
                     await websocket.close()
-                    return False
+                    return None
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             # ``code`` lets the webapp shim tell this apart from other
@@ -974,14 +1048,14 @@ class ServerApi:
                 "text": "That password is not correct. Try again.",
             }))
             await websocket.close()
-            return False
+            return None
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
             try:
                 await websocket.close()
             except Exception:
                 pass
-            return False
+            return None
 
     async def forward(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Run *cmd* on the backend agent server.
@@ -1017,7 +1091,7 @@ class ServerApi:
         Sanitizes the command's ``restoredTabs`` ONCE (warnings
         included) and writes the cleaned list back so the backend's
         own sanitize pass finds nothing left to reject or truncate.
-        For a UDS connection it then (1) marks the connection as
+        For a local connection it then (1) marks the connection as
         hosting a chat webview — every attached webview mirrors the
         whole canonical tab registry from ``tabs_state``, so this flag
         is what makes a registry tab's talk play natively on this
@@ -1041,14 +1115,14 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
-        if ctx.is_uds:
+        if ctx.is_local:
             conn_id = ctx.conn_state["conn_id"]
-            self._backend._printer.mark_uds_webview(conn_id)
+            self._backend._printer.mark_local_webview(conn_id)
             shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
             own_tab = cmd.get("tabId")
             if isinstance(own_tab, str) and own_tab:
                 shown.add(own_tab)
-            self._backend._printer.sync_local_uds_tabs(
+            self._backend._printer.sync_local_tabs(
                 conn_id,
                 shown,
                 ctx.conn_state.setdefault("local_tabs", set()),
@@ -1060,8 +1134,8 @@ class ServerApi:
 
         The one submit path of every surface: the remote webapp sends
         its webview's ``submit`` over WSS, the VS Code extension host
-        forwards its webview's ``submit`` over the Unix socket, and the
-        backend translates both into a ``run`` (path resolution,
+        forwards its webview's ``submit`` over the local WSS endpoint,
+        and the backend translates both into a ``run`` (path resolution,
         follow-up routing) including the path-only shortcut: a prompt
         that is just the path of an existing file is answered on the
         submitting connection — the resolved path for a VS Code window
@@ -1073,7 +1147,7 @@ class ServerApi:
             ctx: The transport context of the current call; its
                 endpoint receives a path-only prompt's reply.
         """
-        await self._backend._handle_submit(cmd, ctx.endpoint, ctx.is_uds)
+        await self._backend._handle_submit(cmd, ctx.endpoint, ctx.is_local)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Resolve, and for a browser serve, a clicked file link.
@@ -1083,7 +1157,8 @@ class ServerApi:
         tab's work dir, its pending worktree).  A browser has no editor
         to open the path in, so it gets the file's content (or a
         plain-text directory listing) for an in-page content tab; a
-        VS Code window (UDS) gets the resolved path as an
+        local client (a VS Code window on the token-authenticated
+        loopback WSS endpoint) gets the resolved path as an
         ``openResolvedFile`` action that its extension host opens in a
         real editor tab.
 
@@ -1091,7 +1166,7 @@ class ServerApi:
             cmd: The ``openFile`` command.
             ctx: The transport context of the current call.
         """
-        await self._backend._handle_open_file(cmd, ctx.endpoint, ctx.is_uds)
+        await self._backend._handle_open_file(cmd, ctx.endpoint, ctx.is_local)
 
     async def save_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a remote-web client's edits back to a file on disk.
@@ -1103,9 +1178,9 @@ class ServerApi:
         atomically; the ``version`` stamp taken from the ``fileContent``
         reply lets the daemon refuse to overwrite a file that changed
         on disk since it was opened unless ``force`` is set.  The reply
-        is a ``fileSaved`` event sent to the requester only.  UDS
+        is a ``fileSaved`` event sent to the requester only.  Local
         clients (VS Code windows) edit files in real editor tabs, so
-        a UDS-delivered ``saveFile`` is dropped as a defensive no-op.
+        a locally delivered ``saveFile`` is dropped as a defensive no-op.
 
         Args:
             cmd: The ``saveFile`` command (``path``, ``content``,
@@ -1113,7 +1188,7 @@ class ServerApi:
                 ``force``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_save_file(cmd, ctx.endpoint)
 
@@ -1124,8 +1199,8 @@ class ServerApi:
         panel contents lazily: a path only becomes a clickable link
         after this check confirms that clicking it (``openFile``)
         would actually open something — a file or a directory.  Served
-        to browsers (WSS) and VS Code windows (UDS) alike, with the
-        same resolution ``openFile`` applies.
+        to remote browsers and local clients (VS Code windows) alike,
+        with the same resolution ``openFile`` applies.
 
         Args:
             cmd: The ``checkPaths`` command.
@@ -1147,7 +1222,7 @@ class ServerApi:
         task), later polls re-run it every 10 minutes, and a poll with
         ``refresh: true`` (the panel's refresh button) re-runs it at
         once.  Served on BOTH transports — the direct ``taskUpdate``
-        reply goes back to whichever endpoint (WSS or UDS) asked.
+        reply goes back to whichever endpoint (local or remote) asked.
 
         Args:
             cmd: The ``getTaskUpdate`` command (``tabId``, optional
@@ -1161,8 +1236,8 @@ class ServerApi:
 
         The right sidebar's "Schedule" subpanel (every surface: remote
         webapp, VS Code sidebar chat, editor-tabs Task Info view) polls
-        this command.  The direct reply, to whichever endpoint (WSS or
-        UDS) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
+        this command.  The direct reply, to whichever endpoint (local
+        or remote) asked, is ``{"type": "cronJobs", "jobs": [...]}`` with the
         rows of :func:`kiss.server.sidebar_panels.cron_jobs_report`.
 
         Args:
@@ -1244,8 +1319,8 @@ class ServerApi:
         the view lists the work dir, expanding a folder lists that
         folder, and clicking a file goes through ``openFile``.  The
         reply is a ``dirListing`` event sent to the requester only.
-        UDS clients (VS Code windows) have a real Explorer, so a
-        UDS-delivered ``listDir`` is dropped as a defensive no-op,
+        Local clients (VS Code windows) have a real Explorer, so a
+        locally delivered ``listDir`` is dropped as a defensive no-op,
         exactly like ``saveFile``.
 
         Args:
@@ -1253,7 +1328,7 @@ class ServerApi:
                 ``workDir``, ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_list_dir(cmd, ctx.endpoint)
 
@@ -1263,7 +1338,7 @@ class ServerApi:
         The activity bar's Source Control view lists the repository's
         staged, unstaged and untracked changes (VS Code's "Changes"
         section) from this command's ``gitStatus`` reply, sent to the
-        requester only.  A UDS-delivered ``gitStatus`` is dropped as a
+        requester only.  A locally delivered ``gitStatus`` is dropped as a
         defensive no-op, exactly like ``saveFile``.
 
         Args:
@@ -1271,7 +1346,7 @@ class ServerApi:
                 ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_git_status(cmd, ctx.endpoint)
 
@@ -1281,7 +1356,7 @@ class ServerApi:
         The activity bar's Source Control view draws a commit graph
         (VS Code's "Graph" section) with each commit's modified files
         from this command's ``gitLog`` reply, sent to the requester
-        only.  A UDS-delivered ``gitLog`` is dropped as a defensive
+        only.  A locally delivered ``gitLog`` is dropped as a defensive
         no-op, exactly like ``saveFile``.
 
         Args:
@@ -1289,7 +1364,7 @@ class ServerApi:
                 ``tabId``, ``token``, ``limit``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_git_log(cmd, ctx.endpoint)
 
@@ -1299,7 +1374,7 @@ class ServerApi:
         The remote Source Control graph's commit context menu ("Open
         Changes", "Open File", "Compare with...") reads its text from
         this command's ``gitShow`` reply, sent to the requester only.
-        A UDS-delivered ``gitShow`` is dropped as a defensive no-op,
+        A locally delivered ``gitShow`` is dropped as a defensive no-op,
         exactly like ``gitLog``.
 
         Args:
@@ -1307,7 +1382,7 @@ class ServerApi:
                 ``base``, ``mode``, ``workDir``, ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_git_show(cmd, ctx.endpoint)
 
@@ -1317,7 +1392,7 @@ class ServerApi:
         "Checkout (Detached)", "Create Branch...", "Create Tag..." and
         "Cherry Pick" of the remote Source Control graph's commit menu
         each send one ``gitAction``; the outcome comes back as a
-        ``gitActionResult`` to the requester only.  A UDS-delivered
+        ``gitActionResult`` to the requester only.  A locally delivered
         ``gitAction`` is dropped as a defensive no-op (VS Code windows
         run the real Git extension).
 
@@ -1327,7 +1402,7 @@ class ServerApi:
                 ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_git_action(cmd, ctx.endpoint)
 
@@ -1337,7 +1412,7 @@ class ServerApi:
         New File..., New Folder..., Rename..., Delete, Paste, Find in
         Folder... and Compare Selected of the remote Explorer's context
         menu each send one ``fsAction``; the outcome comes back as an
-        ``fsResult`` to the requester only.  A UDS-delivered
+        ``fsResult`` to the requester only.  A locally delivered
         ``fsAction`` is dropped as a defensive no-op (VS Code windows
         have the real Explorer).
 
@@ -1347,7 +1422,7 @@ class ServerApi:
                 ``workDir``, ``tabId``, ``token``).
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
+        if ctx.is_local:
             return
         await self._backend._handle_fs_action(cmd, ctx.endpoint)
 
@@ -1360,7 +1435,7 @@ class ServerApi:
         ``reports/chat-<title-slug>-<chatId>.html`` under the tab's work
         dir.  Both
         transports take this path — the VS Code extension host
-        forwards the webview's ``shareChat`` over UDS, the remote
+        forwards the webview's ``shareChat``, the remote
         webapp sends it over WSS — so the page is built in exactly one
         place.  The reply is a direct ``share_done`` event to the
         requester.
@@ -1441,7 +1516,7 @@ class ServerApi:
         daemon-owned config file through the socket instead of parsing
         the file itself.  The reply is a direct ``kissConfig`` event.
 
-        LOCAL (UDS) CLIENTS ONLY: unlike ``getConfig`` (whose reply is
+        LOCAL CLIENTS ONLY: unlike ``getConfig`` (whose reply is
         shaped for the settings panel), this returns the config
         verbatim — including ``remote_password`` — so a remote WSS
         browser must never receive it.  A WSS-delivered command is
@@ -1451,7 +1526,7 @@ class ServerApi:
             cmd: The ``readKissConfig`` command.
             ctx: The transport context of the current call.
         """
-        if not ctx.is_uds:
+        if not ctx.is_local:
             return
         await self._backend._handle_read_kiss_config(cmd, ctx.endpoint)
 
@@ -1467,7 +1542,7 @@ class ServerApi:
         instead of rewriting the file itself.  The reply is a direct
         ``kissConfigSaved`` acknowledgement event.
 
-        LOCAL (UDS) CLIENTS ONLY: a remote WSS browser must not be
+        LOCAL CLIENTS ONLY: a remote WSS browser must not be
         able to change ``remote_password`` or any other daemon
         setting through this raw channel; a WSS-delivered command is
         dropped as a defensive no-op.
@@ -1476,7 +1551,7 @@ class ServerApi:
             cmd: The ``writeKissConfig`` command carrying ``config``.
             ctx: The transport context of the current call.
         """
-        if not ctx.is_uds:
+        if not ctx.is_local:
             return
         await self._backend._handle_write_kiss_config(cmd, ctx.endpoint)
 
@@ -1494,7 +1569,7 @@ class ServerApi:
         (0..100) tunes wake-word eagerness.  The listener is bound to
         this connection and stopped on disconnect.
 
-        LOCAL (UDS) CLIENTS ONLY: the listener captures this
+        LOCAL CLIENTS ONLY: the listener captures this
         machine's microphone, so a remote WSS browser must not
         control it (browser-mode voice capture stays in-page via
         ``voiceTranscribe``); a WSS-delivered command is dropped as a
@@ -1504,7 +1579,7 @@ class ServerApi:
             cmd: The ``voiceWakeStart`` command.
             ctx: The transport context of the current call.
         """
-        if not ctx.is_uds:
+        if not ctx.is_local:
             return
         await self._backend._handle_voice_wake_start(
             cmd, ctx.endpoint, ctx.conn_state["conn_id"],
@@ -1516,14 +1591,14 @@ class ServerApi:
         """Stop this client's daemon-hosted wake-word listener.
 
         Services ``voiceWakeStop``; a no-op when the connection has no
-        running listener.  LOCAL (UDS) CLIENTS ONLY, matching
+        running listener.  LOCAL CLIENTS ONLY, matching
         ``voiceWakeStart``.
 
         Args:
             cmd: The ``voiceWakeStop`` command (unused).
             ctx: The transport context of the current call.
         """
-        if not ctx.is_uds:
+        if not ctx.is_local:
             return
         await self._backend._handle_voice_wake_stop(
             ctx.conn_state["conn_id"],

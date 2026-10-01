@@ -4,8 +4,8 @@
 # add your name here
 """Parity tests: the remote webapp must behave like the VS Code extension.
 
-The remote webapp (browser over WSS) and the VS Code extension (UDS)
-share one frontend (``media/main.js``) and one backend dispatch path
+The remote webapp (browser over WSS) and the VS Code extension (local
+token-authenticated WSS) share one frontend (``media/main.js``) and one backend dispatch path
 (:meth:`RemoteAccessServer._dispatch_client_command`).  These tests
 lock in the behaviours that previously diverged between the two:
 
@@ -21,9 +21,9 @@ lock in the behaviours that previously diverged between the two:
   ``measureSize`` request) must be silently ignored, like the other
   VS Code-only webview messages.
 
-All tests drive the server through a real UDS client connection, the
-same newline-delimited JSON protocol browsers speak over WSS — both
-transports now share :meth:`_dispatch_client_command` verbatim.
+All tests drive the server through a real local client connection, the
+same JSON protocol browsers speak over WSS — both kinds of peer share
+:meth:`_dispatch_client_command` verbatim.
 """
 
 from __future__ import annotations
@@ -45,9 +45,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -103,14 +101,13 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._install_root = self.install_root
@@ -124,31 +121,27 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect(
-        self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
-        )
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        return await open_local_connection(self.server, limit=16 * 1024 * 1024)
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _read_event(
-        self, reader: asyncio.StreamReader, timeout: float = 2.0,
+        self, reader: LocalReader, timeout: float = 2.0,
     ) -> dict[str, Any]:
         line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        assert line, "UDS closed unexpectedly"
+        assert line, "local connection closed unexpectedly"
         msg = json.loads(line.decode("utf-8"))
         assert isinstance(msg, dict)
         return msg
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         max_events: int = 50,
         timeout: float = 2.0,

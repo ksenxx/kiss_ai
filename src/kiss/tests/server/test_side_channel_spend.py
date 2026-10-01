@@ -10,9 +10,9 @@ same way.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
-import socket
 import tempfile
 import threading
 import time
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from websockets.asyncio.server import ServerConnection
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.persistence import (
@@ -35,7 +36,7 @@ from kiss.server import agent_state, commands
 from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.task_update import charge_side_channel_usage
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import fake_daemon
 
 
 def _row(task_id: str) -> tuple[int, float, int]:
@@ -147,14 +148,14 @@ def test_missing_rows_and_zero_spend_charge_nothing() -> None:
 
 
 class _AnswerDaemon:
-    """A real UDS daemon stand-in that answers one ``/ask`` run.
+    """A real local-endpoint daemon stand-in that answers one ``/ask`` run.
 
     Sends ``status running=true``, a successful ``result`` carrying
     *cost* / tokens / steps, then ``status running=false``.
     """
 
     def __init__(self, cost: str, wait_for_stop: bool = False) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir.
+        """Serve a ``wss://`` stand-in daemon from a thread with its own loop.
 
         With *wait_for_stop* the task never finishes on its own: the
         result (a failure carrying the spend) and the terminal status
@@ -163,60 +164,65 @@ class _AnswerDaemon:
         self.cost = cost
         self.wait_for_stop = wait_for_stop
         self._dir = Path(tempfile.mkdtemp(prefix="kiss_ask_spend_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self.endpoint_file = self._dir / "sorcar-local.json"
+        self._loop = asyncio.new_event_loop()
+        self._stop = asyncio.Event()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._loop.run_until_complete, args=(self._main(),), daemon=True,
+        )
         self._thread.start()
+        if not self._ready.wait(timeout=30):
+            raise RuntimeError("stand-in daemon did not start")
 
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
-            return
-        with conn:
-            reader = conn.makefile("rb")
-            tab_id = json.loads(reader.readline().decode("utf-8")).get("tabId", "")
-            if self.wait_for_stop:
-                conn.sendall(json.dumps(
-                    {"type": "status", "running": True, "tabId": tab_id},
-                ).encode() + b"\n")
-                while json.loads(reader.readline() or b"{}").get("type") != "stop":
-                    pass
-            for event in (
-                {"type": "status", "running": True},
-                {
-                    "type": "result", "taskId": "ask-child",
-                    "success": not self.wait_for_stop,
-                    "text": "<p>because</p>", "cost": self.cost,
-                    "total_tokens": 1234, "step_count": 4,
-                },
-                {"type": "status", "running": False},
-            ):
-                conn.sendall(json.dumps({**event, "tabId": tab_id}).encode() + b"\n")
-            try:
-                reader.readline()
-            except OSError:
+    async def _main(self) -> None:
+        async with fake_daemon(
+            self._dir, self._serve, endpoint_file=self.endpoint_file,
+        ):
+            self._ready.set()
+            await self._stop.wait()
+
+    async def _serve(self, ws: ServerConnection) -> None:
+        tab_id = json.loads(await ws.recv()).get("tabId", "")
+        if self.wait_for_stop:
+            await ws.send(json.dumps(
+                {"type": "status", "running": True, "tabId": tab_id},
+            ))
+            while json.loads(await ws.recv()).get("type") != "stop":
                 pass
+        for event in (
+            {"type": "status", "running": True},
+            {
+                "type": "result", "taskId": "ask-child",
+                "success": not self.wait_for_stop,
+                "text": "<p>because</p>", "cost": self.cost,
+                "total_tokens": 1234, "step_count": 4,
+            },
+            {"type": "status", "running": False},
+        ):
+            await ws.send(json.dumps({**event, "tabId": tab_id}))
+        try:
+            await ws.recv()
+        except Exception:
+            pass
 
     def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
-        self._srv.close()
+        """Shut down the listener and remove the temp endpoint dir."""
+        self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(timeout=10)
+        self._loop.close()
         shutil.rmtree(self._dir, ignore_errors=True)
 
 
-@requires_unix_sockets
 def test_ask_answer_spend_is_charged_to_the_running_owner_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end over a real socket: the answer's cost reaches the owner."""
+    """End to end over a real connection: the answer's cost reaches the owner."""
     owner_task = _task(finished=False)
     owner_agent = SorcarAgent("ask-owner")
     daemon = _AnswerDaemon("$0.3515")
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     server, events = _server()
     try:
         server._dispatch_ask_side_channel(
@@ -233,15 +239,14 @@ def test_ask_answer_spend_is_charged_to_the_running_owner_task(
     assert _row(owner_task) == (100, 1.0, 2)
 
 
-@requires_unix_sockets
 def test_ask_answer_stopped_on_timeout_still_charges_its_spend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A timed-out answer's spend (from the failure result) is charged."""
     owner_task = _task(finished=True)
     daemon = _AnswerDaemon("$0.2000", wait_for_stop=True)
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     monkeypatch.setattr(commands, "_ASK_TIMEOUT_SECONDS", 0.3)
     server, events = _server()
     try:

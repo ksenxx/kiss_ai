@@ -3,13 +3,13 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Task events reach only the UDS peers that can show them.
+"""Task events reach only the local peers that can show them.
 
 Before this change every task event (every streamed token) was copied
-to every connected UDS client; with dozens of headless ``run`` clients
+to every connected local client; with dozens of headless ``run`` clients
 the daemon's event loop drowned in per-client send coroutines.  The
-tests drive a real :class:`RemoteAccessServer` over real Unix-domain
-sockets: a peer that addressed only another tab is skipped, while a
+tests drive a real :class:`RemoteAccessServer` over real local
+connections: a peer that addressed only another tab is skipped, while a
 webview peer and a peer that never addressed a tab keep receiving every
 copy, and global events still reach everyone.
 """
@@ -27,28 +27,26 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
-@requires_unix_sockets
-class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
-    """E2E fan-out routing over a live daemon socket."""
+class TestTargetedLocalFanout(unittest.IsolatedAsyncioTestCase):
+    """E2E fan-out routing over a live daemon's local endpoint."""
 
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
-        self.tmpdir = tempfile.mkdtemp(prefix="kiss-uds-fanout-")
+        self.tmpdir = tempfile.mkdtemp(prefix="kiss-local-fanout-")
         self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -60,40 +58,40 @@ class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(str(self.uds_path))
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(self.server)
         self.addAsyncCleanup(self._close, writer)
         return reader, writer
 
-    async def _close(self, writer: asyncio.StreamWriter) -> None:
+    async def _close(self, writer: LocalWriter) -> None:
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
             pass
 
-    async def _send(self, writer: asyncio.StreamWriter, msg: dict[str, Any]) -> None:
+    async def _send(self, writer: LocalWriter, msg: dict[str, Any]) -> None:
         writer.write(json.dumps(msg).encode() + b"\n")
         await writer.drain()
 
-    async def _wait_for_uds_writers(self, count: int) -> None:
+    async def _wait_for_local_clients(self, count: int) -> None:
         for _ in range(300):
             with self.server._printer._ws_lock:
-                if len(self.server._printer._uds_writers) >= count:
+                if len(self.server._printer._local_clients) >= count:
                     return
             await asyncio.sleep(0.01)
-        raise AssertionError(f"server never registered {count} UDS writers")
+        raise AssertionError(f"server never registered {count} local clients")
 
     async def _wait_for_interest(self, tab_id: str) -> None:
         printer = self.server._printer
         for _ in range(300):
             with printer._ws_lock:
-                if any(tab_id in tabs for tabs in printer._uds_local_tab_sets.values()):
+                if any(tab_id in tabs for tabs in printer._local_tab_sets.values()):
                     return
             await asyncio.sleep(0.01)
         raise AssertionError(f"server never recorded interest in {tab_id}")
 
-    async def _collect(self, reader: asyncio.StreamReader, seconds: float) -> list[dict[str, Any]]:
+    async def _collect(self, reader: LocalReader, seconds: float) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
@@ -114,7 +112,7 @@ class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
         reader_a, writer_a = await self._connect()
         reader_b, writer_b = await self._connect()
         reader_c, _writer_c = await self._connect()
-        await self._wait_for_uds_writers(3)
+        await self._wait_for_local_clients(3)
         await self._send(writer_a, {"type": "stop", "tabId": "tab-a"})
         await self._send(writer_b, {"type": "stop", "tabId": "tab-b"})
         await self._wait_for_interest("tab-a")
@@ -150,18 +148,18 @@ class TestTargetedUdsFanout(unittest.IsolatedAsyncioTestCase):
     async def test_webview_peer_receives_copies_for_other_tabs(self) -> None:
         """A connection that announced a webview mirrors every tab, whatever it addressed."""
         reader_w, writer_w = await self._connect()
-        await self._wait_for_uds_writers(1)
+        await self._wait_for_local_clients(1)
         await self._send(writer_w, {"type": "stop", "tabId": "tab-w"})
         await self._wait_for_interest("tab-w")
         printer = self.server._printer
         conn_ids: list[str] = []
         for _ in range(300):
             with printer._ws_lock:
-                conn_ids = list(printer._uds_local_tab_sets)
+                conn_ids = list(printer._local_tab_sets)
             if conn_ids:
                 break
             await asyncio.sleep(0.01)
-        printer.mark_uds_webview(conn_ids[0])
+        printer.mark_local_webview(conn_ids[0])
         await self._collect(reader_w, 0.3)
 
         printer.subscribe_tab("task-2", "tab-other")

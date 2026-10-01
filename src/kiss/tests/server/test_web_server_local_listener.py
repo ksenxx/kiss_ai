@@ -2,35 +2,41 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the Unix-domain socket listener on RemoteAccessServer.
+"""Integration tests for the daemon's local channel on RemoteAccessServer.
 
-``RemoteAccessServer`` exposes a localhost UDS at ``~/.kiss/sorcar.sock``
-(mode 0o600) alongside the public WSS port so the VS Code extension
-can be a second client of the same backend ``VSCodeServer`` that
-browsers already talk to.  Local clients speak the SAME
-newline-delimited JSON protocol as WSS clients — no password
-challenge, POSIX filesystem permissions gate access instead.
+``RemoteAccessServer`` serves same-machine clients (the VS Code
+extension, the ``sorcar`` CLI, ``run_agent`` sub-agents) over the same
+WSS listener browsers use.  It publishes an endpoint file (mode 0o600)
+carrying its URL, CA certificate path and a per-start token; a loopback
+client that presents the token in its ``auth`` frame is admitted as a
+local client and speaks the SAME newline-delimited JSON protocol as
+remote WSS clients.  The endpoint file's mode gates access the way the
+former Unix socket's 0o600 mode did.
 
-These tests bind a temporary socket under ``tmp_path`` (not the
-production ``~/.kiss/sorcar.sock``) by passing ``uds_path=`` so
-concurrent test runs do not race on the shared default path.
+These tests write a temporary endpoint file under ``tmp_path`` (not the
+production ``~/.kiss/sorcar-local.json``) by passing
+``local_endpoint_file=`` so concurrent test runs do not race on the
+shared default path.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import stat
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-import kiss.agents.sorcar.persistence as th
-from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from websockets.asyncio.client import connect
 
-pytestmark = requires_unix_sockets
+import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar import local_endpoint
+from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import LocalReader, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -47,8 +53,8 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-class TestUdsListener(IsolatedAsyncioTestCase):
-    """End-to-end tests for the UDS listener."""
+class TestLocalListener(IsolatedAsyncioTestCase):
+    """End-to-end tests for the local channel."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -59,14 +65,14 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
 
@@ -78,18 +84,18 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _read_event(
-        self, reader: asyncio.StreamReader, timeout: float = 1.0,
+        self, reader: LocalReader, timeout: float = 1.0,
     ) -> dict[str, object]:
-        """Read one newline-delimited JSON message from the UDS."""
+        """Read one newline-delimited JSON message from the local channel."""
         line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        assert line, "UDS closed unexpectedly"
+        assert line, "local connection closed unexpectedly"
         msg = json.loads(line.decode("utf-8"))
         assert isinstance(msg, dict)
         return msg
 
     async def _drain_events(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         max_events: int = 50,
         timeout: float = 1.0,
@@ -104,29 +110,52 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             f"{max_events} messages",
         )
 
-    async def test_socket_exists_with_owner_only_permissions(self) -> None:
-        """UDS file is bound with mode 0o600 so only the owner can connect."""
-        self.assertTrue(self.uds_path.exists())
-        mode = self.uds_path.stat().st_mode & 0o777
-        self.assertEqual(mode, 0o600)
-        self.assertTrue(stat.S_ISSOCK(self.uds_path.stat().st_mode))
+    async def test_endpoint_file_describes_this_daemon(self) -> None:
+        """The endpoint file names this daemon's port, token, CA and pid."""
+        self.assertTrue(self.endpoint_file.exists())
+        self.assertTrue(stat.S_ISREG(self.endpoint_file.stat().st_mode))
+        endpoint = local_endpoint.read_endpoint(self.endpoint_file)
+        assert endpoint is not None
+        self.assertEqual(endpoint.token, self.server.local_token)
+        self.assertEqual(endpoint.pid, os.getpid())
+        self.assertEqual(endpoint.url, f"wss://127.0.0.1:{self.server.port}/ws")
+        assert endpoint.ca is not None
+        self.assertTrue(Path(endpoint.ca).is_file())
 
-    async def test_ready_yields_focusinput_to_uds_client(self) -> None:
-        """A ``ready`` command over UDS produces a ``focusInput`` reply."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
+    @posix_only("chmod-based 0600 file mode")
+    async def test_endpoint_file_has_owner_only_permissions(self) -> None:
+        """The endpoint file is 0o600 so only the owner learns the token."""
+        mode = self.endpoint_file.stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    async def test_wrong_token_is_not_admitted_as_local(self) -> None:
+        """A loopback peer with a wrong token is not treated as local."""
+        endpoint = local_endpoint.read_endpoint(self.endpoint_file)
+        assert endpoint is not None
+        async with connect(
+            endpoint.url,
+            ssl=local_endpoint.client_ssl_context(endpoint),
+            open_timeout=10,
+            close_timeout=2.0,
+            compression=None,
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "token": "not-the-token"}))
+            reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual(reply.get("type"), "auth_required")
+
+    async def test_ready_yields_focusinput_to_local_client(self) -> None:
+        """A ``ready`` command over the local channel produces a ``focusInput`` reply."""
+        reader, writer = await open_local_connection(self.server)
         try:
             writer.write(
                 json.dumps(
-                    {"type": "ready", "tabId": "tab-uds-1",
+                    {"type": "ready", "tabId": "tab-local-1",
                      "restoredTabs": []},
                 ).encode("utf-8") + b"\n",
             )
             await writer.drain()
             focus = await self._drain_events(reader, "focusInput", timeout=2.0)
-            self.assertEqual(focus.get("tabId"), "tab-uds-1")
+            self.assertEqual(focus.get("tabId"), "tab-local-1")
         finally:
             writer.close()
             try:
@@ -134,16 +163,13 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             except Exception:
                 pass
 
-    async def test_broadcast_fans_out_to_uds_client(self) -> None:
-        """Backend broadcasts reach UDS clients via the WebPrinter fan-out."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
+    async def test_broadcast_fans_out_to_local_client(self) -> None:
+        """Backend broadcasts reach local clients via the WebPrinter fan-out."""
+        reader, writer = await open_local_connection(self.server)
         try:
             writer.write(
                 json.dumps(
-                    {"type": "ready", "tabId": "tab-uds-3",
+                    {"type": "ready", "tabId": "tab-local-3",
                      "restoredTabs": []},
                 ).encode("utf-8") + b"\n",
             )
@@ -151,11 +177,11 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             await self._drain_events(reader, "focusInput", timeout=2.0)
 
             self.server._printer.broadcast(
-                {"type": "ping", "tabId": "tab-uds-3", "value": 42},
+                {"type": "ping", "tabId": "tab-local-3", "value": 42},
             )
             ping = await self._drain_events(reader, "ping", timeout=2.0)
             self.assertEqual(ping.get("value"), 42)
-            self.assertEqual(ping.get("tabId"), "tab-uds-3")
+            self.assertEqual(ping.get("tabId"), "tab-local-3")
         finally:
             writer.close()
             try:
@@ -164,22 +190,19 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 pass
 
     async def test_submit_with_large_attachment_is_processed(self) -> None:
-        """A ``submit`` whose JSON line exceeds the default 64 KiB
-        ``asyncio.StreamReader`` limit (e.g. a base64-encoded image
-        attachment) must still be parsed and produce a ``setTaskText``
-        broadcast.  Regression test for the bug where any task with an
-        attached image/PDF was silently dropped because the UDS
-        ``readline()`` raised ``LimitOverrunError`` and the handler's
-        outer ``except Exception`` closed the connection.
+        """A ``submit`` whose JSON frame exceeds 64 KiB (e.g. a
+        base64-encoded image attachment) must still be parsed and
+        produce a ``setTaskText`` broadcast.  Regression test for the
+        bug where any task with an attached image/PDF was silently
+        dropped because the local channel's line reader capped a frame
+        at 64 KiB and the handler's outer ``except Exception`` closed
+        the connection.
         """
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
+        reader, writer = await open_local_connection(self.server)
         try:
             writer.write(
                 json.dumps(
-                    {"type": "ready", "tabId": "tab-uds-att",
+                    {"type": "ready", "tabId": "tab-local-att",
                      "restoredTabs": []},
                 ).encode("utf-8") + b"\n",
             )
@@ -189,7 +212,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             big_b64 = "A" * (200 * 1024)
             submit = {
                 "type": "submit",
-                "tabId": "tab-uds-att",
+                "tabId": "tab-local-att",
                 "prompt": "look at this image",
                 "model": "",
                 "workDir": self.tmpdir,
@@ -212,7 +235,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 reader, "setTaskText", timeout=5.0,
             )
             self.assertEqual(echo.get("text"), "look at this image")
-            self.assertEqual(echo.get("tabId"), "tab-uds-att")
+            self.assertEqual(echo.get("tabId"), "tab-local-att")
         finally:
             writer.close()
             try:
@@ -230,10 +253,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         tabs: []}`` so the installer is allowed to restart it on a
         fingerprint change.
         """
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
+        reader, writer = await open_local_connection(self.server)
         try:
             query = json.dumps({"type": "activeTasksQuery"}).encode("utf-8")
             writer.write(query + b"\n")
@@ -254,8 +274,8 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         """When a tab claims to be running a task, the query reports it.
 
         Reproduces the SIGTERM regression by registering an active
-        ``AgentState`` in the registry and verifying the UDS
-        query returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
+        ``AgentState`` in the registry and verifying the local query
+        returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
         descriptor — the same shape the SIGTERM log line prints.  This
         is the signal the extension uses to defer the restart.
         """
@@ -271,10 +291,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         )
         agent_state.register(state)
         try:
-            reader, writer = await asyncio.open_unix_connection(
-                str(self.uds_path),
-                limit=16 * 1024 * 1024,
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
                     json.dumps({"type": "activeTasksQuery"}).encode("utf-8")
@@ -299,22 +316,57 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         finally:
             agent_state.unregister("74", state)
 
-    async def test_stop_async_removes_socket(self) -> None:
-        """``stop_async`` unlinks the socket file on shutdown."""
+    async def test_stop_async_removes_endpoint_file(self) -> None:
+        """``stop_async`` removes the endpoint file it wrote on shutdown."""
         certfile = Path(self.tmpdir) / "cert2.pem"
         keyfile = Path(self.tmpdir) / "key2.pem"
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
-        local_uds = Path(self.tmpdir) / "sorcar-extra.sock"
+        extra_endpoint = Path(self.tmpdir) / "sorcar-local-extra.json"
         srv = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url-2.json",
-            uds_path=local_uds,
+            local_endpoint_file=extra_endpoint,
         )
         await srv.start_async()
-        self.assertTrue(local_uds.exists())
+        self.assertTrue(extra_endpoint.exists())
         await srv.stop_async()
-        self.assertFalse(local_uds.exists())
+        self.assertFalse(extra_endpoint.exists())
+
+    async def test_stop_async_keeps_a_successors_endpoint_file(self) -> None:
+        """A daemon stopping after a successor took over must not delete
+        the successor's endpoint file: the token in the file is the
+        ownership witness."""
+        certfile = Path(self.tmpdir) / "cert3.pem"
+        keyfile = Path(self.tmpdir) / "key3.pem"
+        from kiss.server.web_server import _generate_self_signed_cert
+        _generate_self_signed_cert(certfile, keyfile)
+        shared = Path(self.tmpdir) / "sorcar-local-shared.json"
+        first = RemoteAccessServer(
+            host="127.0.0.1", port=0, certfile=str(certfile),
+            keyfile=str(keyfile),
+            url_file=Path(self.tmpdir) / "remote-url-3.json",
+            local_endpoint_file=shared,
+        )
+        await first.start_async()
+        second = RemoteAccessServer(
+            host="127.0.0.1", port=0, certfile=str(certfile),
+            keyfile=str(keyfile),
+            url_file=Path(self.tmpdir) / "remote-url-4.json",
+            local_endpoint_file=shared,
+        )
+        await second.start_async()
+        try:
+            written = local_endpoint.read_endpoint(shared)
+            assert written is not None
+            self.assertEqual(written.token, second.local_token)
+            await first.stop_async()
+            still = local_endpoint.read_endpoint(shared)
+            assert still is not None
+            self.assertEqual(still.token, second.local_token)
+        finally:
+            await second.stop_async()
+        self.assertFalse(shared.exists())

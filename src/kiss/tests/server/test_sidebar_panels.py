@@ -15,7 +15,7 @@
 * :func:`kiss.server.sidebar_panels.apps_status` runs the probe
   subprocess and caches its answer.
 * ``getCronJobs`` / ``getAppsStatus`` / ``getSpendReport`` are
-  answered over the UDS transport of a real :class:`RemoteAccessServer`.
+  answered over the local connection of a real :class:`RemoteAccessServer`.
 
 Not covered in-process: the probe-failure branch of ``_probe_apps``
 (the subprocess crashing, timing out or printing no JSON) cannot be
@@ -53,7 +53,7 @@ from kiss.tests.agents.sorcar.test_history_date_range import (
     _restore,
     _set_timestamp,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 
 def _brave_config() -> Path:
@@ -367,38 +367,31 @@ class TestAppsStatus(_StoreTestCase):
         self.assertIs({a["name"]: a for a in apps}["brave"]["authenticated"], False)
 
 
-@requires_unix_sockets
-class TestSidebarPanelCommandsOverUds(_StoreTestCase):
-    """``getCronJobs`` / ``getAppsStatus`` get direct replies over UDS.
+class TestSidebarPanelCommandsOverLocal(_StoreTestCase):
+    """``getCronJobs`` / ``getAppsStatus`` get direct replies over a local connection.
 
     The VS Code extension's webviews reach the daemon through the host's
-    UDS connection (FORWARDED_COMMANDS in SorcarSidebarView.ts).
+    local connection (FORWARDED_COMMANDS in SorcarSidebarView.ts).
     """
 
     def setUp(self) -> None:
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
         )
-        self.server._printer._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(self.server._uds_handler, path=self.sock_path),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
     def tearDown(self) -> None:
-        async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
-
         concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)], timeout=5,
+            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
+            timeout=30,
         )
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
@@ -410,7 +403,7 @@ class TestSidebarPanelCommandsOverUds(_StoreTestCase):
         """Send *commands* on one connection; return one reply per command."""
 
         async def _talk() -> list[dict[str, Any]]:
-            reader, writer = await asyncio.open_unix_connection(self.sock_path)
+            reader, writer = await open_local_connection(self.server)
             try:
                 for command in commands:
                     writer.write(json.dumps(command).encode() + b"\n")

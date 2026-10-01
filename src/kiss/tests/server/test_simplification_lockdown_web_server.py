@@ -55,7 +55,7 @@ from kiss.server.web_server import (
     _translate_webview_command,
     _version_tuple,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
@@ -103,7 +103,6 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
         self.port = _find_free_port()
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
@@ -111,7 +110,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -205,25 +204,24 @@ class TestHttpEndpointMatrix(_ServerTestBase):
 class TestVscodeOnlyCommandsDropped(_ServerTestBase):
     """VS Code-only webview commands must be silently dropped."""
 
-    @requires_unix_sockets
     async def test_vscode_only_commands_dropped_unknown_command_errors(
         self,
     ) -> None:
-        """``notificationAction``/``sizeReport``/UDS ``openFile``
+        """``notificationAction``/``sizeReport``/local ``openFile``
         produce no ``error`` event; an unknown command produces exactly
         the ``Unknown command`` error broadcast.
 
         Commands on one connection are dispatched strictly in order, so
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
-        ``openFile`` is served on the UDS transport too (the daemon
-        resolves file links for every surface and answers a VS Code
-        window with ``openResolvedFile``, carrying its own ``error``
-        field for a missing file); it must never surface as an
-        ``error`` event.
+        ``openFile`` is served to local (VS Code) clients too (the
+        daemon resolves file links for every surface and answers a
+        VS Code window with ``openResolvedFile``, carrying its own
+        ``error`` field for a missing file); it must never surface as
+        an ``error`` event.
         """
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         try:
             for cmd in (
@@ -237,7 +235,7 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
             seen: list[dict[str, object]] = []
             for _ in range(20):
                 line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-                self.assertTrue(line, "UDS closed before the error sentinel")
+                self.assertTrue(line, "local channel closed before the error sentinel")
                 msg = json.loads(line.decode("utf-8"))
                 seen.append(msg)
                 if msg.get("type") == "error":

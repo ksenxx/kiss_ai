@@ -158,7 +158,7 @@ stubModule(path.join(OUT_DIR, 'gitApi.js'), {
   getGitApi: () => Promise.resolve(undefined),
 });
 stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
-  isReloadReady: () => ({codeReady: false, socketUp: false, size: 0}),
+  isReloadReady: () => ({codeReady: false, daemonUp: false, size: 0}),
 });
 
 const extensionPath = path.join(OUT_DIR, 'extension.js');

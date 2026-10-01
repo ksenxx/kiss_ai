@@ -16,7 +16,7 @@ run:
 * the ``<task>`` splitter (``parse_task_tags``), which would hand the SEA
   one fragment of ``ask /repo what does <task>hello</task> mean?``.
 
-The daemon pipeline runs for real on a temporary Unix-domain socket
+The daemon pipeline runs for real on a temporary local WSS endpoint
 (:class:`DaemonRunApiHarness`); only the executor LLM loop is a stub
 recording the prompt it was handed.
 """
@@ -29,10 +29,7 @@ from typing import Any
 from kiss.agents.sorcar.bare_path_task import with_open_directive
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
-
-pytestmark = requires_unix_sockets
 
 DIRECTIVE = "The task is nothing but the path of an existing"
 """Start of the sentence ``with_open_directive`` appends to a bare-path task."""
@@ -75,7 +72,7 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
         self._record_prompts(prompts)
         result = sorcar.run(
             prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
-            sock_path=self.sock_path, timeout=60, **kwargs,
+            endpoint_file=self.endpoint_file, timeout=60, **kwargs,
         )
         assert result.success is True, result
         assert len(prompts) == 1, prompts
@@ -135,7 +132,7 @@ class BarePathAgentScriptRunTest(DaemonRunApiHarness):
         result = sorcar.run(
             "<task>first thing</task><task>second thing</task>",
             work_dir=self.repo, use_worktree=False, auto_commit=False,
-            sock_path=self.sock_path, timeout=60,
+            endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result
         assert len(prompts) == 2, prompts

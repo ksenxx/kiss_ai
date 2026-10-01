@@ -2,21 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: the daemon serves WSS whether or not the platform has AF_UNIX.
+"""E2E: the daemon's local channel is the same WSS listener on every platform.
 
-CPython on Windows has no ``socket.AF_UNIX`` and no
-``asyncio.start_unix_server``.  Before the fix, ``_setup_server``
-tripped over the missing attribute inside its UDS ``try`` block and
-logged a WARNING with a traceback on every daemon start, even though
-nothing was wrong with the platform.  The daemon must instead skip
-UDS setup cleanly: one INFO line, ``_uds_server is None``, and the
-WSS listener still serving.
-
-The same test file runs on both platforms without faking anything:
-on a POSIX host it asserts the normal path (UDS bound, socket file
-present, a UDS client gets served, no fallback log); on Windows it
-asserts the fallback path.  Either way a real WSS client must complete
-the auth handshake against the running server.
+The daemon used to bind a second, Unix-domain-socket listener for
+same-machine clients and had to skip it cleanly on Windows (CPython
+there has no ``socket.AF_UNIX``).  That platform fork is gone: local
+clients now connect to the one WSS listener and prove they are local
+with the per-start token from the endpoint file.  This test runs the
+real server and asserts the platform-independent contract: start logs
+nothing at WARNING or above, a remote WSS client and a token-bearing
+local client are both served, the endpoint file exists while the daemon
+runs and is gone once it stops.
 """
 
 from __future__ import annotations
@@ -41,12 +37,8 @@ from kiss.server.web_server import (
     _SHUTDOWN_SIGNALS,
     RemoteAccessServer,
     _generate_self_signed_cert,
-    _unix_sockets_supported,
 )
-
-_HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
-_FALLBACK_TEXT = "Unix-domain sockets are unavailable"
-_BIND_FAILURE_TEXT = "Failed to bind UDS"
+from kiss.tests.local_ws import open_local_connection
 
 
 def _free_port() -> int:
@@ -62,26 +54,26 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 
-class TestUdsSetupFollowsPlatform(IsolatedAsyncioTestCase):
-    """UDS is bound where AF_UNIX exists and skipped cleanly where it does not."""
+class TestLocalChannelOnEveryPlatform(IsolatedAsyncioTestCase):
+    """One WSS listener serves remote and local clients; no platform fallback."""
 
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-uds-platform-"))
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-local-platform-"))
         self._saved_cfg = (vc.CONFIG_DIR, vc.CONFIG_PATH)
         vc.CONFIG_DIR = self.tmpdir / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
         self.port = _free_port()
-        self.uds_path = self.tmpdir / "sorcar.sock"
+        self.endpoint_file = self.tmpdir / "sorcar-local.json"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
             work_dir=str(self.tmpdir),
         )
         self.stopped = False
@@ -125,58 +117,40 @@ class TestUdsSetupFollowsPlatform(IsolatedAsyncioTestCase):
                 if msg.get("type") == "auth_ok":
                     return
 
-    async def test_wss_serves_and_uds_matches_platform(self) -> None:
+    async def test_wss_serves_remote_and_local_clients(self) -> None:
         records = await self._start_capturing_logs()
-        fallback = [r for r in records if _FALLBACK_TEXT in r.getMessage()]
-        bind_failures = [
-            r for r in records if _BIND_FAILURE_TEXT in r.getMessage()
-        ]
-        self.assertEqual(bind_failures, [], "UDS bind must never log a failure")
+        self.assertEqual(
+            [r.getMessage() for r in records if r.levelno >= logging.WARNING],
+            [],
+            "a clean start must not log warnings about the local channel",
+        )
         self.assertIsNotNone(self.server._ws_server)
         await self._wss_auth_round_trip()
 
-        self.assertEqual(_unix_sockets_supported(), _HAS_AF_UNIX)
-        if _HAS_AF_UNIX:
-            # Normal path: UDS bound, no fallback message, a UDS
-            # client is served over the same protocol.
-            self.assertEqual(fallback, [])
-            self.assertIsNotNone(self.server._uds_server)
-            self.assertTrue(self.uds_path.exists())
-            self.assertIsNotNone(self.server._uds_inode)
-            reader, writer = await asyncio.open_unix_connection(
-                str(self.uds_path),
+        # Local channel: the endpoint file names this listener and a
+        # client presenting its token is served over the same protocol.
+        self.assertTrue(self.endpoint_file.exists())
+        endpoint = json.loads(self.endpoint_file.read_text())
+        self.assertEqual(endpoint["url"], f"wss://127.0.0.1:{self.port}/ws")
+        self.assertEqual(endpoint["token"], self.server.local_token)
+        reader, writer = await open_local_connection(self.server)
+        try:
+            writer.write(
+                json.dumps({"type": "getDefaultModel"}).encode() + b"\n",
             )
-            try:
-                writer.write(
-                    json.dumps({"type": "getDefaultModel"}).encode() + b"\n",
-                )
-                await writer.drain()
-                line = await asyncio.wait_for(reader.readline(), 30)
-                self.assertTrue(line, "UDS client got no reply")
-            finally:
-                writer.close()
-                await writer.wait_closed()
-            self.assertTrue(await self.server._uds_socket_is_live())
-        else:
-            # Fallback path (Windows): exactly one INFO line, no
-            # listener, no socket file, and the probes are inert.
-            self.assertEqual(len(fallback), 1, [r.getMessage() for r in records])
-            self.assertEqual(fallback[0].levelno, logging.INFO)
-            self.assertIsNone(fallback[0].exc_info)
-            self.assertEqual(
-                [r for r in records if r.levelno >= logging.WARNING], [],
-                "no warning may be logged for the missing UDS channel",
-            )
-            self.assertIsNone(self.server._uds_server)
-            self.assertIsNone(self.server._uds_inode)
-            self.assertFalse(self.uds_path.exists())
-            self.assertFalse(await self.server._uds_socket_is_live())
-            self.server._unlink_own_uds_socket()  # must be a silent no-op
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), 30)
+            self.assertTrue(line, "local client got no reply")
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
         await self.server.stop_async()
         self.stopped = True
-        self.assertIsNone(self.server._uds_server)
-        self.assertFalse(self.uds_path.exists())
+        self.assertFalse(
+            self.endpoint_file.exists(),
+            "stop_async must remove the endpoint file it wrote",
+        )
 
 
 class TestShutdownSignalsFollowPlatform(TestCase):
@@ -194,7 +168,8 @@ class TestShutdownSignalsFollowPlatform(TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         srv = RemoteAccessServer(
             host="127.0.0.1", port=0,
-            url_file=tmp / "unused-url.json", uds_path=tmp / "unused.sock",
+            url_file=tmp / "unused-url.json",
+            local_endpoint_file=tmp / "unused-local.json",
         )
         saved = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
         try:

@@ -35,6 +35,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_DIR = path.join(__dirname, '..', 'out');
 const OUT_AGENT_CLIENT = path.join(OUT_DIR, 'AgentClient.js');
@@ -45,7 +46,7 @@ if (!fs.existsSync(OUT_AGENT_CLIENT) || !fs.existsSync(OUT_SIDEBAR)) {
   process.exit(0);
 }
 if (process.platform === 'win32') {
-  console.log('SKIP: UDS tests require a POSIX platform');
+  console.log('SKIP: local-endpoint test require a POSIX platform');
   process.exit(0);
 }
 
@@ -123,8 +124,8 @@ process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 
 // The sidebar must find no daemon at all: that is the whole scenario.
-const deadSock = path.join(tmpHome, '.kiss', 'nothing-here.sock');
-process.env.KISS_SORCAR_SOCK = deadSock;
+const deadSock = path.join(tmpHome, '.kiss', 'nothing-here.json');
+process.env.KISS_SORCAR_LOCAL = deadSock;
 
 const {AgentClient} = require(OUT_AGENT_CLIENT);
 const {SorcarSidebarView} = require(OUT_SIDEBAR);
@@ -141,9 +142,9 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function listen(server, sockPath) {
+function listen(server, endpointPath) {
   return new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 }
 
@@ -156,8 +157,8 @@ function close(server) {
 // ---------------------------------------------------------------------
 
 async function testExpiredCommandIsAnnounced() {
-  const sockPath = tmpSock('expired.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('expired.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 250,
@@ -170,10 +171,10 @@ async function testExpiredCommandIsAnnounced() {
   await delay(600);
 
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.on('connect', resolve);
     client.connect();
@@ -203,8 +204,8 @@ async function testExpiredCommandIsAnnounced() {
 }
 
 async function testOverflowingCommandsAreAnnounced() {
-  const sockPath = tmpSock('overflow.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('overflow.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -231,14 +232,14 @@ async function testOverflowingCommandsAreAnnounced() {
 }
 
 async function testDeliveredCommandsAreNotAnnounced() {
-  const sockPath = tmpSock('delivered.sock');
+  const endpointPath = tmpSock('delivered.json');
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
 
-  const client = new AgentClient(sockPath, {
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,

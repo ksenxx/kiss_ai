@@ -40,7 +40,7 @@ class TestHttpWireProtocol(unittest.IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 

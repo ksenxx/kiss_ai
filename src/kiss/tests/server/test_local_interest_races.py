@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E tests: local-UDS talk bookkeeping vs. tab-registry races.
+"""E2E tests: local-client talk bookkeeping vs. tab-registry races.
 
-The printer's local-UDS bookkeeping used to MIRROR "which tabs a local
-webview shows": every registry removal pruned the tab from every UDS
+The printer's local-client bookkeeping used to MIRROR "which tabs a local
+webview shows": every registry removal pruned the tab from every local
 connection, every ``ready`` re-copied a registry snapshot into the
 connection's set, and the talk fan-out trusted that copy.  Registry
 and printer keep separate locks, so the mirror could interleave with
@@ -23,10 +23,10 @@ races):
    bookkeeping while registry and every client showed it.
 
 The rule now (``VSCodeServer._local_tab_shown``, consulted by
-``WebPrinter.shown_local_uds_tabs`` at talk time), evaluated in order:
+``WebPrinter.shown_local_tabs`` at talk time), evaluated in order:
 (1) a tab listed in the canonical registry is shown by every attached
-chat webview, so it counts when some UDS connection has announced
-``ready``; otherwise (2) a target some UDS peer addressed counts while
+chat webview, so it counts when some local connection has announced
+``ready``; otherwise (2) a target some local peer addressed counts while
 its own agent state is alive and not ``frontend_closed`` (a
 ``run_agent`` dispatch's ``api-…`` tab, a running sub-agent's tab, a
 headless client's own registry tab with no webview attached);
@@ -42,8 +42,8 @@ facts and the canonical facts are read one after the other, so an
 event landing between the two reads can misjudge the utterance being
 fanned out, and the next decision is correct again.
 
-The race tests drive a REAL ``RemoteAccessServer`` over its UDS
-listener with a real audio-player child process
+The race tests drive a REAL ``RemoteAccessServer`` over its local
+WSS channel with a real audio-player child process
 (``KISS_SORCAR_PLAY_CMD``); the racing interleavings are forced
 through seams on the server object itself (a wrapped method that
 parks or runs the racing close), never through mocks of the code
@@ -75,7 +75,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server import agent_state, talk_player
 from kiss.server.agent_state import AgentState
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 from kiss.tests.server.test_talk_endpoint_muting import (
     _find_free_port,
     _redirect_persistence,
@@ -93,7 +93,7 @@ def _encode(cmd: dict[str, Any]) -> bytes:
 class _CloseDuringSync:
     """Seam for race 2: run the racing close INSIDE the ``ready`` sync.
 
-    Wraps ``WebPrinter.sync_local_uds_tabs``, the bookkeeping step of
+    Wraps ``WebPrinter.sync_local_tabs``, the bookkeeping step of
     ``ServerApi.ready``: closing the tab here reproduces "ready is
     mid-flight, the close completes, ready finishes" deterministically
     and on the event-loop thread (no parked loop, no second thread).
@@ -136,8 +136,7 @@ class _ParkingCall:
         return self._real(*args, **kwargs)
 
 
-@requires_unix_sockets
-class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
+class TestLocalInterestRaces(IsolatedAsyncioTestCase):
     """The three documented races plus the retained sub-agent behaviour."""
 
     async def asyncSetUp(self) -> None:
@@ -156,21 +155,20 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=_find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self.backend = self.server._vscode_server
         self.registry = self.backend.tab_registry
         self.printer = self.server._printer
         self.task_id = uuid.uuid4().hex
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -193,24 +191,22 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
 
     # ----------------------------------------------------------- helpers
 
-    async def _open_uds(
+    async def _open_local(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS client and pin its work dir (no ``ready`` yet)."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024
-        )
+    ) -> tuple[LocalReader, LocalWriter]:
+        """Open one local client and pin its work dir (no ``ready`` yet)."""
+        reader, writer = await open_local_connection(self.server)
         self._writers.append(writer)
         writer.write(_encode({"type": "setWorkDir", "workDir": self.tmpdir}))
         await writer.drain()
         return reader, writer
 
-    async def _send(self, writer: asyncio.StreamWriter, cmd: dict[str, Any]) -> None:
+    async def _send(self, writer: LocalWriter, cmd: dict[str, Any]) -> None:
         writer.write(_encode(cmd))
         await writer.drain()
 
     async def _ready(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
         tab_id: str,
     ) -> None:
         """Announce ``ready`` and wait for the snapshot it triggers."""
@@ -221,17 +217,17 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
 
     async def _wait_tabs_state(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         accept: Any,
         timeout: float = 10.0,
     ) -> list[str]:
-        """Read UDS events until a ``tabs_state`` satisfying *accept*."""
+        """Read local-channel events until a ``tabs_state`` satisfying *accept*."""
         deadline = asyncio.get_event_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             self.assertGreater(remaining, 0, "expected tabs_state never arrived")
             line = await asyncio.wait_for(reader.readline(), timeout=remaining)
-            self.assertTrue(line, "UDS connection closed unexpectedly")
+            self.assertTrue(line, "local connection closed unexpectedly")
             msg = json.loads(line.decode("utf-8"))
             if isinstance(msg, dict) and msg.get("type") == "tabs_state":
                 ids = [t.get("tabId") for t in msg.get("tabs", [])]
@@ -239,30 +235,30 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
                     return ids
 
     async def _collect_talk(
-        self, reader: asyncio.StreamReader, timeout: float = 5.0,
+        self, reader: LocalReader, timeout: float = 5.0,
     ) -> dict[str, Any]:
-        """Read UDS events until one ``talk`` copy arrives."""
+        """Read local-channel events until one ``talk`` copy arrives."""
         deadline = asyncio.get_event_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             self.assertGreater(remaining, 0, "talk copy never arrived")
             line = await asyncio.wait_for(reader.readline(), timeout=remaining)
-            self.assertTrue(line, "UDS connection closed unexpectedly")
+            self.assertTrue(line, "local connection closed unexpectedly")
             msg = json.loads(line.decode("utf-8"))
             if isinstance(msg, dict) and msg.get("type") == "talk":
                 return msg
 
     async def _collect_talks(
-        self, reader: asyncio.StreamReader, count: int, timeout: float = 5.0,
+        self, reader: LocalReader, count: int, timeout: float = 5.0,
     ) -> dict[str, dict[str, Any]]:
-        """Read UDS events until *count* ``talk`` copies arrive; by tab."""
+        """Read local-channel events until *count* ``talk`` copies arrive; by tab."""
         talks: dict[str, dict[str, Any]] = {}
         deadline = asyncio.get_event_loop().time() + timeout
         while len(talks) < count:
             remaining = deadline - asyncio.get_event_loop().time()
             self.assertGreater(remaining, 0, "talk copies never arrived")
             line = await asyncio.wait_for(reader.readline(), timeout=remaining)
-            self.assertTrue(line, "UDS connection closed unexpectedly")
+            self.assertTrue(line, "local connection closed unexpectedly")
             msg = json.loads(line.decode("utf-8"))
             if isinstance(msg, dict) and msg.get("type") == "talk":
                 talks[msg["tabId"]] = msg
@@ -287,16 +283,16 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         return self._markers()
 
     async def _assert_talk_native(
-        self, reader: asyncio.StreamReader, tab_id: str, talk_id: str,
+        self, reader: LocalReader, tab_id: str, talk_id: str,
     ) -> None:
-        """The daemon plays the clip and the UDS copy is muted."""
+        """The daemon plays the clip and the local copy is muted."""
         self.printer.subscribe_tab(self.task_id, tab_id)
         self.printer.broadcast(_talk_event(self.task_id, talk_id))
         talk = await self._collect_talk(reader)
         self.assertEqual(talk["tabId"], tab_id)
         self.assertTrue(
             talk.get("muted"),
-            "a local webview shows the tab, so its UDS copy must be muted "
+            "a local webview shows the tab, so its local copy must be muted "
             "in favour of daemon-native playback",
         )
         self.assertEqual(
@@ -306,9 +302,9 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         )
 
     async def _assert_talk_not_native(
-        self, reader: asyncio.StreamReader, tab_id: str, talk_id: str,
+        self, reader: LocalReader, tab_id: str, talk_id: str,
     ) -> None:
-        """The UDS copy stays playable and the daemon stays silent."""
+        """The local copy stays playable and the daemon stays silent."""
         self.printer.subscribe_tab(self.task_id, tab_id)
         self.printer.broadcast(_talk_event(self.task_id, talk_id))
         talk = await self._collect_talk(reader)
@@ -341,9 +337,9 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         # The tab's task is still running: the close defers teardown
         # and the task keeps its subscription to the closed tab.
         self._register_live_state(tab, task_id=self.task_id, running=True)
-        reader_a, writer_a = await self._open_uds()
+        reader_a, writer_a = await self._open_local()
         await self._ready(reader_a, writer_a, "placeholder-a")
-        reader_b, writer_b = await self._open_uds()
+        reader_b, writer_b = await self._open_local()
         await self._ready(reader_b, writer_b, "placeholder-b")
 
         await self._send(writer_b, {"type": "closeTab", "tabId": tab})
@@ -372,15 +368,15 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         """
         tab = "snap-" + uuid.uuid4().hex[:8]
         self.registry.update_tab(tab, title="snapshot chat", create=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         seam = _CloseDuringSync(
-            self.printer.sync_local_uds_tabs, self.backend._close_tab, tab,
+            self.printer.sync_local_tabs, self.backend._close_tab, tab,
         )
-        self.printer.sync_local_uds_tabs = seam  # type: ignore[method-assign]
+        self.printer.sync_local_tabs = seam  # type: ignore[method-assign]
         try:
             await self._ready(reader, writer, "placeholder")
         finally:
-            del self.printer.sync_local_uds_tabs
+            del self.printer.sync_local_tabs
         self.assertTrue(seam.fired, "ready never reached the sync")
         self.assertFalse(self.registry.has_tab(tab))
 
@@ -399,11 +395,11 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         tab = "reopen-" + uuid.uuid4().hex[:8]
         chat = "chat-" + uuid.uuid4().hex[:8]
         self.registry.update_tab(tab, chat_id=chat, create=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._ready(reader, writer, "placeholder")
 
-        seam = _ParkingCall(self.backend._prune_local_uds_tab)
-        self.backend._prune_local_uds_tab = seam  # type: ignore[method-assign]
+        seam = _ParkingCall(self.backend._prune_local_tab)
+        self.backend._prune_local_tab = seam  # type: ignore[method-assign]
         closer = threading.Thread(
             target=self.backend._close_tab, args=(tab,), daemon=True,
         )
@@ -417,7 +413,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         finally:
             seam.release.set()
             closer.join(timeout=10)
-            del self.backend._prune_local_uds_tab
+            del self.backend._prune_local_tab
         self.assertFalse(closer.is_alive(), "close never finished")
         self.assertTrue(self.registry.has_tab(tab))
 
@@ -437,7 +433,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         tab = "mid-" + uuid.uuid4().hex[:8]
         chat = "chat-" + uuid.uuid4().hex[:8]
         self.registry.update_tab(tab, chat_id=chat, create=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._ready(reader, writer, "placeholder")
 
         seam = _ParkingCall(self.backend._registry_update_tab)
@@ -483,7 +479,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         return state
 
     async def _wait_subagent_close(
-        self, reader: asyncio.StreamReader, tab_id: str,
+        self, reader: LocalReader, tab_id: str,
     ) -> None:
         deadline = asyncio.get_event_loop().time() + 10
         while True:
@@ -498,7 +494,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """Control: a sub-agent tab running its own task never enters
-        the registry: it counts while a UDS peer addressed it and its
+        the registry: it counts while a local peer addressed it and its
         agent state is not closed.  Closing it mid-run raises
         ``frontend_closed`` (the busy state and its subscription are
         retained until the task ends), so the talk stops playing
@@ -507,7 +503,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         """
         sub_tab = "parent-" + uuid.uuid4().hex[:8] + "__sub_task1"
         self._register_live_state(sub_tab, running=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._ready(reader, writer, "placeholder")
         await self._send(writer, {"type": "getTabsState", "tabId": sub_tab})
         await self._wait_tabs_state(reader, lambda ids: True)
@@ -523,7 +519,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
 
     async def test_headless_peer_live_tab_counts_until_its_close(self) -> None:
         """Control: a ``run_agent`` dispatch — the daemon client is a
-        UDS peer that never announces ``ready`` and runs its sub-agent
+        local peer that never announces ``ready`` and runs its sub-agent
         in an ``api-…`` tab outside the registry.  The state and the
         peer's interest are reproduced directly (the state carries no
         parent metadata, so its close takes the plain, not the
@@ -533,7 +529,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         """
         api_tab = "api-" + uuid.uuid4().hex
         self._register_live_state(api_tab, server_owned=True, running=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._send(writer, {"type": "getTabsState", "tabId": api_tab})
         await self._wait_tabs_state(reader, lambda ids: True)
 
@@ -551,13 +547,13 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         await self._assert_talk_not_native(reader, api_tab, "api-closed-talk")
 
     async def test_registry_tab_needs_an_attached_webview(self) -> None:
-        """A registry tab addressed only by a headless UDS peer is shown
+        """A registry tab addressed only by a headless local peer is shown
         nowhere locally; it counts as soon as a chat webview attaches
         (``ready``), even though that webview never addressed it.
         """
         tab = "bg-" + uuid.uuid4().hex[:8]
         self.registry.update_tab(tab, title="background chat", create=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._send(writer, {"type": "getTabsState", "tabId": tab})
         await self._wait_tabs_state(reader, lambda ids: True)
 
@@ -574,7 +570,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         its talk must still play natively here.  (The old per-tab copy
         only knew tabs present at ``ready`` time or named later.)
         """
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._ready(reader, writer, "placeholder")
         tab = "late-" + uuid.uuid4().hex[:8]
         self.registry.update_tab(tab, title="late chat", create=True)
@@ -591,7 +587,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         test reproduces those inputs directly (state + the two
         subscriptions + the resume's dispatch record) rather than
         driving the persisted-history resume.  The viewer has no agent
-        state of its own: it counts while it is subscribed and a UDS
+        state of its own: it counts while it is subscribed and a local
         peer addressed it, and its real ``closeTab`` (which
         unsubscribes it) ends native playback.
         """
@@ -600,7 +596,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         viewer = f"parent-{uuid.uuid4().hex[:8]}__sub_{child_task}"
         self._register_live_state(synthetic, task_id=child_task, running=True)
         self.printer.subscribe_tab(child_task, synthetic)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._ready(reader, writer, "placeholder")
         # What ``_attach_viewer_to_running_chat`` does for the resume,
         # plus the resume's own dispatch record of the viewer id.
@@ -648,7 +644,7 @@ class TestLocalUdsInterestRaces(IsolatedAsyncioTestCase):
         api_tab = "api-" + uuid.uuid4().hex
         self.registry.update_tab(api_tab, chat_id="chat-x", create=True)
         self._register_live_state(api_tab, server_owned=True, running=True)
-        reader, writer = await self._open_uds()
+        reader, writer = await self._open_local()
         await self._send(writer, {"type": "getTabsState", "tabId": api_tab})
         await self._wait_tabs_state(reader, lambda ids: True)
 

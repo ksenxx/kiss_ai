@@ -29,9 +29,9 @@ restarts and a reader never sees a torn document.  The file has
 exactly ONE owner: a registry loads it once and publishes its complete
 in-memory list on every save, so a second live registry on the same
 file would overwrite the first one's tabs with a stale snapshot.
-Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (UDS
-socket liveness check), and a server embedded in another process that
-shares the KISS home — the channel launcher's private-UDS daemon —
+Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (the
+WSS port bind), and a server embedded in another process that
+shares the KISS home — the channel launcher's private-endpoint daemon —
 owns a private registry file instead
 (``VSCodeServer.use_private_tab_registry``).  A thread lock therefore
 suffices for the registry's in-memory readers and writers; the unique

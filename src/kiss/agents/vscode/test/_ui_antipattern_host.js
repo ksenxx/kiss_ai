@@ -203,7 +203,7 @@ function loadExtension(opts) {
     getGitApi: () => Promise.resolve(undefined),
   });
   stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
-    isReloadReady: () => ({codeReady: false, socketUp: false, size: 0}),
+    isReloadReady: () => ({codeReady: false, daemonUp: false, size: 0}),
   });
   stubModule(path.join(OUT_DIR, 'kissPaths.js'), {
     findKissProject: () => '/fake/kiss_project',

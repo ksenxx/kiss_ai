@@ -11,7 +11,7 @@
 // both probe the daemon as "dead" -- it has not finished binding yet.
 // With no lock anywhere in DependencyInstaller, the second window ran
 // killProcessOnPort(8787) and SIGTERMed the daemon the first had just
-// started, WHILE it was booting: it had not yet accepted a UDS
+// started, WHILE it was booting: it had not yet accepted a local-endpoint
 // connection, so daemonHasActiveTasks() could not report the in-flight
 // work that decideRestart() exists to protect.
 //
@@ -174,7 +174,7 @@ async function testRestartHonoursTheLock() {
   const elapsed = Date.now() - startedAt;
   held();
 
-  // The guarded path opens with a 1.5s health probe and a 1.5s UDS
+  // The guarded path opens with a 1.5s health probe and a 1.5s endpoint
   // probe; returning promptly is the observable proof it was skipped.
   assert.ok(
     elapsed < 1000,

@@ -15,9 +15,9 @@ The invariant (``~/.kiss/SORCAR.md``)::
 
 "Surfaces" are the real chat webviews (``media/main.js``): the VS Code
 sidebar view, a VS Code editor-tab panel and browser tabs of the
-remote web app.  This test runs the REAL daemon on a Unix socket and
-REAL webviews under jsdom (``test/multiSurfaceBridge.js``), one daemon
-connection per webview, exactly like production; only the LLM loop is
+remote web app.  This test runs the REAL daemon on its local WSS
+endpoint and REAL webviews under jsdom (``test/multiSurfaceBridge.js``),
+one daemon connection per webview, exactly like production; only the LLM loop is
 scripted (the parent fans out through ``_run_tasks_parallel``, one
 child nests a grandchild, and the leaves block until released).
 
@@ -72,14 +72,12 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.tests.conftest import requires_unix_sockets
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
-
-pytestmark = requires_unix_sockets
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 _VSCODE_DIR = Path(__file__).resolve().parents[2] / "agents" / "vscode"
 _BRIDGE = _VSCODE_DIR / "test" / "multiSurfaceBridge.js"
 _JSDOM_PKG = _VSCODE_DIR / "node_modules" / "jsdom" / "package.json"
+_WS_CLIENT = _VSCODE_DIR / "out" / "wsClient.js"
 
 PARENT_PROMPT = "fan out: spawn two children xq9"
 CHILD_MARK = "CHILDTASK"
@@ -89,11 +87,11 @@ WAVE2_MARK = "SECONDWAVE"
 
 
 class SurfaceBridge:
-    """Drive ``multiSurfaceBridge.js``: real webviews over the daemon UDS."""
+    """Drive ``multiSurfaceBridge.js``: real webviews on the daemon's local endpoint."""
 
-    def __init__(self, sock_path: str) -> None:
+    def __init__(self, endpoint_file: str) -> None:
         self.proc = subprocess.Popen(
-            ["node", str(_BRIDGE), sock_path],
+            ["node", str(_BRIDGE), endpoint_file],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -181,7 +179,7 @@ def _fan_out(agent: Any, tasks: list[str]) -> None:
     )
 
 
-class SubagentTabsAllSurfacesTest(DaemonUdsHarness):
+class SubagentTabsAllSurfacesTest(DaemonLocalHarness):
     """Open-everywhere while running, closed-everywhere when done."""
 
     def setUp(self) -> None:
@@ -189,8 +187,10 @@ class SubagentTabsAllSurfacesTest(DaemonUdsHarness):
             self.skipTest("node is not available on PATH")
         if not _JSDOM_PKG.is_file():
             self.skipTest("jsdom is not installed under agents/vscode")
+        if not _WS_CLIENT.is_file():
+            self.skipTest("out/wsClient.js missing: run `npm run compile` in agents/vscode")
         super().setUp()
-        self.bridge = SurfaceBridge(self.sock_path)
+        self.bridge = SurfaceBridge(str(self.endpoint_file))
 
     def tearDown(self) -> None:
         self.bridge.quit()

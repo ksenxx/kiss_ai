@@ -11,7 +11,7 @@ An editable content tab sends ``saveFile`` (the Monaco editor's full
 text) and :meth:`RemoteAccessServer._handle_save_file` writes it back
 to the file the tab was opened from, replying ``fileSaved``.  These
 tests drive a REAL :class:`RemoteAccessServer` over real ``wss://``
-(and the real UDS for the drop gate) — no mocks.
+(and the real local channel for the drop gate) — no mocks.
 """
 
 from __future__ import annotations
@@ -21,14 +21,14 @@ import json
 import os
 import stat
 from collections.abc import Coroutine
-from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import connect
 
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import _file_version
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.test_content_tab_file_links import (
     _PY_SOURCE,
     _no_verify_ssl,
@@ -432,19 +432,16 @@ class TestSaveFile:
         assert target.read_text() == "g\n"
 
 
-@requires_unix_sockets
-class TestUdsDropGate:
-    """A VS Code window (UDS) edits files in real editors: its
-    ``saveFile`` is dropped and never touches the disk."""
+class TestLocalDropGate:
+    """A VS Code window (local connection) edits files in real editors:
+    its ``saveFile`` is dropped and never touches the disk."""
 
-    def test_uds_delivered_save_is_dropped(self, harness) -> None:
-        target = harness.work_dir / "uds_guard.txt"
+    def test_local_delivered_save_is_dropped(self, harness) -> None:
+        target = harness.work_dir / "local_guard.txt"
         target.write_text("untouched\n")
 
         async def _probe() -> list[dict]:
-            reader, writer = await asyncio.open_unix_connection(
-                str(Path(harness.tmpdir) / "sorcar.sock"),
-            )
+            reader, writer = await open_local_connection(harness.server)
             try:
                 for cmd in (
                     {
@@ -454,7 +451,7 @@ class TestUdsDropGate:
                         "tabId": "u-1",
                     },
                     # Positive control, sent LAST: getInputHistory IS
-                    # answered over UDS.  Its reply arriving proves the
+                    # answered over the local channel.  Its reply arriving proves the
                     # saveFile before it was processed — and dropped.
                     {"type": "getInputHistory", "tabId": "u-1"},
                 ):

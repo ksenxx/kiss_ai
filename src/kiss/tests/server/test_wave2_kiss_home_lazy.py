@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import kiss.agents.sorcar.local_endpoint as local_endpoint
 import kiss.agents.sorcar.persistence as persistence
 import kiss.core.vscode_config as vscode_config
 import kiss.server.user_assets as user_assets
@@ -91,7 +92,10 @@ def test_web_server_paths_resolve_lazily(fresh_home: Path) -> None:
     assert web_server._tls_dir() == fresh_home / "tls"
     assert web_server._url_file_path() == fresh_home / "remote-url.json"
     assert web_server._URL_FILE == fresh_home / "remote-url.json"
-    assert web_server._default_uds_path() == fresh_home / "sorcar.sock"
+    assert local_endpoint.default_endpoint_path() == fresh_home / "sorcar-local.json"
+    assert web_server.RemoteAccessServer()._local_endpoint_file == (
+        fresh_home / "sorcar-local.json"
+    )
     assert web_server._cloudflared_pidfile() == fresh_home / "cloudflared.pid"
 
 

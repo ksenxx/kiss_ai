@@ -10,8 +10,8 @@ drives these three commands: the Explorer view lists folders with
 working tree with ``gitStatus`` and the commit graph with ``gitLog``.
 Every test here talks to a REAL :class:`RemoteAccessServer` over real
 ``wss://`` and to a REAL git repository built in a temp dir — no mocks.
-The UDS drop gate (a VS Code window never shows these views) is driven
-over a real Unix-domain-socket connection.
+The local-client drop gate (a VS Code window never shows these views)
+is driven over a real local WSS connection.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 
 
 def _find_free_port() -> int:
@@ -198,14 +199,13 @@ class ExplorerHarness:
         self.port = _find_free_port()
         self.base_url = f"https://127.0.0.1:{self.port}"
         self.ws_url = f"wss://127.0.0.1:{self.port}/ws"
-        self.uds_path = tmp / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=tmp / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         self.loop = asyncio.new_event_loop()
@@ -708,22 +708,19 @@ class TestGitLog:
         assert status["branch"] == "main"
 
 
-@requires_unix_sockets
-class TestUdsDropGate:
-    """A VS Code window (UDS) never gets a reply to these commands."""
+class TestLocalDropGate:
+    """A VS Code window (local client) never gets a reply to these commands."""
 
-    def test_uds_delivered_commands_are_dropped(self, harness) -> None:
+    def test_locally_delivered_commands_are_dropped(self, harness) -> None:
         async def _probe() -> list[dict]:
-            reader, writer = await asyncio.open_unix_connection(
-                str(harness.uds_path)
-            )
+            reader, writer = await open_local_connection(harness.server)
             try:
                 for cmd in (
                     {"type": "listDir", "tabId": "u-1"},
                     {"type": "gitStatus", "tabId": "u-1"},
                     {"type": "gitLog", "tabId": "u-1"},
                     # Positive control, sent LAST: getInputHistory IS
-                    # answered over UDS (inputHistory).  Its reply
+                    # answered locally (inputHistory).  Its reply
                     # arriving proves the three commands before it were
                     # processed — and dropped — rather than still queued.
                     {"type": "getInputHistory", "tabId": "u-1"},

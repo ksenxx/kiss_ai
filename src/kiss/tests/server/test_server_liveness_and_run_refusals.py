@@ -5,7 +5,8 @@
 """End-to-end regression tests for the server-core audit findings.
 
 Every test here drives a **real** :class:`RemoteAccessServer` bound to
-a temporary Unix-domain socket and an ephemeral TCP port, with
+an ephemeral TCP port (serving remote and token-bearing local WSS
+clients alike), with
 persistence redirected to a scratch sqlite database, and speaks the
 real newline-delimited JSON wire protocol over a real client socket.
 Nothing is mocked, patched or doubled: the agent states the handlers
@@ -73,7 +74,7 @@ from kiss.server.web_server import (
     _generate_self_signed_cert,
     _snapshot_active_tabs,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 _UNAVAILABLE_MODEL = "kiss-test-no-such-model"
 """Model name guaranteed to be absent from ``get_available_models()``.
@@ -126,9 +127,8 @@ def _git(cwd: Path, *args: str) -> None:
     )
 
 
-@requires_unix_sockets
 class _ServerHarness(IsolatedAsyncioTestCase):
-    """Real ``RemoteAccessServer`` on a temp UDS + ephemeral port."""
+    """Real ``RemoteAccessServer`` on an ephemeral port with a local endpoint file."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -136,7 +136,6 @@ class _ServerHarness(IsolatedAsyncioTestCase):
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.port = _find_free_port()
         self.work_dir = Path(self.tmpdir) / "repo"
         self.work_dir.mkdir()
@@ -146,12 +145,12 @@ class _ServerHarness(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         await self.server.start_async()
         self._stopped = False
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
         self._workers: list[tuple[threading.Event, threading.Thread]] = []
 
     async def asyncTearDown(self) -> None:
@@ -175,16 +174,16 @@ class _ServerHarness(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one real UDS connection (simulates one window)."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        """Open one real local connection (simulates one window)."""
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         """Write one newline-framed JSON command."""
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
@@ -192,7 +191,7 @@ class _ServerHarness(IsolatedAsyncioTestCase):
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 200,
         timeout: float = 15.0,
@@ -200,7 +199,7 @@ class _ServerHarness(IsolatedAsyncioTestCase):
         """Read frames until *predicate* matches, else fail the test."""
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -208,11 +207,11 @@ class _ServerHarness(IsolatedAsyncioTestCase):
         raise AssertionError("predicate never matched")
 
     async def _await_dispatch(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
     ) -> None:
         """Block until every command sent so far has been dispatched.
 
-        ``_uds_handler`` dispatches this connection's commands
+        The daemon dispatches this connection's commands
         sequentially, so the reply to a trailing ``activeTasksQuery``
         cannot be produced until the preceding commands' handlers have
         returned.  (It says nothing about *broadcast* delivery, which
@@ -226,7 +225,7 @@ class _ServerHarness(IsolatedAsyncioTestCase):
 
     async def _collect_frames(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         stop: Callable[[dict[str, Any]], bool],
         timeout: float = 10.0,
     ) -> list[dict[str, Any]]:
@@ -293,7 +292,7 @@ class TestRunRefusedDuringMergeClearsStatus(_ServerHarness):
     """F08-1: a refused run must lower the client's running flag."""
 
     async def _refusal_frames(
-        self, reader: asyncio.StreamReader, tab_id: str,
+        self, reader: LocalReader, tab_id: str,
     ) -> list[dict[str, Any]]:
         """Collect frames until the refusal is fully delivered.
 
@@ -562,7 +561,7 @@ class TestSecondServerPreservesRegistry(_ServerHarness):
             host="127.0.0.1",
             port=_find_free_port(),
             url_file=Path(self.tmpdir) / "remote-url-2.json",
-            uds_path=Path(self.tmpdir) / "sorcar-2.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local-2.json",
             work_dir=str(self.work_dir),
         )
 
@@ -612,8 +611,8 @@ class TestSubmitRecordsConnId(_ServerHarness):
     """F08-7: ``submit`` and ``run`` must record the same connection."""
 
     async def _launch(
-        self, writer: asyncio.StreamWriter,
-        reader: asyncio.StreamReader,
+        self, writer: LocalWriter,
+        reader: LocalReader,
         cmd_type: str,
         tab_id: str,
     ) -> agent_state.AgentState:

@@ -11,6 +11,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 class StubEventEmitter {
   constructor() {
@@ -71,13 +72,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-syncwd-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  fs.rmSync(tmpHome, {recursive: true, force: true});
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const received = [];
 let serverResolveLine = null;
@@ -86,7 +81,7 @@ const linePromise = new Promise((resolve) => {
 });
 
 let lastServerSock = null;
-const server = net.createServer((sock) => {
+const server = createFakeDaemon((sock) => {
   lastServerSock = sock;
   let buf = '';
   sock.on('data', (chunk) => {
@@ -111,7 +106,7 @@ const server = net.createServer((sock) => {
 });
 
 async function runTests() {
-  await new Promise((res, rej) => server.listen(sockPath, (err) => (err ? rej(err) : res())));
+  await new Promise((res, rej) => server.listen(endpointPath, (err) => (err ? rej(err) : res())));
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
@@ -186,7 +181,7 @@ async function runTests() {
 runTests().then(
   () => {
     server.close(() => {
-      try {fs.unlinkSync(sockPath);} catch {}
+      try {fs.unlinkSync(endpointPath);} catch {}
       fs.rmSync(tmpHome, {recursive: true, force: true});
       console.log('\n4 passed, 0 failed');
       process.exit(0);
@@ -195,7 +190,7 @@ runTests().then(
   (err) => {
     console.error('FAIL:', err);
     server.close(() => {
-      try {fs.unlinkSync(sockPath);} catch {}
+      try {fs.unlinkSync(endpointPath);} catch {}
       fs.rmSync(tmpHome, {recursive: true, force: true});
       process.exit(1);
     });

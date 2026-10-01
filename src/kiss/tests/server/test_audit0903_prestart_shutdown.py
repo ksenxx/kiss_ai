@@ -30,8 +30,8 @@ stop/shutdown state and routes a pre-cancelled run straight through
 terminal cancellation — the worker thread is never started and the
 run's untrusted setup never executes.
 
-Everything here is real: a ``RemoteAccessServer`` serving its Unix
-domain socket, TWO independent client connections, real ``run`` /
+Everything here is real: a ``RemoteAccessServer`` serving its local
+endpoint, TWO independent client connections, real ``run`` /
 ``stop`` commands, the real shutdown sweep.  The pre-start window is
 held open deterministically by parking the production registry
 publication (:class:`TabRegistry` subclass whose ``update_tab`` parks
@@ -57,7 +57,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
 import tempfile
 import textwrap
 import threading
@@ -66,12 +65,11 @@ from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
 from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import connect_local
 
 _STOP_LABEL = "Task stopped by user"
 _SHUTDOWN_LABEL = "Task interrupted by server restart/shutdown"
@@ -144,35 +142,38 @@ class _RaisingTabRegistry(TabRegistry):
         return super().update_tab(tab_id, **kwargs)
 
 
-class _UdsClient:
-    """Newline-delimited JSON client of the server's Unix domain socket."""
+class _LocalClient:
+    """JSON-frame client of the server's local endpoint, driven on *loop*.
 
-    def __init__(self, sock_path: str) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(sock_path)
+    The connection and its reader task live on the server's event loop
+    (the test thread talks to them through
+    ``run_coroutine_threadsafe``); events are collected under a
+    condition the test thread waits on.
+    """
+
+    def __init__(self, endpoint_file: str, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
         self.events: list[dict[str, Any]] = []
         self._cond = threading.Condition()
-        threading.Thread(target=self._reader, daemon=True).start()
+        self.ws = asyncio.run_coroutine_threadsafe(
+            connect_local(Path(endpoint_file), open_timeout=30), loop,
+        ).result(timeout=30)
+        asyncio.run_coroutine_threadsafe(self._reader(), loop)
 
-    def _reader(self) -> None:
-        buf = b""
+    async def _reader(self) -> None:
         while True:
             try:
-                chunk = self.sock.recv(65536)
-            except OSError:
-                chunk = b""
-            if not chunk:
+                message = await self.ws.recv()
+            except Exception:
                 return
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if line.strip():
-                    with self._cond:
-                        self.events.append(json.loads(line))
-                        self._cond.notify_all()
+            with self._cond:
+                self.events.append(json.loads(message))
+                self._cond.notify_all()
 
     def send(self, cmd: dict[str, Any]) -> None:
-        self.sock.sendall((json.dumps(cmd) + "\n").encode())
+        asyncio.run_coroutine_threadsafe(
+            self.ws.send(json.dumps(cmd)), self.loop,
+        ).result(timeout=30)
 
     def wait_for(
         self,
@@ -201,7 +202,7 @@ class _UdsClient:
                 self._cond.wait(remaining)
 
     def close(self) -> None:
-        self.sock.close()
+        asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop).result(timeout=10)
 
 
 class TestPrestartShutdownAndStopHandshake(TestCase):
@@ -210,28 +211,23 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
     def setUp(self) -> None:
         os.environ.setdefault("KISS_WORKDIR", "/tmp")
         agent_state.agent_states.clear()
-        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-uds-prestart-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-prestart-"))
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
         self.script = self.tmp / "agent.py"
         self.script.write_text(_BLOCKING_SCRIPT, encoding="utf-8")
-        self.sock_path = str(self.tmp / "sorcar.sock")
+        self.endpoint_file = str(self.tmp / "sorcar-local.json")
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.remote = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=str(self.work_dir),
+            local_endpoint_file=self.endpoint_file, work_dir=str(self.work_dir),
         )
-        self.remote._printer._loop = self.loop
-        self.remote._loop = self.loop
         self.registry: _ParkingTabRegistry | None = None
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.remote._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=10)
-        self.client1 = _UdsClient(self.sock_path)
-        self.client2 = _UdsClient(self.sock_path)
+        asyncio.run_coroutine_threadsafe(
+            self.remote.start_private_async(), self.loop,
+        ).result(timeout=30)
+        self.client1 = _LocalClient(self.endpoint_file, self.loop)
+        self.client2 = _LocalClient(self.endpoint_file, self.loop)
 
     def tearDown(self) -> None:
         (self.tmp / "release").write_text("1", encoding="utf-8")
@@ -247,14 +243,16 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
         self.client2.close()
 
         async def _drain() -> None:
-            # No ``wait_closed()``: on Python 3.14 it also waits for
-            # every handler coroutine, which ``_drain_tasks`` below
-            # already does — with a cancellation fallback for
-            # stragglers, so teardown always terminates.
-            self.uds_server.close()
-            for writer in list(self.remote._printer._uds_writers):
-                writer.close()
-            await self.remote._drain_tasks(set(self.remote._uds_handler_tasks))
+            ws_server = self.remote._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                try:
+                    await asyncio.wait_for(ws_server.wait_closed(), timeout=10)
+                except TimeoutError:
+                    pass
+            local_endpoint.remove_endpoint_if_owned(
+                self.remote._local_endpoint_file, self.remote._local_token,
+            )
 
         asyncio.run_coroutine_threadsafe(_drain(), self.loop).result(timeout=15)
         self.loop.call_soon_threadsafe(self.loop.stop)

@@ -1357,7 +1357,7 @@ class _CommandsMixin:
         Spawns a daemon thread that calls
         :func:`daemon_client.run` with the resolved ``ask_sea`` script
         as ``extension_agent_path``: the daemon accepts the run over
-        its own Unix socket and runs it as a sub-agent of
+        its own local endpoint and runs it as a sub-agent of
         *owner_task_id*.  The frontend then renders the answering
         session as a nested sub-agent tab under the running task's
         tab — same webview, no interaction with the outer agent's
@@ -1405,7 +1405,7 @@ class _CommandsMixin:
         """
         from kiss.agents.seas.ask import ask_sea
         from kiss.agents.sorcar import daemon_client
-        from kiss.agents.sorcar.agent_dispatch import _daemon_sock_path
+        from kiss.agents.sorcar.agent_dispatch import _daemon_endpoint_file
         from kiss.server.task_update import charge_side_channel_usage
 
         # Always the bundled script: ``seas/`` has the lowest registry
@@ -1416,7 +1416,7 @@ class _CommandsMixin:
         sea_path = Path(ask_sea.__file__)
         append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
         append_to_system_prompt = ask_sea.append_to_system_prompt()
-        sock_path = _daemon_sock_path()
+        endpoint_file = _daemon_endpoint_file()
         epoch_getter = getattr(owner_agent, "_usage_epoch", None)
         epoch = epoch_getter() if callable(epoch_getter) else None
 
@@ -1434,7 +1434,7 @@ class _CommandsMixin:
                     chat_id=chat_id,
                     use_worktree=False,
                     auto_commit=False,
-                    sock_path=sock_path,
+                    endpoint_file=endpoint_file,
                     timeout=_ASK_TIMEOUT_SECONDS,
                     stop_on_timeout=True,
                 )
@@ -2464,7 +2464,7 @@ class _CommandsMixin:
     def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
         """Update the server's *fallback* working directory.
 
-        Sent by the VS Code extension on every (re)connect of its UDS
+        Sent by the VS Code extension on every (re)connect of its daemon
         client and whenever ``vscode.workspace.workspaceFolders``
         changes (i.e. the user opens a different folder), so a
         freshly-attached extension synchronises the daemon even when

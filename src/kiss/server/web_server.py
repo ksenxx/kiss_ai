@@ -86,7 +86,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from kiss.agents.sorcar import cron_agent
+from kiss.agents.sorcar import cron_agent, local_endpoint
 from kiss.agents.sorcar._concurrency import pid_alive as _is_pid_alive
 from kiss.agents.sorcar.persistence import (
     _load_all_chat_events_by_chat_id,
@@ -345,12 +345,12 @@ _SHUTDOWN_SIGNALS: tuple[int, ...] = tuple(
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None))
     if sig is not None
 )
-_UDS_DRAIN_TIMEOUT = 30.0
-"""Seconds a UDS peer may leave its socket unread before it is dropped.
+_SEND_TIMEOUT = 30.0
+"""Seconds a client may leave its socket unread before it is dropped.
 
-UDS peers have no ping watchdog, so a peer that stops reading would
-otherwise hold its send lock forever while every later broadcast queues
-another pending send for it without bound.
+The listeners run without a ping watchdog, so a peer that stops reading
+would otherwise hold its send lock forever while every later broadcast
+queues another pending send for it without bound.
 """
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
@@ -409,7 +409,7 @@ _MAX_LINE_BYTES = 64 * 1024 * 1024
 
 # Byte budget for the JSON tasks of one ``share_tasks`` reply.  The
 # reply's smallest receiver is NOT this server's own 64 MiB frame
-# (``_MAX_LINE_BYTES``) but the VS Code extension's UDS client, which
+# (``_MAX_LINE_BYTES``) but the VS Code extension's local client, which
 # destroys the connection past MAX_LINE_BUFFER_BYTES = 32 MiB
 # (``src/AgentClient.ts``); the 8 MiB headroom under that covers the
 # reply envelope and the frame's UTF-8 / escaping overhead.  Older
@@ -562,33 +562,6 @@ def __getattr__(name: str) -> Path:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _default_uds_path() -> Path:
-    """Return the default localhost Unix-domain socket path.
-
-    The socket is exposed by :class:`RemoteAccessServer` in addition
-    to the public WSS port.  Local clients (the VS Code extension)
-    connect to this socket over the SAME newline-delimited JSON
-    protocol that browsers speak over WSS — no password challenge is
-    performed because POSIX filesystem permissions (mode 0o600)
-    restrict access to the owning user.  A fresh
-    ``RemoteAccessServer(uds_path=...)`` argument overrides this
-    location for tests so multiple instances do not race on the same
-    socket file.
-    """
-    return _kiss_home_dir() / "sorcar.sock"
-
-
-def _unix_sockets_supported() -> bool:
-    """Return whether this Python can bind Unix-domain sockets.
-
-    CPython on Windows has neither ``socket.AF_UNIX`` nor the asyncio
-    ``start_unix_server`` / ``open_unix_connection`` helpers, so the
-    daemon's local UDS channel cannot exist there and every UDS code
-    path is skipped (the daemon serves WSS only).
-    """
-    return hasattr(socket, "AF_UNIX")
-
-
 def _tunnel_backoff_delay(failure_count: int) -> int:
     """Return the backoff delay for *failure_count* consecutive failures.
 
@@ -640,6 +613,43 @@ def _rate_limit_backoff_seconds() -> int:
     """
     jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
     return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
+
+
+def _bound_loopback(*ws_servers: Any) -> tuple[str, int]:
+    """Return the ``(host, port)`` a same-machine client should dial.
+
+    A listener bound to ``localhost`` or a wildcard may hold several
+    sockets (IPv4 and IPv6, each with its own ephemeral port when the
+    daemon asked for port 0).  Prefers an IPv4 socket reachable at
+    ``127.0.0.1``, then an IPv6 one reachable at ``::1``, over the
+    given servers in order (``None`` entries are skipped); when no
+    socket is reachable over loopback, the first bound address.
+
+    Args:
+        ws_servers: ``websockets`` servers whose ``sockets`` are bound.
+
+    Returns:
+        The URL host (IPv6 in brackets) and the port of the chosen socket.
+    """
+    fallback: tuple[str, int] | None = None
+    v6: tuple[str, int] | None = None
+    sockets = [
+        sock for server in ws_servers if server is not None for sock in server.sockets
+    ]
+    for sock in sockets:
+        addr, port = sock.getsockname()[:2]
+        if sock.family == socket.AF_INET:
+            if addr in ("127.0.0.1", "0.0.0.0"):
+                return "127.0.0.1", port
+        elif sock.family == socket.AF_INET6 and addr in ("::1", "::") and v6 is None:
+            v6 = ("[::1]", port)
+        if fallback is None:
+            fallback = (f"[{addr}]" if sock.family == socket.AF_INET6 else addr, port)
+    if v6 is not None:
+        return v6
+    if fallback is None:
+        raise RuntimeError("the WSS listener has no bound socket")
+    return fallback
 
 
 def _is_loopback_ip(ip: str) -> bool:
@@ -2220,7 +2230,7 @@ def _load_local_tls_pair(ctx: ssl.SSLContext, lan_ips: Iterable[str]) -> bytes:
     check through ``load_cert_chain``: the check-then-generate sequence
     and the pair publication are not atomic, so two concurrent processes
     could otherwise publish (or load) a mismatched cert/key pair (F4-10).
-    The lock is bounded like the UDS sidecar lock in ``_bind_uds``: a
+    The lock is bounded like every other sidecar lock in this module: a
     blocking ``LOCK_EX`` behind a wedged sibling would stall startup
     forever, and cancelling the ``to_thread`` caller cannot interrupt
     the executor syscall.
@@ -2330,6 +2340,13 @@ def _create_ssl_context(
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # No TLS 1.3 session tickets: the synchronous ``websockets`` client
+    # (daemon_client, cron, run_agent dispatch) reads post-handshake
+    # NewSessionTicket records on its receive thread while its main thread
+    # writes the HTTP upgrade on the same SSL object, which intermittently
+    # loses the upgrade request and stalls the connection.  Local clients
+    # never resume sessions, so the tickets buy nothing.
+    ctx.num_tickets = 0
     if certfile and keyfile:
         ctx.load_cert_chain(certfile, keyfile)
         return ctx
@@ -2412,19 +2429,23 @@ class WebPrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
-        self._uds_writers: set[asyncio.StreamWriter] = set()
-        # Local-UDS talk bookkeeping.  This printer owns two facts:
-        # which UDS connection addressed which tab id (INTEREST: the
+        # Local peers (token-authenticated loopback connections: VS
+        # Code extension windows, ``daemon_client`` runs) are kept
+        # apart from ``_ws_clients`` because talk arbitration sends
+        # them muted copies when the daemon plays a clip itself.
+        self._local_clients: set[ServerConnection] = set()
+        # Local talk bookkeeping.  This printer owns two facts:
+        # which local connection addressed which tab id (INTEREST: the
         # per-connection sets and their shared reference counts) and
-        # which UDS connections host a chat webview (``ready`` seen).
+        # which local connections host a chat webview (``ready`` seen).
         # Whether a tab is SHOWN by a local webview is decided at talk
         # time by the rule installed via ``set_local_tab_visibility``
         # from those facts plus the canonical ones (tab registry, live
         # agent state) — never from a copy of registry state kept
-        # here.  See ``shown_local_uds_tabs``.
-        self._local_uds_tab_counts: dict[str, int] = {}
-        self._uds_local_tab_sets: dict[str, set[str]] = {}
-        self._uds_webview_conns: set[str] = set()
+        # here.  See ``shown_local_tabs``.
+        self._local_tab_counts: dict[str, int] = {}
+        self._local_tab_sets: dict[str, set[str]] = {}
+        self._local_webview_conns: set[str] = set()
         self._local_tab_visibility: Callable[[str, bool, bool], bool] | None = None
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
@@ -2432,7 +2453,7 @@ class WebPrinter(JsonPrinter):
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, FifoSendLock] = {}
-        self._uds_drain_timeout: float = _UDS_DRAIN_TIMEOUT
+        self._send_timeout: float = _SEND_TIMEOUT
         # tabId -> pending worktree dir of that tab's finished (or
         # running) worktree task; see _track_worktree_event().
         self._tab_worktree_dirs: dict[str, str] = {}
@@ -2741,8 +2762,8 @@ class WebPrinter(JsonPrinter):
                 f'{base}, "tabId": {json.dumps(tab_id)}}}', tab_id,
             )
 
-    def _uds_writers_for_tab(self, tab_id: str) -> list[asyncio.StreamWriter]:
-        """UDS writers that receive a task event copy stamped *tab_id*.
+    def _local_clients_for_tab(self, tab_id: str) -> list[ServerConnection]:
+        """Local clients that receive a task event copy stamped *tab_id*.
 
         Webview connections mirror the whole tab registry and peers
         that never addressed a tab keep receiving every copy.  A
@@ -2756,20 +2777,20 @@ class WebPrinter(JsonPrinter):
             tab_id: The frontend tab id the copy is stamped with.
 
         Returns:
-            The writers to schedule the copy on.
+            The connections to schedule the copy on.
         """
         with self._ws_lock:
             skip: set[Any] = set()
-            for conn_id, tabs in self._uds_local_tab_sets.items():
+            for conn_id, tabs in self._local_tab_sets.items():
                 if (
                     tabs
                     and tab_id not in tabs
-                    and conn_id not in self._uds_webview_conns
+                    and conn_id not in self._local_webview_conns
                 ):
                     endpoint = self._conn_endpoints.get(conn_id)
                     if endpoint is not None:
                         skip.add(endpoint)
-            return [w for w in self._uds_writers if w not in skip]
+            return [w for w in self._local_clients if w not in skip]
 
     @staticmethod
     def _increment_count(counts: dict[str, int], key: str) -> None:
@@ -2795,9 +2816,9 @@ class WebPrinter(JsonPrinter):
         The daemon's :class:`~kiss.server.server.VSCodeServer` installs
         :meth:`~kiss.server.server.VSCodeServer._local_tab_shown`.  The
         talk fan-out consults it at decision time
-        (:meth:`shown_local_uds_tabs`) with the two facts this printer
-        owns — whether some UDS connection recorded interest in the
-        tab and whether any UDS webview is attached at all — so the
+        (:meth:`shown_local_tabs`) with the two facts this printer
+        owns — whether some local connection recorded interest in the
+        tab and whether any local webview is attached at all — so the
         bookkeeping here never has to mirror registry state: a stale
         or pruned interest entry can neither resurrect a closed tab nor
         hide a reopened one.  Without a rule (a standalone printer)
@@ -2810,25 +2831,25 @@ class WebPrinter(JsonPrinter):
         with self._ws_lock:
             self._local_tab_visibility = decide
 
-    def mark_uds_webview(self, conn_id: str) -> None:
-        """Record that UDS connection *conn_id* hosts a chat webview.
+    def mark_local_webview(self, conn_id: str) -> None:
+        """Record that local connection *conn_id* hosts a chat webview.
 
         Called on the connection's ``ready``: a VS Code chat webview
-        announces itself that way, while headless UDS peers (the
+        announces itself that way, while headless local peers (the
         ``run_agent`` daemon client, tests) never do.  Every attached
         webview mirrors the whole canonical tab registry, so this flag
         — not per-tab interest — is what decides native playback for
-        registry tabs (see :meth:`shown_local_uds_tabs`).  Cleared by
-        :meth:`unregister_local_uds_tabs` on disconnect.
+        registry tabs (see :meth:`shown_local_tabs`).  Cleared by
+        :meth:`unregister_local_tabs` on disconnect.
 
         Args:
-            conn_id: The UDS connection's id.
+            conn_id: The local connection's id.
         """
         with self._ws_lock:
-            self._uds_webview_conns.add(conn_id)
+            self._local_webview_conns.add(conn_id)
 
-    def shown_local_uds_tabs(self, tab_ids: Iterable[str]) -> set[str]:
-        """Return the subset of *tab_ids* a local UDS webview shows.
+    def shown_local_tabs(self, tab_ids: Iterable[str]) -> set[str]:
+        """Return the subset of *tab_ids* a local local webview shows.
 
         Reads this printer's two facts under its own lock — the
         interest set and whether a webview is attached — then hands
@@ -2850,8 +2871,8 @@ class WebPrinter(JsonPrinter):
             The ids a local webview currently shows.
         """
         with self._ws_lock:
-            interested = {t for t in tab_ids if t in self._local_uds_tab_counts}
-            webview_attached = bool(self._uds_webview_conns)
+            interested = {t for t in tab_ids if t in self._local_tab_counts}
+            webview_attached = bool(self._local_webview_conns)
             decide = self._local_tab_visibility
         if decide is None:
             return interested
@@ -2859,12 +2880,12 @@ class WebPrinter(JsonPrinter):
             t for t in tab_ids if decide(t, t in interested, webview_attached)
         }
 
-    def register_local_uds_tab(
+    def register_local_tab(
         self, conn_id: str, tab_id: str, local_tabs: set[str]
     ) -> None:
-        """Record the local UDS connection *conn_id*'s interest in *tab_id*.
+        """Record the local local connection *conn_id*'s interest in *tab_id*.
 
-        Interest is what a UDS command's ``tabId`` proves: this peer
+        Interest is what a local command's ``tabId`` proves: this peer
         addressed the tab.  It takes part in the native-playback
         decision only for tabs no attached webview mirrors from the
         registry (a ``run_agent`` dispatch's ``api-…`` tab, a sub-agent
@@ -2874,20 +2895,20 @@ class WebPrinter(JsonPrinter):
         closed registry tab is inert.
 
         Args:
-            conn_id: The UDS connection's id.
-            tab_id: The frontend tab id seen on a UDS command.
+            conn_id: The local connection's id.
+            tab_id: The frontend tab id seen on a local command.
             local_tabs: The connection's mutable local-tab set (lives
                 in its ``conn_state``).  Membership is checked and
                 updated under the printer lock.
         """
         with self._ws_lock:
-            self._uds_local_tab_sets[conn_id] = local_tabs
+            self._local_tab_sets[conn_id] = local_tabs
             if tab_id in local_tabs:
                 return
             local_tabs.add(tab_id)
-            self._increment_count(self._local_uds_tab_counts, tab_id)
+            self._increment_count(self._local_tab_counts, tab_id)
 
-    def sync_local_uds_tabs(
+    def sync_local_tabs(
         self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
     ) -> None:
         """Reconcile *conn_id*'s interest set to exactly *tab_ids*.
@@ -2897,21 +2918,21 @@ class WebPrinter(JsonPrinter):
         reload bounds the interest a connection accumulated.
 
         Args:
-            conn_id: The UDS connection's id.
+            conn_id: The local connection's id.
             tab_ids: The tab ids the client announced in its ``ready``.
             local_tabs: The connection's mutable local-tab set.
         """
         with self._ws_lock:
-            self._uds_local_tab_sets[conn_id] = local_tabs
+            self._local_tab_sets[conn_id] = local_tabs
             for tab_id in tab_ids - local_tabs:
-                self._increment_count(self._local_uds_tab_counts, tab_id)
+                self._increment_count(self._local_tab_counts, tab_id)
             for tab_id in local_tabs - tab_ids:
-                self._decrement_count(self._local_uds_tab_counts, tab_id)
+                self._decrement_count(self._local_tab_counts, tab_id)
             local_tabs.clear()
             local_tabs.update(tab_ids)
 
-    def prune_local_uds_tab(self, tab_id: str) -> None:
-        """Drop *tab_id* from every UDS connection's interest set.
+    def prune_local_tab(self, tab_id: str) -> None:
+        """Drop *tab_id* from every local connection's interest set.
 
         Called when the canonical registry removes a tab (close or
         displacement).  Bookkeeping hygiene only: the visibility rule
@@ -2924,30 +2945,30 @@ class WebPrinter(JsonPrinter):
             tab_id: The frontend tab id the registry removed.
         """
         with self._ws_lock:
-            for local_tabs in self._uds_local_tab_sets.values():
+            for local_tabs in self._local_tab_sets.values():
                 if tab_id in local_tabs:
                     local_tabs.discard(tab_id)
-                    self._decrement_count(self._local_uds_tab_counts, tab_id)
+                    self._decrement_count(self._local_tab_counts, tab_id)
 
-    def unregister_local_uds_tabs(
+    def unregister_local_tabs(
         self, conn_id: str, tab_ids: set[str]
     ) -> None:
-        """Drop a disconnected UDS connection's local-tab registrations.
+        """Drop a disconnected local connection's local-tab registrations.
 
         Args:
-            conn_id: The UDS connection's id.
+            conn_id: The local connection's id.
             tab_ids: The connection's remaining local-tab ids.
         """
         with self._ws_lock:
-            self._uds_webview_conns.discard(conn_id)
-            self._uds_local_tab_sets.pop(conn_id, None)
+            self._local_webview_conns.discard(conn_id)
+            self._local_tab_sets.pop(conn_id, None)
             for tab_id in tab_ids:
-                self._decrement_count(self._local_uds_tab_counts, tab_id)
+                self._decrement_count(self._local_tab_counts, tab_id)
 
     def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
         """Fan out one ``talk`` event with per-device playback arbitration.
 
-        Local UDS webview tabs (VS Code chat webviews on the daemon's
+        Local local webview tabs (VS Code chat webviews on the daemon's
         machine) CANNOT reliably play the synthesized clip themselves:
         Chromium's autoplay policy rejects ``Audio.play()`` in a
         webview unless the user interacted with it seconds earlier
@@ -2957,13 +2978,13 @@ class WebPrinter(JsonPrinter):
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
         speakers (:mod:`kiss.server.talk_player`, ``afplay`` on
-        macOS) and stamps every local UDS webview copy ``muted``.
+        macOS) and stamps every local local webview copy ``muted``.
 
         Muting is per-ENDPOINT, not per-serialization: the canonical
         tab registry mirrors the same tab ids to every client, so a
         remote WSS browser shows the very tab the local webview does.
         The browser is a different device with its own speakers, so
-        when the daemon owns the utterance only the same-machine UDS
+        when the daemon owns the utterance only the same-machine local
         copies are muted while every WSS copy stays playable.
 
         Otherwise webview subscriber tabs receive the playable copy
@@ -2974,17 +2995,17 @@ class WebPrinter(JsonPrinter):
             event: The ``talk`` event (no ``tabId`` stamp yet).
             targets: Subscriber tab ids for the event's task.
         """
-        local_uds_tabs = self.shown_local_uds_tabs(targets)
-        daemon_plays = bool(local_uds_tabs) and self._play_talk_clip_locally(
+        local_tabs_shown = self.shown_local_tabs(targets)
+        daemon_plays = bool(local_tabs_shown) and self._play_talk_clip_locally(
             event
         )
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
         for tab_id in targets:
             tab_suffix = f', "tabId": {json.dumps(tab_id)}}}'
-            if daemon_plays and tab_id in local_uds_tabs:
+            if daemon_plays and tab_id in local_tabs_shown:
                 self._send_to_wss_clients(base + tab_suffix)
-                self._send_to_uds_writers(muted_base + tab_suffix)
+                self._send_to_local_clients(muted_base + tab_suffix)
             else:
                 self._send_to_ws_clients(base + tab_suffix)
 
@@ -3027,7 +3048,7 @@ class WebPrinter(JsonPrinter):
 
         WSS peers are remote browsers — separate devices from the
         daemon machine — so talk arbitration sends them the playable
-        copy while the same-machine UDS peers get the muted one.
+        copy while the same-machine local peers get the muted one.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
@@ -3038,26 +3059,27 @@ class WebPrinter(JsonPrinter):
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
-    def _send_to_uds_writers(self, data: Payload, tab_id: str = "") -> None:
-        """Send a pre-serialised JSON payload to local UDS peers only.
+    def _send_to_local_clients(self, data: Payload, tab_id: str = "") -> None:
+        """Send a pre-serialised JSON payload to local peers only.
 
-        UDS peers (VS Code extension webviews, Python clients) are
-        always on the daemon's machine; talk arbitration sends them
-        muted copies when a local player already owns the utterance.
+        Local peers (VS Code extension webviews, Python clients that
+        authenticated with the local token) are always on the daemon's
+        machine; talk arbitration sends them muted copies when a local
+        player already owns the utterance.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
             tab_id: The tab the payload is stamped with, when it is a
                 task-event copy; only the peers that can show that tab
-                receive it (see :meth:`_uds_writers_for_tab`).  Empty
+                receive it (see :meth:`_local_clients_for_tab`).  Empty
                 for global events, which reach every peer.
         """
         if tab_id:
-            endpoints = self._uds_writers_for_tab(tab_id)
+            endpoints = self._local_clients_for_tab(tab_id)
         else:
             with self._ws_lock:
-                endpoints = list(self._uds_writers)
+                endpoints = list(self._local_clients)
         for endpoint in endpoints:
             self._schedule_send(endpoint, data)
 
@@ -3067,20 +3089,20 @@ class WebPrinter(JsonPrinter):
         Factored out of :meth:`broadcast` so fan-out copies for
         subscribed viewer tab ids reuse the same dispatch and pending-
         future tracking as the primary broadcast.  Fans out to BOTH
-        WSS clients and local Unix-domain socket writers in lockstep by
+        remote WSS clients and local clients in lockstep by
         delegating to :meth:`_send_to_wss_clients` and
-        :meth:`_send_to_uds_writers` (per-endpoint FIFO order is
+        :meth:`_send_to_local_clients` (per-endpoint FIFO order is
         preserved by each endpoint's ``send_lock``).
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``)
                 or a reserved replay slot that resolves to it.
             tab_id: The stamped tab of a task-event copy (empty for
-                global events); UDS delivery is narrowed to the peers
-                that can show it.
+                global events); local delivery is narrowed to the
+                peers that can show it.
         """
         self._send_to_wss_clients(data)
-        self._send_to_uds_writers(data, tab_id)
+        self._send_to_local_clients(data, tab_id)
 
     def _reserve_replay_send(
         self, slot: ConcurrentFuture[str], conn_id: str,
@@ -3181,18 +3203,14 @@ class WebPrinter(JsonPrinter):
                 text = data
             if admit is not None and not admit():
                 return
-            if isinstance(endpoint, asyncio.StreamWriter):
-                await self._uds_send(endpoint, text)
-            else:
-                await endpoint.send(text)
+            await self._timed_send(endpoint, text)
 
     def _schedule_send(self, endpoint: Any, data: Payload) -> None:
         """Schedule one payload send to one endpoint on the event loop.
 
         Shared by :meth:`_send_to_ws_clients` (fan-out) and
-        :meth:`_send_to_conn` (targeted reply).  ``endpoint`` is a
-        :class:`ServerConnection` (WSS) or an
-        :class:`asyncio.StreamWriter` (UDS).  The resulting future is
+        :meth:`_send_to_conn` (targeted reply).  ``endpoint`` is the
+        client's :class:`ServerConnection`.  The resulting future is
         tracked in ``_pending_sends`` (M8) so a stuck/slow peer's
         pending sends can be cancelled when the client disconnects.
 
@@ -3222,48 +3240,45 @@ class WebPrinter(JsonPrinter):
             partial(self._discard_pending_send, endpoint),
         )
 
-    async def _uds_send(
-        self, writer: asyncio.StreamWriter, data: str,
-    ) -> None:
-        """Write a newline-delimited JSON payload to a UDS client.
+    async def _timed_send(self, endpoint: ServerConnection, data: str) -> None:
+        """Send *data* to *endpoint*, dropping a peer that stops reading.
 
-        Mirrors ``ServerConnection.send`` for Unix-domain socket
-        peers.  On any write failure, the writer is removed from the
-        active set so subsequent broadcasts skip it.
-
-        The drain is bounded by :attr:`_uds_drain_timeout`: a peer that
-        stops reading would otherwise block here forever under the
-        endpoint's send lock while every later broadcast appended one
-        more pending future for it without bound.  On timeout the peer
-        is dropped and its transport closed (which also unblocks its
-        handler's ``readline()`` so the connection is torn down).
+        ``ServerConnection.send`` waits for the transport's write
+        buffer to drain, so a peer that stops reading would otherwise
+        hold its send lock forever while every later broadcast queued
+        one more pending send for it without bound (the listeners run
+        without a ping watchdog).  A send that does not complete within
+        :attr:`_send_timeout` removes the peer from both client sets
+        and aborts its transport, which also ends its handler.
 
         Args:
-            writer: The asyncio stream writer for the UDS connection.
+            endpoint: The client connection to write to.
             data: The JSON payload (already encoded with ``json.dumps``).
         """
         try:
-            writer.write(data.encode("utf-8") + b"\n")
-            await asyncio.wait_for(writer.drain(), self._uds_drain_timeout)
+            await asyncio.wait_for(endpoint.send(data), self._send_timeout)
         except Exception:
-            logger.debug("Failed to write to UDS client", exc_info=True)
-            self.remove_uds_writer(writer)
-            writer.close()
+            logger.debug("Failed to write to client", exc_info=True)
+            self.remove_client(endpoint)
+            self.remove_local_client(endpoint)
+            transport = getattr(endpoint, "transport", None)
+            if transport is not None:
+                transport.abort()
 
     def _add_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
-        """Register a WSS/UDS *endpoint* in *collection* for broadcasting.
+        """Register *endpoint* in *collection* for broadcasting.
 
-        Shared body of :meth:`add_client` and :meth:`add_uds_writer`.
+        Shared body of :meth:`add_client` and :meth:`add_local_client`.
         """
         with self._ws_lock:
             collection.add(endpoint)
             self._pending_sends.setdefault(endpoint, set())
 
     def _remove_endpoint(self, endpoint: Any, collection: set[Any]) -> None:
-        """Remove a WSS/UDS *endpoint* and cancel its pending sends.
+        """Remove *endpoint* and cancel its pending sends.
 
         Shared body of :meth:`remove_client` and
-        :meth:`remove_uds_writer`.  Cancelling the pending
+        :meth:`remove_local_client`.  Cancelling the pending
         ``run_coroutine_threadsafe`` futures (M8) ensures a
         permanently stuck send queue cannot keep the underlying
         coroutine alive after the peer is gone.
@@ -3297,15 +3312,14 @@ class WebPrinter(JsonPrinter):
     def bind_conn(self, conn_id: str, endpoint: Any) -> None:
         """Associate a connection id with its transport endpoint.
 
-        Called by the WSS / UDS handlers when a client connects, so
+        Called by the connection handler when a client connects, so
         :meth:`broadcast` can route request/reply events (stamped
         with ``connId``) back to ONLY the requesting connection.
 
         Args:
             conn_id: The unique id stamped (as ``connId``) on every
                 command from this connection.
-            endpoint: The :class:`ServerConnection` (WSS) or
-                :class:`asyncio.StreamWriter` (UDS) for the connection.
+            endpoint: The connection's :class:`ServerConnection`.
         """
         with self._ws_lock:
             self._conn_endpoints[conn_id] = endpoint
@@ -3319,21 +3333,21 @@ class WebPrinter(JsonPrinter):
         with self._ws_lock:
             self._conn_endpoints.pop(conn_id, None)
 
-    def add_uds_writer(self, writer: asyncio.StreamWriter) -> None:
-        """Register a Unix-domain socket writer for event broadcasting.
+    def add_local_client(self, ws: ServerConnection) -> None:
+        """Register a token-authenticated local connection for broadcasting.
 
         Args:
-            writer: The asyncio stream writer to add.
+            ws: The local client's WebSocket server connection.
         """
-        self._add_endpoint(writer, self._uds_writers)
+        self._add_endpoint(ws, self._local_clients)
 
-    def remove_uds_writer(self, writer: asyncio.StreamWriter) -> None:
-        """Remove a Unix-domain socket writer from event broadcasting.
+    def remove_local_client(self, ws: ServerConnection) -> None:
+        """Remove a local connection from event broadcasting.
 
         Args:
-            writer: The asyncio stream writer to remove.
+            ws: The local client's WebSocket server connection.
         """
-        self._remove_endpoint(writer, self._uds_writers)
+        self._remove_endpoint(ws, self._local_clients)
 
     def _discard_pending_send(self, client: Any, fut: Any) -> None:
         """Remove a completed send future from the per-client pending set.
@@ -3343,8 +3357,6 @@ class WebPrinter(JsonPrinter):
         :attr:`_pending_sends` set bounded so it does not grow without
         limit on a long-running healthy connection.
 
-        ``client`` may be a :class:`ServerConnection` (WSS) or an
-        :class:`asyncio.StreamWriter` (UDS).
         """
         with self._ws_lock:
             pending = self._pending_sends.get(client)
@@ -4851,7 +4863,7 @@ _WS_SHIM_JS = r"""
           // instance) keeps its own value across reloads, and the
           // auth_ok handler below replays it on every reconnect —
           // mirroring how each VS Code window re-announces its
-          // workspace folder on every UDS (re)connect.
+          // workspace folder on every daemon (re)connect.
           try {
             sessionStorage.setItem('sorcar-work-dir', msg.workDir || '');
           } catch(e) {}
@@ -5426,9 +5438,8 @@ class RemoteAccessServer:
         certfile: str | None = None,
         keyfile: str | None = None,
         url_file: str | Path | None = None,
-        uds_path: str | Path | None = None,
+        local_endpoint_file: str | Path | None = None,
         ntfy_base_url: str = _NTFY_BASE_URL,
-        uds_owner_wait_s: float = 30.0,
     ) -> None:
         load_api_keys()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
@@ -5498,15 +5509,18 @@ class RemoteAccessServer:
         # Second WSS listener bound to 127.0.0.1:<port> beside the
         # wildcard one; see :meth:`_bind_loopback_alias`.
         self._ws_loopback_server: Any = None
-        self._uds_path: Path = (
-            Path(uds_path) if uds_path else _default_uds_path()
+        # Where same-machine clients learn this daemon's URL and the
+        # per-start secret that marks them as local (see
+        # :mod:`kiss.agents.sorcar.local_endpoint`).  Written once the WSS
+        # listener is bound; removed on shutdown while it is still ours.
+        self._local_endpoint_file: Path = (
+            Path(local_endpoint_file) if local_endpoint_file
+            else local_endpoint.default_endpoint_path()
         )
-        self._uds_owner_wait_s = uds_owner_wait_s
-        # A concurrently starting sibling legitimately holds the UDS
-        # sidecar lock for up to ``uds_owner_wait_s`` while it waits
-        # out a predecessor, so the startup lock wait must outlast that.
-        self._uds_lock_timeout_s = uds_owner_wait_s + 30.0
-        self._uds_server: asyncio.Server | None = None
+        self._local_token: str = local_endpoint.new_token()
+        # Set by start_private_async: only token-authenticated local
+        # clients may use the daemon, never a remote password.
+        self._local_only: bool = False
         self._watchdog_task: asyncio.Task[None] | None = None
         self._tls_refresh_task: asyncio.Task[None] | None = None
         self._latest_version: str | None = None
@@ -5514,7 +5528,6 @@ class RemoteAccessServer:
         self._shutdown_initiated = False
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
-        self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
         # PEM of the auto-generated server certificate the live SSL
@@ -5550,7 +5563,6 @@ class RemoteAccessServer:
         self._update_models_starting = False
         self._update_models_watch_task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
-        self._uds_inode: int | None = None
 
     async def _process_request(
         self, connection: ServerConnection, request: Request
@@ -5803,10 +5815,15 @@ class RemoteAccessServer:
                 del self._auth_failures[other_ip]
         self._auth_failures.setdefault(ip, []).append(now)
 
-    async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
-        """Authenticate a WebSocket client using the configured password.
+    async def _authenticate_ws(
+        self, websocket: ServerConnection,
+    ) -> sorcar_api.AuthKind | None:
+        """Authenticate a WebSocket client with the ``auth`` handshake.
 
-        Returns True on success, False (and closes the socket) on failure.
+        Returns ``"local"`` for a loopback peer that presented this
+        daemon's local token (see :attr:`local_token`), ``"remote"``
+        for a client that supplied the configured ``remote_password``,
+        and ``None`` (with the socket closed) on failure.
 
         When the configured ``remote_password`` is empty, only
         loopback peers may connect at all (:meth:`_process_request`
@@ -5824,10 +5841,32 @@ class RemoteAccessServer:
         server API and lives in
         :meth:`kiss.server.sorcar.ServerApi.authenticate`, which
         calls back into this server's :meth:`_client_ip` /
-        :meth:`_auth_lock_remaining` / :meth:`_record_auth_failure`
-        primitives.
+        :meth:`_auth_lock_remaining` / :meth:`_record_auth_failure` /
+        :attr:`local_token` primitives.
         """
         return await self._server_api.authenticate(websocket)
+
+    @property
+    def local_token(self) -> str:
+        """The per-start secret a loopback client presents to be local.
+
+        Published to same-machine clients through the endpoint file
+        (:mod:`kiss.agents.sorcar.local_endpoint`), whose 0600 mode restricts
+        it to the owning user — the access rule local clients had
+        from the file mode of the former Unix socket.
+        """
+        return self._local_token
+
+    @property
+    def local_only(self) -> bool:
+        """Whether only token-authenticated local clients are admitted.
+
+        True for the private daemon :meth:`start_private_async` serves:
+        it replaces an owner-only channel, so a remote-password login
+        (an empty password admits anyone who can reach the port) must
+        not open it to other users of the machine.
+        """
+        return self._local_only
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
         """Run a backend command in the thread-pool executor."""
@@ -5839,16 +5878,28 @@ class RemoteAccessServer:
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
-        Performs password authentication, then relays messages between
-        the browser and the ``VSCodeServer`` command dispatcher.
+        Performs the ``auth`` handshake, then relays messages between
+        the client and the ``VSCodeServer`` command dispatcher.  A
+        *local* client (a loopback peer that presented the local
+        token: the VS Code extension, ``daemon_client`` runs) joins the
+        printer's local-client set — so talk arbitration can send it
+        muted copies — and its commands run with ``is_local`` set,
+        which unlocks the local-only commands (``readKissConfig``,
+        voice wake, local-tab registration).  A remote browser joins
+        the plain client set.
 
         Args:
             websocket: The WebSocket server connection.
         """
-        if not await self._authenticate_ws(websocket):
+        auth = await self._authenticate_ws(websocket)
+        if auth is None:
             return
+        is_local = auth == "local"
 
-        self._printer.add_client(websocket)
+        if is_local:
+            self._printer.add_local_client(websocket)
+        else:
+            self._printer.add_client(websocket)
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -5863,7 +5914,7 @@ class RemoteAccessServer:
                     continue
                 try:
                     await self._dispatch_client_command(
-                        cmd, websocket, conn_state,
+                        cmd, websocket, conn_state, is_local,
                     )
                 except websockets.exceptions.ConnectionClosed:
                     raise
@@ -5878,107 +5929,41 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
+            if is_local:
+                # A daemon-hosted wake-word listener is owned by
+                # exactly this connection: reap it here so a closed VS
+                # Code window can never leak a mic-holding child
+                # process.
+                try:
+                    await self._voice_wake.stop(conn_state["conn_id"])
+                except Exception:
+                    logger.debug(
+                        "voice-wake stop on disconnect failed",
+                        exc_info=True,
+                    )
+                local_tabs = conn_state.get("local_tabs")
+                self._printer.unregister_local_tabs(
+                    conn_state["conn_id"],
+                    local_tabs if isinstance(local_tabs, set) else set(),
+                )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
-
-    async def _uds_handler(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Handle a local Unix-domain socket client connection.
-
-        Speaks the same JSON command protocol as :meth:`_ws_handler`
-        but framed as newline-delimited JSON lines instead of
-        WebSocket frames, and skips the password challenge — POSIX
-        filesystem permissions (mode 0o600 on the socket file) gate
-        access to the owning user.  Used by the VS Code extension so
-        the same :class:`VSCodeServer` instance serves both local and
-        remote clients out of one process, eliminating the per-tab
-        Python subprocess plumbing.
-
-        Args:
-            reader: Asyncio stream reader for the connection.
-            writer: Asyncio stream writer for the connection.  Also
-                registered with :class:`WebPrinter` so backend
-                broadcasts reach this peer.
-        """
-        task = asyncio.current_task()
-        if task is not None:
-            # Tracked so stop_async can DRAIN in-flight handlers:
-            # closing the client writer unblocks readline(), but
-            # without a join the handler (and its cleanup finally)
-            # may still be mid-flight after shutdown returns.
-            self._uds_handler_tasks.add(task)
-            task.add_done_callback(self._uds_handler_tasks.discard)
-        self._printer.add_uds_writer(writer)
-        conn_state: dict[str, Any] = {
-            "work_dir": "", "conn_id": uuid.uuid4().hex,
-        }
-        self._printer.bind_conn(conn_state["conn_id"], writer)
-        try:
-            while True:
-                line = await reader.readline()
-                if not line:
-                    break
-                try:
-                    cmd = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(cmd, dict):
-                    continue
-                try:
-                    await self._dispatch_client_command(
-                        cmd, writer, conn_state,
-                    )
-                except (ConnectionError, asyncio.IncompleteReadError):
-                    raise
-                except Exception:
-                    logger.warning(
-                        "Error handling UDS command %r; connection kept",
-                        cmd.get("type", ""), exc_info=True,
-                    )
-        except Exception:
-            logger.debug("UDS handler error", exc_info=True)
-        finally:
-            # A daemon-hosted wake-word listener is owned by exactly
-            # this connection: reap it here so a closed VS Code window
-            # can never leak a mic-holding child process.
-            try:
-                await self._voice_wake.stop(conn_state["conn_id"])
-            except Exception:
-                logger.debug(
-                    "voice-wake stop on disconnect failed", exc_info=True,
-                )
-            local_tabs = conn_state.get("local_tabs")
-            self._printer.unregister_local_uds_tabs(
-                conn_state["conn_id"],
-                local_tabs if isinstance(local_tabs, set) else set(),
-            )
-            self._vscode_server.drop_connection_state(conn_state["conn_id"])
-            self._vscode_server.browser_tabs.viewer_gone(conn_state["conn_id"])
-            self._printer.unbind_conn(conn_state["conn_id"])
-            self._printer.remove_uds_writer(writer)
-            try:
-                writer.close()
-            except Exception:
-                logger.debug("UDS writer close failed", exc_info=True)
-
+            self._printer.remove_local_client(websocket)
 
     async def _dispatch_client_command(
         self,
         cmd: dict[str, Any],
         endpoint: Any,
         conn_state: dict[str, Any],
+        is_local: bool = False,
     ) -> None:
         """Hand one parsed client command to the server's code API.
 
-        Single shared per-message entry point for :meth:`_ws_handler`
-        (remote browsers) and :meth:`_uds_handler` (the local VS Code
-        extension), so the two transports cannot drift in behaviour.
-        This method owns NO routing: it wraps the connection's
+        The single per-message entry point of :meth:`_ws_handler` for
+        remote browsers and local clients alike, so the two kinds of
+        peer cannot drift in behaviour.  This method owns NO routing: it wraps the connection's
         transport state into a :class:`kiss.server.sorcar.ApiContext`
         and calls :meth:`kiss.server.sorcar.ServerApi.dispatch`, which
         validates the command against the API catalog, applies the
@@ -5989,21 +5974,21 @@ class RemoteAccessServer:
 
         Args:
             cmd: The parsed JSON command dictionary.
-            endpoint: The client connection — a
-                :class:`ServerConnection` (WSS) or an
-                :class:`asyncio.StreamWriter` (UDS).  Used for direct
-                replies.
+            endpoint: The client's :class:`ServerConnection`, used
+                for direct replies.
             conn_state: Per-connection mutable state holding the
                 connection's own ``work_dir`` and unique ``conn_id``.
                 Each VS Code window owns exactly one connection, and
                 the API layer's stamping of these fields is what
                 guarantees the per-window work_dir and autocomplete
                 isolation invariants.
+            is_local: Whether the connection authenticated with the
+                local token (see :meth:`_authenticate_ws`).
         """
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
             conn_state=conn_state,
-            is_uds=isinstance(endpoint, asyncio.StreamWriter),
+            is_local=is_local,
         )
         await self._server_api.dispatch(cmd, ctx)
 
@@ -6100,7 +6085,7 @@ class RemoteAccessServer:
     def _maybe_schedule_server_reset_complete(self) -> None:
         """Schedule the post-restart broadcast iff a pending flag exists.
 
-        Called once from :meth:`_setup_server` after the WSS / UDS
+        Called once from :meth:`_setup_server` after the WSS
         listeners are bound and the watchdog tasks are armed.  The
         flag file written by :meth:`_write_server_reset_flag` in the
         previous daemon instance is CLAIMED first — atomically renamed
@@ -6748,7 +6733,7 @@ class RemoteAccessServer:
         """Reply with the raw merged ``~/.kiss/config.json`` contents.
 
         Services the ``readKissConfig`` command (routed — and gated to
-        local UDS clients — by
+        local clients — by
         :meth:`kiss.server.sorcar.ServerApi.read_kiss_config`).  The
         reply is a single direct ``{"type": "kissConfig", "config":
         {...}}`` event to the requesting *endpoint* — never broadcast
@@ -6772,7 +6757,7 @@ class RemoteAccessServer:
         """Merge the command's ``config`` keys into ``config.json``.
 
         Services the ``writeKissConfig`` command (routed — and gated
-        to local UDS clients — by
+        to local clients — by
         :meth:`kiss.server.sorcar.ServerApi.write_kiss_config`).
         Delegates to :func:`kiss.core.vscode_config.save_config`, so
         the write shares the daemon's atomic, lock-guarded merge path
@@ -6818,13 +6803,13 @@ class RemoteAccessServer:
         """Start a daemon-hosted wake-word listener for one connection.
 
         Services the ``voiceWakeStart`` command (routed — and gated to
-        local UDS clients — by
+        local clients — by
         :meth:`kiss.server.sorcar.ServerApi.voice_wake_start`).  The
         listener child process is owned by *conn_id*: its protocol
         lines stream back to the requesting *endpoint* as
         ``voiceWakeEvent`` / ``voiceWakeState`` events (see
         :mod:`kiss.server.voice_wake_control`), and the
-        :meth:`_uds_handler` disconnect cleanup stops it when the
+        :meth:`_ws_handler` disconnect cleanup stops it when the
         connection goes away.
 
         Args:
@@ -6876,9 +6861,9 @@ class RemoteAccessServer:
         """Stop *conn_id*'s daemon-hosted wake-word listener, if any.
 
         Services the ``voiceWakeStop`` command (routed — and gated to
-        local UDS clients — by
+        local clients — by
         :meth:`kiss.server.sorcar.ServerApi.voice_wake_stop`); also
-        called by the UDS disconnect cleanup, so it is a no-op when
+        called by the local-connection disconnect cleanup, so it is a no-op when
         the connection owns no listener.
 
         Args:
@@ -7283,7 +7268,7 @@ class RemoteAccessServer:
         ``<workDir>/reports/chat-<title-slug>-<chatId>.html`` (see
         :func:`_share_page_filename`).  Both clients take
         this path — the VS Code extension forwards the command over
-        UDS, the remote webapp sends it over WSS — so the page is
+        the daemon connection, the remote webapp sends it over WSS — so the page is
         built in exactly one place.  The reply is a single
         ``share_done`` JSON object sent directly to the requesting
         *endpoint* — never broadcast — with the shape::
@@ -7300,7 +7285,7 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``shareChat`` command (``chatId``,
                 ``html``, optional ``title``, ``workDir``, ``tabId``).
-            endpoint: The requesting connection (WSS or UDS).
+            endpoint: The requesting connection (local or remote).
         """
         tab_id = self._cmd_str(cmd, "tabId")
         chat_id = cmd.get("chatId", "")
@@ -7377,7 +7362,7 @@ class RemoteAccessServer:
         own fan-outs must still reach its shared page.
 
         Every receiver caps one frame — this server at
-        ``_MAX_LINE_BYTES``, the VS Code extension's UDS client at a
+        ``_MAX_LINE_BYTES``, the VS Code extension's local client at a
         smaller 32 MiB — and drops the connection on overflow, so when
         the tasks do not fit ``_SHARE_TASKS_MAX_REPLY_BYTES`` the
         OLDEST ones are left out and ``truncated`` is set — the newest
@@ -7390,7 +7375,7 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``shareChatTasks`` command (``chatId``,
                 optional ``tabId``, optional ``taskId``).
-            endpoint: The requesting connection (WSS or UDS).
+            endpoint: The requesting connection (local or remote).
         """
         tab_id = self._cmd_str(cmd, "tabId")[:_SHARE_TASKS_MAX_ID_CHARS]
         chat_id = self._cmd_str(cmd, "chatId")[:_SHARE_TASKS_MAX_ID_CHARS]
@@ -8108,7 +8093,7 @@ class RemoteAccessServer:
         spurious re-activation of the extension.
 
         The response is a single JSON object sent directly to the
-        requesting *endpoint* — a UDS writer or a WSS connection, via
+        requesting *endpoint* — a :class:`ServerConnection`, via
         :meth:`_endpoint_send` — i.e. not broadcast to other clients.
         It has the shape::
 
@@ -8433,21 +8418,17 @@ class RemoteAccessServer:
         data: str,
         admit: Callable[[], bool] | None = None,
     ) -> None:
-        """Send ``data`` to either a WSS or a UDS endpoint.
-
-        ``endpoint`` is either a :class:`ServerConnection` (WSS) or
-        an :class:`asyncio.StreamWriter` (UDS).  This helper hides
-        the protocol difference so :meth:`_handle_ready` and
-        :meth:`_uds_handler` share a single dispatch path.
+        """Send ``data`` to one client connection.
 
         Delegates to the printer's :meth:`WebPrinter._locked_send`
         (C-R1) rather than duplicating it: that path acquires the
         per-endpoint send lock — so a direct reply cannot overtake a
         broadcast event already in flight to the same client
         (``Connection.send`` waits out write backpressure BEFORE
-        queuing the frame) — and, for UDS peers, routes through
-        ``_uds_send``, whose failure handler removes a dead writer
-        from the active set so subsequent broadcasts skip it.
+        queuing the frame) — and routes through
+        :meth:`WebPrinter._timed_send`, whose failure handler removes
+        a dead peer from the active sets so subsequent broadcasts skip
+        it.
 
         Args:
             endpoint: The connection to send to.
@@ -8549,7 +8530,7 @@ class RemoteAccessServer:
         those tabs are new to every client, so all of them are replayed
         to everyone.
         Tab state is server-canonical — clients never keep a tab set
-        of their own — so the same path serves VS Code webviews (UDS)
+        of their own — so the same path serves VS Code webviews (local)
         and remote web apps (WSS) alike.
 
         Args:
@@ -9675,6 +9656,11 @@ class RemoteAccessServer:
             self._ws_server.close()
         if self._ws_loopback_server is not None:
             self._ws_loopback_server.close()
+        # Nothing can connect any more: the endpoint file must not keep
+        # advertising this daemon (a rebind publishes a fresh one).
+        local_endpoint.remove_endpoint_if_owned(
+            self._local_endpoint_file, self._local_token,
+        )
 
     async def _watchdog_ping_clients(self) -> None:
         """Ping every connected WSS client, closing unresponsive ones.
@@ -9886,21 +9872,6 @@ class RemoteAccessServer:
         # No database write may run here: the legacy side-channel stamp
         # and the orphan sweep live on VSCodeServer's background thread
         # so a locked sorcar.db never delays binding the listeners.
-
-        if not _unix_sockets_supported():
-            # CPython on Windows has no AF_UNIX, so the daemon's local
-            # channel cannot exist there: serve WSS only.  This is the
-            # expected shape of the platform, not a failure, so it is
-            # logged once at INFO without a traceback.
-            logger.info(
-                "Unix-domain sockets are unavailable on %s; the daemon "
-                "serves WebSocket clients only (no UDS at %s)",
-                sys.platform, self._uds_path,
-            )
-            self._uds_server = None
-        else:
-            await self._bind_uds()
-
         try:
             # Sign-in pages that connectors hand to the user open in the
             # streamed Browser tab, focused on every surface, while this
@@ -9908,231 +9879,28 @@ class RemoteAccessServer:
             # Inside the rollback scope: a setup that fails or is
             # cancelled unregisters it again in _close_partial_setup.
             set_browser_tab_opener(self._vscode_server.browser_tabs.open_for_user)
-            await self._setup_server_after_uds()
+            await self._bind_listeners()
         except BaseException:
             # Rollback (F4-04): a TLS/WSS/tunnel failure or a
-            # cancellation must not leave the already-bound UDS
-            # listener (or a half-bound WSS listener) live in an
-            # embedder that catches the exception.
+            # cancellation must not leave a half-bound WSS listener
+            # live in an embedder that catches the exception.
             self._close_partial_setup()
             raise
-
-    async def _bind_uds(self) -> None:
-        """Bind the Unix-domain-socket listener at ``self._uds_path``.
-
-        Any failure is logged with its traceback and leaves
-        ``self._uds_server`` as ``None``; the daemon then serves WSS
-        only and local extension clients fall back to it.  Only called
-        on platforms with ``AF_UNIX`` (see :func:`_unix_sockets_supported`).
-        """
-        try:
-            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
-            # Serialise the probe → unlink → bind sequence across
-            # processes with an exclusive sidecar file lock (C-RC3;
-            # same pattern as ``_create_ssl_context``'s ``.tls.lock``):
-            # the sequence is not atomic, so two daemons starting
-            # concurrently (e.g. a launchd respawn racing install.sh)
-            # could otherwise each pass the liveness probe and then
-            # unlink the socket the other had just bound — leaving one
-            # stranded daemon and no socket file.  The blocking
-            # acquisition runs in the executor so a sibling holding
-            # the lock never stalls this event loop.
-            lock_path = self._uds_path.with_name(
-                self._uds_path.name + ".lock",
-            )
-            with open(lock_path, "w", encoding="utf-8") as uds_lock:
-                # Bounded: a blocking ``LOCK_EX`` would wait forever
-                # behind a wedged sibling, and cancelling this
-                # coroutine does not interrupt the executor syscall.
-                await asyncio.get_running_loop().run_in_executor(
-                    None, _flock_with_deadline, uds_lock,
-                    self._uds_lock_timeout_s,
-                )
-                if self._uds_path.exists() or self._uds_path.is_symlink():
-                    await self._wait_for_uds_release()
-                    try:
-                        self._uds_path.unlink()
-                    except OSError:
-                        logger.debug(
-                            "Could not unlink stale UDS socket at %s",
-                            self._uds_path, exc_info=True,
-                        )
-                # ``cleanup_socket=False``: asyncio's own close-time
-                # cleanup (default since Python 3.13) stats the
-                # pathname and unlinks it WITHOUT the sidecar flock —
-                # the same non-atomic check-then-unlink this daemon's
-                # ``_unlink_own_uds_socket`` guards against, so it
-                # could remove a successor's freshly bound socket.
-                # All pathname cleanup goes through the flock-guarded
-                # ``_unlink_own_uds_socket`` instead.
-                self._uds_server = await asyncio.start_unix_server(
-                    self._uds_handler, path=str(self._uds_path),
-                    limit=_MAX_LINE_BYTES, cleanup_socket=False,
-                )
-                os.chmod(self._uds_path, 0o600)
-                try:
-                    self._uds_inode = os.stat(self._uds_path).st_ino
-                except OSError:
-                    self._uds_inode = None
-        except Exception:
-            logger.warning(
-                "Failed to bind UDS at %s; local extension clients "
-                "will fall back to WSS",
-                self._uds_path, exc_info=True,
-            )
-            self._uds_server = None
-
-    async def _wait_for_uds_release(self) -> None:
-        """Wait for a live predecessor daemon to release the UDS pathname.
-
-        During a daemon restart the outgoing instance can take tens of
-        seconds to shut down (tunnel cleanup; the SIGTERM failsafe only
-        forces exit after 30s), and its UDS listener stays live for
-        that whole window.  Raising immediately here left the new
-        daemon without a UDS for its entire lifetime; the VS Code
-        extension's health probe reads that as ``sock-missing`` and
-        answers with yet another daemon restart on the next window
-        activation — an endless restart churn the user sees as a
-        recurring "KISS Sorcar Server is starting ..." screen.
-
-        Polls the pathname for up to ``self._uds_owner_wait_s``
-        seconds.  Only an owner that stays live past the deadline — a
-        genuine concurrent daemon (F4-03), whose clients unlinking
-        would strand on an unreachable inode — makes this raise.
-
-        Raises:
-            OSError: When another live daemon still owns the pathname
-                after the deadline.
-        """
-        deadline = time.monotonic() + self._uds_owner_wait_s
-        logged = False
-        while await self._uds_socket_is_live():
-            if time.monotonic() >= deadline:
-                raise OSError(
-                    f"UDS socket {self._uds_path} is owned by "
-                    "another live daemon; refusing to steal it",
-                )
-            if not logged:
-                logged = True
-                logger.info(
-                    "UDS socket %s is owned by another live daemon "
-                    "(likely a predecessor still shutting down); "
-                    "waiting up to %.0fs for it to release the "
-                    "pathname…",
-                    self._uds_path, self._uds_owner_wait_s,
-                )
-            await asyncio.sleep(0.5)
-
-    async def _uds_socket_is_live(self) -> bool:
-        """Return True when a live peer accepts connections on the UDS path.
-
-        Probes the existing socket pathname before startup unlinks it
-        (F4-03) so one daemon cannot silently strand another live
-        daemon's listener.
-        """
-        if not _unix_sockets_supported():
-            return False
-        try:
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self._uds_path)),
-                timeout=1.0,
-            )
-        except (OSError, TimeoutError, ValueError):
-            return False
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            logger.debug("UDS probe close failed", exc_info=True)
-        return True
 
     def _close_partial_setup(self) -> None:
         """Tear down listeners bound by a failed/cancelled ``_setup_server``."""
         # No surfaces will ever attach to this server: sign-in pages
         # must not be sent to its Browser tab.
         set_browser_tab_opener(None)
-        if self._uds_server is not None:
-            self._uds_server.close()
-            self._uds_server = None
-            self._unlink_own_uds_socket()
+        local_endpoint.remove_endpoint_if_owned(
+            self._local_endpoint_file, self._local_token,
+        )
         if self._ws_server is not None:
             self._ws_server.close()
             self._ws_server = None
         if self._ws_loopback_server is not None:
             self._ws_loopback_server.close()
             self._ws_loopback_server = None
-
-    def _unlink_own_uds_socket(self) -> None:
-        """Unlink the UDS pathname only when it still names OUR socket.
-
-        A successor daemon may have already rebound the shared
-        pathname; blindly unlinking would strand its live listener
-        (F4-03).  The inode recorded right after our bind is the
-        ownership witness — but the witness ``stat`` and the pathname
-        ``unlink`` are two separate syscalls, so the check-then-unlink
-        pair must run under the same exclusive sidecar flock that
-        serializes the startup probe → unlink → bind sequence (C-RC3).
-        Without it, a successor holding the flock can pass its own
-        liveness probe (our listener is already closed), rebind the
-        pathname, and have this cleanup unlink its brand-new live
-        socket between our ``stat`` and our ``unlink``.
-
-        The lock is taken non-blocking and the unlink is SKIPPED when
-        it is contended: a contender is inside the startup protocol
-        and unlinks any stale pathname itself, so failing closed here
-        never leaks a stale socket file that matters — while blocking
-        could stall this (possibly event-loop) thread behind a
-        successor's live-predecessor wait.
-
-        The inode witness alone is not sufficient even under the lock:
-        the filesystem can hand a successor's fresh socket the just
-        freed inode number of ours (observed in the regression test on
-        tmpfs/ext4).  Both callers close our own listener before this
-        cleanup, so a pathname that still ACCEPTS a connection is
-        never ours — a sync liveness probe under the lock therefore
-        disambiguates inode reuse.
-        """
-        if self._uds_inode is None or not _unix_sockets_supported():
-            # No ownership witness (or no UDS on this platform at
-            # all) — fail CLOSED: never unlink a pathname a successor
-            # daemon may have rebound.
-            return
-        lock_path = self._uds_path.with_name(self._uds_path.name + ".lock")
-        try:
-            uds_lock = open(lock_path, "w", encoding="utf-8")
-        except OSError:
-            # Cannot participate in the lock protocol — fail CLOSED.
-            return
-        try:
-            if not lock_exclusive(uds_lock, blocking=False):
-                # A concurrent daemon is inside probe → unlink → bind;
-                # it owns stale-pathname cleanup for the duration.
-                return
-            try:
-                if os.stat(self._uds_path).st_ino != self._uds_inode:
-                    return
-            except OSError:
-                return
-            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            probe.settimeout(0.5)
-            try:
-                probe.connect(str(self._uds_path))
-                # A live listener answered: the pathname belongs to a
-                # successor daemon (our own listener is closed before
-                # this cleanup runs) whose socket reused our inode.
-                return
-            except OSError:
-                pass  # dead socket file — ours to remove
-            finally:
-                probe.close()
-            try:
-                self._uds_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                logger.debug("UDS unlink failed", exc_info=True)
-        finally:
-            uds_lock.close()
 
     async def _serve_wss(self, host: str) -> Any:
         """Start a WSS listener for this server on ``host:self.port``.
@@ -10158,14 +9926,18 @@ class RemoteAccessServer:
     def _wants_loopback_alias(self) -> bool:
         """Whether this server should also bind ``127.0.0.1`` explicitly.
 
-        Only a wildcard listener on a BSD-derived kernel (macOS) needs
-        it: there another process may bind the specific loopback
-        address of the same port beside our ``0.0.0.0`` socket and
-        take over every ``127.0.0.1`` connection.  Linux refuses that
-        bind while the wildcard listener exists, and a server that
-        already listens on a specific address has nothing to protect.
+        A wildcard listener on a BSD-derived kernel (macOS) needs it:
+        there another process may bind the specific loopback address of
+        the same port beside our ``0.0.0.0`` socket and take over every
+        ``127.0.0.1`` connection.  Linux refuses that bind while the
+        wildcard listener exists.  A listener on a single non-loopback
+        address (``--host 192.168.1.5``) needs it on every platform:
+        same-machine clients prove they are local by connecting from a
+        loopback address, which that listener cannot accept.
         """
-        return sys.platform == "darwin" and self.host in ("", "0.0.0.0")
+        if self.host in ("", "0.0.0.0", "::"):
+            return sys.platform == "darwin"
+        return self.host != "localhost" and not _is_loopback_ip(self.host)
 
     async def _bind_loopback_alias(self) -> bool:
         """Bind ``127.0.0.1:port`` beside the wildcard listener (macOS).
@@ -10216,9 +9988,39 @@ class RemoteAccessServer:
                 "server again",
                 self.port, self.port,
             )
+            # Local clients may have been pointed at a non-loopback
+            # address meanwhile: publish the loopback one.
+            self._write_local_endpoint_file()
 
-    async def _setup_server_after_uds(self) -> None:
-        """Continue :meth:`_setup_server` after the UDS bind."""
+    def _write_local_endpoint_file(self) -> None:
+        """Publish this daemon's URL and local token for same-machine clients.
+
+        Called once the WSS listener is bound.  ``ca`` names the PEM
+        file a local client must trust.  With auto-generated
+        certificates that is the local CA under the TLS dir; with a
+        custom ``--certfile`` it is the ``ca.pem`` beside it when one
+        exists (the layout :func:`_generate_self_signed_cert` produces),
+        else the certificate itself (a self-signed certificate is its
+        own trust anchor).
+        """
+        if self._ssl_certfile and self._ssl_keyfile:
+            sibling_ca = Path(self._ssl_certfile).parent / tls_certs.CA_CERT_FILE
+            ca_path = str(sibling_ca) if sibling_ca.is_file() else self._ssl_certfile
+        else:
+            ca_path = str(_tls_dir() / tls_certs.CA_CERT_FILE)
+        host, port = _bound_loopback(self._ws_loopback_server, self._ws_server)
+        local_endpoint.write_endpoint(
+            self._local_endpoint_file,
+            local_endpoint.LocalEndpoint(
+                url=f"wss://{host}:{port}/ws",
+                token=self._local_token,
+                ca=ca_path,
+                pid=os.getpid(),
+            ),
+        )
+
+    async def _bind_listeners(self) -> None:
+        """Bind the WSS listener(s), publish the local endpoint, start the tunnel."""
         if self._ssl_context is None:
             lan_ips = await asyncio.to_thread(_get_local_ips)
             self._ssl_context = await asyncio.to_thread(
@@ -10237,6 +10039,12 @@ class RemoteAccessServer:
         for attempt in range(_BIND_RETRY_ATTEMPTS):
             try:
                 self._ws_server = await self._serve_wss(self.host)
+                if self.port == 0:
+                    # An ephemeral port (tests, embedders): record the
+                    # one the OS picked so the URL file, the endpoint
+                    # file and the loopback alias name the real port.
+                    self.port = _bound_loopback(self._ws_server)[1]
+                    self._local_url = f"https://localhost:{self.port}"
                 break
             except OSError as exc:
                 if exc.errno not in _BIND_RETRYABLE_ERRNOS:
@@ -10276,6 +10084,13 @@ class RemoteAccessServer:
             )
             raise SystemExit(2)
         await self._bind_loopback_alias()
+        # Local clients (the VS Code extension, ``run_agent``) may
+        # connect from here on: the endpoint file is written before
+        # the tunnel wait below so they need not wait out the
+        # password/tunnel startup.  Written inline (a small file under
+        # the endpoint lock) so a cancellation of this startup cannot
+        # race a detached writer that publishes after the rollback.
+        self._write_local_endpoint_file()
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -10396,13 +10211,13 @@ class RemoteAccessServer:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         # Scheduled automations (cron) run in a background daemon
         # thread for the daemon's whole lifetime; prompt jobs are
-        # submitted back to this daemon through its own UDS socket.
-        # Only this blocking lifecycle (the real `kiss-web` daemon)
-        # owns the scheduler: `start_async()` embedders — in-process
-        # helper daemons and tests — must not fire the user's
-        # scheduled jobs.
+        # submitted back to this daemon through its own local WSS
+        # endpoint.  Only this blocking lifecycle (the real `kiss-web`
+        # daemon) owns the scheduler: `start_async()` embedders —
+        # in-process helper daemons and tests — must not fire the
+        # user's scheduled jobs.
         cron_stop = cron_agent.start_scheduler_thread(
-            sock_path=str(self._uds_path),
+            endpoint_file=str(self._local_endpoint_file),
         )
         loop = asyncio.get_running_loop()
         self._shutdown_future = loop.create_future()
@@ -10929,13 +10744,46 @@ class RemoteAccessServer:
                 return
             await self._setup_server()
 
+    async def start_private_async(self) -> None:
+        """Serve local clients only: loopback WSS on an ephemeral port.
+
+        The channel-agent launcher's in-process daemon
+        (``_kiss_web_launcher._ensure_api_server``) needs the command
+        API without any of the public daemon's duties: no tunnel, no
+        URL file, no watchdogs, no cron scheduler.  Binds
+        ``127.0.0.1:0`` (the OS picks the port), records the port in
+        :attr:`port` and publishes the endpoint file so
+        :func:`kiss.agents.sorcar.local_endpoint.connect` finds it.
+        Serialised against :meth:`stop_async` like :meth:`start_async`.
+        """
+        async with self._lifecycle_lock:
+            if self._shutdown_initiated:
+                return
+            self._loop = asyncio.get_running_loop()
+            self._printer._loop = self._loop
+            if self._ssl_context is None:
+                self._ssl_context = await asyncio.to_thread(
+                    _create_ssl_context, self._ssl_certfile, self._ssl_keyfile, [],
+                )
+            self._local_only = True
+            self.port = 0
+            try:
+                self._ws_server = await self._serve_wss("127.0.0.1")
+                self.port = _bound_loopback(self._ws_server)[1]
+                self._write_local_endpoint_file()
+            except BaseException:
+                # A cancelled or failed start must not leave a listener
+                # (or an endpoint file pointing at one) behind.
+                self._close_partial_setup()
+                raise
+
     async def _drain_tasks(
         self, tasks: set[asyncio.Task[None]], timeout: float = 2.0,
     ) -> None:
         """Join *tasks*, cancelling any that outlive *timeout*.
 
         Shutdown helper: waits up to *timeout* seconds for the given
-        asyncio tasks (in-flight UDS handlers, deferred tab-close
+        asyncio tasks (deferred tab-close
         tasks) to finish on their own — closed streams already
         unblock them — then cancels and awaits any stragglers so
         none can touch server state after shutdown completes.
@@ -10971,9 +10819,9 @@ class RemoteAccessServer:
         tunnel: embedders and tests own their server's full lifecycle
         and must not leak a background cloudflared process.
 
-        Ordering: command ingress is quiesced FIRST — the WSS/UDS
-        listeners are closed and every established UDS client stream
-        is closed (F4-02) — and only then are the in-flight agent
+        Ordering: command ingress is quiesced FIRST — the WSS
+        listeners are closed, which also closes every established
+        client connection (F4-02) — and only then are the in-flight agent
         worker threads stopped, so a surviving peer cannot launch
         fresh work after the worker sweep (F4-06).  The whole method
         is serialised against :meth:`start_async` with
@@ -11004,33 +10852,9 @@ class RemoteAccessServer:
                 except TimeoutError:
                     pass
             self._ws_loopback_server = None
-            if self._uds_server is not None:
-                self._uds_server.close()
-                try:
-                    await asyncio.wait_for(
-                        self._uds_server.wait_closed(), timeout=2,
-                    )
-                except TimeoutError:
-                    pass
-                self._uds_server = None
-                self._unlink_own_uds_socket()
-            # asyncio.Server.close() does not close streams that were
-            # already accepted: close every established UDS client so
-            # its handler unblocks from readline() and exits (F4-02).
-            for writer in list(self._printer._uds_writers):
-                try:
-                    writer.close()
-                except Exception:
-                    logger.debug(
-                        "UDS client close on shutdown failed",
-                        exc_info=True,
-                    )
-            # DRAIN in-flight UDS handlers: closing writers merely
-            # unblocks readline(); the handler coroutines (and their
-            # cleanup `finally` blocks) may still be running.  Join
-            # them so no coroutine touches server state after
-            # stop_async returns; cancel stragglers.
-            await self._drain_tasks(set(self._uds_handler_tasks))
+            local_endpoint.remove_endpoint_if_owned(
+                self._local_endpoint_file, self._local_token,
+            )
             # Reap daemon-hosted wake-word listeners: their owning
             # connections are gone (or going), and a leaked child
             # would keep the microphone open past shutdown.

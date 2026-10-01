@@ -14,7 +14,7 @@
   the child lands in the parent's chat as its sub-agent and that its
   spend is charged to the parent.
 * ``getTaskUpdate`` is exercised over a live WSS connection and over
-  the UDS transport of a real :class:`RemoteAccessServer`.
+  the local channel of a real :class:`RemoteAccessServer`.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ from kiss.tests.agents.sorcar.local_model_server import (
     serve,
     tool_call_body,
 )
-from kiss.tests.conftest import posix_only, requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     CapturePrinter,
@@ -596,51 +596,46 @@ class TestGetTaskUpdateOverWss(IsolatedAsyncioTestCase):
             await ws.close()
 
 
-@posix_only("UDS transport")
-@requires_unix_sockets
-class TestGetTaskUpdateOverUds(unittest.TestCase):
-    """A UDS-delivered ``getTaskUpdate`` gets a direct ``taskUpdate`` reply.
+class TestGetTaskUpdateOverLocalChannel(unittest.TestCase):
+    """A local-channel ``getTaskUpdate`` gets a direct ``taskUpdate`` reply.
 
-    Editor-tab chat panels of the VS Code extension (UDS clients) poll
-    ``getTaskUpdate`` to fill the secondary sidebar's Task Info view,
-    so the command is served on both transports and the reply must
-    come back on the requesting UDS connection.
+    Editor-tab chat panels of the VS Code extension (local WSS clients)
+    poll ``getTaskUpdate`` to fill the secondary sidebar's Task Info
+    view, so the command is served to local and remote clients alike and
+    the reply must come back on the requesting connection.
     """
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            host="127.0.0.1",
+            port=0,
+            work_dir=self.tmp.name,
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
+            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
         )
-        self.server._printer._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(self.server._uds_handler, path=self.sock_path),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=15)
 
     def tearDown(self) -> None:
-        async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
-
         concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)], timeout=5,
+            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
+            timeout=10,
         )
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
         self.tmp.cleanup()
 
-    def test_uds_get_task_update_gets_direct_reply(self) -> None:
+    def test_local_get_task_update_gets_direct_reply(self) -> None:
         """A chat editor panel's poll under an idle tab id is answered on its connection."""
 
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(self.sock_path)
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
                     json.dumps({

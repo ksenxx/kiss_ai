@@ -5,7 +5,7 @@
 """End-to-end tests for :func:`kiss.server.sorcar.run`.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
-temporary Unix-domain socket and drive the new synchronous
+loopback local endpoint and drive the new synchronous
 ``kiss.server.sorcar.run`` API against it.  The only replaced boundary
 is the LLM itself: like the other task-runner suites in this
 directory, ``SorcarAgent``'s parent ``run`` is swapped for a stub so
@@ -21,7 +21,6 @@ import inspect
 import json
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
 import textwrap
@@ -31,14 +30,12 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
 
 
 def _task_chat_id(task_id: str) -> str:
@@ -66,11 +63,11 @@ def _init_repo(repo: str) -> None:
 
 
 class SorcarRunApiTest(unittest.TestCase):
-    """Drive ``kiss.server.sorcar.run`` against a real daemon over UDS."""
+    """Drive ``kiss.server.sorcar.run`` against a real daemon over its local endpoint."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="sorcar_run_api_")
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
@@ -98,16 +95,11 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
@@ -125,15 +117,13 @@ class SorcarRunApiTest(unittest.TestCase):
         agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            ws_server = self.server._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                await ws_server.wait_closed()
+            local_endpoint.remove_endpoint_if_owned(
+                self.server._local_endpoint_file, self.server._local_token,
+            )
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -202,7 +192,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "say hi",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -245,7 +235,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "explode please",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
@@ -295,7 +285,7 @@ class SorcarRunApiTest(unittest.TestCase):
         first = sorcar.run(
             "remember the magic word xyzzy",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert first.success is True
@@ -304,7 +294,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "what was the magic word?",
             work_dir=self.repo,
             chat_id=first.chat_id,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert second.success is True
@@ -321,7 +311,7 @@ class SorcarRunApiTest(unittest.TestCase):
         extra_cmd: dict[str, Any] | None = None,
         events_out: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """Drive one raw ``run`` command over the UDS and wait for the end.
+        """Drive one raw ``run`` command over the local endpoint and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so malformed
         ``toolsFile`` payloads (or other malformed command fields via
@@ -341,10 +331,8 @@ class SorcarRunApiTest(unittest.TestCase):
             task produced none.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(60)
+        ws = local_endpoint.connect(Path(self.endpoint_file), open_timeout=60)
         try:
-            sock.connect(self.sock_path)
             cmd = {
                 "type": "run",
                 "prompt": "raw client task",
@@ -355,12 +343,11 @@ class SorcarRunApiTest(unittest.TestCase):
                 "toolsFile": tools_file,
                 **(extra_cmd or {}),
             }
-            sock.sendall(json.dumps(cmd).encode() + b"\n")
-            reader = sock.makefile("rb")
+            ws.send(json.dumps(cmd))
             started = False
             result_event: dict[str, Any] | None = None
             while True:
-                event = json.loads(reader.readline())
+                event = json.loads(ws.recv(timeout=60))
                 if events_out is not None and event.get("tabId") == tab_id:
                     events_out.append(event)
                 if event.get("type") == "result":
@@ -378,7 +365,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 elif started:
                     return result_event
         finally:
-            sock.close()
+            ws.close()
 
     def _write_tools_file(self, name: str, content: str) -> str:
         """Write a tools module under the test tmpdir and return its path.
@@ -470,7 +457,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "use my tools",
             work_dir=self.repo,
             tools=tools_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -552,7 +539,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "use the selected tools",
             work_dir=self.repo,
             tools=tools_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -606,7 +593,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "greet bob",
                 work_dir=self.repo,
                 tools=Path("rel_tools.py"),
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=60,
             )
         finally:
@@ -645,7 +632,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "use the tools file",
             work_dir=self.repo,
             tools=tools_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -802,7 +789,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "use the broken tools file",
             work_dir=self.repo,
             tools=tools_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
@@ -866,7 +853,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "still alive?",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -874,11 +861,11 @@ class SorcarRunApiTest(unittest.TestCase):
     def test_invalid_tools_file_raises_value_error(self) -> None:
         """Invalid ``tools`` values are rejected before connecting.
 
-        ``sock_path`` points at a nonexistent socket, so reaching the
+        ``endpoint_file`` names a nonexistent file, so reaching the
         connect stage would raise ``ConnectionError`` instead of the
         expected ``ValueError`` — proving validation is pre-connect.
         """
-        missing_sock = str(Path(self.tmpdir) / "nowhere.sock")
+        missing_endpoint = str(Path(self.tmpdir) / "nowhere.json")
 
         def a_tool(x: str) -> str:
             """Echo.
@@ -901,7 +888,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 sorcar.run(
                     "hello",
                     tools=tools,
-                    sock_path=missing_sock,
+                    endpoint_file=missing_endpoint,
                     timeout=5,
                 )
 
@@ -937,7 +924,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "apply overrides",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
             max_budget=2.5,
             model_config={"base_url": "http://localhost:9999/v1"},
@@ -1037,7 +1024,7 @@ class SorcarRunApiTest(unittest.TestCase):
                     work_dir=self.repo,
                     use_worktree=False,
                     classify_tasks=override,
-                    sock_path=self.sock_path,
+                    endpoint_file=self.endpoint_file,
                     timeout=60,
                 )
                 assert result.success is True
@@ -1046,7 +1033,7 @@ class SorcarRunApiTest(unittest.TestCase):
                 "task without a classification override",
                 work_dir=self.repo,
                 use_worktree=False,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=60,
             )
             assert result.success is True
@@ -1086,7 +1073,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "run under the persisted web-tools setting",
             work_dir=self.repo,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1100,7 +1087,7 @@ class SorcarRunApiTest(unittest.TestCase):
             work_dir=self.repo,
             use_worktree=False,
             use_web_tools=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1143,7 +1130,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "run under the persisted memory-off setting",
             work_dir=self.repo,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1158,7 +1145,7 @@ class SorcarRunApiTest(unittest.TestCase):
             work_dir=self.repo,
             use_worktree=False,
             use_memory=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1203,7 +1190,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "say hi",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
             system_prompt=custom,
         )
@@ -1246,7 +1233,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "say hi",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1383,7 +1370,7 @@ class SorcarRunApiTest(unittest.TestCase):
         result = sorcar.run(
             "say hi",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1451,7 +1438,7 @@ class SorcarRunApiTest(unittest.TestCase):
             "say hi",
             work_dir=scratch,
             scope_work_dir=workspace,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1510,7 +1497,7 @@ class SorcarRunApiTest(unittest.TestCase):
             extension_agent_path=str(agent_script),
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1566,7 +1553,7 @@ class SorcarRunApiTest(unittest.TestCase):
             extension_agent_path=str(agent_script),
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1617,7 +1604,7 @@ class SorcarRunApiTest(unittest.TestCase):
             extension_agent_path=str(agent_script),
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -1629,15 +1616,15 @@ class SorcarRunApiTest(unittest.TestCase):
         )
 
     def test_no_daemon_raises_connection_error(self) -> None:
-        """A missing daemon socket raises a helpful ConnectionError."""
-        missing = str(Path(self.tmpdir) / "nowhere.sock")
+        """A missing daemon endpoint file raises a helpful ConnectionError."""
+        missing = str(Path(self.tmpdir) / "nowhere.json")
         with self.assertRaises(ConnectionError):
-            sorcar.run("hello", sock_path=missing, timeout=5)
+            sorcar.run("hello", endpoint_file=missing, timeout=5)
 
     def test_blank_prompt_raises_value_error(self) -> None:
         """Blank prompts are rejected before any connection is made."""
         with self.assertRaises(ValueError):
-            sorcar.run("   ", sock_path=self.sock_path, timeout=5)
+            sorcar.run("   ", endpoint_file=self.endpoint_file, timeout=5)
 
     def _stub_dispatch_run(self) -> None:
         """Install a parent-run stub that spends a fixed, known amount."""
@@ -1684,13 +1671,13 @@ class SorcarRunApiTest(unittest.TestCase):
         # name must pass the runner's availability guard).
         script = Path(self.tmpdir) / "noop_dispatch_agent.py"
         script.write_text("# intentionally empty agent script\n")
-        saved_sock = cron_agent._daemon_sock_path
-        cron_agent._daemon_sock_path = self.sock_path
+        saved_endpoint = cron_agent._daemon_endpoint_file
+        cron_agent._daemon_endpoint_file = self.endpoint_file
         try:
             tool = make_run_agent_tool(self.repo, parent)
             return tool("do nothing", str(script))
         finally:
-            cron_agent._daemon_sock_path = saved_sock
+            cron_agent._daemon_endpoint_file = saved_endpoint
 
     def test_run_agent_tool_attributes_subtask_cost_to_parent(self) -> None:
         """A dispatched sub-task's spend folds into the calling agent.

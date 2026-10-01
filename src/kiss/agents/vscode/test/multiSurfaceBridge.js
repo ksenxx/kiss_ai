@@ -6,17 +6,19 @@
 'use strict';
 
 // Test helper: host several REAL chat webviews (media/main.js under
-// jsdom), each connected to a running kiss daemon over its Unix
-// socket, and expose them to a driving process over stdin/stdout.
+// jsdom), each connected to a running kiss daemon over its local WSS
+// endpoint, and expose them to a driving process over stdin/stdout.
 //
 // Every webview is one "surface" — a VS Code sidebar view, a VS Code
 // editor-tab panel, or a browser tab of the remote web app — and each
 // gets its OWN daemon connection, exactly like production (the
-// extension host forwards webview commands verbatim over the UDS; the
-// remote page's acquireVsCodeApi shim posts them over its WebSocket).
-// Everything a webview posts is written to its socket as one JSON
-// line; every event line the daemon writes is dispatched to the
-// webview as a `message` event.
+// extension host forwards webview commands verbatim over its local
+// connection; the remote page's acquireVsCodeApi shim posts them over
+// its WebSocket).  The connection is the extension's own `WsClient`
+// (out/wsClient.js) authenticated with the token from the endpoint
+// file named on the command line, like AgentClient.ts.  Everything a
+// webview posts is sent as one JSON frame; every event frame the
+// daemon sends is dispatched to the webview as a `message` event.
 //
 // Protocol (one JSON object per line):
 //   in : {op:'open', name, bodyAttrs, state}   -> out {op:'opened', name}
@@ -53,16 +55,32 @@
 // running/done flags) taken from the state it persists via setState.
 
 const fs = require('fs');
-const net = require('net');
 const path = require('path');
 const readline = require('readline');
 const {JSDOM, VirtualConsole} = require('jsdom');
+const {WsClient} = require(path.join(__dirname, '..', 'out', 'wsClient.js'));
 
 const MEDIA = path.join(__dirname, '..', 'media');
-const SOCK_PATH = process.argv[2];
-if (!SOCK_PATH) {
-  process.stderr.write('usage: node multiSurfaceBridge.js <uds-path>\n');
+const ENDPOINT_FILE = process.argv[2];
+if (!ENDPOINT_FILE) {
+  process.stderr.write(
+    'usage: node multiSurfaceBridge.js <sorcar-local.json>\n',
+  );
   process.exit(2);
+}
+const CONNECT_TIMEOUT_MS = 10000;
+
+// The daemon's endpoint file (`kiss.agents.sorcar.local_endpoint`):
+// WSS URL, per-start local token and the CA to trust.  Read per
+// connection, as the extension does, so a restarted daemon's fresh
+// token is picked up by `reconnect`.
+function readEndpoint() {
+  const rec = JSON.parse(fs.readFileSync(ENDPOINT_FILE, 'utf8'));
+  return {
+    url: rec.url,
+    token: rec.token,
+    ca: rec.ca ? fs.readFileSync(rec.ca, 'utf8') : undefined,
+  };
 }
 
 const surfaces = new Map();
@@ -148,40 +166,53 @@ function makeWebview(bodyAttrs, initialState, onPost, errors) {
 }
 
 // One daemon connection for `surface`: the webview's posts go out as
-// JSON lines, the daemon's event lines come back as `message` events.
+// JSON frames once the local token is accepted, the daemon's event
+// frames come back as `message` events.
 function connectSocket(surface, onConnect) {
-  const socket = net.createConnection(SOCK_PATH);
+  const endpoint = readEndpoint();
+  const socket = new WsClient({
+    url: endpoint.url,
+    ca: endpoint.ca,
+    connectTimeoutMs: CONNECT_TIMEOUT_MS,
+  });
   const pending = [];
-  let connected = false;
-  socket.on('connect', () => {
-    connected = true;
-    pending.splice(0).forEach(line => socket.write(line));
-    onConnect();
+  let authenticated = false;
+  socket.on('open', () => {
+    socket.send(JSON.stringify({type: 'auth', token: endpoint.token}));
   });
   surface.socket = socket;
   surface.post = msg => {
-    const line = JSON.stringify(msg) + '\n';
-    if (connected) socket.write(line);
+    const line = JSON.stringify(msg);
+    if (authenticated) socket.send(line);
     else pending.push(line);
   };
   // What the webview posted before this socket existed (main.js sends
   // `ready` while it is still being evaluated).
   surface.queued.splice(0).forEach(surface.post);
-  const rl = readline.createInterface({input: socket});
-  rl.on('line', line => {
-    if (!line.trim()) return;
+  socket.on('message', text => {
     let ev;
     try {
-      ev = JSON.parse(line);
+      ev = JSON.parse(text);
     } catch (_e) {
       return;
     }
+    if (!authenticated) {
+      if (ev.type === 'auth_ok' && ev.local === true) {
+        authenticated = true;
+        pending.splice(0).forEach(line => socket.send(line));
+        onConnect();
+      } else {
+        surface.errors.push('auth: ' + JSON.stringify(ev));
+      }
+      return;
+    }
     // A held surface (a slow client: a phone tab in the background)
-    // keeps the daemon's lines until `release` delivers them in order.
+    // keeps the daemon's frames until `release` delivers them in order.
     if (surface.held) surface.held.push(ev);
     else deliver(surface, ev);
   });
   socket.on('error', e => surface.errors.push('socket: ' + String(e)));
+  socket.connect();
 }
 
 function deliver(surface, ev) {

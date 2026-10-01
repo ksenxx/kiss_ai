@@ -29,7 +29,8 @@ from kiss.server import tricks
 from kiss.server.commands import _CommandsMixin
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 
 _BUNDLED = "## Trick\n\nBundled promptlet one.\n\n## Trick\n\nBundled two.\n"
 
@@ -281,37 +282,32 @@ class TestAddTrickCommand(_TricksHome):
         self.assertNotIn("Blocked.", resync["tricks"])
 
 
-@requires_unix_sockets
-class TestAddTrickOverUds(_TricksHome):
-    """``addTrick`` travels the real transport: UDS → catalog → handler."""
+class TestAddTrickOverLocalEndpoint(_TricksHome):
+    """``addTrick`` travels the real transport: local WSS → catalog → handler."""
 
     def setUp(self) -> None:
         super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
+        self.endpoint_file = os.path.join(self.tmp.name, "sorcar-test-local.json")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            local_endpoint_file=self.endpoint_file,
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
         )
-        self.server._printer._loop = self.loop
-        # ``forward`` runs the backend handler on the loop's executor.
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
     def tearDown(self) -> None:
         async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            ws_server = self.server._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                await ws_server.wait_closed()
 
         concurrent.futures.wait(
             [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)],
@@ -327,9 +323,7 @@ class TestAddTrickOverUds(_TricksHome):
         self, cmd: dict[str, Any], want_type: str
     ) -> dict[str, Any]:
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.endpoint_file)
             try:
                 writer.write(json.dumps(cmd).encode() + b"\n")
                 await writer.drain()

@@ -26,14 +26,14 @@ second time from the child's totals, and spend banked on the child
 after its last usage event must still be announced and folded.
 
 The tests drive the real ``daemon_client.run`` and ``run_agent`` tool
-against a UNIX-socket daemon stand-in that streams a scripted event
+against a local-WSS daemon stand-in that streams a scripted event
 sequence, with a real ``SorcarAgent`` as the calling agent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import socket
 import tempfile
 import threading
 import time
@@ -41,20 +41,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import cron_agent, daemon_client
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.task_runner import inject_keyboard_interrupt
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets  # the Sorcar daemon speaks over a UDS
+from kiss.tests.local_ws import fake_daemon
 
 
 @pytest.fixture(autouse=True)
-def _standalone_daemon_socket(monkeypatch: pytest.MonkeyPatch):
-    """Keep a daemon socket recorded by another test from diverting dispatch."""
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
+def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
+    """Keep a daemon endpoint recorded by another test from diverting dispatch."""
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     yield
 
 
@@ -76,54 +76,62 @@ def _result(cost: str, tokens: int, steps: int, success: bool) -> dict[str, Any]
 
 
 class _ScriptedDaemon:
-    """A UDS daemon stand-in that streams *events* for the client's tab.
+    """A local-WSS daemon stand-in that streams *events* for the client's tab.
 
-    After the ``run`` command it sends ``status running=true``, then
-    every scripted event (stamped with the client's tab id), then
+    Served by :func:`fake_daemon` on an event loop of its own thread, so
+    the synchronous ``daemon_client.run`` under test can block the test
+    thread.  After the ``run`` command it sends ``status running=true``,
+    then every scripted event (stamped with the client's tab id), then
     ends as *end* says: ``"finish"`` sends ``status running=false``,
-    ``"hold"`` keeps the connection open (recording every later
-    client command), ``"drop"`` closes the connection.
+    ``"hold"`` keeps the connection open (recording every later client
+    command), ``"drop"`` closes the connection.
     """
 
     def __init__(self, events: list[dict[str, Any]], end: str) -> None:
-        """Start listening on a fresh socket path."""
-        self.sock_path = (
-            Path(tempfile.mkdtemp(prefix="kiss_spend_")) / "daemon.sock"
-        )
+        """Start serving; returns once the endpoint file is written."""
+        self.tmp = Path(tempfile.mkdtemp(prefix="kiss_spend_"))
+        self.endpoint_file = self.tmp / "sorcar-local.json"
         self.events = events
         self.end = end
         self.commands: list[dict[str, Any]] = []
         self.sent_all = threading.Event()
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._ready = threading.Event()
+        self._loop = asyncio.new_event_loop()
+        self._closed = asyncio.Event()
+        self._thread = threading.Thread(
+            target=self._loop.run_until_complete, args=(self._serve(),), daemon=True,
+        )
         self._thread.start()
+        assert self._ready.wait(10), "the scripted daemon never came up"
 
-    def _serve(self) -> None:
-        """Serve one client connection."""
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
+    async def _serve(self) -> None:
+        """Keep the fake daemon up until :meth:`close`."""
+        async with fake_daemon(self.tmp, self._handle, endpoint_file=self.endpoint_file):
+            self._ready.set()
+            await self._closed.wait()
+
+    async def _handle(self, ws: ServerConnection) -> None:
+        """Serve one authenticated client connection."""
+        tab_id = json.loads(await ws.recv())["tabId"]
+        stream = [{"type": "status", "running": True}, *self.events]
+        if self.end == "finish":
+            stream.append({"type": "status", "running": False})
+        for event in stream:
+            await ws.send(json.dumps({**event, "tabId": tab_id}))
+        self.sent_all.set()
+        if self.end == "drop":
             return
-        with conn:
-            reader = conn.makefile("rb")
-            tab_id = json.loads(reader.readline())["tabId"]
-            stream = [{"type": "status", "running": True}, *self.events]
-            if self.end == "finish":
-                stream.append({"type": "status", "running": False})
-            for event in stream:
-                conn.sendall(json.dumps({**event, "tabId": tab_id}).encode() + b"\n")
-            self.sent_all.set()
-            if self.end == "drop":
-                return
-            for line in reader:
+        try:
+            async for line in ws:
                 self.commands.append(json.loads(line))
+        except ConnectionClosed:
+            pass
 
     def close(self) -> None:
-        """Stop listening."""
-        self._srv.close()
-        self._thread.join(timeout=5)
+        """Stop serving and close every connection."""
+        self._loop.call_soon_threadsafe(self._closed.set)
+        self._thread.join(timeout=10)
+        self._loop.close()
 
 
 def test_post_result_usage_is_part_of_the_task_result() -> None:
@@ -134,7 +142,7 @@ def test_post_result_usage_is_part_of_the_task_result() -> None:
         _usage("$0.2827", 54512, 4),  # the classifier fold
     ], end="finish")
     try:
-        result = daemon_client.run("child", sock_path=daemon.sock_path, timeout=30)
+        result = daemon_client.run("child", endpoint_file=daemon.endpoint_file, timeout=30)
     finally:
         daemon.close()
     assert (result.cost, result.tokens, result.steps) == (0.2827, 54512, 4)
@@ -150,7 +158,7 @@ def test_run_agent_folds_post_result_spend_into_the_caller(
         _result("$0.2872", 61859, 3, success=True),
         _usage("$0.3039", 63139, 4),
     ], end="finish")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     parent = SorcarAgent("spend-parent")
@@ -196,7 +204,7 @@ def test_interrupted_wait_reports_the_spend_seen_so_far() -> None:
     try:
         exc = _interrupt_blocked_dispatch(
             daemon,
-            lambda: daemon_client.run("child", sock_path=daemon.sock_path, timeout=60),
+            lambda: daemon_client.run("child", endpoint_file=daemon.endpoint_file, timeout=60),
         )
     finally:
         daemon.close()
@@ -211,7 +219,7 @@ def test_stopped_caller_is_still_charged_the_childs_spend(
 ) -> None:
     """A caller stopped mid-dispatch keeps the stopped child's spend."""
     daemon = _ScriptedDaemon([_usage("$56.4700", 700000, 120)], end="hold")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     parent = SorcarAgent("stopped-parent")
@@ -236,7 +244,7 @@ def test_interrupt_before_any_spend_charges_nothing(
 ) -> None:
     """With no spend reported yet, the stopped caller is charged nothing."""
     daemon = _ScriptedDaemon([], end="hold")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     parent = SorcarAgent("idle-parent")
@@ -257,7 +265,7 @@ def test_dropped_connection_charges_the_spend_seen_so_far(
 ) -> None:
     """A daemon that dies mid-dispatch still leaves the child's spend charged."""
     daemon = _ScriptedDaemon([_usage("$0.5000", 1000, 2)], end="drop")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     parent = SorcarAgent("dropped-parent")
@@ -289,7 +297,7 @@ def _fold_into(
 ) -> None:
     """Dispatch a child whose daemon streams *stream*; fold it into *parent*."""
     daemon = _ScriptedDaemon(stream, end="finish")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:

@@ -5,11 +5,11 @@
 """FINDINGS-4 regression tests for web_server.py.
 
 End-to-end tests against a real :class:`RemoteAccessServer` with real
-UDS connections (no mocks):
+local connections (no mocks):
 
-- F4-02: ``stop_async()`` must close established UDS client streams,
-  and (residual) JOIN the in-flight handler coroutines so none touch
-  server state after shutdown returns.
+- F4-02: ``stop_async()`` must close established local client
+  connections, and (residual) JOIN the in-flight handler coroutines so
+  none touch server state after shutdown returns.
 - F4-06: ``_handle_submit`` must refuse new tasks once shutdown began.
 - F4-10: concurrent self-signed TLS generation publishes a matched
   cert/key pair.
@@ -30,7 +30,8 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import posix_only, requires_unix_sockets
+from kiss.tests.conftest import posix_only
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -58,14 +59,13 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -76,21 +76,18 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect(
-        self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(str(self.uds_path))
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        return await open_local_connection(self.server)
 
     @staticmethod
-    async def _send(writer: asyncio.StreamWriter, cmd: dict) -> None:
+    async def _send(writer: LocalWriter, cmd: dict) -> None:
         writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
         await writer.drain()
 
-    @requires_unix_sockets
-    async def test_f402_stop_async_closes_established_uds_clients(
+    async def test_f402_stop_async_closes_established_local_clients(
         self,
     ) -> None:
-        """stop_async must disconnect already-accepted UDS streams."""
+        """stop_async must disconnect already-accepted local connections."""
         reader, writer = await self._connect()
         await self._send(writer, {"type": "activeTasksQuery"})
         line = await asyncio.wait_for(reader.readline(), timeout=3)
@@ -106,30 +103,38 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
                 break
         writer.close()
 
-    @requires_unix_sockets
-    async def test_f4_stop_async_drains_uds_handlers(self) -> None:
-        """stop_async must JOIN in-flight UDS handler coroutines.
+    async def test_f4_stop_async_drains_local_handlers(self) -> None:
+        """stop_async must JOIN in-flight local handler coroutines.
 
-        Closing the client stream merely unblocks the handler's
-        readline(); without a drain the handler (and its cleanup
-        ``finally``) may still be running — touching server state —
-        after stop_async returns.
+        Closing the listener merely unblocks the handler's receive
+        loop; without a join the handler (and its cleanup ``finally``,
+        which deregisters the peer) may still be running — touching
+        server state — after stop_async returns.  The handler's
+        ``finally`` is the only place a local client is removed from
+        the printer, so an empty registry after ``stop_async`` proves
+        every handler ran to completion.
         """
         _reader, writer = await self._connect()
-        await self._send(writer, {"type": "activeTasksQuery"})
-        await asyncio.sleep(0.15)
-        handlers = set(self.server._uds_handler_tasks)
-        self.assertTrue(handlers, "UDS handler task was not tracked")
+        await self._send(writer, {"type": "stop", "tabId": "f4-drain-tab"})
+        registered = False
+        for _ in range(100):
+            with self.server._printer._ws_lock:
+                registered = bool(self.server._printer._local_tab_sets)
+            if registered:
+                break
+            await asyncio.sleep(0.01)
+        self.assertTrue(self.server._printer._local_clients, "local client was not tracked")
+        self.assertTrue(registered, "local tab interest was not recorded")
 
         await self.server.stop_async()
 
-        for task in handlers:
-            self.assertTrue(
-                task.done(),
-                "a UDS handler coroutine was still running after "
+        with self.server._printer._ws_lock:
+            self.assertFalse(
+                self.server._printer._local_clients,
+                "a local handler coroutine was still running after "
                 "stop_async returned",
             )
-        self.assertFalse(self.server._uds_handler_tasks)
+            self.assertFalse(self.server._printer._local_tab_sets)
         writer.close()
 
     async def test_f406_submit_refused_after_shutdown_started(self) -> None:
@@ -255,7 +260,7 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         srv = RemoteAccessServer(
             host="127.0.0.1", port=0,
             url_file=Path(self.tmpdir) / "unused-url.json",
-            uds_path=Path(self.tmpdir) / "unused.sock",
+            local_endpoint_file=Path(self.tmpdir) / "unused-local.json",
         )
         # No running loop: the handler must fall back to raising
         # KeyboardInterrupt (previously SIGHUP returned silently,

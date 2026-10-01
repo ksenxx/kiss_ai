@@ -331,7 +331,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
         """
         ip = self._require_lan_ip()
         api = self._server._server_api
-        results: list[bool] = []
+        results: list[str | None] = []
 
         async def handshake(ws: Any) -> None:
             results.append(await api.authenticate(ws))
@@ -352,7 +352,7 @@ class TestEmptyPasswordLanBlock(IsolatedAsyncioTestCase):
                     websockets.exceptions.ConnectionClosed,
                 ):
                     await asyncio.wait_for(ws.recv(), timeout=5)
-        self.assertEqual(results, [False])
+        self.assertEqual(results, [None])
 
     async def test_watchdog_kills_live_tunnel_when_password_cleared(
         self,

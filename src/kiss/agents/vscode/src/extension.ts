@@ -18,7 +18,7 @@ import {
   promptApiKeysNow,
 } from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
-import {kissHomeDir, sorcarSockPath} from './userAssets';
+import {kissHomeDir, sorcarEndpointPath} from './userAssets';
 import {
   HISTORY_PANEL_TAB_ID,
   historyPanelBodyAttrs,
@@ -777,7 +777,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   const markerPath = path.join(kissHomeDir(), '.extension-updated');
-  const sockPath = sorcarSockPath();
+  const endpointPath = sorcarEndpointPath();
 
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
@@ -802,7 +802,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const RELOAD_SETTLE_INTERVAL_MS = 500;
-  const RELOAD_SOCKET_GRACE_MS = 3_000;
+  const RELOAD_DAEMON_GRACE_MS = 3_000;
   const RELOAD_SETTLE_TIMEOUT_MS = 15_000;
   const triggerReload = () => {
     if (reloadTriggered || settleTimer) return;
@@ -811,9 +811,9 @@ export function activate(context: vscode.ExtensionContext): void {
     let codeReadySince = -1;
     settleTimer = setInterval(() => {
       waited += RELOAD_SETTLE_INTERVAL_MS;
-      const {codeReady, socketUp, size} = isReloadReady(
+      const {codeReady, daemonUp, size} = isReloadReady(
         extJsPath,
-        sockPath,
+        endpointPath,
         prevSize,
       );
       prevSize = size;
@@ -823,7 +823,7 @@ export function activate(context: vscode.ExtensionContext): void {
       else if (codeReadySince < 0) codeReadySince = waited;
       const codeStableFor = codeReadySince < 0 ? 0 : waited - codeReadySince;
       if (
-        (codeReady && (socketUp || codeStableFor >= RELOAD_SOCKET_GRACE_MS)) ||
+        (codeReady && (daemonUp || codeStableFor >= RELOAD_DAEMON_GRACE_MS)) ||
         waited >= RELOAD_SETTLE_TIMEOUT_MS
       ) {
         doReload();

@@ -6,15 +6,15 @@
 
 The daemon owns the one submit path: the remote webapp sends its
 webview's ``submit`` over WSS, the VS Code extension host forwards its
-webview's ``submit`` over the Unix socket, and ``_handle_submit``
+webview's ``submit`` over the local WSS endpoint, and ``_handle_submit``
 classifies both.  A prompt that is nothing but the path of an existing
 regular file is a request to open that file: the submitting connection
 gets ``promptOpened`` and then the file — as ``openResolvedFile`` (the
 resolved path, which the extension host opens in a real editor tab) for
-a UDS client, as ``fileContent`` for a browser — and no task starts.
+a local client, as ``fileContent`` for a browser — and no task starts.
 
-These tests drive a real ``RemoteAccessServer`` over its UDS and over a
-real WSS connection and assert the daemon's reply frames.  No test
+These tests drive a real ``RemoteAccessServer`` over its local WSS
+endpoint and over a remote WSS connection and assert the daemon's reply frames.  No test
 makes a paid LLM call: the prompts that must still start a task use a
 model name absent from ``get_available_models()``, so the worker
 returns at ``task_runner``'s "No model available" guard.
@@ -29,6 +29,7 @@ from typing import Any
 from websockets.asyncio.client import connect
 
 from kiss.server import agent_state
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_server_liveness_and_run_refusals import (
     _UNAVAILABLE_MODEL,
     _no_verify_ssl,
@@ -60,12 +61,12 @@ def _is_open_reply_or_task_end(msg: dict[str, Any], tab_id: str) -> bool:
     )
 
 
-class TestPathOnlySubmitOverUds(_ServerHarness):
-    """A VS Code window's ``submit`` (UDS) is answered ``openResolvedFile``."""
+class TestPathOnlySubmitOverLocal(_ServerHarness):
+    """A VS Code window's ``submit`` (local) is answered ``openResolvedFile``."""
 
     async def _submit(
         self,
-        writer: asyncio.StreamWriter,
+        writer: LocalWriter,
         prompt: str,
         tab_id: str,
         work_dir: str = "",
@@ -73,7 +74,7 @@ class TestPathOnlySubmitOverUds(_ServerHarness):
         await self._send(writer, _submit_cmd(prompt, tab_id, work_dir))
 
     async def _frames_after_submit(
-        self, reader: asyncio.StreamReader, tab_id: str,
+        self, reader: LocalReader, tab_id: str,
     ) -> list[dict[str, Any]]:
         """Frames up to the file reply or the task's end."""
         return await self._collect_frames(
@@ -107,7 +108,7 @@ class TestPathOnlySubmitOverUds(_ServerHarness):
         )
         self.assertFalse(
             [f for f in frames if f.get("type") == "fileContent"],
-            f"a UDS client must never get a browser fileContent: {frames}",
+            f"a local client must never get a browser fileContent: {frames}",
         )
         self.assertFalse(
             [f for f in frames if f.get("type") == "status"],

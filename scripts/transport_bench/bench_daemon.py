@@ -6,8 +6,9 @@
 
 Starts a :class:`kiss.server.web_server.RemoteAccessServer` inside an
 isolated ``KISS_HOME`` (so the developer's ``~/.kiss`` is never touched)
-serving BOTH transports — the Unix-domain socket and the TLS WebSocket —
-exactly as production does, then obeys one-line commands on stdin:
+serving its TLS WebSocket exactly as production does (the local
+endpoint file with the per-start token lands in that ``KISS_HOME``),
+then obeys one-line commands on stdin:
 
 ``burst <n> <payload_bytes> <gap_us>``
     Broadcast *n* global ``bench_event`` events of about *payload_bytes*
@@ -26,8 +27,8 @@ Every broadcast event additionally carries ``t0`` — the daemon's
 can compute one-way delivery latency (``CLOCK_MONOTONIC`` is shared by
 all processes on a Linux host).
 
-Prints ``READY <pid> <port> <uds_path>`` on stdout once both transports
-are listening.
+Prints ``READY <pid> <port> <endpoint_file>`` on stdout once the
+listener is up.
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ async def _serve(ns: argparse.Namespace) -> None:
     home = Path(ns.kiss_home)
     certfile, keyfile = home / "cert.pem", home / "key.pem"
     _generate_self_signed_cert(certfile, keyfile)
-    uds_path = home / "sorcar.sock"
+    endpoint_file = home / "sorcar-local.json"
     server = RemoteAccessServer(
         host="127.0.0.1",
         port=ns.port,
@@ -85,13 +86,12 @@ async def _serve(ns: argparse.Namespace) -> None:
         certfile=str(certfile),
         keyfile=str(keyfile),
         url_file=home / "remote-url.json",
-        uds_path=uds_path,
-        uds_owner_wait_s=1.0,
+        local_endpoint_file=endpoint_file,
     )
     await server.start_async()
     printer = server._printer
     _install_t0_stamp(printer)
-    print(f"READY {os.getpid()} {ns.port} {uds_path}", flush=True)
+    print(f"READY {os.getpid()} {ns.port} {endpoint_file}", flush=True)
 
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
@@ -121,7 +121,7 @@ def main() -> None:
     """Run the benchmark daemon until ``quit`` or EOF on stdin."""
     ns = _parse()
     os.environ["KISS_HOME"] = ns.kiss_home
-    os.environ.pop("KISS_SORCAR_SOCK", None)
+    os.environ.pop("KISS_SORCAR_LOCAL", None)
     asyncio.run(_serve(ns))
 
 

@@ -8,41 +8,45 @@ The helper is invoked from ``scripts/build-extension.sh`` and
 ``install.sh`` BEFORE either script SIGTERMs the kiss-web daemon.  Its
 contract — documented in the script's module docstring — is:
 
-* exit ``0`` when the daemon's UDS reports zero active tasks OR the
-  socket is missing / refusing connections (daemon already dead);
+* exit ``0`` when the daemon's local endpoint reports zero active tasks
+  OR the endpoint file is missing / the daemon refuses connections
+  (daemon already dead);
 * exit ``1`` when the daemon reports one or more active tasks OR the
   probe could not be completed (timeout, malformed response, etc.).
 
 These tests reproduce the regression described in task_history rows
 3233/3234 ("Task interrupted by server restart/shutdown"): a real
-``RemoteAccessServer`` is started against a temp UDS, the registry is
-populated with a fake active tab, and the helper is executed as a
-subprocess with ``KISS_SORCAR_SOCK`` overridden to the temp socket.
-The pre-fix scripts (no helper, unconditional ``lsof -ti :8787 | kill``)
-would have killed the daemon here; the post-fix scripts gate on the
-helper's exit code and refuse.
+``RemoteAccessServer`` is started with a temp endpoint file, the
+registry is populated with a fake active tab, and the helper is
+executed as a subprocess with ``KISS_SORCAR_LOCAL`` overridden to the
+temp endpoint file.  The pre-fix scripts (no helper, unconditional
+``lsof -ti :8787 | kill``) would have killed the daemon here; the
+post-fix scripts gate on the helper's exit code and refuse.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+from websockets.asyncio.server import ServerConnection
+
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import fake_daemon
 
 _SCRIPT_PATH = (
     Path(__file__).resolve().parents[4]
@@ -64,10 +68,10 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-def _run_helper(sock_path: Path, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    """Run the helper script with ``KISS_SORCAR_SOCK`` overridden."""
+def _run_helper(endpoint_file: Path, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
+    """Run the helper script with ``KISS_SORCAR_LOCAL`` overridden."""
     env = os.environ.copy()
-    env["KISS_SORCAR_SOCK"] = str(sock_path)
+    env["KISS_SORCAR_LOCAL"] = str(endpoint_file)
     env["KISS_ACTIVE_TASKS_TIMEOUT"] = "2.0"
     return subprocess.run(
         [sys.executable, str(_SCRIPT_PATH)],
@@ -79,12 +83,30 @@ def _run_helper(sock_path: Path, timeout: float = 5.0) -> subprocess.CompletedPr
     )
 
 
-@requires_unix_sockets
+def _one_shot_handler(lines: list[bytes]):
+    """Build a fake-daemon handler that answers the probe with *lines*.
+
+    Each ``bytes`` element is sent verbatim as one frame after the
+    helper's ``activeTasksQuery`` arrives.  This bypasses
+    ``RemoteAccessServer`` entirely so a test can simulate an OLD
+    daemon that doesn't recognise ``activeTasksQuery`` — the exact wire
+    behaviour responsible for the install.sh abort in the user-reported
+    bug — or a daemon that pushes stray broadcasts first.
+    """
+
+    async def _handler(ws: ServerConnection) -> None:
+        await ws.recv()  # the activeTasksQuery frame
+        for line in lines:
+            await ws.send(line.decode("utf-8").rstrip("\n"))
+
+    return _handler
+
+
 class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
     """End-to-end coverage for the bash-callable active-tasks probe.
 
-    The probe talks to the daemon over its Unix-domain socket on behalf of
-    the POSIX shell scripts, so the whole class needs ``AF_UNIX``.
+    The probe talks to the daemon over its local WSS endpoint on behalf
+    of the POSIX shell scripts.
     """
 
     async def asyncSetUp(self) -> None:
@@ -93,14 +115,14 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
         with agent_state.STATE_LOCK:
@@ -127,10 +149,8 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         self.assertTrue(mode & 0o100, f"script not executable: {oct(mode)}")
 
     async def test_idle_daemon_exits_zero(self) -> None:
-        """Helper exits 0 when the daemon's UDS reports count=0."""
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _run_helper, self.uds_path,
-        )
+        """Helper exits 0 when the daemon's local endpoint reports count=0."""
+        result = await asyncio.to_thread(_run_helper, self.endpoint_file)
         self.assertEqual(
             result.returncode, 0,
             f"unexpected exit={result.returncode}\n"
@@ -154,9 +174,7 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         )
         agent_state.register(active)
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, _run_helper, self.uds_path,
-            )
+            result = await asyncio.to_thread(_run_helper, self.endpoint_file)
         finally:
             agent_state.unregister("3233", active)
         self.assertEqual(
@@ -169,11 +187,11 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         self.assertIn("task=3233", result.stderr)
         self.assertIn("KISS_FORCE_RESTART", result.stderr)
 
-    def test_missing_socket_exits_zero(self) -> None:
-        """Helper exits 0 when the socket file is absent (daemon dead)."""
-        missing_sock = Path(tempfile.mkdtemp()) / "nope" / "sorcar.sock"
+    def test_missing_endpoint_file_exits_zero(self) -> None:
+        """Helper exits 0 when the endpoint file is absent (daemon dead)."""
+        missing = Path(tempfile.mkdtemp()) / "nope" / "sorcar-local.json"
         try:
-            result = _run_helper(missing_sock)
+            result = _run_helper(missing)
             self.assertEqual(
                 result.returncode, 0,
                 f"unexpected exit={result.returncode}\n"
@@ -181,75 +199,30 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             )
             self.assertIn("not present", result.stderr)
         finally:
-            shutil.rmtree(missing_sock.parent.parent, ignore_errors=True)
+            shutil.rmtree(missing.parent.parent, ignore_errors=True)
 
-    def _run_fake_uds_server(
-        self,
-        sock_path: Path,
-        lines: list[bytes],
-    ) -> tuple[socket.socket, threading.Thread]:
-        """Spin up a one-shot AF_UNIX server that returns ``lines``.
-
-        Each ``bytes`` element is written verbatim after the helper
-        sends its ``activeTasksQuery`` line (so callers can include or
-        omit the trailing newline as needed for the test case).  This
-        bypasses ``RemoteAccessServer`` entirely so we can simulate an
-        OLD daemon that doesn't recognise ``activeTasksQuery`` — the
-        exact wire behaviour responsible for the install.sh abort in
-        the user-reported bug.
-        """
-        if sock_path.exists():
-            sock_path.unlink()
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(str(sock_path))
-        srv.listen(1)
-        srv.settimeout(5.0)
-
-        def _serve() -> None:
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                return
-            try:
-                conn.settimeout(5.0)
-                buf = b""
-                while b"\n" not in buf:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    buf += chunk
-                for line in lines:
-                    conn.sendall(line)
-            finally:
-                conn.close()
-
-        thread = threading.Thread(target=_serve, daemon=True)
-        thread.start()
-        return srv, thread
-
-    def test_old_daemon_unknown_command_exits_zero(self) -> None:
+    async def test_old_daemon_unknown_command_exits_zero(self) -> None:
         """An OLD daemon's "Unknown command" error → exit 0.
 
         Reproduces the user report::
 
-            kiss-web UDS probe at ~/.kiss/sorcar.sock returned
+            kiss-web probe at wss://127.0.0.1:8787/ws returned
             unexpected message {'type': 'error', 'text':
             'Unknown command: activeTasksQuery'}; refusing to kill.
 
-        Before the fix the helper read the first broadcast line, saw
+        Before the fix the helper read the first broadcast frame, saw
         an unknown ``type``, and exited 1 — blocking install.sh from
         replacing the very daemon that lacked the handler.  After the
         fix the helper recognises the specific error string and exits
         0 so install.sh can proceed.
         """
         scratch = Path(tempfile.mkdtemp())
-        sock_path = scratch / "old.sock"
-        srv, thread = self._run_fake_uds_server(
-            sock_path,
+        handler = _one_shot_handler(
             [b'{"type":"error","text":"Unknown command: activeTasksQuery"}\n'],
         )
         try:
-            result = _run_helper(sock_path)
+            async with fake_daemon(scratch, handler) as endpoint_file:
+                result = await asyncio.to_thread(_run_helper, endpoint_file)
             self.assertEqual(
                 result.returncode, 0,
                 f"expected exit 0 for OLD-daemon error; got "
@@ -259,32 +232,29 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             self.assertIn("predates", result.stderr)
             self.assertIn("activeTasksQuery", result.stderr)
         finally:
-            srv.close()
-            thread.join(timeout=2.0)
             shutil.rmtree(scratch, ignore_errors=True)
 
-    def test_stray_broadcast_before_response_is_tolerated(self) -> None:
-        """Helper drains stray broadcast lines and parses the real reply.
+    async def test_stray_broadcast_before_response_is_tolerated(self) -> None:
+        """Helper drains stray broadcast frames and parses the real reply.
 
-        ``RemoteAccessServer._uds_handler`` registers every connected
-        client as a broadcast destination.  Unrelated event lines can
-        therefore land on the wire BEFORE our ``activeTasksResponse``.
-        The pre-fix helper read only the first line and rejected
+        ``RemoteAccessServer._ws_handler`` registers every connected
+        local client as a broadcast destination.  Unrelated event frames
+        can therefore land on the wire BEFORE our ``activeTasksResponse``.
+        The pre-fix helper read only the first frame and rejected
         anything that wasn't an ``activeTasksResponse`` — this test
         locks in the fix by interleaving a stray broadcast with the
         real reply and asserting the helper still exits 0.
         """
         scratch = Path(tempfile.mkdtemp())
-        sock_path = scratch / "noisy.sock"
-        srv, thread = self._run_fake_uds_server(
-            sock_path,
+        handler = _one_shot_handler(
             [
                 b'{"type":"event","name":"noise"}\n',
                 b'{"type":"activeTasksResponse","count":0,"tabs":[]}\n',
             ],
         )
         try:
-            result = _run_helper(sock_path)
+            async with fake_daemon(scratch, handler) as endpoint_file:
+                result = await asyncio.to_thread(_run_helper, endpoint_file)
             self.assertEqual(
                 result.returncode, 0,
                 f"expected exit 0 after skipping stray broadcast; got "
@@ -293,30 +263,37 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             )
             self.assertIn("idle (count=0)", result.stderr)
         finally:
-            srv.close()
-            thread.join(timeout=2.0)
             shutil.rmtree(scratch, ignore_errors=True)
 
-    def test_stale_socket_with_no_listener_exits_zero(self) -> None:
-        """A socket file with no listener is "safe to kill" (daemon dead).
+    def test_stale_endpoint_file_with_no_listener_exits_zero(self) -> None:
+        """An endpoint file with no listener is "safe to kill" (daemon dead).
 
-        After a crash the UDS file can persist on disk while no process
-        listens on it.  ``connect`` then raises ``ConnectionRefusedError``
-        (Linux) or ``FileNotFoundError`` depending on platform — both
-        must map to ``count==0`` so the bash script does not block a
-        legitimate cleanup when the daemon is already gone.
+        After a crash the endpoint file can persist on disk while no
+        process listens on its URL.  ``connect`` then raises
+        ``ConnectionRefusedError``, which must map to ``count==0`` so the
+        bash script does not block a legitimate cleanup when the daemon
+        is already gone.
         """
         scratch = Path(tempfile.mkdtemp())
-        stale_sock = scratch / "stale.sock"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale_file = scratch / "sorcar-local.json"
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            free_port = int(s.getsockname()[1])
         try:
-            s.bind(str(stale_sock))
-            s.close()
-            result = _run_helper(stale_sock)
+            local_endpoint.write_endpoint(
+                stale_file,
+                local_endpoint.LocalEndpoint(
+                    url=f"wss://127.0.0.1:{free_port}/ws", token="stale",
+                    ca=None, pid=os.getpid(),
+                ),
+            )
+            self.assertIsNotNone(json.loads(stale_file.read_text())["url"])
+            result = _run_helper(stale_file)
             self.assertEqual(
                 result.returncode, 0,
                 f"unexpected exit={result.returncode}\n"
                 f"stderr={result.stderr}\nstdout={result.stdout}",
             )
+            self.assertIn("refused connection", result.stderr)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)

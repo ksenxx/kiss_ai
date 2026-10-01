@@ -131,20 +131,21 @@ exit 0
 fs.chmodSync(fakeLsof, 0o755);
 
 // Stand-in daemon that "systemd" starts after the kill: answers
-// activeTasksQuery on the UDS and holds 127.0.0.1:8787 so
+// activeTasksQuery on the local endpoint and holds 127.0.0.1:8787 so
 // verifyDaemonStartup() returns promptly.
-const udsHelper = path.join(tmpRoot, 'uds-helper.js');
+const daemonHelper = path.join(tmpRoot, 'daemon-helper.js');
 fs.writeFileSync(
-  udsHelper,
+  daemonHelper,
   `
 'use strict';
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const kissDir = path.join(process.env.HOME, '.kiss');
-const sock = path.join(kissDir, 'sorcar.sock');
+const sock = path.join(kissDir, 'sorcar-local.json');
 try { fs.unlinkSync(sock); } catch {}
-const srv = net.createServer(c => {
+const {createFakeDaemon} = require(${JSON.stringify(path.join(__dirname, 'fakeDaemon.js'))});
+const srv = createFakeDaemon(c => {
   c.setEncoding('utf-8');
   let buf = '';
   c.on('data', d => {
@@ -184,7 +185,7 @@ fs.writeFileSync(
 sleep ${LSOF_DELAY_S}
 case " $* " in
   *" restart "*)
-    nohup "${process.execPath}" "${udsHelper}" >/dev/null 2>&1 &
+    nohup "${process.execPath}" "${daemonHelper}" >/dev/null 2>&1 &
     ;;
 esac
 exit 0

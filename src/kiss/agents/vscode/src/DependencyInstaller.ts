@@ -19,7 +19,7 @@ import {
 } from './daemonHealth';
 import {verifyDaemonStartup} from './daemonRestartVerify';
 import {restartLaunchAgent} from './macLaunchd';
-import {kissHomeDir, sorcarSockPath} from './userAssets';
+import {kissHomeDir, readLocalEndpoint, sorcarEndpointPath} from './userAssets';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -863,6 +863,7 @@ async function runSlowPathSetup(
  * whole window.
  */
 export async function pidsOnPort(port: number): Promise<string[]> {
+  if (process.platform === 'win32') return windowsDaemonPidsOnPort(port);
   try {
     const r = await spawnCollect(
       'lsof',
@@ -894,12 +895,75 @@ export async function pidsOnPort(port: number): Promise<string[]> {
   }
 }
 
+/**
+ * Windows: the kiss-web pid listening on *port*, or empty.
+ *
+ * Windows has no `lsof`.  `netstat -ano` names the pid that owns the
+ * LISTENING socket, and `tasklist` names its image; a pid counts only
+ * when both agree with the daemon's own endpoint file (which records
+ * the pid that bound the port) and the image is a Python / kiss-web
+ * executable.  A stale endpoint file whose pid was reused by an
+ * unrelated process therefore never selects that process, and a VS
+ * Code Remote port forward (Code.exe) is never mistaken for the daemon.
+ */
+async function windowsDaemonPidsOnPort(port: number): Promise<string[]> {
+  const endpoint = readLocalEndpoint(sorcarEndpointPath());
+  if (!endpoint || !endpoint.pid) return [];
+  let url: URL;
+  try {
+    url = new URL(endpoint.url);
+  } catch {
+    return [];
+  }
+  if (Number(url.port) !== port) return [];
+  const pid = String(endpoint.pid);
+  try {
+    const ns = await spawnCollect('netstat', ['-ano', '-p', 'tcp'], {
+      timeoutMs: 5000,
+    });
+    if (ns.code !== 0) return [];
+    const listening = ns.stdout.split(/\r?\n/).some(line => {
+      const m = /^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/.exec(line);
+      return m !== null && Number(m[1]) === port && m[2] === pid;
+    });
+    if (!listening) return [];
+    const tl = await spawnCollect(
+      'tasklist',
+      ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+      {timeoutMs: 5000},
+    );
+    if (tl.code !== 0) return [];
+    const image = /^"([^"]*)"/.exec(tl.stdout.trim());
+    if (!image || !/^(kiss-web|python[\w.]*)\.exe$/i.test(image[1])) return [];
+    return [pid];
+  } catch {
+    return [];
+  }
+}
+
 function killPids(pids: string[], signal: NodeJS.Signals): void {
   for (const pid of pids) {
     try {
-      process.kill(parseInt(pid, 10), signal);
+      if (process.platform === 'win32') {
+        // Node's process.kill is TerminateProcess on Windows whatever
+        // the signal; `taskkill /T` also takes the daemon's children
+        // (agent subprocesses) so none is left holding the port.
+        spawn('taskkill', ['/PID', pid, '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        }).unref();
+      } else {
+        process.kill(parseInt(pid, 10), signal);
+      }
     } catch {}
   }
+}
+
+/** Where `kiss-web` lives in the bundled project's venv. */
+export function kissWebBinPath(kissProjectPath: string): string {
+  return process.platform === 'win32'
+    ? path.join(kissProjectPath, '.venv', 'Scripts', 'kiss-web.exe')
+    : path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
 }
 
 /**
@@ -931,27 +995,41 @@ async function systemctlRestartKissWeb(): Promise<void> {
   );
 }
 
+/**
+ * Start kiss-web as a detached background process.
+ *
+ * The fallback when no service manager runs it (systemd unavailable on
+ * Linux) and the only supervisor on Windows, where the extension's
+ * activation check and restart retry take the place of `Restart=always`:
+ * a daemon that dies is started again the next time a window activates
+ * or a restart is due.  The child outlives the extension host
+ * (`detached`, `unref`) and, on Windows, gets no console window.
+ */
 function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
   const binDir = path.join(HOME_DIR, '.local', 'bin');
   try {
     fs.mkdirSync(LOG_DIR, {recursive: true});
     const outFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stdout.log'), 'a');
     const errFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stderr.log'), 'a');
+    const inheritedPath =
+      process.env.PATH ||
+      (process.platform === 'win32' ? '' : '/usr/local/bin:/usr/bin:/bin');
     const child = spawn(kissWebBin, [], {
       cwd: workDir,
       detached: true,
+      windowsHide: true,
       stdio: ['ignore', outFd, errFd],
       env: {
         ...process.env,
-        PATH: `${binDir}:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
+        PATH: `${binDir}${path.delimiter}${inheritedPath}`,
       },
     });
     child.unref();
     fs.closeSync(outFd);
     fs.closeSync(errFd);
     log(
-      `kiss-web started directly (no systemd): pid ${child.pid ?? '<unknown>'}, ` +
-        `cwd ${workDir}`,
+      'kiss-web started directly (no service manager): pid ' +
+        `${child.pid ?? '<unknown>'}, cwd ${workDir}`,
     );
   } catch (err) {
     log(
@@ -964,7 +1042,7 @@ function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
 // daemon on port 8787.  Without a cross-process lock two windows opened
 // together both see "dead", and the second SIGTERMs the daemon the first
 // has just started -- while it is still booting, so it has not yet
-// accepted a UDS connection and cannot report the active tasks that
+// published its endpoint and cannot report the active tasks that
 // decideRestart() exists to protect.
 const RESTART_LOCK_FILE = path.join(LOG_DIR, '.kiss-web.restart.lock');
 // How long a lock whose owner cannot be identified -- an empty file
@@ -1139,9 +1217,7 @@ export async function restartKissWebDaemon(
   workDir: string,
   force = false,
 ): Promise<boolean> {
-  if (process.platform === 'win32') return true;
-
-  const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
+  const kissWebBin = kissWebBinPath(kissProjectPath);
   if (!fs.existsSync(kissWebBin)) {
     log(`kiss-web binary not found at ${kissWebBin} — skipping daemon setup`);
     return true;
@@ -1192,17 +1268,17 @@ async function restartKissWebDaemonLocked(
   try {
     savedFp = fs.readFileSync(fpFile, 'utf-8').trim();
   } catch {}
-  const sockPath = sorcarSockPath();
+  const endpointPath = sorcarEndpointPath();
 
   const health = await probeDaemonHealth(8787, 1500);
-  const sockExists = fs.existsSync(sockPath);
+  const endpointExists = fs.existsSync(endpointPath);
 
-  // Always query the UDS, even when the TCP listener looks dead: the task
-  // worker can be alive behind a transiently refused HTTP port, and
+  // Always query the local endpoint, even when the TCP probe looks dead:
+  // the task worker can be alive behind a transiently refused port, and
   // decideRestart() protects any reported active task regardless of health.
   const activeTasks:
     {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} =
-    await daemonHasActiveTasks(sockPath, 1500);
+    await daemonHasActiveTasks(endpointPath, 1500);
 
   const fingerprintMatches = !!currentFp && currentFp === savedFp;
   const decision = decideRestart({
@@ -1234,7 +1310,7 @@ async function restartKissWebDaemonLocked(
     } else {
       log(
         `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
-          `daemon healthy (health=${health}, sock=${sockExists}) — ` +
+          `daemon healthy (health=${health}, endpoint=${endpointExists}) — ` +
           'skipping restart to preserve tunnel URL',
       );
     }
@@ -1244,7 +1320,7 @@ async function restartKissWebDaemonLocked(
     `kiss-web restart (${decision.reason}): fingerprint ` +
       `${savedFp.slice(0, 8) || '<none>'} → ` +
       `${currentFp.slice(0, 8) || '<none>'}, health=${health}, ` +
-      `sock=${sockExists}, activeTasks=` +
+      `endpoint=${endpointExists}, activeTasks=` +
       `${activeTasks.ok ? activeTasks.count : 'unknown(' + activeTasks.reason + ')'}`,
   );
 
@@ -1267,13 +1343,13 @@ async function restartKissWebDaemonLocked(
       const xPath = xmlEscape(
         `/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
       );
-      // The daemon resolves its state dir — and the socket it binds —
-      // from $KISS_HOME, so a KISS_HOME visible only to the VS Code
-      // process must reach the launchd service too; otherwise the
-      // extension probes $KISS_HOME/sorcar.sock while the daemon binds
-      // ~/.kiss/sorcar.sock, and every health poll restarts a healthy
-      // daemon.  KISS_SORCAR_SOCK is a client-side override only (the
-      // daemon does not read it), so it is deliberately NOT propagated.
+      // The daemon resolves its state dir — and the endpoint file it
+      // writes — from $KISS_HOME, so a KISS_HOME visible only to the VS
+      // Code process must reach the launchd service too; otherwise the
+      // extension probes $KISS_HOME/sorcar-local.json while the daemon
+      // writes ~/.kiss/sorcar-local.json, and every health poll restarts
+      // a healthy daemon.  KISS_SORCAR_LOCAL is a client-side override
+      // only (the daemon does not read it), so it is NOT propagated.
       const kissHomeEnv = process.env.KISS_HOME || '';
       const xKissHomeEntry = kissHomeEnv
         ? `\n        <key>KISS_HOME</key>\n        <string>${xmlEscape(
@@ -1348,10 +1424,10 @@ async function restartKissWebDaemonLocked(
       const uPath = unitEscape(`${binDir}:/usr/local/bin:/usr/bin:/bin`);
       const uLogDir = unitEscape(LOG_DIR);
       // Same KISS_HOME propagation as the launchd plist above: the
-      // daemon binds its socket under $KISS_HOME, so the service must
-      // see the same value the extension host sees.  KISS_SORCAR_SOCK
-      // is a client-side override only (the daemon does not read it),
-      // so it is deliberately NOT propagated.
+      // daemon writes its endpoint file under $KISS_HOME, so the service
+      // must see the same value the extension host sees.
+      // KISS_SORCAR_LOCAL is a client-side override only (the daemon
+      // does not read it), so it is deliberately NOT propagated.
       const kissHomeEnv = process.env.KISS_HOME || '';
       const kissHomeLine = kissHomeEnv
         ? `Environment=KISS_HOME=${unitEscape(kissHomeEnv)}\n`
@@ -1417,11 +1493,18 @@ WantedBy=default.target
       reissueRestart = () => spawnKissWebDirect(kissWebBin, workDir);
       void reissueRestart();
     }
+  } else {
+    // Windows (and any other platform without launchd/systemd): the
+    // detached spawn IS the service; the extension re-issues it when
+    // the daemon is found dead.
+    log('Starting kiss-web as a detached background process...');
+    reissueRestart = () => spawnKissWebDirect(kissWebBin, workDir);
+    void reissueRestart();
   }
 
   const verdict = await verifyDaemonStartup({
     binPath: kissWebBin,
-    sockPath,
+    endpointPath,
     port: 8787,
     restart: reissueRestart,
     log,
@@ -1980,11 +2063,10 @@ function playwrightBrowsersPath(): string {
 }
 
 async function isDaemonRunning(): Promise<boolean> {
-  if (process.platform === 'win32') return false;
-  const sockPath = sorcarSockPath();
+  const endpointPath = sorcarEndpointPath();
   for (let attempt = 0; attempt < 3; attempt++) {
     const health = await probeDaemonHealth(8787);
-    if (health === 'alive' && fs.existsSync(sockPath)) return true;
+    if (health === 'alive' && fs.existsSync(endpointPath)) return true;
     if (attempt < 2) {
       await new Promise(r => setTimeout(r, 300));
     }

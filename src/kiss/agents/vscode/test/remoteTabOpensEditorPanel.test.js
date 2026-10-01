@@ -49,6 +49,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
@@ -56,11 +57,6 @@ assert.ok(
   fs.existsSync(path.join(OUT_DIR, 'SorcarPanelManager.js')),
   'compiled extension missing — run `npm run compile` first',
 );
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  process.exit(0);
-}
 
 class StubEventEmitter {
   constructor() {
@@ -185,12 +181,12 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-remotetab-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const serverSockets = [];
 // Every command line any client sent to the daemon stub.
 const receivedCommands = [];
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   serverSockets.push(sock);
   let buf = '';
   sock.on('data', chunk => {
@@ -294,7 +290,7 @@ const PLACEHOLDER_TAB_GROUPS = {
 };
 
 async function runTest() {
-  server.listen(sockPath);
+  server.listen(endpointPath);
 
   // ===== Phase A: a RELOADED window (serialized chat placeholders,
   // previous session's panel tab ids persisted as T0 + T-idle) =======

@@ -86,9 +86,9 @@ the :func:`kiss.server.sorcar.run` parameter name, except
 ``if_append_basic_tools``, whose getter
 ``if_append_basic_tools()`` overrides the ``append_basic_tools``
 parameter (wire field ``appendBasicTools``).  ``timeout``,
-``stop_on_timeout``, and ``sock_path`` are absent by design: they are
+``stop_on_timeout``, and ``endpoint_file`` are absent by design: they are
 client-transport parameters — the script only runs on the daemon that
-``sock_path`` selects, ``timeout`` bounds the client's local wait, and
+``endpoint_file`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
 daemon-side getter could never take effect.
 ``scope_work_dir()`` (wire field ``tabScopeWorkDir``) overrides the

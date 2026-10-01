@@ -19,8 +19,8 @@ with the installer's own refusal line when this run's slice of
 ``update.log`` contains one, otherwise as a generic ``update failed (exit
 N)`` pointing at the log.  A clean exit reports nothing more.
 
-Every test drives the REAL :class:`RemoteAccessServer` over its UDS
-protocol from two client connections (two VS Code windows) and runs a
+Every test drives the REAL :class:`RemoteAccessServer` over its local
+channel from two client connections (two VS Code windows) and runs a
 real stub ``install.sh``.
 """
 
@@ -40,9 +40,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 REFUSAL = "another KISS update is already running (pid 123); exiting."
 
@@ -105,14 +103,13 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=_find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.install_root = Path(self.tmpdir) / "kiss_ai"
         self.install_root.mkdir()
@@ -121,7 +118,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         self.server._update_log_path = self.log_path
         self.release = Path(self.tmpdir) / "release"
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         self.release.write_text("")
@@ -155,27 +152,27 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
     def _held_stub(self) -> str:
         return HELD_INSTALL_SH.format(release=self.release, tmpdir=self.tmpdir)
 
-    async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
-    async def _send(self, writer: asyncio.StreamWriter, cmd: dict[str, Any]) -> None:
+    async def _send(self, writer: LocalWriter, cmd: dict[str, Any]) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local channel closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -183,7 +180,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         raise AssertionError(f"predicate never matched within {max_events} events")
 
     async def _banners_before_probe(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
     ) -> list[dict[str, Any]]:
         """Return the notice/error events queued on a window before a probe.
 

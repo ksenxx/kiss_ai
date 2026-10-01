@@ -8,8 +8,8 @@
 // Bridged end-to-end test: the REAL chat webview (media/main.js in
 // jsdom) talks to the REAL compiled extension host
 // (out/SorcarSidebarView.js) over the real message channel, which
-// forwards to the REAL daemon (test/_real_daemon.py) over a real Unix
-// socket, against a REAL temp workspace on disk.  No component in the
+// forwards to the REAL daemon (test/_real_daemon.py) over the real local
+// WSS endpoint, against a REAL temp workspace on disk.  No component in the
 // checkPaths -> pathsExist -> click -> openFile -> openResolvedFile
 // chain is faked: webview postMessage feeds the host's
 // onDidReceiveMessage, host postMessage feeds the webview's message
@@ -134,14 +134,6 @@ process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
 fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  for (const dir of tmpDirs.slice().reverse()) {
-    fs.rmSync(dir, {recursive: true, force: true});
-  }
-  process.exit(0);
-}
 
 const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
 const UV = findUvPath();

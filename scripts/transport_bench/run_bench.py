@@ -2,15 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Benchmark the daemon's Unix-domain socket against its local WSS.
+"""Benchmark the daemon's local WSS transport.
 
 Drives ONE real ``kiss-web`` daemon (:mod:`bench_daemon`) through the
 same JSON command API over each transport in turn and records, per
 workload and transport, latency percentiles plus the daemon's CPU time
 and resident memory read from ``/proc``:
 
-``connect``     connection setup until the first ``pong`` (WSS: TCP + TLS
-                + upgrade + ``auth`` handshake; UDS: socket connect).
+``connect``     connection setup until the first ``pong`` (TCP + TLS +
+                upgrade + token ``auth`` handshake).
 ``ping``        sequential ``ping`` -> ``pong`` round trips on one
                 persistent connection.
 ``models``      sequential ``getModels`` -> ``models`` request/reply
@@ -22,8 +22,12 @@ and resident memory read from ``/proc``:
                 deltas (:mod:`fake_model`); one-way latency of every
                 ``text_delta`` and the task's wall time.
 
-Transports: ``uds``; ``wss`` (permessage-deflate negotiated, as browsers
-do); ``wss-nocomp`` (the client declines compression).
+Transports: ``wss`` (permessage-deflate negotiated, as browsers do);
+``wss-nocomp`` (the client declines compression).  Both authenticate
+with the token from the daemon's endpoint file, so the daemon treats
+them as local clients.  The ``uds`` numbers in
+``reports/transport_bench_uds_vs_wss.json`` were measured before the
+Unix socket was removed and cannot be re-run on this tree.
 
 Usage (from the repo root)::
 
@@ -41,7 +45,6 @@ import os
 import queue
 import resource
 import shutil
-import ssl
 import statistics
 import subprocess
 import sys
@@ -52,6 +55,8 @@ from pathlib import Path
 from typing import Any
 
 from websockets.asyncio.client import connect as ws_connect
+
+from kiss.agents.sorcar import local_endpoint
 
 HERE = Path(__file__).resolve().parent
 MAX_BYTES = 64 * 1024 * 1024
@@ -162,32 +167,6 @@ class Phase:
 # ----------------------------------------------------------- transports
 
 
-class UdsConn:
-    """One newline-delimited JSON connection to the daemon's Unix socket."""
-
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self.reader, self.writer = reader, writer
-        self.bytes_in = 0
-
-    async def send(self, cmd: dict[str, Any]) -> None:
-        self.writer.write(json.dumps(cmd).encode() + b"\n")
-        await self.writer.drain()
-
-    async def recv(self) -> dict[str, Any]:
-        line = await self.reader.readline()
-        if not line:
-            raise ConnectionError("UDS closed")
-        self.bytes_in += len(line)
-        return dict(json.loads(line))
-
-    async def close(self) -> None:
-        self.writer.close()
-        try:
-            await self.writer.wait_closed()
-        except Exception:
-            pass
-
-
 class WssConn:
     """One authenticated WebSocket connection to the daemon's WSS port."""
 
@@ -210,31 +189,30 @@ class WssConn:
 class Transport:
     """Factory for connections of one transport flavour."""
 
-    def __init__(self, name: str, uds_path: str, port: int) -> None:
-        self.name, self.uds_path, self.port = name, uds_path, port
-        self.ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        self.ssl.check_hostname = False
-        self.ssl.verify_mode = ssl.CERT_NONE
+    def __init__(self, name: str, endpoint_file: str) -> None:
+        self.name = name
+        endpoint = local_endpoint.read_endpoint(Path(endpoint_file))
+        if endpoint is None:
+            raise RuntimeError(f"no endpoint file at {endpoint_file}")
+        self.endpoint = endpoint
+        self.ssl = local_endpoint.client_ssl_context(endpoint)
 
-    async def connect(self) -> UdsConn | WssConn:
+    async def connect(self) -> WssConn:
         """Open one connection ready to accept commands."""
-        if self.name == "uds":
-            reader, writer = await asyncio.open_unix_connection(self.uds_path, limit=MAX_BYTES)
-            return UdsConn(reader, writer)
         ws = await ws_connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=self.ssl, max_size=MAX_BYTES,
+            self.endpoint.url, ssl=self.ssl, max_size=MAX_BYTES,
             compression="deflate" if self.name == "wss" else None,
             ping_interval=None,
         )
         conn = WssConn(ws)
-        await conn.send({"type": "auth", "password": ""})
+        await conn.send({"type": "auth", "token": self.endpoint.token})
         first = await conn.recv()
-        if first.get("type") != "auth_ok":
-            raise RuntimeError(f"auth failed: {first}")
+        if first.get("type") != "auth_ok" or not first.get("local"):
+            raise RuntimeError(f"local auth failed: {first}")
         return conn
 
 
-async def wait_for(conn: UdsConn | WssConn, wanted: str, timeout: float = 30) -> dict[str, Any]:
+async def wait_for(conn: WssConn, wanted: str, timeout: float = 30) -> dict[str, Any]:
     """Return the first event of type *wanted*, skipping others."""
     deadline = time.monotonic() + timeout
     while True:
@@ -286,7 +264,7 @@ async def bench_request_reply(
     return out
 
 
-async def _drain_burst(conn: UdsConn | WssConn, n: int) -> tuple[list[int], int, int]:
+async def _drain_burst(conn: WssConn, n: int) -> tuple[list[int], int, int]:
     """Receive *n* ``bench_event`` events; return one-way latencies."""
     lat: list[int] = []
     seen = 0
@@ -347,7 +325,7 @@ async def bench_task(
     extra = [await tr.connect() for _ in range(viewers)]
     runner.bytes_in = 0
 
-    async def drain_viewer(c: UdsConn | WssConn) -> list[int]:
+    async def drain_viewer(c: WssConn) -> list[int]:
         lat: list[int] = []
         while True:
             ev = await asyncio.wait_for(c.recv(), timeout=180)
@@ -504,7 +482,7 @@ async def run_all(ns: argparse.Namespace) -> dict[str, Any]:
         "auto_commit": False, "max_budget": 100,
     }))
     env = {**os.environ, "KISS_HOME": str(kiss_home), "PYTHONUNBUFFERED": "1"}
-    env.pop("KISS_SORCAR_SOCK", None)
+    env.pop("KISS_SORCAR_LOCAL", None)
 
     logs = Path(ns.out).parent
     logs.mkdir(parents=True, exist_ok=True)
@@ -521,11 +499,11 @@ async def run_all(ns: argparse.Namespace) -> dict[str, Any]:
                         "--kiss-home", str(kiss_home), "--work-dir", str(work_dir),
                         "--port", str(port)], env, logs / "daemon.log")
         ready = daemon.expect("READY")
-        daemon_pid, uds_path = int(ready[1]), ready[3]
+        daemon_pid, endpoint_file = int(ready[1]), ready[3]
         stats = ProcStats(daemon_pid, daemon)
         baseline_mem = stats.memory_kb()
 
-        transports = [Transport(n, uds_path, port) for n in ns.transports]
+        transports = [Transport(n, endpoint_file) for n in ns.transports]
         results: dict[str, Any] = {
             "config": vars(ns), "daemon_pid": daemon_pid,
             "daemon_baseline_rss_kb": baseline_mem.get("VmRSS", 0),
@@ -600,7 +578,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rounds", type=int, default=3)
-    ap.add_argument("--transports", nargs="+", default=["uds", "wss", "wss-nocomp"])
+    ap.add_argument("--transports", nargs="+", default=["wss", "wss-nocomp"])
     ap.add_argument("--connects", type=int, default=50)
     ap.add_argument("--pings", type=int, default=2000)
     ap.add_argument("--models-reqs", type=int, default=300)

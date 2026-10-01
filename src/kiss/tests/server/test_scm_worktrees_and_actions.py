@@ -34,7 +34,8 @@ import pytest
 
 from kiss.server.explorer import git_worktrees
 from kiss.server.fs_actions import FIND_MAX_MATCHES, fs_action
-from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _git,
@@ -867,9 +868,8 @@ class TestOpenBinaryFiles:
         assert "background" not in plain
 
 
-@requires_unix_sockets
-class TestUdsDrop:
-    """VS Code windows (UDS peers) never get the remote-only replies."""
+class TestLocalDrop:
+    """VS Code windows (local peers) never get the remote-only replies."""
 
     @pytest.mark.parametrize(
         "payload",
@@ -879,11 +879,11 @@ class TestUdsDrop:
             {"type": "fsAction", "action": "delete", "path": "/nope"},
         ],
     )
-    def test_uds_delivered_commands_produce_no_reply(self, harness, payload) -> None:
+    def test_local_delivered_commands_produce_no_reply(self, harness, payload) -> None:
         import asyncio
 
-        async def _over_uds() -> list[dict]:
-            reader, writer = await asyncio.open_unix_connection(str(harness.uds_path))
+        async def _over_local() -> list[dict]:
+            reader, writer = await open_local_connection(harness.server)
             writer.write((json.dumps(payload) + "\n").encode())
             await writer.drain()
             # A control command that always answers, to bound the wait.
@@ -901,7 +901,7 @@ class TestUdsDrop:
             writer.close()
             return got
 
-        got = harness.run(_over_uds())
+        got = harness.run(_over_local())
         assert all(
             m.get("type") not in ("gitShow", "gitActionResult", "fsResult")
             for m in got

@@ -35,18 +35,20 @@ from kiss.tests.agents.sorcar.test_cron_agent import (  # noqa: F401
 )
 
 
-def test_tools_file_loaded_run_now_uses_daemon_sock_path(
+def test_tools_file_loaded_run_now_uses_daemon_endpoint_file(
     tmp_path: Path,
 ) -> None:
     # A run_agent(agent="cron", ...) session gets its cron_job tool from a
     # FRESH synthetic module (the daemon's tools-file loader re-executes
-    # this file), whose own _daemon_sock_path global is never set:
-    # run_now must still target the socket recorded in the canonical
+    # this file), whose own _daemon_endpoint_file global is never set:
+    # run_now must still target the endpoint file recorded in the canonical
     # module by the daemon's scheduler thread.
     from kiss.server.tools_file import ToolsFileError, execute_python_file
 
-    custom_sock = tmp_path / "custom-daemon.sock"
-    stop_event = start_scheduler_thread(interval=999.0, sock_path=str(custom_sock))
+    custom_endpoint = tmp_path / "custom-daemon.json"
+    stop_event = start_scheduler_thread(
+        interval=999.0, endpoint_file=str(custom_endpoint),
+    )
     try:
         namespace = execute_python_file(
             cron_agent.__file__, ToolsFileError, "tools file",
@@ -55,20 +57,18 @@ def test_tools_file_loaded_run_now_uses_daemon_sock_path(
         # A distinct module copy — the very situation the canonical
         # lookup exists for.
         assert loaded_cron_job is not cron_job
-        assert namespace["_daemon_sock_path"] is None
+        assert namespace["_daemon_endpoint_file"] is None
         job = _create(loaded_cron_job(
             "create", name="llm", prompt="say hi", schedule="every 1h",
             deliver="none",
         ))
         reply = yaml.safe_load(loaded_cron_job("run_now", job_id=job["id"]))
         assert reply["ran"]["last_status"] == "error"
-        assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
+        assert "custom-daemon.json" in load_jobs()[0]["last_summary"]
     finally:
         _stop_scheduler(stop_event)
 
-def test_kiss_web_daemon_runs_scheduler_thread(
-    tmp_path: Path, uds_tmp_path: Path,
-) -> None:
+def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
     """The kiss-web daemon starts the cron thread, the thread executes a
     due job, and shutdown stops the thread."""
     import asyncio
@@ -91,7 +91,7 @@ def test_kiss_web_daemon_runs_scheduler_thread(
             port=port,
             use_tunnel=False,
             work_dir=str(tmp_path),
-            uds_path=str(uds_tmp_path / "sorcar.sock"),
+            local_endpoint_file=str(tmp_path / "sorcar-local.json"),
         )
         task = asyncio.ensure_future(server._serve_async())
         try:

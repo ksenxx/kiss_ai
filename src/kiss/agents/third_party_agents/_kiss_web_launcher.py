@@ -7,7 +7,7 @@
 Every agent in ``kiss/agents/third_party_agents/`` is launched through
 :func:`run_agent_via_kiss_web`, which is implemented on top of the
 public synchronous client API :func:`kiss.server.sorcar.run`: the
-launcher connects to a kiss-web daemon's Unix-domain socket, submits
+launcher connects to a kiss-web daemon's local WSS endpoint, submits
 the documented ``run`` command, and blocks until the daemon reports
 the task finished.  The task therefore executes with the full kiss-web
 lifecycle — live event broadcasts to every connected webview,
@@ -61,32 +61,33 @@ _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
 # keep this module's public surface unchanged.
 
 _API_SERVER: RemoteAccessServer | None = None
-_API_SERVER_SOCK: str = ""
+_API_SERVER_ENDPOINT: str = ""
 _API_SERVER_LOCK = threading.Lock()
 
-_SOCK_PATH_OVERRIDE: str | None = None
+_ENDPOINT_FILE_OVERRIDE: str | None = None
 
 
 def _ensure_api_server() -> str:
-    """Start the process-global in-process daemon; return its UDS path.
+    """Start the process-global in-process daemon; return its endpoint file.
 
     Creates one :class:`~kiss.server.web_server.RemoteAccessServer` —
-    the production daemon class — serving only a private Unix-domain
-    socket (mode 0o600 in a private temp directory) on a dedicated
+    the production daemon class — serving only a loopback WSS listener
+    on an ephemeral port, whose endpoint file (mode 0600, in a private
+    temp directory) carries a private local token, on a dedicated
     asyncio loop thread.  The launcher's ``sorcar.run`` calls connect
-    to this socket, so channel agents work without any externally
+    through that file, so channel agents work without any externally
     started kiss-web daemon.
 
     Returns:
-        The Unix-domain socket path of the in-process daemon.
+        The endpoint file path of the in-process daemon.
     """
-    global _API_SERVER, _API_SERVER_SOCK
+    global _API_SERVER, _API_SERVER_ENDPOINT
     with _API_SERVER_LOCK:
         if _API_SERVER is None:
             from kiss.server.web_server import RemoteAccessServer
 
-            sock_dir = tempfile.mkdtemp(prefix="kiss-tp-api-")
-            sock_path = str(Path(sock_dir) / "sorcar.sock")
+            private_dir = tempfile.mkdtemp(prefix="kiss-tp-api-")
+            endpoint_file = str(Path(private_dir) / "sorcar-local.json")
             loop = asyncio.new_event_loop()
             thread = threading.Thread(
                 target=loop.run_forever,
@@ -94,41 +95,42 @@ def _ensure_api_server() -> str:
                 daemon=True,
             )
             thread.start()
-            startup: concurrent.futures.Future[asyncio.AbstractServer] | None = None
+            server: RemoteAccessServer | None = None
+            startup: concurrent.futures.Future[None] | None = None
             try:
-                server = RemoteAccessServer(uds_path=sock_path)
+                server = RemoteAccessServer(
+                    host="127.0.0.1", port=0, local_endpoint_file=endpoint_file,
+                )
                 # This daemon shares the KISS home (database, chats) with
                 # the canonical kiss-web daemon but must not share its tab
                 # registry: ``tabs.json`` tolerates exactly one owner, and
                 # a second one erased the canonical daemon's tabs with its
                 # stale snapshot on every channel run.  The channel tabs
-                # are transient, so they live next to the private socket.
+                # are transient, so they live next to the private
+                # endpoint file.
                 server._vscode_server.use_private_tab_registry(
-                    Path(sock_dir) / "tabs.json",
+                    Path(private_dir) / "tabs.json",
                 )
-                server._printer._loop = loop
-                server._loop = loop
                 startup = asyncio.run_coroutine_threadsafe(
-                    asyncio.start_unix_server(
-                        server._uds_handler, path=sock_path,
-                    ),
-                    loop,
+                    server.start_private_async(), loop,
                 )
-                startup.result(timeout=30)
+                startup.result(timeout=60)
             except BaseException:
                 # Without this the ``run_forever`` daemon thread (and any
                 # listener the timed-out coroutine went on to create)
                 # would outlive the failed attempt, one per retry.
-                _abort_api_server_startup(loop, thread, startup, sock_dir)
+                _abort_api_server_startup(loop, thread, server, startup, private_dir)
                 raise
             _API_SERVER = server
-            _API_SERVER_SOCK = sock_path
-        return _API_SERVER_SOCK
+            _API_SERVER_ENDPOINT = endpoint_file
+        return _API_SERVER_ENDPOINT
 
 
-async def _close_listener(listener: asyncio.AbstractServer) -> None:
-    listener.close()
-    await listener.wait_closed()
+async def _stop_after_startup(server: RemoteAccessServer) -> None:
+    """Stop *server* once its (possibly cancelled) startup has settled."""
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await server.stop_async()
 
 
 async def _stop_loop_after_pending_cancels() -> None:
@@ -144,38 +146,47 @@ async def _stop_loop_after_pending_cancels() -> None:
 def _abort_api_server_startup(
     loop: asyncio.AbstractEventLoop,
     thread: threading.Thread,
-    startup: concurrent.futures.Future[asyncio.AbstractServer] | None,
-    sock_dir: str,
+    server: RemoteAccessServer | None,
+    startup: concurrent.futures.Future[None] | None,
+    private_dir: str,
 ) -> None:
     """Tear down a half-started private daemon after a startup failure.
 
-    Cancels the pending listener coroutine (or closes the listener it
-    already produced), stops the loop thread and joins it with a finite
+    Cancels the pending startup coroutine (or stops the server it
+    already bound), stops the loop thread and joins it with a finite
     timeout, closes the loop once it has stopped, and removes the
-    private socket directory.  Every step is best-effort: this runs on
-    an error path and must never mask the original exception.
+    private directory.  Every step is best-effort: this runs on an
+    error path and must never mask the original exception.
 
     Args:
         loop: The dedicated event loop the thread is running.
         thread: The ``run_forever`` thread.
-        startup: The ``start_unix_server`` future, or ``None`` when the
-            failure happened before it was submitted.
-        sock_dir: The private temp directory holding the socket.
+        server: The server being started, or ``None`` when the failure
+            happened before it was constructed.
+        startup: The ``start_private_async`` future, or ``None`` when
+            the failure happened before it was submitted.
+        private_dir: The private temp directory holding the endpoint
+            file and tab registry.
     """
-    if startup is not None and not startup.cancel():
-        # Already finished: on timeout the listener may well exist.
-        if startup.exception() is None:
-            with contextlib.suppress(Exception):
-                asyncio.run_coroutine_threadsafe(
-                    _close_listener(startup.result()), loop,
-                ).result(timeout=2)
+    if startup is not None:
+        startup.cancel()
+    if server is not None:
+        # Whether the cancel landed (the coroutine rolled its listener
+        # back) or lost the race with completion (a bound listener and a
+        # published endpoint exist), ``stop_async`` closes what is left;
+        # it waits for the startup's lifecycle lock, so it runs after
+        # the startup has finished either way.
+        with contextlib.suppress(Exception):
+            asyncio.run_coroutine_threadsafe(
+                _stop_after_startup(server), loop,
+            ).result(timeout=10)
     # Not awaited: the loop stops before this future's completion
     # callback could run, so ``thread.join`` is the wait.
     asyncio.run_coroutine_threadsafe(_stop_loop_after_pending_cancels(), loop)
     thread.join(timeout=2)
     if not thread.is_alive():
         loop.close()
-    shutil.rmtree(sock_dir, ignore_errors=True)
+    shutil.rmtree(private_dir, ignore_errors=True)
 
 
 class KissWebChatAgent(BaseChannelAgent):
@@ -231,7 +242,7 @@ def run_agent_via_kiss_web(
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     timeout: float | None = None,
-    sock_path: str | None = None,
+    endpoint_file: str | None = None,
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
@@ -297,8 +308,8 @@ def run_agent_via_kiss_web(
         timeout: Max seconds to wait for the task; ``None`` waits
             indefinitely.  On timeout the task keeps running in the
             daemon and ``""`` is returned.
-        sock_path: Daemon UDS path override.  ``None`` uses the
-            process-global in-process daemon
+        endpoint_file: Daemon endpoint file override.  ``None`` uses
+            the process-global in-process daemon
             (:func:`_ensure_api_server`).
 
     Returns:
@@ -308,7 +319,7 @@ def run_agent_via_kiss_web(
     Raises:
         ValueError: When *tools* (or ``agent.tools_file``) is not the
             path of an existing Python file.
-        ConnectionError: When the daemon socket cannot be reached.
+        ConnectionError: When the daemon cannot be reached.
     """
     from kiss.server import sorcar
 
@@ -326,7 +337,7 @@ def run_agent_via_kiss_web(
     # and calls its tools(); the daemon-built agent supplies the
     # standard tools itself.
     tools_path = str(tools) if tools else agent.tools_file
-    sock = sock_path or _SOCK_PATH_OVERRIDE or _ensure_api_server()
+    endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
     _enter_workspace(agent.workspace)
     try:
         try:
@@ -345,7 +356,7 @@ def run_agent_via_kiss_web(
                 append_to_system_prompt=append_to_system_prompt,
                 append_to_prompt=append_to_prompt,
                 timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
-                sock_path=sock,
+                endpoint_file=endpoint,
             )
         except TimeoutError:
             logger.warning(

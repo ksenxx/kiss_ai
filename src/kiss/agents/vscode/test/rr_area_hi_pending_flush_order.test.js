@@ -19,9 +19,10 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 if (process.platform === 'win32') {
-  console.log('skipped on win32 (UDS test)');
+  console.log('skipped on win32 (local-endpoint test)');
   process.exit(0);
 }
 
@@ -30,7 +31,7 @@ const {AgentClient} = require(
 );
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-rrhi-flush-'));
-const sockPath = path.join(tmpDir, 'sorcar.sock');
+const endpointPath = path.join(tmpDir, 'sorcar-local.json');
 
 function waitFor(predicate, message, timeout = 5000) {
   const start = Date.now();
@@ -48,7 +49,7 @@ function waitFor(predicate, message, timeout = 5000) {
 
 async function main() {
   const received = [];
-  const server = net.createServer(sock => {
+  const server = createFakeDaemon(sock => {
     let buf = '';
     sock.on('data', chunk => {
       buf += chunk.toString();
@@ -62,10 +63,10 @@ async function main() {
   });
   await new Promise((resolve, reject) => {
     server.on('error', reject);
-    server.listen(sockPath, err => (err ? reject(err) : resolve()));
+    server.listen(endpointPath, err => (err ? reject(err) : resolve()));
   });
 
-  const client = new AgentClient(sockPath);
+  const client = new AgentClient(endpointPath);
 
   // The sidebar's real connect handler sends init commands; mirror it.
   client.on('connect', () => {

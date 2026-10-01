@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 const {JSDOM} = require('jsdom');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -87,13 +88,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-e2e-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  fs.rmSync(tmpHome, {recursive: true, force: true});
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const daemonCmds = [];
 let lastServerSock = null;
@@ -107,7 +102,7 @@ function daemonReply(obj) {
 // which persists no tabs of its own any more, relearns the running task.
 const registryTabs = new Map();
 let taskRunning = false;
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   lastServerSock = sock;
   let buf = '';
   sock.on('data', chunk => {
@@ -251,7 +246,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function runTests() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
@@ -337,7 +332,7 @@ function cleanup() {
     server.close();
   } catch {}
   try {
-    fs.unlinkSync(sockPath);
+    fs.unlinkSync(endpointPath);
   } catch {}
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }
