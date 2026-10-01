@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 const {JSDOM} = require('jsdom');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -87,13 +88,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-e2e-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  fs.rmSync(tmpHome, {recursive: true, force: true});
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const daemonCmds = [];
 let lastServerSock = null;
@@ -107,7 +102,7 @@ function daemonReply(obj) {
 // which persists no tabs of its own any more, relearns the running task.
 const registryTabs = new Map();
 let taskRunning = false;
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   lastServerSock = sock;
   let buf = '';
   sock.on('data', chunk => {
@@ -123,7 +118,7 @@ const server = net.createServer(sock => {
         continue;
       }
       daemonCmds.push(cmd);
-      if (cmd.type === 'run') {
+      if (cmd.type === 'submit') {
         const tabId = cmd.tabId;
         registryTabs.set(tabId, {chatId: 'chat-1', title: 'do a long task'});
         taskRunning = true;
@@ -251,7 +246,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function runTests() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
@@ -278,8 +273,8 @@ async function runTests() {
   await sleep(80);
   const TAB = view._activeTabId;
   assert.ok(
-    daemonCmds.some(c => c.type === 'run' && c.tabId === TAB),
-    'daemon must receive the initial run command',
+    daemonCmds.some(c => c.type === 'submit' && c.tabId === TAB),
+    'daemon must receive the initial submit command',
   );
   assert.ok(TAB, 'extension must have learned the active tab id from submit');
 
@@ -295,7 +290,7 @@ async function runTests() {
   typeAndSend(ctx2.win, 'please also update the docs');
   await sleep(80);
   const duringTypes = daemonCmds
-    .filter(c => c.type === 'appendUserMessage' || c.type === 'run')
+    .filter(c => c.type === 'appendUserMessage' || c.type === 'submit')
     .map(c => c.type);
   assert.deepStrictEqual(
     duringTypes,
@@ -312,13 +307,13 @@ async function runTests() {
   typeAndSend(ctx2.win, 'now do a follow-up task');
   await sleep(80);
   const afterTypes = daemonCmds
-    .filter(c => c.type === 'appendUserMessage' || c.type === 'run')
+    .filter(c => c.type === 'appendUserMessage' || c.type === 'submit')
     .map(c => c.type);
   assert.deepStrictEqual(
     afterTypes,
-    ['run'],
+    ['submit'],
     'BUG: after the task finished in a re-opened tab, a typed message ' +
-      'must start a new run (was: ' +
+      'must reach the daemon as a submit, which starts a new run (was: ' +
       JSON.stringify(afterTypes) +
       '). The extension dropped it as a submit for a still-"running" tab.',
   );
@@ -337,7 +332,7 @@ function cleanup() {
     server.close();
   } catch {}
   try {
-    fs.unlinkSync(sockPath);
+    fs.unlinkSync(endpointPath);
   } catch {}
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }

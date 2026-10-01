@@ -11,6 +11,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 class StubEventEmitter {
   constructor() {
@@ -82,13 +83,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mpr-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  fs.rmSync(tmpHome, {recursive: true, force: true});
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const received = [];
 const perConn = [];
@@ -98,7 +93,7 @@ let lastConnIndex = -1;
 
 function startServer() {
   return new Promise((resolve, reject) => {
-    server = net.createServer((sock) => {
+    server = createFakeDaemon((sock) => {
       lastServerSock = sock;
       const connIndex = perConn.length;
       perConn.push([]);
@@ -122,7 +117,7 @@ function startServer() {
       sock.on('error', () => {});
     });
     server.on('error', reject);
-    server.listen(sockPath, (err) => (err ? reject(err) : resolve()));
+    server.listen(endpointPath, (err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -137,7 +132,7 @@ function stopServer() {
     if (!server) return resolve();
     server.close(() => {
       try {
-        fs.unlinkSync(sockPath);
+        fs.unlinkSync(endpointPath);
       } catch {}
       server = null;
       resolve();

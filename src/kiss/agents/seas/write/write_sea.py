@@ -127,6 +127,9 @@ sense stays when no plain word means the same thing ("leverage" in a piece on de
 """
 """The writing protocol added to the system prompt of every run."""
 
+DISPATCH_TIMEOUT_SECONDS = 3600.0
+"""Wait of the ``/write`` relay before it stops the agent (see :func:`dispatch_timeout`)."""
+
 
 def description() -> str:
     """Return the one-sentence help text shown by ``/write help``."""
@@ -141,3 +144,14 @@ def description() -> str:
 def add_to_system_prompt() -> str:
     """Add the writing protocol to the default Sorcar system prompt."""
     return SYSTEM_PROMPT
+
+
+def dispatch_timeout() -> float:
+    """Seconds the ``/write`` relay waits for the agent before stopping it.
+
+    Rewriting a long document means reading every source in full, writing,
+    editing, and running the tests that check the file; a 100 KB README took
+    over the default 300 s ``run_agent`` wait, which stopped the agent after
+    the edits were made but before it could return them.
+    """
+    return DISPATCH_TIMEOUT_SECONDS

@@ -116,7 +116,7 @@ class _LiveServer:
                 certfile=str(self.certfile),
                 keyfile=str(self.keyfile),
                 url_file=self.tmp_path / "remote-url.json",
-                uds_path=self.tmp_path / "sorcar.sock",
+                local_endpoint_file=self.tmp_path / "sorcar-local.json",
             )
             started = False
             try:

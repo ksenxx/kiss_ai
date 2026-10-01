@@ -64,4 +64,4 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 695 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#models-supported).
+The full per-model list is in [MODELS.md](https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md) in the repository.

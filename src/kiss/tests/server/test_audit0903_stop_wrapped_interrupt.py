@@ -20,8 +20,8 @@ while such a getter runs was therefore swallowed:
   watchdog's 5-second retry could land a SECOND interrupt in the
   result broadcasting / persistence should they take that long.
 
-Everything here is real: a ``RemoteAccessServer`` serving its Unix
-domain socket, ``run`` / ``stop`` commands sent as ``daemon_client``
+Everything here is real: a ``RemoteAccessServer`` serving its local
+endpoint, ``run`` / ``stop`` commands sent as ``daemon_client``
 would (the ``run`` carries a client-minted ``taskId`` run token and
 the ``stop`` repeats it, exercising the run-token guard end to end),
 the real worker thread and the real watchdog.  The interrupt lands
@@ -54,7 +54,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
 import tempfile
 import textwrap
 import threading
@@ -63,44 +62,38 @@ from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
+from websockets.exceptions import ConnectionClosed
+
+from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _stop_interrupt_wrapped
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
 
 _STOP_LABEL = "Task stopped by user"
 
 
-class _UdsClient:
-    """Newline-delimited JSON client of the server's Unix domain socket."""
+class _LocalClient:
+    """JSON client of the server's local endpoint, reading on a thread."""
 
-    def __init__(self, sock_path: str) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(sock_path)
+    def __init__(self, endpoint_file: Path) -> None:
+        self.ws = local_endpoint.connect(endpoint_file)
         self.events: list[dict[str, Any]] = []
         self._cond = threading.Condition()
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self) -> None:
-        buf = b""
         while True:
             try:
-                chunk = self.sock.recv(65536)
-            except OSError:
-                chunk = b""
-            if not chunk:
+                message = self.ws.recv()
+            except (ConnectionClosed, OSError):
                 return
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if line.strip():
-                    with self._cond:
-                        self.events.append(json.loads(line))
-                        self._cond.notify_all()
+            with self._cond:
+                self.events.append(json.loads(message))
+                self._cond.notify_all()
 
     def send(self, cmd: dict[str, Any]) -> None:
-        self.sock.sendall((json.dumps(cmd) + "\n").encode())
+        self.ws.send(json.dumps(cmd))
 
     def wait_for(
         self,
@@ -129,7 +122,7 @@ class _UdsClient:
                 self._cond.wait(remaining)
 
     def close(self) -> None:
-        self.sock.close()
+        self.ws.close()
 
 
 _BLOCKING_GETTER = textwrap.dedent(
@@ -161,7 +154,6 @@ _BROKEN_GETTER = textwrap.dedent(
 )
 
 
-@requires_unix_sockets
 class TestStopWrappedInterrupt(TestCase):
     """An injected stop swallowed by a loader is still a user stop."""
 
@@ -171,21 +163,16 @@ class TestStopWrappedInterrupt(TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-audit0903-wrap-"))
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
-        self.sock_path = str(self.tmp / "sorcar.sock")
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.remote = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=str(self.work_dir),
+            local_endpoint_file=self.tmp / "sorcar-local.json",
+            work_dir=str(self.work_dir),
         )
-        self.remote._printer._loop = self.loop
-        self.remote._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.remote._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=10)
-        self.client = _UdsClient(self.sock_path)
+        asyncio.run_coroutine_threadsafe(
+            self.remote.start_private_async(), self.loop,
+        ).result(timeout=30)
+        self.client = _LocalClient(self.tmp / "sorcar-local.json")
 
     def tearDown(self) -> None:
         # Release any still-blocked getter so its worker thread exits
@@ -199,19 +186,13 @@ class TestStopWrappedInterrupt(TestCase):
         ):
             time.sleep(0.05)
         self.client.close()
-
-        async def _drain() -> None:
-            # Await the accepted handlers' ``finally`` blocks (closed
-            # client sockets unblock their ``readline``) instead of
-            # stopping the loop under them, which leaked pending
-            # ``_uds_handler`` tasks ("Task was destroyed but it is
-            # pending!") into later tests.
-            self.uds_server.close()
-            for writer in list(self.remote._printer._uds_writers):
-                writer.close()
-            await self.remote._drain_tasks(set(self.remote._uds_handler_tasks))
-
-        asyncio.run_coroutine_threadsafe(_drain(), self.loop).result(timeout=15)
+        # ``stop_async`` closes the listener and joins the accepted
+        # handlers' ``finally`` blocks instead of stopping the loop
+        # under them, which would leak pending handler tasks ("Task
+        # was destroyed but it is pending!") into later tests.
+        asyncio.run_coroutine_threadsafe(
+            self.remote.stop_async(), self.loop,
+        ).result(timeout=60)
         self.loop.call_soon_threadsafe(self.loop.stop)
         agent_state.agent_states.clear()
 
@@ -305,7 +286,7 @@ class TestStopWrappedInterrupt(TestCase):
 class TestStopInterruptWrappedPredicate(TestCase):
     """Remaining branches of ``_stop_interrupt_wrapped``, on real objects.
 
-    The UDS tests above cover the two production catch sites; the
+    The daemon tests above cover the two production catch sites; the
     predicate's other decision branches are exercised here directly —
     real :class:`AgentState` objects and real exception chains, no
     doubles.  The wire timing needed to land a NON-interrupt script

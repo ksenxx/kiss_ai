@@ -14,7 +14,7 @@ reload of the webview (a ``resumeSession`` of the parent) re-announced
 each finished update as ``openSubagentTab{isDone: true}`` — one dead
 tab per periodic update.
 
-Real daemon over a UDS socket (:class:`DaemonUdsHarness`); only the LLM
+Real daemon on a loopback WSS endpoint (:class:`DaemonLocalHarness`); only the LLM
 boundary (``RelentlessAgent.run``) is stubbed.
 """
 
@@ -27,10 +27,7 @@ from typing import Any
 from kiss.agents.seas.task_update import task_update_sea
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.server.server import _is_side_channel_row
-from kiss.tests.conftest import requires_unix_sockets
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
-
-pytestmark = requires_unix_sockets
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 PARENT_TAB_ID = "webtab-updated-1"
 PARENT_MARKER = "long running parent task tu7"
@@ -45,7 +42,7 @@ def _result_text() -> str:
     )
 
 
-class TaskUpdateSubagentTabClosesTest(DaemonUdsHarness):
+class TaskUpdateSubagentTabClosesTest(DaemonLocalHarness):
     """The task-update child's tab closes when done and stays closed on replay."""
 
     def _install_stub(  # type: ignore[override]

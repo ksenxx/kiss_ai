@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests of the ``docker_image`` run parameter on the daemon.
 
-A real :class:`kiss.server.web_server.RemoteAccessServer` on a temporary
-Unix-domain socket (the :class:`DaemonRunApiHarness`) runs tasks whose
+A real :class:`kiss.server.web_server.RemoteAccessServer` with a temporary
+local endpoint (the :class:`DaemonRunApiHarness`) runs tasks whose
 tools attach to a REAL Docker container started by the test.  The only
 replaced boundary is the LLM: the executor's :meth:`KISSAgent.run` is
 swapped for a stub that records the tools it was handed and *calls* them,
@@ -35,7 +35,6 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 IMAGE = "python:3.11-slim"
@@ -50,7 +49,6 @@ def _docker_available() -> bool:
 
 
 pytestmark = [
-    requires_unix_sockets,
     pytest.mark.slow,
     pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
 ]
@@ -149,7 +147,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             use_worktree=False,
             use_web_tools=False,
             docker_image=f"container:{self.container.id}",
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=120,
         )
         assert result.success is True, result.text
@@ -175,7 +173,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             use_worktree=False,
             use_web_tools=False,
             docker_image=f"container:{self.container.id}",
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=180,
         )
         assert result.success is True, result.text
@@ -210,7 +208,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_web_tools=False,
             extension_agent_path=script,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=120,
         )
         assert result.success is True, result.text
@@ -237,7 +235,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             use_worktree=False,
             use_web_tools=False,
             extension_agent_path=script,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=120,
         )
         assert result.success is False

@@ -7,7 +7,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
+const {startRealDaemon} = require('./_realDaemon.js');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -196,29 +196,13 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-openfile-'));
 const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+process.env.KISS_HOME = path.join(tmpHome, '.kiss');
+fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  for (const dir of tmpDirs.slice().reverse()) {
-    fs.rmSync(dir, {recursive: true, force: true});
-  }
-  process.exit(0);
-}
-
-let lastServerSock = null;
-const server = net.createServer(sock => {
-  lastServerSock = sock;
-  sock.on('data', () => {});
-});
-
-async function waitForClient() {
-  for (let i = 0; i < 100 && !lastServerSock; i++) {
-    await new Promise(r => setTimeout(r, 20));
-  }
-  assert.ok(lastServerSock, 'client never connected to daemon');
-}
+const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
+const UV = findUvPath();
+assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');
+let daemon = null;
 
 function makeWebviewView() {
   const recv = new StubEventEmitter();
@@ -264,10 +248,6 @@ function clear() {
 }
 
 async function runTests() {
-  await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
-  );
-
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
     fs.existsSync(sourcePath),
@@ -276,9 +256,12 @@ async function runTests() {
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-openfile-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-openfile-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
+  daemon = await startRealDaemon(UV, ws, process.env);
 
   const textFile = path.join(ws, 'src', 'main.py');
   fs.mkdirSync(path.dirname(textFile), {recursive: true});
@@ -301,7 +284,11 @@ async function runTests() {
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
   wv.fireMessage({type: 'ready', tabId: 'tab1', restoredTabs: []});
-  await waitForClient();
+  await waitFor(
+    () => wv.posted.find(m => m.type === 'tabs_state'),
+    'the real daemon must answer ready',
+    15000,
+  );
 
   clear();
   wv.fireMessage({type: 'openFile', path: 'src/main.py'});
@@ -375,8 +362,10 @@ async function runTests() {
     "pdf file: the file's directory must be a local resource root",
   );
   const pdfHtml = pdfPanel.webview.html;
+  // The URI sits inside the page's JSON config, so compare its JSON
+  // form (a Windows path has its backslashes escaped there).
   assert.ok(
-    pdfHtml.includes('vscode-resource:' + pdfFile),
+    pdfHtml.includes(JSON.stringify('vscode-resource:' + pdfFile)),
     'pdf panel: the page must fetch the PDF through its webview URI',
   );
   assert.ok(
@@ -451,24 +440,23 @@ async function runTests() {
   assert.strictEqual(saveDialogs.length, 2);
   console.log('  ok - pdf panel download saves a copy through a save dialog');
 
+  // An existing path outside the workspace opens too: the daemon resolves
+  // file links the same way for every surface (the remote webapp always
+  // opened absolute paths).
   clear();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-'));
+  const outside = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-')),
+  );
   tmpDirs.push(outside);
-  const outsideFile = path.join(outside, 'evil.py');
+  const outsideFile = path.join(outside, 'notes.py');
   fs.writeFileSync(outsideFile, 'x = 1\n');
   wv.fireMessage({type: 'openFile', path: outsideFile});
-  await new Promise(r => setTimeout(r, 100));
-  assert.deepStrictEqual(
-    openedTextDocs,
-    [],
-    'outside-workspace path: openTextDocument must NOT be called',
+  await waitFor(
+    () => openedTextDocs.length === 1 && shownTextDocs.length === 1,
+    'outside-workspace path: openTextDocument + showTextDocument expected',
   );
-  assert.deepStrictEqual(
-    executedCommands.filter(c => c.cmd === 'vscode.open'),
-    [],
-    'outside-workspace path: vscode.open must NOT be invoked',
-  );
-  console.log('  ok - outside-workspace path is refused');
+  assert.strictEqual(openedTextDocs[0], outsideFile);
+  console.log('  ok - outside-workspace path opens like any other');
 
   clear();
   wv.fireMessage({type: 'openFile', path: 'no/such/file.py'});
@@ -512,7 +500,7 @@ async function runTests() {
   console.log('  ok - directory reveals in Explorer (not an editor)');
 
   view.dispose();
-  server.close();
+  await daemon.stop();
   for (const dir of tmpDirs.slice().reverse()) {
     fs.rmSync(dir, {recursive: true, force: true});
   }

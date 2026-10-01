@@ -4,7 +4,7 @@
 # add your name here
 """Integration tests: each VS Code window keeps its own work_dir.
 
-Every VS Code window owns exactly one UDS connection to the shared
+Every VS Code window owns exactly one local connection to the shared
 ``kiss-web`` daemon and announces its open workspace folder via
 ``setWorkDir``.  The daemon records that folder per connection
 (``kiss.server.sorcar.ServerApi.dispatch``) and stamps it onto
@@ -18,8 +18,9 @@ observe each other's folder.  Before the per-connection state existed,
 redirected autocomplete, commit-message generation and task launches
 of every other window to its own folder.
 
-These tests bind a temporary socket under ``tmp_path`` (not the
-production ``~/.kiss/sorcar.sock``) and open two real UDS client
+These tests bind a loopback WSS listener on an ephemeral port with an
+endpoint file under a temp dir (not the production
+``~/.kiss/sorcar-local.json``) and open two real local client
 connections that simulate two VS Code windows.
 """
 
@@ -37,9 +38,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -68,7 +67,7 @@ def _file_names(event: dict[str, Any]) -> list[str]:
 
 
 class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
-    """Two UDS connections (= two VS Code windows) with distinct folders."""
+    """Two local connections (= two VS Code windows) with distinct folders."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -86,17 +85,16 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -113,24 +111,23 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS connection (simulates one VS Code window)."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        """Open one local connection (simulates one VS Code window)."""
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 5.0,
@@ -143,7 +140,7 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         """
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):

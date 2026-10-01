@@ -10,7 +10,7 @@ carrying ``work_dir`` -- passes through ``_apply_new_work_dir``, which
 records it in ``config.json`` (``recent_work_dirs``: ``{path, ts}``
 rows).  ``getConfig`` returns the rows most recently opened first,
 skipping directories that no longer exist.  Tested against a real
-``RemoteAccessServer`` over its UDS socket plus the config helpers on a
+``RemoteAccessServer`` over its local channel plus the config helpers on a
 real temporary ``config.json``.
 
 The webview half (the "..." menu item, the panel, both surfaces) is
@@ -33,7 +33,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 class _IsolatedConfig:
@@ -193,8 +193,7 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-@requires_unix_sockets
-class TestRecentWorkDirsOverUds(IsolatedAsyncioTestCase):
+class TestRecentWorkDirsOverLocalChannel(IsolatedAsyncioTestCase):
     """``setWorkDir`` / ``saveConfig`` record, ``getConfig`` reports."""
 
     async def asyncSetUp(self) -> None:
@@ -213,17 +212,16 @@ class TestRecentWorkDirsOverUds(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -241,29 +239,29 @@ class TestRecentWorkDirsOverUds(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local channel closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -273,7 +271,7 @@ class TestRecentWorkDirsOverUds(IsolatedAsyncioTestCase):
         )
 
     async def _recent_paths(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
     ) -> list[str]:
         await self._send(writer, {"type": "getConfig"})
         msg = await self._drain_until(

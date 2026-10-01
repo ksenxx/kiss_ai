@@ -35,94 +35,112 @@ function probeDaemonHealth(port, timeoutMs) {
   });
 }
 
-function daemonHasActiveTasks(sockPath, timeoutMs) {
+/**
+ * Ask the daemon named by the endpoint file how many tasks are running.
+ *
+ * Connects over the daemon's local WSS endpoint (token auth, CA
+ * pinned), sends `activeTasksQuery` and resolves with
+ * `{ok: true, count, tabs}` or `{ok: false, reason}`.  `reason` is
+ * `endpoint-missing` when no daemon has published an endpoint or the
+ * published one refuses connections (a stale file).
+ *
+ * @param {string} endpointPath The daemon's endpoint file.
+ * @param {number} [timeoutMs] Overall probe budget (default 1500).
+ * @returns {Promise<{ok: true, count: number, tabs: string[]} | {ok: false, reason: string}>}
+ */
+function daemonHasActiveTasks(endpointPath, timeoutMs) {
+  // Required here, not at module load: these are compiled TypeScript
+  // modules, and the pure helpers in this file (`sleep`, `decideRestart`,
+  // `probeDaemonHealth`) are also loaded straight from src/ by tests.
+  const {readLocalEndpoint} = require('./userAssets');
+  const {WsClient} = require('./wsClient');
   const timeout = typeof timeoutMs === 'number' ? timeoutMs : 1500;
   return new Promise(resolve => {
-    try {
-      if (!fs.existsSync(sockPath)) {
-        resolve({ok: false, reason: 'sock-missing'});
+    const endpoint = readLocalEndpoint(endpointPath);
+    if (!endpoint) {
+      resolve({ok: false, reason: 'endpoint-missing'});
+      return;
+    }
+    let ca;
+    if (endpoint.ca) {
+      try {
+        ca = fs.readFileSync(endpoint.ca, 'utf8');
+      } catch (err) {
+        resolve({ok: false, reason: 'ca-unreadable:' + (err && err.code)});
         return;
       }
-    } catch {
-      resolve({ok: false, reason: 'sock-stat-failed'});
-      return;
     }
 
     let settled = false;
-    let buf = '';
+    let authenticated = false;
     const finish = result => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try {
-        sock.destroy();
+        ws.destroy();
       } catch {
       }
       resolve(result);
     };
     const timer = setTimeout(() => finish({ok: false, reason: 'timeout'}), timeout);
-    const sock = net.createConnection(sockPath);
-    sock.setEncoding('utf-8');
-    sock.once('connect', () => {
+    const ws = new WsClient({url: endpoint.url, ca, connectTimeoutMs: timeout});
+    ws.on('open', () => {
+      ws.send(JSON.stringify({type: 'auth', token: endpoint.token}));
+    });
+    ws.on('message', text => {
+      let parsed;
       try {
-        sock.write(JSON.stringify({type: 'activeTasksQuery'}) + '\n');
-      } catch (err) {
-        finish({ok: false, reason: 'write-failed:' + (err && err.code)});
-      }
-    });
-    sock.on('data', chunk => {
-      buf += chunk;
-      let nl = buf.indexOf('\n');
-      while (nl >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        nl = buf.indexOf('\n');
-        if (line.length === 0) continue;
-        let parsed;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (!parsed || typeof parsed !== 'object') continue;
-        if (parsed.type === 'activeTasksResponse') {
-          const count = typeof parsed.count === 'number' ? parsed.count : -1;
-          const tabs = Array.isArray(parsed.tabs)
-            ? parsed.tabs.filter(t => typeof t === 'string')
-            : [];
-          if (count < 0) {
-            finish({ok: false, reason: 'missing-count'});
-            return;
-          }
-          finish({ok: true, count, tabs});
-          return;
-        }
-        if (
-          parsed.type === 'error' &&
-          typeof parsed.text === 'string' &&
-          parsed.text.indexOf('Unknown command: activeTasksQuery') >= 0
-        ) {
-          // An old daemon that cannot answer the query conveys NO
-          // information about whether it is running a task. Reporting
-          // "zero active tasks" here would authorize a restart that can
-          // abort in-flight work in exactly the process being upgraded.
-          finish({ok: false, reason: 'unsupported-query'});
-          return;
-        }
-      }
-    });
-    sock.once('error', err => {
-      const code = err && err.code;
-      if (code === 'ENOENT' || code === 'ECONNREFUSED' ||
-          code === 'ENOTSOCK') {
-        finish({ok: false, reason: 'sock-missing'});
+        parsed = JSON.parse(text);
+      } catch {
         return;
       }
-      finish({ok: false, reason: 'error:' + code});
+      if (!parsed || typeof parsed !== 'object') return;
+      if (!authenticated) {
+        if (parsed.type === 'auth_ok' && parsed.local === true) {
+          authenticated = true;
+          ws.send(JSON.stringify({type: 'activeTasksQuery'}));
+        } else {
+          finish({ok: false, reason: 'auth-rejected'});
+        }
+        return;
+      }
+      if (parsed.type === 'activeTasksResponse') {
+        const count = typeof parsed.count === 'number' ? parsed.count : -1;
+        const tabs = Array.isArray(parsed.tabs)
+          ? parsed.tabs.filter(t => typeof t === 'string')
+          : [];
+        if (count < 0) {
+          finish({ok: false, reason: 'missing-count'});
+          return;
+        }
+        finish({ok: true, count, tabs});
+        return;
+      }
+      if (
+        parsed.type === 'error' &&
+        typeof parsed.text === 'string' &&
+        parsed.text.indexOf('Unknown command: activeTasksQuery') >= 0
+      ) {
+        // An old daemon that cannot answer the query conveys NO
+        // information about whether it is running a task. Reporting
+        // "zero active tasks" here would authorize a restart that can
+        // abort in-flight work in exactly the process being upgraded.
+        finish({ok: false, reason: 'unsupported-query'});
+      }
     });
-    sock.once('end', () => {
+    ws.on('error', err => {
+      const code = err && err.code;
+      if (code === 'ECONNREFUSED') {
+        finish({ok: false, reason: 'endpoint-missing'});
+        return;
+      }
+      finish({ok: false, reason: 'error:' + (code || (err && err.message))});
+    });
+    ws.on('close', () => {
       finish({ok: false, reason: 'eof'});
     });
+    ws.connect();
   });
 }
 
@@ -142,11 +160,11 @@ function decideRestart(state) {
   if (
     health === 'alive' &&
     activeTasks && !activeTasks.ok &&
-    activeTasks.reason === 'sock-missing'
+    activeTasks.reason === 'endpoint-missing'
   ) {
     return {
       skip: false,
-      reason: 'unreachable-uds (alive but socket file missing)',
+      reason: 'unreachable-local (alive but endpoint file missing)',
     };
   }
   if (health === 'alive' && !(activeTasks && activeTasks.ok)) {

@@ -61,7 +61,7 @@ def _make_remote_server() -> Any:
     return RemoteAccessServer(
         use_tunnel=False,
         url_file=os.path.join(tmp, "url.json"),
-        uds_path=os.path.join(tmp, "sorcar.sock"),
+        local_endpoint_file=os.path.join(tmp, "sorcar-local.json"),
     )
 
 

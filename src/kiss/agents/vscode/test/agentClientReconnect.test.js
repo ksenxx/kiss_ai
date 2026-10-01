@@ -9,7 +9,7 @@
 // against a REAL unix domain socket (no mocks):
 //
 // 1. Reconnects must back off. Every open VS Code window runs one of
-//    these against ~/.kiss/sorcar.sock, so a fixed 500 ms retry meant N
+//    these against ~/.kiss/sorcar-local.json, so a fixed 500 ms retry meant N
 //    windows knocked 2N times a second for the whole of every daemon
 //    restart -- exactly while it was trying to bind.
 // 2. A command queued against a daemon that then died must not be
@@ -24,6 +24,7 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_AGENT_CLIENT = path.join(__dirname, '..', 'out', 'AgentClient.js');
 if (!fs.existsSync(OUT_AGENT_CLIENT)) {
@@ -44,9 +45,9 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function listen(server, sockPath) {
+function listen(server, endpointPath) {
   return new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 }
 
@@ -57,15 +58,15 @@ function close(server) {
 // The daemon is down for the whole window: every attempt is refused, so
 // the gaps between attempts are exactly the client's retry schedule.
 async function testReconnectBacksOff() {
-  const sockPath = tmpSock('storm.sock');
+  const endpointPath = tmpSock('storm.json');
   const attempts = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     attempts.push(Date.now());
     conn.destroy();
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
 
-  const client = new AgentClient(sockPath);
+  const client = new AgentClient(endpointPath);
   client.connect();
   await delay(3000);
   client.dispose();
@@ -90,8 +91,8 @@ async function testReconnectBacksOff() {
 }
 
 async function testStaleQueuedCommandIsNotReplayed() {
-  const sockPath = tmpSock('stale-run.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('stale-run.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 250,
@@ -103,10 +104,10 @@ async function testStaleQueuedCommandIsNotReplayed() {
 
   // A NEW daemon comes up on the same socket.
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
 
   await new Promise(resolve => {
     client.on('connect', resolve);
@@ -131,8 +132,8 @@ async function testStaleQueuedCommandIsNotReplayed() {
 }
 
 async function testFreshQueuedCommandIsStillDelivered() {
-  const sockPath = tmpSock('fresh-run.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('fresh-run.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -140,10 +141,10 @@ async function testFreshQueuedCommandIsStillDelivered() {
 
   client.sendCommand({type: 'run', task: 'do the thing', tabId: 't1'});
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.on('connect', resolve);
     client.connect();
@@ -161,8 +162,8 @@ async function testFreshQueuedCommandIsStillDelivered() {
 }
 
 async function testQueueIsBounded() {
-  const sockPath = tmpSock('bounded.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('bounded.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -173,10 +174,10 @@ async function testQueueIsBounded() {
   }
 
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.on('connect', resolve);
     client.connect();
@@ -202,10 +203,6 @@ async function testQueueIsBounded() {
 }
 
 (async () => {
-  if (process.platform === 'win32') {
-    console.log('SKIP: UDS tests require a POSIX platform');
-    return;
-  }
   try {
     await testReconnectBacksOff();
     await testStaleQueuedCommandIsNotReplayed();

@@ -146,10 +146,9 @@ export type FromWebviewMessage =
       webTools?: boolean;
       tabId?: string;
       workDir?: string;
-      // The client's workspace, sent only when `workDir` (a folder
-      // picked in the "Working directory" panel) lies outside it, so
-      // the tab stays scoped to this window.
-      tabScopeWorkDir?: string;
+      // The file tab the webview's user viewed last; the host's own
+      // visible editor takes precedence when there is one.
+      activeFile?: string;
     }
   | {type: 'stop'; tabId?: string}
   // The Stop button of one tool-call panel: interrupts only that tool
@@ -292,7 +291,19 @@ export type FromWebviewMessage =
       tabId?: string;
     }
   | {type: 'getWelcomeInfo'}
-  | {type: 'complete'; query: string; tabId?: string}
+  // activeFile / activeFileContent: the file tab the webview's user
+  // viewed last (its Monaco buffer as content; "" when no file tab is
+  // open); the host's own visible editor takes precedence when there
+  // is one, and when neither a native editor nor a webview file is
+  // open the host sends no activeFile at all (the daemon then keeps
+  // the last editor it was told about).
+  | {
+      type: 'complete';
+      query: string;
+      tabId?: string;
+      activeFile?: string;
+      activeFileContent?: string;
+    }
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
@@ -546,10 +557,22 @@ type ToWebviewMessageBody =
   | {
       // A path-only `submit` (a prompt that is just the path of an
       // existing file) opened that file instead of starting a task; sent
-      // by the extension host (SorcarSidebarView `submit`) and by the
-      // daemon (web_server.py _handle_submit) so the webview lifts the
-      // task claim it stamped on the submitting tab.
+      // by the daemon (web_server.py _handle_submit) to the submitting
+      // connection so the webview lifts the task claim it stamped on the
+      // submitting tab.
       type: 'promptOpened';
+    }
+  | {
+      // Reply to a VS Code window's `openFile` (or path-only `submit`),
+      // sent only to the requesting connection (web_server.py
+      // _handle_open_file with native=True): the path the daemon
+      // resolved for the tab, which the extension host opens in a real
+      // editor tab; `error` when nothing resolved. Consumed by the host,
+      // never relayed to the webview.
+      type: 'openResolvedFile';
+      path: string;
+      line?: number;
+      error?: string;
     }
   | {
       // Reply to `openFile` (web_server.py _handle_open_file), sent only
@@ -1050,11 +1073,6 @@ type ToWebviewMessageBody =
         chatId: string;
         title: string;
         workDir: string;
-        // Workspace-visibility scope, distinct from workDir (the
-        // execution directory): a run_agent sub-task runs in a
-        // channel/cron scratch dir but is scoped to the calling
-        // workspace. Empty means "scope by workDir".
-        scopeWorkDir: string;
       }>;
     }
   | {
@@ -1158,6 +1176,9 @@ type ToWebviewMessageBody =
 export interface AgentCommand {
   type:
     | 'run'
+    | 'submit'
+    | 'openFile'
+    | 'checkPaths'
     | 'stop'
     | 'interruptTool'
     | 'appendUserMessage'
@@ -1214,6 +1235,10 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
+  /** checkPaths: the candidate paths to test for existence. */
+  paths?: string[];
+  /** openFile: the line a `path:NN` link names. */
+  line?: number;
   html?: string;
   chatId?: number | string;
   taskId?: string | number | null;
@@ -1223,6 +1248,7 @@ export interface AgentCommand {
   useParallel?: boolean;
   autoCommit?: boolean;
   webTools?: boolean;
+  classifyTasks?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;

@@ -11,9 +11,9 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 
-const {verifyDaemonStartup} = require('../src/daemonRestartVerify');
-const {probeDaemonHealth} = require('../src/daemonHealth');
-const {fakeSockPath, SOCK_FILE_OPS, SOCK_FILE_SKIP} = require('./fakeSock');
+const {verifyDaemonStartup} = require('../out/daemonRestartVerify');
+const {probeDaemonHealth} = require('../out/daemonHealth');
+const {createFakeDaemon, fakeEndpointPath, writeStaleEndpoint} = require('./fakeDaemon');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-install-stuck-'));
 
@@ -42,13 +42,13 @@ function freeTcpPort() {
   });
 }
 
-function startUdsHalf(sockPath, activeCount) {
+function startDaemonHalf(endpointPath, activeCount) {
   return new Promise((resolve, reject) => {
     try {
-      fs.rmSync(sockPath, {force: true});
+      fs.rmSync(endpointPath, {force: true});
     } catch {
     }
-    const uds = net.createServer(conn => {
+    const daemon = createFakeDaemon(conn => {
       conn.setEncoding('utf-8');
       let buf = '';
       conn.on('data', chunk => {
@@ -78,13 +78,13 @@ function startUdsHalf(sockPath, activeCount) {
       });
       conn.on('error', () => { });
     });
-    uds.once('error', reject);
-    uds.listen(sockPath, () => {
+    daemon.once('error', reject);
+    daemon.listen(endpointPath, () => {
       resolve({
         close: async () => {
-          await new Promise(res => uds.close(() => res()));
+          await new Promise(res => daemon.close(() => res()));
           try {
-            fs.rmSync(sockPath, {force: true});
+            fs.rmSync(endpointPath, {force: true});
           } catch {
           }
         },
@@ -105,13 +105,13 @@ function startTcpHalf(port) {
   });
 }
 
-async function startFakeDaemon(port, sockPath) {
+async function startFakeDaemon(port, endpointPath) {
   const tcp = await startTcpHalf(port);
-  const uds = await startUdsHalf(sockPath, 0);
+  const daemon = await startDaemonHalf(endpointPath, 0);
   return {
     close: async () => {
       await tcp.close();
-      await uds.close();
+      await daemon.close();
     },
   };
 }
@@ -129,12 +129,12 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('repro-timeout');
-      const sockPath = fakeSockPath(tmpRoot, 'repro-timeout.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'repro-timeout.json');
       assert.strictEqual(await probeDaemonHealth(port, 500), 'dead');
-      assert.strictEqual(fs.existsSync(sockPath), false);
+      assert.strictEqual(fs.existsSync(endpointPath), false);
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: null,
         timeoutMs: 400,
@@ -154,14 +154,14 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('bootstrap-race');
-      const sockPath = fakeSockPath(tmpRoot, 'bootstrap-race.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'bootstrap-race.json');
       let daemon = null;
       let calls = 0;
       let spawned = false;
       const logs = [];
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -170,7 +170,7 @@ async function main() {
           }
           if (!spawned) {
             spawned = true;
-            startFakeDaemon(port, sockPath).then(d => {
+            startFakeDaemon(port, endpointPath).then(d => {
               daemon = d;
             });
           }
@@ -199,14 +199,14 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('async-restart');
-      const sockPath = fakeSockPath(tmpRoot, 'async-restart.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'async-restart.json');
       let daemon = null;
       let calls = 0;
       let spawned = false;
       const logs = [];
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: async () => {
           calls += 1;
@@ -216,7 +216,7 @@ async function main() {
           }
           if (!spawned) {
             spawned = true;
-            daemon = await startFakeDaemon(port, sockPath);
+            daemon = await startFakeDaemon(port, endpointPath);
           }
         },
         log: msg => logs.push(msg),
@@ -246,7 +246,7 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('venv-wipe');
-      const sockPath = fakeSockPath(tmpRoot, 'venv-wipe.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'venv-wipe.json');
       fs.rmSync(bin);
       let daemon = null;
       let restartsWhileBinMissing = 0;
@@ -257,13 +257,13 @@ async function main() {
       }, 250);
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           if (!fs.existsSync(bin)) restartsWhileBinMissing += 1;
           if (!spawned) {
             spawned = true;
-            startFakeDaemon(port, sockPath).then(d => {
+            startFakeDaemon(port, endpointPath).then(d => {
               daemon = d;
             });
           }
@@ -295,11 +295,11 @@ async function main() {
       const port = await freeTcpPort();
       const bin = path.join(tmpRoot, 'never-reinstalled', '.venv', 'bin',
         'kiss-web');
-      const sockPath = fakeSockPath(tmpRoot, 'never-reinstalled.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'never-reinstalled.json');
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -317,21 +317,18 @@ async function main() {
     },
   );
 
-  // The next two cases rm / pre-create the socket FILE independently of
-  // a listener; a Windows pipe exists exactly while it is served.
-  if (!SOCK_FILE_OPS) console.log(`  sock-missing / stale UDS file: ${SOCK_FILE_SKIP}`);
-  if (SOCK_FILE_OPS) await test(
-    'alive TCP + missing UDS file reports sock-missing without restarts',
+  await test(
+    'alive TCP + missing endpoint file reports endpoint-missing without restarts',
     async () => {
       const port = await freeTcpPort();
-      const bin = makeKissWebBin('sock-missing');
-      const sockPath = path.join(tmpRoot, 'sock-missing.sock');
-      const daemon = await startFakeDaemon(port, sockPath);
-      fs.rmSync(sockPath);
+      const bin = makeKissWebBin('endpoint-missing');
+      const endpointPath = path.join(tmpRoot, 'endpoint-missing.json');
+      const daemon = await startFakeDaemon(port, endpointPath);
+      fs.rmSync(endpointPath);
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -342,7 +339,7 @@ async function main() {
         probeTimeoutMs: 200,
       });
       assert.strictEqual(res.ok, false);
-      assert.strictEqual(res.reason, 'sock-missing');
+      assert.strictEqual(res.reason, 'endpoint-missing');
       assert.strictEqual(res.restarts, 0);
       assert.strictEqual(calls, 0, 'must not bounce an alive daemon');
       await daemon.close();
@@ -353,12 +350,12 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('happy');
-      const sockPath = fakeSockPath(tmpRoot, 'happy.sock');
-      const daemon = await startFakeDaemon(port, sockPath);
+      const endpointPath = fakeEndpointPath(tmpRoot, 'happy.json');
+      const daemon = await startFakeDaemon(port, endpointPath);
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -381,17 +378,17 @@ async function main() {
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('slow');
-      const sockPath = fakeSockPath(tmpRoot, 'slow.sock');
+      const endpointPath = fakeEndpointPath(tmpRoot, 'slow.json');
       let daemon = null;
       const spawnTimer = setTimeout(() => {
-        startFakeDaemon(port, sockPath).then(d => {
+        startFakeDaemon(port, endpointPath).then(d => {
           daemon = d;
         });
       }, 300);
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -415,22 +412,22 @@ async function main() {
 
   await test('defaults: minimal options against a live daemon', async () => {
     const port = await freeTcpPort();
-    const sockPath = fakeSockPath(tmpRoot, 'defaults.sock');
+    const endpointPath = fakeEndpointPath(tmpRoot, 'defaults.json');
     const bin = makeKissWebBin('defaults');
-    const daemon = await startFakeDaemon(port, sockPath);
-    const res = await verifyDaemonStartup({binPath: bin, sockPath, port});
+    const daemon = await startFakeDaemon(port, endpointPath);
+    const res = await verifyDaemonStartup({binPath: bin, endpointPath, port});
     assert.strictEqual(res.ok, true);
     assert.strictEqual(res.reason, 'alive');
     assert.strictEqual(res.restarts, 0);
     await daemon.close();
   });
 
-  await test('mid-boot daemon (UDS answering, TCP dead) is never bounced',
+  await test('mid-boot daemon (endpoint answering, TCP dead) is never bounced',
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('mid-boot');
-      const sockPath = fakeSockPath(tmpRoot, 'mid-boot.sock');
-      const uds = await startUdsHalf(sockPath, 0);
+      const endpointPath = fakeEndpointPath(tmpRoot, 'mid-boot.json');
+      const daemon = await startDaemonHalf(endpointPath, 0);
       let tcp = null;
       const tcpTimer = setTimeout(() => {
         startTcpHalf(port).then(t => {
@@ -440,7 +437,7 @@ async function main() {
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -457,22 +454,22 @@ async function main() {
       assert.strictEqual(
         calls,
         0,
-        'a UDS-answering (mid-boot) daemon must never be re-restarted',
+        'a local-endpoint-answering (mid-boot) daemon must never be re-restarted',
       );
-      await uds.close();
+      await daemon.close();
       if (tcp) await tcp.close();
     });
 
-  await test('UDS daemon with active tasks + dead TCP: no restart, timeout',
+  await test('endpoint daemon with active tasks + dead TCP: no restart, timeout',
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('active-veto');
-      const sockPath = fakeSockPath(tmpRoot, 'active-veto.sock');
-      const uds = await startUdsHalf(sockPath, 2);
+      const endpointPath = fakeEndpointPath(tmpRoot, 'active-veto.json');
+      const daemon = await startDaemonHalf(endpointPath, 2);
       let calls = 0;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           calls += 1;
@@ -486,28 +483,28 @@ async function main() {
       assert.strictEqual(res.reason, 'timeout');
       assert.strictEqual(res.restarts, 0);
       assert.strictEqual(calls, 0, 'must not abort a busy daemon');
-      await uds.close();
+      await daemon.close();
     });
 
-  if (SOCK_FILE_OPS) await test('stale UDS file does not fake success; restart still fires',
+  await test('stale endpoint file does not fake success; restart still fires',
     async () => {
       const port = await freeTcpPort();
       const bin = makeKissWebBin('stale-sock');
-      const sockPath = path.join(tmpRoot, 'stale-sock.sock');
-      const dead = await startUdsHalf(sockPath, 0);
+      const endpointPath = path.join(tmpRoot, 'stale-sock.json');
+      const dead = await startDaemonHalf(endpointPath, 0);
       await new Promise(res => setTimeout(res, 10));
       await dead.close();
-      fs.writeFileSync(sockPath, '');
+      writeStaleEndpoint(endpointPath, await freeTcpPort());
       let daemon = null;
       let spawned = false;
       const res = await verifyDaemonStartup({
         binPath: bin,
-        sockPath,
+        endpointPath,
         port,
         restart: () => {
           if (!spawned) {
             spawned = true;
-            startFakeDaemon(port, sockPath).then(d => {
+            startFakeDaemon(port, endpointPath).then(d => {
               daemon = d;
             });
           }

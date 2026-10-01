@@ -13,7 +13,7 @@
 // workspace-folders listener AFTER teardown: daemon connections went 1 -> 2
 // and workspace subscriptions 0 -> 1.
 //
-// This test reproduces that scenario against a real UDS daemon stub and
+// This test reproduces that scenario against a real local daemon stub and
 // asserts that after dispose() no new daemon connection and no new
 // workspace-folders subscription can ever appear.
 
@@ -25,6 +25,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 class StubEventEmitter {
   constructor() {
@@ -116,17 +117,11 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-term-disp-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  fs.rmSync(tmpHome, {recursive: true, force: true});
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 let connectionCount = 0;
 let lastServerSock = null;
-const server = net.createServer((sock) => {
+const server = createFakeDaemon((sock) => {
   connectionCount++;
   lastServerSock = sock;
   sock.on('data', () => {});
@@ -184,7 +179,7 @@ function makeWebviewView() {
 
 async function runTests() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, (err) => (err ? rej(err) : res())),
+    server.listen(endpointPath, (err) => (err ? rej(err) : res())),
   );
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
@@ -287,7 +282,7 @@ function cleanup() {
     server.close();
   } catch {}
   try {
-    fs.unlinkSync(sockPath);
+    fs.unlinkSync(endpointPath);
   } catch {}
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }

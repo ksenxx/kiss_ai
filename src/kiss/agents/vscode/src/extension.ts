@@ -18,7 +18,7 @@ import {
   promptApiKeysNow,
 } from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
-import {kissHomeDir, sorcarSockPath} from './userAssets';
+import {kissHomeDir, sorcarEndpointPath} from './userAssets';
 import {
   HISTORY_PANEL_TAB_ID,
   historyPanelBodyAttrs,
@@ -36,6 +36,7 @@ import {
   showWarningNotification,
 } from './WebviewNotifications';
 import {PRODUCT_NAME} from './brand';
+import {INSTALL_PROGRESS_FILE, InstallProgressWatcher} from './installProgress';
 
 let sidebarView: SorcarSidebarView | undefined;
 let panelManager: SorcarPanelManager | undefined;
@@ -206,14 +207,8 @@ export function activate(context: vscode.ExtensionContext): void {
     return panelManager!.activeController();
   };
 
-  const workspaceDir = (): string => {
-    const folders = vscode.workspace.workspaceFolders;
-    return folders && folders.length > 0 ? folders[0].uri.fsPath : '';
-  };
-
   // Switching the editor-tabs mode (from the settings UI toggle or
-  // settings.json): ON migrates the registry's chats of this workspace
-  // into editor tabs (the sidebar view hides via its `when` clause)
+  // settings.json): ON migrates the registry's chats into editor tabs (the sidebar view hides via its `when` clause)
   // and KEEPS the secondary sidebar open, now showing the Task Info
   // view — the remote webapp's rightmost desktop panel — in the spot
   // the sidebar chat occupied;
@@ -255,10 +250,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // bar, OFF restores the user's own actions location.
         void syncEditorActionsLocation(context, editorTabsMode());
         if (editorTabsMode()) {
-          panelManager!.enterMode(
-            sidebarView!.getRegistryTabEntries(),
-            workspaceDir(),
-          );
+          panelManager!.enterMode(sidebarView!.getRegistryTabEntries());
           // The secondary sidebar stays OPEN: the chat view it hosted
           // just hid (its `when` clause flipped false), and the Task
           // Info view takes its place. The reveal's focus then goes
@@ -381,7 +373,7 @@ export function activate(context: vscode.ExtensionContext): void {
           toAdopt = [];
         }
       }
-      panelManager!.adoptRegistryTabs(toAdopt, workspaceDir(), delta.listed);
+      panelManager!.adoptRegistryTabs(toAdopt, delta.listed);
     }),
   );
 
@@ -777,9 +769,15 @@ export function activate(context: vscode.ExtensionContext): void {
     } catch {}
   }
 
+  // While ./install.sh runs (Update button, a terminal, the daemon) show
+  // its current step as a non-blocking progress notification.
+  context.subscriptions.push(
+    new InstallProgressWatcher(path.join(kissHomeDir(), INSTALL_PROGRESS_FILE)),
+  );
+
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   const markerPath = path.join(kissHomeDir(), '.extension-updated');
-  const sockPath = sorcarSockPath();
+  const endpointPath = sorcarEndpointPath();
 
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
@@ -804,7 +802,7 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const RELOAD_SETTLE_INTERVAL_MS = 500;
-  const RELOAD_SOCKET_GRACE_MS = 3_000;
+  const RELOAD_DAEMON_GRACE_MS = 3_000;
   const RELOAD_SETTLE_TIMEOUT_MS = 15_000;
   const triggerReload = () => {
     if (reloadTriggered || settleTimer) return;
@@ -813,9 +811,9 @@ export function activate(context: vscode.ExtensionContext): void {
     let codeReadySince = -1;
     settleTimer = setInterval(() => {
       waited += RELOAD_SETTLE_INTERVAL_MS;
-      const {codeReady, socketUp, size} = isReloadReady(
+      const {codeReady, daemonUp, size} = isReloadReady(
         extJsPath,
-        sockPath,
+        endpointPath,
         prevSize,
       );
       prevSize = size;
@@ -825,7 +823,7 @@ export function activate(context: vscode.ExtensionContext): void {
       else if (codeReadySince < 0) codeReadySince = waited;
       const codeStableFor = codeReadySince < 0 ? 0 : waited - codeReadySince;
       if (
-        (codeReady && (socketUp || codeStableFor >= RELOAD_SOCKET_GRACE_MS)) ||
+        (codeReady && (daemonUp || codeStableFor >= RELOAD_DAEMON_GRACE_MS)) ||
         waited >= RELOAD_SETTLE_TIMEOUT_MS
       ) {
         doReload();

@@ -6,13 +6,10 @@
 import {AgentClient} from './AgentClient';
 import {AgentCommand, Attachment} from './types';
 
-export interface RunFields {
+export interface SubmitFields {
   prompt: string;
   model: string;
   workDir?: string;
-  // The client workspace a tab stays scoped to when `workDir` lies
-  // outside it (see the daemon's `tabScopeWorkDir`).
-  tabScopeWorkDir?: string;
   activeFile?: string;
   attachments?: Attachment[];
   useWorktree?: boolean;
@@ -26,8 +23,13 @@ export interface RunFields {
 export class SorcarApi {
   constructor(private readonly client: AgentClient) {}
 
-  run(fields: RunFields): void {
-    this._post({...fields, type: 'run'});
+  /**
+   * Submit a prompt through the daemon's one submit path (web_server.py
+   * `_handle_submit`): a path-only prompt opens the file, a prompt to a
+   * running tab is a follow-up, anything else starts a run.
+   */
+  submit(fields: SubmitFields): void {
+    this._post({...fields, type: 'submit'});
   }
 
   stop(tabId?: string): void {

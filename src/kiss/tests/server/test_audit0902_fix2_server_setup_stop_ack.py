@@ -19,8 +19,8 @@ hard-code ``"Task stopped by user"`` there without calling
 * ``AgentState.interrupted_by_shutdown`` was ignored, so a graceful
   daemon shutdown was reported to the user as a user stop.
 
-Everything here is real: a ``RemoteAccessServer`` serving its Unix
-domain socket, ``run`` / ``stop`` commands sent as a client would, the
+Everything here is real: a ``RemoteAccessServer`` serving its local
+WSS endpoint, ``run`` / ``stop`` commands sent as a client would, the
 real worker thread, the real watchdog, the real shutdown routine
 (``_stop_active_agent_tasks``).  The interrupt is made to land in the
 prologue deterministically with a real :class:`logging.Handler` on the
@@ -41,7 +41,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 import tempfile
 import threading
 import time
@@ -49,11 +48,13 @@ from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
+from websockets.exceptions import ConnectionClosed
+
+from kiss.agents.sorcar import local_endpoint
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.task_runner import _state_owns_thread
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
 
 # Watchdog schedule: first injection after 1 s, retry after 5 more.
 _RETRY_MOMENT = 6.0
@@ -121,35 +122,27 @@ class _ParkingHandler(logging.Handler):
             raise
 
 
-class _UdsClient:
-    """Newline-delimited JSON client of the server's Unix domain socket."""
+class _LocalClient:
+    """JSON-frame client of the server's local WSS endpoint (one thread reads)."""
 
-    def __init__(self, sock_path: str) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(sock_path)
+    def __init__(self, endpoint_file: Path) -> None:
+        self.ws = local_endpoint.connect(endpoint_file)
         self.events: list[dict[str, Any]] = []
         self._cond = threading.Condition()
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self) -> None:
-        buf = b""
         while True:
             try:
-                chunk = self.sock.recv(65536)
-            except OSError:
-                chunk = b""
-            if not chunk:
+                frame = self.ws.recv()
+            except (ConnectionClosed, OSError):
                 return
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if line.strip():
-                    with self._cond:
-                        self.events.append(json.loads(line))
-                        self._cond.notify_all()
+            with self._cond:
+                self.events.append(json.loads(frame))
+                self._cond.notify_all()
 
     def send(self, cmd: dict[str, Any]) -> None:
-        self.sock.sendall((json.dumps(cmd) + "\n").encode())
+        self.ws.send(json.dumps(cmd))
 
     def wait_for(
         self,
@@ -178,10 +171,9 @@ class _UdsClient:
                 self._cond.wait(remaining)
 
     def close(self) -> None:
-        self.sock.close()
+        self.ws.close()
 
 
-@requires_unix_sockets
 class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
     """One injection, correct label, for a stop landing in setup."""
 
@@ -191,21 +183,16 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="kiss-setup-stop-"))
         self.work_dir = self.tmp / "wd"
         self.work_dir.mkdir()
-        self.sock_path = str(self.tmp / "sorcar.sock")
+        self.endpoint_file = self.tmp / "sorcar-local.json"
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.remote = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=str(self.work_dir),
+            local_endpoint_file=self.endpoint_file, work_dir=str(self.work_dir),
         )
-        self.remote._printer._loop = self.loop
-        self.remote._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.remote._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=10)
-        self.client = _UdsClient(self.sock_path)
+        asyncio.run_coroutine_threadsafe(
+            self.remote.start_private_async(), self.loop,
+        ).result(timeout=30)
+        self.client = _LocalClient(self.endpoint_file)
         self.logger = logging.getLogger("kiss.server.task_runner")
         self._saved_level = self.logger.level
         self.logger.setLevel(logging.DEBUG)
@@ -217,7 +204,9 @@ class TestSetupStopIsAcknowledgedAndLabelled(TestCase):
             self.logger.removeHandler(self.handler)
         self.logger.setLevel(self._saved_level)
         self.client.close()
-        self.loop.call_soon_threadsafe(self.uds_server.close)
+        asyncio.run_coroutine_threadsafe(
+            self.remote.stop_async(), self.loop,
+        ).result(timeout=30)
         self.loop.call_soon_threadsafe(self.loop.stop)
         agent_state.agent_states.clear()
 

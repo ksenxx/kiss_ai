@@ -89,19 +89,20 @@ fs.chmodSync(kissWebBin, 0o755);
 // "systemd" starts after the forced restart.  Either way it holds
 // 127.0.0.1:8787 open when nothing else does, so the health probe says
 // "alive" and verifyDaemonStartup() returns promptly.
-const udsHelper = path.join(tmpRoot, 'uds-helper.js');
+const daemonHelper = path.join(tmpRoot, 'daemon-helper.js');
 fs.writeFileSync(
-  udsHelper,
+  daemonHelper,
   `
 'use strict';
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const kissDir = path.join(process.env.HOME, '.kiss');
-const sock = path.join(kissDir, 'sorcar.sock');
+const sock = path.join(kissDir, 'sorcar-local.json');
 const active = process.env.KISS_FAKE_ACTIVE === '1';
 try { fs.unlinkSync(sock); } catch {}
-const srv = net.createServer(c => {
+const {createFakeDaemon} = require(${JSON.stringify(path.join(__dirname, 'fakeDaemon.js'))});
+const srv = createFakeDaemon(c => {
   c.setEncoding('utf-8');
   let buf = '';
   c.on('data', d => {
@@ -141,7 +142,7 @@ fs.writeFileSync(
 echo "$@" >> "${systemctlLog}"
 case " $* " in
   *" restart "*" --no-block "*|*" --no-block "*" restart "*)
-    KISS_FAKE_ACTIVE=0 nohup "${process.execPath}" "${udsHelper}" >/dev/null 2>&1 &
+    KISS_FAKE_ACTIVE=0 nohup "${process.execPath}" "${daemonHelper}" >/dev/null 2>&1 &
     ;;
 esac
 exit 0
@@ -248,7 +249,7 @@ function cleanup() {
 }
 
 function startWedgedDaemon() {
-  const child = spawn(process.execPath, [udsHelper], {
+  const child = spawn(process.execPath, [daemonHelper], {
     stdio: 'ignore',
     detached: true,
     env: {...process.env, HOME: tmpHome, KISS_FAKE_ACTIVE: '1'},
@@ -280,7 +281,7 @@ function runChild(scenario) {
         // precedence over $HOME, so an inherited value would point the
         // installer at the developer's real socket and markers.
         KISS_HOME: kissDir,
-        KISS_SORCAR_SOCK: path.join(kissDir, 'sorcar.sock'),
+        KISS_SORCAR_LOCAL: path.join(kissDir, 'sorcar-local.json'),
         PATH: `${fakeBin}:${process.env.PATH}`,
         KISS_TEST_DIR: __dirname,
         KISS_TEST_MODULE: OUT,

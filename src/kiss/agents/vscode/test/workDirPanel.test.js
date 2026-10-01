@@ -18,9 +18,9 @@
 //     workDirPicked (or workDirError for a bad path) and never opens the
 //     folder as the window's workspace.  The verified folder becomes the
 //     ACTIVE CHAT TAB's working directory: its next task runs there
-//     (submit.workDir, plus submit.tabScopeWorkDir = the workspace when
-//     the folder lies outside it so the tab stays in this window); the
-//     window, the workspace and the other tabs are untouched.
+//     (submit.workDir); the window, the workspace and the other tabs are
+//     untouched, and the tab stays on every surface's tab bar whatever
+//     folder it runs in (no workspace scope is sent).
 
 /* global require, __dirname, console, process */
 
@@ -498,19 +498,17 @@ function testVsCodePickChangesOnlyTheTab() {
   );
   click(win, byId(win, 'workdir-panel-close'));
 
-  // The next task runs there; the tab stays scoped to this window's
-  // workspace, which the picked folder lies outside of.
+  // The next task runs there. No workspace scope travels with it: the
+  // tab bar is shared by every surface, not scoped to this window.
   let sub = submitPrompt(win, posted, 'list the files');
   assert.strictEqual(sub.tabId, firstTab);
   assert.strictEqual(sub.workDir, '/elsewhere/repo');
-  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
+  assert.strictEqual(sub.tabScopeWorkDir, undefined);
 
-  // A pick inside the workspace needs no scope override.
   send(win, {type: 'status', running: false, tabId: firstTab});
   pickForActiveTab(win, posted, '/work/ws/sub');
   sub = submitPrompt(win, posted, 'and again');
   assert.strictEqual(sub.workDir, '/work/ws/sub');
-  assert.strictEqual(sub.tabScopeWorkDir, undefined);
 
   // Another chat tab is untouched by the first tab's pin.
   win._testApi.createNewTab();
@@ -571,7 +569,6 @@ function testVsCodeLateReplyLandsOnTheTabThatAsked() {
   assert.strictEqual(win._testApi.getActiveTabId(), tabA);
   sub = submitPrompt(win, posted, 'from a');
   assert.strictEqual(sub.workDir, '/picked/for-a', 'tab A runs where it asked');
-  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
 
   // A reply for a tab that no longer exists changes nothing.
   send(win, {type: 'workDirPicked', path: '/picked/gone', tabId: 'no-such'});
@@ -580,7 +577,7 @@ function testVsCodeLateReplyLandsOnTheTabThatAsked() {
   assert.strictEqual(sub.workDir, undefined, 'the pin was consumed by the run');
 }
 
-function testVsCodePinSurvivesReplayAndKeepsTheTabVisible() {
+function testVsCodePinSurvivesReplay() {
   const {win, posted} = makeWebview({remote: false});
   send(win, {type: 'configData', config: {work_dir: '/work/ws'}});
   const tabA = pickForActiveTab(win, posted, '/outside/repo');
@@ -613,7 +610,6 @@ function testVsCodePinSurvivesReplayAndKeepsTheTabVisible() {
   click(win, byId(win, 'workdir-panel-close'));
   let sub = submitPrompt(win, posted, 'run it');
   assert.strictEqual(sub.workDir, '/outside/repo');
-  assert.strictEqual(sub.tabScopeWorkDir, '/work/ws');
 
   // The pick is consumed: the tab now carries the replayed task's dir.
   send(win, {type: 'status', running: false, tabId: tabA});
@@ -729,8 +725,8 @@ const tests = [
     testVsCodeLateReplyLandsOnTheTabThatAsked,
   ],
   [
-    'vscode: the pin survives a task replay and keeps the tab shown',
-    testVsCodePinSurvivesReplayAndKeepsTheTabVisible,
+    'vscode: the pin survives a task replay',
+    testVsCodePinSurvivesReplay,
   ],
   [
     'remote: canonical root spelling is refused',

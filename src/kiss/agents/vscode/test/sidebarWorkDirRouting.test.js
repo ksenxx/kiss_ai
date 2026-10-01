@@ -6,8 +6,9 @@
 'use strict';
 
 // E2E tests for SorcarSidebarView routing/lifecycle findings:
-// VS-011: openFile/checkPaths must resolve against the tab's workDir.
-// VS-012: symlinks must not escape the workspace containment check.
+// VS-011: openFile/checkPaths carry the tab's workDir to the daemon, which
+//         resolves them (web_server.py _resolve_tab_file) and answers this
+//         window with openResolvedFile — opened by the host as sent.
 // VS-016: closeTab must release per-tab host resources.
 // VS-018: stopTask without a resolved webview must stop via the API.
 
@@ -36,16 +37,10 @@ class EventEmitterLite {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-sidebar-route-'));
 const wsRoot = path.join(tmp, 'workspace');
 const tabRepo = path.join(tmp, 'tab-repo');
-const outside = path.join(tmp, 'outside');
 fs.mkdirSync(wsRoot, {recursive: true});
 fs.mkdirSync(tabRepo, {recursive: true});
-fs.mkdirSync(outside, {recursive: true});
 fs.writeFileSync(path.join(tabRepo, 'inrepo.txt'), 'tab repo file\n');
 fs.writeFileSync(path.join(wsRoot, 'inws.txt'), 'workspace file\n');
-fs.writeFileSync(path.join(outside, 'secret.txt'), 'SECRET\n');
-if (process.platform !== 'win32') {
-  fs.symlinkSync(outside, path.join(wsRoot, 'link-out'));
-}
 
 const vscodeStub = {
   Uri: {
@@ -169,9 +164,10 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// VS-011: openFile resolves against the tab's workDir, not workspace 0.
+// VS-011: openFile is forwarded with the tab's workDir, and the daemon's
+// resolved answer is what the host opens.
 async function testOpenFileHonorsTabWorkDir() {
-  const {view} = makeView();
+  const {view, sent} = makeView();
   opened.length = 0;
   await view._handleMessage({
     type: 'openFile',
@@ -180,81 +176,59 @@ async function testOpenFileHonorsTabWorkDir() {
     tabId: 't1',
   });
   assert.deepStrictEqual(
+    sent.filter(c => c.type === 'openFile'),
+    [{type: 'openFile', path: 'inrepo.txt', line: undefined,
+      workDir: tabRepo, tabId: 't1'}],
+    'VS-011: openFile must reach the daemon with the tab workDir, unresolved',
+  );
+  assert.deepStrictEqual(opened, [], 'the host does not resolve paths itself');
+  const handlers = {};
+  view._installClientListener({
+    on: (evt, cb) => {
+      handlers[evt] = cb;
+    },
+  });
+  handlers.message({
+    type: 'openResolvedFile',
+    path: path.join(tabRepo, 'inrepo.txt'),
+    tabId: 't1',
+  });
+  await delay(10);
+  assert.deepStrictEqual(
     opened,
     [path.join(tabRepo, 'inrepo.txt')],
-    'VS-011: openFile must resolve relative paths against the tab workDir',
+    'VS-011: the daemon-resolved path is what opens',
   );
+  handlers.message({
+    type: 'openResolvedFile',
+    path: 'inws.txt',
+    tabId: 't1',
+    error: 'File not found: inws.txt',
+  });
+  await delay(10);
+  assert.strictEqual(opened.length, 1, 'an error reply opens nothing');
   view.dispose();
-  console.log('ok - VS-011 openFile honors the tab workDir');
+  console.log('ok - VS-011 openFile carries the tab workDir to the daemon');
 }
 
-// VS-011: checkPaths resolves against the supplied workDir.
+// VS-011: checkPaths is forwarded with the supplied workDir; the daemon
+// answers pathsExist on this connection and the host relays it.
 async function testCheckPathsHonorsTabWorkDir() {
-  const {view} = makeView();
-  const posted = [];
-  view._view = {
-    visible: true,
-    webview: {postMessage: m => posted.push(m)},
-    show() {},
-  };
-  view._disposed = false;
+  const {view, sent} = makeView();
   await view._handleMessage({
     type: 'checkPaths',
     paths: ['inrepo.txt', 'inws.txt'],
     workDir: tabRepo,
     tabId: 't1',
   });
-  const reply = posted.find(m => m.type === 'pathsExist');
-  assert.ok(reply, 'pathsExist reply expected');
-  assert.strictEqual(
-    reply.results['inrepo.txt'],
-    true,
-    'VS-011: file in the tab repo must be reported as existing',
-  );
-  assert.strictEqual(
-    reply.results['inws.txt'],
-    false,
-    'VS-011: file that only exists in workspace 0 must not match the tab repo',
-  );
-  view.dispose();
-  console.log('ok - VS-011 checkPaths honors the tab workDir');
-}
-
-// VS-012: symlink escape must be refused for openFile and checkPaths.
-async function testSymlinkEscapeRefused() {
-  if (process.platform === 'win32') return;
-  const {view} = makeView();
-  opened.length = 0;
-  const posted = [];
-  view._view = {
-    visible: true,
-    webview: {postMessage: m => posted.push(m)},
-    show() {},
-  };
-  view._disposed = false;
-  await view._handleMessage({
-    type: 'openFile',
-    path: 'link-out/secret.txt',
-    tabId: 't1',
-  });
   assert.deepStrictEqual(
-    opened,
-    [],
-    'VS-012: a workspace symlink must not open a file outside the workspace',
-  );
-  await view._handleMessage({
-    type: 'checkPaths',
-    paths: ['link-out/secret.txt'],
-    tabId: 't1',
-  });
-  const reply = posted.find(m => m.type === 'pathsExist');
-  assert.strictEqual(
-    reply.results['link-out/secret.txt'],
-    false,
-    'VS-012: checkPaths must not report symlink-escaping paths as openable',
+    sent.filter(c => c.type === 'checkPaths'),
+    [{type: 'checkPaths', paths: ['inrepo.txt', 'inws.txt'],
+      workDir: tabRepo, tabId: 't1'}],
+    'VS-011: checkPaths must reach the daemon with the tab workDir',
   );
   view.dispose();
-  console.log('ok - VS-012 symlink escape refused');
+  console.log('ok - VS-011 checkPaths carries the tab workDir to the daemon');
 }
 
 // VS-016: closeTab releases per-tab resources.
@@ -325,7 +299,6 @@ async function run() {
   await testOpenFileHonorsTabWorkDir();
   await testCompleteUsesMessageTabId();
   await testCheckPathsHonorsTabWorkDir();
-  await testSymlinkEscapeRefused();
   await testCloseTabCleansResources();
   await testStopTaskWithoutWebview();
   await delay(10);

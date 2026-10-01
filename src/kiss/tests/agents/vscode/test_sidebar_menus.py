@@ -64,6 +64,25 @@ def _row_at(path: str, cls: str = "") -> str:
     return f".explorer-row{cls}[data-explorer-path='{_css(path)}']"
 
 
+def _click_root_button(page, root: str, action: str) -> None:
+    """Hover *root*'s Explorer row and click its ``set`` / ``remove`` button.
+
+    The buttons are shown by the row's ``:hover`` rule.  A tree
+    re-render after the hover (a late explorer refresh from the daemon)
+    replaces the row and the mouse, not having moved, leaves the new
+    row un-hovered, so the hover is repeated until the button of the
+    current row is visible.
+    """
+    row = page.locator(_row_at(root, ".is-root"))
+    button = page.locator(f"{_row_at(root, '.is-root')} .explorer-root-{action}")
+    for _ in range(50):
+        row.hover()
+        if button.is_visible():
+            break
+        page.wait_for_timeout(100)
+    button.click()
+
+
 def _open_page(browser, harness):
     """Open the remote page in desktop mode with clipboard access and
     record the WS frames the client sends."""
@@ -687,6 +706,461 @@ def test_commit_actions_run_git_and_refresh(browser, harness, worktree):
             ".chat-tab", "els => els.map(e => e.textContent)",
         )
         assert any("v1 \u2194 " + harness.shas["first"][:7] in t for t in titles)
+    finally:
+        context.close()
+
+
+def _selected_names(page) -> list[str]:
+    """Base names of the selected Explorer rows, in tree order."""
+    names = page.eval_on_selector_all(
+        ".explorer-row.is-selected",
+        "els => els.map(e => e.dataset.explorerPath.split(/[\\\\/]/).pop())",
+    )
+    return [str(n) for n in names]
+
+
+def _read_clipboard(page, slot: str) -> str:
+    """Return the clipboard text with its line breaks normalized to LF.
+
+    Chromium hands multi-line text to the Windows clipboard as CRLF, so
+    the ``'\\n'``-joined paths come back with a ``\\r`` per line there.
+    """
+    page.wait_for_function(
+        f"navigator.clipboard.readText().then(t => window.{slot} = t) && true",
+    )
+    page.wait_for_function(f"typeof window.{slot} === 'string'", timeout=5000)
+    return str(page.evaluate(f"window.{slot}")).replace("\r\n", "\n")
+
+
+def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree):
+    """Ctrl/Cmd-click toggles rows, Shift-click selects a range, the
+    arrow keys move the selection (Shift extends it), Ctrl+A selects
+    every visible row and Escape clears; the context menu of a selected
+    row acts on the whole selection (Compare Selected for two files,
+    Copy Path joins the paths, Delete removes them all)."""
+    folder = harness.work_dir / "multi"
+    folder.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+        (folder / name).write_text(name + " multi-sentinel\n")
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _open_explorer(page)
+        page.click("#explorer-refresh")
+        page.wait_for_selector(_explorer_row_sel("/multi", ".is-dir"), timeout=15000)
+        _explorer_row(page, "multi").click()
+        page.wait_for_selector(_explorer_row_sel("/multi/d.txt"), timeout=15000)
+        assert page.get_attribute("#explorer-tree", "aria-multiselectable") == "true"
+        tabs_before = page.locator(".chat-tab").count()
+
+        # A plain click selects the row alone and opens the file.
+        _explorer_row(page, "a.txt").click()
+        _wait_tab_count(page, tabs_before + 1)
+        assert _selected_names(page) == ["a.txt"]
+        assert _explorer_row(page, "a.txt").get_attribute("aria-selected") == "true"
+        # Ctrl-click adds a row without opening it; Shift-click selects
+        # from the anchor (the last row clicked) to the target.
+        # ControlOrMeta: on macOS Ctrl-click is the context-menu gesture
+        # (Chromium fires ``contextmenu``), so Cmd-click is the toggle.
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
+        assert _selected_names(page) == ["a.txt", "c.txt"]
+        _explorer_row(page, "d.txt").click(modifiers=["Shift"])
+        assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
+        page.wait_for_timeout(300)
+        assert page.locator(".chat-tab").count() == tabs_before + 1
+        # Ctrl-click on a selected row deselects it.
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
+        assert _selected_names(page) == ["c.txt", "d.txt"]
+
+        # The menu of a selected row is the multi-selection menu.
+        _explorer_row(page, "c.txt").click(button="right")
+        assert _menu_labels(page) == [
+            "Open to the Side",
+            "Compare Selected",
+            "Cut",
+            "Copy",
+            "Copy Path",
+            "Copy Relative Path",
+            "Delete",
+        ]
+        _menu_item(page, "Copy Path").click()
+        clip = _read_clipboard(page, "__multiPaths")
+        assert clip.split("\n") == [str(folder / "c.txt"), str(folder / "d.txt")]
+        _explorer_row(page, "d.txt").click(button="right")
+        _menu_item(page, "Copy Relative Path").click()
+        rel = _read_clipboard(page, "__multiRel")
+        assert rel.split("\n") == [
+            os.path.join("multi", "c.txt"), os.path.join("multi", "d.txt"),
+        ]
+        # Compare Selected diffs the two files in a result tab.
+        _explorer_row(page, "c.txt").click(button="right")
+        _menu_item(page, "Compare Selected").click()
+        _wait_tab_count(page, tabs_before + 2)
+        _wait_content(page, "-c.txt multi-sentinel")
+        titles = page.eval_on_selector_all(
+            ".chat-tab", "els => els.map(e => e.textContent)",
+        )
+        assert any("c.txt \u2194 d.txt" in t for t in titles)
+        compares = [f for f in _sent(frames, "fsAction") if f["action"] == "compare"]
+        assert compares[-1]["path"] == str(folder / "c.txt")
+        assert compares[-1]["dest"] == str(folder / "d.txt")
+
+        # Right-clicking a row outside the selection selects it alone:
+        # the single-row menu (with Rename...) comes up.
+        _explorer_row(page, "b.txt").click(button="right")
+        assert "Rename..." in _menu_labels(page)
+        assert _selected_names(page) == ["b.txt"]
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sidebar-context-menu", state="hidden")
+
+        # Arrow keys move the selection; Shift+arrow extends it.
+        row_b = _explorer_row(page, "b.txt")
+        row_b.focus()
+        row_b.press("ArrowDown")
+        assert _selected_names(page) == ["c.txt"]
+        page.keyboard.press("Shift+ArrowDown")
+        assert _selected_names(page) == ["c.txt", "d.txt"]
+        page.keyboard.press("Shift+ArrowUp")
+        assert _selected_names(page) == ["c.txt"]
+        # Left goes up to the folder and selects it; Right steps into
+        # the first child and selects that.
+        page.keyboard.press("ArrowLeft")
+        assert _selected_names(page) == ["multi"]
+        page.keyboard.press("ArrowRight")
+        assert _selected_names(page) == ["a.txt"]
+        # Ctrl+A selects every visible row, Escape clears the selection.
+        page.keyboard.press("ControlOrMeta+a")
+        selected = _selected_names(page)
+        assert {"multi", "a.txt", "b.txt", "c.txt", "d.txt"} <= set(selected)
+        assert len(selected) == page.locator(".explorer-row").count()
+        page.keyboard.press("Escape")
+        assert _selected_names(page) == []
+
+        # Three files, the Delete key on one of them: one confirmation
+        # for all three, then every one is gone (b.txt survives).
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "d.txt").click(modifiers=["ControlOrMeta"])
+        assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
+        _explorer_row(page, "d.txt").press("Delete")
+        message = _answer_confirm(page, "fs-delete", accept=True)
+        assert message.startswith("Delete 3 items?")
+        for name in ("a.txt", "c.txt", "d.txt"):
+            page.wait_for_selector(
+                _explorer_row_sel("/multi/" + name), state="detached", timeout=15000,
+            )
+            assert not (folder / name).exists()
+        assert (folder / "b.txt").is_file()
+        # The editor tab of a deleted file closed with it.
+        _wait_tab_count(page, tabs_before + 1)
+
+        # A folder and a file inside it: the file is not sent separately
+        # (the folder's delete takes it along), so one delete goes out.
+        deletes_before = len(
+            [f for f in _sent(frames, "fsAction") if f["action"] == "delete"],
+        )
+        _explorer_row(page, "multi").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "b.txt").click(modifiers=["ControlOrMeta"])
+        assert _selected_names(page) == ["multi", "b.txt"]
+        # Opened on the child, the menu is still the FOLDER's single-row
+        # menu (the selection reduces to the folder).
+        _explorer_row(page, "b.txt").click(button="right")
+        assert _menu_labels(page)[:2] == ["New File...", "New Folder..."]
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#sidebar-context-menu", state="hidden")
+        assert _selected_names(page) == ["multi", "b.txt"]
+        _explorer_row(page, "multi").click(button="right")
+        _menu_item(page, "Delete").click()
+        message = _answer_confirm(page, "fs-delete", accept=True)
+        assert message.startswith("Delete 'multi'?")
+        page.wait_for_selector(
+            _explorer_row_sel("/multi", ".is-dir"), state="detached", timeout=15000,
+        )
+        assert not folder.exists()
+        deletes = [f for f in _sent(frames, "fsAction") if f["action"] == "delete"]
+        assert len(deletes) == deletes_before + 1
+        assert deletes[-1]["path"] == str(folder)
+    finally:
+        context.close()
+        if folder.exists():
+            import shutil
+
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_explorer_multi_copy_pastes_every_entry(browser, harness, worktree):
+    """Copy with two rows selected, then Paste into a folder: both files
+    are copied there (one fsAction each)."""
+    src = harness.work_dir / "multi-src"
+    dest = harness.work_dir / "multi-dest"
+    src.mkdir()
+    dest.mkdir()
+    (src / "one.txt").write_text("one\n")
+    (src / "two.txt").write_text("two\n")
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _open_explorer(page)
+        page.click("#explorer-refresh")
+        page.wait_for_selector(_explorer_row_sel("/multi-src", ".is-dir"), timeout=15000)
+        _explorer_row(page, "multi-src").click()
+        page.wait_for_selector(_explorer_row_sel("/multi-src/two.txt"), timeout=15000)
+        _explorer_row(page, "one.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "two.txt").click(modifiers=["Shift"])
+        assert _selected_names(page) == ["one.txt", "two.txt"]
+        _explorer_row(page, "one.txt").click(button="right")
+        _menu_item(page, "Copy").click()
+        page.wait_for_selector("#sidebar-context-menu", state="hidden")
+        _explorer_row(page, "multi-dest").click(button="right")
+        _menu_item(page, "Paste").click()
+        page.wait_for_selector(_explorer_row_sel("/multi-dest/one.txt"), timeout=15000)
+        page.wait_for_selector(_explorer_row_sel("/multi-dest/two.txt"), timeout=15000)
+        assert (dest / "one.txt").read_text() == "one\n"
+        assert (dest / "two.txt").read_text() == "two\n"
+        copies = [f for f in _sent(frames, "fsAction") if f["action"] == "copy"]
+        assert sorted(c["path"] for c in copies[-2:]) == [
+            str(src / "one.txt"), str(src / "two.txt"),
+        ]
+        assert {c["dest"] for c in copies[-2:]} == {str(dest)}
+    finally:
+        context.close()
+        import shutil
+
+        shutil.rmtree(src, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
+
+
+def test_changes_panel_folds_each_worktree(browser, harness, worktree):
+    """Each worktree header of the Changes list folds its rows (click,
+    Enter, Left/Right arrows); the fold survives a refresh."""
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _open_scm(page)
+        page.wait_for_selector("#scm-changes .scm-worktree-hdr", timeout=15000)
+        headers = page.locator("#scm-changes .scm-worktree-hdr")
+        assert headers.count() == 2
+        wt_hdr = headers.filter(has_text="wt-task")
+        wt_body = wt_hdr.locator("xpath=following-sibling::*[1]")
+        assert wt_body.get_attribute("class") == "scm-worktree-body"
+        assert wt_hdr.get_attribute("aria-expanded") == "true"
+        assert wt_hdr.get_attribute("role") == "treeitem"
+        wt_row = wt_body.locator(".scm-row", has_text="wt-untracked.txt")
+        assert wt_row.is_visible()
+        # Click folds the worktree; the main checkout stays open.
+        wt_hdr.click()
+        assert wt_hdr.get_attribute("aria-expanded") == "false"
+        assert not wt_row.is_visible()
+        main_hdr = headers.filter(has_text="repo")
+        assert main_hdr.get_attribute("aria-expanded") == "true"
+        assert page.locator(
+            "#scm-changes .scm-row[data-scm-worktree]", has_text="README.md",
+        ).first.is_visible()
+        # A refresh re-renders the list with the fold kept.
+        statuses_before = len(_sent(frames, "gitStatus"))
+        page.click("#scm-refresh")
+        for _ in range(100):
+            if len(_sent(frames, "gitStatus")) > statuses_before:
+                break
+            page.wait_for_timeout(100)
+        assert len(_sent(frames, "gitStatus")) > statuses_before
+        # The reply re-renders the list; its header keeps the fold.
+        page.wait_for_function(
+            """() => {
+                 const hdr = Array.from(document.querySelectorAll(
+                   '#scm-changes .scm-worktree-hdr')).find(
+                   h => h.textContent.includes('wt-task'));
+                 return !!hdr && hdr.getAttribute('aria-expanded') === 'false';
+               }""",
+            timeout=15000,
+        )
+        page.wait_for_timeout(500)
+        wt_hdr = page.locator("#scm-changes .scm-worktree-hdr", has_text="wt-task")
+        assert wt_hdr.get_attribute("aria-expanded") == "false"
+        assert not page.locator(
+            "#scm-changes .scm-row", has_text="wt-untracked.txt",
+        ).first.is_visible()
+        # Keyboard: Right opens, Left folds, Enter toggles.
+        wt_hdr.focus()
+        wt_hdr.press("ArrowRight")
+        assert wt_hdr.get_attribute("aria-expanded") == "true"
+        assert page.locator(
+            "#scm-changes .scm-row", has_text="wt-untracked.txt",
+        ).first.is_visible()
+        wt_hdr.press("ArrowLeft")
+        assert wt_hdr.get_attribute("aria-expanded") == "false"
+        wt_hdr.press("Enter")
+        assert wt_hdr.get_attribute("aria-expanded") == "true"
+        # Down from the header lands on its first row, up from a row
+        # of the second worktree reaches the header.
+        wt_hdr.press("ArrowDown")
+        page.wait_for_function(
+            "document.activeElement && document.activeElement.classList"
+            ".contains('scm-row')",
+        )
+    finally:
+        context.close()
+
+
+# Monaco 0.52 keeps a disposed diff editor in getDiffEditors(); the one
+# on screen is the one whose container is still attached and visible.
+_VISIBLE_DIFF = """(() => monaco.editor.getDiffEditors().find(d =>
+    d.getContainerDomNode().isConnected
+    && d.getContainerDomNode().offsetParent !== null))()"""
+
+
+def _diff_tab_texts(page) -> dict:
+    """The original / modified texts of the diff editor on screen."""
+    texts: dict = page.evaluate(
+        """() => {
+             const ed = """ + _VISIBLE_DIFF + """;
+             if (!ed) return null;
+             const m = ed.getModel();
+             return {original: m.original.getValue(),
+                     modified: m.modified.getValue(),
+                     readOnly: ed.getModifiedEditor().getOption(
+                       monaco.editor.EditorOption.readOnly)};
+           }""",
+    )
+    return texts
+
+
+def _wait_diff_tab(page, modified_text: str) -> dict:
+    page.wait_for_function(
+        """text => {
+             if (!window.monaco) return false;
+             const ed = """ + _VISIBLE_DIFF + """;
+             const m = ed ? ed.getModel() : null;
+             return !!m && m.modified.getValue().includes(text);
+           }""",
+        arg=modified_text,
+        timeout=20000,
+    )
+    return _diff_tab_texts(page)
+
+
+def test_graph_file_click_opens_a_diff_editor(browser, harness, worktree):
+    """Clicking a file under a commit of the Graph opens VS Code's diff
+    editor: the parent's version on the left, the commit's on the
+    right, titled "name (parent ↔ sha)"; a file of the "Uncommitted
+    changes" row diffs HEAD against the working tree."""
+    context, page, frames = _open_page(browser, harness)
+    try:
+        _open_scm(page)
+        tabs_before = page.locator(".chat-tab").count()
+        second = page.locator("#scm-graph .scm-commit", has_text="second: rename")
+        second.click()
+        files = page.locator("#scm-graph .scm-commit-files .scm-row")
+        files.filter(has_text="nested.py").first.click()
+        _wait_tab_count(page, tabs_before + 1)
+        diff = _wait_diff_tab(page, "x = 1  # nested-sentinel-4f2a")
+        assert diff["original"] == ""
+        assert diff["modified"] == "x = 1  # nested-sentinel-4f2a\n"
+        assert diff["readOnly"] is True
+        assert page.locator(".content-tab-view .monaco-diff-editor").first.is_visible()
+        first7 = harness.shas["first"][:7]
+        second7 = harness.shas["second"][:7]
+        titles = page.eval_on_selector_all(
+            ".chat-tab", "els => els.map(e => e.textContent)",
+        )
+        assert any(
+            f"nested.py ({first7} \u2194 {second7})" in t for t in titles
+        )
+        shows = _sent(frames, "gitShow")
+        assert shows[-1]["mode"] == "diff"
+        assert shows[-1]["sha"] == harness.shas["second"]
+        assert shows[-1]["path"] == "dir/nested.py"
+        # The renamed file: the left side is the parent's a.txt.
+        files.filter(has_text="b.txt").first.click()
+        _wait_tab_count(page, tabs_before + 2)
+        page.wait_for_function(
+            f"Array.from(document.querySelectorAll('.chat-tab'))"
+            f".some(t => t.textContent.includes('b.txt ({first7} \u2194 {second7})'))",
+            timeout=15000,
+        )
+        diff = _wait_diff_tab(page, "a\n")
+        assert diff["original"] == "a\n" and diff["modified"] == "a\n"
+        assert _sent(frames, "gitShow")[-1]["origPath"] == "a.txt"
+        # Clicking the same file again brings its tab back, no new tab.
+        files.filter(has_text="nested.py").first.click()
+        page.wait_for_timeout(500)
+        assert page.locator(".chat-tab").count() == tabs_before + 2
+        # The menu's Open Changes on a file of a commit is the same diff.
+        files.filter(has_text="nested.py").first.click(button="right")
+        assert _menu_labels(page) == ["Open Changes", "Open File"]
+        page.keyboard.press("Escape")
+        # A file of the main checkout's "Uncommitted changes" row:
+        # HEAD on the left, the working tree on the right.
+        rows = page.locator("#scm-graph .scm-commit.is-worktree")
+        rows.first.click()
+        wt_files = rows.first.locator("xpath=following-sibling::*[1]").locator(".scm-row")
+        wt_files.filter(has_text="README.md").first.click()
+        _wait_tab_count(page, tabs_before + 3)
+        diff = _wait_diff_tab(page, "# readme changed")
+        assert diff["original"] == "# readme\n"
+        assert diff["modified"] == "# readme changed\n"
+        titles = page.eval_on_selector_all(
+            ".chat-tab", "els => els.map(e => e.textContent)",
+        )
+        assert any("README.md (Working Tree)" in t for t in titles)
+        last = _sent(frames, "gitShow")[-1]
+        assert last["sha"] == "" and last["mode"] == "diff"
+        assert last["workDir"] == str(harness.work_dir)
+        # Its context menu offers Open Changes ahead of Open File.
+        wt_files.filter(has_text="README.md").first.click(button="right")
+        assert _menu_labels(page)[:2] == ["Open Changes", "Open File"]
+        page.keyboard.press("Escape")
+        # The linked worktree's row diffs ITS HEAD against ITS file.
+        rows.nth(1).click()
+        lt_files = rows.nth(1).locator("xpath=following-sibling::*[1]").locator(".scm-row")
+        lt_files.filter(has_text="README.md").first.click()
+        _wait_tab_count(page, tabs_before + 4)
+        diff = _wait_diff_tab(page, "# readme edited in the worktree")
+        assert diff["original"] == "# readme\n"
+        last = _sent(frames, "gitShow")[-1]
+        assert last["workDir"] == str(worktree)
+        # A deleted file: the right side is empty.
+        wt_files.filter(has_text="b.txt").first.click()
+        _wait_tab_count(page, tabs_before + 5)
+        page.wait_for_function(
+            "Array.from(document.querySelectorAll('.chat-tab'))"
+            ".some(t => t.textContent.includes('b.txt (Working Tree)'))",
+            timeout=15000,
+        )
+        page.wait_for_function(
+            """() => {
+                 const ed = """ + _VISIBLE_DIFF + """;
+                 const m = ed ? ed.getModel() : null;
+                 return !!m && m.original.getValue() === 'a\\n'
+                   && m.modified.getValue() === '';
+               }""",
+            timeout=15000,
+        )
+    finally:
+        context.close()
+
+
+def test_graph_file_diff_without_monaco_is_a_unified_diff(browser, harness, worktree):
+    """With the Monaco CDN unreachable the diff tab shows the two sides
+    as a plain unified diff (LCS over lines) instead of a diff editor."""
+    context = browser.new_context(ignore_https_errors=True, viewport={"width": 1400, "height": 900})
+    context.route("https://cdn.jsdelivr.net/**", lambda route: route.abort())
+    page = context.new_page()
+    try:
+        goto_retrying_network_change(page, harness.base_url + "/")
+        page.wait_for_selector("#task-input", state="visible", timeout=30000)
+        page.wait_for_function(
+            "document.getElementById('meta-workdir').textContent.length > 1",
+            timeout=30000,
+        )
+        _open_scm(page)
+        rows = page.locator("#scm-graph .scm-commit.is-worktree")
+        rows.first.click()
+        wt_files = rows.first.locator("xpath=following-sibling::*[1]").locator(".scm-row")
+        wt_files.filter(has_text="README.md").first.click()
+        page.wait_for_selector(".content-tab-view .content-code-fallback", timeout=30000)
+        text = page.locator(".content-tab-view .content-code-fallback").evaluate(
+            "el => el.textContent",
+        )
+        assert text == "-# readme\n+# readme changed\n "
+        assert page.locator(".content-menubar").count() == 0
     finally:
         context.close()
 
@@ -1595,8 +2069,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         # Set as Working Directory (the buttons show on hover): the daemon
         # and the saved config follow, the old working directory stays
         # listed as an added folder.
-        plain_root.hover()
-        page.locator(".explorer-root-set").first.click()
+        _click_root_button(page, plain, "set")
         _wait_first_root(page, plain)
         assert _root_paths(page) == [plain, repo]
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
@@ -1614,8 +2087,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         # Remove the plain folder with its button: gone from the tree and
         # from storage, still on disk.
         fs_before = len(_sent(frames, "fsAction"))
-        page.locator(_row_at(plain, ".is-root")).hover()
-        page.locator(".explorer-root-remove").first.click()
+        _click_root_button(page, plain, "remove")
         page.wait_for_function(
             "document.querySelectorAll('#explorer-tree > .explorer-row.is-root').length === 1",
             timeout=15000,

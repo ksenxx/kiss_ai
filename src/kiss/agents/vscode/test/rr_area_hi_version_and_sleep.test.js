@@ -76,12 +76,12 @@ async function main() {
   console.log('  ok - SorcarTab.getVersion delegates to the shared parser');
 
   // The single sleep(): exported from daemonHealth, awaited for real.
-  const {sleep} = require(path.join(SRC, 'daemonHealth.js'));
+  const {sleep} = require(path.join(SRC, '..', 'out', 'daemonHealth.js'));
   const t0 = Date.now();
   await sleep(60);
   assert.ok(Date.now() - t0 >= 50, 'sleep must actually wait');
   // Its two consumers still load and run with the shared helper.
-  const {verifyDaemonStartup} = require(path.join(SRC, 'daemonRestartVerify.js'));
+  const {verifyDaemonStartup} = require(path.join(SRC, '..', 'out', 'daemonRestartVerify.js'));
   assert.strictEqual(typeof verifyDaemonStartup, 'function');
   const macLaunchd = require(path.join(SRC, 'macLaunchd.js'));
   assert.strictEqual(typeof macLaunchd.restartLaunchAgent, 'function');

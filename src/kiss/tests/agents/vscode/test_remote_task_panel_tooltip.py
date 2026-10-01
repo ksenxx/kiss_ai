@@ -22,8 +22,6 @@ task through the production ``setTaskText`` event path, hovers
 from __future__ import annotations
 
 import asyncio
-import shutil
-import tempfile
 import threading
 from pathlib import Path
 
@@ -61,7 +59,6 @@ def _start_live_server(
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"
     _generate_self_signed_cert(certfile, keyfile)
-    uds_dir = tempfile.mkdtemp(prefix="kiss-tt-")
 
     async def scenario() -> None:
         server = RemoteAccessServer(
@@ -71,7 +68,7 @@ def _start_live_server(
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp_path / "remote-url.json",
-            uds_path=Path(uds_dir) / "sorcar.sock",
+            local_endpoint_file=tmp_path / "sorcar-local.json",
         )
         started = False
         try:
@@ -91,10 +88,7 @@ def _start_live_server(
             if started:
                 await server.stop_async()
 
-    try:
-        asyncio.run(scenario())
-    finally:
-        shutil.rmtree(uds_dir, ignore_errors=True)
+    asyncio.run(scenario())
 
 
 @pytest.mark.timeout(180)

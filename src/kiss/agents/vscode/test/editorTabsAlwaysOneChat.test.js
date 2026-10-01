@@ -37,6 +37,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
@@ -44,11 +45,6 @@ assert.ok(
   fs.existsSync(path.join(OUT_DIR, 'SorcarPanelManager.js')),
   'compiled extension missing — run `npm run compile` first',
 );
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  process.exit(0);
-}
 
 class StubEventEmitter {
   constructor() {
@@ -182,10 +178,10 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-onechat-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const daemonCommands = [];
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   let buf = '';
   sock.on('data', chunk => {
     buf += chunk.toString('utf8');
@@ -253,7 +249,7 @@ async function assertBackgroundReplacement(panel) {
 }
 
 async function runTest() {
-  server.listen(sockPath);
+  server.listen(endpointPath);
   const retired = [];
   const manager = new SorcarPanelManager(
     vscodeStub.Uri.file(EXT_ROOT),
@@ -400,8 +396,7 @@ async function runTest() {
   await sleep(50);
   assert.strictEqual(createdPanels.length, 9, 'X remains: no open');
   manager.adoptRegistryTabs(
-    [{tabId: 'reg-x', chatId: 'chat-X', title: 'X', workDir: '', scopeWorkDir: ''}],
-    '',
+    [{tabId: 'reg-x', chatId: 'chat-X', title: 'X', workDir: ''}],
   );
   assert.strictEqual(createdPanels.length, 9, 'same-chat tab: adoption blocked');
   panelX.dispose();
@@ -429,10 +424,10 @@ async function runTest() {
   editorTabsMode = true;
 
   // --- enterMode with nothing to migrate opens one chat ---------------
-  manager.enterMode([], '/ws');
+  manager.enterMode([]);
   assert.strictEqual(createdPanels.length, 11, 'enterMode: one chat');
   await assertFocusedReplacement(lastPanel());
-  manager.enterMode([], '/ws');
+  manager.enterMode([]);
   assert.strictEqual(createdPanels.length, 11, 'enterMode again: no dup');
 
   // --- terminal dispose: panels stand, nothing new opens --------------
