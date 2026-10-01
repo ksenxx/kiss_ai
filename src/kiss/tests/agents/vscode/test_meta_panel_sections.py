@@ -55,7 +55,10 @@ import pytest
 from playwright.sync_api import Browser, Locator, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import (
+    goto_retrying_network_change,
+    reload_retrying_network_change,
+)
 
 # main.js only reveals #app once the websocket handshake succeeds,
 # which never happens against a static server; an !important rule
@@ -386,7 +389,7 @@ def test_drag_moves_the_boundary_persists_and_dblclick_restores(
         assert shrunk["contentBottom"] == pytest.approx(shrunk["panelInnerBottom"], abs=2)
 
         # The height survives a reload.
-        page.reload()
+        reload_retrying_network_change(page)
         page.wait_for_selector("body.remote-desktop", state="attached")
         page.evaluate(_PREPARE_JS)
         page.evaluate(_HIDE_GLOBAL_SECTIONS_JS)

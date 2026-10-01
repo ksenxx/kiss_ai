@@ -459,6 +459,38 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
         url: The address to open.
         **goto_kwargs: Passed through to ``page.goto`` (``wait_until`` ...).
     """
+    _navigate_retrying_network_change(page, functools.partial(page.goto, url, **goto_kwargs), url)
+
+
+def reload_retrying_network_change(page, **reload_kwargs) -> None:
+    """Reload the Playwright *page*, retrying ``ERR_NETWORK_CHANGED``.
+
+    ``page.reload()`` is a navigation like ``page.goto`` and dies the same
+    way when a host interface changes mid-request (full-suite run of
+    2026-10-01: ``Page.reload: net::ERR_NETWORK_CHANGED`` in
+    ``test_activity_bar``). Same retry rule as
+    :func:`goto_retrying_network_change`: up to three attempts, for that
+    error only.
+
+    Args:
+        page: A ``playwright.sync_api.Page``.
+        **reload_kwargs: Passed through to ``page.reload`` (``wait_until`` ...).
+    """
+    _navigate_retrying_network_change(
+        page, functools.partial(page.reload, **reload_kwargs), page.url
+    )
+
+
+def _navigate_retrying_network_change(page, navigate: Callable[[], object], label: str) -> None:
+    """Run *navigate* on *page* up to three times while it fails with ``ERR_NETWORK_CHANGED``.
+
+    Args:
+        page: A ``playwright.sync_api.Page``.
+        navigate: A no-argument callable performing the navigation (a bound
+            ``page.goto``/``page.reload`` with its arguments).
+        label: The address named in the error when the page ends on
+            Chromium's error page for a reason other than a network change.
+    """
     from playwright.sync_api import Error as PlaywrightError
 
     failures: list[str] = []
@@ -472,7 +504,7 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
         for attempt in range(3):
             failures.clear()
             try:
-                page.goto(url, **goto_kwargs)
+                navigate()
             except PlaywrightError as exc:
                 if "net::ERR_NETWORK_CHANGED" not in str(exc) or attempt == 2:
                     raise
@@ -483,7 +515,7 @@ def goto_retrying_network_change(page, url: str, **goto_kwargs) -> None:
             network_changed = any("net::ERR_NETWORK_CHANGED" in f for f in failures)
             if not network_changed or attempt == 2:
                 raise AssertionError(
-                    f"{url} ended on {page.url}; failed navigations: {failures}"
+                    f"{label} ended on {page.url}; failed navigations: {failures}"
                 )
             time.sleep(1.0)
     finally:

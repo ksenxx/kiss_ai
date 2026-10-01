@@ -34,7 +34,10 @@ from playwright.sync_api import sync_playwright
 
 from kiss.server.web_server import _compare_versions, _read_version
 from kiss.tests.agents.vscode.test_content_tab_editing import _dismiss_toasts
-from kiss.tests.conftest import goto_retrying_network_change
+from kiss.tests.conftest import (
+    goto_retrying_network_change,
+    reload_retrying_network_change,
+)
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     harness,  # noqa: F401  (module fixture used by param name)
@@ -462,7 +465,7 @@ def test_view_choice_survives_a_reload(browser, harness):
     try:
         page.click("#activity-scm")
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
-        page.reload()
+        reload_retrying_network_change(page)
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
         page.wait_for_selector("#scm-graph .scm-commit", timeout=15000)
         assert page.locator("#activity-scm").get_attribute("aria-selected") == "true"
