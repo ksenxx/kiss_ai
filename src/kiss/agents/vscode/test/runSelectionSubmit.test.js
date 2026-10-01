@@ -205,7 +205,7 @@ const server = createFakeDaemon(sock => {
         continue;
       }
       daemonCmds.push(cmd);
-      if (cmd.type === 'run') {
+      if (cmd.type === 'submit') {
         const tabId = cmd.tabId;
         daemonReply({type: 'clear', chat_id: 'chat-1', tabId});
         daemonReply({
@@ -373,7 +373,7 @@ async function runTests() {
     '',
     'the input textbox must be cleared after the submit (like Send)',
   );
-  const runs1 = daemonCmds.filter(c => c.type === 'run');
+  const runs1 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs1.length,
     1,
@@ -436,7 +436,7 @@ async function runTests() {
   );
   assert.strictEqual(inputValues.length, 0, 'nothing pasted for empty sel');
   assert.strictEqual(
-    daemonCmds.filter(c => c.type === 'run' || c.type === 'appendUserMessage')
+    daemonCmds.filter(c => c.type === 'submit' || c.type === 'appendUserMessage')
       .length,
     0,
     'nothing submitted for empty selection / missing editor',
@@ -445,7 +445,7 @@ async function runTests() {
   wvv1.webviewView.webview.postMessage({type: 'insertAndSubmit', text: ''});
   await sleep(100);
   assert.strictEqual(
-    daemonCmds.filter(c => c.type === 'run' || c.type === 'appendUserMessage')
+    daemonCmds.filter(c => c.type === 'submit' || c.type === 'appendUserMessage')
       .length,
     0,
     'insertAndSubmit without text must not submit anything',
@@ -500,7 +500,7 @@ async function runTests() {
       JSON.stringify(lateInputValues) +
       ')',
   );
-  const runs4 = daemonCmds.filter(c => c.type === 'run');
+  const runs4 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs4.length,
     1,
@@ -543,17 +543,28 @@ async function runTests() {
     provider3.resolveWebviewView(wvv3.webviewView, {}, {});
     wvv3.wire();
     setTimeout(() => {
-      evalWebviewScripts(ctx3.win);
+      // Listen before the scripts run: the host flushes the held prompt
+      // synchronously while the webview's `ready` is being processed.
       const inp3 = ctx3.win.document.getElementById('task-input');
       inp3.addEventListener('input', () => slowInputValues.push(inp3.value));
+      evalWebviewScripts(ctx3.win);
     }, 600);
   };
 
   const SEL5 = 'summarize the selected code';
   vscodeStub.window.activeTextEditor = makeEditor(ws, SEL5);
   daemonCmds.length = 0;
+  // The command returns as soon as the sidebar is revealed; the prompt
+  // is held until the webview's `ready` handshake (600 ms away here)
+  // and forwarded to the daemon from the composer after that.
   await registeredCommands.get('kissSorcar.runSelection')();
-  await sleep(500);
+  for (
+    let i = 0;
+    i < 60 && !daemonCmds.some(c => c.type === 'submit');
+    i++
+  ) {
+    await sleep(50);
+  }
 
   assert.ok(
     slowInputValues.includes(SEL5),
@@ -563,7 +574,7 @@ async function runTests() {
       JSON.stringify(slowInputValues) +
       ')',
   );
-  const runs5 = daemonCmds.filter(c => c.type === 'run');
+  const runs5 = daemonCmds.filter(c => c.type === 'submit');
   assert.strictEqual(
     runs5.length,
     1,

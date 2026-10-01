@@ -229,7 +229,9 @@ async function runTests() {
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
   daemon = await startRealDaemon(UV, ws, process.env);
@@ -352,7 +354,9 @@ async function runTests() {
   // 7. An existing .md path outside the workspace previews too: the
   //    daemon resolves file links the same way for every surface.
   clear();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-out-'));
+  const outside = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-out-')),
+  );
   tmpDirs.push(outside);
   const outsideMd = path.join(outside, 'notes.md');
   fs.writeFileSync(outsideMd, '# outside\n');

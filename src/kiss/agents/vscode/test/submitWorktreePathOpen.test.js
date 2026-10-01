@@ -165,7 +165,9 @@ async function runTests() {
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtsubmit-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtsubmit-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
 
@@ -290,10 +292,12 @@ async function runTests() {
   console.log('  ok - workspace dir does not shadow the worktree file');
 
   // 2. A non-path prompt still starts a task (which ends at once: the
-  // model is unavailable).
+  // model is unavailable).  The daemon reports `running: true` twice per
+  // run (an immediate ack, then the start carrying startTs), so wait for
+  // at least one.
   submit('summarize the repo', 'tab1');
   await waitFor(
-    () => started('tab1').length === 1,
+    () => started('tab1').length >= 1,
     'a non-path prompt must start an agent task',
     15000,
   );
@@ -308,7 +312,7 @@ async function runTests() {
   wv.fireMessage({type: 'openTab', tabId: 'tab2', workDir: wt});
   submit('reports', 'tab2');
   await waitFor(
-    () => started('tab2').length === 1,
+    () => started('tab2').length >= 1,
     'a directory-path prompt must start an agent task',
     15000,
   );

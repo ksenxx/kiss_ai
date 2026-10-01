@@ -5,8 +5,9 @@
 """A real Sorcar daemon for the extension host's end-to-end JS tests.
 
 Started by ``test/_realDaemon.js`` as ``uv run python _real_daemon.py
-<work_dir>``: serves a real :class:`RemoteAccessServer` on the Unix
-socket under ``$KISS_HOME`` (the temp home the JS test set up, which
+<work_dir>``: serves a real :class:`RemoteAccessServer` on a loopback
+WSS port and publishes its token-authenticated local endpoint in
+``$KISS_HOME/sorcar-local.json`` (the temp home the JS test set up, which
 the compiled extension host connects to), prints ``READY`` once it
 listens, and exits when its stdin closes.
 
@@ -24,7 +25,6 @@ import json
 import socket
 import sys
 
-from kiss.core.config import kiss_home
 from kiss.server.web_server import RemoteAccessServer
 
 
@@ -41,7 +41,6 @@ async def main(work_dir: str) -> None:
         host="127.0.0.1",
         port=_free_port(),
         work_dir=work_dir,
-        uds_path=kiss_home() / "sorcar.sock",
         use_tunnel=False,
     )
     await server.start_async()

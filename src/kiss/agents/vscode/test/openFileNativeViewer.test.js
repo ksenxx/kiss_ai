@@ -256,7 +256,9 @@ async function runTests() {
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-openfile-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-openfile-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
   daemon = await startRealDaemon(UV, ws, process.env);
@@ -440,7 +442,9 @@ async function runTests() {
   // file links the same way for every surface (the remote webapp always
   // opened absolute paths).
   clear();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-'));
+  const outside = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-')),
+  );
   tmpDirs.push(outside);
   const outsideFile = path.join(outside, 'notes.py');
   fs.writeFileSync(outsideFile, 'x = 1\n');

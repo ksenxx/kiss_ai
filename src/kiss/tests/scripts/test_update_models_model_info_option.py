@@ -73,7 +73,7 @@ def test_model_info_option_updates_only_the_target(tmp_path: Path) -> None:
     assert "keep/me" in data, "unrelated entry lost"
     assert _BUNDLED.read_bytes() == bundled_before, "repo catalog touched"
     assert _README.read_bytes() == readme_before, "README touched"
-    assert "README left untouched" in proc.stdout
+    assert "README.md and MODELS.md left untouched" in proc.stdout
 
 
 def test_missing_target_is_seeded_from_the_bundled_catalog(

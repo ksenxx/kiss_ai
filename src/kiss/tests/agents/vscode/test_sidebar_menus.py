@@ -735,14 +735,14 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         assert _explorer_row(page, "a.txt").get_attribute("aria-selected") == "true"
         # Ctrl-click adds a row without opening it; Shift-click selects
         # from the anchor (the last row clicked) to the target.
-        _explorer_row(page, "c.txt").click(modifiers=["Control"])
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["a.txt", "c.txt"]
         _explorer_row(page, "d.txt").click(modifiers=["Shift"])
         assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
         page.wait_for_timeout(300)
         assert page.locator(".chat-tab").count() == tabs_before + 1
         # Ctrl-click on a selected row deselects it.
-        _explorer_row(page, "a.txt").click(modifiers=["Control"])
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["c.txt", "d.txt"]
 
         # The menu of a selected row is the multi-selection menu.
@@ -802,7 +802,7 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         page.keyboard.press("ArrowRight")
         assert _selected_names(page) == ["a.txt"]
         # Ctrl+A selects every visible row, Escape clears the selection.
-        page.keyboard.press("Control+a")
+        page.keyboard.press("ControlOrMeta+a")
         selected = _selected_names(page)
         assert {"multi", "a.txt", "b.txt", "c.txt", "d.txt"} <= set(selected)
         assert len(selected) == page.locator(".explorer-row").count()
@@ -811,9 +811,9 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
 
         # Three files, the Delete key on one of them: one confirmation
         # for all three, then every one is gone (b.txt survives).
-        _explorer_row(page, "a.txt").click(modifiers=["Control"])
-        _explorer_row(page, "c.txt").click(modifiers=["Control"])
-        _explorer_row(page, "d.txt").click(modifiers=["Control"])
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "d.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
         _explorer_row(page, "d.txt").press("Delete")
         message = _answer_confirm(page, "fs-delete", accept=True)
@@ -832,8 +832,8 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         deletes_before = len(
             [f for f in _sent(frames, "fsAction") if f["action"] == "delete"],
         )
-        _explorer_row(page, "multi").click(modifiers=["Control"])
-        _explorer_row(page, "b.txt").click(modifiers=["Control"])
+        _explorer_row(page, "multi").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "b.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["multi", "b.txt"]
         # Opened on the child, the menu is still the FOLDER's single-row
         # menu (the selection reduces to the folder).
@@ -877,7 +877,7 @@ def test_explorer_multi_copy_pastes_every_entry(browser, harness, worktree):
         page.wait_for_selector(_explorer_row_sel("/multi-src", ".is-dir"), timeout=15000)
         _explorer_row(page, "multi-src").click()
         page.wait_for_selector(_explorer_row_sel("/multi-src/two.txt"), timeout=15000)
-        _explorer_row(page, "one.txt").click(modifiers=["Control"])
+        _explorer_row(page, "one.txt").click(modifiers=["ControlOrMeta"])
         _explorer_row(page, "two.txt").click(modifiers=["Shift"])
         assert _selected_names(page) == ["one.txt", "two.txt"]
         _explorer_row(page, "one.txt").click(button="right")
