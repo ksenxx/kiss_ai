@@ -79,7 +79,7 @@ class TestPortBusyExitsCleanly(_BindRetryTestBase):
                 host="127.0.0.1",
                 port=port,
                 work_dir=self._tmpdir.name,
-                uds_path=f"{self._tmpdir.name}/sorcar.sock",
+                local_endpoint_file=f"{self._tmpdir.name}/sorcar-local.json",
             )
             with self.assertRaises(SystemExit) as ctx:
                 await server._setup_server()
@@ -113,7 +113,7 @@ class TestPortFreesDuringRetry(_BindRetryTestBase):
             host="127.0.0.1",
             port=port,
             work_dir=self._tmpdir.name,
-            uds_path=f"{self._tmpdir.name}/sorcar.sock",
+            local_endpoint_file=f"{self._tmpdir.name}/sorcar-local.json",
         )
         try:
             await server._setup_server()
@@ -143,7 +143,7 @@ class TestNonRetryableErrnoFailsFast(_BindRetryTestBase):
                 host="127.0.0.1",
                 port=12345,
                 work_dir=self._tmpdir.name,
-                uds_path=f"{self._tmpdir.name}/sorcar.sock",
+                local_endpoint_file=f"{self._tmpdir.name}/sorcar-local.json",
             )
             with self.assertRaises(SystemExit) as ctx:
                 await server._setup_server()
@@ -178,7 +178,7 @@ class TestRetryableErrnoIsRetried(_BindRetryTestBase):
                 host="127.0.0.1",
                 port=12345,
                 work_dir=self._tmpdir.name,
-                uds_path=f"{self._tmpdir.name}/sorcar.sock",
+                local_endpoint_file=f"{self._tmpdir.name}/sorcar-local.json",
             )
             with self.assertRaises(SystemExit) as ctx:
                 await server._setup_server()

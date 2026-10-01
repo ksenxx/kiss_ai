@@ -102,7 +102,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
             port=_free_port(),
             work_dir=str(self.repo),
             use_tunnel=False,
-            uds_path=self.home / "test-sorcar.sock",
+            local_endpoint_file=self.home / "test-sorcar-local.json",
             url_file=self.home / "remote_url.txt",
         )
         await self.server.start_async()

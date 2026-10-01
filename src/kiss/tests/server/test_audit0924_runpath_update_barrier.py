@@ -18,7 +18,7 @@ refuses a fresh task while it is up.  The barrier is lowered when the
 installer exits (any exit code) or the spawn fails, so a daemon the
 installer did not restart accepts tasks again.
 
-The daemon is real (UDS transport, fake PyPI endpoint, stub
+The daemon is real (local WSS transport, fake PyPI endpoint, stub
 ``install.sh`` scripts); admitted runs use a model name that is not
 configured, so ``_run_task`` takes its own "No model available" exit
 after registering the run — no model is ever called and nothing is
@@ -36,7 +36,7 @@ from typing import Any
 
 import kiss.server.agent_state as agent_state
 import kiss.server.web_server as ws
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 TAB = "tab-a0924-barrier"
@@ -74,7 +74,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             HELD_INSTALL_SH.format(release=self.release, tmpdir=self.tmpdir),
         )
         self.vscode = self.server._vscode_server
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
         self._threads: list[threading.Thread] = []
         self._hold = threading.Event()
         self._clear_tab()
@@ -133,13 +133,13 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         with agent_state.STATE_LOCK:
             return bool(self.vscode._update_installing)
 
-    async def _client(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await self._connect_uds()
+    async def _client(self) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await self._connect_local()
         self._writers.append(writer)
         await self._send_ready(writer, TAB)
         return reader, writer
 
-    async def _send(self, writer: asyncio.StreamWriter, cmd: dict[str, object]) -> None:
+    async def _send(self, writer: LocalWriter, cmd: dict[str, object]) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
@@ -168,7 +168,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         await self._wait_until(idle, "the tab to go idle")
 
     async def _submit_and_expect_refusal(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
     ) -> None:
         """Send a ``run`` on TAB and assert the update barrier refused it."""
         await self._send(writer, self._run_cmd("started during the update"))
@@ -183,7 +183,7 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             self.assertIsNone(agent_state.find_by_tab(TAB))
 
     async def _submit_and_expect_admission(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: LocalReader, writer: LocalWriter,
     ) -> None:
         """Send a ``run`` on TAB and assert ``_run_task`` really ran it."""
         await self._send(writer, self._run_cmd("started after the update"))
@@ -198,7 +198,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
 
     # -- tests ----------------------------------------------------------
 
-    @requires_unix_sockets
     async def test_direct_update_refuses_runs_until_the_installer_exits(self) -> None:
         reader, writer = await self._client()
         await self._wait_for_event(reader, "update_available")
@@ -217,7 +216,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         await self._wait_until(lambda: not self._barrier_up(), "the barrier to drop")
         await self._submit_and_expect_admission(reader, writer)
 
-    @requires_unix_sockets
     async def test_idle_poller_arms_barrier_with_its_idle_verdict(self) -> None:
         busy = agent_state.AgentState(
             "a0924-barrier-busy", tab_id="tab-a0924-busy", is_task_active=True,
@@ -249,7 +247,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         finally:
             agent_state.unregister(busy.task_id, busy)
 
-    @requires_unix_sockets
     async def test_failed_installer_lowers_the_barrier(self) -> None:
         self._install_stub(FAILING_INSTALL_SH)
         reader, writer = await self._client()
@@ -260,7 +257,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         self.assertFalse(self._barrier_up())
         await self._submit_and_expect_admission(reader, writer)
 
-    @requires_unix_sockets
     async def test_running_task_still_accepts_steering_during_update(self) -> None:
         # A task that was already running when the update started is
         # the user's explicit choice: typing into its tab still steers
@@ -292,7 +288,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             self._hold.set()
             agent_state.unregister(running.task_id, running)
 
-    @requires_unix_sockets
     async def test_barrier_not_armed_while_a_task_thread_is_installed(self) -> None:
         # ``busy()`` counts an installed worker thread even before the
         # run raises ``is_task_active`` (the start window): the idle
@@ -319,7 +314,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
         with agent_state.STATE_LOCK:
             self.vscode._update_installing = False
 
-    @requires_unix_sockets
     async def test_cmd_run_refuses_under_barrier_without_state_or_thread(self) -> None:
         # No installer involved: the barrier set the way the daemon
         # sets it is enough for ``_cmd_run`` to refuse with the
@@ -334,7 +328,6 @@ class TestUpdateRunBarrier(_UpdateCheckTestBase):
             self.server._set_update_barrier(False)
         await self._submit_and_expect_admission(reader, writer)
 
-    @requires_unix_sockets
     async def test_arming_and_admission_never_overlap(self) -> None:
         # Stress the atomicity: an arming attempt races a submit many
         # times.  Whatever the interleaving, a run must never be found

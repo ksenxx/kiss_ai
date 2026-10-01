@@ -4,14 +4,15 @@
 # add your name here
 """Parity tests: the remote webapp must behave like the VS Code extension.
 
-The remote webapp (browser over WSS) and the VS Code extension (UDS)
-share one frontend (``media/main.js``) and one backend dispatch path
+The remote webapp (browser over WSS) and the VS Code extension (local
+token-authenticated WSS) share one frontend (``media/main.js``) and one backend dispatch path
 (:meth:`RemoteAccessServer._dispatch_client_command`).  These tests
 lock in the behaviours that previously diverged between the two:
 
 * ``submit`` must forward the webview's ``autoCommit`` toggle into the
-  backend ``run`` command (the extension's ``_startTask`` always did;
-  the web server used to drop it).
+  backend ``run`` command (the daemon's ``_handle_submit`` is now the
+  one submit path of both surfaces — the extension host forwards its
+  webview's ``submit`` over UDS — and used to drop the toggle).
 * ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` exactly
   like the extension's ``runUpdate()`` / ``installerPath.js`` — falling
   back to the curl bootstrap when the script is missing — and must
@@ -20,9 +21,9 @@ lock in the behaviours that previously diverged between the two:
   ``measureSize`` request) must be silently ignored, like the other
   VS Code-only webview messages.
 
-All tests drive the server through a real UDS client connection, the
-same newline-delimited JSON protocol browsers speak over WSS — both
-transports now share :meth:`_dispatch_client_command` verbatim.
+All tests drive the server through a real local client connection, the
+same JSON protocol browsers speak over WSS — both kinds of peer share
+:meth:`_dispatch_client_command` verbatim.
 """
 
 from __future__ import annotations
@@ -44,9 +45,7 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -102,14 +101,13 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._install_root = self.install_root
@@ -123,31 +121,27 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect(
-        self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
-        )
+    async def _connect(self) -> tuple[LocalReader, LocalWriter]:
+        return await open_local_connection(self.server, limit=16 * 1024 * 1024)
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _read_event(
-        self, reader: asyncio.StreamReader, timeout: float = 2.0,
+        self, reader: LocalReader, timeout: float = 2.0,
     ) -> dict[str, Any]:
         line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-        assert line, "UDS closed unexpectedly"
+        assert line, "local connection closed unexpectedly"
         msg = json.loads(line.decode("utf-8"))
         assert isinstance(msg, dict)
         return msg
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         max_events: int = 50,
         timeout: float = 2.0,
@@ -306,10 +300,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
     async def test_submit_forwards_auto_commit_to_run(self) -> None:
         """A webapp ``submit`` with ``autoCommit: true`` reaches the task.
 
-        The VS Code extension's ``_startTask`` forwards the toggle in
-        the ``run`` command and ``task_runner`` flips
-        ``tab.auto_commit_mode``; the web server's submit → run
-        translation must do the same.  Uses a stub agent (the pattern
+        ``task_runner`` flips ``tab.auto_commit_mode`` from the
+        ``run`` command's ``autoCommit``; the daemon's submit → run
+        translation (shared by the extension and the webapp) must carry
+        the toggle through.  Uses a stub agent (the pattern
         ``_run_task`` explicitly supports for tests) so no LLM call is
         made, and a fake API key so a model is "available".
         """
@@ -474,15 +468,13 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             await asyncio.to_thread(_join_task_threads)
             agent_state.agent_states.clear()
 
-    async def test_submit_forwards_tab_scope_work_dir_to_run(self) -> None:
-        """A webapp ``submit`` with ``tabScopeWorkDir`` keeps the tab scoped.
+    async def test_submit_forwards_active_file_to_run(self) -> None:
+        """A webapp ``submit`` with ``activeFile`` reaches the agent.
 
-        The "Working directory" panel pins one tab to a folder outside
-        the client's workspace; the webview then sends the workspace as
-        ``tabScopeWorkDir`` so the tab does not vanish from that tab bar
-        once the run publishes its work dir.  The submit → run
-        translation must forward it to the tab registry's scope while
-        the run's ``workDir`` stays the picked folder.
+        The remote webapp names the file tab its user viewed last
+        (``main.js`` ``editorContext``) the way the VS Code host names
+        its visible editor; the submit → run translation must forward
+        it so ``task_runner`` passes it as ``current_editor_file``.
         """
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
         from kiss.core import config as config_module
@@ -497,7 +489,7 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             self.assertTrue(available, "no model available with fake key")
             model = next(m for m in available if m.startswith("claude-"))
 
-            tab_id = "tab-parity-scope"
+            tab_id = "tab-parity-activefile"
             agent = WorktreeSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
             seen_kwargs: dict[str, Any] = {}
@@ -508,27 +500,27 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
 
             agent.run = fake_run  # type: ignore[assignment]
             seed = agent_state.AgentState(
-                "parity-scope-seed",
+                "parity-activefile-seed",
                 agent=agent,
                 tab_id=tab_id,
                 server_owned=True,
             )
             agent_state.register(seed)
 
-            workspace = Path(self.tmpdir) / "workspace"
-            picked = Path(self.tmpdir) / "picked"
-            workspace.mkdir(parents=True, exist_ok=True)
-            picked.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(self.tmpdir) / "work"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            viewed = work_dir / "notes.md"
+            viewed.write_text("# notes\n", encoding="utf-8")
 
             reader, writer = await self._connect()
             try:
                 await self._send(writer, {
                     "type": "submit",
                     "tabId": tab_id,
-                    "prompt": "run in the picked folder",
+                    "prompt": "summarize the notes",
                     "model": model,
-                    "workDir": str(picked),
-                    "tabScopeWorkDir": str(workspace),
+                    "workDir": str(work_dir),
+                    "activeFile": str(viewed),
                     "attachments": [],
                     "useWorktree": False,
                     "useParallel": False,
@@ -542,16 +534,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     ),
                     "stub agent.run never started",
                 )
-                self.assertEqual(seen_kwargs.get("work_dir"), str(picked))
-                entry = next(
-                    e for e in self.server._vscode_server.tab_registry.snapshot()
-                    if e["tabId"] == tab_id
-                )
-                self.assertEqual(entry["workDir"], str(picked))
                 self.assertEqual(
-                    entry["scopeWorkDir"],
-                    str(workspace),
-                    "tabScopeWorkDir was dropped on the submit → run path",
+                    seen_kwargs.get("current_editor_file"),
+                    str(viewed),
+                    "activeFile was dropped on the submit → run path",
                 )
             finally:
                 writer.close()

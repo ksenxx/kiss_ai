@@ -5,27 +5,29 @@
 
 'use strict';
 
-// End-to-end tests for a run the daemon never received.
+// End-to-end tests for a submit the daemon never received.
 //
-// Sending a prompt is optimistic: the tab is shown as running -- spinner
-// on, composer locked -- the moment the user presses enter, before any
-// daemon has confirmed a thing.  The only thing that ever turns that
-// back off is a `status running:false`, and the only thing that sends
-// one is the daemon.
+// The host forwards the webview's `submit` to the daemon, whose
+// `status running:true` broadcast is what shows the tab as running
+// (spinner on, composer locked); the webview meanwhile holds the prompt
+// as the tab's unacknowledged draft.  The only thing that ever settles
+// that is a `status` for the tab, and the only thing that sends one is
+// the daemon.
 //
 // AgentClient may legitimately decide never to deliver a queued
 // command: one queued against a daemon that then died must not be
 // replayed into the DIFFERENT daemon that answers ten seconds later (it
 // would start an agent nobody asked for), and the queue is bounded so a
 // long outage cannot grow it without limit.  Both were silent, so the
-// tab that had already been marked running stayed running for ever,
-// with no agent behind it and no way to type in it.
+// tab waited for ever on a run that nobody would ever start, with no
+// word to the user.
 //
 // Two levels are covered, both for real:
 //   1. the REAL compiled AgentClient over a REAL unix domain socket:
 //      dropping a command must be announced;
 //   2. the REAL compiled SorcarSidebarView driving a webview: the
-//      announcement must actually put the tab back.
+//      announcement must settle the tab (`status running:false`) and
+//      tell the user.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -33,6 +35,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_DIR = path.join(__dirname, '..', 'out');
 const OUT_AGENT_CLIENT = path.join(OUT_DIR, 'AgentClient.js');
@@ -43,7 +46,7 @@ if (!fs.existsSync(OUT_AGENT_CLIENT) || !fs.existsSync(OUT_SIDEBAR)) {
   process.exit(0);
 }
 if (process.platform === 'win32') {
-  console.log('SKIP: UDS tests require a POSIX platform');
+  console.log('SKIP: local-endpoint test require a POSIX platform');
   process.exit(0);
 }
 
@@ -121,8 +124,8 @@ process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 
 // The sidebar must find no daemon at all: that is the whole scenario.
-const deadSock = path.join(tmpHome, '.kiss', 'nothing-here.sock');
-process.env.KISS_SORCAR_SOCK = deadSock;
+const deadSock = path.join(tmpHome, '.kiss', 'nothing-here.json');
+process.env.KISS_SORCAR_LOCAL = deadSock;
 
 const {AgentClient} = require(OUT_AGENT_CLIENT);
 const {SorcarSidebarView} = require(OUT_SIDEBAR);
@@ -139,9 +142,9 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-function listen(server, sockPath) {
+function listen(server, endpointPath) {
   return new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 }
 
@@ -154,8 +157,8 @@ function close(server) {
 // ---------------------------------------------------------------------
 
 async function testExpiredCommandIsAnnounced() {
-  const sockPath = tmpSock('expired.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('expired.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 250,
@@ -168,10 +171,10 @@ async function testExpiredCommandIsAnnounced() {
   await delay(600);
 
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.on('connect', resolve);
     client.connect();
@@ -201,8 +204,8 @@ async function testExpiredCommandIsAnnounced() {
 }
 
 async function testOverflowingCommandsAreAnnounced() {
-  const sockPath = tmpSock('overflow.sock');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpSock('overflow.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -229,14 +232,14 @@ async function testOverflowingCommandsAreAnnounced() {
 }
 
 async function testDeliveredCommandsAreNotAnnounced() {
-  const sockPath = tmpSock('delivered.sock');
+  const endpointPath = tmpSock('delivered.json');
   const received = [];
-  const server = net.createServer(conn => {
+  const server = createFakeDaemon(conn => {
     conn.on('data', d => received.push(d.toString()));
   });
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
 
-  const client = new AgentClient(sockPath, {
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -328,8 +331,9 @@ async function testTabsWithADroppedRunAreNotLeftRunning() {
   submit('tab-0');
   assert.deepStrictEqual(
     statusFor(posted, 'tab-0'),
-    [true],
-    'sending a prompt must show the tab as running straight away',
+    [],
+    'the host does not fake a running state: the daemon broadcasts the ' +
+      'status once it has the submit',
   );
 
   // The window stays open through a long outage. The queue is bounded
@@ -339,15 +343,14 @@ async function testTabsWithADroppedRunAreNotLeftRunning() {
 
   assert.deepStrictEqual(
     statusFor(posted, 'tab-0'),
-    [true, false],
-    'a tab whose run was dropped must be put back to not-running: it was ' +
-      'marked running before the daemon had seen anything, and nothing ' +
-      'else will ever unmark it',
+    [false],
+    'a tab whose submit was dropped must be settled as not-running: the ' +
+      'daemon never saw the prompt, so nothing else will ever answer it',
   );
   assert.deepStrictEqual(
     statusFor(posted, 'tab-300'),
-    [true],
-    'a tab whose run is still queued must stay running',
+    [],
+    'a tab whose submit is still queued must be left alone',
   );
 
   const notices = posted.filter(m => m && m.type === 'notification');

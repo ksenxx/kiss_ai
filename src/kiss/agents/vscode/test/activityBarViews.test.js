@@ -377,7 +377,9 @@ async function main() {
       JSON.stringify(paths),
       JSON.stringify([1, 3, 3, 3, 1]),
     );
-    // Expand the side commit: its file opens with the repo root.
+    // Expand the side commit: clicking its file asks for the file's
+    // diff (parent vs commit) in the repo, as VS Code opens a diff
+    // editor for a history item's file; no working file is opened.
     const side = win.document.querySelector(
       '#scm-graph .scm-commit[data-scm-sha="' + C + '"]',
     );
@@ -386,9 +388,38 @@ async function main() {
     const fileRow = side.parentNode.querySelector('.scm-commit-files .scm-row');
     assert.strictEqual(fileRow.dataset.scmPath, WD + '/c.py');
     click(win, fileRow);
-    const opened = ofType(posted, 'openFile');
-    assert.strictEqual(opened.length, 1);
-    assert.strictEqual(opened[0].path, WD + '/c.py');
+    assert.strictEqual(ofType(posted, 'openFile').length, 0);
+    const shows = ofType(posted, 'gitShow');
+    assert.strictEqual(shows.length, 1);
+    assert.strictEqual(shows[0].mode, 'diff');
+    assert.strictEqual(shows[0].sha, C);
+    assert.strictEqual(shows[0].path, 'c.py');
+    assert.strictEqual(shows[0].workDir, WD);
+    // The reply opens a diff tab titled like VS Code's.
+    send(win, {
+      type: 'gitShow',
+      token: shows[0].token,
+      workDir: WD,
+      sha: C,
+      parent: R,
+      path: 'c.py',
+      originalPath: 'c.py',
+      mode: 'diff',
+      repo: WD,
+      original: 'x = 1\ny = 2\n',
+      modified: 'x = 1\ny = 3\n',
+      originalMissing: false,
+      modifiedMissing: false,
+      truncated: false,
+    });
+    await sleep(50);
+    const diffTab = Array.from(win.document.querySelectorAll('.chat-tab')).find(
+      t =>
+        t.textContent.includes(
+          'c.py (' + R.slice(0, 7) + ' \u2194 ' + C.slice(0, 7) + ')',
+        ),
+    );
+    assert.ok(diffTab, 'a diff tab titled like VS Code');
     // Section headers collapse their lists.
     click(win, byId(win, 'scm-graph-toggle'));
     assert.ok(byId(win, 'scm-graph').hidden);

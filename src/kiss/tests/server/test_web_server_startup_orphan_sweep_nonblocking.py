@@ -9,7 +9,7 @@ Production symptom
 After running ``install.sh`` (or the Update button), the freshly
 respawned ``kiss-web`` daemon took a long time to come back up: the
 "KISS Sorcar Server is starting ..." overlay lingered and install.sh's
-bounded wait for ``~/.kiss/sorcar.sock`` timed out.
+bounded wait for the daemon's local endpoint timed out.
 
 Root cause
 ==========
@@ -19,7 +19,7 @@ Root cause
 **synchronously** — an UPDATE on ``task_history`` behind the
 persistence write lock, against connections configured with
 ``PRAGMA busy_timeout=30000``.  All of this happened BEFORE
-``_setup_server`` bound the UDS / WSS listeners.  During an install
+``_setup_server`` bound the WSS listener.  During an install
 restart the previous daemon is SIGTERM/SIGKILLed mid-write, so the
 new daemon regularly found the SQLite lock still held (straggler
 process flushing, WAL recovery on a multi-GB database) and blocked
@@ -37,7 +37,7 @@ These are end-to-end tests: a real ``RemoteAccessServer`` is
 constructed against a real on-disk SQLite database whose write lock
 is genuinely held by a second connection (exactly what a dying
 previous daemon does), and readiness is probed by connecting to the
-real Unix-domain socket.
+real local WSS endpoint.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 _SENTINEL = "Agent Failed Abruptly"
 _RECOVERED = "Task terminated unexpectedly (process killed)"
@@ -113,7 +113,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         _persistence._DB_PATH = kiss_dir / "sorcar.db"
         _persistence._db_conn = None
         self.db_path = kiss_dir / "sorcar.db"
-        self.uds_path = tmp / "sorcar-test.sock"
+        self.endpoint_file = tmp / "sorcar-local.json"
         self.url_file = tmp / "remote-url.json"
         self.server: RemoteAccessServer | None = None
         self.locker: sqlite3.Connection | None = None
@@ -134,8 +134,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             _persistence._KISS_DIR,
         ) = self._saved
 
-    @requires_unix_sockets
-    async def test_startup_binds_uds_while_db_write_locked(self) -> None:
+    async def test_startup_binds_listener_while_db_write_locked(self) -> None:
         """End-to-end reproduction of the slow install-restart.
 
         1. Seed the database with an orphaned task row (the sentinel a
@@ -143,7 +142,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
            ``install.sh`` kills the old daemon mid-task).
         2. Hold the SQLite write lock from a second connection, playing
            the role of the dying previous daemon's final writes.
-        3. Start a real ``RemoteAccessServer`` and require the UDS
+        3. Start a real ``RemoteAccessServer`` and require the local
            listener to accept a connection within
            ``_STARTUP_BUDGET_SECS`` — before the fix this took the
            full 30 s ``busy_timeout``.
@@ -169,13 +168,13 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             port=_find_free_port(),
             use_tunnel=False,
             url_file=self.url_file,
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
         reader = writer = None
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self.uds_path)),
+                open_local_connection(self.endpoint_file),
                 timeout=_STARTUP_BUDGET_SECS,
             )
         finally:
@@ -187,7 +186,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
                     pass
         elapsed = time.monotonic() - started
         assert elapsed < _STARTUP_BUDGET_SECS, (
-            f"server took {elapsed:.1f}s to accept a UDS connection while "
+            f"server took {elapsed:.1f}s to accept a local connection while "
             f"sorcar.db was write-locked — startup is blocked on the "
             f"orphan-task sweep (pre-fix behaviour: ~30s busy_timeout)"
         )
@@ -225,7 +224,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             port=_find_free_port(),
             use_tunnel=False,
             url_file=self.url_file,
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
         elapsed = time.monotonic() - started

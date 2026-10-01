@@ -17,8 +17,8 @@ Unlike the in-process tests in ``test_server_reset.py`` (which replace
 the self-``SIGTERM`` with a recorder), this test spawns a **real**
 ``RemoteAccessServer.start()`` daemon in a child process, starts a real
 in-flight agent worker thread inside it, drives the very same
-``serverReset`` command a webview OK click produces over the real UDS
-socket, and lets the real ``SIGTERM`` → graceful loop-shutdown →
+``serverReset`` command a webview OK click produces over the real local
+WSS endpoint, and lets the real ``SIGTERM`` → graceful loop-shutdown →
 shutdown-``finally`` machinery run to completion.
 
 Assertions:
@@ -43,10 +43,9 @@ from pathlib import Path
 from unittest import TestCase
 
 import pytest
+from websockets.exceptions import ConnectionClosed
 
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.agents.sorcar import local_endpoint
 
 _CHILD_SCRIPT = r"""
 import os
@@ -90,7 +89,7 @@ server = RemoteAccessServer(
     keyfile=str(keyfile),
     use_tunnel=False,
     url_file=tmp / "remote-url.json",
-    uds_path=tmp / "sorcar.sock",
+    local_endpoint_file=tmp / "sorcar-local.json",
 )
 
 from kiss.server import agent_state
@@ -263,48 +262,35 @@ class TestServerResetStopsRunningAgents(TestCase):
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
 
-        uds_path = self.tmpdir / "sorcar.sock"
+        endpoint_file = self.tmpdir / "sorcar-local.json"
         heartbeat = self.tmpdir / "heartbeat.txt"
         task_id_file = self.tmpdir / "task_id.txt"
 
-        self._wait_for(uds_path.exists, 30.0, "UDS socket to appear")
+        self._wait_for(endpoint_file.exists, 30.0, "local endpoint file to appear")
         self._wait_for(heartbeat.exists, 30.0, "agent heartbeat to start")
         self._wait_for(task_id_file.exists, 30.0, "task row to be registered")
 
     def _send_server_reset(self) -> None:
         """Drive EXACTLY what the webview OK button produces.
 
-        Sends a ``serverReset`` command on the daemon's UDS socket and
-        waits for the ``server-reset-restarting`` acknowledgement.
+        Sends a ``serverReset`` command on the daemon's local WSS endpoint
+        and waits for the ``server-reset-restarting`` acknowledgement.
         """
-        uds_path = self.tmpdir / "sorcar.sock"
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(10.0)
-        client.connect(str(uds_path))
+        client = local_endpoint.connect(self.tmpdir / "sorcar-local.json")
         try:
-            client.sendall(json.dumps({"type": "serverReset"}).encode() + b"\n")
-            buf = b""
+            client.send(json.dumps({"type": "serverReset"}))
             deadline = time.monotonic() + 10.0
             acked = False
             while time.monotonic() < deadline and not acked:
                 try:
-                    chunk = client.recv(65536)
-                except TimeoutError:
+                    msg = json.loads(client.recv(timeout=deadline - time.monotonic()))
+                except (TimeoutError, ConnectionClosed):
                     break
-                if not chunk:
-                    break
-                buf += chunk
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if not line.strip():
-                        continue
-                    msg = json.loads(line)
-                    if (
-                        msg.get("type") == "notification"
-                        and msg.get("id") == "server-reset-restarting"
-                    ):
-                        acked = True
-                        break
+                if (
+                    msg.get("type") == "notification"
+                    and msg.get("id") == "server-reset-restarting"
+                ):
+                    acked = True
             self.assertTrue(acked, "serverReset was never acknowledged")
         finally:
             client.close()

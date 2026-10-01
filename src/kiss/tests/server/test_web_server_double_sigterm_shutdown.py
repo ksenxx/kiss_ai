@@ -48,11 +48,11 @@ from pathlib import Path
 from kiss.server.web_server import RemoteAccessServer
 
 url_file = sys.argv[1]
-uds_path = sys.argv[2]
+endpoint_file = sys.argv[2]
 ready_file = sys.argv[3]
 
 server = RemoteAccessServer(
-    use_tunnel=False, url_file=url_file, uds_path=uds_path,
+    use_tunnel=False, url_file=url_file, local_endpoint_file=endpoint_file,
 )
 
 # A child that ignores SIGTERM and sleeps, standing in for cloudflared.
@@ -112,7 +112,7 @@ class TestDoubleSigtermShutdown(unittest.TestCase):
         """A SIGTERM landing mid-cleanup is ignored; shutdown stays clean."""
         with tempfile.TemporaryDirectory() as tmp:
             url_file = str(Path(tmp) / "remote-url.json")
-            uds_path = str(Path(tmp) / "sorcar.sock")
+            endpoint_file = str(Path(tmp) / "sorcar-local.json")
             ready_file = str(Path(tmp) / "tunnel-child-ready")
             driver_path = Path(tmp) / "driver.py"
             driver_path.write_text(_DRIVER)
@@ -120,7 +120,7 @@ class TestDoubleSigtermShutdown(unittest.TestCase):
             proc = subprocess.Popen(
                 [
                     sys.executable, str(driver_path),
-                    url_file, uds_path, ready_file,
+                    url_file, endpoint_file, ready_file,
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

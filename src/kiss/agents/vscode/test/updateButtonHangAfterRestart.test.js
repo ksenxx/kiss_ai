@@ -15,8 +15,8 @@ const {
   probeDaemonHealth,
   daemonHasActiveTasks,
   decideRestart,
-} = require('../src/daemonHealth');
-const {fakeSockPath, SOCK_FILE_OPS, SOCK_FILE_SKIP} = require('./fakeSock');
+} = require('../out/daemonHealth');
+const {createFakeDaemon, fakeEndpointPath} = require('./fakeDaemon');
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-update-hang-'));
 
@@ -48,26 +48,27 @@ function listenTcp() {
   });
 }
 
-function listenUds(sockPath) {
+function listenDaemon(endpointPath) {
   return new Promise((resolve, reject) => {
     try {
-      if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+      if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
     } catch { }
-    const server = net.createServer(sock => {
+    // Authenticates, then never answers activeTasksQuery.
+    const server = createFakeDaemon(sock => {
       sock.on('data', () => { });
       sock.on('error', () => { });
     });
     server.once('error', reject);
-    server.listen(sockPath, () => {
+    server.listen(endpointPath, () => {
       resolve({
-        deleteSocketFile: () => {
+        deleteEndpointFile: () => {
           try {
-            fs.unlinkSync(sockPath);
+            fs.unlinkSync(endpointPath);
           } catch { }
         },
         close: () => new Promise(res => server.close(() => {
           try {
-            if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+            if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
           } catch { }
           res();
         })),
@@ -78,27 +79,24 @@ function listenUds(sockPath) {
 
 (async () => {
 
-  // install.sh rm-ing the socket file from under a listening daemon has
-  // no pipe equivalent: a pipe path exists exactly while it is served.
-  if (!SOCK_FILE_OPS) console.log(`  Update-button hang — ${SOCK_FILE_SKIP}`);
-  else await test('Update-button hang — TCP alive + UDS file deleted ⇒ restart forced', async () => {
+  await test('Update-button hang — TCP alive + endpoint file deleted ⇒ restart forced', async () => {
     const {port, close: closeTcp} = await listenTcp();
-    const sockPath = path.join(tmpRoot, 'update-hang.sock');
-    const uds = await listenUds(sockPath);
+    const endpointPath = path.join(tmpRoot, 'update-hang.json');
+    const daemon = await listenDaemon(endpointPath);
     try {
-      assert.ok(fs.existsSync(sockPath),
-        'precondition: UDS socket file present before the simulated rm');
+      assert.ok(fs.existsSync(endpointPath),
+        'precondition: endpoint file present before the simulated rm');
 
-      uds.deleteSocketFile();
-      assert.ok(!fs.existsSync(sockPath),
-        'after the simulated rm the UDS file must be gone');
+      daemon.deleteEndpointFile();
+      assert.ok(!fs.existsSync(endpointPath),
+        'after the simulated rm the endpoint file must be gone');
 
       const health = await probeDaemonHealth(port, 1500);
-      const activeTasks = await daemonHasActiveTasks(sockPath, 500);
+      const activeTasks = await daemonHasActiveTasks(endpointPath, 500);
       assert.strictEqual(health, 'alive',
-        `daemon's TCP listener should survive UDS file removal; got: ${health}`);
-      assert.deepStrictEqual(activeTasks, {ok: false, reason: 'sock-missing'},
-        `UDS probe should report sock-missing once install.sh has rm-ed ` +
+        `daemon's TCP listener should survive endpoint file removal; got: ${health}`);
+      assert.deepStrictEqual(activeTasks, {ok: false, reason: 'endpoint-missing'},
+        `endpoint probe should report endpoint-missing once install.sh has rm-ed ` +
         `the socket file; got: ${JSON.stringify(activeTasks)}`);
 
       const decision = decideRestart({
@@ -107,33 +105,33 @@ function listenUds(sockPath) {
         activeTasks,
       });
       assert.strictEqual(decision.skip, false,
-        `restartKissWebDaemon must recycle a daemon whose UDS file is ` +
+        `restartKissWebDaemon must recycle a daemon whose endpoint file is ` +
         `missing — otherwise the webview stays on "KISS Sorcar Server ` +
         `is starting ..." forever.  Got: ${JSON.stringify(decision)}`);
-      assert.ok(/unreachable-uds/.test(decision.reason),
-        `restart reason must flag the unreachable UDS so install.sh / ` +
+      assert.ok(/unreachable-local/.test(decision.reason),
+        `restart reason must flag the unreachable endpoint so install.sh / ` +
         `restartKissWebDaemon logs are diagnosable; got: ${decision.reason}`);
     } finally {
-      await uds.close();
+      await daemon.close();
       await closeTcp();
     }
   });
 
-  await test('Task-3192 protection — TCP alive + UDS timeout ⇒ restart STILL deferred', async () => {
+  await test('Task-3192 protection — TCP alive + endpoint timeout ⇒ restart STILL deferred', async () => {
     const {port, close: closeTcp} = await listenTcp();
-    const sockPath = fakeSockPath(tmpRoot, 'task3192.sock');
+    const endpointPath = fakeEndpointPath(tmpRoot, 'task3192.json');
 
     const server = await new Promise((resolve, reject) => {
-      try { if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath); }
+      try { if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath); }
       catch { }
-      const srv = net.createServer(s => {
+      const srv = createFakeDaemon(s => {
         s.on('data', () => { });
         s.on('error', () => { });
       });
       srv.once('error', reject);
-      srv.listen(sockPath, () => resolve({
+      srv.listen(endpointPath, () => resolve({
         close: () => new Promise(res => srv.close(() => {
-          try { if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath); }
+          try { if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath); }
           catch { }
           res();
         })),
@@ -142,7 +140,7 @@ function listenUds(sockPath) {
 
     try {
       const health = await probeDaemonHealth(port, 1500);
-      const activeTasks = await daemonHasActiveTasks(sockPath, 150);
+      const activeTasks = await daemonHasActiveTasks(endpointPath, 150);
       assert.strictEqual(health, 'alive');
       assert.strictEqual(activeTasks.ok, false);
       assert.strictEqual(activeTasks.reason, 'timeout',
@@ -166,18 +164,18 @@ function listenUds(sockPath) {
     }
   });
 
-  await test('Unreachable-UDS restart wins over healthy-unchanged skip', () => {
+  await test('Unreachable-endpoint restart wins over healthy-unchanged skip', () => {
     const decision = decideRestart({
       fingerprintMatches: true,
       health: 'alive',
-      activeTasks: {ok: false, reason: 'sock-missing'},
+      activeTasks: {ok: false, reason: 'endpoint-missing'},
     });
     assert.strictEqual(decision.skip, false,
-      `unreachable-uds must beat healthy-unchanged or the user remains ` +
+      `unreachable-local must beat healthy-unchanged or the user remains ` +
       `stranded on the loading overlay forever; got: ${JSON.stringify(decision)}`);
   });
 
-  await test('Active-tasks reply still wins over sock-missing (precedence pin)', () => {
+  await test('Active-tasks reply still wins over endpoint-missing (precedence pin)', () => {
     const decision = decideRestart({
       fingerprintMatches: false,
       health: 'alive',
@@ -187,18 +185,18 @@ function listenUds(sockPath) {
     assert.strictEqual(decision.reason, 'active-tasks');
   });
 
-  await test('TOCTOU race — rm -f lands AFTER existsSync but BEFORE connect ⇒ reason normalised to sock-missing', async () => {
-    const sockPath = path.join(tmpRoot, 'toctou.sock');
-    fs.writeFileSync(sockPath, '');
+  await test('TOCTOU race — rm -f lands AFTER existsSync but BEFORE connect ⇒ reason normalised to endpoint-missing', async () => {
+    const endpointPath = path.join(tmpRoot, 'toctou.json');
+    fs.writeFileSync(endpointPath, '');
     setImmediate(() => {
-      try { fs.unlinkSync(sockPath); } catch { }
+      try { fs.unlinkSync(endpointPath); } catch { }
     });
-    const res = await daemonHasActiveTasks(sockPath, 500);
+    const res = await daemonHasActiveTasks(endpointPath, 500);
     assert.strictEqual(res.ok, false,
       `TOCTOU probe must fail; got: ${JSON.stringify(res)}`);
-    assert.strictEqual(res.reason, 'sock-missing',
-      `the error path must normalise to 'sock-missing' so decideRestart's ` +
-      `unreachable-uds branch fires; got reason='${res.reason}'`);
+    assert.strictEqual(res.reason, 'endpoint-missing',
+      `the error path must normalise to 'endpoint-missing' so decideRestart's ` +
+      `unreachable-local branch fires; got reason='${res.reason}'`);
 
     const decision = decideRestart({
       fingerprintMatches: true,
@@ -208,8 +206,8 @@ function listenUds(sockPath) {
     assert.strictEqual(decision.skip, false,
       `TOCTOU race must STILL force a restart end-to-end; ` +
       `got: ${JSON.stringify(decision)}`);
-    assert.ok(/unreachable-uds/.test(decision.reason),
-      `decision reason must flag unreachable-uds; got: ${decision.reason}`);
+    assert.ok(/unreachable-local/.test(decision.reason),
+      `decision reason must flag unreachable-local; got: ${decision.reason}`);
   });
 
 })()

@@ -5,9 +5,9 @@
 
 // H-RC1: every daemon-shared path the extension host touches must live
 // under the SAME root the daemon uses: $KISS_HOME (fallback ~/.kiss),
-// with the socket overridable via $KISS_SORCAR_SOCK. DependencyInstaller
+// with the socket overridable via $KISS_SORCAR_LOCAL. DependencyInstaller
 // used to hardcode $HOME/.kiss for its lock/marker/config files and
-// $HOME/.kiss/sorcar.sock for the daemon probe, so with KISS_HOME set it
+// $HOME/.kiss/sorcar-local.json for the daemon probe, so with KISS_HOME set it
 // probed a socket the daemon never binds, killed it mid-task, and then
 // polled the wrong path for 180s.
 //
@@ -44,42 +44,42 @@ const kissHome = path.join(tmp, 'kiss-home');
 fs.mkdirSync(fakeHome, {recursive: true});
 fs.mkdirSync(kissHome, {recursive: true});
 
-// userAssets.sorcarSockPath(): KISS_SORCAR_SOCK wins, then $KISS_HOME,
+// userAssets.sorcarEndpointPath(): KISS_SORCAR_LOCAL wins, then $KISS_HOME,
 // then ~/.kiss.
 const sockCode = `
-  const {sorcarSockPath} = require(${JSON.stringify(
+  const {sorcarEndpointPath} = require(${JSON.stringify(
     path.join(OUT, 'userAssets.js'),
   )});
-  console.log(sorcarSockPath());
+  console.log(sorcarEndpointPath());
 `;
 assert.strictEqual(
   runNode(sockCode, {
     HOME: fakeHome,
     KISS_HOME: kissHome,
-    KISS_SORCAR_SOCK: '',
+    KISS_SORCAR_LOCAL: '',
   }),
-  path.join(kissHome, 'sorcar.sock'),
-  'sorcarSockPath must honor KISS_HOME',
+  path.join(kissHome, 'sorcar-local.json'),
+  'sorcarEndpointPath must honor KISS_HOME',
 );
 assert.strictEqual(
   runNode(sockCode, {
     HOME: fakeHome,
     KISS_HOME: '',
-    KISS_SORCAR_SOCK: '',
+    KISS_SORCAR_LOCAL: '',
   }),
-  path.join(fakeHome, '.kiss', 'sorcar.sock'),
-  'sorcarSockPath must fall back to ~/.kiss',
+  path.join(fakeHome, '.kiss', 'sorcar-local.json'),
+  'sorcarEndpointPath must fall back to ~/.kiss',
 );
 assert.strictEqual(
   runNode(sockCode, {
     HOME: fakeHome,
     KISS_HOME: kissHome,
-    KISS_SORCAR_SOCK: path.join(tmp, 'override.sock'),
+    KISS_SORCAR_LOCAL: path.join(tmp, 'override.json'),
   }),
-  path.join(tmp, 'override.sock'),
-  'KISS_SORCAR_SOCK must override everything',
+  path.join(tmp, 'override.json'),
+  'KISS_SORCAR_LOCAL must override everything',
 );
-console.log('  ok - sorcarSockPath honors KISS_SORCAR_SOCK / KISS_HOME');
+console.log('  ok - sorcarEndpointPath honors KISS_SORCAR_LOCAL / KISS_HOME');
 
 // DependencyInstaller's cross-window locks (the daemon restart lock and
 // the API-keys prompt lock share LOG_DIR with config.json and every

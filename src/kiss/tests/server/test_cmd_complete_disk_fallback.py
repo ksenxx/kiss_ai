@@ -154,6 +154,71 @@ class TestCmdCompleteDiskFallback(unittest.TestCase):
             "re-reported the same activeFile",
         )
 
+    def test_empty_active_file_forgets_snapshot(self) -> None:
+        """``activeFile: ""`` (the browser closed its last file tab) clears it.
+
+        An *absent* ``activeFile`` keeps the snapshot (focus inside the
+        webview while the editor stays visible); the explicit empty
+        path is the "no file open" signal and must stop completions
+        against the closed file's identifiers.
+        """
+        path = self.root / "closed.py"
+        path.write_text("closedDiskIdent = 1\n", encoding="utf-8")
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "closedLi",
+            "activeFile": str(path),
+            "activeFileContent": "closedLiveIdent = 1\n",
+            "connId": "win-4",
+        })
+        self.assertIn("closedLiveIdent", [c["text"] for c in self._completions_for("closedLi")])
+        self.events.clear()
+        # Absent activeFile: the snapshot is kept.
+        self.server._cmd_complete({"type": "complete", "query": "closedLi", "connId": "win-4"})
+        self.assertIn("closedLiveIdent", [c["text"] for c in self._completions_for("closedLi")])
+        self.events.clear()
+        # Explicit empty activeFile: the snapshot is gone, and stays
+        # gone for later commands that carry no activeFile.
+        self.server._cmd_complete({
+            "type": "complete", "query": "closedLi", "activeFile": "", "connId": "win-4",
+        })
+        self.assertNotIn(
+            "closedLiveIdent", [c["text"] for c in self._completions_for("closedLi")],
+            "the closed file's buffer still fed completions",
+        )
+        self.events.clear()
+        self.server._cmd_complete({"type": "complete", "query": "closedDi", "connId": "win-4"})
+        self.assertNotIn(
+            "closedDiskIdent", [c["text"] for c in self._completions_for("closedDi")],
+            "the closed file's path was still read from disk",
+        )
+
+    def test_emptied_buffer_replaces_stale_content(self) -> None:
+        """``activeFileContent: ""`` for the same file drops the old text."""
+        path = self.root / "emptied.py"
+        path.write_text("emptiedDiskIdent = 1\n", encoding="utf-8")
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "emptiedLi",
+            "activeFile": str(path),
+            "activeFileContent": "emptiedLiveIdent = 1\n",
+            "connId": "win-5",
+        })
+        self.assertIn("emptiedLiveIdent", [c["text"] for c in self._completions_for("emptiedLi")])
+        self.events.clear()
+        self.server._cmd_complete({
+            "type": "complete",
+            "query": "emptiedLi",
+            "activeFile": str(path),
+            "activeFileContent": "",
+            "connId": "win-5",
+        })
+        texts = [c["text"] for c in self._completions_for("emptiedLi")]
+        self.assertNotIn("emptiedLiveIdent", texts, "stale buffer text survived an emptied buffer")
+        self.assertNotIn(
+            "emptiedDiskIdent", texts, "an empty open buffer must not fall back to disk"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

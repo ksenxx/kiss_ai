@@ -9,45 +9,13 @@
 // the clipboard, and the first `window.__MY_TRICKS_COUNT__` rows (the
 // user's own, from ~/.kiss/MY_INJECTION.md) also carry a delete button
 // that posts `deleteTrick` and drops the row at once.  Also covers the
-// `tricksData` reply's `userCount` and the compiled `getTricksData()`
-// that freezes the count into the VS Code page.
+// `tricksData` reply's `userCount`.
 
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const Module = require('module');
 const {makeWebview, send} = require('./simplify2_harness');
-
-function makeUri(fsPath) {
-  return {
-    fsPath,
-    toString() {
-      return 'vscode-webview://kiss' + fsPath;
-    },
-  };
-}
-
-// `out/SorcarTab.js` imports `vscode`; the stub supplies the two members
-// buildChatHtml touches (see buildChatHtmlTricksEscape.test.js).
-global.__kissVscodeStub = {
-  Uri: {
-    joinPath(base, ...parts) {
-      return makeUri(path.join(base.fsPath, ...parts));
-    },
-  },
-  workspace: {
-    isTrusted: false,
-    getConfiguration() {
-      return {get: () => undefined};
-    },
-  },
-};
-const origResolve = Module._resolveFilename;
-Module._resolveFilename = function (request, parent, ...rest) {
-  if (request === 'vscode') return require.resolve('./_vscode-stub.js');
-  return origResolve.call(this, request, parent, ...rest);
-};
 
 function rows(doc) {
   return Array.from(doc.getElementById('tricks-list').children);
@@ -253,61 +221,7 @@ async function runPanel() {
   console.log('tricksPanelCopyDelete.test.js: panel passed');
 }
 
-function runGetTricksData() {
-  const sourcePath = path.join(__dirname, '..', 'out', 'SorcarTab.js');
-  assert.ok(fs.existsSync(sourcePath), `compiled extension missing: ${sourcePath}`);
-  delete require.cache[require.resolve(sourcePath)];
-  const {getTricksData, getTricks, buildChatHtml} = require(sourcePath);
-  assert.strictEqual(typeof getTricksData, 'function');
-
-  const kissHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-tricks-count-'));
-  const bundledFile = path.join(kissHome, 'INJECTIONS.md');
-  const prevHome = process.env.KISS_HOME;
-  const prevInj = process.env.KISS_INJECTIONS_PATH;
-  process.env.KISS_HOME = kissHome;
-  process.env.KISS_INJECTIONS_PATH = bundledFile;
-  try {
-    fs.writeFileSync(bundledFile, '## Trick\n\nbundled one\n\n## Trick\n\nbundled two\n');
-    fs.writeFileSync(
-      path.join(kissHome, 'MY_INJECTION.md'),
-      '## Trick\n\nmine one\n\n## Other\n\nskip\n\n## Trick\n\nmine two\n',
-    );
-    assert.deepStrictEqual(getTricksData(), {
-      tricks: ['mine one', 'mine two', 'bundled one', 'bundled two'],
-      userCount: 2,
-    });
-    assert.deepStrictEqual(getTricks(), getTricksData().tricks);
-
-    fs.writeFileSync(path.join(kissHome, 'MY_INJECTION.md'), '');
-    assert.deepStrictEqual(getTricksData(), {
-      tricks: ['bundled one', 'bundled two'],
-      userCount: 0,
-    });
-
-    // The page freezes the count next to the list.
-    fs.writeFileSync(path.join(kissHome, 'MY_INJECTION.md'), '## Trick\n\nmine\n');
-    const html = buildChatHtml(
-      {cspSource: 'vscode-resource:', asWebviewUri: uri => uri},
-      makeUri(path.join(__dirname, '..')),
-      'test-model',
-    );
-    assert.ok(!html.includes('{{MY_TRICKS_COUNT}}'), 'placeholder substituted');
-    const m = html.match(/window\.__MY_TRICKS_COUNT__\s*=\s*(\d+);/);
-    assert.ok(m, '__MY_TRICKS_COUNT__ assignment present');
-    assert.strictEqual(m[1], '1');
-    assert.ok(html.includes('window.__TRICKS__ = ["mine","bundled one","bundled two"];'));
-  } finally {
-    if (prevHome === undefined) delete process.env.KISS_HOME;
-    else process.env.KISS_HOME = prevHome;
-    if (prevInj === undefined) delete process.env.KISS_INJECTIONS_PATH;
-    else process.env.KISS_INJECTIONS_PATH = prevInj;
-    fs.rmSync(kissHome, {recursive: true, force: true});
-  }
-  console.log('tricksPanelCopyDelete.test.js: getTricksData passed');
-}
-
 runPanel()
-  .then(runGetTricksData)
   .then(() => console.log('tricksPanelCopyDelete.test.js passed'))
   .catch(err => {
     console.error(err);

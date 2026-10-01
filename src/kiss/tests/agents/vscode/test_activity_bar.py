@@ -404,7 +404,9 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
             "els => els.map(e => [e.querySelector('.scm-path').textContent,"
             " e.querySelector('.scm-status').textContent])",
         ) == [["feature.txt", "A"]]
-        # Clicking a listed file opens it as a content tab.
+        # Clicking a listed file opens the file's diff (parent vs
+        # commit) in a diff-editor tab, as VS Code does; the working
+        # file itself is not opened.
         tabs_before = page.locator(".chat-tab").count()
         files.nth(1).click()
         page.wait_for_function(
@@ -412,11 +414,16 @@ def test_commit_click_lists_modified_files_and_opens_them(browser, harness):
             timeout=15000,
         )
         opened = _sent(frames, "openFile")
-        assert opened[-1]["path"] == str(harness.work_dir.resolve() / "dir" / "nested.py")
+        assert not opened
+        shows = _sent(frames, "gitShow")
+        assert shows[-1]["mode"] == "diff"
+        assert shows[-1]["sha"] == harness.shas["second"]
+        assert shows[-1]["path"] == "dir/nested.py"
         page.wait_for_function(
-            "document.querySelector('.content-tab-view') && "
-            "Array.from(document.querySelectorAll('.content-tab-view'))"
-            ".some(v => v.innerText.includes('nested-sentinel-4f2a'))",
+            "window.monaco && monaco.editor.getDiffEditors().some(d => {"
+            "  const m = d.getModel();"
+            "  return !!m && d.getContainerDomNode().isConnected"
+            "    && m.modified.getValue().includes('nested-sentinel-4f2a'); })",
             timeout=15000,
         )
         # A deleted file in the Changes list is not openable.

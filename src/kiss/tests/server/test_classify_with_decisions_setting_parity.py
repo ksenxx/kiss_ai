@@ -35,8 +35,8 @@ without test doubles:
   drives the real ``chat.html`` + ``main.js`` through the checkbox's
   init / poll / save paths — passes under ``node``.
 
-The browser webapp speaks the same newline-delimited JSON over WSS that
-the VS Code extension speaks over the UDS used here; both go through
+The browser webapp speaks the same JSON frames over WSS that the VS
+Code extension speaks over the local endpoint used here; both go through
 ``RemoteAccessServer._dispatch_client_command`` verbatim.
 """
 
@@ -55,7 +55,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.task_classifier import clear_classification_cache
 from kiss.core import config as config_module
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 _KISS_ROOT = Path(__file__).resolve().parents[2]
@@ -83,14 +83,14 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         certfile = self.isolated.tmpdir / "cert.pem"
         keyfile = self.isolated.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = self.isolated.tmpdir / "sorcar.sock"
+        self.endpoint_file = self.isolated.tmpdir / "sorcar-local.json"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.isolated.tmpdir / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
 
@@ -103,15 +103,15 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
 
     async def _request(self, cmd: dict[str, Any]) -> dict[str, Any]:
         """Send *cmd* on a fresh client connection; return its ``configData`` reply."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+        reader, writer = await open_local_connection(
+            self.endpoint_file, limit=16 * 1024 * 1024,
         )
         try:
             writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
             await writer.drain()
             for _ in range(50):
                 line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-                self.assertTrue(line, "UDS closed before a configData reply")
+                self.assertTrue(line, "connection closed before a configData reply")
                 event = json.loads(line.decode("utf-8"))
                 self.assertIsInstance(event, dict)
                 if event.get("type") == "configData":
@@ -129,7 +129,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertIsInstance(stored, dict)
         return dict(stored)
 
-    @requires_unix_sockets
     async def test_unticking_the_box_pins_the_llm_classifier(self) -> None:
         """The panel's partial saveConfig turns the decisions route off."""
         # Off by default; tick it first so the untick has an effect.
@@ -151,7 +150,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         agent._use_web_tools = False
         return [tool.__name__ for tool in agent._get_tools()]
 
-    @requires_unix_sockets
     async def test_unticking_the_box_removes_the_decide_tool(self) -> None:
         """The saved setting decides whether an agent gets the Jev ``decide`` tool.
 
@@ -167,7 +165,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         await self._request(dict(_TICKED_SAVE))
         self.assertIn("decide", self._agent_tool_names())
 
-    @requires_unix_sockets
     async def test_ticking_the_box_back_restores_the_decisions_route(self) -> None:
         """A ticked box saved after an unticked one re-enables Jev."""
         await self._request(dict(_UNTICKED_SAVE))
@@ -179,7 +176,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertTrue(decisions_tool_available())
         self.assertIs(reply["config"]["classify_with_decisions"], True)
 
-    @requires_unix_sockets
     async def test_get_config_carries_the_key_for_the_checkbox(self) -> None:
         """``getConfig`` reports the key at its default and after a save."""
         first = await self._request({"type": "getConfig"})
@@ -191,7 +187,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         second = await self._request({"type": "getConfig"})
         self.assertIs(second["config"]["classify_with_decisions"], True)
 
-    @requires_unix_sockets
     async def test_partial_save_leaves_the_other_settings_alone(self) -> None:
         """Only the edited key changes; the merge keeps the rest."""
         self.isolated.write_config(
@@ -207,7 +202,6 @@ class TestClassifyWithDecisionsSettingParity(IsolatedAsyncioTestCase):
         self.assertEqual(stored["max_budget"], 7)
         self.assertEqual(stored["memory_dir"], "/tmp/mem")
 
-    @requires_unix_sockets
     async def test_junk_value_is_coerced_like_the_other_toggles(self) -> None:
         """A non-boolean payload value is coerced, never stored raw."""
         await self._request({"type": "saveConfig", "config": {"classify_with_decisions": 0}})

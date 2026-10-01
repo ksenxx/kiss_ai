@@ -417,12 +417,17 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         )
 
     async def test_correct_password_locked_out_too(self) -> None:
-        """Even the correct password is refused while locked out (per-IP)."""
+        """Even the correct password is refused while locked out (per-IP).
+
+        The daemon reads the locked peer's first frame (a local token
+        would still be honoured) and answers ``auth_locked``; a client
+        whose frame lost the race against the close sees the close.
+        """
         for _ in range(ws_mod._AUTH_FAIL_MAX):
             await self._try_auth("wrong-password")
 
         resp = await self._try_auth("secret-h4")
-        self.assertIn(resp, ("closed", "timeout"))
+        self.assertIn(resp, ("auth_locked", "closed", "timeout"))
 
     async def test_record_auth_failure_tracks_per_ip(self) -> None:
         """The internal failure tracker is per-source-IP."""

@@ -7,10 +7,9 @@
 The user interfaces (VS Code extension, remote webapp, CLI) may only
 talk to the daemon through the command catalog defined in
 ``kiss.server.sorcar.API``.  These tests exercise the catalog's
-validation logic directly and over a REAL Unix-domain-socket
-connection to a live :class:`RemoteAccessServer` dispatcher — the
-exact production ``_uds_handler`` code path the VS Code extension
-uses — asserting that:
+validation logic directly and over a REAL local WebSocket connection
+to a live :class:`RemoteAccessServer` dispatcher — the exact production
+``_ws_handler`` code path the VS Code extension uses — asserting that:
 
 * commands outside the API are rejected with an ``error`` event
   delivered only to the sender (and stamped with the sender's tab id),
@@ -38,7 +37,7 @@ from typing import Any
 
 from kiss.server.sorcar import API, ApiCommand, validate_command
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 
 class TestValidateCommand(unittest.TestCase):
@@ -117,38 +116,30 @@ class TestValidateCommand(unittest.TestCase):
             cmd.name = "hacked"  # type: ignore[misc]
 
 
-@requires_unix_sockets
-class TestServerApiOverUds(unittest.TestCase):
-    """The live daemon dispatcher enforces the API over a real UDS."""
+class TestServerApiOverLocalConnection(unittest.TestCase):
+    """The live daemon dispatcher enforces the API over a real local connection."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
         )
-        self.server._printer._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path
-            ),
-            self.loop,
-        ).result(timeout=5)
+        # Loopback WSS on an ephemeral port: the production ``_ws_handler``
+        # without the public daemon's tunnel, URL file and watchdogs.
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
     def tearDown(self) -> None:
-        async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
-
         concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)],
-            timeout=5,
+            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
+            timeout=30,
         )
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
@@ -158,13 +149,11 @@ class TestServerApiOverUds(unittest.TestCase):
     def _roundtrip(
         self, cmd: dict[str, Any], want_type: str
     ) -> dict[str, Any]:
-        """Send *cmd* over a fresh UDS connection; return the first
+        """Send *cmd* over a fresh local connection; return the first
         received event of type *want_type*."""
 
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(json.dumps(cmd).encode() + b"\n")
                 await writer.drain()
@@ -203,9 +192,7 @@ class TestServerApiOverUds(unittest.TestCase):
 
     def test_non_object_command_is_dropped_connection_survives(self) -> None:
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(b'["not", "an", "object"]\n')
                 writer.write(
@@ -234,9 +221,7 @@ class TestServerApiOverUds(unittest.TestCase):
 
     def test_vscode_only_command_is_dropped_silently(self) -> None:
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(json.dumps({"type": "voiceAck"}).encode())
                 writer.write(b"\n")
@@ -267,9 +252,7 @@ class TestServerApiOverUds(unittest.TestCase):
         """
 
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
                     json.dumps({
@@ -297,12 +280,8 @@ class TestServerApiOverUds(unittest.TestCase):
 
     def test_error_reply_goes_only_to_the_sender(self) -> None:
         async def _talk() -> tuple[dict[str, Any], dict[str, Any]]:
-            reader_a, writer_a = await asyncio.open_unix_connection(
-                self.sock_path
-            )
-            reader_b, writer_b = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader_a, writer_a = await open_local_connection(self.server)
+            reader_b, writer_b = await open_local_connection(self.server)
             try:
                 writer_a.write(
                     json.dumps({"type": "bogusCommand"}).encode() + b"\n"
@@ -375,9 +354,7 @@ class TestServerApiOverUds(unittest.TestCase):
 
     def test_voice_wake_stop_without_listener_is_a_noop(self) -> None:
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
                     json.dumps({"type": "voiceWakeStop"}).encode() + b"\n"
@@ -410,7 +387,7 @@ class TestServerApiOverUds(unittest.TestCase):
         discard a retired generation's stale report (gpt-5.6-sol
         round-3 review, findings 2-3).  The tag is a daemon-internal
         delivery-boundary token: a real listener stand-in started
-        through ``voiceWakeStart`` over the production UDS dispatcher
+        through ``voiceWakeStart`` over the production local dispatcher
         must stream ``voiceWakeEvent`` / ``voiceWakeState`` payloads
         whose wire shape is unchanged — no ``voiceGen`` key.
         """
@@ -420,9 +397,7 @@ class TestServerApiOverUds(unittest.TestCase):
         ]
 
         async def _talk() -> list[dict[str, Any]]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(
                     json.dumps({"type": "voiceWakeStart"}).encode() + b"\n"
@@ -472,10 +447,10 @@ class TestServerApiOverUds(unittest.TestCase):
             ).result(timeout=15)
 
     def test_local_only_commands_are_dropped_for_remote_clients(self) -> None:
-        """The UDS-gated handlers must ignore WSS-delivered commands.
+        """The local-only handlers must ignore remote-browser commands.
 
         Each handler is invoked through the live server's API with a
-        non-UDS context and NO endpoint: were the gate missing, the
+        non-local context and NO endpoint: were the gate missing, the
         handler's direct reply would dereference the ``None`` endpoint
         and the future would raise.
         """
@@ -485,7 +460,7 @@ class TestServerApiOverUds(unittest.TestCase):
         ctx = ApiContext(
             endpoint=None,
             conn_state={"work_dir": "", "conn_id": "remote-conn"},
-            is_uds=False,
+            is_local=False,
         )
         calls = [
             api.read_kiss_config({"type": "readKissConfig"}, ctx),

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+from kiss.agents.sorcar.web_stealth import virtual_display
 from kiss.core.browser_handoff import is_headless_environment
 from kiss.core.default_browser import ResolvedBrowser, resolve_browser
 
@@ -369,21 +370,31 @@ class BrowserTabService:
         self._browser = resolve_browser()
         self._profile_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
+        display = None
         headless = is_headless_environment()
+        if headless:
+            # No window server: run a *headed* browser on a shared Xvfb
+            # when one can be started.  Chromium brands headless mode
+            # "HeadlessChrome" in the User-Agent and the Sec-CH-UA client
+            # hints on purpose, and Google's sign-in answers that (and
+            # navigator.webdriver) with "Couldn't sign you in", which
+            # would break every OAuth hand-off streamed through the tab.
+            display = virtual_display()
+            headless = display is None
         try:
-            context = await self._launch_context(headless)
+            context = await self._launch_context(headless, display)
         except Exception:
             if headless:
                 raise
             # A desktop session without a reachable window server (a Mac
             # reached over ssh, for instance): fall back to headless.
-            context = await self._launch_context(True)
+            context = await self._launch_context(True, None)
         await self._mask_headless_user_agent(context)
         context.on("page", self._on_page)
         context.on("close", self._on_context_close)
         return context
 
-    async def _launch_context(self, headless: bool) -> BrowserContext:
+    async def _launch_context(self, headless: bool, display: str | None) -> BrowserContext:
         assert self._playwright is not None and self._browser is not None
         width, height = _DEFAULT_VIEWPORT
         return await self._playwright.chromium.launch_persistent_context(
@@ -391,10 +402,19 @@ class BrowserTabService:
             executable_path=self._browser.executable,
             headless=headless,
             viewport={"width": width, "height": height},
-            # The debugging port lets an agent attach a second CDP client
-            # (open_for_agent); 0 picks a free port, recorded in the
-            # profile's DevToolsActivePort file.
-            args=["--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"],
+            env={**os.environ, "DISPLAY": display} if display else None,
+            args=[
+                # Chromium forces navigator.webdriver on for any
+                # --remote-debugging-* flag; only this explicit disable
+                # clears it (dropping --enable-automation is not enough).
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+                # The debugging port lets an agent attach a second CDP
+                # client (open_for_agent); 0 picks a free port, recorded
+                # in the profile's DevToolsActivePort file.
+                "--remote-debugging-port=0",
+            ],
             ignore_default_args=["--enable-automation"],
         )
 

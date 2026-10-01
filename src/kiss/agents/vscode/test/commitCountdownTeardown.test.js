@@ -171,7 +171,7 @@ stubModule(path.join(OUT_DIR, 'gitApi.js'), {
   getGitApi: () => Promise.resolve(fakeGitApi),
 });
 stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
-  isReloadReady: () => ({codeReady: false, socketUp: false, size: 0}),
+  isReloadReady: () => ({codeReady: false, daemonUp: false, size: 0}),
 });
 stubModule(path.join(OUT_DIR, 'kissPaths.js'), {
   findKissProject: () => '/fake/kiss_project',

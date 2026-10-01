@@ -19,7 +19,7 @@ tab contract instead of opening a top-level tab of its own:
    viewers subscribed via ``resumeSession`` and to the dispatch tab id.
 
 Like the sibling suites, a real :class:`RemoteAccessServer` is served
-on a temporary Unix-domain socket and only the LLM boundary
+on a loopback WSS endpoint under a temp dir and only the LLM boundary
 (``RelentlessAgent.run``) is replaced by a stub, so the daemon's full
 pipeline — command dispatch, worker thread, agent wiring, broadcasts,
 persistence — executes for real.
@@ -43,9 +43,7 @@ from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import make_test_tls, open_local_connection
 
 PARENT_TAB_ID = "webtab-parent-1"
 
@@ -71,18 +69,19 @@ def _init_repo(repo: str) -> None:
     git("commit", "-q", "-m", "seed")
 
 
-class DaemonUdsHarness(unittest.TestCase):
-    """A real daemon on a temporary Unix socket plus a webview-like viewer.
+class DaemonLocalHarness(unittest.TestCase):
+    """A real daemon on a loopback WSS endpoint plus a webview-like viewer.
 
     Shared by the sub-agent tab suites: ``setUp`` isolates persistence
     and config under a temp ``.kiss`` dir, serves a
-    :class:`RemoteAccessServer` on a UDS, and exposes helpers to open a
-    viewer connection, send it commands and stub the LLM boundary.
+    :class:`RemoteAccessServer` to local clients only
+    (:meth:`start_private_async`), and exposes helpers to open a viewer
+    connection, send it commands and stub the LLM boundary.
     """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="run_agent_subtab_")
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
@@ -109,19 +108,17 @@ class DaemonUdsHarness(unittest.TestCase):
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
+        certfile, keyfile, _ca = make_test_tls(Path(self.tmpdir))
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file,
+            certfile=str(certfile), keyfile=str(keyfile),
+            work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
-        self._viewer_writer: asyncio.StreamWriter | None = None
+        self._viewer_writer: Any | None = None
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
@@ -137,15 +134,7 @@ class DaemonUdsHarness(unittest.TestCase):
                     self._viewer_writer.close()
                 except Exception:
                     pass
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            await self.server.stop_async()
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -186,13 +175,11 @@ class DaemonUdsHarness(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _open_viewer(self) -> list[dict[str, Any]]:
-        """Open a webview-like UDS connection and drain its events."""
+        """Open a webview-like local connection and drain its events."""
 
-        async def _open() -> tuple[
-            asyncio.StreamReader, asyncio.StreamWriter,
-        ]:
-            return await asyncio.open_unix_connection(
-                self.sock_path, limit=16 * 1024 * 1024,
+        async def _open() -> tuple[Any, Any]:
+            return await open_local_connection(
+                self.server, limit=16 * 1024 * 1024,
             )
 
         reader, writer = asyncio.run_coroutine_threadsafe(
@@ -215,10 +202,10 @@ class DaemonUdsHarness(unittest.TestCase):
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             with self.server._printer._ws_lock:
-                if self.server._printer._uds_writers:
+                if self.server._printer._local_clients:
                     return received
             time.sleep(0.02)
-        raise AssertionError("viewer UDS connection never registered")
+        raise AssertionError("viewer local connection never registered")
 
     def _send_from_viewer(self, cmd: dict[str, Any]) -> None:
         writer = self._viewer_writer
@@ -288,7 +275,7 @@ class DaemonUdsHarness(unittest.TestCase):
         self._parent_class.run = stub_run
 
 
-class RunAgentSubagentTabTest(DaemonUdsHarness):
+class RunAgentSubagentTabTest(DaemonLocalHarness):
     """Sub-agent dispatches get run_parallel tab semantics end to end."""
 
     def test_parented_dispatch_gets_run_parallel_tab_semantics(self) -> None:
@@ -306,7 +293,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             work_dir=self.repo,
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert parent.success is True
@@ -322,7 +309,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
                 auto_commit=False,
                 parent_task_id=parent.task_id,
                 parent_tab_id=PARENT_TAB_ID,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=60,
             )
 
@@ -513,7 +500,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             work_dir=self.repo,
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert parent.success is True
@@ -526,7 +513,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             auto_commit=False,
             parent_task_id=parent.task_id,
             parent_tab_id=PARENT_TAB_ID,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert child.success is True
@@ -579,7 +566,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             work_dir=self.repo,
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -656,7 +643,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
             work_dir=self.repo,
             use_worktree=False,
             auto_commit=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert parent.success is True
@@ -675,7 +662,7 @@ class RunAgentSubagentTabTest(DaemonUdsHarness):
                 parent_task_id=parent.task_id,
                 parent_tab_id=PARENT_TAB_ID,
                 parent_reviewer=parent_reviewer,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=60,
             )
             assert child.success is True

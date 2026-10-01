@@ -136,7 +136,7 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self._old_path}"
 
         self._url_file = tmp / "remote-url.json"
-        self._uds_path = tmp / "kiss-web-test.sock"
+        self._endpoint_file = tmp / "kiss-web-test-local.json"
 
     async def asyncTearDown(self) -> None:
         """Restore globals, reap the fake cloudflared, stop the metrics server."""
@@ -161,7 +161,7 @@ class TestAdoptedTunnelUrlStableAcrossStopAsync(IsolatedAsyncioTestCase):
             work_dir=self._tmp.name,
             use_tunnel=True,
             url_file=self._url_file,
-            uds_path=self._uds_path,
+            local_endpoint_file=self._endpoint_file,
             ntfy_base_url=unroutable_base_url(),
         )
 
@@ -242,7 +242,7 @@ class TestSpawnedTunnelStopAsyncLeavesNoStaleState(IsolatedAsyncioTestCase):
             work_dir=self._tmp.name,
             use_tunnel=False,
             url_file=tmp / "remote-url.json",
-            uds_path=tmp / "kiss-web-test.sock",
+            local_endpoint_file=tmp / "kiss-web-test-local.json",
             ntfy_base_url=unroutable_base_url(),
         )
         await self._server.start_async()

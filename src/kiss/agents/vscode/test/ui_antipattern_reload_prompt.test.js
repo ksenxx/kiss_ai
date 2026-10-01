@@ -36,7 +36,7 @@ const h = loadExtension({
   config: {'kissSorcar.editorTabsMode': false},
   modules: {
     'reloadGuard.js': {
-      isReloadReady: () => ({codeReady: true, socketUp: true, size: 1}),
+      isReloadReady: () => ({codeReady: true, daemonUp: true, size: 1}),
     },
     'UpdateChecker.js': {
       checkForExtensionUpdate: () => Promise.resolve({checked: false}),
