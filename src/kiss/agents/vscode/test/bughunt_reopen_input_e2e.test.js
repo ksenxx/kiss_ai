@@ -123,7 +123,7 @@ const server = net.createServer(sock => {
         continue;
       }
       daemonCmds.push(cmd);
-      if (cmd.type === 'run') {
+      if (cmd.type === 'submit') {
         const tabId = cmd.tabId;
         registryTabs.set(tabId, {chatId: 'chat-1', title: 'do a long task'});
         taskRunning = true;
@@ -278,8 +278,8 @@ async function runTests() {
   await sleep(80);
   const TAB = view._activeTabId;
   assert.ok(
-    daemonCmds.some(c => c.type === 'run' && c.tabId === TAB),
-    'daemon must receive the initial run command',
+    daemonCmds.some(c => c.type === 'submit' && c.tabId === TAB),
+    'daemon must receive the initial submit command',
   );
   assert.ok(TAB, 'extension must have learned the active tab id from submit');
 
@@ -295,7 +295,7 @@ async function runTests() {
   typeAndSend(ctx2.win, 'please also update the docs');
   await sleep(80);
   const duringTypes = daemonCmds
-    .filter(c => c.type === 'appendUserMessage' || c.type === 'run')
+    .filter(c => c.type === 'appendUserMessage' || c.type === 'submit')
     .map(c => c.type);
   assert.deepStrictEqual(
     duringTypes,
@@ -312,13 +312,13 @@ async function runTests() {
   typeAndSend(ctx2.win, 'now do a follow-up task');
   await sleep(80);
   const afterTypes = daemonCmds
-    .filter(c => c.type === 'appendUserMessage' || c.type === 'run')
+    .filter(c => c.type === 'appendUserMessage' || c.type === 'submit')
     .map(c => c.type);
   assert.deepStrictEqual(
     afterTypes,
-    ['run'],
+    ['submit'],
     'BUG: after the task finished in a re-opened tab, a typed message ' +
-      'must start a new run (was: ' +
+      'must reach the daemon as a submit, which starts a new run (was: ' +
       JSON.stringify(afterTypes) +
       '). The extension dropped it as a submit for a still-"running" tab.',
   );

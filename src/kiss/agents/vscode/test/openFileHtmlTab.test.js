@@ -11,7 +11,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
+const {startRealDaemon} = require('./_realDaemon.js');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -160,8 +160,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-htmltab-'));
 const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+process.env.KISS_HOME = path.join(tmpHome, '.kiss');
+fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
@@ -171,18 +171,10 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-let lastServerSock = null;
-const server = net.createServer(sock => {
-  lastServerSock = sock;
-  sock.on('data', () => {});
-});
-
-async function waitForClient() {
-  for (let i = 0; i < 100 && !lastServerSock; i++) {
-    await new Promise(r => setTimeout(r, 20));
-  }
-  assert.ok(lastServerSock, 'client never connected to daemon');
-}
+const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
+const UV = findUvPath();
+assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');
+let daemon = null;
 
 function makeWebviewView() {
   const recv = new StubEventEmitter();
@@ -226,10 +218,6 @@ function clear() {
 }
 
 async function runTests() {
-  await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
-  );
-
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
     fs.existsSync(sourcePath),
@@ -241,6 +229,7 @@ async function runTests() {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-htmltab-ws-'));
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
+  daemon = await startRealDaemon(UV, ws, process.env);
 
   const htmlFile = path.join(ws, 'reports', 'summary.html');
   fs.mkdirSync(path.dirname(htmlFile), {recursive: true});
@@ -261,7 +250,11 @@ async function runTests() {
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
   wv.fireMessage({type: 'ready', tabId: 'tab1', restoredTabs: []});
-  await waitForClient();
+  await waitFor(
+    () => wv.posted.find(m => m.type === 'tabs_state'),
+    'the real daemon must answer ready',
+    15000,
+  );
 
   // 1. Clicking an .html link opens a rendered webview tab, NOT the
   //    text editor and NOT the native viewer.
@@ -399,20 +392,30 @@ async function runTests() {
   assert.deepStrictEqual(createdPanels, [], 'no webview panel for .py');
   console.log('  ok - non-html files still open in the text editor');
 
-  // 6. An .html path outside the workspace is still refused.
+  // 6. An existing .html path outside the workspace opens too: the
+  //    daemon resolves file links the same way for every surface (the
+  //    remote webapp always opened absolute paths), so a report an agent
+  //    wrote under /tmp or ~ is one click away in VS Code as well.
   clear();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-out-'));
   tmpDirs.push(outside);
-  const outsideHtml = path.join(outside, 'evil.html');
-  fs.writeFileSync(outsideHtml, '<p>nope</p>');
+  const outsideHtml = path.join(outside, 'report.html');
+  fs.writeFileSync(outsideHtml, '<p>outside</p>');
   wv.fireMessage({type: 'openFile', path: outsideHtml});
-  await new Promise(r => setTimeout(r, 100));
-  assert.deepStrictEqual(
-    createdPanels,
-    [],
-    'outside-workspace html: no panel may be created',
+  await waitFor(
+    () => createdPanels.length === 1,
+    'outside-workspace html: a panel must be created',
   );
-  console.log('  ok - outside-workspace html path is refused');
+  assert.strictEqual(createdPanels[0].title, 'report.html');
+  createdPanels[0].dispose();
+  console.log('  ok - outside-workspace html path opens like any other');
+
+  // 6b. A missing path opens nothing: the daemon answers with an error.
+  clear();
+  wv.fireMessage({type: 'openFile', path: 'no/such/page.html'});
+  await new Promise(r => setTimeout(r, 300));
+  assert.deepStrictEqual(createdPanels, [], 'missing html: no panel');
+  console.log('  ok - missing html path opens nothing');
 
   // 7. dispose() closes every remaining preview tab (the recreated
   //    summary.html panel from test 3 and the legacy.htm panel from
@@ -426,7 +429,7 @@ async function runTests() {
   );
   console.log('  ok - view dispose closes preview tabs');
 
-  server.close();
+  await daemon.stop();
   for (const dir of tmpDirs.slice().reverse()) {
     fs.rmSync(dir, {recursive: true, force: true});
   }

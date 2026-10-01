@@ -56,6 +56,7 @@ export class AgentClient extends EventEmitter {
   private _reconnectMaxMs: number;
   private _pendingTtlMs: number;
   private _maxPendingSends: number;
+  private _preamble: AgentCommand | null = null;
 
   constructor(sockPath?: string, options: AgentClientOptions = {}) {
     super();
@@ -86,6 +87,11 @@ export class AgentClient extends EventEmitter {
       }
       this._connecting = false;
       this._connectedAt = Date.now();
+      // The preamble goes out first: the daemon resolves every later
+      // command's missing workDir against the pin it carries, and the
+      // queue may hold commands that need it (a submit or a file link
+      // clicked during the outage).
+      if (this._preamble) sock.write(JSON.stringify(this._preamble) + '\n');
       // Flush the queue BEFORE announcing the connection: a 'connect'
       // handler immediately writes fresh commands (e.g. getModels), and
       // if those went out ahead of older queued frames the daemon's
@@ -132,6 +138,25 @@ export class AgentClient extends EventEmitter {
       if (this._disposed) return;
       this._scheduleReconnect();
     });
+  }
+
+  /**
+   * Set the command written first on every (re)connect, ahead of any
+   * queued frame; `null` clears it.
+   *
+   * The daemon pins a connection's workspace folder from `setWorkDir`
+   * and stamps that pin on every later command that carries no
+   * `workDir`, so the pin must reach a fresh connection before the
+   * commands queued while it was down (a prompt submitted, a file link
+   * clicked) — otherwise they would resolve against the daemon-global
+   * folder, another window's.  The preamble is written on this
+   * connection and on every reconnect; a change takes effect from the
+   * next connect (send the new command yourself for the current one).
+   *
+   * @param cmd The command to lead every connection with.
+   */
+  setPreamble(cmd: AgentCommand | null): void {
+    this._preamble = cmd;
   }
 
   sendCommand(cmd: AgentCommand): void {

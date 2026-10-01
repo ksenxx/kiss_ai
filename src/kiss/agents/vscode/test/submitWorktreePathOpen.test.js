@@ -6,16 +6,24 @@
 'use strict';
 
 // End-to-end test of the path-only submit shortcut against a pending
-// worktree: typing just `reports/analysis.html` and pressing Send must
-// open the tab's worktree copy of the file — not fall through to
-// _startTask and launch an unintended agent run.
+// worktree, through the REAL compiled extension host and the REAL
+// daemon (test/_real_daemon.py) over a real Unix socket: typing just
+// `reports/analysis.html` and pressing Send must open the tab's worktree
+// copy of the file in the editor — not launch an unintended agent run.
+// The host forwards the webview's `submit` untouched; the daemon
+// classifies it and answers this window with `promptOpened` and
+// `openResolvedFile`, which the host opens natively.
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {startRealDaemon} = require('./_realDaemon.js');
+
+// Absent from get_available_models(): a prompt that must still start a
+// task ends at task_runner's "No model available" guard, no LLM call.
+const UNAVAILABLE_MODEL = 'kiss-test-no-such-model';
 
 class StubEventEmitter {
   constructor() {
@@ -106,8 +114,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wtsubmit-'));
 const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+process.env.KISS_HOME = path.join(tmpHome, '.kiss');
+fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
@@ -117,31 +125,10 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-let lastServerSock = null;
-const daemonReceived = [];
-let daemonBuffer = '';
-const server = net.createServer(sock => {
-  lastServerSock = sock;
-  sock.on('data', chunk => {
-    daemonBuffer += chunk.toString();
-    let idx;
-    while ((idx = daemonBuffer.indexOf('\n')) >= 0) {
-      const line = daemonBuffer.slice(0, idx).trim();
-      daemonBuffer = daemonBuffer.slice(idx + 1);
-      if (!line) continue;
-      try {
-        daemonReceived.push(JSON.parse(line));
-      } catch {}
-    }
-  });
-});
-
-async function waitForClient() {
-  for (let i = 0; i < 100 && !lastServerSock; i++) {
-    await new Promise(r => setTimeout(r, 20));
-  }
-  assert.ok(lastServerSock, 'client never connected to daemon');
-}
+const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
+const UV = findUvPath();
+assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');
+let daemon = null;
 
 function makeWebviewView() {
   const recv = new StubEventEmitter();
@@ -178,10 +165,6 @@ async function waitFor(predicate, message, timeoutMs = 1500) {
 }
 
 async function runTests() {
-  await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
-  );
-
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
     fs.existsSync(sourcePath),
@@ -199,6 +182,8 @@ async function runTests() {
   fs.mkdirSync(path.join(wt, 'reports'), {recursive: true});
   const wtReport = path.join(wt, 'reports', 'analysis.html');
   fs.writeFileSync(wtReport, '<h1>report</h1>\n');
+
+  daemon = await startRealDaemon(UV, ws, process.env);
 
   // reports/analysis.html is an HTML file, so a path-only submit renders
   // it in a webview panel tab (exactly like a clicked file link — both
@@ -225,16 +210,30 @@ async function runTests() {
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
   wv.fireMessage({type: 'ready', tabId: 'tab1', restoredTabs: []});
-  await waitForClient();
+  await waitFor(
+    () => wv.posted.find(m => m.type === 'tabs_state'),
+    'the real daemon must answer ready',
+    15000,
+  );
 
-  function sendDaemon(msg) {
-    lastServerSock.write(JSON.stringify(msg) + '\n');
-  }
-  function runCommands() {
-    return daemonReceived.filter(m => m.type === 'run');
-  }
+  const started = tabId =>
+    wv.posted.filter(
+      m => m.type === 'status' && m.running === true && m.tabId === tabId,
+    );
+  const submit = (prompt, tabId) =>
+    wv.fireMessage({
+      type: 'submit',
+      prompt,
+      model: UNAVAILABLE_MODEL,
+      attachments: [],
+      useWorktree: false,
+      workDir: ws,
+      tabId,
+    });
 
-  sendDaemon({
+  // The worktree task's own event, emitted by the daemon: it records the
+  // tab's pending worktree for path resolution and reaches this window.
+  daemon.broadcast({
     type: 'worktree_created',
     worktreeDir: wt,
     branch: 'kiss/wt-1',
@@ -243,25 +242,16 @@ async function runTests() {
   await waitFor(
     () => wv.posted.find(m => m.type === 'worktree_created'),
     'worktree_created must reach the webview',
+    5000,
   );
 
   // 1. A path-only submit opens the pending worktree copy — no run.
-  wv.fireMessage({
-    type: 'submit',
-    prompt: 'reports/analysis.html',
-    workDir: ws,
-    tabId: 'tab1',
-  });
-  await waitFor(() => opened.length === 1, 'submit must open the file');
+  submit('reports/analysis.html', 'tab1');
+  await waitFor(() => opened.length === 1, 'submit must open the file', 5000);
   assert.strictEqual(
     opened[0],
     wtReport,
     'a path-only submit must open the pending worktree copy',
-  );
-  assert.strictEqual(
-    runCommands().length,
-    0,
-    'a path-only submit that resolves must not start an agent task',
   );
   await waitFor(
     () => wv.posted.find(m => m.type === 'promptOpened'),
@@ -272,22 +262,28 @@ async function runTests() {
     'tab1',
     'promptOpened must address the submitting tab',
   );
+  assert.strictEqual(
+    started('tab1').length,
+    0,
+    'a path-only submit that resolves must not start an agent task',
+  );
+  assert.ok(
+    !wv.posted.some(m => m.type === 'openResolvedFile'),
+    'the daemon\'s openResolvedFile is for the host, not the webview',
+  );
   console.log('  ok - path-only submit opens the worktree copy, no run');
 
   // 1b. A workspace DIRECTORY must not shadow a pending-worktree FILE
-  // at the same relative path: the submit shortcut resolves fileOnly,
-  // so the directory candidate is skipped and the worktree copy opens.
+  // at the same relative path: the daemon resolves a path-only submit
+  // for regular files only, so the directory candidate is skipped and
+  // the worktree copy opens.
   fs.mkdirSync(path.join(ws, 'shadow.html'), {recursive: true});
   fs.writeFileSync(path.join(wt, 'shadow.html'), '<h1>wt copy</h1>\n');
-  wv.fireMessage({
-    type: 'submit',
-    prompt: 'shadow.html',
-    workDir: ws,
-    tabId: 'tab1',
-  });
+  submit('shadow.html', 'tab1');
   await waitFor(
     () => opened.length === 2,
     'submit must open the worktree copy behind the directory',
+    5000,
   );
   assert.strictEqual(
     opened[1],
@@ -295,22 +291,19 @@ async function runTests() {
     'a workspace directory must not shadow the pending-worktree file',
   );
   assert.strictEqual(
-    runCommands().length,
+    started('tab1').length,
     0,
     'the shadowed path-only submit must not start an agent task',
   );
   console.log('  ok - workspace dir does not shadow the worktree file');
 
-  // 2. A non-path prompt still starts a task.
-  wv.fireMessage({
-    type: 'submit',
-    prompt: 'summarize the repo',
-    workDir: ws,
-    tabId: 'tab1',
-  });
+  // 2. A non-path prompt still starts a task (which ends at once: the
+  // model is unavailable).
+  submit('summarize the repo', 'tab1');
   await waitFor(
-    () => runCommands().length === 1,
+    () => started('tab1').length === 1,
     'a non-path prompt must start an agent task',
+    15000,
   );
   assert.strictEqual(opened.length, 2, 'no extra file must be opened');
   console.log('  ok - a non-path prompt still starts a task');
@@ -318,22 +311,29 @@ async function runTests() {
   // 3. A prompt naming a DIRECTORY starts a task: directories resolve
   // for clickable links (checkPaths/openFile), but the path-only submit
   // shortcut is for regular files only — "reports" must not be swallowed
-  // by an Explorer reveal.
-  // tab2: tab1 is marked running by the previous submit, so a repeat
-  // submit there would append a follow-up message instead of starting.
-  wv.fireMessage({
-    type: 'submit',
-    prompt: 'reports',
-    workDir: wt,
-    tabId: 'tab2',
-  });
+  // by an Explorer reveal.  tab2: tab1's task may still be winding down,
+  // and a submit to a running tab is a follow-up, not a new run.
+  wv.fireMessage({type: 'openTab', tabId: 'tab2', workDir: wt});
+  submit('reports', 'tab2');
   await waitFor(
-    () => runCommands().length === 2,
+    () => started('tab2').length === 1,
     'a directory-path prompt must start an agent task',
+    15000,
   );
   assert.strictEqual(opened.length, 2, 'no extra file must be opened');
   console.log('  ok - a directory-path prompt still starts a task');
 
+  // Let both tasks reach their end before the daemon is stopped.
+  await waitFor(
+    () =>
+      ['tab1', 'tab2'].every(t =>
+        wv.posted.some(
+          m => m.type === 'status' && m.running === false && m.tabId === t,
+        ),
+      ),
+    'both refused tasks must end',
+    30000,
+  );
   view.dispose();
 }
 
@@ -345,9 +345,8 @@ runTests()
     console.error('FAIL:', err && err.message ? err.message : err);
     process.exitCode = 1;
   })
-  .finally(() => {
-    server.close();
-    if (lastServerSock) lastServerSock.destroy();
+  .finally(async () => {
+    if (daemon) await daemon.stop();
     for (const dir of tmpDirs.slice().reverse()) {
       fs.rmSync(dir, {recursive: true, force: true});
     }

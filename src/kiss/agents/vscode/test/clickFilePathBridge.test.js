@@ -7,19 +7,21 @@
 
 // Bridged end-to-end test: the REAL chat webview (media/main.js in
 // jsdom) talks to the REAL compiled extension host
-// (out/SorcarSidebarView.js) over the real message channel, against a
-// REAL temp workspace on disk.  No component in the checkPaths ->
-// pathsExist -> click -> openFile chain is faked: webview postMessage
-// feeds the host's onDidReceiveMessage, and host postMessage feeds the
-// webview's message event.
+// (out/SorcarSidebarView.js) over the real message channel, which
+// forwards to the REAL daemon (test/_real_daemon.py) over a real Unix
+// socket, against a REAL temp workspace on disk.  No component in the
+// checkPaths -> pathsExist -> click -> openFile -> openResolvedFile
+// chain is faked: webview postMessage feeds the host's
+// onDidReceiveMessage, host postMessage feeds the webview's message
+// event, and the daemon resolves every path.
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
 const {JSDOM} = require('jsdom');
+const {startRealDaemon} = require('./_realDaemon.js');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -130,8 +132,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-bridge-'));
 const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+process.env.KISS_HOME = path.join(tmpHome, '.kiss');
+fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
@@ -141,11 +143,11 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-let lastServerSock = null;
-const server = net.createServer(sock => {
-  lastServerSock = sock;
-  sock.on('data', () => {});
-});
+const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
+const UV = findUvPath();
+assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');
+let daemon = null;
+let lastTraffic = () => ({toHost: [], toWebview: []});
 
 // makeBridgedWebview loads chat.html + panelCopy.js + api.js + main.js
 // in jsdom and wires BOTH directions to the real extension host `view`:
@@ -208,10 +210,6 @@ function clickEl(win, el) {
 }
 
 async function runTests() {
-  await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
-  );
-
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
     fs.existsSync(sourcePath),
@@ -227,8 +225,12 @@ async function runTests() {
   fs.writeFileSync(realFile, 'print("bridged")\n');
   const missingFile = path.join(ws, 'src', 'gone.py');
 
+  daemon = await startRealDaemon(UV, ws, process.env);
+
   // Real host side.
   const view = new SorcarSidebarView(makeUri(path.join(__dirname, '..')));
+  const received = [];
+  lastTraffic = () => ({toHost: webviewRef ? webviewRef.posted : [], toWebview: received});
   const hostRecv = new StubEventEmitter();
   let webviewRef = null;
   const hostWebview = {
@@ -237,6 +239,7 @@ async function runTests() {
     cspSource: 'vscode-resource:',
     asWebviewUri: uri => makeUri(uri.fsPath),
     postMessage: msg => {
+      received.push(msg);
       // Host -> webview: the real VS Code bridge delivers this as a
       // 'message' event inside the webview page.
       if (webviewRef) {
@@ -277,25 +280,25 @@ async function runTests() {
     () => posted.some(m => m.type === 'checkPaths'),
     'webview must send checkPaths to the host',
   );
-  // The real host answers asynchronously with pathsExist.
+  // The real daemon answers the forwarded checkPaths with pathsExist.
   await waitFor(
     () => findLinks(win, realFile).length === 1,
-    'absolute existing path must become clickable via the REAL host reply',
+    'absolute existing path must become clickable via the REAL daemon reply',
   );
   await waitFor(
     () => findLinks(win, 'src/app.py').length === 1,
-    'relative existing path must become clickable via the REAL host reply',
+    'relative existing path must become clickable via the REAL daemon reply',
   );
   assert.strictEqual(
     findLinks(win, missingFile).length,
     0,
-    'missing path must NOT be clickable after the REAL host reply',
+    'missing path must NOT be clickable after the REAL daemon reply',
   );
   const missing = Array.from(
     win.document.querySelectorAll('#output [data-path-missing]'),
   ).filter(el => el.textContent === missingFile);
   assert.strictEqual(missing.length, 1, 'missing path stays plain text');
-  console.log('  ok - real host reply gates clickability end to end');
+  console.log("  ok - real daemon reply gates clickability end to end");
 
   // Clicking the promoted link must reach the REAL openFile handler
   // and open the file in the (stubbed) editor.
@@ -327,11 +330,14 @@ runTests()
   })
   .catch(err => {
     console.error('FAIL:', err && err.stack ? err.stack : err);
+    const {toHost, toWebview} = lastTraffic();
+    const brief = m => JSON.stringify(m).slice(0, 200);
+    console.error('webview -> host:', toHost.map(brief).join('\n  '));
+    console.error('host -> webview:', toWebview.map(brief).join('\n  '));
     process.exitCode = 1;
   })
-  .finally(() => {
-    server.close();
-    if (lastServerSock) lastServerSock.destroy();
+  .finally(async () => {
+    if (daemon) await daemon.stop();
     for (const dir of tmpDirs.slice().reverse()) {
       fs.rmSync(dir, {recursive: true, force: true});
     }

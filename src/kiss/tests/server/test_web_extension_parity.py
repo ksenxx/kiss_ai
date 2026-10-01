@@ -10,8 +10,9 @@ share one frontend (``media/main.js``) and one backend dispatch path
 lock in the behaviours that previously diverged between the two:
 
 * ``submit`` must forward the webview's ``autoCommit`` toggle into the
-  backend ``run`` command (the extension's ``_startTask`` always did;
-  the web server used to drop it).
+  backend ``run`` command (the daemon's ``_handle_submit`` is now the
+  one submit path of both surfaces — the extension host forwards its
+  webview's ``submit`` over UDS — and used to drop the toggle).
 * ``runUpdate`` must locate and run ``~/.kiss/kiss_ai/install.sh`` exactly
   like the extension's ``runUpdate()`` / ``installerPath.js`` — falling
   back to the curl bootstrap when the script is missing — and must
@@ -306,10 +307,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
     async def test_submit_forwards_auto_commit_to_run(self) -> None:
         """A webapp ``submit`` with ``autoCommit: true`` reaches the task.
 
-        The VS Code extension's ``_startTask`` forwards the toggle in
-        the ``run`` command and ``task_runner`` flips
-        ``tab.auto_commit_mode``; the web server's submit → run
-        translation must do the same.  Uses a stub agent (the pattern
+        ``task_runner`` flips ``tab.auto_commit_mode`` from the
+        ``run`` command's ``autoCommit``; the daemon's submit → run
+        translation (shared by the extension and the webapp) must carry
+        the toggle through.  Uses a stub agent (the pattern
         ``_run_task`` explicitly supports for tests) so no LLM call is
         made, and a fake API key so a model is "available".
         """

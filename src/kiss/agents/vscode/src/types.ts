@@ -557,10 +557,22 @@ type ToWebviewMessageBody =
   | {
       // A path-only `submit` (a prompt that is just the path of an
       // existing file) opened that file instead of starting a task; sent
-      // by the extension host (SorcarSidebarView `submit`) and by the
-      // daemon (web_server.py _handle_submit) so the webview lifts the
-      // task claim it stamped on the submitting tab.
+      // by the daemon (web_server.py _handle_submit) to the submitting
+      // connection so the webview lifts the task claim it stamped on the
+      // submitting tab.
       type: 'promptOpened';
+    }
+  | {
+      // Reply to a VS Code window's `openFile` (or path-only `submit`),
+      // sent only to the requesting connection (web_server.py
+      // _handle_open_file with native=True): the path the daemon
+      // resolved for the tab, which the extension host opens in a real
+      // editor tab; `error` when nothing resolved. Consumed by the host,
+      // never relayed to the webview.
+      type: 'openResolvedFile';
+      path: string;
+      line?: number;
+      error?: string;
     }
   | {
       // Reply to `openFile` (web_server.py _handle_open_file), sent only
@@ -1164,6 +1176,9 @@ type ToWebviewMessageBody =
 export interface AgentCommand {
   type:
     | 'run'
+    | 'submit'
+    | 'openFile'
+    | 'checkPaths'
     | 'stop'
     | 'interruptTool'
     | 'appendUserMessage'
@@ -1220,6 +1235,10 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
+  /** checkPaths: the candidate paths to test for existence. */
+  paths?: string[];
+  /** openFile: the line a `path:NN` link names. */
+  line?: number;
   html?: string;
   chatId?: number | string;
   taskId?: string | number | null;
@@ -1229,6 +1248,7 @@ export interface AgentCommand {
   useParallel?: boolean;
   autoCommit?: boolean;
   webTools?: boolean;
+  classifyTasks?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;

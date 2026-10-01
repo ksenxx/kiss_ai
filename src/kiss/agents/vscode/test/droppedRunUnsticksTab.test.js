@@ -5,27 +5,29 @@
 
 'use strict';
 
-// End-to-end tests for a run the daemon never received.
+// End-to-end tests for a submit the daemon never received.
 //
-// Sending a prompt is optimistic: the tab is shown as running -- spinner
-// on, composer locked -- the moment the user presses enter, before any
-// daemon has confirmed a thing.  The only thing that ever turns that
-// back off is a `status running:false`, and the only thing that sends
-// one is the daemon.
+// The host forwards the webview's `submit` to the daemon, whose
+// `status running:true` broadcast is what shows the tab as running
+// (spinner on, composer locked); the webview meanwhile holds the prompt
+// as the tab's unacknowledged draft.  The only thing that ever settles
+// that is a `status` for the tab, and the only thing that sends one is
+// the daemon.
 //
 // AgentClient may legitimately decide never to deliver a queued
 // command: one queued against a daemon that then died must not be
 // replayed into the DIFFERENT daemon that answers ten seconds later (it
 // would start an agent nobody asked for), and the queue is bounded so a
 // long outage cannot grow it without limit.  Both were silent, so the
-// tab that had already been marked running stayed running for ever,
-// with no agent behind it and no way to type in it.
+// tab waited for ever on a run that nobody would ever start, with no
+// word to the user.
 //
 // Two levels are covered, both for real:
 //   1. the REAL compiled AgentClient over a REAL unix domain socket:
 //      dropping a command must be announced;
 //   2. the REAL compiled SorcarSidebarView driving a webview: the
-//      announcement must actually put the tab back.
+//      announcement must settle the tab (`status running:false`) and
+//      tell the user.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -328,8 +330,9 @@ async function testTabsWithADroppedRunAreNotLeftRunning() {
   submit('tab-0');
   assert.deepStrictEqual(
     statusFor(posted, 'tab-0'),
-    [true],
-    'sending a prompt must show the tab as running straight away',
+    [],
+    'the host does not fake a running state: the daemon broadcasts the ' +
+      'status once it has the submit',
   );
 
   // The window stays open through a long outage. The queue is bounded
@@ -339,15 +342,14 @@ async function testTabsWithADroppedRunAreNotLeftRunning() {
 
   assert.deepStrictEqual(
     statusFor(posted, 'tab-0'),
-    [true, false],
-    'a tab whose run was dropped must be put back to not-running: it was ' +
-      'marked running before the daemon had seen anything, and nothing ' +
-      'else will ever unmark it',
+    [false],
+    'a tab whose submit was dropped must be settled as not-running: the ' +
+      'daemon never saw the prompt, so nothing else will ever answer it',
   );
   assert.deepStrictEqual(
     statusFor(posted, 'tab-300'),
-    [true],
-    'a tab whose run is still queued must stay running',
+    [],
+    'a tab whose submit is still queued must be left alone',
   );
 
   const notices = posted.filter(m => m && m.type === 'notification');

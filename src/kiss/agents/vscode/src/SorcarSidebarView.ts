@@ -8,42 +8,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-function isPathInside(target: string, root: string): boolean {
-  const rt = path.resolve(root);
-  const tg = path.resolve(target);
-  if (tg === rt) return true;
-  const rel = path.relative(rt, tg);
-  return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-}
-
-/**
- * Resolve *p* against *root* and return the resolved path only when it is
- * a real file or directory inside *root* — comparing REAL paths, so a
- * symlink inside the workspace cannot smuggle in a path that actually
- * lives outside it. Directories resolve too: clicking a directory link
- * reveals it in the Explorer (see _openResolvedFile). Pass
- * fileOnly=true to reject directories, so a caller that wants a file
- * can fall through to its next candidate (the pending worktree).
- */
-function resolveWorkspaceFile(
-  p: string,
-  root: string,
-  fileOnly = false,
-): string | null {
-  try {
-    const resolved = path.resolve(root, p);
-    if (!isPathInside(resolved, root)) return null;
-    const real = fs.realpathSync(resolved);
-    const realRoot = fs.realpathSync(root);
-    if (!isPathInside(real, realRoot)) return null;
-    const st = fs.statSync(real);
-    if (!st.isFile() && (fileOnly || !st.isDirectory())) return null;
-    return resolved;
-  } catch {
-    return null;
-  }
-}
-
 function isSilentDiscardMessage(message: string | undefined): boolean {
   return /^Discarded branch '[^']+'\.$/.test(message || '');
 }
@@ -201,7 +165,6 @@ import {bootstrapInstallUrl, findInstallScript} from './installerPath';
 import {
   FromWebviewMessage,
   ToWebviewMessage,
-  Attachment,
   AgentCommand,
   MetaPanelValues,
   TaskUpdateState,
@@ -349,6 +312,17 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // webview can tell whether the @-mention picker still belongs to the
   // conversation on screen.
   getFiles: ['prefix', 'workDir', 'tabId'],
+  // File links are resolved by the daemon for every surface (`~`, the
+  // tab's work dir, its pending worktree — web_server.py
+  // _resolve_tab_file). checkPaths is answered with `pathsExist`,
+  // relayed to the webview; openFile is answered to this window with
+  // `openResolvedFile` (handled in the client listener, opened in a
+  // real editor tab) where a browser would get `fileContent`. workDir
+  // is forwarded as sent: the daemon stamps this connection's pinned
+  // workspace folder when it is empty and echoes the client's value
+  // on `pathsExist`, which the webview uses as a correlation key.
+  openFile: ['path', 'line', 'workDir', 'tabId'],
+  checkPaths: ['paths', 'workDir', 'tabId'],
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
@@ -737,8 +711,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     this._client = client;
     this._installClientListener(client);
+    // The window's workspace folder leads every connection: the daemon
+    // pins it and stamps it on each later command sent without a
+    // workDir (a forwarded submit, openFile or checkPaths), including
+    // the ones queued while the daemon was down.
+    client.setPreamble({type: 'setWorkDir', workDir: this._getWorkDir()});
     client.on('connect', () => {
-      this._getApi().setWorkDir(this._getWorkDir());
       if (!this._panelHooks) {
         // The window's ONE long-lived controller (the sidebar view;
         // panels and the history panel carry panelHooks) asks for the
@@ -776,6 +754,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
       () => {
         const wd = this._getWorkDir();
+        client.setPreamble({type: 'setWorkDir', workDir: wd});
         this._getApi().setWorkDir(wd);
         // The webview scopes its tab bar and history to the workspace
         // directory; tell it directly, because the daemon answers
@@ -788,14 +767,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Undo the optimistic UI of a command the daemon never received.
+   * Settle the UI of a command the daemon never received.
    *
-   * A run is shown as started the instant the user sends it, long
-   * before any daemon has confirmed it: the tab spins and the composer
-   * locks.  Only a `status running:false` ever undoes that, and only
-   * the daemon sends one -- so a command the client gives up on leaves
-   * the tab running for ever, with no agent behind it and nothing the
-   * user can do but reload the window.
+   * A submitted prompt waits for the daemon's `status` to show its tab
+   * as running (or its `promptOpened` / follow-up handling); the
+   * webview meanwhile holds it as the tab's unacknowledged draft.  Only
+   * the daemon ever answers -- so a command the client gives up on
+   * would leave the tab waiting for ever, with no agent behind it and
+   * no word to the user.  A `status running:false` settles the tab and
+   * a notification says what happened.
    *
    * @param cmd The command that was never delivered.
    * @param reason Why the client gave up on it.
@@ -806,8 +786,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   ): void {
     const dropped = cmd as {type?: string; tabId?: string};
     const tabId = dropped.tabId;
-    if (dropped.type === 'run') {
-      if (tabId !== undefined) this._runningTabs.delete(tabId);
+    if (dropped.type === 'submit') {
       this._sendToWebview({type: 'status', running: false, tabId});
       const why =
         reason === 'expired'
@@ -876,35 +855,31 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
+        // The directory is remembered only to close the worktree in
+        // the SCM view when its branch is merged (worktree_result);
+        // file-path resolution against a pending worktree is the
+        // daemon's job (RemoteAccessServer._resolve_tab_file).
         const dir = msg.worktreeDir;
-        const wtTabId = msg.tabId;
-        if (dir && wtTabId !== undefined) {
-          // Not gated on _isOwnTab: a canonical tab created by another
-          // client is adopted by this webview from `tabs_state` without
-          // ever sending a message that would register it in _ownTabs,
-          // yet its transcript (mirrored here) still needs the
-          // pending-worktree fallback for _resolveTabFile(). Recording
-          // a directory is side-effect free; only the SCM view below
-          // stays scoped to tabs this window interacted with.
-          // worktreeWorkDir (the task's cwd inside the worktree) wins
-          // over the worktree root so relative paths from tasks
-          // launched in a repo subdirectory resolve correctly.
-          this._worktreeDirs.set(wtTabId, msg.worktreeWorkDir || dir);
-        }
-        if (dir && this._isOwnTab(wtTabId)) {
+        if (dir && this._isOwnTab(msg.tabId)) {
+          if (msg.tabId !== undefined) this._worktreeDirs.set(msg.tabId, dir);
           void this._openWorktreeInScm(dir);
         }
       }
-      if (msg.type === 'task_events' && Array.isArray(msg.events)) {
-        // A session replay (reconnect, adopted canonical tab) reaches a
-        // host that may have no _worktreeDirs entry for the tab: the
-        // daemon dropped its own tracking in cleanup_tab() before the
-        // replay, and while the task is still running nothing re-emits
-        // worktree_done. The historical worktree events nested in the
-        // replayed transcript are the only copy of the directory, so
-        // scan them in order (a later successful worktree_result nets
-        // out an earlier worktree_created).
-        this._trackReplayedWorktreeEvents(msg.tabId, msg.events);
+      if (msg.type === 'openResolvedFile') {
+        // The daemon's answer to this window's `openFile` (or path-only
+        // `submit`): the path it resolved for the tab, which this host
+        // opens in a real editor tab — the browser gets `fileContent`
+        // instead. Direct reply, so no _isOwnTab gate is needed.
+        if (msg.error) {
+          console.warn(`[kissSorcar] ${msg.error}`);
+        } else if (msg.path) {
+          // The editor can still refuse a file the daemon resolved
+          // (binary, oversized); keep that out of the socket listener.
+          this._openResolvedFile(msg.path, msg.line).catch(err =>
+            console.error('[kissSorcar] Failed to open file:', err),
+          );
+        }
+        return;
       }
       if (msg.type === 'tabs_state' && Array.isArray(msg.tabs)) {
         // The snapshot is canonical and complete: a tab it no longer
@@ -979,13 +954,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
       if (msg.type === 'worktree_result' && msg.success && !msg.kept) {
-        // Mirrors the unconditional recording above: a merge/discard
-        // finished by any client retires the worktree directory, so the
-        // fallback entry must go even when this window never claimed
-        // the tab. git.close on a repository that was never opened is
-        // a harmless no-op. A "Do nothing" result (kept: true) leaves
-        // the worktree on disk, so its fallback entry must survive for
-        // transcript file links to keep resolving into it.
+        // A merge/discard finished by any client retires the worktree
+        // directory this window opened in the SCM view. A "Do nothing"
+        // result (kept: true) leaves the worktree on disk, so it stays
+        // open.
         const doneTabId = msg.tabId;
         if (doneTabId !== undefined) {
           const doneDir = this._worktreeDirs.get(doneTabId);
@@ -1230,65 +1202,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return path.parse(cwd).root === cwd ? '' : cwd;
   }
 
-  /**
-   * Restore the pending-worktree fallback from a replayed transcript.
-   *
-   * Applies the same net effect as receiving the nested worktree
-   * events live: `worktree_created` / `worktree_done` record the
-   * directory (preferring the task's cwd inside the worktree), a
-   * successful `worktree_result` retires it.
-   */
-  private _trackReplayedWorktreeEvents(
-    tabId: string | undefined,
-    events: unknown[],
-  ): void {
-    if (tabId === undefined) return;
-    for (const raw of events) {
-      if (!raw || typeof raw !== 'object') continue;
-      const ev = raw as {
-        type?: string;
-        worktreeDir?: string;
-        worktreeWorkDir?: string;
-        success?: boolean;
-      };
-      if (ev.type === 'worktree_created' || ev.type === 'worktree_done') {
-        const dir = ev.worktreeWorkDir || ev.worktreeDir;
-        if (dir) this._worktreeDirs.set(tabId, dir);
-      } else if (ev.type === 'worktree_result' && ev.success) {
-        this._worktreeDirs.delete(tabId);
-      }
-    }
-  }
-
-  /**
-   * Resolve *p* for a tab: against *wd* first, then against the tab's
-   * pending worktree directory.
-   *
-   * A worktree task's committed artifacts live only on its un-merged
-   * `kiss/wt-*` branch until the user merges (or the next run
-   * auto-retires it), so a path printed in its result panel does not
-   * exist under the workspace root yet and a plain
-   * `resolveWorkspaceFile(p, wd)` reports it missing — leaving the
-   * link permanently grey.  Falling back to the worktree dir recorded
-   * for the tab (`worktree_created` / `worktree_done`) makes the path
-   * resolvable the moment the result renders; after a merge or discard
-   * the `worktree_result` handler drops the entry and the workspace
-   * copy (or genuine absence) wins again.
-   */
-  private _resolveTabFile(
-    p: string,
-    wd: string,
-    tabId: string | undefined,
-    fileOnly = false,
-  ): string | null {
-    const resolved = resolveWorkspaceFile(p, wd, fileOnly);
-    if (resolved) return resolved;
-    const wtDir =
-      tabId !== undefined ? this._worktreeDirs.get(tabId) : undefined;
-    if (wtDir && wtDir !== wd) return resolveWorkspaceFile(p, wtDir, fileOnly);
-    return null;
-  }
-
   private _sendToWebview(message: ToWebviewMessage): void {
     if (!this._disposed && this._view) {
       this._view.webview.postMessage(message);
@@ -1355,37 +1268,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     } catch {}
   }
 
-  private _startTask(
-    prompt: string,
-    model: string,
-    activeFile?: string,
-    attachments?: Attachment[],
-    useWorktree?: boolean,
-    useParallel?: boolean,
-    tabId?: string,
-    workDir?: string,
-    autoCommit?: boolean,
-    webTools?: boolean,
-  ): void {
-    const effectiveWorkDir = workDir || this._getWorkDir();
-    // No local setTaskText echo: the daemon's common run path
-    // broadcasts it to EVERY client (this webview included), so the
-    // task-panel text mirrors identically for all run origins.
-    this._sendToWebview({type: 'status', running: true, tabId});
-    this._getApi().run({
-      prompt,
-      model,
-      workDir: effectiveWorkDir,
-      activeFile,
-      attachments,
-      useWorktree,
-      useParallel,
-      autoCommit,
-      webTools,
-      tabId,
-    });
-  }
-
   private _isOwnTab(tabId: string | undefined): boolean {
     return !tabId || this._ownTabs.has(tabId);
   }
@@ -1450,64 +1332,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'submit': {
-        const tabId = message.tabId;
-        if (tabId) this._activeTabId = tabId;
-        if (tabId !== undefined && this._runningTabs.has(tabId)) {
-          const followUp = message.prompt.trim();
-          if (followUp) {
-            this._getApi().appendUserMessage(message.prompt, tabId);
-          }
-          return;
-        }
-
-        const tabWorkDir = message.workDir;
-        const effectiveWorkDir = tabWorkDir || this._getWorkDir();
-
-        const trimmed = message.prompt.trim();
-        if (trimmed && !trimmed.includes('\n')) {
-          // _resolveTabFile (not plain resolveWorkspaceFile): a report
-          // that lives only in the tab's pending worktree must open
-          // like any other file link — falling through to _startTask
-          // would launch an unintended agent run on a path-only prompt.
-          // Regular files ONLY (fileOnly): _resolveTabFile also
-          // resolves directories (for clickable directory links), but
-          // a one-word prompt that happens to name a directory ("src",
-          // "tmp", ...) must still start a task, not reveal the
-          // directory in the Explorer. fileOnly also keeps a workspace
-          // DIRECTORY from shadowing a pending-worktree FILE at the
-          // same relative path: the directory candidate is skipped and
-          // the worktree file still opens.
-          const resolved = this._resolveTabFile(
-            trimmed,
-            effectiveWorkDir,
-            tabId,
-            true,
-          );
-          if (resolved) {
-            await this._openResolvedFile(resolved);
-            // No task started: let the webview drop the prompt and the
-            // task claim it stamped on the tab when it submitted.
-            this._sendToWebview({type: 'promptOpened', tabId});
-            return;
-          }
-        }
-
-        if (tabId !== undefined) this._runningTabs.add(tabId);
-        this._startTask(
-          message.prompt,
-          message.model,
-          this._getVisibleEditorFile() || message.activeFile || undefined,
-          message.attachments,
-          message.useWorktree,
-          message.useParallel,
-          tabId,
-          effectiveWorkDir,
-          message.autoCommit,
-          message.webTools,
-        );
+      case 'submit':
+        if (message.tabId) this._activeTabId = message.tabId;
+        // The daemon owns the classification (path-only prompt, follow-up
+        // or new run) and, when the tab carries no work dir, stamps this
+        // connection's pinned workspace folder (setWorkDir on connect);
+        // the host adds only its visible editor file.
+        this._getApi().submit({
+          ...message,
+          activeFile:
+            this._getVisibleEditorFile() || message.activeFile || undefined,
+        });
         break;
-      }
 
       case 'stop': {
         const stopTabId = message.tabId;
@@ -1541,46 +1377,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._getApi().recordFileUsage(message.path, message.workDir);
         }
         break;
-
-      case 'openFile':
-        if (message.path) {
-          const wd = message.workDir || this._getWorkDir();
-          const filePath = this._resolveTabFile(
-            message.path,
-            wd,
-            message.tabId,
-          );
-          if (!filePath) {
-            console.warn(
-              '[SorcarSidebarView] refusing to open file outside workspace:',
-              message.path,
-            );
-            break;
-          }
-          await this._openResolvedFile(filePath, message.line);
-        }
-        break;
-
-      case 'checkPaths': {
-        // The chat webview linkifies file-path-looking strings in event
-        // panel contents lazily: a path only becomes a clickable link
-        // after this existence check confirms that clicking it would
-        // actually open a file (same resolution rules as 'openFile').
-        const wd = message.workDir || this._getWorkDir();
-        const results: Record<string, boolean> = {};
-        const paths = Array.isArray(message.paths) ? message.paths : [];
-        for (const p of paths) {
-          if (typeof p !== 'string' || !p) continue;
-          results[p] = this._resolveTabFile(p, wd, message.tabId) !== null;
-        }
-        this._sendToWebview({
-          type: 'pathsExist',
-          results,
-          workDir: message.workDir,
-          tabId: message.tabId,
-        });
-        break;
-      }
 
       case 'resumeSession': {
         const resumeTabId = message.tabId;
@@ -2157,9 +1953,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /**
    * Submit *prompt* as a task in this webview's chat once the webview
    * is ready, however long its first load takes: posted now when it is
-   * ready, otherwise held and posted once on its `ready`.  Unlike
-   * submitTask there is no timeout fallback, which would start a run
-   * without this panel's tab id (a run the daemon drops).
+   * ready, otherwise held and posted once on its `ready`.  The webview
+   * owns the tab id every run needs, so the prompt always goes through
+   * its composer (and the daemon's one submit path) rather than being
+   * sent as a tab-less run the daemon would drop.
    *
    * @param prompt The task text; blank text is ignored.
    */
@@ -2173,22 +1970,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Reveal the chat, focus its composer and submit *prompt* there once
+   * the webview is ready (see submitWhenReady).
+   *
+   * @param prompt The task text; blank text is ignored.
+   */
   public async submitTask(prompt: string): Promise<void> {
     const text = prompt.trim();
     if (!text) return;
     await this.focusChatInput();
-    for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
-      await new Promise(r => setTimeout(r, 200));
-    }
-    if (this._view && this._webviewReady) {
-      this._sendToWebview({type: 'insertAndSubmit', text});
-      return;
-    }
-    this._startTask(
-      text,
-      this._selectedModel,
-      this._getVisibleEditorFile() || undefined,
-    );
+    this.submitWhenReady(text);
   }
 
   /**

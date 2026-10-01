@@ -11584,10 +11584,11 @@
 
   // File paths found by linkifyFilePaths start as inert
   // [data-path-candidate] spans and become clickable [data-path] links
-  // ONLY after the host confirms the file exists (checkPaths ->
-  // pathsExist round-trip).  Each candidate is stamped with the workDir
-  // it was checked under (data-path-wd) so replies for one workDir never
-  // resolve spans checked under another.  Existence results are NOT
+  // ONLY after the daemon confirms the file exists (checkPaths ->
+  // pathsExist round-trip, on both surfaces).  Each candidate is stamped
+  // with the workDir it was checked under (data-path-wd), which the
+  // reply echoes as sent, so replies for one workDir never resolve
+  // spans checked under another.  Existence results are NOT
   // cached: only in-flight checks are deduped (per workDir+path), so
   // paths in NEW panels are re-checked and files created or deleted
   // mid-run get fresh clickability.  Candidate spans awaiting a reply
@@ -15342,8 +15343,8 @@
       }
     }
     // A prompt that was just the path of an existing file opened that
-    // file instead of starting a task (the extension host's and the
-    // daemon's `submit` shortcut): acknowledged, and there is no task
+    // file instead of starting a task (the daemon's `submit` shortcut,
+    // shared by both surfaces): acknowledged, and there is no task
     // for the tab to own, so the claim sendMessage() stamped is lifted
     // — left in place it would let the tab adopt the next bare task id
     // off the wire (mayAdoptTaskId) and a reload would put the path

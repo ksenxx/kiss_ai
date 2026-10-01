@@ -12,8 +12,9 @@
 // directory or a file-system root (also one reached through `..` or a
 // symlink).  The host never opens the folder as the window's workspace:
 // `vscode.openFolder` must not run, and the window's own folder is as
-// valid a pick as any other.  A `submit` carrying a tab work dir runs
-// there; without one the run uses the window's workspace.
+// valid a pick as any other.  A `submit` carrying a tab work dir is
+// forwarded with it and runs there; without one it is forwarded bare and
+// the daemon stamps the window's pinned workspace folder.
 //
 // Runs the compiled extension (out/SorcarSidebarView.js) against a
 // minimal `vscode` stub; run `npm run compile` first.
@@ -137,7 +138,7 @@ function makeView() {
   const runs = [];
   view._api = {
     forward: cmd => forwarded.push(cmd),
-    run: fields => runs.push(fields),
+    submit: fields => runs.push(fields),
     getConfig: () => {},
     setWorkDir: () => {},
   };
@@ -319,7 +320,9 @@ async function testSubmitRunsInTheTabWorkDir() {
   });
   assert.strictEqual(runs.length, 2);
   assert.strictEqual(runs[0].workDir, other, 'the tab dir is the run dir');
-  assert.strictEqual(runs[1].workDir, wsRoot, 'no tab dir: the workspace');
+  // No tab dir: the submit is forwarded without one; the daemon stamps
+  // this connection's pinned workspace folder (setWorkDir on connect).
+  assert.strictEqual(runs[1].workDir, undefined, 'no tab dir: left to the pin');
   view.dispose();
 }
 

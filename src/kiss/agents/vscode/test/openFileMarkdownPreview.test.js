@@ -14,7 +14,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const net = require('net');
+const {startRealDaemon} = require('./_realDaemon.js');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
@@ -166,8 +166,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-'));
 const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+process.env.KISS_HOME = path.join(tmpHome, '.kiss');
+fs.mkdirSync(process.env.KISS_HOME, {recursive: true});
 
 if (process.platform === 'win32') {
   console.log('  skipped on win32 (UDS test)');
@@ -177,18 +177,10 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-let lastServerSock = null;
-const server = net.createServer(sock => {
-  lastServerSock = sock;
-  sock.on('data', () => {});
-});
-
-async function waitForClient() {
-  for (let i = 0; i < 100 && !lastServerSock; i++) {
-    await new Promise(r => setTimeout(r, 20));
-  }
-  assert.ok(lastServerSock, 'client never connected to daemon');
-}
+const {findUvPath} = require(path.join(__dirname, '..', 'out', 'kissPaths.js'));
+const UV = findUvPath();
+assert.ok(UV, 'this suite needs a real uv binary to run the real daemon');
+let daemon = null;
 
 function makeWebviewView() {
   const recv = new StubEventEmitter();
@@ -237,10 +229,6 @@ function clear() {
 }
 
 async function runTests() {
-  await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
-  );
-
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
   assert.ok(
     fs.existsSync(sourcePath),
@@ -252,6 +240,7 @@ async function runTests() {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-ws-'));
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
+  daemon = await startRealDaemon(UV, ws, process.env);
 
   const mdFile = path.join(ws, 'docs', 'notes.md');
   fs.mkdirSync(path.dirname(mdFile), {recursive: true});
@@ -272,7 +261,11 @@ async function runTests() {
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
   wv.fireMessage({type: 'ready', tabId: 'tab1', restoredTabs: []});
-  await waitForClient();
+  await waitFor(
+    () => wv.posted.find(m => m.type === 'tabs_state'),
+    'the real daemon must answer ready',
+    15000,
+  );
 
   // 1. Clicking a .md link opens the built-in markdown preview tab
   //    (converted-to-HTML rendering), NOT the raw source in the editor
@@ -364,21 +357,28 @@ async function runTests() {
   assert.deepStrictEqual(previewCommands(), [], 'no preview for .html');
   console.log('  ok - .html still renders in its own webview tab');
 
-  // 7. A .md path outside the workspace is still refused.
+  // 7. An existing .md path outside the workspace previews too: the
+  //    daemon resolves file links the same way for every surface.
   clear();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-mdprev-out-'));
   tmpDirs.push(outside);
-  const outsideMd = path.join(outside, 'evil.md');
-  fs.writeFileSync(outsideMd, '# nope\n');
+  const outsideMd = path.join(outside, 'notes.md');
+  fs.writeFileSync(outsideMd, '# outside\n');
   wv.fireMessage({type: 'openFile', path: outsideMd});
-  await new Promise(r => setTimeout(r, 100));
-  assert.deepStrictEqual(
-    previewCommands(),
-    [],
-    'outside-workspace md: no preview may open',
+  await waitFor(
+    () => previewCommands().length === 1,
+    'outside-workspace md: the preview must open',
   );
+  assert.strictEqual(previewCommands()[0].args[0].fsPath, outsideMd);
+  console.log('  ok - outside-workspace md path previews like any other');
+
+  // 8. A missing .md path opens nothing: the daemon answers with an error.
+  clear();
+  wv.fireMessage({type: 'openFile', path: 'no/such/notes.md'});
+  await new Promise(r => setTimeout(r, 300));
+  assert.deepStrictEqual(previewCommands(), [], 'missing md: no preview');
   assert.deepStrictEqual(shownTextDocs, [], 'and no editor either');
-  console.log('  ok - outside-workspace md path is refused');
+  console.log('  ok - missing md path opens nothing');
 
   view.dispose();
 }
@@ -386,15 +386,15 @@ async function runTests() {
 runTests()
   .then(() => {
     console.log('openFileMarkdownPreview tests passed');
-    process.exit(0);
   })
   .catch(err => {
     console.error(err);
-    process.exit(1);
+    process.exitCode = 1;
   })
-  .finally(() => {
-    server.close();
+  .finally(async () => {
+    if (daemon) await daemon.stop();
     for (const dir of tmpDirs.slice().reverse()) {
       fs.rmSync(dir, {recursive: true, force: true});
     }
+    process.exit();
   });

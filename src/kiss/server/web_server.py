@@ -6924,9 +6924,10 @@ class RemoteAccessServer:
     ) -> Path | None:
         """Resolve *raw_path* for a tab, trying its pending worktree too.
 
-        Mirrors the VS Code extension host's resolution
-        (``SorcarSidebarView._resolveTabFile``): the path is resolved
-        against *work_dir* first; when that names no file and the tab
+        The one resolution every surface uses (the VS Code extension
+        host forwards its webview's ``openFile``/``checkPaths``/path-only
+        ``submit`` here instead of resolving locally): the path is
+        resolved against *work_dir* first; when that names no file and the tab
         has a pending worktree (a finished worktree task whose branch is
         not merged yet), the same relative path is tried inside the
         worktree directory — that is where the task's committed
@@ -6971,16 +6972,33 @@ class RemoteAccessServer:
         return None
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any,
+        self, cmd: dict[str, Any], endpoint: Any, native: bool = False,
     ) -> None:
-        """Read a file for a remote-web client and reply with its content.
+        """Resolve the file an ``openFile`` names and reply for its client.
 
         Handles the ``openFile`` command sent by ``media/main.js`` when
         the user clicks a file link (``span[data-path]``) in a chat
-        webview served by the remote webapp.  The reply is a single
-        ``fileContent`` JSON object sent directly to the requesting
-        *endpoint* via :meth:`_endpoint_send` — never broadcast — with
-        the shape::
+        webview.  The path is resolved once, here, for every surface
+        (:meth:`_resolve_tab_file`: ``~`` expansion, the command's
+        ``workDir``, then the tab's pending worktree); what the reply
+        carries depends on the client:
+
+        * *native* (a VS Code window over the Unix socket, whose
+          extension host opens files in real editor tabs) gets the
+          resolved path as an ``openResolvedFile`` action::
+
+              {"type": "openResolvedFile", "path": <resolved abs path>,
+               "tabId": <echo of cmd tabId>,
+               "line": <echo of cmd line, when a positive int>}
+              {"type": "openResolvedFile", "path": <raw path>,
+               "tabId": ..., "error": <message>}   # nothing to open
+
+        * a remote-web browser (no editor of its own) gets the
+          content, as a single ``fileContent`` JSON object.
+
+        Both are sent directly to the requesting *endpoint* via
+        :meth:`_endpoint_send` — never broadcast.  The ``fileContent``
+        shape::
 
             {"type": "fileContent", "path": <resolved abs path>,
              "name": <basename>, "tabId": <echo of cmd tabId>,
@@ -7020,7 +7038,10 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``openFile`` command (``path``, optional
                 ``workDir``, ``tabId``, ``line``).
-            endpoint: The requesting WSS connection.
+            endpoint: The requesting connection (WSS or UDS).
+            native: ``True`` for a client that opens the resolved path
+                itself (the VS Code extension host); ``False`` for one
+                that needs the content.
         """
         raw_path = self._cmd_str(cmd, "path")
         if not raw_path:
@@ -7030,6 +7051,26 @@ class RemoteAccessServer:
         line = cmd.get("line")
         if isinstance(line, bool) or not isinstance(line, int) or line < 1:
             line = 0
+
+        def _resolve_native() -> dict[str, Any]:
+            reply: dict[str, Any] = {
+                "type": "openResolvedFile",
+                "path": raw_path,
+                "tabId": tab_id,
+            }
+            if line:
+                reply["line"] = line
+            path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+            if path is None:
+                reply["error"] = f"File not found: {raw_path}"
+            else:
+                reply["path"] = str(path)
+            return reply
+
+        if native:
+            reply = await asyncio.to_thread(_resolve_native)
+            await self._reply_direct(endpoint, reply, "openFile")
+            return
 
         def _read_file() -> dict[str, Any]:
             reply: dict[str, Any] = {
@@ -7430,19 +7471,20 @@ class RemoteAccessServer:
     async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Tell a remote-web client which candidate file paths exist.
+        """Tell a client which candidate file paths exist.
 
         Handles the ``checkPaths`` command sent by ``media/main.js``
-        after it linkifies file-path-looking strings in event panel
-        contents: a path is rendered as a clickable link ONLY when this
-        check confirms it names an existing regular file or directory,
-        i.e. that a subsequent ``openFile`` click would actually serve
-        content (file text or a directory listing).
+        (from a browser over WSS or, via the VS Code extension host,
+        over the Unix socket) after it linkifies file-path-looking
+        strings in event panel contents: a path is rendered as a
+        clickable link ONLY when this check confirms it names an
+        existing regular file or directory, i.e. that a subsequent
+        ``openFile`` click would actually open something.
         Paths are resolved exactly like :meth:`_handle_open_file`
         resolves them (``~`` expansion, then relative to the command's
-        ``workDir``, falling back to the daemon work dir).  The reply
-        is sent directly to the requesting *endpoint* — never
-        broadcast — with the shape::
+        ``workDir``, then the tab's pending worktree).  The reply is
+        sent directly to the requesting *endpoint* — never broadcast —
+        with the shape::
 
             {"type": "pathsExist", "results": {<path>: <bool>, ...},
              "workDir": <echo of cmd workDir>,
@@ -7451,12 +7493,20 @@ class RemoteAccessServer:
         Args:
             cmd: The parsed ``checkPaths`` command (``paths``, optional
                 ``workDir``, ``tabId``).
-            endpoint: The requesting WSS connection.
+            endpoint: The requesting connection (WSS or UDS).
         """
         raw_paths = cmd.get("paths")
         if not isinstance(raw_paths, list):
             raw_paths = []
-        raw_work_dir = self._cmd_str(cmd, "workDir")
+        # The reply's workDir is a correlation key: main.js stamps each
+        # candidate with the workDir it sent (data-path-wd) and only
+        # applies a reply whose workDir matches.  Echo what the CLIENT
+        # sent — ServerApi.dispatch keeps it in ``clientWorkDir`` when it
+        # stamps the connection's pin into ``workDir`` — or a tab that
+        # sent "" would never see its links promoted.
+        raw_work_dir = self._cmd_str(
+            cmd, "clientWorkDir" if "clientWorkDir" in cmd else "workDir",
+        )
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
 
@@ -8574,29 +8624,31 @@ class RemoteAccessServer:
             await self._run_cmd(resume)
 
     async def _open_path_only_prompt(
-        self, cmd: dict[str, Any], endpoint: Any,
+        self, cmd: dict[str, Any], endpoint: Any, native: bool,
     ) -> bool:
         """Open the file a path-only ``submit`` names; ``True`` when it did.
 
-        The extension host's shortcut (``SorcarSidebarView`` ``case
-        'submit'``) for the daemon: a single-line prompt that is nothing
-        but the path of an existing regular file, typed into a tab that
-        is not running a task, is a request to open that file.  The
-        submitting connection gets ``promptOpened`` (the webview drops
-        the prompt and the task claim it stamped on the tab, see
-        ``main.js`` ``handleEvent``) and then the file's ``fileContent``
-        (:meth:`_handle_open_file`); no task starts.
+        The one path-only shortcut for every surface: a single-line
+        prompt that is nothing but the path of an existing regular
+        file, typed into a tab that is not running a task, is a request
+        to open that file.  The submitting connection gets
+        ``promptOpened`` (the webview drops the prompt and the task
+        claim it stamped on the tab, see ``main.js`` ``handleEvent``)
+        and then the file, through :meth:`_handle_open_file`: the
+        resolved path (``openResolvedFile``) for a *native* client, the
+        ``fileContent`` for a browser.  No task starts.
 
         A tab whose task is running, or that views a task blocked in
         ``ask_user_question``, is skipped: there the prompt is a
-        follow-up or an answer that ``_cmd_run`` routes to the worker —
-        the same precedence the extension host gives its running tabs.
+        follow-up or an answer that ``_cmd_run`` routes to the worker.
         Directories are skipped too, so a one-word prompt that happens
         to name a folder (``src``, ``tmp``) is still a task.
 
         Args:
-            cmd: The ``submit`` message from the browser.
+            cmd: The ``submit`` message from the client.
             endpoint: The submitting connection.
+            native: Whether the client opens the resolved path itself
+                (see :meth:`_handle_open_file`).
 
         Returns:
             ``True`` when the prompt was answered with the file and the
@@ -8627,34 +8679,41 @@ class RemoteAccessServer:
         await self._handle_open_file(
             {"path": str(path), "workDir": work_dir, "tabId": tab_id},
             endpoint,
+            native,
         )
         return True
 
     async def _handle_submit(
-        self, cmd: dict[str, Any], endpoint: Any = None,
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any = None,
+        native: bool = False,
     ) -> None:
-        """Translate the webview ``submit`` command into a backend ``run``.
+        """Translate a webview ``submit`` into a backend ``run``.
 
-        The VS Code TypeScript extension transforms ``submit`` into a
-        ``run`` command after resolving paths and tracking running tabs.
-        The web server performs the same translation, including the
-        extension host's path-only shortcut: a single-line prompt that
-        is nothing but the path of an existing regular file (relative
-        to the tab's work dir or its pending worktree) is a request to
-        open that file, so it is answered with the file's
-        ``fileContent`` (:meth:`_handle_open_file`) and no task starts.
-        Only regular files qualify: a one-word prompt that happens to
-        name a directory (``src``, ``tmp``) is still a task.
+        The single submit path of every surface: the VS Code extension
+        host forwards its webview's ``submit`` here over the Unix
+        socket exactly as the remote webapp sends it over WSS.  The
+        translation includes the path-only shortcut: a single-line
+        prompt that is nothing but the path of an existing regular file
+        (relative to the tab's work dir or its pending worktree) is a
+        request to open that file, so it is answered through
+        :meth:`_open_path_only_prompt` and no task starts.  Only
+        regular files qualify: a one-word prompt that happens to name a
+        directory (``src``, ``tmp``) is still a task.
 
         Args:
-            cmd: The ``submit`` message from the browser.
-            endpoint: The submitting connection, which receives the
-                ``fileContent`` reply of a path-only prompt; ``None``
-                disables the shortcut.
+            cmd: The ``submit`` message from the client.
+            endpoint: The submitting connection, which receives a
+                path-only prompt's ``promptOpened`` and file reply;
+                ``None`` disables the shortcut.
+            native: Whether the submitting client opens the resolved
+                path itself (a VS Code window) rather than needing the
+                file's content (a browser).
         """
         tab_id = cmd.get("tabId", "")
         if endpoint is not None and await self._open_path_only_prompt(
-            cmd, endpoint,
+            cmd, endpoint, native,
         ):
             return
         if self._shutdown_initiated:

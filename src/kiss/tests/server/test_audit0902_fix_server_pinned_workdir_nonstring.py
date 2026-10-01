@@ -126,21 +126,24 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
             # must be known complete — through an A-side probe reply —
             # before B's setWorkDir may move the global fallback, or A
             # could still move it back to A afterwards.
+            # (``pathsExist`` echoes the workDir the CLIENT sent — the
+            # webview's correlation key — so the pin shows in the
+            # results, which resolve only-in-a.txt against A.)
             await ws_a.send(json.dumps(
                 {"type": "checkPaths", "paths": ["only-in-a.txt"], "tabId": "a"},
             ))
-            echo_a = await self._recv_type(ws_a, "pathsExist")
-            self.assertEqual(echo_a["workDir"], str(self.dir_a))
+            probe_a = await self._recv_type(ws_a, "pathsExist")
+            self.assertEqual(probe_a["results"], {"only-in-a.txt": True})
             # Window B's pin is complete once its own (unstamped)
-            # checkPaths echoes B: the global fallback is now B.
+            # checkPaths resolves against B: the global fallback is now B.
             await ws_b.send(json.dumps(
                 {"type": "setWorkDir", "workDir": str(self.dir_b)},
             ))
             await ws_b.send(json.dumps(
                 {"type": "checkPaths", "paths": ["only-in-b.txt"], "tabId": "b"},
             ))
-            echo_b = await self._recv_type(ws_b, "pathsExist")
-            self.assertEqual(echo_b["workDir"], str(self.dir_b))
+            probe_b = await self._recv_type(ws_b, "pathsExist")
+            self.assertEqual(probe_b["results"], {"only-in-b.txt": True})
             self.assertEqual(
                 self.server._vscode_server.work_dir, str(self.dir_b),
             )
@@ -161,7 +164,7 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
                     reply["path"], str(self.dir_a / "only-in-a.txt"),
                 )
 
-    async def test_check_paths_echoes_pin_for_malformed_work_dir(self) -> None:
+    async def test_check_paths_uses_pin_for_malformed_work_dir(self) -> None:
         reply = await self._pinned_roundtrip(
             [{"type": "checkPaths", "paths": ["only-in-a.txt", "only-in-b.txt"],
               "workDir": 123, "tabId": "t"}],
@@ -170,7 +173,9 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
         self.assertEqual(
             reply["results"], {"only-in-a.txt": True, "only-in-b.txt": False},
         )
-        self.assertEqual(reply["workDir"], str(self.dir_a))
+        # The echo is the client's key (a non-string counts as none), not
+        # the pin the paths were resolved against.
+        self.assertEqual(reply["workDir"], "")
 
     async def test_ready_reports_pin_for_malformed_work_dir(self) -> None:
         # ``ready`` fans out into ``getConfig`` whose reply names the
@@ -191,7 +196,8 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
         ):
             with self.subTest(payload=payload):
                 reply = await self._pinned_roundtrip([payload], "pathsExist")
-                self.assertEqual(reply["workDir"], str(self.dir_a))
+                self.assertEqual(reply["results"], {"only-in-a.txt": True})
+                self.assertEqual(reply["workDir"], "")
 
     async def test_malformed_set_work_dir_does_not_move_the_pin(self) -> None:
         reply = await self._pinned_roundtrip(
@@ -201,7 +207,7 @@ class TestPinnedWorkDirBeatsMalformedField(IsolatedAsyncioTestCase):
             ],
             "pathsExist",
         )
-        self.assertEqual(reply["workDir"], str(self.dir_a))
+        self.assertEqual(reply["results"], {"only-in-a.txt": True})
 
     async def test_explicit_string_work_dir_wins_over_pin(self) -> None:
         reply = await self._pinned_roundtrip(

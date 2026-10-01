@@ -177,20 +177,25 @@ async function runTests() {
   });
   await new Promise(r => setTimeout(r, 80));
 
-  const appended = received.filter(c => c.type === 'appendUserMessage');
+  // The host forwards every submit unchanged — the daemon's one submit
+  // path (_cmd_run) queues a prompt sent to a running tab as a follow-up
+  // for the worker, exactly as it does for the remote webapp — so the
+  // prompt must reach the daemon, not be dropped or turned into
+  // something else by the host.
+  const submits = received.filter(c => c.type === 'submit');
   assert.strictEqual(
-    appended.length,
+    submits.length,
     1,
     'BUG: a submit for an already-running tab must be forwarded to the ' +
-      'daemon as an appendUserMessage, not silently dropped (got types: ' +
+      'daemon, not silently dropped (got types: ' +
       JSON.stringify(received.map(c => c.type)) +
       ')',
   );
-  assert.strictEqual(appended[0].prompt, 'inject me into the running agent');
-  assert.strictEqual(appended[0].tabId, TAB);
+  assert.strictEqual(submits[0].prompt, 'inject me into the running agent');
+  assert.strictEqual(submits[0].tabId, TAB);
   assert.ok(
-    !received.some(c => c.type === 'run'),
-    'a submit for a running tab must not start a second run',
+    !received.some(c => c.type === 'run' || c.type === 'appendUserMessage'),
+    'the host must not classify the prompt itself; the daemon does',
   );
 
   if (typeof view.dispose === 'function') view.dispose();

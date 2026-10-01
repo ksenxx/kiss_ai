@@ -510,7 +510,7 @@ class ServerBackend(Protocol):
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any,
+        self, cmd: dict[str, Any], endpoint: Any, native: bool = False,
     ) -> None: ...
 
     async def _handle_save_file(
@@ -590,7 +590,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_submit(
-        self, cmd: dict[str, Any], endpoint: Any = None,
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any = None,
+        native: bool = False,
     ) -> None: ...
 
     async def _send_welcome_info(self) -> None: ...
@@ -696,7 +699,10 @@ class ServerApi:
            :func:`kiss.core.utils.is_root_dir`) is blanked first and
            treated exactly like an absent one, so a client whose cwd
            degenerated to the root can never pin, persist or execute
-           against the whole disk.
+           against the whole disk.  When the pin is stamped, the value
+           the client sent is kept as ``clientWorkDir`` so a reply that
+           echoes ``workDir`` as a correlation key (``pathsExist``)
+           echoes what the client will recognise.
         7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -750,6 +756,9 @@ class ServerApi:
             # as absent as a missing one: left in place it would be
             # blanked by the handler and fall back to the daemon-global
             # folder — another window's — instead of this window's pin.
+            # The client's own value survives as ``clientWorkDir`` for
+            # replies that echo it as a correlation key (``pathsExist``).
+            cmd["clientWorkDir"] = raw_wd if isinstance(raw_wd, str) else ""
             cmd["workDir"] = ctx.conn_state["work_dir"]
         await getattr(self, handler)(cmd, ctx)
 
@@ -1049,39 +1058,40 @@ class ServerApi:
     async def submit(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Start a task from a webview ``submit``.
 
-        The backend translates the webview ``submit`` into a ``run``
-        (path resolution, running-tab tracking) exactly as the VS Code
-        TypeScript extension would, including its path-only shortcut: a
-        prompt that is just the path of an existing file is answered
-        with that file's ``fileContent`` on the submitting connection
-        and starts no task.
+        The one submit path of every surface: the remote webapp sends
+        its webview's ``submit`` over WSS, the VS Code extension host
+        forwards its webview's ``submit`` over the Unix socket, and the
+        backend translates both into a ``run`` (path resolution,
+        follow-up routing) including the path-only shortcut: a prompt
+        that is just the path of an existing file is answered on the
+        submitting connection — the resolved path for a VS Code window
+        to open natively, the ``fileContent`` for a browser — and
+        starts no task.
 
         Args:
             cmd: The ``submit`` command.
             ctx: The transport context of the current call; its
-                endpoint receives a path-only prompt's ``fileContent``.
+                endpoint receives a path-only prompt's reply.
         """
-        await self._backend._handle_submit(cmd, ctx.endpoint)
+        await self._backend._handle_submit(cmd, ctx.endpoint, ctx.is_uds)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Serve a file's content to a remote-web client.
+        """Resolve, and for a browser serve, a clicked file link.
 
-        A remote-web (WSS) client clicked a file or directory link in a
-        chat webview.  The browser has no editor to open the path in,
-        so the daemon reads the file (or builds a plain-text directory
-        listing) and replies with its content for an in-page content
-        tab.  UDS clients (VS Code windows) never take
-        this path: their webview's ``openFile`` is consumed by the
-        extension host, which opens the file in a real editor tab — so
-        a UDS-delivered ``openFile`` is dropped as a defensive no-op.
+        A client clicked a file or directory link in a chat webview.
+        The daemon resolves the path once for every surface (``~``, the
+        tab's work dir, its pending worktree).  A browser has no editor
+        to open the path in, so it gets the file's content (or a
+        plain-text directory listing) for an in-page content tab; a
+        VS Code window (UDS) gets the resolved path as an
+        ``openResolvedFile`` action that its extension host opens in a
+        real editor tab.
 
         Args:
             cmd: The ``openFile`` command.
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
-            return
-        await self._backend._handle_open_file(cmd, ctx.endpoint)
+        await self._backend._handle_open_file(cmd, ctx.endpoint, ctx.is_uds)
 
     async def save_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Write a remote-web client's edits back to a file on disk.
@@ -1095,8 +1105,7 @@ class ServerApi:
         on disk since it was opened unless ``force`` is set.  The reply
         is a ``fileSaved`` event sent to the requester only.  UDS
         clients (VS Code windows) edit files in real editor tabs, so
-        a UDS-delivered ``saveFile`` is dropped as a defensive no-op,
-        exactly like ``openFile``.
+        a UDS-delivered ``saveFile`` is dropped as a defensive no-op.
 
         Args:
             cmd: The ``saveFile`` command (``path``, ``content``,
@@ -1109,24 +1118,19 @@ class ServerApi:
         await self._backend._handle_save_file(cmd, ctx.endpoint)
 
     async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Report which file paths exist to a remote-web client.
+        """Report which file paths exist to the requesting client.
 
         The chat webview linkifies file-path-looking strings in event
         panel contents lazily: a path only becomes a clickable link
         after this check confirms that clicking it (``openFile``)
-        would actually serve something — a file's content or a
-        directory's listing.  UDS clients (VS Code windows)
-        never take this path: their webview's ``checkPaths`` is
-        consumed by the extension host, which checks the local
-        filesystem itself — so a UDS-delivered ``checkPaths`` is
-        dropped as a defensive no-op.
+        would actually open something — a file or a directory.  Served
+        to browsers (WSS) and VS Code windows (UDS) alike, with the
+        same resolution ``openFile`` applies.
 
         Args:
             cmd: The ``checkPaths`` command.
             ctx: The transport context of the current call.
         """
-        if ctx.is_uds:
-            return
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
     async def get_task_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1242,7 +1246,7 @@ class ServerApi:
         reply is a ``dirListing`` event sent to the requester only.
         UDS clients (VS Code windows) have a real Explorer, so a
         UDS-delivered ``listDir`` is dropped as a defensive no-op,
-        exactly like ``checkPaths``.
+        exactly like ``saveFile``.
 
         Args:
             cmd: The ``listDir`` command (optional ``path``,
@@ -1260,7 +1264,7 @@ class ServerApi:
         staged, unstaged and untracked changes (VS Code's "Changes"
         section) from this command's ``gitStatus`` reply, sent to the
         requester only.  A UDS-delivered ``gitStatus`` is dropped as a
-        defensive no-op, exactly like ``checkPaths``.
+        defensive no-op, exactly like ``saveFile``.
 
         Args:
             cmd: The ``gitStatus`` command (optional ``workDir``,
@@ -1278,7 +1282,7 @@ class ServerApi:
         (VS Code's "Graph" section) with each commit's modified files
         from this command's ``gitLog`` reply, sent to the requester
         only.  A UDS-delivered ``gitLog`` is dropped as a defensive
-        no-op, exactly like ``checkPaths``.
+        no-op, exactly like ``saveFile``.
 
         Args:
             cmd: The ``gitLog`` command (optional ``workDir``,

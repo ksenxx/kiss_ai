@@ -210,15 +210,17 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
         self,
     ) -> None:
         """``notificationAction``/``sizeReport``/UDS ``openFile``
-        produce no error; an unknown command produces exactly the
-        ``Unknown command`` error broadcast.
+        produce no ``error`` event; an unknown command produces exactly
+        the ``Unknown command`` error broadcast.
 
         Commands on one connection are dispatched strictly in order, so
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
-        ``openFile`` is not in ``sorcar.DROPPED_COMMANDS`` (the web
-        server implements it for WSS clients) but must still be a
-        silent defensive drop on the UDS transport.
+        ``openFile`` is served on the UDS transport too (the daemon
+        resolves file links for every surface and answers a VS Code
+        window with ``openResolvedFile``, carrying its own ``error``
+        field for a missing file); it must never surface as an
+        ``error`` event.
         """
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path), limit=16 * 1024 * 1024,
