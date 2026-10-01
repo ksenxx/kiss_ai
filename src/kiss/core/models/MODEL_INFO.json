@@ -837,11 +837,12 @@
   },
   "gemini-3.1-flash-tts-preview": {
     "context_length": 8192,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
+    "input_price_per_1M": 1.0,
+    "output_price_per_1M": 20.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-10: $1.00 text input / $20.00 audio output per 1M"
   },
   "gemini-3.1-pro-preview": {
     "context_length": 500000,
@@ -905,11 +906,12 @@
   },
   "gemini-embedding-2": {
     "context_length": 8192,
-    "input_price_per_1M": 0.0,
+    "input_price_per_1M": 0.2,
     "output_price_per_1M": 0.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "ai.google.dev/gemini-api/docs/pricing 2026-10: $0.20 per 1M text input tokens"
   },
   "gemini-embedding-2-preview": {
     "context_length": 8192,
