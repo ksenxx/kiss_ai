@@ -6,9 +6,9 @@
 
 Started by ``test/_realDaemon.js`` as ``uv run python _real_daemon.py
 <work_dir>``: serves a real :class:`RemoteAccessServer` on a loopback
-WSS port and publishes its token-authenticated local endpoint in
+WSS port, publishing its token-authenticated endpoint in
 ``$KISS_HOME/sorcar-local.json`` (the temp home the JS test set up, which
-the compiled extension host connects to), prints ``READY`` once it
+the compiled extension host reads to connect), prints ``READY`` once it
 listens, and exits when its stdin closes.
 
 Every non-empty stdin line is a JSON event the test wants broadcast to

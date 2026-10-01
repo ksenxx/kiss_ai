@@ -70,7 +70,16 @@ def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
 
 
 def _restore_db(saved: tuple[Any, Any, Any]) -> None:
-    """Undo :func:`_redirect_db`."""
+    """Undo :func:`_redirect_db`.
+
+    Also drops the process-owner marker the redirected ``_KISS_DIR``
+    accumulated (``task-owners/<token>.lock``, held open for the
+    liveness probe): Windows refuses to delete an open file, so leaving
+    it would make the caller's ``TemporaryDirectory`` cleanup fail with
+    ``WinError 32``.  The next owner-token request re-mints it under
+    the restored directory.
+    """
+    th._release_owner_marker()
     if th._db_conn is not None:
         th._db_conn.close()
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
@@ -80,7 +89,10 @@ class _LocalServerTestCase(unittest.TestCase):
     """Harness: a live local-channel dispatcher exactly like the extension's."""
 
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors: the server's worker threads keep their
+        # per-thread sorcar.db connections open, and Windows refuses to
+        # delete an open file (the OS reclaims the handle at exit).
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.work_dir = os.path.join(self.tmp.name, "workspace")
         os.makedirs(self.work_dir)
         self.loop = asyncio.new_event_loop()

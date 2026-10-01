@@ -42,6 +42,7 @@ import json
 import socket
 import ssl
 import stat
+import sys
 import tempfile
 import time
 from collections.abc import Iterable
@@ -184,8 +185,9 @@ class SslBuildOffLoopTest(IsolatedAsyncioTestCase):
         assert self.endpoint_file.exists(), (
             "start_async returned without publishing the endpoint file"
         )
-        mode = stat.S_IMODE(self.endpoint_file.stat().st_mode)
-        assert mode == 0o600, f"endpoint file mode {oct(mode)}, expected 0o600"
+        if sys.platform != "win32":  # NTFS has no POSIX mode bits
+            mode = stat.S_IMODE(self.endpoint_file.stat().st_mode)
+            assert mode == 0o600, f"endpoint file mode {oct(mode)}, expected 0o600"
         data = json.loads(self.endpoint_file.read_text())
         assert data["url"] == f"wss://127.0.0.1:{self.server.port}/ws"
         assert data["token"] == self.server.local_token

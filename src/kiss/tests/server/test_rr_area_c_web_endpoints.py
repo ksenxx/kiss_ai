@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -106,8 +107,9 @@ class TestLocalEndpointPublication(IsolatedAsyncioTestCase):
         await server.start_async()
         try:
             assert endpoint_file.exists()
-            mode = stat.S_IMODE(endpoint_file.stat().st_mode)
-            assert mode == 0o600, f"endpoint file mode {oct(mode)}"
+            if sys.platform != "win32":  # NTFS has no POSIX mode bits
+                mode = stat.S_IMODE(endpoint_file.stat().st_mode)
+                assert mode == 0o600, f"endpoint file mode {oct(mode)}"
             endpoint = local_endpoint.read_endpoint(endpoint_file)
             assert endpoint is not None
             assert endpoint.url == f"wss://127.0.0.1:{server.port}/ws"

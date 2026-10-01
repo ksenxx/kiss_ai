@@ -34,6 +34,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
@@ -72,7 +73,8 @@ def _run_helper(endpoint_file: Path, timeout: float = 5.0) -> subprocess.Complet
     """Run the helper script with ``KISS_SORCAR_LOCAL`` overridden."""
     env = os.environ.copy()
     env["KISS_SORCAR_LOCAL"] = str(endpoint_file)
-    env["KISS_ACTIVE_TASKS_TIMEOUT"] = "2.0"
+    # Windows reports a refused loopback connect only after ~2 s.
+    env["KISS_ACTIVE_TASKS_TIMEOUT"] = "5.0" if sys.platform == "win32" else "2.0"
     return subprocess.run(
         [sys.executable, str(_SCRIPT_PATH)],
         env=env,
@@ -139,6 +141,7 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @unittest.skipIf(sys.platform == "win32", "NTFS has no executable bit")
     def test_helper_script_file_exists_and_is_executable(self) -> None:
         """The helper exists at the path the bash scripts hard-code."""
         self.assertTrue(

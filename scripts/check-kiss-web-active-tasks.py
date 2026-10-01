@@ -42,7 +42,9 @@ Environment
   ``~/.kiss/sorcar-local.json``).  Used by the integration test in
   ``test_check_active_tasks_script.py`` to point at a per-test daemon.
 * ``KISS_ACTIVE_TASKS_TIMEOUT`` — connect+read timeout in seconds
-  (default ``2.0``).
+  (default ``2.0``; ``5.0`` on Windows, where a refused loopback
+  connect is only reported after ~2 s of SYN retransmits and would
+  otherwise be mistaken for a timeout, i.e. a live daemon).
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ import time
 from pathlib import Path
 
 DEFAULT_ENDPOINT_FILE = Path.home() / ".kiss" / "sorcar-local.json"
-DEFAULT_TIMEOUT = 2.0
+DEFAULT_TIMEOUT = 5.0 if sys.platform == "win32" else 2.0
 
 
 def _classify_message(msg: object) -> str:

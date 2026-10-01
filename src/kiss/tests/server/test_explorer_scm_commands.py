@@ -119,25 +119,27 @@ def build_repo(repo: Path) -> dict[str, str]:
     Returns:
         A mapping of commit labels to full shas.
     """
+    # newline="\n": the tests compare working-tree contents byte for byte
+    # against LF strings, and Windows would otherwise write CRLF.
     _git(repo, "init", "-q", "-b", "main")
-    (repo / "a.txt").write_text("a\n")
-    (repo / "README.md").write_text("# readme\n")
+    (repo / "a.txt").write_text("a\n", newline="\n")
+    (repo / "README.md").write_text("# readme\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "first: add a.txt, README.md")
     first = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "mv", "a.txt", "b.txt")
     (repo / "dir").mkdir()
-    (repo / "dir" / "nested.py").write_text("x = 1  # nested-sentinel-4f2a\n")
+    (repo / "dir" / "nested.py").write_text("x = 1  # nested-sentinel-4f2a\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "second: rename a.txt -> b.txt")
     second = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "checkout", "-q", "-b", "feature")
-    (repo / "feature.txt").write_text("feature-file-sentinel-7c1e\n")
+    (repo / "feature.txt").write_text("feature-file-sentinel-7c1e\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "feature: add feature.txt")
     feat = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "checkout", "-q", "main")
-    (repo / "main-only.txt").write_text("m\n")
+    (repo / "main-only.txt").write_text("m\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "main: add main-only.txt")
     main_only = _git(repo, "rev-parse", "HEAD").strip()
@@ -145,10 +147,10 @@ def build_repo(repo: Path) -> dict[str, str]:
     merge = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "tag", "v1")
     # Dirty working tree.
-    (repo / "README.md").write_text("# readme changed\n")
-    (repo / "dir" / "nested.py").write_text("x = 2  # nested-sentinel-4f2a\n")
+    (repo / "README.md").write_text("# readme changed\n", newline="\n")
+    (repo / "dir" / "nested.py").write_text("x = 2  # nested-sentinel-4f2a\n", newline="\n")
     _git(repo, "add", "dir/nested.py")
-    (repo / "untracked.txt").write_text("u\n")
+    (repo / "untracked.txt").write_text("u\n", newline="\n")
     (repo / "b.txt").unlink()
     return {
         "first": first,

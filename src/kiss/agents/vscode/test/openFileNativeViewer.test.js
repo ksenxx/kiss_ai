@@ -362,8 +362,10 @@ async function runTests() {
     "pdf file: the file's directory must be a local resource root",
   );
   const pdfHtml = pdfPanel.webview.html;
+  // The URI sits inside the page's JSON config, so compare its JSON
+  // form (a Windows path has its backslashes escaped there).
   assert.ok(
-    pdfHtml.includes('vscode-resource:' + pdfFile),
+    pdfHtml.includes(JSON.stringify('vscode-resource:' + pdfFile)),
     'pdf panel: the page must fetch the PDF through its webview URI',
   );
   assert.ok(

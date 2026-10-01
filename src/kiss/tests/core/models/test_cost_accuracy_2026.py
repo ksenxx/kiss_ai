@@ -298,12 +298,11 @@ class TestDirectMoonshotCachePricing:
         # does any fixed ratio to the blended input price (2026-09-26: $1.03
         # input, $0.30 cache read = 0.29x).  The updater prices each
         # OpenRouter row independently, so the alias is not tied to the
-        # kimi-k3 entry either.  Because the blended input price moves with
-        # the provider mix while the cache rate does not, the cache read can
-        # even exceed the input price (2026-09-30: $0.318 input, $0.40 cache
-        # read, both as published).  What must hold is that the explicit
-        # OpenRouter cache price was kept: a positive price that is not the
-        # 0.25x direct-Moonshot default.
+        # kimi-k3 entry either.  The blended input price can even drop
+        # below the cache rate (2026-09-30: $0.318 input, $0.40 cache
+        # read), so no bound ties the two.  What must hold is that the
+        # explicit OpenRouter cache price was kept: a positive price that
+        # is not the 0.25x direct-Moonshot default.
         latest = MODEL_INFO["openrouter/~moonshotai/kimi-latest"]
         assert latest.input_price_per_1M > 0
         cache_read = latest.cache_read_price_per_1M

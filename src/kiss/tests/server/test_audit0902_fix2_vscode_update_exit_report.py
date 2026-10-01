@@ -31,7 +31,9 @@ import json
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
+import unittest
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -266,6 +268,8 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         self.assertEqual(await self._banners_before_probe(reader_a, writer_a), [])
         self.assertIn("Source bootstrap complete", self.log_path.read_text())
 
+    @unittest.skipIf(sys.platform == "win32",
+                     "Windows refuses to unlink a log the installer holds open")
     async def test_missing_log_still_reports_the_generic_failure(self) -> None:
         # The log vanishing under a running installer (a cleanup of
         # ~/.kiss) must not turn the report into an unhandled exception.

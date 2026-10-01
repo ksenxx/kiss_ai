@@ -100,6 +100,7 @@ from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive
 from kiss.core.models.model_info import get_default_model
+from kiss.core.processes import find_bash
 from kiss.core.processes import process_identity as _process_identity
 from kiss.core.utils import is_root_dir, replace_waiting_for_readers
 from kiss.core.vscode_config import (
@@ -6164,12 +6165,17 @@ class RemoteAccessServer:
         daemon's own pid routes through :meth:`_handle_shutdown_signal`
         exactly like an external ``pkill``/supervisor stop, so the
         established graceful-shutdown path runs and the supervisor
-        respawns a fresh daemon.
+        respawns a fresh daemon.  On Windows ``os.kill(pid, SIGTERM)``
+        is ``TerminateProcess`` (no handler runs, the agents die
+        abruptly), so the handler is invoked directly there.
         """
         logger.warning(
             "Server reset requested: pid=%d sending SIGTERM to self",
             os.getpid(),
         )
+        if sys.platform == "win32":  # pragma: no cover — Windows only
+            self._handle_shutdown_signal(signal.SIGTERM)
+            return
         os.kill(os.getpid(), signal.SIGTERM)
 
     async def _handle_run_update(self, conn_id: str = "") -> None:
@@ -6345,6 +6351,10 @@ class RemoteAccessServer:
             moment (the start of this run's output), or ``None`` when
             the spawn failed.
         """
+        # Git for Windows keeps bash.exe off PATH; a bare "bash" there
+        # fails with WinError 2 (reported through the OSError path below
+        # when no bash is installed at all).
+        bash = find_bash() or "bash"
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
@@ -6362,17 +6372,17 @@ class RemoteAccessServer:
                 # the bootstrap the same way; ``KISS_NONINTERACTIVE=1`` is
                 # what both installers read in place of
                 # ``--non-interactive``.
-                argv = ["bash", str(bootstrap)]
+                argv = [bash, str(bootstrap)]
                 cwd = str(script.parent)
                 env = dict(os.environ)
                 env["KISS_NONINTERACTIVE"] = "1"
             else:
-                argv = ["bash", str(script), "--non-interactive"]
+                argv = [bash, str(script), "--non-interactive"]
                 cwd = str(script.parent)
                 env = None
         else:
             argv = [
-                "bash", "-c",
+                bash, "-c",
                 'set -o pipefail; '
                 'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
             ]

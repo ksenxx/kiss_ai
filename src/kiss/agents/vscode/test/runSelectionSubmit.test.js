@@ -205,6 +205,8 @@ const server = createFakeDaemon(sock => {
         continue;
       }
       daemonCmds.push(cmd);
+      // The host forwards every prompt as a `submit`; the real daemon
+      // classifies it (a fresh tab: a run) and answers like this.
       if (cmd.type === 'submit') {
         const tabId = cmd.tabId;
         daemonReply({type: 'clear', chat_id: 'chat-1', tabId});
@@ -543,8 +545,9 @@ async function runTests() {
     provider3.resolveWebviewView(wvv3.webviewView, {}, {});
     wvv3.wire();
     setTimeout(() => {
-      // Listen before the scripts run: the host flushes the held prompt
-      // synchronously while the webview's `ready` is being processed.
+      // Listen before the scripts run: the host posts the held paste
+      // the moment the webview reports `ready`, which the stub
+      // delivers synchronously from inside evalWebviewScripts.
       const inp3 = ctx3.win.document.getElementById('task-input');
       inp3.addEventListener('input', () => slowInputValues.push(inp3.value));
       evalWebviewScripts(ctx3.win);
@@ -556,11 +559,16 @@ async function runTests() {
   daemonCmds.length = 0;
   // The command returns as soon as the sidebar is revealed; the prompt
   // is held until the webview's `ready` handshake (600 ms away here)
-  // and forwarded to the daemon from the composer after that.
+  // and forwarded to the daemon from the composer after that, so wait
+  // for the paste and the daemon `submit` rather than a fixed interval.
   await registeredCommands.get('kissSorcar.runSelection')();
   for (
     let i = 0;
-    i < 60 && !daemonCmds.some(c => c.type === 'submit');
+    i < 80 &&
+    !(
+      slowInputValues.includes(SEL5) &&
+      daemonCmds.some(c => c.type === 'submit')
+    );
     i++
   ) {
     await sleep(50);

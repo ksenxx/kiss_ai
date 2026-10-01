@@ -85,7 +85,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         """The exact prompt of the reported task opens the file natively."""
         target = self.work_dir / "src" / "seas" / "review_paper_sea.py"
         target.parent.mkdir(parents=True)
-        target.write_text("print('review paper SEA')\n", encoding="utf-8")
+        target.write_text("print('review paper SEA')\n", encoding="utf-8", newline="\n")
         reader, writer = await self._connect()
         tab_id = "tab-path-only"
 
@@ -130,7 +130,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
     async def test_absolute_and_quoted_paths_open(self) -> None:
         """Absolute, ``~``-free, whitespace-padded prompts open too."""
         target = self.work_dir / "notes.md"
-        target.write_text("# notes\n", encoding="utf-8")
+        target.write_text("# notes\n", encoding="utf-8", newline="\n")
         reader, writer = await self._connect()
         tab_id = "tab-abs-path"
 
@@ -168,7 +168,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
     async def test_missing_path_and_multiline_prompt_start_tasks(self) -> None:
         """A path that does not exist, or a multi-line prompt, runs."""
         target = self.work_dir / "exists.txt"
-        target.write_text("x\n", encoding="utf-8")
+        target.write_text("x\n", encoding="utf-8", newline="\n")
         reader, writer = await self._connect()
 
         await self._submit(writer, "./no/such/file.py", "tab-missing")
@@ -191,7 +191,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         ``notes.md`` — would open the file and never reach the worker.
         """
         target = self.work_dir / "notes.md"
-        target.write_text("# notes\n", encoding="utf-8")
+        target.write_text("# notes\n", encoding="utf-8", newline="\n")
         reader, writer = await self._connect()
         tab_id = "tab-busy"
         state, _exited = self._register_starting_task(tab_id, "task-busy")
@@ -221,7 +221,7 @@ class TestPathOnlySubmitOverLocal(_ServerHarness):
         other = self.work_dir.parent / "other"
         other.mkdir()
         target = other / "pinned.txt"
-        target.write_text("pinned\n", encoding="utf-8")
+        target.write_text("pinned\n", encoding="utf-8", newline="\n")
         reader, writer = await self._connect()
         tab_id = "tab-pinned"
 
@@ -258,7 +258,7 @@ class TestPathOnlySubmitOverWss(_ServerHarness):
         """The same prompt over WSS opens the file in a content tab."""
         target = self.work_dir / "src" / "seas" / "review_paper_sea.py"
         target.parent.mkdir(parents=True)
-        target.write_text("print('review paper SEA')\n", encoding="utf-8")
+        target.write_text("print('review paper SEA')\n", encoding="utf-8", newline="\n")
         tab_id = "tab-path-only-web"
 
         async with connect(
