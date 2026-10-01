@@ -150,8 +150,10 @@ class _Handler(BaseHTTPRequestHandler):
         if server.accounts.get(body.get("connected_account_id", "")) != "ACTIVE":
             self._reply(400, {"error": {"message": "connected account is not active"}})
             return
-        params = [(p["name"], p["value"]) for p in body.get("parameters") or []
-                  if p["type"] == "query"]
+        # Like Composio: a repeated query name in ``parameters`` keeps only
+        # its last value (the endpoint URL's own query string is kept whole).
+        params = {p["name"]: p["value"] for p in body.get("parameters") or []
+                  if p["type"] == "query"}
         headers = {p["name"]: p["value"] for p in body.get("parameters") or []
                    if p["type"] == "header"}
         headers["Authorization"] = f"Bearer {server.token}"
