@@ -23,7 +23,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   contract as every sibling cleanup path).
 
 The live-server tests drive a real :class:`RemoteAccessServer` over a
-real Unix-domain socket connection, mirroring the harness of
+real local WebSocket connection, mirroring the harness of
 ``test_simplify_web_server_regr.py``.
 """
 
@@ -45,7 +45,7 @@ import kiss.server.web_server as ws_mod
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -62,20 +62,18 @@ def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-@requires_unix_sockets
 class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
-    """E2E tests over a real running RemoteAccessServer (UDS)."""
+    """E2E tests over a real running RemoteAccessServer (local WSS)."""
 
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-fixer6-live-")
         self.saved = _redirect_persistence(self.tmpdir)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -87,51 +85,51 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect_uds(
+    async def _connect_local(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self.addAsyncCleanup(self._close_writer, writer)
         return reader, writer
 
-    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+    async def _close_writer(self, writer: LocalWriter) -> None:
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
             pass
 
-    async def _send(self, writer: asyncio.StreamWriter, msg: dict) -> None:
+    async def _send(self, writer: LocalWriter, msg: dict) -> None:
         writer.write(json.dumps(msg).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         max_events: int = 50,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg: dict[str, Any] = json.loads(line.decode("utf-8"))
             if msg.get("type") == wanted_type:
                 return msg
         raise AssertionError(f"no {wanted_type!r} event observed")
 
     async def _server_side_writer(self) -> Any:
-        """Return the server-side UDS writer of the latest connection."""
+        """Return the server-side connection of the latest local client."""
         writers: list[Any] = []
         for _ in range(200):
             with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
+                writers = list(self.server._printer._local_clients)
             if writers:
                 return writers[-1]
             await asyncio.sleep(0.01)
-        raise AssertionError("server never registered the UDS writer")
+        raise AssertionError("server never registered the local client")
 
     async def test_send_lock_not_recreated_for_removed_endpoint(self) -> None:
         """A send racing endpoint removal must not leak a _send_locks entry.
@@ -143,12 +141,12 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         straggler ``_schedule_send`` fires from a worker thread (as a
         broadcast from an agent thread would).
         """
-        await self._connect_uds()
+        await self._connect_local()
         printer = self.server._printer
         writer = await self._server_side_writer()
         with printer._ws_lock:
             self.assertIn(writer, printer._pending_sends)
-        printer.remove_uds_writer(writer)
+        printer.remove_local_client(writer)
         with printer._ws_lock:
             self.assertNotIn(writer, printer._send_locks)
             self.assertNotIn(writer, printer._pending_sends)
@@ -169,7 +167,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         printer = self.server._printer
         data = json.dumps({"type": "notice", "text": "x", "tabId": "t"})
         for _ in range(10):
-            await self._connect_uds()
+            await self._connect_local()
             writer = await self._server_side_writer()
 
             def hammer(w: Any = writer) -> None:
@@ -180,7 +178,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
             t = threading.Thread(target=hammer)
             t.start()
             await asyncio.sleep(random.uniform(0.0, 0.01))
-            printer.remove_uds_writer(writer)
+            printer.remove_local_client(writer)
             await asyncio.to_thread(t.join)
         await asyncio.sleep(0.3)
         with printer._ws_lock:
@@ -191,7 +189,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_with_non_str_tab_ids_still_serviced(self) -> None:
         """Non-str tabId/chatId values must not abort ready handling."""
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(
             writer,
             {
@@ -228,7 +226,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
             await orig_run_cmd(cmd)
 
         self.server._run_cmd = recording_run_cmd  # type: ignore[method-assign]
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(
             writer,
             {
@@ -267,7 +265,7 @@ class TestAuthFailureBookkeeping(unittest.TestCase):
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
 
     def tearDown(self) -> None:

@@ -108,7 +108,7 @@ function runDriver(role, delayMs) {
     KISS_TEST_DI_PATH: path.join(__dirname, '..', 'out', 'DependencyInstaller.js'),
   };
   delete env.KISS_HOME;
-  delete env.KISS_SORCAR_SOCK;
+  delete env.KISS_SORCAR_LOCAL;
   delete env.ANTHROPIC_API_KEY;
   delete env.OPENAI_API_KEY;
   const child = spawn(process.execPath, [driverPath], {

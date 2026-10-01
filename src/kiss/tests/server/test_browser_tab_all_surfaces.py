@@ -11,7 +11,7 @@ tab that is open on every connected surface, streams JPEG frames to
 the surfaces showing it, replays their input on the real page, and is
 closed on every surface when the page closes.
 
-This test runs the REAL daemon on a Unix socket, REAL webviews under
+This test runs the REAL daemon on its local WSS endpoint, REAL webviews under
 jsdom (``test/multiSurfaceBridge.js``, one daemon connection each) and
 a REAL Chromium-family browser (the machine's default browser when it
 is Chromium-based, else Playwright's bundled Chromium) against a local
@@ -49,14 +49,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-from kiss.tests.conftest import requires_unix_sockets
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_subagent_tabs_all_surfaces import (
     _JSDOM_PKG,
     SurfaceBridge,
 )
-
-pytestmark = requires_unix_sockets
 
 _PLAYWRIGHT_CACHE = Path.home() / ".cache" / "ms-playwright"
 
@@ -101,7 +98,7 @@ def _wait(pred: Callable[[], Any], what: str, timeout: float = 30) -> Any:
     raise AssertionError(f"timed out waiting for {what}; last={last!r}")
 
 
-class BrowserTabAllSurfacesTest(DaemonUdsHarness):
+class BrowserTabAllSurfacesTest(DaemonLocalHarness):
     """Open everywhere while the page lives, closed everywhere when it closes."""
 
     def setUp(self) -> None:
@@ -117,7 +114,7 @@ class BrowserTabAllSurfacesTest(DaemonUdsHarness):
         self._saved_home = os.environ.get("KISS_BROWSER_HOME")
         os.environ["KISS_BROWSER_HOME"] = self.base + "/"
         super().setUp()
-        self.bridge = SurfaceBridge(self.sock_path)
+        self.bridge = SurfaceBridge(str(self.endpoint_file))
 
     def tearDown(self) -> None:
         self.bridge.quit()

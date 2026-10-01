@@ -9,7 +9,7 @@ in-memory list on every mutation, so two live registries on ONE file
 overwrite each other's tabs.  The design assumes a single owner per
 ``KISS_HOME`` — and the canonical ``kiss-web`` daemon is that owner —
 but ``_kiss_web_launcher._ensure_api_server`` builds a second,
-private-UDS ``RemoteAccessServer`` in the channel-agent process whose
+private loopback-WSS ``RemoteAccessServer`` in the channel-agent process whose
 ``VSCodeServer`` used to bind the SAME ``KISS_HOME/tabs.json``.  Every
 channel run registers a tab, so the canonical daemon's tabs were
 erased by the embedded server's stale snapshot (and vice versa), and
@@ -38,9 +38,6 @@ from unittest import TestCase
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
 
 _TABS_PER_SIDE = 12
 
@@ -74,15 +71,17 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
             "tabId": "vscode-earlier", "chatId": "chat-earlier",
             "title": "earlier chat", "workDir": str(self.tmp),
         }]}), encoding="utf-8")
-        self._saved_launcher = (launcher._API_SERVER, launcher._API_SERVER_SOCK)
+        self._saved_launcher = (
+            launcher._API_SERVER, launcher._API_SERVER_ENDPOINT,
+        )
         launcher._API_SERVER = None
-        launcher._API_SERVER_SOCK = ""
+        launcher._API_SERVER_ENDPOINT = ""
 
     def tearDown(self) -> None:
         embedded = launcher._API_SERVER
         if embedded is not None and embedded._loop is not None:
             embedded._loop.call_soon_threadsafe(embedded._loop.stop)
-        launcher._API_SERVER, launcher._API_SERVER_SOCK = self._saved_launcher
+        launcher._API_SERVER, launcher._API_SERVER_ENDPOINT = self._saved_launcher
         (
             _persistence._DB_PATH, _persistence._db_conn, _persistence._KISS_DIR,
         ) = self._saved_persistence
@@ -105,15 +104,16 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
         self,
     ) -> None:
         canonical = RemoteAccessServer(
-            uds_path=str(self.tmp / "canonical.sock"), work_dir=str(self.tmp),
+            local_endpoint_file=str(self.tmp / "canonical-local.json"),
+            work_dir=str(self.tmp),
         )
-        # The launcher's real entry point: a private-UDS daemon in this
-        # process sharing the KISS home (database, chats) with the
-        # canonical one.
-        sock_path = launcher._ensure_api_server()
+        # The launcher's real entry point: a private loopback-WSS daemon
+        # in this process sharing the KISS home (database, chats) with
+        # the canonical one.
+        endpoint_file = launcher._ensure_api_server()
         embedded = launcher._API_SERVER
         assert embedded is not None
-        self.assertTrue(Path(sock_path).exists())
+        self.assertTrue(Path(endpoint_file).exists())
 
         barrier = threading.Barrier(2)
         threads = [
@@ -153,7 +153,8 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
         )
         # A fresh canonical daemon (restart) sees exactly its own tabs.
         restarted = RemoteAccessServer(
-            uds_path=str(self.tmp / "restarted.sock"), work_dir=str(self.tmp),
+            local_endpoint_file=str(self.tmp / "restarted-local.json"),
+            work_dir=str(self.tmp),
         )
         self.assertEqual(
             {e["tabId"] for e in restarted._vscode_server.tab_registry.snapshot()},

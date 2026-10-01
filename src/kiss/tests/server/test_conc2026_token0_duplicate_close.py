@@ -31,8 +31,8 @@ Real :class:`VSCodeServer`, real :class:`TabRegistry`, real
 :class:`JsonPrinter`; the racing interleavings are forced through
 seams on the server/registry objects (a wrapper that runs the racing
 step inside the window), never through mocks of the code under test —
-the same technique as ``test_review3_server_fixes.py`` and
-``test_local_uds_interest_races.py``.
+the same technique as ``test_review3_server_fixes.py`` and the
+local-tab interest-race tests.
 """
 
 from __future__ import annotations

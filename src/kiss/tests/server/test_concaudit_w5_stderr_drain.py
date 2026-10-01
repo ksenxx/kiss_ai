@@ -177,7 +177,7 @@ class TestDrainSurvivesInvalidUtf8(unittest.TestCase):
         server = RemoteAccessServer(
             use_tunnel=False,
             url_file=tmp_dir / "remote-url.json",
-            uds_path=tmp_dir / "kiss.sock",
+            local_endpoint_file=tmp_dir / "kiss-local.json",
         )
         # The undrained child blocks on the full pipe during the
         # fail-fast window, so it is still alive and gets published.

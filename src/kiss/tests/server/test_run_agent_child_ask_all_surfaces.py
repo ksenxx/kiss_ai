@@ -29,11 +29,8 @@ from kiss.core import vscode_config
 from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.server import _subagent_is_done
-from kiss.tests.conftest import requires_unix_sockets
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 from kiss.tests.server.test_subagent_tabs_all_surfaces import _JSDOM_PKG, SurfaceBridge
-
-pytestmark = requires_unix_sockets
 
 QUESTION = "Which colour should the child use? (zq7)"
 ANSWER = "teal zq7"
@@ -60,7 +57,7 @@ PARENT_PROMPT = (
 SURFACES = ("sidebar", "remote", "slow", "remote2", "editor")
 
 
-class RunAgentChildAskAllSurfacesTest(DaemonUdsHarness):
+class RunAgentChildAskAllSurfacesTest(DaemonLocalHarness):
     """Exercise live, delayed, reconnected and completed child views."""
 
     def setUp(self) -> None:
@@ -81,9 +78,9 @@ class RunAgentChildAskAllSurfacesTest(DaemonUdsHarness):
         })
         self.server._vscode_server._refresh_default_model()
         # This is the daemon's normal dispatch destination, set at boot.
-        self._saved_daemon_sock = cron_agent._daemon_sock_path
-        cron_agent._daemon_sock_path = self.sock_path
-        self.bridge = SurfaceBridge(self.sock_path)
+        self._saved_daemon_endpoint = cron_agent._daemon_endpoint_file
+        cron_agent._daemon_endpoint_file = str(self.endpoint_file)
+        self.bridge = SurfaceBridge(str(self.endpoint_file))
 
     def tearDown(self) -> None:
         """Stop remaining tasks before releasing the daemon and its database."""
@@ -96,7 +93,7 @@ class RunAgentChildAskAllSurfacesTest(DaemonUdsHarness):
             if state.task_thread:
                 state.task_thread.join(timeout=20)
         self.bridge.quit()
-        cron_agent._daemon_sock_path = self._saved_daemon_sock
+        cron_agent._daemon_endpoint_file = self._saved_daemon_endpoint
         super().tearDown()
 
     @staticmethod

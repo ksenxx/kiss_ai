@@ -6634,13 +6634,13 @@
   },
   "openrouter/~moonshotai/kimi-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.318,
-    "output_price_per_1M": 7.943,
+    "input_price_per_1M": 0.28,
+    "output_price_per_1M": 10.0,
     "fc": true,
     "emb": false,
     "gen": true,
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.4
+    "cache_read_price_per_1M": 0.28
   },
   "openrouter/~openai/gpt-astra-latest": {
     "context_length": 500000,

@@ -29,9 +29,9 @@ restarts and a reader never sees a torn document.  The file has
 exactly ONE owner: a registry loads it once and publishes its complete
 in-memory list on every save, so a second live registry on the same
 file would overwrite the first one's tabs with a stale snapshot.
-Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (UDS
-socket liveness check), and a server embedded in another process that
-shares the KISS home — the channel launcher's private-UDS daemon —
+Daemon startup guarantees one canonical daemon per ``KISS_HOME`` (the
+WSS port bind), and a server embedded in another process that
+shares the KISS home — the channel launcher's private-endpoint daemon —
 owns a private registry file instead
 (``VSCodeServer.use_private_tab_registry``).  A thread lock therefore
 suffices for the registry's in-memory readers and writers; the unique
@@ -697,15 +697,14 @@ class TabRegistry:
             chat_id: New chat binding (``None`` keeps the current one).
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
-            scope_work_dir: The directory that scopes the tab to a
-                client workspace, distinct from *work_dir* (the tab's
-                execution/display directory): a standalone API
-                dispatch executes in a channel/cron scratch directory
-                but must appear in the CALLING workspace's tab bar, so
-                its scope is pinned to that workspace while *work_dir*
-                stays the scratch directory.  ``None``/empty keeps the
-                current value; clients fall back to *work_dir* when it
-                is empty, preserving the pre-scope behaviour.
+            scope_work_dir: The workspace a standalone API dispatch
+                (``sorcar.run`` / a SEA file's ``scope_work_dir()``)
+                was issued from, distinct from *work_dir* (the
+                channel/cron scratch directory it executes in).
+                Informational: every client shows every registry tab
+                whatever folder it runs in, so this field no longer
+                decides where a tab is visible.  ``None``/empty keeps
+                the current value.
             task_id: The specific historical task the tab shows.
                 ``None`` keeps the current value; ``""`` clears it (the
                 tab tracks the chat's latest task again).

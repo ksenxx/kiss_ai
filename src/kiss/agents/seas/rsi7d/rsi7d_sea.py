@@ -116,6 +116,7 @@ import textwrap
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -1749,9 +1750,13 @@ def _base_commit(repo: Path, task: str, start_ms: int) -> tuple[str, str]:
     the task.
     """
     start_s = start_ms // 1000
+    # ISO 8601 with an explicit zone: git reads a bare ``@<epoch>`` as an
+    # epoch only when it has nine or more digits and otherwise guesses a
+    # calendar date from it (differently per platform and zone).
+    started = datetime.fromtimestamp(start_s, UTC).isoformat()
     wanted = _normalized(task)
     proc = _git(
-        "log", "--all", f"--since=@{start_s}", "--format=%H%x1f%ct%x1f%P%x1f%B%x1e", cwd=repo
+        "log", "--all", f"--since={started}", "--format=%H%x1f%ct%x1f%P%x1f%B%x1e", cwd=repo
     )
     matches: list[tuple[int, str, str]] = []
     for record in proc.stdout.split("\x1e"):
@@ -1765,7 +1770,7 @@ def _base_commit(repo: Path, task: str, start_ms: int) -> tuple[str, str]:
     if matches:
         _committed, sha, parent = min(matches)
         return parent, f"first parent of the task's auto-commit {sha[:12]}"
-    proc = _git("rev-list", "-1", "--first-parent", f"--before=@{start_s}", "HEAD", cwd=repo)
+    proc = _git("rev-list", "-1", "--first-parent", f"--before={started}", "HEAD", cwd=repo)
     sha = proc.stdout.strip()
     return sha, "HEAD of the repository when the task started" if sha else ""
 

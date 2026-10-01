@@ -446,7 +446,7 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=0,
             url_file=self.tmp / "remote-url.json",
-            uds_path=self.tmp / "sorcar.sock",
+            local_endpoint_file=self.tmp / "sorcar-local.json",
             **kwargs,  # type: ignore[arg-type]
         )
         await self.server.start_async()

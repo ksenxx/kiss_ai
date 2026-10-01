@@ -25,7 +25,7 @@ echo-strip clipped it to ``_token`` so accepting produced the
 non-existent identifier ``qux_token``.
 
 These are end-to-end reproductions through the real pipeline:
-the daemon's UDS ``complete`` command -> ``ghost`` event.
+the daemon's local-channel ``complete`` command -> ``ghost`` event.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -58,9 +58,8 @@ def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-@requires_unix_sockets
 class TestGhostSuffixNotEchoStripped(IsolatedAsyncioTestCase):
-    """UDS ``complete`` -> ``ghost`` round trip through the real daemon."""
+    """Local ``complete`` -> ``ghost`` round trip through the real daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -71,17 +70,16 @@ class TestGhostSuffixNotEchoStripped(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -98,30 +96,27 @@ class TestGhostSuffixNotEchoStripped(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(self.server)
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):

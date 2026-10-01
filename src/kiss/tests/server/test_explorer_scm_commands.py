@@ -10,8 +10,8 @@ drives these three commands: the Explorer view lists folders with
 working tree with ``gitStatus`` and the commit graph with ``gitLog``.
 Every test here talks to a REAL :class:`RemoteAccessServer` over real
 ``wss://`` and to a REAL git repository built in a temp dir — no mocks.
-The UDS drop gate (a VS Code window never shows these views) is driven
-over a real Unix-domain-socket connection.
+The local-client drop gate (a VS Code window never shows these views)
+is driven over a real local WSS connection.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 
 
 def _find_free_port() -> int:
@@ -118,25 +119,27 @@ def build_repo(repo: Path) -> dict[str, str]:
     Returns:
         A mapping of commit labels to full shas.
     """
+    # newline="\n": the tests compare working-tree contents byte for byte
+    # against LF strings, and Windows would otherwise write CRLF.
     _git(repo, "init", "-q", "-b", "main")
-    (repo / "a.txt").write_text("a\n")
-    (repo / "README.md").write_text("# readme\n")
+    (repo / "a.txt").write_text("a\n", newline="\n")
+    (repo / "README.md").write_text("# readme\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "first: add a.txt, README.md")
     first = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "mv", "a.txt", "b.txt")
     (repo / "dir").mkdir()
-    (repo / "dir" / "nested.py").write_text("x = 1  # nested-sentinel-4f2a\n")
+    (repo / "dir" / "nested.py").write_text("x = 1  # nested-sentinel-4f2a\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "second: rename a.txt -> b.txt")
     second = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "checkout", "-q", "-b", "feature")
-    (repo / "feature.txt").write_text("feature-file-sentinel-7c1e\n")
+    (repo / "feature.txt").write_text("feature-file-sentinel-7c1e\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "feature: add feature.txt")
     feat = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "checkout", "-q", "main")
-    (repo / "main-only.txt").write_text("m\n")
+    (repo / "main-only.txt").write_text("m\n", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "main: add main-only.txt")
     main_only = _git(repo, "rev-parse", "HEAD").strip()
@@ -144,10 +147,10 @@ def build_repo(repo: Path) -> dict[str, str]:
     merge = _git(repo, "rev-parse", "HEAD").strip()
     _git(repo, "tag", "v1")
     # Dirty working tree.
-    (repo / "README.md").write_text("# readme changed\n")
-    (repo / "dir" / "nested.py").write_text("x = 2  # nested-sentinel-4f2a\n")
+    (repo / "README.md").write_text("# readme changed\n", newline="\n")
+    (repo / "dir" / "nested.py").write_text("x = 2  # nested-sentinel-4f2a\n", newline="\n")
     _git(repo, "add", "dir/nested.py")
-    (repo / "untracked.txt").write_text("u\n")
+    (repo / "untracked.txt").write_text("u\n", newline="\n")
     (repo / "b.txt").unlink()
     return {
         "first": first,
@@ -198,14 +201,13 @@ class ExplorerHarness:
         self.port = _find_free_port()
         self.base_url = f"https://127.0.0.1:{self.port}"
         self.ws_url = f"wss://127.0.0.1:{self.port}/ws"
-        self.uds_path = tmp / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=tmp / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         self.loop = asyncio.new_event_loop()
@@ -708,22 +710,19 @@ class TestGitLog:
         assert status["branch"] == "main"
 
 
-@requires_unix_sockets
-class TestUdsDropGate:
-    """A VS Code window (UDS) never gets a reply to these commands."""
+class TestLocalDropGate:
+    """A VS Code window (local client) never gets a reply to these commands."""
 
-    def test_uds_delivered_commands_are_dropped(self, harness) -> None:
+    def test_locally_delivered_commands_are_dropped(self, harness) -> None:
         async def _probe() -> list[dict]:
-            reader, writer = await asyncio.open_unix_connection(
-                str(harness.uds_path)
-            )
+            reader, writer = await open_local_connection(harness.server)
             try:
                 for cmd in (
                     {"type": "listDir", "tabId": "u-1"},
                     {"type": "gitStatus", "tabId": "u-1"},
                     {"type": "gitLog", "tabId": "u-1"},
                     # Positive control, sent LAST: getInputHistory IS
-                    # answered over UDS (inputHistory).  Its reply
+                    # answered locally (inputHistory).  Its reply
                     # arriving proves the three commands before it were
                     # processed — and dropped — rather than still queued.
                     {"type": "getInputHistory", "tabId": "u-1"},

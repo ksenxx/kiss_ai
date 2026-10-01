@@ -3099,6 +3099,16 @@ body.sidebar-chat-mode #meta-info-content {
   outline-offset: -1px;
 }
 
+/* Selected rows (multi-select): VS Code's list selection tint, a
+   little stronger while the tree has keyboard focus. */
+.explorer-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.explorer-tree:focus-within .explorer-row.is-selected {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
 .explorer-chevron {
   flex: 0 0 16px;
   width: 16px;
@@ -3391,7 +3401,24 @@ body.sidebar-chat-mode #meta-info-content {
   margin-top: var(--space-1);
   padding-right: var(--space-1-5);
   color: var(--fg);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
 }
+
+/* The header folds the worktree's rows: its chevron points right when
+   folded, down when open (like a folder row of the Explorer). */
+.scm-worktree-hdr:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.scm-worktree-hdr:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.scm-worktree-hdr.expanded > .explorer-chevron { transform: rotate(90deg); }
+
+.scm-worktree-body[hidden] { display: none; }
 
 .scm-worktree-hdr.is-current .scm-worktree-name::after {
   content: ' (current)';

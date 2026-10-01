@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import platform
 import shutil
 import socket
 import ssl
@@ -59,6 +60,21 @@ from kiss.tests.server._ntfy_emulator import unroutable_base_url
 class TestBuildHtml(unittest.TestCase):
     """Test HTML template generation."""
 
+    def test_title_names_product_and_machine(self) -> None:
+        """The browser tab title is ``KISS Sorcar: <machine name>``.
+
+        A user with several KISS servers open tells the tabs apart by
+        the host name, the same value the task settings report as
+        "Machine info".  No ``{{PAGE_TITLE}}`` placeholder may leak.
+        The bare-product-name fallback of ``_page_title`` needs a host
+        without a node name, which no real test host provides, so it is
+        not exercised here.
+        """
+        html = _build_html()
+        node = platform.node().strip()
+        self.assertTrue(node, "test host has no node name")
+        self.assertIn(f"<title>{PRODUCT_NAME}: {node}</title>", html)
+        self.assertNotIn("{{PAGE_TITLE}}", html)
 
     def test_html_has_no_vscode_csp(self) -> None:
         """The standalone HTML does not contain VS Code CSP nonce directives."""
@@ -364,7 +380,7 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         """GET / returns the chat HTML page."""
         status, body = await self._http_get("/")
         self.assertEqual(status, 200)
-        self.assertIn(f"<title>{PRODUCT_NAME}</title>", body)
+        self.assertIn(f"<title>{PRODUCT_NAME}: ", body)
         self.assertIn('id="task-input"', body)
 
 
@@ -1911,7 +1927,7 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             _fetch,
         )
         self.assertEqual(status, 200)
-        self.assertIn(f"<title>{PRODUCT_NAME}</title>", body)
+        self.assertIn(f"<title>{PRODUCT_NAME}: ", body)
 
     async def test_plain_ws_rejected(self) -> None:
         """Plain ws:// connection to the TLS server should fail."""

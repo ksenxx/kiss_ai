@@ -50,7 +50,7 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
             host="127.0.0.1",
             port=self.port,
             url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.tmpdir / "sorcar.sock",
+            local_endpoint_file=self.tmpdir / "sorcar-local.json",
         )
         asyncio.run_coroutine_threadsafe(
             self.server.start_async(), self.loop,

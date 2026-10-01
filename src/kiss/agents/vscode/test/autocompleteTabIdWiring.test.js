@@ -25,6 +25,7 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 const {JSDOM} = require('jsdom');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
@@ -126,20 +127,12 @@ const tmpDirs = [tmpHome];
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  for (const dir of tmpDirs.slice().reverse()) {
-    fs.rmSync(dir, {recursive: true, force: true});
-  }
-  process.exit(0);
-}
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 // Every JSON command line the host actually writes to the daemon.
 const daemonCommands = [];
 let lastServerSock = null;
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   lastServerSock = sock;
   let buf = '';
   sock.on('data', chunk => {
@@ -213,7 +206,7 @@ function typeInto(win, text) {
 
 async function runTests() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 
   const sourcePath = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');

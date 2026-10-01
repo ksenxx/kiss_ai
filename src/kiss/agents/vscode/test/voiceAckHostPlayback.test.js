@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 const {JSDOM} = require('jsdom');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const MEDIA = path.join(EXT_ROOT, 'media');
@@ -19,7 +20,7 @@ const OUT_SIDEBAR = path.join(EXT_ROOT, 'out', 'SorcarSidebarView.js');
 const OUT_PLAYER = path.join(EXT_ROOT, 'out', 'voiceAckPlayer.js');
 
 if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS + sh test)');
+  console.log('  skipped on win32 (sh test)');
   process.exit(0);
 }
 for (const compiled of [OUT_SIDEBAR, OUT_PLAYER]) {
@@ -100,7 +101,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ack-e2e-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const recordFile = path.join(tmpHome, 'played.txt');
 const recorder = path.join(tmpHome, 'recorder.sh');
@@ -111,7 +112,7 @@ fs.writeFileSync(
 );
 process.env.KISS_SORCAR_PLAY_CMD = `sh "${recorder}"`;
 
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   let buf = '';
   sock.on('data', chunk => {
     buf += chunk.toString();
@@ -206,7 +207,7 @@ async function waitFor(cond, deadlineMs) {
 
 async function main() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 
   delete require.cache[require.resolve(OUT_SIDEBAR)];

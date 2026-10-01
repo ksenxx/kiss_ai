@@ -27,7 +27,7 @@ The fix
 ``src/reloadGuard.js`` exposes :func:`isReloadReady`, and ``extension.ts``
 now defers the reload until the reinstall has fully settled — ``extension.js``
 present, non-empty and size-stable across consecutive polls, and the kiss-web
-daemon socket back — instead of reloading on the first transient stat change.
+daemon endpoint file back — instead of reloading on the first transient stat change.
 
 These tests genuinely execute:
 
@@ -35,7 +35,7 @@ These tests genuinely execute:
   transiently remove ``out/extension.js`` (the precondition for the bug), and
 * the real ``src/reloadGuard.js`` module via ``node``, to prove the guard
   refuses to reload during every transient state and only allows it once the
-  reinstall has settled and the daemon socket is back.
+  reinstall has settled and the daemon endpoint file is back.
 """
 
 from __future__ import annotations
@@ -213,12 +213,12 @@ class TestReloadGuardBehavior(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _ready(self, ext_js: Path, sock: Path, prev_size: int) -> dict:
+    def _ready(self, ext_js: Path, endpoint: Path, prev_size: int) -> dict:
         """Call ``isReloadReady`` in the real guard module and return its result."""
         script = (
             f"const g = require({json.dumps(str(RELOAD_GUARD_JS))});"
             f"const r = g.isReloadReady("
-            f"{json.dumps(str(ext_js))}, {json.dumps(str(sock))}, {prev_size});"
+            f"{json.dumps(str(ext_js))}, {json.dumps(str(endpoint))}, {prev_size});"
             "process.stdout.write(JSON.stringify(r));"
         )
         out = subprocess.run(
@@ -238,28 +238,28 @@ class TestReloadGuardBehavior(unittest.TestCase):
         """
         ext_js = self.tmp / "out" / "extension.js"
         ext_js.parent.mkdir(parents=True)
-        sock = self.tmp / "sorcar.sock"
+        endpoint = self.tmp / "sorcar-local.json"
 
-        r = self._ready(ext_js, sock, -1)
+        r = self._ready(ext_js, endpoint, -1)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], -1)
 
         ext_js.write_text("")
-        r = self._ready(ext_js, sock, 0)
+        r = self._ready(ext_js, endpoint, 0)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], 0)
 
         ext_js.write_text("partial-bundle")
         size = len("partial-bundle")
-        r = self._ready(ext_js, sock, -1)
+        r = self._ready(ext_js, endpoint, -1)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], size)
 
-        r = self._ready(ext_js, sock, size)
+        r = self._ready(ext_js, endpoint, size)
         self.assertFalse(r["ready"])
 
-        sock.write_text("")
-        r = self._ready(ext_js, sock, size)
+        endpoint.write_text("{}")
+        r = self._ready(ext_js, endpoint, size)
         self.assertTrue(r["ready"])
         self.assertEqual(r["size"], size)
 

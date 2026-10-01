@@ -19,7 +19,7 @@
 // asynchronously resolved default when it arrives.  This test drives the
 // REAL compiled SorcarSidebarView against a fake HOME whose `uv` takes
 // 1.5s to answer: the constructor must return in a small fraction of
-// that, the first command sent to the (real UDS) daemon carries the
+// that, the first command sent to the (real local WSS) daemon carries the
 // provisional model, and one sent after `uv` answered carries the
 // resolved one.
 
@@ -29,6 +29,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_VIEW = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
 if (!fs.existsSync(OUT_VIEW)) {
@@ -76,7 +77,7 @@ for (const k of [
 ]) {
   delete process.env[k];
 }
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 // --- vscode stub -----------------------------------------------------
 class StubEventEmitter {
@@ -145,9 +146,9 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// --- real UDS daemon stand-in: records every frame ---------------------
+// --- real local daemon stand-in: records every frame ---------------------
 const frames = [];
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   let buf = '';
   sock.setEncoding('utf-8');
   sock.on('data', d => {
@@ -186,7 +187,7 @@ function cleanup() {
 
 async function main() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
   const {SorcarSidebarView} = require(OUT_VIEW);
 

@@ -18,11 +18,11 @@ to stop waiting, not to cancel the work), and it still accepts
 ``_NO_DEADLINE_WAKE_SECONDS`` and retries, so an injected abort — the
 ``KeyboardInterrupt`` of a parent Stop — still gets delivered).
 
-These tests run real UNIX-domain-socket daemon stand-ins and drive the
-real client code:
+These tests run real local-WSS daemon stand-ins (served by
+:func:`kiss.tests.local_ws.fake_daemon`) and drive the real client code:
 
-* The ``run_agent`` tool (path mode, standard socket resolution via
-  ``KISS_SORCAR_SOCK``) returns the delayed sub-task's YAML result,
+* The ``run_agent`` tool (path mode, standard endpoint resolution via
+  ``KISS_SORCAR_LOCAL``) returns the delayed sub-task's YAML result,
   both with the default timeout and with an explicit one.  The delay
   is seconds, so this cannot behaviorally pin the default at exactly
   300 s — only a five-minute test could; the shrunk-constant timeout
@@ -41,8 +41,8 @@ Not covered here, and why: the stop-SEND failure branch (a broken
 daemon connection at the exact moment the stop is written raises
 ``ConnectionError`` instead of a ``TimeoutError`` that would falsely
 claim "was stopped") cannot be staged end-to-end without test
-doubles — closing or shutting down a UDS peer makes the client's
-blocking ``recv`` return EOF first, taking the ordinary
+doubles — closing a WebSocket peer makes the client's blocking
+``recv`` raise ``ConnectionClosed`` first, taking the ordinary
 connection-loss path before any stop is attempted.
 * ``daemon_client.run(timeout=None)`` returns a result delivered only
   after a delay, without raising ``TimeoutError``.
@@ -53,9 +53,9 @@ connection-loss path before any stop is attempted.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
-import socket
 import tempfile
 import threading
 import time
@@ -64,6 +64,8 @@ from typing import Any
 
 import pytest
 import yaml
+from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosed
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent, daemon_client
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
@@ -71,149 +73,146 @@ from kiss.server.task_runner import inject_keyboard_interrupt
 from kiss.tests.agents.sorcar.test_dispatch_stop_cascade import (
     _RecordingDaemon,
 )
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets  # the Sorcar daemon speaks over a UDS
-
+from kiss.tests.local_ws import fake_daemon
 
 
 @pytest.fixture(autouse=True)
-def _standalone_daemon_socket(monkeypatch: pytest.MonkeyPatch):
-    """Isolate each test from a recorded in-process daemon socket.
+def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
+    """Isolate each test from a recorded in-process daemon endpoint.
 
-    ``_dispatch`` prefers the socket the cron scheduler recorded at
-    daemon boot (``cron_agent._daemon_sock_path``) over the standard
-    ``KISS_SORCAR_SOCK`` resolution; a value left behind by another
-    test module would divert the dispatch away from this module's fake
-    daemons.
+    ``_dispatch`` prefers the endpoint file the cron scheduler recorded
+    at daemon boot (``cron_agent._daemon_endpoint_file``) over the
+    standard ``KISS_SORCAR_LOCAL`` resolution; a value left behind by
+    another test module would divert the dispatch away from this
+    module's fake daemons.
     """
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     yield
 
 
-class _SlowFinishDaemon:
-    """A real UDS daemon stand-in whose result arrives after a delay.
+async def _send_event(ws: ServerConnection, event: dict[str, Any]) -> bool:
+    """Send one JSON event frame; False once the client has gone away."""
+    try:
+        await ws.send(json.dumps(event))
+        return True
+    except ConnectionClosed:
+        return False
 
-    Accepts one connection, reads the initial ``run`` command, sends
-    ``{"type": "status", "running": true}``, sleeps *delay* seconds,
-    and only then sends the terminal ``result`` + ``status
-    running=false`` pair — the shape of a long-running task on a live
-    daemon.
+
+class _LocalDaemon:
+    """Base for local-WSS daemon stand-ins served on a loop of their own thread.
+
+    :func:`fake_daemon` completes the ``auth`` handshake, then
+    :meth:`_handle` runs with the authenticated connection.  The
+    synchronous ``daemon_client.run`` under test blocks the test
+    thread, so the daemon lives on its own event loop.
+    """
+
+    def __init__(self, prefix: str) -> None:
+        """Start serving; returns once the endpoint file is written."""
+        self._dir = Path(tempfile.mkdtemp(prefix=prefix))
+        self.endpoint_file = self._dir / "sorcar-local.json"
+        self.run_cmd: dict[str, Any] | None = None
+        self._ready = threading.Event()
+        self._loop = asyncio.new_event_loop()
+        self._closed = asyncio.Event()
+        self._thread = threading.Thread(
+            target=self._loop.run_until_complete, args=(self._serve(),), daemon=True,
+        )
+        self._thread.start()
+        assert self._ready.wait(10), "the daemon stand-in never came up"
+
+    async def _serve(self) -> None:
+        async with fake_daemon(self._dir, self._handle, endpoint_file=self.endpoint_file):
+            self._ready.set()
+            await self._closed.wait()
+
+    async def _handle(self, ws: ServerConnection) -> None:
+        raise NotImplementedError
+
+    async def _read_run(self, ws: ServerConnection) -> str | None:
+        """Record the client's initial ``run`` command; return its tab id."""
+        try:
+            run_cmd: dict[str, Any] = json.loads(await ws.recv())
+        except (ConnectionClosed, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        self.run_cmd = run_cmd
+        return str(run_cmd.get("tabId", ""))
+
+    def close(self) -> None:
+        """Stop serving, close every connection and remove the temp dir."""
+        self._loop.call_soon_threadsafe(self._closed.set)
+        self._thread.join(timeout=10)
+        self._loop.close()
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+
+class _SlowFinishDaemon(_LocalDaemon):
+    """A daemon stand-in whose result arrives after a delay.
+
+    Reads the initial ``run`` command, sends ``{"type": "status",
+    "running": true}``, sleeps *delay* seconds, and only then sends the
+    terminal ``result`` + ``status running=false`` pair — the shape of
+    a long-running task on a live daemon.
     """
 
     def __init__(self, delay: float) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir."""
         self.delay = delay
-        self.run_cmd: dict[str, Any] | None = None
-        self._dir = Path(tempfile.mkdtemp(prefix="kiss_no_timeout_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        super().__init__("kiss_no_timeout_")
 
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
+    async def _handle(self, ws: ServerConnection) -> None:
+        tab_id = await self._read_run(ws)
+        if tab_id is None:
             return
-        with conn:
-            reader = conn.makefile("rb")
-            try:
-                run_cmd: dict[str, Any] = json.loads(
-                    reader.readline().decode("utf-8"),
-                )
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                return
-            self.run_cmd = run_cmd
-            tab_id = run_cmd.get("tabId", "")
-
-            def send(event: dict[str, Any]) -> None:
-                try:
-                    conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
-                except OSError:
-                    pass
-
-            send({"type": "status", "running": True, "tabId": tab_id})
-            time.sleep(self.delay)
-            send({
-                "type": "result",
-                "tabId": tab_id,
-                "taskId": "task-slow-1",
-                "success": True,
-                "text": "slow but done",
-                "cost": "$0.0100",
-                "total_tokens": 5,
-                "step_count": 1,
-            })
-            send({"type": "status", "running": False, "tabId": tab_id})
-            # Absorb the client's closeTab before dropping the socket.
-            try:
-                reader.readline()
-            except OSError:
-                pass
-
-    def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
+        await _send_event(ws, {"type": "status", "running": True, "tabId": tab_id})
+        await asyncio.sleep(self.delay)
+        await _send_event(ws, {
+            "type": "result",
+            "tabId": tab_id,
+            "taskId": "task-slow-1",
+            "success": True,
+            "text": "slow but done",
+            "cost": "$0.0100",
+            "total_tokens": 5,
+            "step_count": 1,
+        })
+        await _send_event(ws, {"type": "status", "running": False, "tabId": tab_id})
+        # Absorb the client's closeTab before dropping the connection.
         try:
-            self._srv.close()
-        except OSError:
+            await ws.recv()
+        except ConnectionClosed:
             pass
-        self._thread.join(timeout=10)
-        shutil.rmtree(self._dir, ignore_errors=True)
 
 
-class _RawBytesDaemon:
-    """A UDS daemon stand-in that sends a scripted byte payload.
+class _OversizeFrameDaemon(_LocalDaemon):
+    """A daemon stand-in that answers the ``run`` with one oversized frame.
 
-    Accepts one connection, sends *payload* verbatim (never reading
-    the client's ``run`` command — the socket buffers it), and keeps
-    the connection open until closed, exercising the client's frame
-    assembly on arbitrary wire bytes.
+    Sends *payload* as a single text frame (never reading the client's
+    ``run`` command) and keeps the connection open until closed,
+    exercising the client's ``max_size`` cap on an arbitrary frame.
     """
 
     def __init__(self, payload: bytes) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir."""
-        self._dir = Path(tempfile.mkdtemp(prefix="kiss_no_timeout_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._conn: socket.socket | None = None
         self._payload = payload
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        super().__init__("kiss_no_timeout_")
 
-    def _serve(self) -> None:
+    async def _handle(self, ws: ServerConnection) -> None:
         try:
-            self._conn, _ = self._srv.accept()
-            self._conn.sendall(self._payload)
-        except OSError:
+            await ws.send(self._payload.decode("ascii"))
+        except ConnectionClosed:
             return
-
-    def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
-        for closable in (self._conn, self._srv):
-            try:
-                if closable is not None:
-                    closable.close()
-            except OSError:
-                pass
-        self._thread.join(timeout=10)
-        shutil.rmtree(self._dir, ignore_errors=True)
+        await self._closed.wait()
 
 
-class _StopConfirmingDaemon:
-    """A UDS daemon stand-in that confirms a ``stop`` with terminal status.
+class _StopConfirmingDaemon(_LocalDaemon):
+    """A daemon stand-in that confirms a ``stop`` with terminal status.
 
-    Accepts one connection, reads the ``run`` command, sends ``status
-    running=true`` (unless ``initial_running`` is false, modelling a
-    task stopped during setup before that broadcast), then never
-    finishes the task: it only records the client's further commands
-    and, on receiving ``stop``, replies — after ``confirm_delay``
-    seconds — with ``status running=false``, the shape of a live
-    daemon stopping a task.
+    Reads the ``run`` command, sends ``status running=true`` (unless
+    ``initial_running`` is false, modelling a task stopped during setup
+    before that broadcast), then never finishes the task: it only
+    records the client's further commands and, on receiving ``stop``,
+    replies — after ``confirm_delay`` seconds — with ``status
+    running=false``, the shape of a live daemon stopping a task.
     """
 
     def __init__(
@@ -222,7 +221,7 @@ class _StopConfirmingDaemon:
         initial_running: bool = True,
         stopped_result: dict[str, Any] | None = None,
     ) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir.
+        """Start serving.
 
         *stopped_result*, when given, is sent as the stopped task's
         ``result`` event just before the terminal status, like the
@@ -232,58 +231,30 @@ class _StopConfirmingDaemon:
         self.initial_running = initial_running
         self.stopped_result = stopped_result
         self.commands: list[dict[str, Any]] = []
-        self.run_cmd: dict[str, Any] | None = None
-        self._dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        super().__init__("kiss_dispatch_timeout_")
 
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
+    async def _handle(self, ws: ServerConnection) -> None:
+        tab_id = await self._read_run(ws)
+        if tab_id is None:
             return
-        with conn:
-            reader = conn.makefile("rb")
-            try:
-                run_cmd: dict[str, Any] = json.loads(
-                    reader.readline().decode("utf-8"),
-                )
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                return
-            self.run_cmd = run_cmd
-            tab_id = run_cmd.get("tabId", "")
-
-            def send(event: dict[str, Any]) -> None:
+        if self.initial_running:
+            await _send_event(ws, {"type": "status", "running": True, "tabId": tab_id})
+        try:
+            async for message in ws:
                 try:
-                    conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
-                except OSError:
-                    pass
-
-            if self.initial_running:
-                send({"type": "status", "running": True, "tabId": tab_id})
-            while True:
-                try:
-                    line = reader.readline()
-                except OSError:
-                    return
-                if not line:
-                    return
-                try:
-                    cmd = json.loads(line.decode("utf-8"))
+                    cmd = json.loads(message)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 self.commands.append(cmd)
                 if cmd.get("type") == "stop":
-                    time.sleep(self.confirm_delay)
+                    await asyncio.sleep(self.confirm_delay)
                     if self.stopped_result is not None:
-                        send({**self.stopped_result, "tabId": tab_id})
-                    send({
+                        await _send_event(ws, {**self.stopped_result, "tabId": tab_id})
+                    await _send_event(ws, {
                         "type": "status", "running": False, "tabId": tab_id,
                     })
+        except ConnectionClosed:
+            return
 
     def wait_for_command(self, cmd_type: str, timeout: float = 5.0) -> bool:
         """Poll until a *cmd_type* command was recorded (or timeout)."""
@@ -294,36 +265,22 @@ class _StopConfirmingDaemon:
             time.sleep(0.02)
         return False
 
-    def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
-        try:
-            self._srv.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=10)
-        shutil.rmtree(self._dir, ignore_errors=True)
 
+def test_oversize_frame_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A frame over the client cap fails loudly.
 
-@pytest.mark.parametrize("terminated", [False, True])
-def test_oversize_frame_rejected(
-    monkeypatch: pytest.MonkeyPatch, terminated: bool,
-) -> None:
-    """A frame over the client cap fails loudly on both detection paths.
-
-    ``terminated=False``: the cap's worth of newline-free bytes
-    accumulates with no newline in sight (the pre-``recv`` check).
-    ``terminated=True``: the newline lands in the same chunk that
-    pushes the frame over the cap, so only the extracted-line length
-    check can catch it (gpt-5.6-sol re-review finding: this path
-    initially bypassed the cap).
+    The client opens its connection with ``max_size=_MAX_LINE_BYTES``;
+    ``websockets`` then closes the connection with code 1009 (message
+    too big) when the daemon sends a larger frame, and the client must
+    surface that as the "frame larger" ``ConnectionError`` rather than
+    the generic "closed the connection" one.
     """
     monkeypatch.setattr(daemon_client, "_MAX_LINE_BYTES", 1024)
-    payload = b"a" * 1500 + (b"\n" if terminated else b"")
-    daemon = _RawBytesDaemon(payload)
+    daemon = _OversizeFrameDaemon(b"a" * 1500)
     try:
         with pytest.raises(ConnectionError, match="frame larger"):
             daemon_client.run(
-                "oversize probe", sock_path=daemon.sock_path, timeout=30.0,
+                "oversize probe", endpoint_file=daemon.endpoint_file, timeout=30.0,
             )
     finally:
         daemon.close()
@@ -340,7 +297,7 @@ def test_run_with_timeout_none_waits_for_delayed_result() -> None:
     daemon = _SlowFinishDaemon(delay=1.5)
     try:
         result = daemon_client.run(
-            "slow child task", sock_path=daemon.sock_path, timeout=None,
+            "slow child task", endpoint_file=daemon.endpoint_file, timeout=None,
         )
         assert result.success
         assert result.text == "slow but done"
@@ -356,13 +313,13 @@ def test_run_agent_tool_waits_past_delayed_result(
     """The ``run_agent`` tool waits out a delay shorter than its timeout.
 
     End-to-end through the real tool (path mode) and the standard
-    ``KISS_SORCAR_SOCK`` socket resolution: the sub-task's result
+    ``KISS_SORCAR_LOCAL`` endpoint resolution: the sub-task's result
     arrives after a delay well under the timeout (the 300-s default,
     and an explicit ``"30"``), and the tool returns the YAML result —
     not a "did not finish within …s" timeout message.
     """
     daemon = _SlowFinishDaemon(delay=1.5)
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "slow_helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
@@ -393,14 +350,14 @@ def test_interrupt_wakes_no_deadline_wait_on_silent_daemon(
     ``closeTab`` to the dispatched task.
     """
     monkeypatch.setattr(daemon_client, "_NO_DEADLINE_WAKE_SECONDS", 0.05)
-    sock_dir = Path(tempfile.mkdtemp(prefix="kiss_no_timeout_"))
-    path = sock_dir / "daemon.sock"
-    daemon = _RecordingDaemon(path, mode="silent")
+    daemon = _RecordingDaemon(mode="silent")
     outcome: dict[str, Any] = {}
 
     def call() -> None:
         try:
-            daemon_client.run("silent child task", sock_path=path, timeout=None)
+            daemon_client.run(
+                "silent child task", endpoint_file=daemon.endpoint_file, timeout=None,
+            )
             outcome["exc"] = None
         except BaseException as exc:  # noqa: BLE001 — capture for assert
             outcome["exc"] = exc
@@ -428,7 +385,6 @@ def test_interrupt_wakes_no_deadline_wait_on_silent_daemon(
         assert daemon.wait_for_command("closeTab")
     finally:
         daemon.close()
-        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 def test_run_agent_tool_times_out_and_stops_the_task(
@@ -445,7 +401,7 @@ def test_run_agent_tool_times_out_and_stops_the_task(
     reservation).
     """
     daemon = _StopConfirmingDaemon()
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
@@ -479,7 +435,7 @@ def test_run_agent_tool_timeout_charges_the_stopped_tasks_spend(
         "text": "Task stopped", "cost": "$1.0842", "total_tokens": 4321,
         "step_count": 7,
     })
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     parent = SorcarAgent("dispatch-timeout-parent")
@@ -513,7 +469,7 @@ def test_run_stop_on_timeout_error_carries_the_stopped_result() -> None:
         with pytest.raises(daemon_client.StoppedOnTimeoutError) as err:
             daemon_client.run(
                 "never finishes", timeout=0.3, stop_on_timeout=True,
-                sock_path=with_result.sock_path,
+                endpoint_file=with_result.endpoint_file,
             )
         assert err.value.result.cost == pytest.approx(0.25)
         assert err.value.result.tokens == 99
@@ -522,7 +478,7 @@ def test_run_stop_on_timeout_error_carries_the_stopped_result() -> None:
         with pytest.raises(daemon_client.StoppedOnTimeoutError) as err2:
             daemon_client.run(
                 "never finishes", timeout=0.3, stop_on_timeout=True,
-                sock_path=without_result.sock_path,
+                endpoint_file=without_result.endpoint_file,
             )
         assert err2.value.result.cost == 0.0
         assert err2.value.result.tokens == 0
@@ -543,10 +499,8 @@ def test_run_agent_tool_reports_unconfirmed_stop(
     running so the caller does not assume the work was cancelled.
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.3)
-    sock_dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
-    path = sock_dir / "daemon.sock"
-    daemon = _RecordingDaemon(path, mode="silent")
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(path))
+    daemon = _RecordingDaemon(mode="silent")
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
@@ -560,7 +514,6 @@ def test_run_agent_tool_reports_unconfirmed_stop(
         assert daemon.wait_for_command("closeTab")
     finally:
         daemon.close()
-        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.mark.parametrize("stop_on_timeout", [False, True])
@@ -584,7 +537,7 @@ def test_client_timeout_stop_cascade_is_opt_in(
         begin = time.monotonic()
         with pytest.raises(TimeoutError, match="did not finish") as excinfo:
             daemon_client.run(
-                "never finishes", sock_path=daemon.sock_path, timeout=0.3,
+                "never finishes", endpoint_file=daemon.endpoint_file, timeout=0.3,
                 stop_on_timeout=stop_on_timeout,
             )
         assert not isinstance(
@@ -616,16 +569,14 @@ def test_stop_confirmation_wait_is_bounded(
     may still be running.
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 0.3)
-    sock_dir = Path(tempfile.mkdtemp(prefix="kiss_dispatch_timeout_"))
-    path = sock_dir / "daemon.sock"
-    daemon = _RecordingDaemon(path, mode="silent")
+    daemon = _RecordingDaemon(mode="silent")
     try:
         begin = time.monotonic()
         with pytest.raises(
             daemon_client.StopUnconfirmedTimeoutError, match="did not finish",
         ):
             daemon_client.run(
-                "never finishes", sock_path=path, timeout=0.3,
+                "never finishes", endpoint_file=daemon.endpoint_file, timeout=0.3,
                 stop_on_timeout=True,
             )
         assert time.monotonic() - begin < 5
@@ -633,7 +584,6 @@ def test_stop_confirmation_wait_is_bounded(
         assert daemon.wait_for_command("closeTab")
     finally:
         daemon.close()
-        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 def test_stop_confirmed_before_initial_running_status(
@@ -655,7 +605,7 @@ def test_stop_confirmed_before_initial_running_status(
         begin = time.monotonic()
         with pytest.raises(TimeoutError, match="did not finish") as excinfo:
             daemon_client.run(
-                "never finishes", sock_path=daemon.sock_path, timeout=0.3,
+                "never finishes", endpoint_file=daemon.endpoint_file, timeout=0.3,
                 stop_on_timeout=True,
             )
         assert not isinstance(
@@ -686,7 +636,7 @@ def test_empty_timeout_applies_the_default_constant(
         agent_dispatch, "DEFAULT_DISPATCH_TIMEOUT_SECONDS", 0.3,
     )
     daemon = _StopConfirmingDaemon()
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:

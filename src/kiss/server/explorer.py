@@ -731,6 +731,136 @@ def git_file_at(work_dir: str, sha: str, path: str) -> dict[str, Any]:
     }
 
 
+def _blob_text(repo: str, spec: str) -> tuple[str | None, str]:
+    """Content of the blob ``rev:path`` *spec*, or ``None`` when absent.
+
+    Returns ``(text, "")`` for a text blob, ``(None, "")`` when the
+    path does not exist at that revision, and ``(None, <message>)`` for
+    a binary blob or any other git failure.
+    """
+    result = _run_git(repo, "show", spec)
+    if result.returncode != 0:
+        err = result.stderr.strip()
+        if "does not exist" in err or "exists on disk, but not in" in err:
+            return None, ""
+        return None, err or "git show failed"
+    if "\0" in result.stdout[:8192]:
+        return None, f"Cannot display binary file: {spec.split(':', 1)[-1]}"
+    return result.stdout, ""
+
+
+def _worktree_file_text(repo: str, path: str) -> tuple[str | None, str]:
+    """Content of the working-tree file *path* under *repo* (see :func:`_blob_text`).
+
+    A symbolic link yields its target text, which is what git stores
+    for it (and what the other side of the diff holds); the link is
+    never followed, so the read stays inside the repository.
+    """
+    full = os.path.join(repo, path)
+    if os.path.islink(full):
+        try:
+            return os.readlink(full), ""
+        except OSError as exc:
+            return None, f"Cannot read {path}: {exc}"
+    if not os.path.isfile(full):
+        return None, ""
+    try:
+        with open(full, "rb") as fh:
+            data = fh.read(GIT_SHOW_MAX_BYTES + 1)
+    except OSError as exc:
+        return None, f"Cannot read {path}: {exc}"
+    if b"\0" in data[:8192]:
+        return None, f"Cannot display binary file: {path}"
+    return data.decode("utf-8", "surrogateescape"), ""
+
+
+def _repo_relative(path: str) -> bool:
+    """Whether *path* is a plain repository-relative path.
+
+    Rejects an empty path, an absolute one and any ``.``/``..``
+    component (or an empty one), so that joining it under the repository
+    root can never reach outside it.  Git reports paths with ``/``; on
+    Windows a ``\\`` also separates components (elsewhere it is an
+    ordinary file-name character).
+    """
+    if not path or os.path.isabs(path):
+        return False
+    parts = re.split(r"[\\/]", path) if os.name == "nt" else path.split("/")
+    return all(part not in ("", ".", "..") for part in parts)
+
+
+def git_file_diff(
+    work_dir: str, sha: str, path: str, orig_path: str = "",
+) -> dict[str, Any]:
+    """Return both sides of one file's change, for a side-by-side diff editor.
+
+    Backs a click on a file row of the Source Control graph: as in VS
+    Code the file opens in a diff editor with the commit's first parent
+    on the left and the commit on the right; for the "Uncommitted
+    changes" row (*sha* empty) HEAD is on the left and the working tree
+    on the right.  A side that does not exist (an added or deleted
+    file) is reported missing and comes back as empty text.
+
+    Args:
+        work_dir: A directory inside the repository (the worktree whose
+            working tree is meant when *sha* is empty).
+        sha: The commit, or ``""`` for the working tree.
+        path: Repository-relative path of the file after the change.
+        orig_path: Its path before a rename (defaults to *path*).
+
+    Returns:
+        ``{"repo", "sha", "parent", "path", "originalPath", "original",
+        "modified", "originalMissing", "modifiedMissing", "truncated"}``
+        or ``{"error": <message>}`` (also for a binary side).
+    """
+    repo = repo_root(work_dir)
+    if not repo:
+        return {"error": f"Not a git repository: {work_dir}"}
+    if not _repo_relative(path):
+        return {"error": f"Not a repository path: {path}"}
+    if orig_path and not _repo_relative(orig_path):
+        return {"error": f"Not a repository path: {orig_path}"}
+    orig_path = orig_path or path
+    if sha:
+        if not _valid_sha(sha):
+            return {"error": f"Not a commit id: {sha}"}
+        check = _run_git(repo, "rev-parse", "--verify", "--quiet", sha + "^{commit}")
+        if check.returncode != 0:
+            return {"error": f"Unknown commit: {sha}"}
+        base_rev = sha + "^"
+    else:
+        base_rev = "HEAD"
+    # A root commit (or an unborn HEAD) has no parent: the left side is
+    # empty.
+    parent = _run_git(repo, "rev-parse", "--verify", "--quiet", base_rev + "^{commit}")
+    parent_sha = _chomp(parent.stdout) if parent.returncode == 0 else ""
+    original, err = (
+        _blob_text(repo, f"{parent_sha}:{orig_path}") if parent_sha else (None, "")
+    )
+    if err:
+        return {"error": err}
+    if sha:
+        modified, err = _blob_text(repo, f"{sha}:{path}")
+    else:
+        modified, err = _worktree_file_text(repo, path)
+    if err:
+        return {"error": err}
+    original_text, cut_original = _truncate(original or "")
+    modified_text, cut_modified = _truncate(modified or "")
+    return {
+        "repo": repo,
+        "sha": sha,
+        "parent": parent_sha,
+        "path": path,
+        "originalPath": orig_path,
+        "original": original_text,
+        "modified": modified_text,
+        "originalMissing": original is None,
+        "modifiedMissing": modified is None,
+        "truncated": cut_original or cut_modified,
+    }
+
+
 def git_compare(work_dir: str, base: str, sha: str) -> dict[str, Any]:
     """Diff two revisions (``base...sha`` as VS Code's "Compare with..." does).
 

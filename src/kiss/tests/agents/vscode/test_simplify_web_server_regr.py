@@ -42,18 +42,17 @@ _LOOPBACK_CONN = SimpleNamespace(remote_address=("127.0.0.1", 0))
 
 
 class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
-    """E2E tests over a real running RemoteAccessServer (WSS + UDS)."""
+    """E2E tests over a real running RemoteAccessServer (WSS)."""
 
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp-live-")
         self.saved = _redirect_persistence(self.tmpdir)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.server._install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._update_log_path = Path(self.tmpdir) / "update.log"

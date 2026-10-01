@@ -11,7 +11,7 @@ Covers :func:`kiss.server.tricks.delete_my_injection_trick` and
 ``deleteTrick`` command handler in ``kiss.server.commands`` (catalog
 entry, ``tricksData`` / ``error`` events, ``userCount`` on both the
 add and the delete reply), the remote page's ``MY_TRICKS_COUNT``
-substitution, and the command over the real UDS transport.
+substitution, and the command over the real local WSS transport.
 """
 
 from __future__ import annotations
@@ -32,7 +32,8 @@ from kiss.server import tricks
 from kiss.server.commands import _CommandsMixin
 from kiss.server.sorcar import API, validate_command
 from kiss.server.web_server import RemoteAccessServer, _build_html
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 
 _BUNDLED = "## Trick\n\nBundled promptlet one.\n\n## Trick\n\nBundled two.\n"
 _USER = (
@@ -416,41 +417,30 @@ class TestRemotePageUserCount(_TricksHome):
         ])
 
 
-@requires_unix_sockets
-class TestDeleteTrickOverUds(_TricksHome):
-    """``deleteTrick`` travels the real transport: UDS → catalog → handler."""
+class TestDeleteTrickOverLocalConnection(_TricksHome):
+    """``deleteTrick`` travels the real transport: local WSS → catalog → handler."""
 
     def setUp(self) -> None:
         super().setUp()
         self.user_file.write_text(_USER, encoding="utf-8")
         self.tmp = tempfile.TemporaryDirectory()
-        self.sock_path = os.path.join(self.tmp.name, "sorcar-test.sock")
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path,
+            local_endpoint_file=os.path.join(self.tmp.name, "sorcar-local.json"),
             url_file=os.path.join(self.tmp.name, "remote-url.json"),
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
     def tearDown(self) -> None:
-        async def _shutdown() -> None:
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
-
         concurrent.futures.wait(
-            [asyncio.run_coroutine_threadsafe(_shutdown(), self.loop)],
-            timeout=5,
+            [asyncio.run_coroutine_threadsafe(self.server.stop_async(), self.loop)],
+            timeout=30,
         )
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
@@ -462,9 +452,7 @@ class TestDeleteTrickOverUds(_TricksHome):
         self, cmd: dict[str, Any], want_type: str
     ) -> dict[str, Any]:
         async def _talk() -> dict[str, Any]:
-            reader, writer = await asyncio.open_unix_connection(
-                self.sock_path
-            )
+            reader, writer = await open_local_connection(self.server)
             try:
                 writer.write(json.dumps(cmd).encode() + b"\n")
                 await writer.drain()

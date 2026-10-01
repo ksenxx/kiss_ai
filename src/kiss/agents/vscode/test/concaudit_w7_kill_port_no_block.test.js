@@ -77,13 +77,16 @@ fs.chmodSync(kissWebBin, 0o755);
 // test must not be started before that, or a SIGTERM delivered to a
 // still-booting node (default disposition) would kill it outright, the
 // poll loop would end early and the ">= 7 lsof calls" assertion below
-// would fail spuriously.
+// would fail spuriously.  Its argv carries "kiss-web" because
+// pidsOnPort() only returns listeners whose `ps` command line names
+// kiss-web (see pidsOnPortKissWebOnly.test.js).
 const victim = spawn(
   process.execPath,
   [
     '-e',
     'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); ' +
       'process.stdout.write("READY\\n");',
+    '/tmp/fake/.venv/bin/kiss-web',
   ],
   {stdio: ['ignore', 'pipe', 'ignore']},
 );
@@ -128,20 +131,21 @@ exit 0
 fs.chmodSync(fakeLsof, 0o755);
 
 // Stand-in daemon that "systemd" starts after the kill: answers
-// activeTasksQuery on the UDS and holds 127.0.0.1:8787 so
+// activeTasksQuery on the local endpoint and holds 127.0.0.1:8787 so
 // verifyDaemonStartup() returns promptly.
-const udsHelper = path.join(tmpRoot, 'uds-helper.js');
+const daemonHelper = path.join(tmpRoot, 'daemon-helper.js');
 fs.writeFileSync(
-  udsHelper,
+  daemonHelper,
   `
 'use strict';
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const kissDir = path.join(process.env.HOME, '.kiss');
-const sock = path.join(kissDir, 'sorcar.sock');
+const sock = path.join(kissDir, 'sorcar-local.json');
 try { fs.unlinkSync(sock); } catch {}
-const srv = net.createServer(c => {
+const {createFakeDaemon} = require(${JSON.stringify(path.join(__dirname, 'fakeDaemon.js'))});
+const srv = createFakeDaemon(c => {
   c.setEncoding('utf-8');
   let buf = '';
   c.on('data', d => {
@@ -181,7 +185,7 @@ fs.writeFileSync(
 sleep ${LSOF_DELAY_S}
 case " $* " in
   *" restart "*)
-    nohup "${process.execPath}" "${udsHelper}" >/dev/null 2>&1 &
+    nohup "${process.execPath}" "${daemonHelper}" >/dev/null 2>&1 &
     ;;
 esac
 exit 0

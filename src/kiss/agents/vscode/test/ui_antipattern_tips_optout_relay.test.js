@@ -5,13 +5,14 @@
 
 'use strict';
 
-// End-to-end: the webview's `{type: 'tipsOptOut'}` message, driven through
-// SorcarSidebarView's onDidReceiveMessage handler, creates the
-// $KISS_HOME/TIPS_DISABLED marker (the persisted "Don't show tips again"
-// choice) and `{type: 'tipsOptOut', optOut: false}` removes it again.  On
-// the old code the message fell through the switch and no marker was ever
-// written, so the tips window kept reopening.
-
+// End-to-end: the webview's `{type: 'tipsOptOut'}` and `{type:
+// 'getWelcomeInfo'}` messages, driven through SorcarSidebarView's
+// onDidReceiveMessage handler, are forwarded to the daemon verbatim.  The
+// daemon owns the $KISS_HOME/TIPS_DISABLED marker (the persisted "Don't
+// show tips again" choice, `tips_opt_out` in sorcar.py) and the remote
+// URL (`getWelcomeInfo` answers with the `remote_url` event), so the host
+// writes and reads neither itself: one implementation serves the VS Code
+// webview and the remote webapp alike.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -125,30 +126,40 @@ function runTests() {
   workspaceFolders = [{uri: makeUri(ws)}];
 
   const view = new SorcarSidebarView(makeUri(path.join(__dirname, '..')));
+  const forwarded = [];
+  view._api = {
+    forward: cmd => forwarded.push(cmd),
+    getConfig: () => {},
+    setWorkDir: () => {},
+  };
   const wv = makeWebviewView();
   view.resolveWebviewView(wv.webviewView, {}, {});
 
-  assert.ok(!fs.existsSync(marker), 'no marker before the user opts out');
-
   wv.fireMessage({type: 'tipsOptOut'});
-  assert.ok(
-    fs.existsSync(marker),
-    'tipsOptOut (no optOut field) must write $KISS_HOME/TIPS_DISABLED',
-  );
-  console.log('  ok - tipsOptOut writes the TIPS_DISABLED marker');
-
   wv.fireMessage({type: 'tipsOptOut', optOut: true});
-  assert.ok(fs.existsSync(marker), 'tipsOptOut is idempotent');
-
   wv.fireMessage({type: 'tipsOptOut', optOut: false});
+  assert.deepStrictEqual(
+    forwarded.filter(c => c.type === 'tipsOptOut'),
+    [
+      {type: 'tipsOptOut', optOut: undefined},
+      {type: 'tipsOptOut', optOut: true},
+      {type: 'tipsOptOut', optOut: false},
+    ],
+    'every tipsOptOut reaches the daemon with its optOut flag intact',
+  );
   assert.ok(
     !fs.existsSync(marker),
-    'tipsOptOut with optOut:false must remove the marker',
+    'the host must not write $KISS_HOME/TIPS_DISABLED itself',
   );
-  console.log('  ok - tipsOptOut optOut:false removes the marker');
+  console.log('  ok - tipsOptOut is forwarded to the daemon, not written locally');
 
-  wv.fireMessage({type: 'tipsOptOut', optOut: false});
-  assert.ok(!fs.existsSync(marker), 'removing a missing marker is a no-op');
+  wv.fireMessage({type: 'getWelcomeInfo'});
+  assert.deepStrictEqual(
+    forwarded.filter(c => c.type === 'getWelcomeInfo'),
+    [{type: 'getWelcomeInfo'}],
+    'getWelcomeInfo reaches the daemon, which answers with remote_url',
+  );
+  console.log('  ok - getWelcomeInfo is forwarded to the daemon');
 
   if (typeof view.dispose === 'function') view.dispose();
   fs.rmSync(ws, {recursive: true, force: true});

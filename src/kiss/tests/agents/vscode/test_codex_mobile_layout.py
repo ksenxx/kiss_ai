@@ -652,7 +652,7 @@ def test_server_serves_codex_stylesheet_over_http(
                 certfile=str(certfile),
                 keyfile=str(keyfile),
                 url_file=tmp_path / "remote-url.json",
-                uds_path=tmp_path / "sorcar.sock",
+                local_endpoint_file=tmp_path / "sorcar-local.json",
             )
             started = False
             try:

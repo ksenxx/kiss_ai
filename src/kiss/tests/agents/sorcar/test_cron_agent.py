@@ -41,18 +41,17 @@ from kiss.agents.sorcar.cron_agent import (
     start_scheduler_thread,
     tick,
 )
-from kiss.tests.conftest import IS_WINDOWS
 
 
 @pytest.fixture(autouse=True)
 def _isolated_kiss_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point KISS_HOME at a per-test temp dir so the job store is isolated.
 
-    Also resets the module-level daemon socket default so a scheduler
+    Also resets the module-level daemon endpoint default so a scheduler
     started by one test cannot redirect another test's prompt jobs.
     """
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     return tmp_path
 
 
@@ -599,30 +598,30 @@ def test_prompt_sea_source_survives_adversarial_text(tmp_path: Path) -> None:
     assert cmd["model"] == name
 
 
-def test_prompt_job_marker_in_socket_path_is_not_a_timeout(
+def test_prompt_job_marker_in_endpoint_path_is_not_a_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only the exact unconfirmed-stop reply is treated as a timeout.
 
-    A connection error naming a socket path that happens to contain the
-    unconfirmed-stop wording must stay an ordinary error (scratch
-    directory removed), not be mistaken for a possibly live task.
+    A connection error naming an endpoint file whose path happens to
+    contain the unconfirmed-stop wording must stay an ordinary error
+    (scratch directory removed), not be mistaken for a possibly live task.
     """
-    sock = tmp_path / "MAY STILL BE RUNNING" / "no.sock"
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(sock))
+    endpoint = tmp_path / "MAY STILL BE RUNNING" / "no.json"
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(endpoint))
     work_dir = tmp_path / "run"
     work_dir.mkdir()
     job = {"id": "abcd1234", "name": "hi", "prompt": "say hi", "max_budget": 0}
     status, text = cron_agent._run_prompt_job(job, work_dir)
     assert status == "error"
-    assert text is not None and str(sock) in text
+    assert text is not None and str(endpoint) in text
 
 
 def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
-    # With no reachable kiss-web daemon socket (the isolated KISS_HOME
-    # contains no sorcar.sock), the run_agent dispatch of the job's SEA
-    # fails and _execute_job records the error end-to-end.
-    monkeypatch.delenv("KISS_SORCAR_SOCK", raising=False)
+    # With no reachable kiss-web daemon (the isolated KISS_HOME contains
+    # no sorcar-local.json endpoint file), the run_agent dispatch of the
+    # job's SEA fails and _execute_job records the error end-to-end.
+    monkeypatch.delenv("KISS_SORCAR_LOCAL", raising=False)
     job = _create(cron_job(
         "create", name="llm", prompt="say hi", schedule="every 1m",
         deliver="none",
@@ -631,16 +630,11 @@ def test_prompt_job_failure_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None
     assert tick(2.0) == 1
     stored = load_jobs()[0]
     assert stored["last_status"] == "error"
-    # The error explains what is missing instead of a bare traceback:
-    # on POSIX the remedy (start kiss-web); on Windows the reason there
-    # is none — CPython has no Unix-domain sockets, so kiss-web serves
-    # WebSocket clients only and never binds the daemon socket that
-    # run_agent dispatch needs (daemon_client.run_agent_via_daemon).
+    # The error explains what is missing (the endpoint file) and the
+    # remedy (start kiss-web) instead of a bare traceback.
     assert "Cannot connect to the sorcar daemon" in stored["last_summary"]
-    if IS_WINDOWS:
-        assert "Unix-domain sockets are unavailable" in stored["last_summary"]
-    else:
-        assert "kiss-web" in stored["last_summary"]
+    assert "no endpoint file at" in stored["last_summary"]
+    assert "kiss-web" in stored["last_summary"]
 
 
 def test_cli_usage_exits_without_args(
@@ -711,12 +705,14 @@ def test_run_scheduler_returns_when_stop_event_preset() -> None:
     cron_agent.run_scheduler(stop_event, interval=0.01)  # returns immediately
 
 
-def test_run_now_uses_daemon_sock_path(tmp_path: Path) -> None:
-    # A scheduler started for a custom-UDS daemon records its socket as
-    # the module default, so run_now prompt jobs target that daemon
-    # instead of $KISS_HOME/sorcar.sock.
-    custom_sock = tmp_path / "custom-daemon.sock"
-    stop_event = start_scheduler_thread(interval=999.0, sock_path=str(custom_sock))
+def test_run_now_uses_daemon_endpoint_file(tmp_path: Path) -> None:
+    # A scheduler started for a daemon with a custom endpoint file
+    # records that file as the module default, so run_now prompt jobs
+    # target that daemon instead of $KISS_HOME/sorcar-local.json.
+    custom_endpoint = tmp_path / "custom-daemon.json"
+    stop_event = start_scheduler_thread(
+        interval=999.0, endpoint_file=str(custom_endpoint),
+    )
     try:
         job = _create(cron_job(
             "create", name="llm", prompt="say hi", schedule="every 1h",
@@ -724,7 +720,7 @@ def test_run_now_uses_daemon_sock_path(tmp_path: Path) -> None:
         ))
         reply = yaml.safe_load(cron_job("run_now", job_id=job["id"]))
         assert reply["ran"]["last_status"] == "error"
-        assert "custom-daemon.sock" in load_jobs()[0]["last_summary"]
+        assert "custom-daemon.json" in load_jobs()[0]["last_summary"]
     finally:
         _stop_scheduler(stop_event)
 

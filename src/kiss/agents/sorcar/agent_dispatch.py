@@ -63,10 +63,10 @@ project), and the sub-task runs in that same directory, so the
 dispatched agent operates on the calling project through the standard
 task lifecycle (worktree, auto-commit) unless its getters say
 otherwise.  Inside the kiss-web daemon the sub-task is submitted back
-through the daemon's own UDS socket (recorded at boot by the cron
-scheduler); standalone runs use the standard socket resolution
-(``KISS_SORCAR_SOCK``, then ``$KISS_HOME/sorcar.sock``) and need a
-reachable daemon.
+through the daemon's own local endpoint (recorded at boot by the cron
+scheduler); standalone runs use the standard endpoint resolution
+(``KISS_SORCAR_LOCAL``, then ``$KISS_HOME/sorcar-local.json``) and
+need a reachable daemon.
 """
 
 import dataclasses
@@ -431,21 +431,21 @@ def _agent_class(module: Any) -> type | None:
     return None
 
 
-def _daemon_sock_path() -> str | None:
-    """Return the UDS path of the daemon hosting this process, if any.
+def _daemon_endpoint_file() -> str | None:
+    """Return the endpoint file of the daemon hosting this process, if any.
 
     Inside the kiss-web daemon the cron scheduler records the daemon's
-    own socket at boot; dispatched sub-tasks must go back through it.
-    Standalone (no scheduler running in this process) returns ``None``
-    and :func:`kiss.server.sorcar.run` applies its standard socket
-    resolution.
+    own endpoint file at boot; dispatched sub-tasks must go back
+    through it.  Standalone (no scheduler running in this process)
+    returns ``None`` and :func:`kiss.server.sorcar.run` applies its
+    standard endpoint resolution.
 
     Returns:
-        The daemon socket path, or ``None`` when not inside a daemon.
+        The daemon endpoint file, or ``None`` when not inside a daemon.
     """
     from kiss.agents.sorcar import cron_agent
 
-    return cron_agent._daemon_sock_path
+    return cron_agent._daemon_endpoint_file
 
 
 def _attribute_dispatch_usage(parent_agent: Any, result: Any) -> None:
@@ -561,12 +561,12 @@ def dispatch_result(
             and its persisted task id / frontend tab id make the
             sub-task a nested sub-agent of the calling task (same tab
             behavior as a ``run_parallel`` sub-task).
-        scope_work_dir: The CALLING task's work directory, used as the
-            sub-task's tab workspace-scope so its tab shows in the
-            caller's tab bar even though the sub-task executes in
-            *work_dir* (a channel/cron scratch directory).  Empty
-            (standalone tools-file use) leaves the scope falling back
-            to *work_dir*.
+        scope_work_dir: The CALLING task's work directory, recorded on
+            the sub-task's registry tab (``scopeWorkDir``) alongside
+            *work_dir* (the channel/cron scratch directory it executes
+            in).  Informational: the tab is shown on every client
+            regardless.  Empty (standalone tools-file use) records
+            nothing.
         git_lifecycle: Whether the sub-task runs through the standard
             project git lifecycle (worktree isolation + auto-commit).
             ``False`` — the channel and cron modes — dispatches with
@@ -723,7 +723,7 @@ def dispatch_result(
             tool_profile=options.tool_profile,
             timeout=timeout,
             stop_on_timeout=True,
-            sock_path=_daemon_sock_path(),
+            endpoint_file=_daemon_endpoint_file(),
         )
     except daemon_client.StopUnconfirmedTimeoutError:
         return stop_unconfirmed_error(name, timeout)

@@ -28,14 +28,10 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  process.exit(0);
-}
 
 class StubEventEmitter {
   constructor() {
@@ -179,8 +175,8 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-uap-focus-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
-const server = net.createServer(sock => {
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
+const server = createFakeDaemon(sock => {
   sock.on('data', () => {});
   sock.on('error', () => {});
 });
@@ -371,7 +367,7 @@ async function consentTests() {
 }
 
 async function runTest() {
-  server.listen(sockPath);
+  server.listen(endpointPath);
   try {
     await panelTests();
     await consentTests();

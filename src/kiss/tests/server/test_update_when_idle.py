@@ -10,7 +10,7 @@ flight, and rebroadcasts ``update_available`` with ``pendingIdle`` so
 every chat window's toast shows the armed state.  ``cancel: true``
 disarms it; a direct ``runUpdate`` supersedes it.
 
-The daemon is real (UDS transport, fake PyPI endpoint, a stub
+The daemon is real (local WSS transport, fake PyPI endpoint, a stub
 ``install.sh`` that records each launch in a marker file); a running
 task is represented by a live ``AgentState`` in the agent registry,
 exactly as the task runner registers one.
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import kiss.server.agent_state as agent_state
 import kiss.server.web_server as ws
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 INSTALL_SH = """#!/bin/bash
@@ -62,7 +62,7 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         self.busy = agent_state.AgentState(
             "idle-update-task", tab_id="idle-update-tab", is_task_active=True,
         )
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         agent_state.unregister(self.busy.task_id, self.busy)
@@ -93,18 +93,18 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
             return 0
         return len(self.marker.read_text().splitlines())
 
-    async def _client(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await self._connect_uds()
+    async def _client(self) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await self._connect_local()
         self._writers.append(writer)
         await self._send_ready(writer, "tab-idle-update")
         return reader, writer
 
-    async def _send(self, writer: asyncio.StreamWriter, cmd: dict[str, object]) -> None:
+    async def _send(self, writer: LocalWriter, cmd: dict[str, object]) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _wait_pending_idle(
-        self, reader: asyncio.StreamReader, expected: bool,
+        self, reader: LocalReader, expected: bool,
     ) -> dict[str, object]:
         """Read events until an ``update_available`` with the wanted flag."""
         for _ in range(200):
@@ -126,7 +126,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         """Sleep through several idle polls so a wrong launch would show."""
         await asyncio.sleep(ws._IDLE_UPDATE_POLL_S * 6)
 
-    @requires_unix_sockets
     async def test_installs_once_the_running_task_finishes(self) -> None:
         agent_state.register(self.busy)
         reader, writer = await self._client()
@@ -153,7 +152,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         # The finished poller has dropped its own task reference.
         self.assertIsNone(self.server._update_when_idle_task)
 
-    @requires_unix_sockets
     async def test_installs_immediately_when_already_idle(self) -> None:
         reader, writer = await self._client()
         await self._wait_pending_idle(reader, False)
@@ -161,7 +159,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._wait_launches(1)
         self.assertFalse(self.server._update_when_idle_armed)
 
-    @requires_unix_sockets
     async def test_cancel_disarms_and_nothing_is_installed(self) -> None:
         agent_state.register(self.busy)
         reader, writer = await self._client()
@@ -177,7 +174,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._settle()
         self.assertEqual(self._launches(), 0)
 
-    @requires_unix_sockets
     async def test_cancel_with_nothing_pending_is_harmless(self) -> None:
         reader, writer = await self._client()
         await self._wait_pending_idle(reader, False)
@@ -186,7 +182,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._settle()
         self.assertEqual(self._launches(), 0)
 
-    @requires_unix_sockets
     async def test_direct_update_supersedes_pending_idle_update(self) -> None:
         agent_state.register(self.busy)
         reader, writer = await self._client()
@@ -204,7 +199,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._settle()
         self.assertEqual(self._launches(), 1)
 
-    @requires_unix_sockets
     async def test_arming_twice_keeps_the_single_poller(self) -> None:
         """A second arm is ignored while a poller task exists.
 
@@ -230,7 +224,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._settle()
         self.assertEqual(self._launches(), 1)
 
-    @requires_unix_sockets
     async def test_not_armed_while_an_update_is_already_running(self) -> None:
         self._install_stub(
             HELD_INSTALL_SH.format(release=self.release, tmpdir=self.tmpdir),
@@ -250,7 +243,6 @@ class TestUpdateWhenIdle(_UpdateCheckTestBase):
         await self._wait_pending_idle(reader, False)
         self.assertIsNone(self.server._update_when_idle_task)
 
-    @requires_unix_sockets
     async def test_shutdown_cancels_the_pending_poller(self) -> None:
         agent_state.register(self.busy)
         reader, writer = await self._client()

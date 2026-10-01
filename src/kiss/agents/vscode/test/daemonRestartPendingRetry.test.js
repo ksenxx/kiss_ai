@@ -81,18 +81,19 @@ fs.writeFileSync(busyFile, '1\n');
 // Stand-in daemon: answers activeTasksQuery with count 1 while the busy
 // file exists, 0 otherwise; holds 127.0.0.1:8787 when nothing else does so
 // the health probe and verifyDaemonStartup() see a live daemon.
-const udsHelper = path.join(tmpRoot, 'uds-helper.js');
+const daemonHelper = path.join(tmpRoot, 'daemon-helper.js');
 fs.writeFileSync(
-  udsHelper,
+  daemonHelper,
   `
 'use strict';
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const kissDir = path.join(process.env.HOME, '.kiss');
-const sock = path.join(kissDir, 'sorcar.sock');
+const sock = path.join(kissDir, 'sorcar-local.json');
 try { fs.unlinkSync(sock); } catch {}
-const srv = net.createServer(c => {
+const {createFakeDaemon} = require(${JSON.stringify(path.join(__dirname, 'fakeDaemon.js'))});
+const srv = createFakeDaemon(c => {
   c.setEncoding('utf-8');
   let buf = '';
   c.on('data', d => {
@@ -221,7 +222,7 @@ function cleanup() {
 }
 
 function startHelper() {
-  const helper = spawn(process.execPath, [udsHelper], {
+  const helper = spawn(process.execPath, [daemonHelper], {
     stdio: 'ignore',
     detached: true,
     env: {...process.env, HOME: tmpHome},
@@ -254,7 +255,7 @@ async function main() {
         // precedence over $HOME, so an inherited value would point the
         // installer at the developer's real socket and markers.
         KISS_HOME: kissDir,
-        KISS_SORCAR_SOCK: path.join(kissDir, 'sorcar.sock'),
+        KISS_SORCAR_LOCAL: path.join(kissDir, 'sorcar-local.json'),
         PATH: `${fakeBin}:${process.env.PATH}`,
         KISS_RESTART_RETRY_MS: '1500',
         KISS_TEST_LOCK: path.join(kissDir, '.kiss-web.restart.lock'),

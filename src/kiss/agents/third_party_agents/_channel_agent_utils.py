@@ -799,7 +799,7 @@ LAUNCH_KWARG_NAMES = frozenset(
         "append_to_system_prompt",
         "append_to_prompt",
         "timeout",
-        "sock_path",
+        "endpoint_file",
     }
 )
 
@@ -946,7 +946,7 @@ class BaseChannelAgent:
                 ``use_worktree``, ``model_config``, ``web_tools``,
                 ``is_parallel``, ``append_basic_tools``,
                 ``append_to_system_prompt``, ``append_to_prompt``,
-                ``timeout``, ``sock_path``).
+                ``timeout``, ``endpoint_file``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.

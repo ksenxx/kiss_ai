@@ -28,7 +28,7 @@ function test(name, fn) {
 
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-reloadguard-'));
 const extJsPath = path.join(workDir, 'out', 'extension.js');
-const sockPath = path.join(workDir, 'sorcar.sock');
+const endpointPath = path.join(workDir, 'sorcar-local.json');
 fs.mkdirSync(path.dirname(extJsPath), {recursive: true});
 
 function setExtJs(contents) {
@@ -38,17 +38,17 @@ function removeExtJs() {
   if (fs.existsSync(extJsPath)) fs.rmSync(extJsPath);
 }
 function setSocket() {
-  fs.writeFileSync(sockPath, '');
+  fs.writeFileSync(endpointPath, '');
 }
 function removeSocket() {
-  if (fs.existsSync(sockPath)) fs.rmSync(sockPath);
+  if (fs.existsSync(endpointPath)) fs.rmSync(endpointPath);
 }
 
 function shouldReload(state) {
-  const {codeReady, socketUp, codeStableForMs, waitedMs, graceMs, timeoutMs} =
+  const {codeReady, daemonUp, codeStableForMs, waitedMs, graceMs, timeoutMs} =
     state;
   return (
-    (codeReady && (socketUp || codeStableForMs >= graceMs)) ||
+    (codeReady && (daemonUp || codeStableForMs >= graceMs)) ||
     waitedMs >= timeoutMs
   );
 }
@@ -60,9 +60,9 @@ function runSettleLoop({intervalMs, graceMs, timeoutMs, onPoll}) {
   for (let guard = 0; guard < 1000; guard++) {
     waited += intervalMs;
     if (onPoll) onPoll(waited);
-    const {codeReady, socketUp, size} = isReloadReady(
+    const {codeReady, daemonUp, size} = isReloadReady(
       extJsPath,
-      sockPath,
+      endpointPath,
       prevSize,
     );
     prevSize = size;
@@ -71,7 +71,7 @@ function runSettleLoop({intervalMs, graceMs, timeoutMs, onPoll}) {
     if (
       shouldReload({
         codeReady,
-        socketUp,
+        daemonUp,
         codeStableForMs,
         waitedMs: waited,
         graceMs,
@@ -104,15 +104,15 @@ test('extensionFileSize returns the byte size of a regular file', () => {
 
 test('pathExists reflects socket presence', () => {
   removeSocket();
-  assert.strictEqual(pathExists(sockPath), false);
+  assert.strictEqual(pathExists(endpointPath), false);
   setSocket();
-  assert.strictEqual(pathExists(sockPath), true);
+  assert.strictEqual(pathExists(endpointPath), true);
 });
 
 test('isReloadReady: missing entry file is never code-ready', () => {
   removeExtJs();
   setSocket();
-  const r = isReloadReady(extJsPath, sockPath, -1);
+  const r = isReloadReady(extJsPath, endpointPath, -1);
   assert.strictEqual(r.codeReady, false);
   assert.strictEqual(r.ready, false);
   assert.strictEqual(r.size, -1);
@@ -121,14 +121,14 @@ test('isReloadReady: missing entry file is never code-ready', () => {
 test('isReloadReady: empty entry file is never code-ready', () => {
   setExtJs('');
   setSocket();
-  const r = isReloadReady(extJsPath, sockPath, 0);
+  const r = isReloadReady(extJsPath, endpointPath, 0);
   assert.strictEqual(r.codeReady, false);
   assert.strictEqual(r.ready, false);
 });
 
 test('isReloadReady: a still-growing file is not code-ready', () => {
   setExtJs('abc');
-  const r = isReloadReady(extJsPath, sockPath, 1);
+  const r = isReloadReady(extJsPath, endpointPath, 1);
   assert.strictEqual(r.codeReady, false);
 });
 
@@ -136,9 +136,9 @@ test('isReloadReady: stable file WITHOUT socket is code-ready but not ready', ()
   setExtJs('stable-bytes');
   removeSocket();
   const size = extensionFileSize(extJsPath);
-  const r = isReloadReady(extJsPath, sockPath, size);
+  const r = isReloadReady(extJsPath, endpointPath, size);
   assert.strictEqual(r.codeReady, true, 'code should be ready');
-  assert.strictEqual(r.socketUp, false, 'socket should be down');
+  assert.strictEqual(r.daemonUp, false, 'socket should be down');
   assert.strictEqual(r.ready, false, 'strict ready requires the socket');
 });
 
@@ -146,9 +146,9 @@ test('isReloadReady: stable file WITH socket is fully ready', () => {
   setExtJs('stable-bytes');
   setSocket();
   const size = extensionFileSize(extJsPath);
-  const r = isReloadReady(extJsPath, sockPath, size);
+  const r = isReloadReady(extJsPath, endpointPath, size);
   assert.strictEqual(r.codeReady, true);
-  assert.strictEqual(r.socketUp, true);
+  assert.strictEqual(r.daemonUp, true);
   assert.strictEqual(r.ready, true);
 });
 

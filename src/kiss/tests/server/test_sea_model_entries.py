@@ -14,7 +14,7 @@ SEA's ``add_to_system_prompt()`` protocol added to the system prompt.
 Runs that already name their agent (an explicit ``agentPath``, a ``/xxx``
 slash command) keep it and only take the model from the pick.
 
-Everything runs on a real UDS daemon (:class:`DaemonRunApiHarness`); only
+Everything runs on a real local daemon (:class:`DaemonRunApiHarness`); only
 the executor LLM loop is a stub recording the model and system prompt it
 was handed.
 
@@ -28,7 +28,6 @@ applies instead of forcing each one.
 from __future__ import annotations
 
 import json
-import socket
 import time
 import uuid
 from collections.abc import Callable
@@ -38,7 +37,7 @@ from typing import Any
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
-from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar import local_endpoint, sea_commands
 from kiss.agents.sorcar.cron_agent import load_jobs, save_jobs
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.config import kiss_home
@@ -51,10 +50,7 @@ from kiss.core.models.model_info import (
 from kiss.core.vscode_config import save_config
 from kiss.server import sorcar
 from kiss.server.autocomplete import ranked_function_calling_models
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
-
-pytestmark = requires_unix_sockets
 
 AUTOROUTER = "autorouter"
 BESTROUTER = "bestrouter"
@@ -165,7 +161,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         self._record_runs(runs)
         result = sorcar.run(
             prompt, work_dir=self.repo, use_worktree=False, auto_commit=False,
-            sock_path=self.sock_path, timeout=60, **kwargs,
+            endpoint_file=self.endpoint_file, timeout=60, **kwargs,
         )
         assert result.success is True, result
         assert len(runs) == 1, runs
@@ -457,18 +453,16 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert any("hook exploded" in line for line in logs.output), logs.output
 
     def _send(self, cmd: dict[str, Any], done: Callable[[], bool]) -> None:
-        """Send one raw command over the UDS as a client would and wait until *done()* holds."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(10)
+        """Send one raw command over the local endpoint and wait until *done()* holds."""
+        ws = local_endpoint.connect(Path(self.endpoint_file), open_timeout=10)
         try:
-            sock.connect(self.sock_path)
-            sock.sendall(json.dumps(cmd).encode() + b"\n")
+            ws.send(json.dumps(cmd))
             deadline = time.monotonic() + 10
             while not done() and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert done(), cmd
         finally:
-            sock.close()
+            ws.close()
 
     def test_selecting_autorouter_in_the_picker_schedules_the_weekly_job_without_a_task(
         self,

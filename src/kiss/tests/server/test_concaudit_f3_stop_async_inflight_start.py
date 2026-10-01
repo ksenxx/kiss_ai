@@ -55,7 +55,7 @@ class TestStopAsyncKillsInFlightTunnelStart(unittest.IsolatedAsyncioTestCase):
         server = RemoteAccessServer(
             use_tunnel=False,
             url_file=tmp_dir / "remote-url.json",
-            uds_path=tmp_dir / "kiss.sock",
+            local_endpoint_file=tmp_dir / "sorcar-local.json",
         )
         server._vscode_server.use_private_tab_registry(tmp_dir / "tabs.json")
         server._loop = asyncio.get_running_loop()

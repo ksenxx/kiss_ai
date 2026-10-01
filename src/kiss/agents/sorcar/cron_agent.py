@@ -35,7 +35,7 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   ``kiss-cron --tick`` and ``kiss-cron --daemon`` remain available
   for running the scheduler outside the daemon; in that mode command
   jobs work standalone while prompt jobs still need a reachable
-  kiss-web daemon (they are submitted through its socket).
+  kiss-web daemon (they are submitted through its local endpoint).
 - A prompt job runs as its own Sorcar Extension Agent: every run
   writes a small SEA file into its scratch directory
   (:func:`_write_prompt_sea` — the job's prompt, model and budget as
@@ -118,18 +118,18 @@ interval is never overlapped by the next tick in the same process.
 still overlap them, as may ``run_now``.
 """
 
-_daemon_sock_path: str | None = None
-"""UDS path of the kiss-web daemon hosting this process's scheduler.
+_daemon_endpoint_file: str | None = None
+"""Endpoint file of the kiss-web daemon hosting this process's scheduler.
 
 Set by :func:`start_scheduler_thread` so prompt jobs — scheduled ticks
 and ``cron_job("run_now", ...)`` tool calls executed inside the daemon
-alike — are submitted back to the same daemon even when it serves a
-non-default socket.  Read by
-:func:`kiss.agents.sorcar.agent_dispatch._daemon_sock_path`, which
+alike — are submitted back to the same daemon even when it publishes a
+non-default endpoint file.  Read by
+:func:`kiss.agents.sorcar.agent_dispatch._daemon_endpoint_file`, which
 imports the CANONICAL ``kiss.agents.sorcar.cron_agent`` module: a
 dispatched cron session gets its ``cron_job`` tool from a fresh
 synthetic copy of this module whose own global is never set, and its
-``run_now`` still has to find the recorded socket.
+``run_now`` still has to find the recorded endpoint.
 """
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
@@ -775,7 +775,7 @@ def _run_prompt_job(
             caller must keep *work_dir*.
     """
     # Lazy import: agent_dispatch imports this module lazily as well
-    # (``_daemon_sock_path``), and importing it at module load would
+    # (``_daemon_endpoint_file``), and importing it at module load would
     # pull the whole dispatch layer into ``kiss-cron --list``.
     from kiss.agents.sorcar.agent_dispatch import (
         make_run_agent_tool,
@@ -988,10 +988,10 @@ def _execute_job(job: dict[str, Any]) -> None:
     ``last_summary`` fields.  Errors are still delivered (so the user
     learns the automation broke), silent results are not.
 
-    Prompt jobs are submitted to the kiss-web daemon whose socket
-    :func:`start_scheduler_thread` recorded (standard resolution —
-    ``KISS_SORCAR_SOCK``, then ``$KISS_HOME/sorcar.sock`` — when none
-    was recorded, e.g. under ``kiss-cron --tick``).
+    Prompt jobs are submitted to the kiss-web daemon whose endpoint
+    file :func:`start_scheduler_thread` recorded (standard resolution
+    — ``KISS_SORCAR_LOCAL``, then ``$KISS_HOME/sorcar-local.json`` —
+    when none was recorded, e.g. under ``kiss-cron --tick``).
 
     Args:
         job: The job dict to execute.
@@ -1185,28 +1185,29 @@ def run_scheduler(
 
 def start_scheduler_thread(
     interval: float = DEFAULT_TICK_INTERVAL_SECONDS,
-    sock_path: str | None = None,
+    endpoint_file: str | None = None,
 ) -> threading.Event:
     """Start the scheduler loop in a daemon thread.
 
     Called by the kiss-web daemon on startup so scheduled automations
     fire without any external cron process.  Prompt jobs are submitted
-    back to the daemon through *sock_path*, recorded in
-    :data:`_daemon_sock_path`.
+    back to the daemon through *endpoint_file*, recorded in
+    :data:`_daemon_endpoint_file`.
 
     Args:
         interval: Seconds between scheduler passes.
-        sock_path: The hosting daemon's UDS path; recorded as the
-            module's :data:`_daemon_sock_path` so scheduled prompt jobs
-            and ``run_now`` tool calls in this process target the same
-            daemon.  ``None`` keeps the standard socket resolution.
+        endpoint_file: The hosting daemon's endpoint file; recorded as
+            the module's :data:`_daemon_endpoint_file` so scheduled
+            prompt jobs and ``run_now`` tool calls in this process
+            target the same daemon.  ``None`` keeps the standard
+            endpoint resolution.
 
     Returns:
         The stop event: set it to stop the loop.
     """
-    global _daemon_sock_path
-    if sock_path:
-        _daemon_sock_path = sock_path
+    global _daemon_endpoint_file
+    if endpoint_file:
+        _daemon_endpoint_file = endpoint_file
     stop_event = threading.Event()
     threading.Thread(
         target=run_scheduler,

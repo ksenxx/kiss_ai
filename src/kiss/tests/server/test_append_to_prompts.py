@@ -5,8 +5,8 @@
 """End-to-end tests for ``kiss.server.sorcar.run``'s append parameters.
 
 Drive ``kiss.server.sorcar.run(append_to_system_prompt=...,
-append_to_prompt=...)`` against a real daemon on a temporary
-Unix-domain socket, with only the executor LLM stubbed (see
+append_to_prompt=...)`` against a real daemon with a temporary
+local endpoint, with only the executor LLM stubbed (see
 :class:`kiss.tests.server.test_append_basic_tools.DaemonRunApiHarness`).
 
 Contract under test: ``append_to_system_prompt`` is appended to the
@@ -26,12 +26,9 @@ from typing import Any, cast
 
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import (
     DaemonRunApiHarness,
 )
-
-pytestmark = requires_unix_sockets
 
 _SYS_MARKER = "\n\nUNIQUE-APPENDED-SYSTEM-SUFFIX-9317"
 _PROMPT_MARKER = "\n\nUNIQUE-APPENDED-PROMPT-SUFFIX-4620"
@@ -71,7 +68,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             append_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -93,7 +90,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             append_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -114,7 +111,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -132,7 +129,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             append_to_prompt=_PROMPT_MARKER,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -161,7 +158,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             append_to_system_prompt=_SYS_MARKER,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -196,7 +193,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             extension_agent_path=agent_path,
             use_worktree=False,
             use_web_tools=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -224,7 +221,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False

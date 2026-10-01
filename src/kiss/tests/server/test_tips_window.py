@@ -162,8 +162,8 @@ class TestTipsInRemoteHtml(unittest.TestCase):
         self.assertIs(cfg["show"], False)
 
     def test_shared_opt_out_marker_keeps_the_remote_tips_closed(self) -> None:
-        """``$KISS_HOME/TIPS_DISABLED`` (written by the extension or by
-        the ``tips_opt_out`` API) turns ``show`` off on the remote page
+        """``$KISS_HOME/TIPS_DISABLED`` (written by the ``tipsOptOut`` API
+        from either surface) turns ``show`` off on the remote page
         too, so an opt-out made on one surface holds on every surface."""
         _html, cfg = self._render("# Tip\n\nHello.\n", opted_out=True)
         self.assertEqual(cfg["tips"], ["Hello."])

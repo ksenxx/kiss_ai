@@ -99,21 +99,6 @@ function randomTabId(): string {
   return crypto.randomUUID();
 }
 
-/** Normalize a directory for comparison (Windows: \ and case). */
-function normDir(dir: string): string {
-  let s = dir.replace(/\\/g, '/').replace(/\/+$/, '');
-  if (process.platform === 'win32') s = s.toLowerCase();
-  return s;
-}
-
-/** True when *dir* is *root* or a subdirectory of it. */
-function isDirInside(dir: string, root: string): boolean {
-  const d = normDir(dir);
-  const r = normDir(root);
-  if (d === r) return true;
-  return d.startsWith(r + '/');
-}
-
 /**
  * Editor-tabs mode: one VS Code EDITOR TAB (WebviewPanel) per chat tab,
  * replacing the secondary sidebar's internal tab bar. Each panel hosts
@@ -132,10 +117,7 @@ export class SorcarPanelManager {
   // queued command was dropped) or the panel closes, the remembered
   // tab is adopted — otherwise the chat's real tab would be skipped
   // forever on the strength of a claim that can no longer bind.
-  private _pendingAdoptions: Map<
-    string,
-    {entry: RegistryTabEntry; workspaceDir: string}
-  > = new Map();
+  private _pendingAdoptions: Map<string, RegistryTabEntry> = new Map();
   private _poster: ((message: NotificationMessage) => void) | undefined;
   // Where the ACTIVE panel's task-info values go: the secondary
   // sidebar's Task Info view (see extension.ts setMetaSink wiring).
@@ -439,15 +421,14 @@ export class SorcarPanelManager {
 
   /**
    * Materialize editor-tab panels for the daemon registry's chat tabs
-   * scoped to *workspaceDir* — called when the user switches the mode
-   * on, so the sidebar's chats migrate to editor tabs. Opens a fresh
-   * chat when the registry has none for this workspace.
+   * — called when the user switches the mode on, so the sidebar's
+   * chats migrate to editor tabs. Every registry tab is adopted
+   * whatever folder it runs in: all surfaces show the same tabs.
+   * Opens a fresh chat when the registry is empty.
    */
-  public enterMode(entries: RegistryTabEntry[], workspaceDir: string): void {
+  public enterMode(entries: RegistryTabEntry[]): void {
     for (const entry of entries) {
       if (this._panels.has(entry.tabId)) continue;
-      const scope = entry.scopeWorkDir || entry.workDir;
-      if (scope && workspaceDir && !isDirInside(scope, workspaceDir)) continue;
       this._createPanel({
         tabId: entry.tabId,
         title: entry.title,
@@ -465,19 +446,16 @@ export class SorcarPanelManager {
    * task run in the remote web app (or another window) opens as an
    * editor tab here, exactly like sidebar mode adopts the tab into
    * its internal strip. Tabs already open as a panel (by id or by
-   * chat) are left alone, tabs scoped to another workspace are
-   * skipped (same scoping as enterMode), and the new panel never
-   * steals the user's keyboard focus.
+   * chat) are left alone, and the new panel never steals the user's
+   * keyboard focus.
    *
    * @param entries The snapshot's newly added tabs (see
    *     RegistryTabsDelta.added), possibly filtered by the caller.
-   * @param workspaceDir This window's workspace root ('' = adopt all).
    * @param listed EVERY tab the snapshot lists (not just the added
    *     ones) — the source of truth for the displacement decision.
    */
   public adoptRegistryTabs(
     entries: RegistryTabEntry[],
-    workspaceDir: string,
     listed?: RegistryTabEntry[],
   ): void {
     let listedIds: Set<string> | undefined;
@@ -502,7 +480,7 @@ export class SorcarPanelManager {
       // A remembered tab the registry no longer lists was displaced
       // or closed remotely; forget it.
       for (const [chatId, pending] of this._pendingAdoptions) {
-        if (!listedIds.has(pending.entry.tabId)) {
+        if (!listedIds.has(pending.tabId)) {
           this._pendingAdoptions.delete(chatId);
         }
       }
@@ -530,13 +508,11 @@ export class SorcarPanelManager {
           if (!dup.registryBound) {
             // Remember the skip: the panel's claim may never bind
             // (see _pendingAdoptions).
-            this._pendingAdoptions.set(entry.chatId, {entry, workspaceDir});
+            this._pendingAdoptions.set(entry.chatId, entry);
           }
           continue;
         }
       }
-      const scope = entry.scopeWorkDir || entry.workDir;
-      if (scope && workspaceDir && !isDirInside(scope, workspaceDir)) continue;
       this._createPanel(
         {tabId: entry.tabId, title: entry.title, inRegistry: true},
         {preserveFocus: true},
@@ -734,7 +710,7 @@ export class SorcarPanelManager {
     const pending = this._pendingAdoptions.get(chatId);
     if (!pending) return;
     this._pendingAdoptions.delete(chatId);
-    this.adoptRegistryTabs([pending.entry], pending.workspaceDir);
+    this.adoptRegistryTabs([pending]);
   }
 
   /** Retire *cp*'s chat tab from the daemon's shared registry. */

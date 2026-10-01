@@ -189,18 +189,16 @@ function testReadyOnOrphanContentTabFallsBackToAnyChat() {
   console.log('  ok - ready on an orphaned content tab falls back to a chat');
 }
 
-function testReadyWithNoVisibleChatReportsNone() {
+function testReadyWithNoChatReportsNone() {
   const {win, posted} = makeWebview();
   const chatA = win._testApi.getActiveTabId();
-  // A is unpinned, so the report it opens is visible in every workspace.
-  openReport(win, 'everywhere.html');
+  openReport(win, 'report.html');
   const contentTab = win._testApi.getActiveTabId();
-  // The registry replaces the local placeholder A with a chat pinned to
-  // another workspace; the content tab (orphaned, scope frozen at '')
-  // stays on screen.
+  // The registry replaces the local placeholder A with another chat;
+  // the content tab (now orphaned) stays on screen.
   send(win, {
     type: 'tabs_state',
-    tabs: [{tabId: 'pinned', chatId: 'c1', title: 'other', workDir: '/other'}],
+    tabs: [{tabId: 'other', chatId: 'c1', title: 'other', workDir: '/other'}],
   });
   assert.ok(
     !win.document.querySelector(
@@ -209,13 +207,16 @@ function testReadyWithNoVisibleChatReportsNone() {
     'the placeholder chat is gone',
   );
   assert.strictEqual(win._testApi.getActiveTabId(), contentTab);
-  // This window is scoped to /ws: the pinned chat hides, the content
-  // tab does not, so no visible chat is left to represent the window.
-  send(win, {type: 'workspaceWorkDir', workDir: '/ws'});
+  // The user closes that chat too: the content tab survives as the
+  // only tab, so no chat is left to represent the window.
+  win.document
+    .querySelector('.chat-tab[data-tab-id="other"] .chat-tab-close')
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(
-    !win.document.querySelector('.chat-tab[data-tab-id="pinned"]'),
-    'the other workspace\u2019s chat is hidden here',
+    !win.document.querySelector('.chat-tab[data-tab-id="other"]'),
+    'the chat tab is closed',
   );
+  assert.strictEqual(win._testApi.getActiveTabId(), contentTab);
   const lastChanged = posted.filter(m => m.type === 'activeTabChanged').pop();
   assert.strictEqual(
     lastChanged.tabId,
@@ -260,7 +261,7 @@ function main() {
   testReadyOnContentTabNamesOwningChat();
   testReadyOnChatTabIsUnchanged();
   testReadyOnOrphanContentTabFallsBackToAnyChat();
-  testReadyWithNoVisibleChatReportsNone();
+  testReadyWithNoChatReportsNone();
   console.log('all audit0902 ready-chat-tab tests passed');
 }
 

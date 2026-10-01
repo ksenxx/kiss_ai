@@ -1060,6 +1060,8 @@
 
   let tabs = [];
   let activeTabId = '';
+  // The file tab the user looked at most recently (see editorContext).
+  let lastViewedContentTabId = '';
   // The tab the bar last scrolled into view.  renderTabBar() runs on
   // many unrelated events (title updates, running-state changes,
   // stream events); scrolling the active tab into view on each of
@@ -1152,6 +1154,7 @@
       contentSaveToken: '',
       contentSaveTimer: null,
       contentSaveBar: null,
+      // False, or the chat tab id a pending reload was requested as.
       contentReloadRequested: false,
       // A previewable (.md/.html) content tab renders its PREVIEW by
       // default with an "Edit source" toggle in the Save bar (see
@@ -1164,6 +1167,9 @@
       contentSourceMode: false,
       contentIsMarkdown: false,
       contentSourceText: '',
+      // Whether contentSourceText holds the file's text (a tab whose
+      // text has not arrived, or a binary, has no buffer to report).
+      contentHasText: false,
       contentPreviewHolder: null,
       contentMonacoHolder: null,
       contentModeBtn: null,
@@ -1417,41 +1423,34 @@
   // content tab, point the host at whichever chat tab survives — and when
   // none survives, clear it, so the deleted chat stops owning the editor.
   function reportSurvivingChatTab() {
-    // Only a VISIBLE chat may own the editor: pointing the host at a
-    // hidden (another workspace's) or dead tab would route its
-    // commit/merge actions to a chat this user cannot see.
-    const reported = getTab(reportedChatTabId);
-    if (reported && !isTabHidden(reported)) return;
+    // Only a live chat may own the editor: pointing the host at a dead
+    // tab would route its commit/merge actions to a chat that is gone.
+    if (getTab(reportedChatTabId)) return;
     reportChatTab(chatTabIdForHost());
   }
 
   // readychat-coverage:start
   /**
-   * The id of the visible CHAT tab that represents this window to the
-   * host right now, or '' when no visible chat tab exists.
+   * The id of the CHAT tab that represents this window to the host
+   * right now, or '' when no chat tab exists.
    *
-   * The active tab when it is a visible chat; the owning chat of an
-   * active content tab (a file view keeps the editor with the
-   * conversation that produced it); otherwise any visible chat tab.
-   * Shared by every path that (re)announces the on-screen chat --
-   * closing tabs, re-scoping the workspace, and the `ready` sent
-   * after a daemon outage -- so none of them can name a content tab.
+   * The active tab when it is a chat; the owning chat of an active
+   * content tab (a file view keeps the editor with the conversation
+   * that produced it); otherwise any chat tab. Shared by every path
+   * that (re)announces the on-screen chat -- closing tabs and the
+   * `ready` sent after a daemon outage -- so none of them can name a
+   * content tab.
    *
    * @returns {string} A chat tab id, or ''.
    */
   function chatTabIdForHost() {
     const active = getTab(activeTabId);
-    let chat =
-      active && !active.isContentTab && !isTabHidden(active) ? active : null;
+    let chat = active && !active.isContentTab ? active : null;
     if (!chat && active && active.isContentTab && active.ownerTabId) {
       const ownerTab = getTab(active.ownerTabId);
-      if (ownerTab && !ownerTab.isContentTab && !isTabHidden(ownerTab)) {
-        chat = ownerTab;
-      }
+      if (ownerTab && !ownerTab.isContentTab) chat = ownerTab;
     }
-    if (!chat) {
-      chat = tabs.find(t => !t.isContentTab && !isTabHidden(t)) || null;
-    }
+    if (!chat) chat = tabs.find(t => !t.isContentTab) || null;
     return chat ? chat.id : '';
   }
   // readychat-coverage:end
@@ -1469,8 +1468,8 @@
   function chatTargetTabId() {
     let tab = getTab(activeTabId);
     // A file opened FROM a file view names that view as its owner, so
-    // the chain is walked to the chat at its root (like
-    // tabScopeWorkDir does); the visited set fails closed on a cycle.
+    // the chain is walked to the chat at its root; the visited set
+    // fails closed on a cycle.
     const visited = new Set();
     while (tab && tab.isContentTab && !visited.has(tab.id)) {
       visited.add(tab.id);
@@ -1883,18 +1882,12 @@
     // tabs (see moveTabFocus) and Enter/Space activate.  If the active
     // tab is somehow not in the list, the first tab is the stop so the
     // tablist never becomes keyboard-unreachable.
-    // Workspace scoping: tabs of other workspaces exist locally (all
-    // their state intact, still receiving events) but get no strip in
-    // the bar (see isTabHidden).
-    const shown = tabs.filter(t => {
-      return !isTabHidden(t);
-    });
-    const rovingStopId = shown.some(t => t.id === activeTabId)
+    const rovingStopId = tabs.some(t => t.id === activeTabId)
       ? activeTabId
-      : shown.length > 0
-        ? shown[0].id
+      : tabs.length > 0
+        ? tabs[0].id
         : null;
-    shown.forEach(tab => {
+    tabs.forEach(tab => {
       const el = document.createElement('div');
       el.className =
         'chat-tab' +
@@ -2039,9 +2032,7 @@
   function switchToTab(tabId) {
     if (tabId === activeTabId) return;
     const tab = getTab(tabId);
-    // A hidden tab (another workspace's, see isTabHidden) has no strip
-    // in the bar and may never come on screen here.
-    if (!tab || isTabHidden(tab)) return;
+    if (!tab) return;
     saveCurrentTab();
     // activateAdjacentTab owns the activation tail (restore, running
     // state, timers, chevron, focus); only the bar render and the
@@ -2062,13 +2053,11 @@
   // break the "no tab switch unless finished" rule.  For those closes
   // prefer the closed tab's parent chat tab, then the nearest surviving
   // chat tab, falling back to adjacency only if no chat tab is left.
-  // Hidden tabs (other workspaces, see isTabHidden) are never
-  // successors: activating one would put an invisible tab on screen.
-  // Returns null when no visible tab is left (the caller opens a
-  // fresh chat tab then).
+  // Returns null when no tab is left (the caller opens a fresh chat
+  // tab then).
   function pickSuccessorTab(closed, origIdx, agentInitiated) {
     const eligible = (t, chatOnly) => {
-      return !!t && !isTabHidden(t) && !(chatOnly && t.isContentTab);
+      return !!t && !(chatOnly && t.isContentTab);
     };
     const nearest = chatOnly => {
       for (let d = 0; d < tabs.length; d++) {
@@ -2154,8 +2143,7 @@
           ? pickSuccessorTab(closed, origIdx, agentInitiated)
           : null;
       if (!successor) {
-        // No tab of this workspace is left (hidden tabs of other
-        // workspaces may well remain): open a fresh chat here.
+        // No tab is left: open a fresh chat here.
         createNewTab();
         return;
       }
@@ -2199,6 +2187,7 @@
   }
 
   function showContentTab(tab) {
+    if (!tab.isBrowserTab && tab.contentPath) lastViewedContentTabId = tab.id;
     // An open editor menu belongs to the surface being swapped out.
     closeContentMenu();
     const area = ensureContentArea();
@@ -2371,6 +2360,7 @@
     // reload from disk re-renders the tab, and the user should land
     // back on the surface (preview / source) they were on.
     tab.contentSourceText = '';
+    tab.contentHasText = false;
     tab.contentPreviewHolder = null;
     tab.contentMonacoHolder = null;
     tab.contentModeBtn = null;
@@ -2382,10 +2372,21 @@
     }
     if (tab.contentEditor) {
       try {
+        // Monaco keeps a disposed diff editor listed in
+        // getDiffEditors(); detaching its models first lets their
+        // text go.
+        if (tab.contentDiffModels) tab.contentEditor.setModel(null);
         tab.contentEditor.dispose();
       } catch (_e) {}
       tab.contentEditor = null;
     }
+    // A diff editor does not own its two models.
+    (tab.contentDiffModels || []).forEach(model => {
+      try {
+        model.dispose();
+      } catch (_e) {}
+    });
+    tab.contentDiffModels = null;
     if (tab.browserView) {
       tab.browserView.dispose();
       tab.browserView = null;
@@ -2699,6 +2700,106 @@
     ensureMonaco().then(onMonaco, onCdnFailure);
   }
 
+  /**
+   * Show one file's change in a read-only side-by-side Monaco diff
+   * editor (VS Code's diff editor): `ev.diffOriginal` on the left,
+   * `ev.content` on the right, both highlighted by the file's language.
+   * A side that did not exist (an added or deleted file) is empty.
+   * When the Monaco CDN is unreachable, a unified line-by-line diff of
+   * the two texts is shown as plain text instead.
+   */
+  function renderDiffContent(tab, holder, ev) {
+    const language = languageFromPath(
+      String(ev.languageName || ev.name || '').toLowerCase(),
+    );
+    const original = ev.diffOriginal || '';
+    const modified = ev.content || '';
+    function onMonaco(monaco) {
+      if (!holder.isConnected || tab.contentEditor) return;
+      const editor = monaco.editor.createDiffEditor(holder, {
+        readOnly: true,
+        originalEditable: false,
+        automaticLayout: true,
+        renderSideBySide: true,
+        minimap: {enabled: false},
+        scrollBeyondLastLine: false,
+        theme: applyContentMonacoTheme(monaco),
+      });
+      const models = [
+        monaco.editor.createModel(original, language),
+        monaco.editor.createModel(modified, language),
+      ];
+      editor.setModel({original: models[0], modified: models[1]});
+      tab.contentEditor = editor;
+      tab.contentDiffModels = models;
+      appendContentMenuBar(tab, holder, false);
+    }
+    function onCdnFailure() {
+      if (!holder.isConnected || holder.firstChild) return;
+      const pre = document.createElement('pre');
+      pre.className = 'content-code-fallback';
+      const code = document.createElement('code');
+      code.textContent = unifiedDiffText(original, modified);
+      pre.appendChild(code);
+      holder.appendChild(pre);
+    }
+    ensureMonaco().then(onMonaco, onCdnFailure);
+  }
+
+  /**
+   * A plain unified diff of two texts (longest-common-subsequence over
+   * lines), for the no-Monaco fallback of renderDiffContent.
+   */
+  function unifiedDiffText(original, modified) {
+    const a = original.split('\n');
+    const b = modified.split('\n');
+    const n = a.length;
+    const m = b.length;
+    // Guard the O(n*m) table: very large files get the two texts one
+    // after the other instead of a diff.
+    if (n * m > 4000000) {
+      return '--- original\n' + original + '\n+++ modified\n' + modified;
+    }
+    // lcs[i][j] = length of the longest common subsequence of a[i..]
+    // and b[j..]; the last row and column stay zero.
+    const lcs = [];
+    for (let i = 0; i <= n; i++) lcs.push(new Int32Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        lcs[i][j] =
+          a[i] === b[j]
+            ? lcs[i + 1][j + 1] + 1
+            : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) {
+        out.push(' ' + a[i]);
+        i++;
+        j++;
+      } else if (i < n && (j >= m || lcs[i + 1][j] >= lcs[i][j + 1])) {
+        // Removed lines come before the lines added in their place.
+        out.push('-' + a[i]);
+        i++;
+      } else {
+        out.push('+' + b[j]);
+        j++;
+      }
+    }
+    return out.join('\n');
+  }
+
+  /** The code editor a content tab's menu items act on (the right-hand side of a diff). */
+  function contentActionEditor(tab) {
+    const editor = tab.contentEditor;
+    return editor && editor.getModifiedEditor
+      ? editor.getModifiedEditor()
+      : editor;
+  }
+
   // The menus of a content tab's Monaco editor, laid out like VS Code's
   // menu bar. Monaco by itself only has a right-click menu with a few
   // entries, which a phone cannot even open. An item runs either a
@@ -2960,7 +3061,7 @@
     if (item.edits && !editable) return false;
     if (item.enabled) return item.enabled(tab);
     if (!item.id) return true;
-    const action = tab.contentEditor.getAction(item.id);
+    const action = contentActionEditor(tab).getAction(item.id);
     return action ? action.isSupported() : true;
   }
 
@@ -2971,7 +3072,7 @@
   }
 
   function runContentMenuItem(item, tab) {
-    const editor = tab.contentEditor;
+    const editor = contentActionEditor(tab);
     if (!editor) return;
     editor.focus();
     if (item.run) item.run(tab, editor);
@@ -3004,7 +3105,7 @@
       const check = document.createElement('span');
       check.className = 'content-menu-check';
       if (item.checked) {
-        const on = !!item.checked(tab.contentEditor);
+        const on = !!item.checked(contentActionEditor(tab));
         row.setAttribute('aria-checked', String(on));
         check.textContent = on ? '\u2713' : '';
       }
@@ -3191,9 +3292,10 @@
     tab.contentModeBtn = btn;
   }
 
-  // The text a previewable tab would save right now: the editor's
-  // buffer once it exists (it holds any unsaved edits), otherwise the
-  // text read from disk (before the first Edit source toggle).
+  // The text a file tab would save right now: the editor's buffer once
+  // it exists (it holds any unsaved edits), otherwise the text read
+  // from disk (before Monaco loads, or a preview's first Edit source
+  // toggle).
   function contentSourceValue(tab) {
     if (tab.contentEditor) {
       try {
@@ -3201,6 +3303,32 @@
       } catch (_e) {}
     }
     return tab.contentSourceText || '';
+  }
+
+  // The file "open in the editor" for a prompt or a completion: the
+  // file tab the user viewed most recently and still has open, with
+  // its buffer (unsaved edits included) when *withContent* is set.
+  // This is the in-page counterpart of the visible VS Code editor the
+  // extension host reports; the host's own editor wins when it has
+  // one, so the remote webapp gets the same context from its Monaco
+  // tabs as VS Code gets from its native editors. Tabs that are not a
+  // file on disk (git-show://, search results, folder listings, the
+  // streamed browser) never count. With *withContent*, no open file
+  // tab yields ``activeFile: ""``, which tells the daemon to drop its
+  // snapshot of the closed file instead of completing against it; the
+  // buffer is sent whenever it is known, even when emptied, so the
+  // daemon never pairs the path with stale text.
+  function editorContext(withContent) {
+    const tab = getTab(lastViewedContentTabId);
+    const isFile =
+      tab && tab.isContentTab && !tab.isBrowserTab && !tab.contentNotAFile;
+    const path = isFile ? tab.contentPath : '';
+    if (!path) return withContent ? {activeFile: ''} : {};
+    const ctx = {activeFile: path};
+    if (withContent && tab.contentHasText) {
+      ctx.activeFileContent = contentSourceValue(tab);
+    }
+    return ctx;
   }
 
   // (Re)build a previewable tab's preview iframe from the text it
@@ -3346,13 +3474,17 @@
   // flag lets handleFileContent replace a dirty tab's editor, which it
   // otherwise refuses to do (a click on the file's link must not throw
   // the user's unsaved work away).
+  // The flag holds the id of the chat tab the request is sent as (the
+  // daemon echoes it on the reply), so a failed reply can be matched to
+  // this reload and not to another chat's open of the same path.
   function reloadContentTab(tab) {
-    tab.contentReloadRequested = true;
+    const requester = tab.ownerTabId || activeTabId;
+    tab.contentReloadRequested = requester;
     api.send({
       type: 'openFile',
       path: tab.contentPath,
       workDir: tab.ownerBrowseWorkDir || workDirForTab(tab.ownerTabId),
-      tabId: tab.ownerTabId || activeTabId,
+      tabId: requester,
     });
   }
 
@@ -3621,6 +3753,7 @@
   function renderPreviewableContent(tab, view, ev, isMarkdown) {
     tab.contentIsMarkdown = isMarkdown;
     tab.contentSourceText = ev.content || '';
+    tab.contentHasText = true;
     if (typeof ev.version !== 'string') {
       tab.contentFileVersion = '';
       appendContentHtmlFrame(
@@ -3659,6 +3792,9 @@
     view.style.display = 'none';
     area.appendChild(view);
     tab.contentViewEl = view;
+    // Not a file on disk (a commit's patch, search results, a folder
+    // listing): never "the file open in the editor" (editorContext).
+    tab.contentNotAFile = ev.isVirtual === true || ev.isDirectory === true;
     const lower = (ev.name || '').toLowerCase();
     // A directory listing is plain text no matter what the directory is
     // named: without this guard a directory named foo.md or foo.html
@@ -3685,6 +3821,10 @@
       const holder = document.createElement('div');
       holder.className = 'content-monaco-holder';
       view.appendChild(holder);
+      if (ev.isDiff) {
+        renderDiffContent(tab, holder, ev);
+        return;
+      }
       renderCodeContent(
         tab,
         holder,
@@ -3724,6 +3864,10 @@
     // markdown source with rendered HTML.
     if (ev.isReport) {
       // report-coverage:end
+      // The file's own text (ev.source) is what a completion sees as
+      // the buffer, never the converted HTML.
+      tab.contentSourceText = ev.source || '';
+      tab.contentHasText = true;
       appendContentHtmlFrame(view, ev.content || '');
       return;
     }
@@ -3736,6 +3880,10 @@
     // none keeps the read-only viewer, since it has no saveFile.
     const editable = typeof ev.version === 'string';
     tab.contentFileVersion = editable ? ev.version : '';
+    // The text as read from disk stands in for the buffer until Monaco
+    // has created the editor (see contentSourceValue / editorContext).
+    tab.contentSourceText = ev.content || '';
+    tab.contentHasText = true;
     if (editable) appendContentSaveBar(tab, view);
     const holder = document.createElement('div');
     holder.className = 'content-monaco-holder';
@@ -3815,11 +3963,10 @@
   // a user request or a finished task; pass false to open the tab in the
   // background instead.
   //
-  // ownerTabId names the tab whose work produced the file, so the
-  // content tab inherits that owner's WORKSPACE SCOPE (tabScopeWorkDir):
-  // a report written by a hidden foreign tab opens hidden too instead
-  // of stealing focus in an unrelated workspace. It defaults to the
-  // active tab (user-driven opens belong to the conversation on screen).
+  // ownerTabId names the tab whose work produced the file; the Explorer
+  // and Source Control views keep browsing that owner's folder while
+  // the content tab is up. It defaults to the active tab (user-driven
+  // opens belong to the conversation on screen).
   function handleFileContent(ev, mayFocus, ownerTabId) {
     if (mayFocus === undefined) mayFocus = true;
     const owner =
@@ -3827,7 +3974,6 @@
         ? activeTabId
         : String(ownerTabId);
     const ownerTab = getTab(owner);
-    const ownerScope = ownerTab ? tabScopeWorkDir(ownerTab) : '';
     if (ev.error) {
       // tableak-coverage:start
       // A background task's failed file open is that task's problem. Toasting
@@ -3841,17 +3987,16 @@
       }
       // tableak-coverage:end
       // A failed reload keeps the tab's edits, so the next click on
-      // the file's link must protect them again. Match by workspace scope
-      // like the success path below: a failed open of the same path issued
-      // by ANOTHER workspace's conversation must not cancel this tab's own
-      // in-flight reload (its success reply would then only reveal a line
-      // instead of replacing the text).
-      const errScopeKey = normalizeHistoryWorkDir(ownerScope);
+      // the file's link must protect them again. Only a reply to the
+      // chat that requested the reload counts (the reply echoes the
+      // request's tabId): another chat's failed open of the same path
+      // must not cancel this tab's in-flight reload, or its success
+      // reply would only reveal a line instead of replacing the text.
       tabs.forEach(t => {
         if (
           t.isContentTab &&
           t.contentPath === ev.path &&
-          normalizeHistoryWorkDir(tabScopeWorkDir(t)) === errScopeKey
+          t.contentReloadRequested === owner
         ) {
           t.contentReloadRequested = false;
         }
@@ -3859,21 +4004,9 @@
       return;
     }
     const path = ev.path || '';
-    // Reuse by path WITHIN the same workspace scope only: one
-    // workspace's file must not overwrite (or focus) the content tab
-    // another workspace's conversation is showing for the same path —
-    // "currently hidden" is not enough, two different foreign
-    // workspaces are both hidden here.
-    const scopeKey = normalizeHistoryWorkDir(ownerScope);
-    // A tab reloading itself from disk (reloadContentTab) is the
-    // target no matter which scope the reply was attributed to.
+    // One content tab per path, like one editor per file in VS Code.
     const existing = tabs.find(t => {
-      return (
-        t.isContentTab &&
-        t.contentPath === path &&
-        (t.contentReloadRequested ||
-          normalizeHistoryWorkDir(tabScopeWorkDir(t)) === scopeKey)
-      );
+      return t.isContentTab && t.contentPath === path;
     });
     if (existing) {
       // Unsaved edits win over a fresh copy of the file: like VS Code,
@@ -3896,12 +4029,9 @@
     tab.isContentTab = true;
     tab.contentPath = path;
     tab.ownerTabId = owner || '';
-    // Freeze the owner's scope so the content tab stays pinned to its
-    // workspace even after the owner closes (see tabScopeWorkDir).
-    tab.ownerScopeWorkDir = ownerScope;
-    // And the folder the owner really works in (which may differ from
-    // the visibility scope), so the Explorer / Source Control views
-    // keep browsing it while this tab is up even once the owner closes.
+    // Freeze the folder the owner works in, so the Explorer / Source
+    // Control views keep browsing it while this tab is up even once
+    // the owner closes.
     tab.ownerBrowseWorkDir = ownerTab ? workDirForTab(ownerTab.id) : '';
     tabs.push(tab);
     renderContentView(tab, ev);
@@ -4021,6 +4151,7 @@
           content: rep.isMarkdown
             ? markdownReportToHtml(rep.content)
             : rep.content,
+          source: rep.content,
           isReport: true,
         },
         mayFocus,
@@ -4107,7 +4238,7 @@
         action: function () {
           const ids = tabs
             .filter(t => {
-              return t.id !== tabId && !isTabHidden(t);
+              return t.id !== tabId;
             })
             .map(t => {
               return t.id;
@@ -4121,13 +4252,9 @@
       {
         label: 'Close All',
         action: function () {
-          const ids = tabs
-            .filter(t => {
-              return !isTabHidden(t);
-            })
-            .map(t => {
-              return t.id;
-            });
+          const ids = tabs.map(t => {
+            return t.id;
+          });
           ids.forEach(id => {
             closeTab(id);
           });
@@ -4138,7 +4265,7 @@
         action: function () {
           const ids = tabs
             .filter(t => {
-              return !t.isRunning && !isTabHidden(t);
+              return !t.isRunning;
             })
             .map(t => {
               return t.id;
@@ -4158,11 +4285,9 @@
       el.addEventListener('click', () => {
         closeTabContextMenu();
         // The menu may have gone stale while open (the anchor tab was
-        // closed remotely, or a workspace change hid it): acting on a
-        // tab the user can no longer see would close or switch shared
-        // tabs behind their back.
-        const anchor = getTab(tabId);
-        if (!anchor || isTabHidden(anchor)) return;
+        // closed remotely): acting on a tab the user can no longer see
+        // would close or switch shared tabs behind their back.
+        if (!getTab(tabId)) return;
         item.action();
       });
       tabCtxMenu.appendChild(el);
@@ -4435,74 +4560,6 @@
     return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
   }
 
-  // workspacescope-coverage:start
-  // Workspace-scoped tab bar: true when a tab pinned to *workDir*
-  // belongs on this client. Matching reuses the history filter's
-  // semantics (see applyHistoryFilterVisibility): an unpinned tab or
-  // a client without a workspace matches everything, and a tab whose
-  // work dir is a subdirectory of the workspace (e.g. a
-  // ".kiss-worktrees/kiss_wt-..." worktree) still belongs to it.
-  function tabMatchesWorkspace(workDir) {
-    const ws = normalizeHistoryWorkDir(configWorkDir || '');
-    if (ws === '') return true;
-    const wd = normalizeHistoryWorkDir(workDir || '');
-    if (wd === '') return true;
-    if (wd === ws) return true;
-    return wd.startsWith(ws.endsWith('/') ? ws : ws + '/');
-  }
-
-  // The work dir that scopes *tab* to a workspace. Sub-agent and
-  // content tabs are client-local details of a chat tab, so they take
-  // their parent chain's scope. For a registry tab the registry's
-  // canonical value wins — INCLUDING the canonical empty string,
-  // which means "unpinned, belongs everywhere" — and the local pin
-  // only covers tabs the registry has not described yet.
-  function tabScopeWorkDir(tab) {
-    let t = tab;
-    for (let i = 0; t && i < tabs.length; i++) {
-      const upId = t.parentTabId || t.ownerTabId;
-      if (!upId) break;
-      const up = getTab(upId);
-      if (!up) {
-        // The owner is gone (e.g. a finished sub-agent tab closed
-        // after parking its report): the scope frozen at creation
-        // keeps the orphan pinned to its workspace instead of letting
-        // it fall through as unpinned-everywhere.
-        if (typeof t.ownerScopeWorkDir === 'string') {
-          return t.ownerScopeWorkDir;
-        }
-        break;
-      }
-      t = up;
-    }
-    if (!t) return '';
-    // A standalone API sub-task (sorcar.run with a scope) runs in a
-    // channel/cron scratch directory (its registryWorkDir) but pins a
-    // SEPARATE scope to the calling workspace so its tab shows there;
-    // that scope wins when set. (A run_agent sub-task has no registry
-    // tab at all -- it is a client-local sub-agent tab that inherits
-    // its parent chain's scope above.)
-    if (t.registryScopeWorkDir) return t.registryScopeWorkDir;
-    if (typeof t.registryWorkDir === 'string') return t.registryWorkDir;
-    return t.workDir || '';
-  }
-
-  // True when *tab* is not shown on this client because it belongs to
-  // a different workspace. Hidden is a RENDERING property only: the
-  // tab object, its draft, transcript, sub-agent tabs and registry
-  // entry all stay intact, every broadcast keeps routing to it like
-  // to any background tab, and it is still offered back to the daemon
-  // for restart recovery — it just has no strip in the tab bar and
-  // can never become the active tab.
-  function isTabHidden(tab) {
-    // An editor-tab panel shows exactly the chat it was opened for
-    // (plus its sub-agent tabs); workspace scoping already happened
-    // when the panel was created, and hiding the root tab here would
-    // only spawn a placeholder over a perfectly good conversation.
-    if (EDITOR_TAB_MODE) return false;
-    return !!tab && !tabMatchesWorkspace(tabScopeWorkDir(tab));
-  }
-
   // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
   // and content tabs hang off it; nothing else exists in the panel.
   function editorRootTab() {
@@ -4513,48 +4570,18 @@
     );
   }
 
-  function firstVisibleTab() {
-    return (
-      tabs.find(t => {
-        return !isTabHidden(t);
-      }) || null
-    );
-  }
-
-  // Park the user on a tab of THIS workspace: when every tab belongs
-  // to other workspaces, create the same local placeholder an empty
-  // registry gets, and when the active tab is hidden (or gone), save
-  // its draft and activate the first visible tab instead.
-  function ensureVisibleActiveTab() {
-    if (!firstVisibleTab()) tabs.push(makeTab('new chat'));
-    const active = getTab(activeTabId);
-    if (active && !isTabHidden(active)) return;
-    if (active) saveCurrentTab();
-    activateAdjacentTab(firstVisibleTab());
-  }
-
-  // Re-scope the workspace-derived UI after configWorkDir changes:
-  // the history filter and the workspace-scoped tab bar both depend
-  // on it. Purely client-local: no registry command is sent, and no
-  // tab state is discarded — visibility is recomputed, nothing else.
+  // Re-scope the workspace-derived UI after configWorkDir changes: the
+  // history filter and the Explorer / Source Control views browse the
+  // workspace. The tab bar is NOT workspace-scoped: every client of
+  // the daemon shows the same registry tabs, whatever folder each tab
+  // runs in, so a running task is visible on every surface until the
+  // user closes it. Purely client-local: no registry command is sent.
   function applyWorkspaceScope() {
     try {
       applyHistoryFilterVisibility();
     } catch (_e) {}
-    // A context menu opened before the switch anchors to a tab that
-    // may now be hidden; acting on it would mutate an invisible tab.
-    closeTabContextMenu();
-    ensureVisibleActiveTab();
-    // The active tab may have survived (e.g. an everywhere-visible
-    // content tab) while the chat reported to the host got hidden:
-    // re-point the host at a chat of THIS workspace.
-    reportSurvivingChatTab();
-    renderTabBar();
-    persistTabState();
-    // The Explorer / Source Control views browse the workspace too.
     refreshSidebarDataViews(false);
   }
-  // workspacescope-coverage:end
 
   // Reconcile the local tab bar against the canonical `tabs_state`
   // snapshot: adopt tabs other clients opened, drop tabs they closed,
@@ -4606,9 +4633,6 @@
       if (entry.workDir && !root.workDir) root.workDir = entry.workDir;
       if (typeof entry.workDir === 'string') {
         root.registryWorkDir = entry.workDir;
-      }
-      if (typeof entry.scopeWorkDir === 'string') {
-        root.registryScopeWorkDir = entry.scopeWorkDir;
       }
     } else {
       // Same pending-open expiry as the shared reconcile: an id the
@@ -4676,18 +4700,10 @@
       }
       if (e.workDir && !tab.workDir) tab.workDir = e.workDir;
       // Mirror the registry's canonical work dir verbatim (empty
-      // means "unpinned"): it decides the tab's workspace visibility
-      // (see tabScopeWorkDir) without disturbing tab.workDir, which
-      // client features (file links, commit, submit) keep using.
+      // means "unpinned") without disturbing tab.workDir, which client
+      // features (file links, commit, submit) keep using; restart
+      // recovery (restoredTabsForReady) re-seeds the registry from it.
       if (typeof e.workDir === 'string') tab.registryWorkDir = e.workDir;
-      // A standalone API sub-task pins a distinct visibility scope
-      // (the calling workspace) so its tab shows there even though it
-      // runs in a channel/cron scratch directory (registryWorkDir).
-      // Empty means "no override — scope by registryWorkDir" (see
-      // tabScopeWorkDir).
-      if (typeof e.scopeWorkDir === 'string') {
-        tab.registryScopeWorkDir = e.scopeWorkDir;
-      }
       next.push(tab);
     });
 
@@ -4701,23 +4717,19 @@
     });
 
     // A removed registry tab takes its local sub-agent descendants
-    // with it, exactly like a local close would. A snapshot with
-    // nothing VISIBLE to mirror — an empty registry, or one whose
-    // every listed tab is hidden here (another workspace's) — spares
-    // tabs the registry never listed (the local placeholder):
-    // destroying and recreating the placeholder would only lose its
-    // identity and composer draft.
+    // with it, exactly like a local close would. An empty registry
+    // spares tabs it never listed (the local placeholder): destroying
+    // and recreating the placeholder would only lose its identity and
+    // composer draft.
     const removedIds = new Set();
-    const nothingVisibleListed = !next.some(t => {
-      return !isTabHidden(t);
-    });
+    const emptyRegistry = next.length === 0;
     tabs.forEach(t => {
       if (
         !inSnapshot.has(t.id) &&
         !t.isSubagentTab &&
         !t.isContentTab &&
         !pendingOpenTabs.has(t.id) &&
-        !(nothingVisibleListed && !t.inRegistry)
+        !(emptyRegistry && !t.inRegistry)
       ) {
         removedIds.add(t.id);
       }
@@ -4756,10 +4768,9 @@
       }
     });
 
-    if (!firstVisibleTab()) {
-      // Empty registry — or one whose every tab belongs to another
-      // workspace: keep one local, unregistered placeholder so the
-      // composer always exists. The daemon adopts it the moment it
+    if (tabs.length === 0) {
+      // Empty registry: keep one local, unregistered placeholder so
+      // the composer always exists. The daemon adopts it the moment it
       // runs a task; until then it is a welcome screen only.
       tabs.push(makeTab('new chat'));
     }
@@ -4772,13 +4783,9 @@
         }
       });
     }
-    const activeAfter = getTab(activeTabId);
-    if (!activeAfter || isTabHidden(activeAfter)) {
-      // A hidden survivor keeps its draft; a removed tab has nothing
-      // left to save.
-      if (activeAfter) saveCurrentTab();
+    if (!getTab(activeTabId)) {
       const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
-      const target = saved && !isTabHidden(saved) ? saved : firstVisibleTab();
+      const target = saved || tabs[0];
       // The previously selected tab is gone: the draft the boot tab
       // showed for it follows the screen to the tab taking it
       // (restoreTab shows tab.inputValue).
@@ -7612,6 +7619,96 @@
     else openWorkspaceFile(row.dataset.explorerPath, explorerRowRoot(row));
   }
 
+  // ---- Explorer selection ----
+  //
+  // VS Code's multi-select: a plain click or arrow key selects one
+  // row, Ctrl/Cmd toggles a row, Shift selects the visible rows from
+  // the anchor (the last plainly selected row) to the target, Ctrl+A
+  // selects every visible row and Escape clears.  The selection lives
+  // on the rows themselves (`is-selected`), which survive a re-listing
+  // of their folder; a context-menu action on a selected row applies
+  // to the whole selection.
+  let explorerAnchorRow = null;
+
+  /** The selected Explorer rows, in tree order. */
+  function explorerSelectedRows() {
+    return explorerTree
+      ? Array.from(explorerTree.querySelectorAll('.explorer-row.is-selected'))
+      : [];
+  }
+
+  function setExplorerRowSelected(row, on) {
+    row.classList.toggle('is-selected', on);
+    row.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+
+  function clearExplorerSelection() {
+    explorerSelectedRows().forEach(r => setExplorerRowSelected(r, false));
+  }
+
+  /**
+   * Apply a click or key on *row* to the selection.
+   *
+   * @param {HTMLElement} row The row clicked or moved to.
+   * @param {{ctrl?: boolean, shift?: boolean}} mods Modifier keys held
+   *   (`ctrl` covers Cmd on macOS).
+   */
+  function selectExplorerRow(row, mods) {
+    if (mods.shift && explorerAnchorRow && explorerAnchorRow.isConnected) {
+      const rows = visibleTreeItems(explorerTree, '.explorer-row');
+      const a = rows.indexOf(explorerAnchorRow);
+      const b = rows.indexOf(row);
+      if (a >= 0 && b >= 0) {
+        // Like VS Code's list: the run of selected rows around the
+        // anchor is replaced by the anchor..target range; rows selected
+        // elsewhere (with Ctrl) stay selected.
+        const isOn = i => rows[i].classList.contains('is-selected');
+        let lo = a;
+        let hi = a;
+        while (lo > 0 && isOn(lo - 1)) lo--;
+        while (hi < rows.length - 1 && isOn(hi + 1)) hi++;
+        for (let i = lo; i <= hi; i++) setExplorerRowSelected(rows[i], false);
+        for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+          setExplorerRowSelected(rows[i], true);
+        }
+        return;
+      }
+    }
+    if (mods.ctrl) {
+      setExplorerRowSelected(row, !row.classList.contains('is-selected'));
+    } else {
+      clearExplorerSelection();
+      setExplorerRowSelected(row, true);
+    }
+    explorerAnchorRow = row;
+  }
+
+  function selectAllExplorerRows() {
+    visibleTreeItems(explorerTree, '.explorer-row').forEach(r => {
+      if (!r.classList.contains('is-editing')) setExplorerRowSelected(r, true);
+    });
+  }
+
+  /**
+   * The rows an action started on *row* applies to: the whole
+   * selection when *row* is one of several selected rows, else *row*
+   * alone.  A row inside another selected folder is dropped (deleting
+   * or moving the folder takes it along).
+   */
+  function explorerActionRows(row) {
+    const selected = explorerSelectedRows();
+    if (selected.length < 2 || selected.indexOf(row) < 0) return [row];
+    return selected.filter(r => {
+      return !selected.some(other => {
+        return (
+          other !== r &&
+          other.classList.contains('is-dir') &&
+          pathWithin(r.dataset.explorerPath, other.dataset.explorerPath)
+        );
+      });
+    });
+  }
+
   // ---- Source Control ----
   //
   // Both halves (Changes and Graph) reload together; replies carrying
@@ -7622,6 +7719,11 @@
   let scmLog = null;
   let scmRefreshTimer = null;
   const scmExpanded = new Set();
+  // Worktree paths whose section of the Changes list the user folded;
+  // a fold survives the periodic re-render.
+  const scmWorktreeCollapsed = new Set();
+  // The focusable rows of the Source Control view (roving tabindex).
+  const SCM_ITEMS = '.scm-commit, .scm-row, .scm-worktree-hdr';
   const SCM_LANE_W = 14;
   const SCM_ROW_H = 24;
   const SCM_MAX_LANES = 24;
@@ -7751,6 +7853,7 @@
       change.absPath || (repo ? joinPath(repo, change.path) : change.path);
     row.dataset.scmPath = abs;
     row.dataset.scmRelPath = change.path;
+    row.dataset.scmOrigPath = change.origPath || '';
     row.dataset.scmStatus = status;
     row.title =
       (change.origPath ? change.origPath + ' \u2192 ' : '') +
@@ -7820,21 +7923,28 @@
     // One repository (worktree) at a time: the current worktree's
     // changes come first, then every other worktree of the repository
     // under its own header (VS Code lists multiple repositories the
-    // same way).  A single worktree keeps the flat list.
+    // same way), which folds the worktree's rows.  A single worktree
+    // keeps the flat list.
     worktrees.forEach(wt => {
       const changes = Array.isArray(wt.changes) ? wt.changes : [];
       let depth = 0;
+      let body = scmChangesList;
       if (worktrees.length > 1) {
         scmChangesList.appendChild(createScmWorktreeHeader(wt, changes.length));
+        body = document.createElement('div');
+        body.className = 'scm-worktree-body';
+        body.setAttribute('role', 'group');
+        body.hidden = scmWorktreeCollapsed.has(wt.path);
+        scmChangesList.appendChild(body);
         depth = 1;
       }
       if (wt.error) {
-        explorerNote(scmChangesList, depth, String(wt.error));
+        explorerNote(body, depth, String(wt.error));
         return;
       }
       if (!changes.length) {
         if (worktrees.length > 1) {
-          explorerNote(scmChangesList, depth, 'No changes');
+          explorerNote(body, depth, 'No changes');
         }
         return;
       }
@@ -7849,17 +7959,45 @@
           hdr.className = 'scm-group-hdr';
           hdr.style.setProperty('--depth', String(depth));
           hdr.textContent = SCM_GROUP_LABELS[g] + ' (' + rows.length + ')';
-          scmChangesList.appendChild(hdr);
+          body.appendChild(hdr);
           rowDepth = depth + 1;
         }
         rows.forEach(c => {
           const row = createScmFileRow(c, wt.path, rowDepth);
           row.dataset.scmWorktree = wt.path;
-          scmChangesList.appendChild(row);
+          body.appendChild(row);
         });
       });
     });
-    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+    rovingFocus(scmBodyEl, SCM_ITEMS);
+  }
+
+  /**
+   * Fold or unfold one worktree's section of the Changes list (a click
+   * or Enter on its header, Left/Right arrows).
+   *
+   * @param {HTMLElement} hdr The .scm-worktree-hdr row.
+   * @param {boolean} [open] Force open (true) or folded (false).
+   */
+  function toggleScmWorktree(hdr, open) {
+    const path = hdr.dataset.scmWorktree || '';
+    const body =
+      hdr.nextElementSibling &&
+      hdr.nextElementSibling.classList.contains('scm-worktree-body')
+        ? hdr.nextElementSibling
+        : null;
+    if (!body) return;
+    const wasOpen = !body.hidden;
+    const next = typeof open === 'boolean' ? open : !wasOpen;
+    if (next === wasOpen) return;
+    if (next) scmWorktreeCollapsed.delete(path);
+    else scmWorktreeCollapsed.add(path);
+    body.hidden = !next;
+    hdr.classList.toggle('expanded', next);
+    hdr.setAttribute('aria-expanded', next ? 'true' : 'false');
+    // A folded section may have held the focused row: the header
+    // takes the tab stop back.
+    rovingFocus(scmBodyEl, SCM_ITEMS, hdr);
   }
 
   /**
@@ -7884,12 +8022,26 @@
     return rows.filter(wt => wt.current).concat(rows.filter(wt => !wt.current));
   }
 
-  /** The "<worktree folder> <branch>" header above one worktree's rows. */
+  /**
+   * The "<worktree folder> <branch>" header above one worktree's rows:
+   * a tree item with a chevron that folds the rows below it (see
+   * toggleScmWorktree).
+   */
   function createScmWorktreeHeader(wt, count) {
     const hdr = document.createElement('div');
     hdr.className = 'scm-group-hdr scm-worktree-hdr';
     if (wt.current) hdr.classList.add('is-current');
     hdr.title = wt.path;
+    hdr.dataset.scmWorktree = wt.path;
+    hdr.setAttribute('role', 'treeitem');
+    hdr.tabIndex = -1;
+    const open = !scmWorktreeCollapsed.has(wt.path);
+    hdr.classList.toggle('expanded', open);
+    hdr.setAttribute('aria-expanded', open ? 'true' : 'false');
+    const chevron = document.createElement('span');
+    chevron.className = 'explorer-chevron';
+    chevron.appendChild(svgIcon('', ICON_CHEVRON));
+    hdr.appendChild(chevron);
     const name = document.createElement('span');
     name.className = 'scm-worktree-name';
     name.textContent = wt.name || pathBaseName(wt.path);
@@ -8203,7 +8355,7 @@
         createScmCommitRow(row, layouts[i], lanesShown, repo),
       );
     });
-    rovingFocus(scmBodyEl, '.scm-commit, .scm-row');
+    rovingFocus(scmBodyEl, SCM_ITEMS);
   }
 
   function createScmCommitRow(commit, layout, lanesShown, repo) {
@@ -8294,6 +8446,7 @@
     files.forEach(f => {
       const row = createScmFileRow(f, commit.worktreePath || repo, 1);
       row.dataset.scmCommit = commit.isWorktree ? '' : commit.sha;
+      row.dataset.scmWorktree = commit.worktreePath || '';
       container.appendChild(row);
     });
   }
@@ -8328,14 +8481,44 @@
   }
 
   function onScmActivate(target) {
+    const wtHdr = target.closest('.scm-worktree-hdr');
+    if (wtHdr) {
+      toggleScmWorktree(wtHdr);
+      return;
+    }
     const commit = target.closest('.scm-commit');
     if (commit) {
       toggleScmCommit(commit);
       return;
     }
     const file = target.closest('.scm-row');
-    if (!file || file.dataset.scmStatus === 'D') return;
-    openWorkspaceFile(file.dataset.scmPath, scmWorkDir);
+    if (!file) return;
+    if (file.closest('#scm-graph')) {
+      // A file of the graph opens as a diff, as in VS Code: the commit
+      // against its parent, or the working tree against HEAD for the
+      // "Uncommitted changes" row.
+      openScmFileDiff(file);
+      return;
+    }
+    if (file.dataset.scmStatus === 'D') return;
+    openWorkspaceFile(
+      file.dataset.scmPath,
+      file.dataset.scmWorktree || scmWorkDir,
+    );
+  }
+
+  /** Request the side-by-side diff of a graph file row (see handleGitShow). */
+  function openScmFileDiff(row) {
+    const workDir = row.dataset.scmWorktree || scmWorkDir || sidebarWorkDir();
+    sendGitShow(
+      {
+        sha: row.dataset.scmCommit || '',
+        path: row.dataset.scmRelPath || '',
+        origPath: row.dataset.scmOrigPath || '',
+        mode: 'diff',
+      },
+      {workDir: workDir, tabId: activeTabId},
+    );
   }
 
   /** The visible (rendered) items matching *selector* under *root*. */
@@ -8420,8 +8603,9 @@
   const treeMenu = window.TreeContextMenu || null;
   const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || '');
   const IS_LINUX = /Linux|X11/.test(navigator.platform || '') && !IS_MAC;
-  // Cut / Copy remember one Explorer entry until Paste (or another
-  // Cut / Copy) replaces it, like VS Code's Explorer clipboard.
+  // Cut / Copy remember the Explorer entries ({paths, cut}) until Paste
+  // (or another Cut / Copy) replaces them, like VS Code's Explorer
+  // clipboard.
   let explorerClipboard = null;
   // "Select for Compare" remembers a file until "Compare with Selected".
   let explorerCompareWith = '';
@@ -8634,16 +8818,17 @@
     // The tree changed on disk: re-list every listed folder (the rows
     // of entries still present survive, so expansion state is kept)
     // and let the Source Control view know.
-    // Only the Cut this move consumed is spent: a NEWER Cut made while the
-    // move reply was in flight must survive, or the user's pending Paste
-    // silently loses its entry.
+    // Only the Cut entry this move consumed is spent: a NEWER Cut made
+    // while the move reply was in flight must survive, or the user's
+    // pending Paste silently loses its entries.
     if (
       request.action === 'move' &&
       explorerClipboard &&
       explorerClipboard.cut &&
-      explorerClipboard.path === request.path
+      explorerClipboard.paths.indexOf(request.path) >= 0
     ) {
-      explorerClipboard = null;
+      const left = explorerClipboard.paths.filter(p => p !== request.path);
+      explorerClipboard = left.length ? {paths: left, cut: true} : null;
     }
     refreshExplorer(true);
     scmDirty = true;
@@ -8815,7 +9000,131 @@
     });
   }
 
+  /**
+   * The menu for several selected rows (VS Code's Explorer menu with a
+   * multi-selection): Open to the Side for files, Compare Selected for
+   * exactly two files, Cut / Copy / Copy Path / Copy Relative Path /
+   * Delete on every row.  Items that only make sense for one entry
+   * (New File, Paste, Rename, Find in Folder) are left out.
+   */
+  function explorerMultiMenuItems(rows) {
+    const paths = rows.map(r => r.dataset.explorerPath);
+    const files = rows.filter(r => !r.classList.contains('is-dir'));
+    const hasRoot = rows.some(r => {
+      return (
+        r.classList.contains('is-root') ||
+        r.dataset.explorerPath === explorerRowRoot(r)
+      );
+    });
+    const items = [];
+    if (files.length) {
+      items.push({
+        id: 'open-to-side',
+        label: 'Open to the Side',
+        key: keyLabel('Ctrl+Enter', '\u2303Enter'),
+        run: () => {
+          files.forEach(r => {
+            openWorkspaceFileToSide(r.dataset.explorerPath, explorerRowRoot(r));
+          });
+        },
+      });
+      items.push({separator: true});
+    }
+    if (files.length === 2 && rows.length === 2) {
+      items.push({
+        id: 'compare-selected',
+        label: 'Compare Selected',
+        run: () => {
+          sendFsAction({
+            action: 'compare',
+            path: files[0].dataset.explorerPath,
+            dest: files[1].dataset.explorerPath,
+            root: explorerRowRoot(files[0]),
+          });
+        },
+      });
+      items.push({separator: true});
+    }
+    items.push({
+      id: 'cut',
+      label: 'Cut',
+      key: keyLabel('Ctrl+X', '\u2318X'),
+      enabled: !hasRoot,
+      run: () => {
+        explorerClipboard = {paths: paths, cut: true};
+      },
+    });
+    items.push({
+      id: 'copy',
+      label: 'Copy',
+      key: keyLabel('Ctrl+C', '\u2318C'),
+      enabled: !hasRoot,
+      run: () => {
+        explorerClipboard = {paths: paths, cut: false};
+      },
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'copy-path',
+      label: 'Copy Path',
+      key: keyLabel('Shift+Alt+C', '\u2325\u2318C', 'Ctrl+Alt+C'),
+      run: () => copyTextToClipboard(paths.join('\n')),
+    });
+    items.push({
+      id: 'copy-relative-path',
+      label: 'Copy Relative Path',
+      key: keyLabel('Ctrl+Shift+Alt+C', '\u21E7\u2325\u2318C'),
+      run: () =>
+        copyTextToClipboard(
+          rows
+            .map(r => {
+              return (
+                explorerRelativePath(
+                  r.dataset.explorerPath,
+                  explorerRowRoot(r),
+                ) || '.'
+              );
+            })
+            .join('\n'),
+        ),
+    });
+    items.push({separator: true});
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      key: keyLabel('Delete', '\u2318\u232B'),
+      enabled: !hasRoot,
+      run: () => {
+        confirmAction({
+          id: 'fs-delete',
+          message:
+            'Delete ' +
+            rows.length +
+            ' items? The server has no trash, so they cannot be restored.',
+          confirmLabel: 'Delete',
+          cancelLabel: 'Keep',
+          danger: true,
+          onConfirm: function () {
+            rows.forEach(r => {
+              sendFsAction({
+                action: 'delete',
+                path: r.dataset.explorerPath,
+                root: explorerRowRoot(r),
+              });
+            });
+          },
+        });
+      },
+    });
+    return items;
+  }
+
   function explorerMenuItems(row) {
+    const rows = explorerActionRows(row);
+    if (rows.length > 1) return explorerMultiMenuItems(rows);
+    // A selection of a folder and rows inside it reduces to the folder:
+    // the single-row menu is that folder's.
+    row = rows[0];
     const path = row.dataset.explorerPath;
     const root = explorerRowRoot(row);
     const isDir = row.classList.contains('is-dir');
@@ -8919,7 +9228,7 @@
       key: keyLabel('Ctrl+X', '\u2318X'),
       enabled: !isRoot,
       run: () => {
-        explorerClipboard = {path: path, cut: true};
+        explorerClipboard = {paths: [path], cut: true};
       },
     });
     items.push({
@@ -8928,7 +9237,7 @@
       key: keyLabel('Ctrl+C', '\u2318C'),
       enabled: !isRoot,
       run: () => {
-        explorerClipboard = {path: path, cut: false};
+        explorerClipboard = {paths: [path], cut: false};
       },
     });
     items.push({
@@ -8938,11 +9247,13 @@
       enabled: !!explorerClipboard,
       run: () => {
         if (!explorerClipboard) return;
-        sendFsAction({
-          action: explorerClipboard.cut ? 'move' : 'copy',
-          path: explorerClipboard.path,
-          dest: parent,
-          root: root,
+        explorerClipboard.paths.forEach(src => {
+          sendFsAction({
+            action: explorerClipboard.cut ? 'move' : 'copy',
+            path: src,
+            dest: parent,
+            root: root,
+          });
         });
       },
     });
@@ -9127,6 +9438,7 @@
     api.gitShow({
       sha: request.sha,
       path: request.path || '',
+      origPath: request.origPath || '',
       base: request.base || '',
       mode: request.mode || 'patch',
       workDir: at.workDir,
@@ -9170,6 +9482,10 @@
       return;
     }
     const short = String(ev.sha || request.sha).slice(0, 7);
+    if (ev.mode === 'diff') {
+      openGitDiffTab(ev);
+      return;
+    }
     const text =
       (ev.text || '') + (ev.truncated ? '\n[... output truncated ...]\n' : '');
     if (ev.base) {
@@ -9206,6 +9522,45 @@
             : ''),
       text,
       'x.diff',
+    );
+  }
+
+  /**
+   * Open a gitShow "diff" reply in a side-by-side diff tab, titled as
+   * VS Code titles a history item's file — "name (parent7 ↔ sha7)" (a
+   * root commit has no parent: "name (sha7)") — or "name (Working
+   * Tree)" for a file of the "Uncommitted changes" row.  Opening the
+   * same file of the same commit again brings the existing tab forward.
+   */
+  function openGitDiffTab(ev) {
+    const name = pathBaseName(ev.path);
+    const short = String(ev.sha || '').slice(0, 7);
+    const parent = String(ev.parent || '').slice(0, 7);
+    const label = ev.sha
+      ? name + ' (' + (parent ? parent + ' \u2194 ' : '') + short + ')'
+      : name + ' (Working Tree)';
+    const suffix = ev.truncated ? '\n[... output truncated ...]\n' : '';
+    handleFileContent(
+      {
+        path:
+          'git-diff://' +
+          (ev.repo || '') +
+          '/' +
+          (ev.sha || 'worktree') +
+          ':' +
+          ev.path,
+        name: label,
+        content: (ev.modified || '') + suffix,
+        diffOriginal: (ev.original || '') + suffix,
+        languageName: name,
+        isVirtual: true,
+        isDiff: true,
+      },
+      true,
+      // The tab that asked for the diff owns it (the reply echoes the
+      // request's tabId), so a reply landing after a tab switch opens
+      // in that tab's workspace, not the current one's.
+      ev.tabId || activeTabId,
     );
   }
 
@@ -9326,12 +9681,13 @@
     const relPath = row.dataset.scmRelPath || '';
     const absPath = row.dataset.scmPath || '';
     if (sha) {
-      // A file of a commit (MenuId.SCMHistoryItemChangeContext).
+      // A file of a commit (MenuId.SCMHistoryItemChangeContext): Open
+      // Changes is the same side-by-side diff a click opens.
       return [
         {
           id: 'open-changes',
           label: 'Open Changes',
-          run: () => sendGitShow({sha: sha, path: relPath}),
+          run: () => openScmFileDiff(row),
         },
         {
           id: 'open-file',
@@ -9341,9 +9697,10 @@
         },
       ];
     }
-    // A working-tree change (of any worktree).
+    // A working-tree change (of any worktree); under the graph's
+    // "Uncommitted changes" row it also offers the diff a click opens.
     const deleted = row.dataset.scmStatus === 'D';
-    return [
+    const items = [
       {
         id: 'open-file',
         label: 'Open File',
@@ -9365,6 +9722,14 @@
         run: () => copyTextToClipboard(relPath),
       },
     ];
+    if (row.closest('#scm-graph')) {
+      items.unshift({
+        id: 'open-changes',
+        label: 'Open Changes',
+        run: () => openScmFileDiff(row),
+      });
+    }
+    return items;
   }
 
   function onScmContextMenu(e) {
@@ -10052,12 +10417,20 @@
         // The buttons on a top-level folder row act on their own.
         if (e.target.closest('.explorer-root-actions')) return;
         const row = e.target.closest('.explorer-row');
-        if (row && !row.classList.contains('is-editing'))
-          onExplorerActivate(row);
+        if (!row || row.classList.contains('is-editing')) return;
+        const ctrl = e.ctrlKey || e.metaKey;
+        selectExplorerRow(row, {ctrl: ctrl, shift: e.shiftKey});
+        // A modified click only changes the selection.
+        if (!ctrl && !e.shiftKey) onExplorerActivate(row);
       });
       explorerTree.addEventListener('contextmenu', e => {
         const row = e.target.closest('.explorer-row');
         if (row && !row.classList.contains('is-editing')) {
+          // Right-clicking outside the selection selects that row
+          // alone; inside it, the menu acts on the whole selection.
+          if (!row.classList.contains('is-selected')) {
+            selectExplorerRow(row, {});
+          }
           showTreeMenu(e, explorerMenuItems(row), row);
         }
       });
@@ -10068,10 +10441,34 @@
       explorerTree.addEventListener('keydown', e => {
         const row = e.target.closest('.explorer-row');
         if (!row || row.classList.contains('is-editing')) return;
-        if (treeArrowNav(e, explorerTree, '.explorer-row', row)) return;
+        if (treeArrowNav(e, explorerTree, '.explorer-row', row)) {
+          // The arrow keys move the selection with the focus; Shift
+          // extends it from the anchor.
+          const focused = document.activeElement
+            ? document.activeElement.closest('.explorer-row')
+            : null;
+          if (focused) selectExplorerRow(focused, {shift: e.shiftKey});
+          return;
+        }
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          !e.altKey &&
+          !e.shiftKey &&
+          String(e.key).toLowerCase() === 'a'
+        ) {
+          e.preventDefault();
+          selectAllExplorerRows();
+          return;
+        }
+        if (e.key === 'Escape' && explorerSelectedRows().length) {
+          e.preventDefault();
+          clearExplorerSelection();
+          return;
+        }
         if (explorerShortcut(e, row)) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
+          selectExplorerRow(row, {});
           onExplorerActivate(row);
           return;
         }
@@ -10092,6 +10489,7 @@
           if (first) {
             rovingFocus(explorerTree, '.explorer-row', first);
             first.focus();
+            selectExplorerRow(first, {});
           }
           return;
         }
@@ -10104,6 +10502,7 @@
         if (parent) {
           rovingFocus(explorerTree, '.explorer-row', parent);
           parent.focus();
+          selectExplorerRow(parent, {});
         }
       });
     }
@@ -10124,13 +10523,21 @@
       });
       scmBody.addEventListener('contextmenu', onScmContextMenu);
       scmBody.addEventListener('focusin', e => {
-        const item = e.target.closest('.scm-commit, .scm-row');
-        if (item) rovingFocus(scmBody, '.scm-commit, .scm-row', item);
+        const item = e.target.closest(SCM_ITEMS);
+        if (item) rovingFocus(scmBody, SCM_ITEMS, item);
       });
       scmBody.addEventListener('keydown', e => {
-        const item = e.target.closest('.scm-commit, .scm-row');
+        const item = e.target.closest(SCM_ITEMS);
         if (!item) return;
-        if (treeArrowNav(e, scmBody, '.scm-commit, .scm-row', item)) return;
+        if (treeArrowNav(e, scmBody, SCM_ITEMS, item)) return;
+        if (
+          item.classList.contains('scm-worktree-hdr') &&
+          (e.key === 'ArrowRight' || e.key === 'ArrowLeft')
+        ) {
+          e.preventDefault();
+          toggleScmWorktree(item, e.key === 'ArrowRight');
+          return;
+        }
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
         onScmActivate(item);
@@ -10548,14 +10955,7 @@
   // says it is running; sub-agent and content tabs are implementation
   // details of some chat tab, never launch targets themselves.
   function isLaunchRunning(tab) {
-    return (
-      !tab.isContentTab &&
-      !tab.isSubagentTab &&
-      !!tab.isRunning &&
-      // A task running in another workspace's tab is not news for
-      // this client: its tab is hidden here.
-      !isTabHidden(tab)
-    );
+    return !tab.isContentTab && !tab.isSubagentTab && !!tab.isRunning;
   }
 
   // Ties -- two tasks whose start timestamp is missing, so both read 0 --
@@ -10991,7 +11391,12 @@
       ghostTimer = null;
       // Stamp the owning tab so the daemon completes against this tab's
       // chat context, not the host's stale notion of the active tab.
-      api.complete({query: inp.value, tabId: activeTabId || undefined});
+      api.complete(
+        Object.assign(
+          {query: inp.value, tabId: activeTabId || undefined},
+          editorContext(true),
+        ),
+      );
     }, 300);
   }
 
@@ -11179,10 +11584,11 @@
 
   // File paths found by linkifyFilePaths start as inert
   // [data-path-candidate] spans and become clickable [data-path] links
-  // ONLY after the host confirms the file exists (checkPaths ->
-  // pathsExist round-trip).  Each candidate is stamped with the workDir
-  // it was checked under (data-path-wd) so replies for one workDir never
-  // resolve spans checked under another.  Existence results are NOT
+  // ONLY after the daemon confirms the file exists (checkPaths ->
+  // pathsExist round-trip, on both surfaces).  Each candidate is stamped
+  // with the workDir it was checked under (data-path-wd), which the
+  // reply echoes as sent, so replies for one workDir never resolve
+  // spans checked under another.  Existence results are NOT
   // cached: only in-flight checks are deduped (per workDir+path), so
   // paths in NEW panels are re-checked and files created or deleted
   // mid-run get fresh clickability.  Candidate spans awaiting a reply
@@ -14937,8 +15343,8 @@
       }
     }
     // A prompt that was just the path of an existing file opened that
-    // file instead of starting a task (the extension host's and the
-    // daemon's `submit` shortcut): acknowledged, and there is no task
+    // file instead of starting a task (the daemon's `submit` shortcut,
+    // shared by both surfaces): acknowledged, and there is no task
     // for the tab to own, so the claim sendMessage() stamped is lifted
     // — left in place it would let the tab adopt the next bare task id
     // off the wire (mayAdoptTaskId) and a reload would put the path
@@ -15363,13 +15769,25 @@
         }
         renderCustomModels();
         break;
+      case 'tipsData':
+        // The daemon's tips bootstrap, sent on every `ready`: tips.js
+        // stores it and auto-opens the window when due.
+        if (typeof window.__kissApplyTipsConfig === 'function') {
+          window.__kissApplyTipsConfig({
+            tips: Array.isArray(ev.tips) ? ev.tips : [],
+            show: ev.show === true,
+            version: typeof ev.version === 'string' ? ev.version : '',
+          });
+        }
+        break;
       case 'tricksData':
-        // The daemon's full promptlet list after an Add, Edit or Delete
-        // (from this or any other window): it replaces the list frozen
-        // into the page at load time so the panel repaints right away.
-        // The first `userCount` entries are the user's own (editable,
-        // deletable) rows.  An in-place editor still open on a row is
-        // closed: its index may point at another promptlet now.
+        // The daemon's full promptlet list, sent on every `ready` and
+        // after an Add, Edit or Delete (from this or any other window):
+        // it replaces the list frozen into the page at load time so the
+        // panel repaints right away. The first `userCount` entries are
+        // the user's own (editable, deletable) rows. An in-place editor
+        // still open on a row is closed: its index may point at another
+        // promptlet now.
         window.__TRICKS__ = Array.isArray(ev.tricks) ? ev.tricks : [];
         window.__MY_TRICKS_COUNT__ =
           typeof ev.userCount === 'number' ? ev.userCount : 0;
@@ -15673,7 +16091,7 @@
         const hasTaskId =
           ev.taskId !== undefined && ev.taskId !== null && ev.taskId !== '';
         const ocTab = chatId ? getTabByBackendChatId(chatId) : null;
-        if (ocTab && !isTabHidden(ocTab)) {
+        if (ocTab) {
           switchToTab(ocTab.id);
           if (
             !ocTab.isContentTab &&
@@ -16055,8 +16473,8 @@
       case 'workspaceWorkDir':
         // The extension host reports the window's workspace folder
         // change directly (its daemon `setWorkDir` produces no
-        // `configData` reply), so the workspace-scoped tab bar and
-        // history re-scope immediately.
+        // `configData` reply), so the history filter and the Explorer
+        // views re-scope immediately.
         if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
           configWorkDir = ev.workDir;
           applyWorkspaceScope();
@@ -16522,11 +16940,10 @@
         pendingOpenTabs.delete(ev.tabId);
         const rejTab = getTab(ev.tabId);
         if (rejTab && !rejTab.isSubagentTab && !rejTab.isContentTab) {
-          // Count VISIBLE chats only: hidden tabs of other workspaces
-          // must not make the sole visible chat here look expendable
-          // (closing it would spawn a registered replacement, get that
-          // rejected too, and loop).
-          const chatTabs = tabs.filter(t => !t.isContentTab && !isTabHidden(t));
+          // The sole chat tab is never expendable: closing it would
+          // spawn a registered replacement, get that rejected too, and
+          // loop.
+          const chatTabs = tabs.filter(t => !t.isContentTab);
           if (chatTabs.length > 1) closeTab(ev.tabId, true, true);
         }
         if (ev.text) {
@@ -20055,17 +20472,9 @@
       msg.webTools = !!webToolsToggleBtn.checked;
     }
     const runDir = curTab ? curTab.pinnedWorkDir || curTab.workDir : '';
-    if (runDir) {
-      msg.workDir = runDir;
-      // A tab pinned (via the "Working directory" panel) to a folder
-      // outside this client's workspace still belongs to THIS tab bar:
-      // the run's registry scope stays the workspace, or the tab would
-      // vanish from here the moment the daemon publishes its work dir
-      // (see tabScopeWorkDir / isTabHidden).
-      if (configWorkDir && !tabMatchesWorkspace(runDir)) {
-        msg.tabScopeWorkDir = configWorkDir;
-      }
-    }
+    if (runDir) msg.workDir = runDir;
+    // The run's system prompt names the file open in the editor.
+    Object.assign(msg, editorContext(false));
     // The pick was for this task; from here on the run's own work dir
     // (broadcast with its first event) is what the tab carries.
     if (curTab) curTab.pinnedWorkDir = '';
@@ -21851,7 +22260,7 @@
           closeSidebar();
           return;
         }
-        if (existingChatTab && !isTabHidden(existingChatTab)) {
+        if (existingChatTab) {
           switchToTab(existingChatTab.id);
           // The tab may be parked on a different task of the same chat.
           // Scroll the clicked task's region into view so the static

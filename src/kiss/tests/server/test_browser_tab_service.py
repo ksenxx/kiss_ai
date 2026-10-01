@@ -20,6 +20,7 @@ a Linux CI host; they are exercised only through their shared helpers.
 from __future__ import annotations
 
 import http.server
+import os
 import shutil
 import socketserver
 import stat
@@ -33,6 +34,7 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar import web_stealth
 from kiss.core import default_browser as db
 from kiss.server.browser_tab import (
     BrowserTabService,
@@ -284,6 +286,7 @@ def daemon(tmp_path: Path) -> Any:
     server.browser_tabs = BrowserTabService(printer, tmp_path / "profile")
     yield server, printer
     server.browser_tabs.shutdown()
+    web_stealth.stop_virtual_display()
 
 
 def _evaluate(service: BrowserTabService, tab_id: str, expression: str) -> Any:
@@ -449,6 +452,58 @@ def test_headed_launch_falls_back_to_headless(
     server._handle_command({"type": "browserOpen", "url": page_server, "connId": "c1"})
     opened = _wait(lambda: _events(printer, "openBrowserTab"), "openBrowserTab", timeout=90)[0]
     _wait(lambda: _events(printer, "browserState", tab_id=opened["tab_id"], title="Tall"), "state")
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+@pytest.mark.skipif(shutil.which("Xvfb") is None, reason="Xvfb not installed")
+def test_headless_environment_runs_a_headed_browser_on_xvfb(
+    daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str
+) -> None:
+    """Without a display the tab still shows no headless or automation tell.
+
+    Google's sign-in answers a ``HeadlessChrome`` client-hint brand or
+    ``navigator.webdriver`` with "Couldn't sign you in", which would
+    break every OAuth hand-off streamed through the tab.
+    """
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    web_stealth.stop_virtual_display()
+    assert service.open_for_user(page_server) is True
+    tab_id = _events(printer, "openBrowserTab")[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Tall"), "state")
+    brands = _evaluate(service, tab_id, "navigator.userAgentData.brands.map(b => b.brand).join()")
+    assert "HeadlessChrome" not in brands and "Chrom" in brands
+    assert "HeadlessChrome" not in _evaluate(service, tab_id, "navigator.userAgent")
+    assert _evaluate(service, tab_id, "navigator.webdriver") is False
+    assert web_stealth.virtual_display() is not None, "the browser runs on the shared Xvfb"
+
+
+@pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")
+def test_without_xvfb_the_tab_falls_back_to_masked_headless(
+    daemon: Any, monkeypatch: pytest.MonkeyPatch, page_server: str, tmp_path: Path
+) -> None:
+    """No Xvfb binary: real headless mode, with the HeadlessChrome UA token masked."""
+    server, printer = daemon
+    service = server.browser_tabs
+    monkeypatch.setenv("KISS_HEADLESS", "1")
+    web_stealth.stop_virtual_display()
+    # A PATH with every current executable except Xvfb, so browser
+    # discovery (KISS_BROWSER, installed browsers) keeps working.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for entry in os.environ["PATH"].split(os.pathsep):
+        for exe in Path(entry).glob("*") if Path(entry).is_dir() else ():
+            if exe.name != "Xvfb" and not (bin_dir / exe.name).is_symlink():
+                (bin_dir / exe.name).symlink_to(exe)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert shutil.which("Xvfb") is None
+    assert service.open_for_user(page_server) is True
+    tab_id = _events(printer, "openBrowserTab")[0]["tab_id"]
+    _wait(lambda: _events(printer, "browserState", tab_id=tab_id, title="Tall"), "state")
+    assert web_stealth.virtual_display() is None
+    assert "HeadlessChrome" not in _evaluate(service, tab_id, "navigator.userAgent")
+    assert _evaluate(service, tab_id, "navigator.webdriver") is False
 
 
 @pytest.mark.skipif(not _PLAYWRIGHT_CACHE.is_dir(), reason="Playwright browsers not installed")

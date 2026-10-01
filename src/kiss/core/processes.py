@@ -15,6 +15,7 @@ project goes through this module.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,6 +23,34 @@ import threading
 from typing import Any
 
 IS_WINDOWS = sys.platform == "win32"
+
+_WINDOWS_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+
+def find_bash() -> str | None:
+    """Return the ``bash`` executable to run shell scripts with, or ``None``.
+
+    ``shutil.which("bash")`` on every platform; on Windows, where the Git
+    for Windows installer adds only ``Git\\cmd`` to ``PATH`` and leaves
+    ``bash.exe`` in ``Git\\bin``, the usual install locations are probed
+    as well.  ``subprocess.Popen(["bash", ...])`` there fails with
+    ``WinError 2`` unless the caller passes the path this returns.
+
+    Returns:
+        Absolute path of the bash executable, or ``None`` when none is
+        installed.
+    """
+    found = shutil.which("bash")
+    if found or not IS_WINDOWS:
+        return found
+    for candidate in _WINDOWS_BASH_CANDIDATES:  # pragma: no cover — Windows only
+        if os.path.exists(candidate):
+            return candidate
+    return None  # pragma: no cover — Windows without Git bash
 
 # ``signal.SIGKILL`` does not exist on Windows.  Callers that want an
 # unconditional kill pass this; :func:`kill_process_group` ignores the

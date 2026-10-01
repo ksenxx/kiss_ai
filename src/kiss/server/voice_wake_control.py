@@ -247,7 +247,7 @@ class VoiceWakeController:
         # A stop() deregisters its listener and then awaits bounded
         # teardown; the teardown runs as its OWN task registered here
         # (and shield-awaited by the stop), so cancelling the stop —
-        # production-reachable through the UDS handler drain — cannot
+        # production-reachable through the connection handler drain — cannot
         # orphan a live child: the reap task retains ownership until
         # the child is signalled and (boundedly) reaped, and
         # :meth:`stop_all` joins every outstanding entry (gpt-5.6-sol
@@ -664,7 +664,7 @@ class VoiceWakeController:
             ))
         )
         try:
-            # Shielded: cancelling ``start()`` mid-spawn (the UDS
+            # Shielded: cancelling ``start()`` mid-spawn (the connection
             # handler drain) must not abandon a process the event loop
             # may already have forked — the spawn runs to completion
             # under an OWNED disposal task instead (see the handler
@@ -767,7 +767,7 @@ class VoiceWakeController:
         del self._listeners[conn_id]
         # Tear down through an OWNED reap task, registered in the same
         # no-await block as the deregistration: the stop's caller can
-        # be cancelled mid-teardown (the UDS handler drain cancels
+        # be cancelled mid-teardown (the connection handler drain cancels
         # straggling disconnect cleanups), and with the listener
         # already out of ``_listeners`` nothing else would know the
         # child exists — the shield keeps the reap running to

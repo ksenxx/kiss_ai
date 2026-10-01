@@ -130,7 +130,7 @@ Module._resolveFilename = function (request, ...rest) {
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-upd-stomp-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-process.env.KISS_SORCAR_SOCK = path.join(tmpHome, 'no-daemon.sock');
+process.env.KISS_SORCAR_LOCAL = path.join(tmpHome, 'no-daemon.json');
 const installRoot = path.join(tmpHome, '.kiss', 'kiss_ai');
 const scriptsDir = path.join(installRoot, 'scripts');
 fs.mkdirSync(scriptsDir, {recursive: true});

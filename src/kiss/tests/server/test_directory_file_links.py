@@ -76,7 +76,7 @@ class TestDirectoryFileLinks(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.tmpdir / "sorcar.sock",
+            local_endpoint_file=self.tmpdir / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         await self.server.start_async()
