@@ -124,7 +124,7 @@ fs.writeFileSync(
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_PROJECT_PATH = PROJECT_ROOT;
-process.env.KISS_SORCAR_SOCK = path.join(tmpHome, 'no-daemon.sock');
+process.env.KISS_SORCAR_LOCAL = path.join(tmpHome, 'no-daemon.json');
 delete process.env.KISS_VOICE_WAKE_ARGS;
 
 async function waitFor(predicate, message, timeoutMs = 10000) {

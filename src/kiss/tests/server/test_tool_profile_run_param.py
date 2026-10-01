@@ -5,7 +5,7 @@
 """End-to-end tests of the ``tool_profile`` run parameter on the daemon.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
-temporary Unix-domain socket (the :class:`DaemonRunApiHarness` from
+temporary local WSS endpoint (the :class:`DaemonRunApiHarness` from
 ``test_append_basic_tools``) and drive ``kiss.server.sorcar.run`` /
 the ``run_agent`` tool against it.  The only replaced boundary is the
 LLM itself: the per-session executor's
@@ -42,10 +42,7 @@ from kiss.agents.sorcar.agent_dispatch import _run_agent, make_run_agent_tool
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
-
-pytestmark = requires_unix_sockets
 
 _SH_SEA_PATH = str(Path(sh_sea.__file__).resolve())
 
@@ -135,7 +132,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_worktree=True,
             auto_commit=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -171,7 +168,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
                 "/boom anything",
                 work_dir=self.repo,
                 use_worktree=True,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=60,
             )
         finally:
@@ -195,7 +192,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             use_worktree=False,
             auto_commit=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -216,7 +213,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "printf 'hello from sh'",
             work_dir=self.repo,
             extension_agent_path=_SH_SEA_PATH,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -236,7 +233,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             tool_profile="shell",
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -254,7 +251,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             "task with the full toolset",
             work_dir=self.repo,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -270,7 +267,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             tool_profile="bogus",
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False, result
@@ -299,7 +296,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             extension_agent_path=agent_path,
             tool_profile="bash",
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -325,7 +322,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False
@@ -354,8 +351,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         )
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
-        saved_sock = cron_agent._daemon_sock_path
-        cron_agent._daemon_sock_path = self.sock_path
+        saved_endpoint = cron_agent._daemon_endpoint_file
+        cron_agent._daemon_endpoint_file = self.endpoint_file
         try:
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
@@ -363,7 +360,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
                 use_worktree="false", tool_profile="bash",
             )
         finally:
-            cron_agent._daemon_sock_path = saved_sock
+            cron_agent._daemon_endpoint_file = saved_endpoint
         assert yaml.safe_load(text)["success"] is True, text
         assert self._single_call(calls)["tool_names"] == ["finish", "Bash"]
 

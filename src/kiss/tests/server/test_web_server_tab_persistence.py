@@ -101,7 +101,7 @@ class TestTabPersistence(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         # Observe every backend command dispatch (and still forward
         # it) so the tests can assert that no ``closeTab`` is ever

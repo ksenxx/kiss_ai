@@ -58,15 +58,18 @@ including the branches exercised by pre-existing tests:
   test_stop_confirmation_wait_is_bounded``, and
   ``test_unconfirmed_stop_with_failure_result_still_raises`` here).
 
-All daemons below are real UNIX-domain-socket stand-ins (no mocks of
-the code under test), following ``test_dispatch_timeout.py``.
+All daemons below are real local-WSS stand-ins (no mocks of the code
+under test), following ``test_dispatch_timeout.py``: a
+``websockets.sync`` server on an ephemeral loopback port that writes
+the endpoint file ``daemon_client.run`` reads.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
-import socket
+import ssl
 import tempfile
 import threading
 import time
@@ -75,23 +78,112 @@ from typing import Any
 
 import pytest
 import yaml
+from websockets.exceptions import ConnectionClosed
+from websockets.sync.server import ServerConnection, serve
 
-from kiss.agents.sorcar import cron_agent, daemon_client
+from kiss.agents.sorcar import cron_agent, daemon_client, local_endpoint
 from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import make_test_tls
 
-pytestmark = requires_unix_sockets  # the fake daemons below are AF_UNIX servers
+_TOKEN = "audit0903-token"
 
 
 @pytest.fixture(autouse=True)
-def _standalone_daemon_socket(monkeypatch: pytest.MonkeyPatch):
-    """Keep dispatches off any in-process daemon socket recorded at boot."""
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
+def _standalone_daemon_endpoint(monkeypatch: pytest.MonkeyPatch):
+    """Keep dispatches off any in-process daemon endpoint recorded at boot."""
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     yield
 
 
-class _RacingFinishDaemon:
-    """A UDS daemon stand-in whose task finishes naturally past the timeout.
+class _FakeDaemon:
+    """Base of the threaded daemon stand-ins below.
+
+    Serves ``wss://127.0.0.1:<ephemeral>`` with a throwaway certificate,
+    writes the endpoint file at :attr:`endpoint_file`, answers the
+    client's ``auth`` frame, reads the ``run`` command and hands the
+    connection to :meth:`_handle`.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[dict[str, Any]] = []
+        self._dir = Path(tempfile.mkdtemp(prefix="kiss_audit0903_"))
+        certfile, keyfile, ca_file = make_test_tls(self._dir)
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile, keyfile)
+        # TLS 1.3 session tickets race the websockets sync client's
+        # concurrent SSL read/write and hang its opening handshake.
+        ssl_ctx.num_tickets = 0
+        self._server = serve(
+            self._serve, "127.0.0.1", 0, ssl=ssl_ctx, compression=None,
+            max_size=64 * 1024 * 1024,
+        )
+        port = self._server.socket.getsockname()[1]
+        self.endpoint_file = self._dir / local_endpoint.LOCAL_ENDPOINT_FILE
+        local_endpoint.write_endpoint(
+            self.endpoint_file,
+            local_endpoint.LocalEndpoint(
+                url=f"wss://127.0.0.1:{port}/ws", token=_TOKEN,
+                ca=str(ca_file), pid=os.getpid(),
+            ),
+        )
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True,
+        )
+        self._thread.start()
+
+    @staticmethod
+    def _recv(ws: ServerConnection) -> dict[str, Any] | None:
+        """Return the next JSON frame, or ``None`` once the peer is gone."""
+        while True:
+            try:
+                raw = ws.recv()
+            except ConnectionClosed:
+                return None
+            try:
+                cmd = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(cmd, dict):
+                return cmd
+
+    @staticmethod
+    def _send(ws: ServerConnection, event: dict[str, Any]) -> None:
+        try:
+            ws.send(json.dumps(event))
+        except ConnectionClosed:
+            pass
+
+    def _serve(self, ws: ServerConnection) -> None:
+        auth = self._recv(ws)
+        if auth is None or auth.get("type") != "auth":
+            return
+        self._send(ws, {"type": "auth_ok", "local": auth.get("token") == _TOKEN})
+        run_cmd = self._recv(ws)
+        if run_cmd is None:
+            return
+        self._handle(ws, run_cmd.get("tabId", ""))
+
+    def _handle(self, ws: ServerConnection, tab_id: str) -> None:
+        raise NotImplementedError
+
+    def wait_for_command(self, cmd_type: str, timeout: float = 5.0) -> bool:
+        """Poll until a *cmd_type* command was recorded (or timeout)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if any(c.get("type") == cmd_type for c in self.commands):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def close(self) -> None:
+        """Shut down the listener and remove the temp dir."""
+        self._server.shutdown()
+        self._thread.join(timeout=10)
+        shutil.rmtree(self._dir, ignore_errors=True)
+
+
+class _RacingFinishDaemon(_FakeDaemon):
+    """A daemon stand-in whose task finishes naturally past the timeout.
 
     Accepts one connection, reads the ``run`` command, sends ``status
     running=true``, and — from a separate timer thread, exactly like a
@@ -108,97 +200,41 @@ class _RacingFinishDaemon:
     def __init__(
         self, finish_delay: float, send_terminal_status: bool = True,
     ) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir."""
+        """Start a local-WSS listener in a fresh temp dir."""
         self.finish_delay = finish_delay
         self.send_terminal_status = send_terminal_status
-        self.commands: list[dict[str, Any]] = []
-        self._dir = Path(tempfile.mkdtemp(prefix="kiss_audit0903_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        super().__init__()
 
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
-            return
-        with conn:
-            reader = conn.makefile("rb")
-            try:
-                run_cmd: dict[str, Any] = json.loads(
-                    reader.readline().decode("utf-8"),
-                )
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                return
-            tab_id = run_cmd.get("tabId", "")
-            send_lock = threading.Lock()
-
-            def send(event: dict[str, Any]) -> None:
-                with send_lock:
-                    try:
-                        conn.sendall(
-                            json.dumps(event).encode("utf-8") + b"\n",
-                        )
-                    except OSError:
-                        pass
-
-            def finish() -> None:
-                send({
-                    "type": "result",
-                    "tabId": tab_id,
-                    "taskId": "task-raced-1",
-                    "success": True,
-                    "text": "finished on my own",
-                    "cost": "$0.0200",
-                    "total_tokens": 7,
-                    "step_count": 2,
+    def _handle(self, ws: ServerConnection, tab_id: str) -> None:
+        def finish() -> None:
+            self._send(ws, {
+                "type": "result",
+                "tabId": tab_id,
+                "taskId": "task-raced-1",
+                "success": True,
+                "text": "finished on my own",
+                "cost": "$0.0200",
+                "total_tokens": 7,
+                "step_count": 2,
+            })
+            if self.send_terminal_status:
+                self._send(ws, {
+                    "type": "status", "running": False, "tabId": tab_id,
                 })
-                if self.send_terminal_status:
-                    send({
-                        "type": "status", "running": False, "tabId": tab_id,
-                    })
 
-            send({"type": "status", "running": True, "tabId": tab_id})
-            finisher = threading.Timer(self.finish_delay, finish)
-            finisher.daemon = True
-            finisher.start()
-            while True:
-                try:
-                    line = reader.readline()
-                except OSError:
-                    return
-                if not line:
-                    return
-                try:
-                    cmd = json.loads(line.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                self.commands.append(cmd)
-
-    def wait_for_command(self, cmd_type: str, timeout: float = 5.0) -> bool:
-        """Poll until a *cmd_type* command was recorded (or timeout)."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if any(c.get("type") == cmd_type for c in self.commands):
-                return True
-            time.sleep(0.02)
-        return False
-
-    def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
-        try:
-            self._srv.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=10)
-        shutil.rmtree(self._dir, ignore_errors=True)
+        self._send(ws, {"type": "status", "running": True, "tabId": tab_id})
+        finisher = threading.Timer(self.finish_delay, finish)
+        finisher.daemon = True
+        finisher.start()
+        while True:
+            cmd = self._recv(ws)
+            if cmd is None:
+                return
+            self.commands.append(cmd)
 
 
-class _StopKillDaemon:
-    """A UDS daemon stand-in whose task dies only when stopped.
+class _StopKillDaemon(_FakeDaemon):
+    """A daemon stand-in whose task dies only when stopped.
 
     Sends ``status running=true`` and never finishes the task; on the
     client's ``stop`` it broadcasts the failure ``result`` a real
@@ -209,77 +245,34 @@ class _StopKillDaemon:
     """
 
     def __init__(self, send_terminal_status: bool = True) -> None:
-        """Bind a UNIX-domain listener in a fresh temp dir."""
+        """Start a local-WSS listener in a fresh temp dir."""
         self.send_terminal_status = send_terminal_status
-        self.commands: list[dict[str, Any]] = []
-        self._dir = Path(tempfile.mkdtemp(prefix="kiss_audit0903_"))
-        self.sock_path = self._dir / "daemon.sock"
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(self.sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-        self._thread.start()
+        super().__init__()
 
-    def _serve(self) -> None:
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
-            return
-        with conn:
-            reader = conn.makefile("rb")
-            try:
-                run_cmd: dict[str, Any] = json.loads(
-                    reader.readline().decode("utf-8"),
-                )
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    def _handle(self, ws: ServerConnection, tab_id: str) -> None:
+        self._send(ws, {"type": "status", "running": True, "tabId": tab_id})
+        while True:
+            cmd = self._recv(ws)
+            if cmd is None:
                 return
-            tab_id = run_cmd.get("tabId", "")
-
-            def send(event: dict[str, Any]) -> None:
-                try:
-                    conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
-                except OSError:
-                    pass
-
-            send({"type": "status", "running": True, "tabId": tab_id})
-            while True:
-                try:
-                    line = reader.readline()
-                except OSError:
-                    return
-                if not line:
-                    return
-                try:
-                    cmd = json.loads(line.decode("utf-8"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                self.commands.append(cmd)
-                if cmd.get("type") == "stop":
-                    send({
-                        "type": "result",
+            self.commands.append(cmd)
+            if cmd.get("type") == "stop":
+                self._send(ws, {
+                    "type": "result",
+                    "tabId": tab_id,
+                    "taskId": "task-killed-1",
+                    "success": False,
+                    "text": "Task stopped by user",
+                    "cost": "$0.0100",
+                    "total_tokens": 3,
+                    "step_count": 1,
+                })
+                if self.send_terminal_status:
+                    self._send(ws, {
+                        "type": "status",
+                        "running": False,
                         "tabId": tab_id,
-                        "taskId": "task-killed-1",
-                        "success": False,
-                        "text": "Task stopped by user",
-                        "cost": "$0.0100",
-                        "total_tokens": 3,
-                        "step_count": 1,
                     })
-                    if self.send_terminal_status:
-                        send({
-                            "type": "status",
-                            "running": False,
-                            "tabId": tab_id,
-                        })
-
-    def close(self) -> None:
-        """Shut down the listener and remove the temp socket dir."""
-        try:
-            self._srv.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=10)
-        shutil.rmtree(self._dir, ignore_errors=True)
 
 
 def test_stop_on_timeout_returns_naturally_finished_result() -> None:
@@ -296,7 +289,7 @@ def test_stop_on_timeout_returns_naturally_finished_result() -> None:
     try:
         result = daemon_client.run(
             "finishes while stop is in flight",
-            sock_path=daemon.sock_path,
+            endpoint_file=daemon.endpoint_file,
             timeout=0.3,
             stop_on_timeout=True,
         )
@@ -318,13 +311,13 @@ def test_run_agent_tool_returns_result_when_finish_races_timeout(
 ) -> None:
     """The ``run_agent`` tool reports the raced natural finish as success.
 
-    End-to-end through the real tool (path mode, ``KISS_SORCAR_SOCK``
+    End-to-end through the real tool (path mode, ``KISS_SORCAR_LOCAL``
     resolution): the caller must get the sub-task's YAML result — its
     work is done and its spend/summary known — instead of the "did not
     finish within …s and was stopped" error string.
     """
     daemon = _RacingFinishDaemon(finish_delay=0.6)
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
@@ -354,7 +347,7 @@ def test_stop_killed_task_still_raises_timeout() -> None:
         with pytest.raises(TimeoutError, match="did not finish") as excinfo:
             daemon_client.run(
                 "never finishes",
-                sock_path=daemon.sock_path,
+                endpoint_file=daemon.endpoint_file,
                 timeout=0.3,
                 stop_on_timeout=True,
             )
@@ -387,7 +380,7 @@ def test_unconfirmed_stop_with_successful_result_still_raises(
         ):
             daemon_client.run(
                 "finishes but the terminal status never comes",
-                sock_path=daemon.sock_path,
+                endpoint_file=daemon.endpoint_file,
                 timeout=0.3,
                 stop_on_timeout=True,
             )
@@ -410,7 +403,7 @@ def test_run_agent_tool_reports_unconfirmed_stop_despite_result(
     """
     monkeypatch.setattr(daemon_client, "_STOP_CONFIRM_GRACE_SECONDS", 1.0)
     daemon = _RacingFinishDaemon(finish_delay=0.6, send_terminal_status=False)
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(daemon.sock_path))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     try:
@@ -445,7 +438,7 @@ def test_unconfirmed_stop_with_failure_result_still_raises(
         ):
             daemon_client.run(
                 "never finishes",
-                sock_path=daemon.sock_path,
+                endpoint_file=daemon.endpoint_file,
                 timeout=0.3,
                 stop_on_timeout=True,
             )

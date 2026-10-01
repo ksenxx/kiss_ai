@@ -72,7 +72,7 @@ class TestSigtermDuringSigintCleanup(unittest.TestCase):
                 port=port,
                 use_tunnel=False,
                 url_file=Path(tmp) / "remote-url.json",
-                uds_path=Path(tmp) / "sorcar.sock",
+                local_endpoint_file=Path(tmp) / "sorcar-local.json",
             )
             interrupter = threading.Thread(
                 target=_sigint_when_listening,

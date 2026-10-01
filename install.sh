@@ -313,13 +313,25 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
+# The extension's state directory (kissHomeDir() in userAssets.ts honours
+# $KISS_HOME).  The update marker and the progress file below must land
+# here, not in a hard-coded $HOME/.kiss, or a custom-KISS_HOME install
+# never sees them.
+KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
+# Current install step, mirrored by the VS Code extension as a live,
+# non-blocking progress notification (src/installProgress.ts).  Line 1 is
+# this script's pid (the toast is dropped when that process is gone, so a
+# killed install cannot leave a spinner behind), line 2 the step text.
+# The EXIT trap below removes the file when the install ends, which closes
+# the notification.
+PROGRESS_FILE="$KISS_HOME_DIR/.install-progress"
 # Node.js release installed when the machine has none.  Keep this at the
 # newest release of the 22.x line (https://nodejs.org/dist/latest-v22.x/):
 # releases before v22.23.2 carry the HIGH-severity CVEs fixed in the
 # July 2026 security release.
 NODE_VERSION="v22.23.3"
 
-mkdir -p "$BIN_DIR" "$LOG_DIR"
+mkdir -p "$BIN_DIR" "$LOG_DIR" "$KISS_HOME_DIR"
 export PATH="$BIN_DIR:$PATH"
 
 # ---------------------------------------------------------------------------
@@ -417,6 +429,19 @@ handle_hup() {
 }
 trap handle_interrupt INT TERM
 trap handle_hup HUP
+
+# Print a step banner and publish the step to PROGRESS_FILE (see there).
+# Every ">>> ..." banner of the install goes through here so the VS Code
+# notification always names the step the terminal is on.  Publishing is
+# best-effort: an unwritable $KISS_HOME must not fail the install.
+report_step() {
+    echo ">>> $1"
+    # Write, then rename: a poll must never read a truncated file, which
+    # would look like the install had ended.
+    { printf '%s\n%s\n' "$$" "$1" > "$PROGRESS_FILE.tmp" \
+        && mv -f "$PROGRESS_FILE.tmp" "$PROGRESS_FILE"; } 2>/dev/null || true
+}
+trap 'rm -f "$PROGRESS_FILE" "$PROGRESS_FILE.tmp"' EXIT
 
 # Run "$@" while printing a heartbeat every HEARTBEAT_INTERVAL seconds so
 # the user can tell the install is still working.  Without this the npm ci
@@ -1177,16 +1202,16 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     echo ""
 
     if [ "$OS" = "Darwin" ]; then
-        echo ">>> Checking Xcode Command Line Tools..."
+        report_step "Checking Xcode Command Line Tools..."
         ensure_xcode_clt
         echo ""
 
-        echo ">>> Checking Homebrew..."
+        report_step "Checking Homebrew..."
         ensure_homebrew
         echo ""
     fi
 
-    echo ">>> [1/5] Checking git..."
+    report_step "[1/5] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
         hash -r
@@ -1201,7 +1226,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     echo "   git $INSTALLED_GIT ready"
     echo ""
 
-    echo ">>> Checking uv..."
+    report_step "Checking uv..."
     if command -v uv &>/dev/null; then
         INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         echo "   uv $INSTALLED_UV ready"
@@ -1210,7 +1235,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     fi
     echo ""
 
-    echo ">>> [2/5] Checking Node.js..."
+    report_step "[2/5] Checking Node.js..."
     if ! command -v node &>/dev/null || ! command -v npm &>/dev/null || ! command -v npx &>/dev/null; then
         install_node || true
     fi
@@ -1225,7 +1250,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     fi
     echo ""
 
-    echo ">>> [3/5] Checking VS Code CLI..."
+    report_step "[3/5] Checking VS Code CLI..."
     if ! find_code_cli; then
         install_code_cli || true
         find_code_cli || true
@@ -1243,11 +1268,11 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # Clear VS Code's caches BEFORE the extension is built and installed so
     # the update in step [5/5] cannot be served from stale cached state (see
     # clear_vscode_cache above for what is swept and why it is best-effort).
-    echo ">>> Clearing VS Code caches..."
+    report_step "Clearing VS Code caches..."
     clear_vscode_cache
     echo ""
 
-    echo ">>> [4/5] Building VS Code extension..."
+    report_step "[4/5] Building VS Code extension..."
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     cd "$VSCODE_EXT_DIR"
@@ -1319,13 +1344,15 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # extension (``installCliScript`` in DependencyInstaller.ts).  Install the
     # companion repo-root scripts the same way so they too can be run from
     # anywhere.
-    echo ">>> Installing rsorcar and sorcar-docker launchers..."
+    report_step "Installing rsorcar and sorcar-docker launchers..."
     install_repo_script_launcher rsorcar
     install_repo_script_launcher sorcar-docker
     echo ""
 
+    # The banner sits outside the block below because tests extract that
+    # block verbatim and run it without report_step.
+    report_step "[5/5] Installing VS Code extension..."
     # BEGIN: kiss-step-5-5-terminal-freeze  (tests extract this block verbatim)
-    echo ">>> [5/5] Installing VS Code extension..."
     # Heads-up BEFORE the disruptive part of this step.  When install.sh
     # runs inside a VS Code integrated terminal (the Update button, or a
     # user-opened terminal), ``--install-extension --force`` below makes
@@ -1481,6 +1508,10 @@ fi
 # machine (an SSH session, or Linux without a display) there is no
 # browser to open here, so the cloudflared URL is printed for the user to
 # open on their own device.  ``KISS_SKIP_LAUNCH`` (Docker) skips this too.
+#
+# The progress notification is updated here, outside the block, because
+# tests extract the block verbatim and run it without report_step.
+[ -n "${KISS_SKIP_LAUNCH:-}" ] || report_step "Waiting for the kiss-web daemon to open the webapp..."
 # BEGIN: kiss-open-webapp
 KISS_WEBAPP_WAIT_SECS="${KISS_WEBAPP_WAIT_SECS:-900}"
 

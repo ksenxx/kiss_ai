@@ -12,8 +12,8 @@ broadcasts a ``notification`` acknowledgement to the requesting window
 and then schedules a ``SIGTERM`` to its own process so the supervising
 LaunchAgent / systemd unit respawns a fresh daemon.
 
-These tests bind a temporary UDS socket (not the production
-``~/.kiss/sorcar.sock``) and drive a real client connection.  The
+These tests write a temporary local endpoint file (not the production
+``~/.kiss/sorcar-local.json``) and drive a real client connection.  The
 actual self-``SIGTERM`` is replaced on the server instance with a
 recorder so the test process is never killed — the test asserts the
 acknowledgement is delivered and that the restart trigger is scheduled
@@ -35,9 +35,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _find_free_port() -> int:
@@ -63,7 +61,7 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
 
 
 class TestServerReset(IsolatedAsyncioTestCase):
-    """Drive the ``serverReset`` command over a real UDS connection."""
+    """Drive the ``serverReset`` command over a real local connection."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -74,7 +72,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -82,7 +80,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         self._reset_fired = asyncio.Event()
 
@@ -91,7 +89,7 @@ class TestServerReset(IsolatedAsyncioTestCase):
 
         self.server._trigger_server_reset = _record_reset  # type: ignore[method-assign]
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -108,29 +106,29 @@ class TestServerReset(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.endpoint_file, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: LocalWriter, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -239,7 +237,7 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.port = _find_free_port()
         self.url_file = Path(self.tmpdir) / "remote-url.json"
 
@@ -251,7 +249,10 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         self.flag_path = flag_path
 
         self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
-        web_server_mod._SERVER_RESET_COMPLETE_DELAY = 0.1
+        # Long enough for two TLS + auth handshakes in ``_connect`` to
+        # finish before the broadcast fires, short enough to keep the
+        # test fast.
+        web_server_mod._SERVER_RESET_COMPLETE_DELAY = 1.0
 
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -259,10 +260,10 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.url_file,
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = self._saved_delay
@@ -280,23 +281,23 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.endpoint_file, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 200,
         timeout: float = 5.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -371,7 +372,7 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.port = _find_free_port()
         self.url_file = Path(self.tmpdir) / "remote-url.json"
 
@@ -384,10 +385,10 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.url_file,
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = self._saved_delay
@@ -405,8 +406,8 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
 
     async def test_no_flag_means_no_complete_notification(self) -> None:
         """Absent flag ⇒ no "server-reset-complete" toast appears."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+        reader, writer = await open_local_connection(
+            self.endpoint_file, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
 

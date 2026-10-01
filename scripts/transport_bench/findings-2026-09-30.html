@@ -1,0 +1,46 @@
+<h2>Findings</h2>
+<p class="note"><strong>Short version:</strong> on the same machine the Unix socket is the cheaper transport
+for every steady-state message: a persistent local WSS connection adds about 0.08 ms to a command round trip,
+0.15–0.2 ms to the one-way delivery of a streamed event, and roughly 7–19 % to the daemon's CPU during a
+streamed task (≈40–120 µs per streamed chunk). Memory shows no transport-specific difference. The large gaps
+are in connection setup (≈18× slower over WSS) and in floods of thousands of events per second to several
+clients, and neither happens in normal Sorcar use.</p>
+
+<h3>1. Command round trips (one persistent connection)</h3>
+<ul>
+<li><code>ping</code>: p50 <strong>0.053 ms</strong> over UDS, <strong>0.129 ms</strong> over WSS, 0.112 ms with compression declined; p95 0.058 / 0.140 / 0.123 ms. In relative terms WSS is 2.4× slower; in absolute terms it is 80 µs.</li>
+<li>Daemon CPU per ping: 36 µs (UDS), 72 µs (WSS), 63 µs (WSS, no compression). About 9 µs of the WSS cost is permessage-deflate; the rest is TLS record processing and WebSocket framing.</li>
+<li><code>getModels</code> (49 KB reply): p50 2.32 ms UDS, 3.18 ms WSS, 2.50 ms without compression; daemon CPU 1.95 / 2.59 / 2.03 ms per reply. On a large reply compression is the dominant extra cost (≈0.55 ms of CPU to deflate 49 KB); TLS and framing add under 0.1 ms.</li>
+</ul>
+
+<h3>2. Streaming at a realistic rate</h3>
+<p>A paced broadcast of 500 events/s (well above any model's output rate) and a real agent task whose
+stand-in model streams 1000 chunks of 40 characters at 200 chunks/s agree:</p>
+<ul>
+<li>One-way delivery latency, daemon emit → client parse: paced broadcast p95 <strong>0.27 ms</strong> (UDS), <strong>0.42 ms</strong> (WSS), 0.39 ms (no compression); real task <code>text_delta</code> p95 <strong>0.35 ms</strong> / <strong>0.51 ms</strong> / 0.48 ms. With three extra viewers on the same task: 0.49 / 0.70 / 0.69 ms for the runner and 0.48 / 0.67 / 0.65 ms for the viewers.</li>
+<li>Daemon CPU for the whole 5.2 s task: 0.56 s (UDS), 0.60 s (WSS, +7 %), 0.62 s (no compression, +10 %); with three extra viewers 0.69 / 0.81 / 0.78 s (+16 % / +12 %). An earlier run of the same harness measured +19 % for the single-connection task, so treat the extra WSS cost as 7–19 % of task CPU, about 40–120 µs of daemon CPU per streamed chunk. The two WSS variants are within noise of each other here.</li>
+<li>Delivering a paced 200-byte event to four clients costs the daemon 58 µs per delivery over UDS, 79 µs over WSS and 74 µs without compression; with 4 KB events 63 / 98 / 79 µs.</li>
+<li>Task wall time is 5.18 s on every transport: the model's pace sets it.</li>
+</ul>
+
+<h3>3. Floods (transport saturated)</h3>
+<ul>
+<li>Flood numbers are the least stable in this harness: single rounds sit up to ≈45 % from their median, and an earlier run of the same configuration measured the one-client no-compression flood at 16 k events/s against 31 k here. Only large, consistent differences count. Broadcasting 5000 back-to-back 200-byte events to one client, all three transports land in the same band (20–31 k events/s; 39–55 µs daemon CPU per event). With four clients UDS delivers ≈26 k copies/s against 20 k (WSS) and 23 k (no compression); with 4 KB events and four clients ≈28 k against 15 k and 20 k.</li>
+<li>Compression hurts most on floods of 4 KB events: 95 µs of daemon CPU per event over WSS versus 62 µs over UDS and 70 µs with compression declined.</li>
+<li>The latencies in this section are queueing delay inside the burst (tens to hundreds of ms) and measure throughput, not the per-message cost. The daemon sits at 100–120 % of one core in every flood: the event loop plus the emitting thread.</li>
+<li>A real task whose model emits 2000 chunks with no pacing takes 0.40 s (UDS), 0.41 s (WSS) and 0.43 s (no compression) with 0.39 / 0.44 / 0.44 s of daemon CPU. Here the agent's own per-chunk work dominates and the transports are close.</li>
+</ul>
+
+<h3>4. Connection setup</h3>
+<p>Connect until first <code>pong</code>: <strong>0.15 ms</strong> over UDS versus <strong>2.7 ms</strong> over WSS (TCP, TLS handshake, WebSocket upgrade, <code>auth</code>), and 0.15 ms versus 1.9 ms of daemon CPU per connection. This matters only for clients that reconnect constantly; the VS Code extension and the webapp hold one connection.</p>
+
+<h3>5. Memory</h3>
+<p>Daemon RSS was 75 MB at start and 250–300 MB once the first agent task had loaded its modules (median end-of-window RSS 251–299 MB across workloads and transports; peak 273–315 MB). The largest change inside any single window was +49 MB during a 4-client flood over WSS and the largest drop −19 MB after a task, both transient. The idle RSS measured just before each transport's pass was 269 MB (UDS), 251 MB (WSS) and 272 MB (WSS, no compression): no ordering that a transport explains.</p>
+
+<h3>What this means for a UDS → WSS switch</h3>
+<ul>
+<li>For interactive use (one or a few surfaces, chunks arriving at model speed) the difference is not perceptible: sub-millisecond delivery on both, and the daemon spends 11–16 % of one core on a streaming task either way.</li>
+<li>Budget roughly 7–19 % more daemon CPU on a streaming task, growing with the number of connected surfaces, and ≈3 ms plus 2 ms of daemon CPU per (re)connection.</li>
+<li>If WSS becomes the only transport, consider declining permessage-deflate for loopback clients: it saves no meaningful bandwidth on the same machine, and it is the main extra cost on large replies such as <code>getModels</code> and on floods of large events. On small events its cost is within noise.</li>
+<li>Nothing here changes task duration: the model's pace and the agent's per-chunk work set it, and both are identical across transports.</li>
+</ul>

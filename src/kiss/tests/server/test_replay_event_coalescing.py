@@ -29,10 +29,12 @@ import threading
 import time
 from pathlib import Path
 
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.asyncio.server import Server, ServerConnection, serve
+
 import kiss.agents.sorcar.persistence as th
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
-from kiss.tests.conftest import requires_unix_sockets
 
 
 def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
@@ -252,51 +254,45 @@ class TestReplayCoalescing:
         assert got[1]["text"] == "only"
 
 
-@requires_unix_sockets
 class TestFanoutSingleSerialization:
     """The spliced fan-out payload decodes to ``{**event, "tabId": tab}``
-    for every subscribed tab, over a real UDS transport."""
+    for every subscribed tab, over a real WebSocket transport."""
 
     def test_fanout_wire_payload_is_json_equivalent(self) -> None:
         loop = asyncio.new_event_loop()
         loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
         loop_thread.start()
-        tmpdir = tempfile.mkdtemp()
-        sock_path = str(Path(tmpdir) / "fanout.sock")
-        received: list[str] = []
-        got_lines = threading.Event()
+        printer = WebPrinter()
+        printer._loop = loop
+        registered = threading.Event()
 
-        async def _handler(
-            reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-        ) -> None:
-            while True:
-                line = await reader.readline()
-                if not line:
-                    break
-                received.append(line.decode("utf-8"))
-                if len(received) >= 2:
-                    got_lines.set()
+        async def _handler(ws: ServerConnection) -> None:
+            # The daemon side: register the local peer and hold the
+            # connection open until the client closes it.
+            printer.add_local_client(ws)
+            registered.set()
+            await ws.wait_closed()
 
-        server: asyncio.Server | None = None
-        writer: asyncio.StreamWriter | None = None
+        async def _serve() -> Server:
+            # ``serve`` must be constructed on the running loop.
+            return await serve(_handler, "127.0.0.1", 0, compression=None)
+
+        async def _connect(port: int) -> ClientConnection:
+            return await connect(
+                f"ws://127.0.0.1:{port}/", compression=None,
+                max_size=16 * 1024 * 1024,
+            )
+
+        server: Server | None = None
+        client: ClientConnection | None = None
         try:
-            server = asyncio.run_coroutine_threadsafe(
-                asyncio.start_unix_server(_handler, path=sock_path), loop,
+            server = asyncio.run_coroutine_threadsafe(_serve(), loop).result(timeout=5)
+            port = next(iter(server.sockets)).getsockname()[1]
+            client = asyncio.run_coroutine_threadsafe(
+                _connect(port), loop,
             ).result(timeout=5)
+            assert registered.wait(timeout=5)
 
-            async def _connect() -> asyncio.StreamWriter:
-                _reader, w = await asyncio.open_unix_connection(
-                    sock_path, limit=16 * 1024 * 1024,
-                )
-                return w
-
-            writer = asyncio.run_coroutine_threadsafe(
-                _connect(), loop,
-            ).result(timeout=5)
-
-            printer = WebPrinter()
-            printer._loop = loop
-            printer.add_uds_writer(writer)
             printer.subscribe_tab("42", "tab-A")
             printer.subscribe_tab("42", "tab-B")
 
@@ -314,7 +310,12 @@ class TestFanoutSingleSerialization:
             t.join(timeout=5)
             assert not t.is_alive()
 
-            assert got_lines.wait(timeout=5), f"received={received}"
+            async def _recv_two(ws: ClientConnection) -> list[str]:
+                return [str(await ws.recv()) for _ in range(2)]
+
+            received = asyncio.run_coroutine_threadsafe(
+                _recv_two(client), loop,
+            ).result(timeout=5)
             decoded = sorted(
                 (json.loads(line) for line in received),
                 key=lambda d: str(d.get("tabId")),
@@ -332,18 +333,16 @@ class TestFanoutSingleSerialization:
             assert decoded[1] == {**expected_base, "tabId": "tab-B"}
         finally:
             async def _shutdown() -> None:
-                if writer is not None:
-                    writer.close()
-                    await writer.wait_closed()
+                if client is not None:
+                    await client.close()
                 if server is not None:
-                    server.close()
+                    server.close(close_connections=True)
                     await server.wait_closed()
                 loop.stop()
 
             asyncio.run_coroutine_threadsafe(_shutdown(), loop)
             loop_thread.join(timeout=5)
             loop.close()
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

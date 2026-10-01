@@ -20,9 +20,9 @@ by the ``connId`` that the server API dispatcher
   window's in-flight ghost request stale (its result was silently
   dropped).
 
-These tests bind a temporary socket under a temp dir (not the
-production ``~/.kiss/sorcar.sock``) and open two real UDS client
-connections that simulate two VS Code windows.
+These tests start a daemon with a temporary endpoint file (not the
+production ``~/.kiss/sorcar-local.json``) and open two real local
+client connections that simulate two VS Code windows.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -56,9 +56,8 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-@requires_unix_sockets
 class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
-    """Two UDS connections (= two VS Code windows) sharing one daemon."""
+    """Two local connections (= two VS Code windows) sharing one daemon."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -69,17 +68,16 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[Any] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -96,24 +94,23 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
 
     async def _connect(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS connection (simulates one VS Code window)."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
+    ) -> tuple[Any, Any]:
+        """Open one local connection (simulates one VS Code window)."""
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
     async def _send(
-        self, writer: asyncio.StreamWriter, cmd: dict[str, Any],
+        self, writer: Any, cmd: dict[str, Any],
     ) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: Any,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 5.0,
@@ -121,7 +118,7 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
         """Read events until *predicate* matches or the budget expires."""
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):

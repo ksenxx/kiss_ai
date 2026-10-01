@@ -5,7 +5,7 @@
 """End-to-end tests: a ``dockerImage`` run bind-mounts the work dir into its container.
 
 A real :class:`kiss.server.web_server.RemoteAccessServer` on a temporary
-Unix-domain socket (the :class:`DaemonRunApiHarness`) runs a task whose
+loopback local endpoint (the :class:`DaemonRunApiHarness`) runs a task whose
 ``docker_image`` names an IMAGE, so ``RelentlessAgent.run`` starts a
 REAL container through :class:`DockerManager`.  The only replaced
 boundary is the LLM: the executor's :meth:`KISSAgent.run` is swapped for
@@ -34,7 +34,6 @@ import pytest
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
 
 IMAGE = "python:3.11-slim"
@@ -51,7 +50,6 @@ def _docker_available() -> bool:
 
 
 pytestmark = [
-    requires_unix_sockets,
     pytest.mark.slow,
     pytest.mark.skipif(not _docker_available(), reason="Docker daemon is not running"),
 ]
@@ -124,7 +122,7 @@ class DockerWorkDirMountTest(DaemonRunApiHarness):
             use_worktree=False,
             use_web_tools=False,
             docker_image=IMAGE,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=timeout,
         )
 

@@ -7,14 +7,14 @@
 Everything runs against the real installed channel modules and the
 real agent-script loader — no mocks or test doubles (``monkeypatch``
 is used only to isolate environment variables, the working directory,
-and the cron module's daemon-socket default between tests, and to
+and the cron module's daemon-endpoint default between tests, and to
 capture the daemon submission that a live dispatch would perform).  Branches
 not exercised here, and why they need no doubles-based tests:
 
 - ``run_agent``'s successful dispatch path submits a task to the
   kiss-web daemon and needs a live LLM endpoint (unavailable and
   non-deterministic in unit tests); the dispatch plumbing up to the
-  daemon socket is covered via the unreachable-daemon path (and, with
+  daemon endpoint is covered via the unreachable-daemon path (and, with
   a real daemon stand-in, in
   ``kiss.tests.agents.sorcar.test_dispatch_timeout``), and the
   agent-script contract the daemon applies is covered directly
@@ -41,7 +41,7 @@ import pytest
 from kiss.agents.sorcar import agent_dispatch, cron_agent
 from kiss.agents.sorcar.agent_dispatch import (
     _agent_class,
-    _daemon_sock_path,
+    _daemon_endpoint_file,
     available_channels,
     get_tools,
     make_run_agent_tool,
@@ -58,17 +58,18 @@ run_agent = make_run_agent_tool("")
 
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate KISS_HOME, the daemon sockets, and the workspace env var.
+    """Isolate KISS_HOME, the daemon endpoint, and the workspace env var.
 
-    ``KISS_SORCAR_SOCK`` points into an empty temp dir so a dispatch
-    can never reach a real daemon that happens to be running on this
-    machine, and the cron module's recorded daemon socket is reset so
-    a scheduler started elsewhere cannot redirect the dispatch.
+    ``KISS_SORCAR_LOCAL`` points at a missing endpoint file in a temp
+    dir so a dispatch can never reach a real daemon that happens to be
+    running on this machine, and the cron module's recorded daemon
+    endpoint is reset so a scheduler started elsewhere cannot redirect
+    the dispatch.
     """
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
-    monkeypatch.setenv("KISS_SORCAR_SOCK", str(tmp_path / "no-daemon.sock"))
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
     monkeypatch.delenv("KISS_CHANNEL_WORKSPACE", raising=False)
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", None)
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
     return tmp_path
 
 
@@ -150,7 +151,7 @@ def test_channel_dispatch_unreachable_daemon_is_a_clean_error(
 ) -> None:
     out = run_agent("say hi", "ntfy", max_budget="1.5")
     assert out.startswith("Error: the ntfy agent task could not run:")
-    assert "no-daemon.sock" in out
+    assert "no-daemon.json" in out
     # The workspace env var (unset before the call) is unset again.
     import os
 
@@ -577,7 +578,7 @@ def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
     out = run_agent("run 'echo hi' every 5 minutes", "  Cron ")
     assert "unknown agent" not in out
     assert out.startswith("Error: the cron agent task could not run:")
-    assert "no-daemon.sock" in out
+    assert "no-daemon.json" in out
     # The cron dispatch runs in the cron agent's own work directory.
     assert (tmp_path / "cron" / "work").is_dir()
     assert not (tmp_path / "channel_work").exists()
@@ -624,7 +625,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
     assert out.startswith(
         "Error: the my_researcher agent task could not run:"
     )
-    assert "no-daemon.sock" in out
+    assert "no-daemon.json" in out
     # Path mode never touches the channel workspace env var.
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
     # The standalone tool runs path-mode sub-tasks in agent_work.
@@ -684,7 +685,7 @@ def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
     # dummy SEA's file stem, failing only at the unreachable daemon.
     out = run_agent("say hi")
     assert out.startswith("Error: the dummy_sea agent task could not run:")
-    assert "no-daemon.sock" in out
+    assert "no-daemon.json" in out
 
 
 def test_tool_schema_requires_only_task() -> None:
@@ -730,7 +731,7 @@ def test_relative_path_resolves_against_captured_work_dir(
     # The script was found (under the project, not under the CWD) and
     # the dispatch failed only on the unreachable daemon.
     assert out.startswith("Error: the reviewer agent task could not run:")
-    assert "no-daemon.sock" in out
+    assert "no-daemon.json" in out
     # A missing relative path names the project-anchored resolution.
     out = tool("say hi", "agents/nope.py")
     assert out.startswith("Error: agent script")
@@ -791,7 +792,7 @@ def test_dispatch_uses_launcher_workspace_registry(
         # never overwritten.
         assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
         # A dispatch SHARING the active workspace proceeds normally
-        # (and fails only at the unreachable daemon socket).
+        # (and fails only at the unreachable daemon endpoint).
         out = run_agent("say hi", "ntfy", workspace="other-ws")
         assert out.startswith("Error: the ntfy agent task could not run:")
         assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
@@ -800,21 +801,21 @@ def test_dispatch_uses_launcher_workspace_registry(
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
 
 
-def test_dispatch_uses_recorded_daemon_socket(
+def test_dispatch_uses_recorded_daemon_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Inside the kiss-web daemon the cron scheduler records the
-    # daemon's own UDS at boot; the dispatch must target it even when
-    # KISS_SORCAR_SOCK points elsewhere — in path mode too.
-    recorded = tmp_path / "recorded-daemon.sock"
-    monkeypatch.setattr(cron_agent, "_daemon_sock_path", str(recorded))
-    assert _daemon_sock_path() == str(recorded)
+    # daemon's own endpoint file at boot; the dispatch must target it
+    # even when KISS_SORCAR_LOCAL points elsewhere — in path mode too.
+    recorded = tmp_path / "recorded-daemon.json"
+    monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", str(recorded))
+    assert _daemon_endpoint_file() == str(recorded)
     out = run_agent("say hi", "ntfy")
-    assert "recorded-daemon.sock" in out
+    assert "recorded-daemon.json" in out
     script = tmp_path / "probe_agent.py"
     script.write_text("def model() -> str:\n    return 'm'\n")
     out = run_agent("say hi", str(script))
-    assert "recorded-daemon.sock" in out
+    assert "recorded-daemon.json" in out
 
 
 def test_agent_class_resolution() -> None:

@@ -11,11 +11,11 @@ rejects ``Audio.play()`` in a webview unless the user interacted with
 it seconds earlier (microsoft/vscode#197937 / #178642, closed as not
 actionable), so the webview silently fell back to the robotic Web
 Speech system voice.  The daemon now plays the clip natively on its
-own machine's speakers whenever a local UDS webview tab is subscribed
+own machine's speakers whenever a local webview tab is subscribed
 and stamps every same-machine copy ``muted``.
 
-These tests run a REAL ``RemoteAccessServer`` with a UDS listener and
-REAL UDS client connections (no mocks), mirroring
+These tests run a REAL ``RemoteAccessServer`` and REAL token-bearing
+local WSS client connections (no mocks), mirroring
 ``test_talk_double_playback.py``; the daemon's audio player is a REAL
 child process substituted via ``KISS_SORCAR_PLAY_CMD`` whose marker
 files carry the exact bytes it played.
@@ -39,9 +39,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
@@ -103,7 +101,7 @@ def _talk_event(
 
 
 class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
-    """The daemon plays talk clips for local UDS webview tabs."""
+    """The daemon plays talk clips for local webview tabs."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -120,14 +118,13 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self.task_id = uuid.uuid4().hex
@@ -146,8 +143,8 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
 
     async def _connect(
         self, tab_id: str
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS client showing the canonical tab *tab_id*.
+    ) -> tuple[LocalReader, LocalWriter]:
+        """Open one local client showing the canonical tab *tab_id*.
 
         The tab is created in the shared tab registry first — as any
         run on it would do before emitting a talk — because the daemon
@@ -158,8 +155,8 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         self.server._vscode_server.tab_registry.update_tab(
             tab_id, title="webview chat", create=True,
         )
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024
         )
         for cmd in (
             {"type": "setWorkDir", "workDir": self.tmpdir},
@@ -171,7 +168,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         # before that lands sees no attached webview and leaves the copy
         # unmuted.  Wait for the attachment the way the fan-out reads it.
         deadline = asyncio.get_event_loop().time() + 5.0
-        while tab_id not in self.server._printer.shown_local_uds_tabs([tab_id]):
+        while tab_id not in self.server._printer.shown_local_tabs([tab_id]):
             self.assertLess(
                 asyncio.get_event_loop().time(), deadline,
                 "daemon never attached the webview client",
@@ -181,7 +178,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
 
     async def _collect_talks(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         count: int,
         timeout: float = 5.0,
     ) -> list[dict[str, object]]:
@@ -219,7 +216,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
     async def test_daemon_plays_clip_and_mutes_local_webview(self) -> None:
         """THE ALIEN-VOICE BUG: local webview must not speech-fallback.
 
-        With a clip in the event and a local UDS webview subscribed,
+        With a clip in the event and a local webview subscribed,
         the daemon must play the clip natively (byte-exact) and mute
         the webview's copy — an unmuted copy makes the webview attempt
         ``Audio.play()``, get autoplay-rejected, and read the text with

@@ -6,7 +6,7 @@
 'use strict';
 
 // E2E tests for the mic-less-host voice fallback (real child processes,
-// real UDS server, compiled extension code — no mocks).
+// real local daemon, compiled extension code — no mocks).
 //
 // Bug being reproduced: the KISS daemon/extension host runs on a machine
 // without a microphone (e.g. a headless cloud VM reached via Remote-SSH
@@ -27,7 +27,7 @@
 //  3. A spawn failure (uv present but not executable) is also a
 //     hostMicUnavailable condition, not an error.
 //  4. The in-page capture fallback's `voiceTranscribe` webview message is
-//     forwarded verbatim to the daemon over the UDS, and the daemon's
+//     forwarded verbatim to the daemon over the local WSS, and the daemon's
 //     `voiceSpeech` reply is relayed back to the webview — the round trip
 //     that lets the BROWSER's microphone do the recording.
 //
@@ -42,6 +42,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_SIDEBAR = path.join(__dirname, '..', 'out', 'SorcarSidebarView.js');
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..', '..', '..');
@@ -115,12 +116,12 @@ const binDir = path.join(tmpHome, '.local', 'bin');
 fs.mkdirSync(binDir, {recursive: true});
 const uvPath = path.join(binDir, 'uv');
 const pidFile = path.join(tmpHome, 'pids.txt');
-const sockPath = path.join(tmpHome, 'daemon.sock');
+const endpointPath = path.join(tmpHome, 'daemon.json');
 
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_PROJECT_PATH = PROJECT_ROOT;
-process.env.KISS_SORCAR_SOCK = sockPath;
+process.env.KISS_SORCAR_LOCAL = endpointPath;
 delete process.env.KISS_VOICE_WAKE_ARGS;
 
 // The exact stderr tail the real listener leaves on a machine without
@@ -178,11 +179,11 @@ function spawnedCount() {
 }
 
 // A REAL daemon socket: records every JSON frame the extension sends and
-// lets tests push frames back, exactly like kiss-web's UDS transport
+// lets tests push frames back, exactly like kiss-web's local WSS transport
 // (newline-delimited JSON, no handshake).
 const daemonFrames = [];
 const daemonConns = [];
-const daemonServer = net.createServer(conn => {
+const daemonServer = createFakeDaemon(conn => {
   daemonConns.push(conn);
   let buf = '';
   conn.on('data', chunk => {
@@ -420,7 +421,7 @@ async function testVoiceTranscribeRoundTrip() {
   const {view, fire, posted} = makeSidebar();
 
   // The AgentClient is created lazily by the first forward and queues
-  // the command until its UDS connect completes, so the frame's arrival
+  // the command until its endpoint connect completes, so the frame's arrival
   // at the server is itself the connect signal.
   fire({
     type: 'voiceTranscribe',
@@ -453,7 +454,7 @@ async function testVoiceTranscribeRoundTrip() {
 }
 
 async function main() {
-  await new Promise(resolve => daemonServer.listen(sockPath, resolve));
+  await new Promise(resolve => daemonServer.listen(endpointPath, resolve));
   try {
     await testPreReadyDeathIsHostMicUnavailable();
     await testPostReadyDeathStillReportsError();

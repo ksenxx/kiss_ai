@@ -19,9 +19,11 @@
 // replaced by a recorder, as in the other extension-host tests; the
 // daemon side of the empty-workDir fallback is covered separately by
 // src/kiss/tests/server/test_per_window_work_dir.py):
-//  1. no folder + root cwd      -> submit carries workDir '' (which the
-//     daemon resolves to its own fallback folder) and configData keeps
-//     the daemon's work_dir instead of overwriting it with the root.
+//  1. no folder + root cwd      -> the window pins the daemon to ''
+//     (setWorkDir on connect sends _getWorkDir(); the daemon ignores an
+//     empty pin and uses its own fallback folder), the forwarded submit
+//     carries no workDir of its own, and configData keeps the daemon's
+//     work_dir instead of overwriting it with the root.
 //  2. no folder + normal cwd    -> cwd still wins (`code file.txt`
 //     launched from a terminal keeps the shell's directory).
 //  3. folder open               -> the folder still wins everywhere.
@@ -126,7 +128,7 @@ function makeView() {
   view._api = {
     _sent: sent,
     forward: c => sent.push(c),
-    run: c => sent.push({type: 'run', ...c}),
+    submit: c => sent.push({type: 'submit', ...c}),
     stop: tabId => sent.push({type: 'stop', tabId}),
     complete: c => sent.push({type: 'complete', ...c}),
     closeTab: tabId => sent.push({type: 'closeTab', tabId}),
@@ -146,16 +148,25 @@ function makeView() {
   return {view, sent};
 }
 
-async function submitAndGetRun(view, sent, tabId) {
+// Submit from a tab with no work dir of its own and return the work dir
+// the window pins the daemon to (what setWorkDir sends on connect): the
+// forwarded submit itself must carry none, since the daemon stamps the
+// connection's pin.
+async function submitAndGetPinnedWorkDir(view, sent, tabId) {
   await view._handleMessage({
     type: 'submit',
     prompt: 'explain the fallback\nsecond line so no path lookup happens',
     model: 'test-model',
     tabId,
   });
-  const run = sent.find(m => m.type === 'run');
-  assert.ok(run, 'submit must reach the daemon as a run command');
-  return run;
+  const submit = sent.find(m => m.type === 'submit');
+  assert.ok(submit, 'submit must reach the daemon as a submit command');
+  assert.strictEqual(
+    submit.workDir,
+    undefined,
+    'the host must not stamp a workDir; the daemon applies the pin',
+  );
+  return view._getWorkDir();
 }
 
 // 1a. No folder open, host cwd at the filesystem root: the submitted
@@ -163,15 +174,15 @@ async function submitAndGetRun(view, sent, tabId) {
 async function testRootCwdSubmitsEmptyWorkDir() {
   process.chdir(fsRoot);
   const {view, sent} = makeView();
-  const run = await submitAndGetRun(view, sent, 't-root');
+  const pinned = await submitAndGetPinnedWorkDir(view, sent, 't-root');
   assert.strictEqual(
-    run.workDir,
+    pinned,
     '',
-    "no-folder window with root cwd must submit workDir '' " +
-      `(got ${JSON.stringify(run.workDir)})`,
+    "no-folder window with root cwd must pin workDir '' " +
+      `(got ${JSON.stringify(pinned)})`,
   );
   view.dispose();
-  console.log('ok - root cwd: submit carries empty workDir, not the root');
+  console.log('ok - root cwd: the window pins an empty workDir, not the root');
 }
 
 // 1b. Same window: the configData rewrite must keep the daemon's
@@ -202,11 +213,11 @@ async function testTerminalCwdStillWins() {
   process.chdir(wsRoot);
   const cwd = process.cwd(); // may differ from wsRoot via symlinks
   const {view, sent} = makeView();
-  const run = await submitAndGetRun(view, sent, 't-term');
+  const pinned = await submitAndGetPinnedWorkDir(view, sent, 't-term');
   assert.strictEqual(
-    run.workDir,
+    pinned,
     cwd,
-    'no-folder window with a normal cwd must keep submitting that cwd',
+    'no-folder window with a normal cwd must keep pinning that cwd',
   );
   const handlers = {};
   view._installClientListener({
@@ -232,11 +243,11 @@ async function testWorkspaceFolderStillWins() {
     {uri: {fsPath: wsRoot, scheme: 'file'}},
   ];
   const {view, sent} = makeView();
-  const run = await submitAndGetRun(view, sent, 't-ws');
+  const pinned = await submitAndGetPinnedWorkDir(view, sent, 't-ws');
   assert.strictEqual(
-    run.workDir,
+    pinned,
     wsRoot,
-    'a window with a folder open must keep submitting that folder',
+    'a window with a folder open must keep pinning that folder',
   );
   view.dispose();
   vscodeStub.workspace.workspaceFolders = undefined;

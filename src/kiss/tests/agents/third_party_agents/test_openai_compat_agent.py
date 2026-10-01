@@ -6,10 +6,10 @@
 
 Every HTTP test starts the REAL embedded server on an ephemeral port and
 speaks real HTTP with ``requests``.  ``KISS_HOME`` is pointed at a fresh
-temp dir per test (and ``KISS_SORCAR_SOCK`` is cleared), so config state
+temp dir per test (and ``KISS_SORCAR_LOCAL`` is cleared), so config state
 never touches the user's real ``~/.kiss`` and ``kiss.server.sorcar.run``
-deterministically fails fast (connection refused on a nonexistent daemon
-socket) — exercising the honest 502 no-daemon path.
+deterministically fails fast (no daemon endpoint file under the fresh
+``KISS_HOME``) — exercising the honest 502 no-daemon path.
 """
 
 from __future__ import annotations
@@ -42,13 +42,13 @@ _API_KEY = "test-secret-key"
 
 
 class _EnvSwap:
-    """Point ``KISS_HOME`` at a temp dir and clear ``KISS_SORCAR_SOCK``."""
+    """Point ``KISS_HOME`` at a temp dir and clear ``KISS_SORCAR_LOCAL``."""
 
     def __init__(self, target: Path) -> None:
         self._saved_home = os.environ.get("KISS_HOME")
-        self._saved_sock = os.environ.get("KISS_SORCAR_SOCK")
+        self._saved_endpoint = os.environ.get("KISS_SORCAR_LOCAL")
         os.environ["KISS_HOME"] = str(target)
-        os.environ.pop("KISS_SORCAR_SOCK", None)
+        os.environ.pop("KISS_SORCAR_LOCAL", None)
 
     def restore(self) -> None:
         """Restore the original environment values."""
@@ -56,8 +56,8 @@ class _EnvSwap:
             os.environ.pop("KISS_HOME", None)
         else:
             os.environ["KISS_HOME"] = self._saved_home
-        if self._saved_sock is not None:
-            os.environ["KISS_SORCAR_SOCK"] = self._saved_sock
+        if self._saved_endpoint is not None:
+            os.environ["KISS_SORCAR_LOCAL"] = self._saved_endpoint
 
 
 @pytest.fixture()

@@ -33,7 +33,7 @@ S3-11/S3-12  The synchronous daemon client capped a single event line at
              oversized terminal ``result`` frame was split and discarded,
              making ``run()`` return an empty unsuccessful result for a
              task that actually succeeded.  The reader also leaked because
-             ``sock.makefile()``'s reader was never closed.
+             the socket's file reader was never closed.
 
 S3-13        A single corrupt persisted ``timestamp`` (TEXT or infinity in
              the dynamically typed SQLite column) aborted the whole
@@ -60,6 +60,8 @@ from unittest import IsolatedAsyncioTestCase
 
 import yaml
 from websockets.asyncio.client import connect
+from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosed
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server
@@ -68,7 +70,7 @@ from kiss.server.sorcar import ServerApi
 from kiss.server.sorcar import run as sorcar_run
 from kiss.server.task_runner import coerce_budget_override
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import fake_daemon
 
 _PASSWORD = "findings3-auth-test-password"
 
@@ -194,61 +196,36 @@ class TestSafeStartMs(unittest.TestCase):
         self.assertEqual(_safe_start_ms(1000), 1_000_000)
 
 
-class _UdsResultServer:
-    """A minimal real UDS daemon that replays a scripted event stream."""
+async def _replay_scripted_result(ws: ServerConnection, result_text: str) -> None:
+    """Stand-in daemon handler: answer one ``run`` with a scripted stream."""
+    cmd = json.loads(await ws.recv())
+    tab_id = cmd["tabId"]
+    task_id = "task-abc-123"
 
-    def __init__(self, sock_path: Path, result_text: str) -> None:
-        """Bind a UNIX-domain listener at *sock_path*."""
-        self._result_text = result_text
-        self._srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._srv.bind(str(sock_path))
-        self._srv.listen(1)
-        self._thread = threading.Thread(target=self._serve, daemon=True)
+    async def send(event: dict[str, Any]) -> None:
+        await ws.send(json.dumps(event))
 
-    def start(self) -> None:
-        """Begin accepting one client connection."""
-        self._thread.start()
-
-    def _serve(self) -> None:
-        conn, _ = self._srv.accept()
-        with conn:
-            reader = conn.makefile("rb")
-            cmd = json.loads(reader.readline().decode("utf-8"))
-            tab_id = cmd["tabId"]
-            task_id = "task-abc-123"
-
-            def send(event: dict[str, Any]) -> None:
-                conn.sendall(json.dumps(event).encode("utf-8") + b"\n")
-
-            send({"type": "status", "running": True, "tabId": tab_id})
-            send({
-                "type": "result",
-                "tabId": tab_id,
-                "taskId": task_id,
-                "success": True,
-                "text": self._result_text,
-                "summary": self._result_text,
-                "cost": "$0.1234",
-                "total_tokens": 42,
-                "step_count": 7,
-            })
-            send({"type": "status", "running": False, "tabId": tab_id})
-            # Give the client time to consume before EOF.
-            try:
-                reader.read()
-            except OSError:
-                pass
-
-    def close(self) -> None:
-        """Shut the listener down."""
-        try:
-            self._srv.close()
-        except OSError:
-            pass
+    await send({"type": "status", "running": True, "tabId": tab_id})
+    await send({
+        "type": "result",
+        "tabId": tab_id,
+        "taskId": task_id,
+        "success": True,
+        "text": result_text,
+        "summary": result_text,
+        "cost": "$0.1234",
+        "total_tokens": 42,
+        "step_count": 7,
+    })
+    await send({"type": "status", "running": False, "tabId": tab_id})
+    # Give the client time to consume before the connection closes.
+    try:
+        await ws.wait_closed()
+    except ConnectionClosed:
+        pass
 
 
-@requires_unix_sockets
-class TestUdsOversizedResultFraming(unittest.TestCase):
+class TestOversizedResultFraming(unittest.TestCase):
     """S3-11/S3-12: an oversized terminal ``result`` frame must survive."""
 
     def test_oversized_success_result_is_returned(self) -> None:
@@ -256,18 +233,21 @@ class TestUdsOversizedResultFraming(unittest.TestCase):
         # >16 MiB of payload — larger than the OLD 16 MiB client cap so
         # the buggy client would split and discard the terminal frame.
         big_text = "R" * (16 * 1024 * 1024 + 4096)
-        tmpdir = Path(tempfile.mkdtemp(prefix="kiss_f3_uds_"))
-        sock_path = tmpdir / "daemon.sock"
-        server = _UdsResultServer(sock_path, big_text)
-        server.start()
-        try:
-            result = sorcar_run(
-                "do the big thing",
-                sock_path=sock_path,
-                timeout=30.0,
-            )
-        finally:
-            server.close()
+        tmpdir = Path(tempfile.mkdtemp(prefix="kiss_f3_local_"))
+
+        async def handler(ws: ServerConnection) -> None:
+            await _replay_scripted_result(ws, big_text)
+
+        async def _drive() -> Any:
+            async with fake_daemon(tmpdir, handler) as endpoint_file:
+                return await asyncio.to_thread(
+                    sorcar_run,
+                    "do the big thing",
+                    endpoint_file=endpoint_file,
+                    timeout=30.0,
+                )
+
+        result = asyncio.run(_drive())
         self.assertTrue(
             result.success,
             "oversized terminal result frame was dropped — client cap "

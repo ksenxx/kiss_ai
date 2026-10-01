@@ -64,7 +64,7 @@ class TestAwaitActiveMergesCoversAllClaims(unittest.TestCase):
         self.remote = RemoteAccessServer(
             use_tunnel=False,
             url_file=self.tmp_dir / "remote-url.json",
-            uds_path=self.tmp_dir / "kiss.sock",
+            local_endpoint_file=self.tmp_dir / "sorcar-local.json",
         )
         self.server: VSCodeServer = _server(self.repo)
         self.state: AgentState = _register_wt_state("a")

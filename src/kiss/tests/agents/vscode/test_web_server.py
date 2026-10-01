@@ -34,7 +34,7 @@ class TestBuildHtml(unittest.TestCase):
     def test_html_contains_key_elements(self) -> None:
         """The generated HTML includes all essential chat UI components."""
         html = _build_html()
-        self.assertIn(f"<title>{PRODUCT_NAME}</title>", html)
+        self.assertIn(f"<title>{PRODUCT_NAME}: ", html)
         self.assertIn('id="tab-bar"', html)
         self.assertIn('id="output"', html)
         self.assertIn('id="task-input"', html)

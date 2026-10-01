@@ -40,6 +40,7 @@ from kiss.core.models.model import (
 )
 from kiss.core.processes import (
     SIGKILL,
+    find_bash,
     kill_process_group,
     pid_alive,
     popen_process_group,
@@ -513,22 +514,7 @@ def _outline(file_path: str, lines: list[str], size: int) -> str | None:
     )
 
 
-def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
-    """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
-    found = shutil.which("bash")
-    if found:
-        return found
-    for candidate in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ]:
-        if Path(candidate).exists():
-            return candidate
-    return None
-
-
-_WINDOWS_BASH: str | None = _find_windows_bash() if sys.platform == "win32" else None
+_WINDOWS_BASH: str | None = find_bash() if sys.platform == "win32" else None
 
 
 def _popen_kwargs(command: str) -> dict[str, Any]:

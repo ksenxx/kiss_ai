@@ -326,7 +326,7 @@ class TestRemovalGenerationWiring(_Base):
             self.server._tab_chat_views["old"] = "chat-d"
 
         # The stale displacement cleanup resumes — it must stand down.
-        self.server._prune_local_uds_tab("old")
+        self.server._prune_local_tab("old")
         self.server._drop_tab_state("old", removal_token=removal_token)
 
         self.assertTrue(self.server.tab_registry.has_tab("old"))
@@ -346,14 +346,14 @@ class TestRemovalGenerationWiring(_Base):
 
         parked = threading.Event()
         release = threading.Event()
-        real_prune = self.server._prune_local_uds_tab
+        real_prune = self.server._prune_local_tab
 
         def parking_prune(tab_id: str) -> None:
             parked.set()
             release.wait(timeout=30)
             real_prune(tab_id)
 
-        self.server._prune_local_uds_tab = parking_prune  # type: ignore[method-assign]
+        self.server._prune_local_tab = parking_prune  # type: ignore[method-assign]
         try:
             closer = threading.Thread(
                 target=self.server._close_tab, args=("t",), daemon=True,
@@ -374,7 +374,7 @@ class TestRemovalGenerationWiring(_Base):
             self.assertFalse(closer.is_alive())
         finally:
             release.set()
-            self.server._prune_local_uds_tab = real_prune  # type: ignore[method-assign]
+            self.server._prune_local_tab = real_prune  # type: ignore[method-assign]
 
         # Serial outcome of close-then-reopen: tab open on chat-2 with
         # its chat mapping intact.

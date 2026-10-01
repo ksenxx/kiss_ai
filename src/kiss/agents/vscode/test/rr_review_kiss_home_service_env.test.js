@@ -5,12 +5,12 @@
 
 'use strict';
 
-// Review finding 4: the extension probes sorcarSockPath()
-// ($KISS_SORCAR_SOCK ?? $KISS_HOME/sorcar.sock), but the generated
+// Review finding 4: the extension probes sorcarEndpointPath()
+// ($KISS_SORCAR_LOCAL ?? $KISS_HOME/sorcar-local.json), but the generated
 // systemd unit / launchd plist exported only PATH. A KISS_HOME set only
 // in the VS Code process was invisible to the service daemon, which
-// bound ~/.kiss/sorcar.sock while the extension polled
-// $KISS_HOME/sorcar.sock — a 180s poll plus restart loop of a healthy
+// bound ~/.kiss/sorcar-local.json while the extension polled
+// $KISS_HOME/sorcar-local.json — a 180s poll plus restart loop of a healthy
 // daemon.
 //
 // This test drives the REAL compiled restartKissWebDaemon() in a child
@@ -19,7 +19,7 @@
 // kiss-web.service:
 //   - contains Environment=KISS_HOME=... when KISS_HOME is set, and
 //   - omits KISS_HOME entirely when it is not.
-// KISS_SORCAR_SOCK is a client-side override the daemon does not read,
+// KISS_SORCAR_LOCAL is a client-side override the daemon does not read,
 // so it must never appear in the unit.
 
 const assert = require('assert');
@@ -73,12 +73,12 @@ fs.writeFileSync(
 );
 fs.chmodSync(kissWebBin, 0o755);
 
-// Stand-in daemon "systemd" starts: binds the UDS under $KISS_HOME
+// Stand-in daemon "systemd" starts: binds the local endpoint under $KISS_HOME
 // (falling back to ~/.kiss) exactly like the real daemon, and holds
 // port 8787 so verifyDaemonStartup() returns promptly.
-const udsHelper = path.join(tmpRoot, 'uds-helper.js');
+const daemonHelper = path.join(tmpRoot, 'daemon-helper.js');
 fs.writeFileSync(
-  udsHelper,
+  daemonHelper,
   `
 'use strict';
 const net = require('net');
@@ -87,9 +87,10 @@ const path = require('path');
 const kissDir =
   process.env.KISS_HOME || path.join(process.env.HOME, '.kiss');
 fs.mkdirSync(kissDir, {recursive: true});
-const sock = path.join(kissDir, 'sorcar.sock');
+const sock = path.join(kissDir, 'sorcar-local.json');
 try { fs.unlinkSync(sock); } catch {}
-const srv = net.createServer(c => {
+const {createFakeDaemon} = require(${JSON.stringify(path.join(__dirname, 'fakeDaemon.js'))});
+const srv = createFakeDaemon(c => {
   c.setEncoding('utf-8');
   let buf = '';
   c.on('data', d => {
@@ -130,7 +131,7 @@ fs.writeFileSync(
   `#!/bin/sh
 case " $* " in
   *" restart "*)
-    nohup "${process.execPath}" "${udsHelper}" >/dev/null 2>&1 &
+    nohup "${process.execPath}" "${daemonHelper}" >/dev/null 2>&1 &
     ;;
 esac
 exit 0
@@ -192,7 +193,7 @@ function runRestart(extraEnv) {
     KISS_TEST_WORK: fakeWork,
     ...extraEnv,
   };
-  delete env.KISS_SORCAR_SOCK;
+  delete env.KISS_SORCAR_LOCAL;
   if (!('KISS_HOME' in extraEnv)) delete env.KISS_HOME;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['-e', CHILD], {
@@ -224,8 +225,8 @@ async function main() {
     `generated unit must export KISS_HOME to the daemon; got:\n${unit}`,
   );
   assert.ok(
-    !unit.includes('KISS_SORCAR_SOCK'),
-    'KISS_SORCAR_SOCK is client-side only and must not reach the unit',
+    !unit.includes('KISS_SORCAR_LOCAL'),
+    'KISS_SORCAR_LOCAL is client-side only and must not reach the unit',
   );
   console.log('  ok - unit exports KISS_HOME when the extension host has it');
   killHelper();

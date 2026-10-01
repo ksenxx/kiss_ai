@@ -153,7 +153,7 @@ Module._resolveFilename = function (request, ...rest) {
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-audit-upd-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
-process.env.KISS_SORCAR_SOCK = path.join(tmpHome, 'no-daemon.sock');
+process.env.KISS_SORCAR_LOCAL = path.join(tmpHome, 'no-daemon.json');
 // findInstallScript() looks in os.homedir()/.kiss/kiss_ai; os.homedir()
 // honours $HOME on POSIX.
 const installRoot = path.join(tmpHome, '.kiss', 'kiss_ai');

@@ -26,6 +26,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
@@ -33,11 +34,6 @@ assert.ok(
   fs.existsSync(path.join(OUT_DIR, 'SorcarPanelManager.js')),
   'compiled extension missing — run `npm run compile` first',
 );
-
-if (process.platform === 'win32') {
-  console.log('  skipped on win32 (UDS test)');
-  process.exit(0);
-}
 
 class StubEventEmitter {
   constructor() {
@@ -156,11 +152,11 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-activetask-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 
 const serverSockets = [];
 const daemonCommands = [];
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   serverSockets.push(sock);
   let buf = '';
   sock.on('data', chunk => {
@@ -203,7 +199,7 @@ function tabIdOf(panel) {
 }
 
 async function runTest() {
-  server.listen(sockPath);
+  server.listen(endpointPath);
   const manager = new SorcarPanelManager(vscodeStub.Uri.file(EXT_ROOT));
 
   // --- setActiveTaskSink pushes the empty state right away -------------

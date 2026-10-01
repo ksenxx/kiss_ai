@@ -25,8 +25,8 @@ user-local ``~/.kiss/MODEL_INFO.json``, which the installer seeds from the
 bundled catalog and which an installed KISS Sorcar reads at runtime (see
 ``kiss.core.models.model_info``); the settings panel's "Update Models"
 button runs this script against that copy.  When a non-default target is
-updated, the repo's ``README.md`` catalog totals and per-provider model
-lists are left untouched.  The
+updated, the repo's ``README.md`` catalog totals and the per-provider model
+lists in ``MODELS.md`` are left untouched.  The
 write is atomic (temp file + ``os.replace``) because ``model_info`` loads
 the catalog at import time, so a truncating rewrite would break every
 process that starts while the script is running.
@@ -98,6 +98,9 @@ DEFAULT_MODEL_INFO_PATH = (
 )
 MODEL_INFO_PATH = DEFAULT_MODEL_INFO_PATH
 README_PATH = PROJECT_ROOT / "README.md"
+# The full per-provider model list lives in MODELS.md; README.md keeps only
+# the catalog totals. Both are synced by sync_catalog_docs.
+MODELS_PATH = PROJECT_ROOT / "MODELS.md"
 
 
 def _writes_default_catalog() -> bool:
@@ -2182,15 +2185,33 @@ def _summary_label(category: str) -> str:
     return category.replace("`", "")
 
 
+def sync_catalog_docs() -> bool:
+    """Sync ``README.md`` and ``MODELS.md`` with the bundled catalog.
+
+    Runs :func:`sync_readme_catalog` on each of the two files that exists:
+    the README carries only the catalog totals, ``MODELS.md`` the
+    per-provider table and the full model lists. Returns ``True`` when
+    either file was modified.
+    """
+    changed = False
+    for path in (README_PATH, MODELS_PATH):
+        if path.exists():
+            file_changed = sync_readme_catalog(path, MODEL_INFO_PATH)
+            print(f"  {path.name} updated: {file_changed} ({path})")
+            changed = changed or file_changed
+    return changed
+
+
 def sync_readme_catalog(readme_path: Path, model_info_path: Path) -> bool:
-    """Rewrite the catalog section in ``README.md`` to match MODEL_INFO.json.
+    """Rewrite the catalog counts and lists in a Markdown file to match MODEL_INFO.json.
 
     Updates the catalog totals, capability counts, per-provider table
     counts, and — for every per-provider ``<details>`` block — both the
     ``<summary>`` count and the full sorted bullet list of model names, so
-    the README's "Full model list" can never drift from the catalog. All
-    edits are targeted regex substitutions that leave the rest of the file
-    untouched. Returns ``True`` when the file was modified.
+    the "Full model list" in ``MODELS.md`` can never drift from the
+    catalog. All edits are targeted regex substitutions that leave the rest
+    of the file untouched, so the same function serves ``README.md``, which
+    only carries the totals. Returns ``True`` when the file was modified.
     """
     data: dict[str, dict[str, Any]] = json.loads(model_info_path.read_text(encoding="utf-8"))
     groups: dict[str, list[str]] = {}
@@ -2299,11 +2320,10 @@ def _run_scrub_only(dry_run: bool = False) -> None:
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
     if _writes_default_catalog():
-        print("\n[3/3] Syncing README catalog totals and model lists...")
-        changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
-        print(f"  README updated: {changed} ({README_PATH})")
+        print("\n[3/3] Syncing README.md totals and MODELS.md model lists...")
+        sync_catalog_docs()
     else:
-        print("\n[3/3] Non-default catalog target: README left untouched")
+        print("\n[3/3] Non-default catalog target: README.md and MODELS.md left untouched")
     print("\nDone!")
 
 
@@ -2572,10 +2592,9 @@ def main() -> None:
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
 
-    if not args.dry_run and _writes_default_catalog() and README_PATH.exists():
-        print("\n  Syncing README catalog totals and model lists...")
-        changed = sync_readme_catalog(README_PATH, MODEL_INFO_PATH)
-        print(f"  README updated: {changed} ({README_PATH})")
+    if not args.dry_run and _writes_default_catalog():
+        print("\n  Syncing README.md totals and MODELS.md model lists...")
+        sync_catalog_docs()
 
     print("\nDone!")
 

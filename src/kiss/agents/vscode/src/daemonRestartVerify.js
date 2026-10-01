@@ -24,7 +24,7 @@ const fileExists = fs.existsSync;
 
 async function verifyDaemonStartup(opts) {
   const binPath = opts.binPath;
-  const sockPath = opts.sockPath;
+  const endpointPath = opts.endpointPath;
   const port = opts.port;
   const restart = opts.restart || null;
   const log = opts.log || (() => {});
@@ -50,8 +50,8 @@ async function verifyDaemonStartup(opts) {
 
   for (;;) {
     const health = await probeDaemonHealth(port, probeTimeoutMs);
-    const uds = await daemonHasActiveTasks(sockPath, probeTimeoutMs);
-    if (health === 'alive' && uds.ok) {
+    const local = await daemonHasActiveTasks(endpointPath, probeTimeoutMs);
+    if (health === 'alive' && local.ok) {
       return {
         ok: true,
         reason: 'alive',
@@ -67,7 +67,7 @@ async function verifyDaemonStartup(opts) {
     if (Date.now() - startedAt >= timeoutMs) {
       let reason;
       if (!binOk) reason = 'binary-missing';
-      else if (health === 'alive') reason = 'sock-missing';
+      else if (health === 'alive') reason = 'endpoint-missing';
       else reason = 'timeout';
       return {
         ok: false,
@@ -82,14 +82,14 @@ async function verifyDaemonStartup(opts) {
       restart &&
       binOk &&
       health === 'dead' &&
-      !uds.ok &&
-      uds.reason === 'sock-missing' &&
+      !local.ok &&
+      local.reason === 'endpoint-missing' &&
       Date.now() - lastRestartAt >= restartEveryMs
     ) {
       restarts += 1;
       log(
         `kiss-web still down ${Date.now() - startedAt}ms after restart ` +
-          `(probe=${health}, uds=${uds.reason}) — re-issuing daemon ` +
+          `(probe=${health}, local=${local.reason}) — re-issuing daemon ` +
           `restart (attempt ${restarts})`,
       );
       try {

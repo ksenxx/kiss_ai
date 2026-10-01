@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
 
-Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
-temporary Unix-domain socket and drive ``kiss.server.sorcar.run`` with
+Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` with a
+temporary local endpoint and drive ``kiss.server.sorcar.run`` with
 an ``extension_agent_path`` script against it.  The only replaced boundary is the
 LLM itself: like the other task-runner suites in this directory,
 ``SorcarAgent``'s parent ``run`` is swapped for a stub so the daemon's
@@ -26,15 +26,13 @@ import unittest
 from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.core.models.model_info import get_available_models
 from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
 
 
 def _task_chat_id(task_id: str) -> str:
@@ -62,14 +60,14 @@ def _init_repo(repo: str) -> None:
 
 
 class AgentPathApiTest(unittest.TestCase):
-    """Drive ``sorcar.run(extension_agent_path=...)`` against a real daemon over UDS."""
+    """Drive ``sorcar.run(extension_agent_path=...)`` against a real local daemon."""
 
     def setUp(self) -> None:
         # Resolved: macOS mkdtemp returns a symlinked /var/... path while
         # the worktree machinery canonicalizes the repo (git_worktree
         # resolves it), so un-resolved paths break startswith checks.
         self.tmpdir = str(Path(tempfile.mkdtemp(prefix="sorcar_agent_path_")).resolve())
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
@@ -97,16 +95,11 @@ class AgentPathApiTest(unittest.TestCase):
         )
         self.loop_thread.start()
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
@@ -124,15 +117,13 @@ class AgentPathApiTest(unittest.TestCase):
         agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            ws_server = self.server._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                await ws_server.wait_closed()
+            local_endpoint.remove_endpoint_if_owned(
+                self.server._local_endpoint_file, self.server._local_token,
+            )
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -353,7 +344,7 @@ class AgentPathApiTest(unittest.TestCase):
             use_web_tools=True,
             use_memory=True,
             is_parallel=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -409,7 +400,7 @@ class AgentPathApiTest(unittest.TestCase):
             system_prompt="kept system prompt",
             extension_agent_path=agent_path,
             max_budget=3.5,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -459,7 +450,7 @@ class AgentPathApiTest(unittest.TestCase):
             work_dir=self.repo,
             tools=client_tools,
             extension_agent_path=agent_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -495,7 +486,7 @@ class AgentPathApiTest(unittest.TestCase):
         first = sorcar.run(
             "remember the word plugh",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert first.success is True
@@ -514,7 +505,7 @@ class AgentPathApiTest(unittest.TestCase):
             "what was the word?",
             work_dir=self.repo,
             extension_agent_path=agent_path,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert second.success is True
@@ -601,7 +592,7 @@ class AgentPathApiTest(unittest.TestCase):
                     "should not run the agent",
                     work_dir=self.repo,
                     extension_agent_path=agent_path,
-                    sock_path=self.sock_path,
+                    endpoint_file=self.endpoint_file,
                     timeout=60,
                 )
                 assert result.success is False
@@ -661,15 +652,15 @@ class AgentPathApiTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             sorcar.run(
                 "hi", extension_agent_path=str(Path(self.tmpdir) / "missing.py"),
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
             )
         not_py = Path(self.tmpdir) / "agent.txt"
         not_py.write_text("def model():\n    return 'x'\n")
         with self.assertRaises(ValueError):
-            sorcar.run("hi", extension_agent_path=str(not_py), sock_path=self.sock_path)
+            sorcar.run("hi", extension_agent_path=str(not_py), endpoint_file=self.endpoint_file)
         with self.assertRaises(ValueError):
             sorcar.run(
-                "hi", extension_agent_path=cast(Any, 123), sock_path=self.sock_path,
+                "hi", extension_agent_path=cast(Any, 123), endpoint_file=self.endpoint_file,
             )
 
 

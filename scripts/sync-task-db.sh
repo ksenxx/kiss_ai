@@ -692,9 +692,9 @@ sys.exit(0 if busy == 0 and frames <= 0 else 1)' 2>/dev/null || folded=0
     fi
     echo "SORCAR_DB_BACKUP=$backup"
 fi
-# The -shm is an index into the -wal, and the socket describes a process that is
-# gone; neither says anything about the database arriving.
-rm -f sorcar.db-wal sorcar.db-shm sorcar.sock
+# The -shm is an index into the -wal, and the local endpoint file describes a
+# daemon that is gone; neither says anything about the database arriving.
+rm -f sorcar.db-wal sorcar.db-shm sorcar-local.json
 # The one step that takes the old database away.  If it cannot be taken, the old
 # database is still here under its own name -- and gets its -wal back, so that
 # what is here is the database that was here, whole.

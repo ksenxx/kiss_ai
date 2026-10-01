@@ -41,22 +41,19 @@ from kiss.server.web_server import (
     _parse_version_py,
     _version_tuple,
 )
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
-@requires_unix_sockets
-class _UdsHarness(unittest.TestCase):
-    """Shared UDS harness: RemoteAccessServer on a temp unix socket.
+class _LocalHarness(unittest.TestCase):
+    """Shared local-client harness: a private ``RemoteAccessServer``.
 
-    A background
-    event loop runs the server's ``_uds_handler`` on a temp socket and
-    persistence is pointed at a temp sqlite DB so nothing pollutes the
-    user's real ``~/.kiss``.
+    A background event loop serves the server's loopback-only WSS
+    listener (``start_private_async``) and persistence is pointed at a
+    temp sqlite DB so nothing pollutes the user's real ``~/.kiss``.
     """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-fixer-webserver-")
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
 
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
@@ -71,20 +68,14 @@ class _UdsHarness(unittest.TestCase):
         )
         self.loop_thread.start()
 
-        self.server = RemoteAccessServer(uds_path=self.sock_path)
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
+        self.server = RemoteAccessServer(
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
+        )
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
 
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler,
-                path=self.sock_path,
-                limit=_MAX_LINE_BYTES,
-            ),
-            self.loop,
-        ).result(timeout=5)
-
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     def tearDown(self) -> None:
         async def _shutdown() -> None:
@@ -94,8 +85,7 @@ class _UdsHarness(unittest.TestCase):
                     await writer.wait_closed()
                 except Exception:
                     pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            await self.server.stop_async()
 
         try:
             asyncio.run_coroutine_threadsafe(
@@ -111,14 +101,12 @@ class _UdsHarness(unittest.TestCase):
 
     def _open_conn(
         self,
-    ) -> tuple[asyncio.StreamWriter, list[str], threading.Event]:
-        """Open a UDS client; return (writer, received-lines, got-event)."""
+    ) -> tuple[LocalWriter, list[str], threading.Event]:
+        """Open a local client; return (writer, received-lines, got-event)."""
 
-        async def _open() -> tuple[
-            asyncio.StreamReader, asyncio.StreamWriter,
-        ]:
-            return await asyncio.open_unix_connection(
-                self.sock_path, limit=_MAX_LINE_BYTES,
+        async def _open() -> tuple[LocalReader, LocalWriter]:
+            return await open_local_connection(
+                self.server, limit=_MAX_LINE_BYTES,
             )
 
         reader, writer = asyncio.run_coroutine_threadsafe(
@@ -140,7 +128,7 @@ class _UdsHarness(unittest.TestCase):
         asyncio.run_coroutine_threadsafe(_drain(), self.loop)
         return writer, received, got
 
-    def _send_line(self, writer: asyncio.StreamWriter,
+    def _send_line(self, writer: LocalWriter,
                    cmd: dict[str, Any]) -> None:
         """Write one JSON command line on *writer* from the test thread."""
 
@@ -170,7 +158,7 @@ class _UdsHarness(unittest.TestCase):
         raise AssertionError(message)
 
 
-class TestPromptTruncationIsByteBased(_UdsHarness):
+class TestPromptTruncationIsByteBased(_LocalHarness):
     """``submit`` prompts are capped at ``_MAX_PROMPT_BYTES`` UTF-8
     bytes; an over-cap prompt is refused, not started."""
 

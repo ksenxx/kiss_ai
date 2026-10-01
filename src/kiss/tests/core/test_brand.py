@@ -108,7 +108,7 @@ def test_prompt_files_carry_placeholder_and_prompts_are_rendered() -> None:
 def test_remote_webapp_page_is_branded() -> None:
     """The remote chat page carries the name, tagline, skin link and brand JSON."""
     page = web_server._build_html()
-    assert f"<title>{html.escape(PRODUCT_NAME)}</title>" in page
+    assert f"<title>{html.escape(PRODUCT_NAME)}: " in page
     assert f"{PRODUCT_NAME} Server is starting ..." in page
     assert f"<h2>Welcome to {PRODUCT_NAME}</h2>" in page
     assert f"<p>{html.escape(BRAND['tagline'])}</p>" in page
@@ -176,7 +176,7 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
         "print(SYSTEM_PROMPT.splitlines()[2][:63])\n"
         "print(SYSTEM_PROMPT_LITE.splitlines()[2][:63])\n"
         "page = web_server._build_html()\n"
-        "print('<title>Seamless Loop</title>' in page)\n"
+        "print('<title>Seamless Loop: ' in page)\n"
         "print('Welcome to Seamless Loop</h2>' in page\n"
         "      and 'SeamlessLabs&#x27; assistant.' in page)\n"
         "print(tls_certs._CA_COMMON_NAME_PREFIX)\n"

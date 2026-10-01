@@ -26,11 +26,13 @@ function pathExists(p) {
   }
 }
 
-function isReloadReady(extJsPath, sockPath, prevSize) {
+function isReloadReady(extJsPath, endpointPath, prevSize) {
   const size = extensionFileSize(extJsPath);
   const codeReady = size > 0 && size === prevSize;
-  const socketUp = pathExists(sockPath);
-  return {ready: codeReady && socketUp, codeReady, socketUp, size};
+  // The daemon publishes its endpoint file once it listens and removes
+  // it on shutdown, so the file's presence is the daemon's presence.
+  const daemonUp = pathExists(endpointPath);
+  return {ready: codeReady && daemonUp, codeReady, daemonUp, size};
 }
 
 module.exports = {extensionFileSize, pathExists, isReloadReady};

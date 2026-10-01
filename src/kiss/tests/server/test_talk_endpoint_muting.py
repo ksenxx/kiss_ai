@@ -5,38 +5,38 @@
 """E2E tests: talk muting is per-endpoint, not per-serialization.
 
 The canonical tab registry mirrors the SAME tab ids to every client,
-so a remote WSS browser and a local VS Code webview (UDS) both show
+so a remote WSS browser and a local VS Code webview (local connection) both show
 tab ``T``.  When the daemon plays a talk clip natively for the local
-webview, only the SAME-MACHINE (UDS) copies must be muted — the
+webview, only the SAME-MACHINE (local-connection) copies must be muted — the
 remote browser is a different device with its own speakers and must
 keep a playable copy.
 
 Two regressions covered, both against a REAL ``RemoteAccessServer``
-with a real UDS listener, a real ``wss://`` client, and a real
+with a real local listener, a real remote ``wss://`` client, and a real
 audio-player child process (``KISS_SORCAR_PLAY_CMD``) — no mocks:
 
 1. ``_fanout_talk`` used to build ONE serialization per tab (muted
-   iff the tab id was in the UDS local-tab map) and send that same
+   iff the tab id was in the local-tab map) and send that same
    copy to BOTH transports, so the remote browser stayed silent
    whenever any local webview showed the tab.
 2. After a webview reload, ``ready`` announces only the placeholder
    tab; canonical background tabs adopted from the ``tabs_state``
-   snapshot never re-registered in ``_local_uds_tab_counts``, so a
+   snapshot never re-registered in ``_local_tab_counts``, so a
    talk for a background tab skipped daemon-native playback entirely
-   (the webview cannot autoplay → silence).  ``ready`` on a UDS
+   (the webview cannot autoplay → silence).  ``ready`` on a local
    connection now marks the connection as an attached chat webview,
    and every registry tab counts as shown while one is attached.
 3. The local-tab bookkeeping used to be ADD-ONLY per connection:
    closing a canonical tab removed it from every client UI (via the
-   ``tabs_state`` broadcast) but never pruned it from any live UDS
-   connection's ``local_tabs`` set or from ``_local_uds_tab_counts``
-   (decremented only on socket disconnect).  A still-running task's
+   ``tabs_state`` broadcast) but never pruned it from any live local
+   connection's ``local_tabs`` set or from ``_local_tab_counts``
+   (decremented only on client disconnect).  A still-running task's
    talk for the closed tab then triggered daemon-native playback even
    though NO local webview showed the tab, and a repeated ``ready``
    could not self-heal.  The fan-out now decides "shown" at talk time
-   (``WebPrinter.shown_local_uds_tabs`` → ``VSCodeServer._local_tab_shown``),
+   (``WebPrinter.shown_local_tabs`` → ``VSCodeServer._local_tab_shown``),
    in order: a registry tab is shown while a chat webview is attached
-   (every webview mirrors the registry); otherwise a tab a UDS peer
+   (every webview mirrors the registry); otherwise a tab a local peer
    addressed is shown while its own task state is alive and not
    closed; otherwise an addressed tab with no state of its own is a
    still-subscribed viewer of a live task and is shown unless it is a
@@ -68,9 +68,7 @@ from websockets.asyncio.client import connect
 import kiss.agents.sorcar.persistence as th
 from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
-
-pytestmark = requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
@@ -161,7 +159,6 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
 
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -169,11 +166,11 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self.task_id = uuid.uuid4().hex
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[Any] = []
 
     async def asyncTearDown(self) -> None:
         for writer in self._writers:
@@ -193,12 +190,12 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect_uds(
+    async def _connect_local(
         self, tab_id: str
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS client (a VS Code webview) and announce ``ready``."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024
+    ) -> tuple[Any, Any]:
+        """Open one local client (a VS Code webview) and announce ``ready``."""
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024
         )
         self._writers.append(writer)
         for cmd in (
@@ -211,7 +208,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         # before that lands sees no attached webview and leaves the copy
         # unmuted.  Wait for the attachment the way the fan-out reads it.
         deadline = asyncio.get_event_loop().time() + 5.0
-        while tab_id not in self.server._printer.shown_local_uds_tabs([tab_id]):
+        while tab_id not in self.server._printer.shown_local_tabs([tab_id]):
             self.assertLess(
                 asyncio.get_event_loop().time(), deadline,
                 "daemon never attached the webview client",
@@ -219,13 +216,13 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         return reader, writer
 
-    async def _collect_uds_talks(
+    async def _collect_local_talks(
         self,
-        reader: asyncio.StreamReader,
+        reader: Any,
         count: int,
         timeout: float = 5.0,
     ) -> list[dict[str, Any]]:
-        """Read UDS events until *count* ``talk`` copies arrive."""
+        """Read local events until *count* ``talk`` copies arrive."""
         talks: list[dict[str, Any]] = []
         deadline = asyncio.get_event_loop().time() + timeout
         while len(talks) < count:
@@ -275,13 +272,13 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         markers = sorted(self.marker_dir.glob("*.json"))
         return [json.loads(m.read_text()) for m in markers]
 
-    async def test_wss_copy_unmuted_while_uds_copy_muted(self) -> None:
+    async def test_remote_copy_unmuted_while_local_copy_muted(self) -> None:
         """ITEM 1: the remote browser's copy of the SAME tab stays playable.
 
-        One canonical tab id is observed by both a local UDS webview
+        One canonical tab id is observed by both a local webview
         and a remote WSS browser (tab mirroring shows every registry
         tab on every client).  The daemon plays the clip natively for
-        the local webview, so the UDS copy must be muted — but the
+        the local webview, so the local copy must be muted — but the
         WSS copy goes to a DIFFERENT device and must stay unmuted.
         """
         tab_id = "shared-tab-" + uuid.uuid4().hex[:8]
@@ -291,7 +288,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         self.server._vscode_server.tab_registry.update_tab(
             tab_id, title="shared chat", create=True,
         )
-        uds_reader, _uds_writer = await self._connect_uds(tab_id)
+        local_reader, _local_writer = await self._connect_local(tab_id)
         url = f"wss://127.0.0.1:{self.port}/ws"
         async with connect(url, ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
@@ -304,19 +301,19 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
                 _talk_event(self.task_id, "talk-endpoint-1")
             )
 
-            uds_talks = await self._collect_uds_talks(uds_reader, 1)
+            local_talks = await self._collect_local_talks(local_reader, 1)
             wss_talks = await self._collect_wss_talks(ws, 1)
         self.assertEqual(
-            len(uds_talks), 1, "UDS webview never got its talk copy"
+            len(local_talks), 1, "local webview never got its talk copy"
         )
         self.assertEqual(
             len(wss_talks), 1, "WSS browser never got its talk copy"
         )
-        self.assertEqual(uds_talks[0]["tabId"], tab_id)
+        self.assertEqual(local_talks[0]["tabId"], tab_id)
         self.assertEqual(wss_talks[0]["tabId"], tab_id)
         self.assertTrue(
-            uds_talks[0].get("muted"),
-            "the same-machine UDS webview copy must be muted while the "
+            local_talks[0].get("muted"),
+            "the same-machine local webview copy must be muted while the "
             "daemon plays the clip on this machine's speakers",
         )
         self.assertFalse(
@@ -338,7 +335,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         placeholder tab; the canonical background tabs the client
         adopts from the ``tabs_state`` snapshot never arrive in
         tab-carrying commands.  A talk event for such a background tab
-        must still trigger daemon-native playback (and mute the UDS
+        must still trigger daemon-native playback (and mute the local
         copy) — the webview shows the tab and cannot autoplay.  The
         ``ready`` marks the connection as an attached chat webview,
         which is what makes every registry tab count for it.
@@ -350,7 +347,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         registry.update_tab(bg_tab, title="background chat", create=True)
 
         # Fresh reconnect: ready announces ONLY the active tab.
-        uds_reader, _uds_writer = await self._connect_uds(active_tab)
+        local_reader, _local_writer = await self._connect_local(active_tab)
         self.server._printer.subscribe_tab(self.task_id, bg_tab)
         await asyncio.sleep(0.1)
 
@@ -358,9 +355,9 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             _talk_event(self.task_id, "talk-endpoint-2")
         )
 
-        talks = await self._collect_uds_talks(uds_reader, 1)
+        talks = await self._collect_local_talks(local_reader, 1)
         self.assertEqual(
-            len(talks), 1, "UDS webview never got the background-tab copy"
+            len(talks), 1, "local webview never got the background-tab copy"
         )
         self.assertEqual(talks[0]["tabId"], bg_tab)
         markers = await asyncio.to_thread(self._wait_markers, 1)
@@ -379,13 +376,13 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             "the utterance",
         )
 
-    async def _wait_uds_tabs_state_without(
+    async def _wait_local_tabs_state_without(
         self,
-        reader: asyncio.StreamReader,
+        reader: Any,
         tab_id: str,
         timeout: float = 5.0,
     ) -> None:
-        """Read UDS events until a ``tabs_state`` arrives sans *tab_id*."""
+        """Read local events until a ``tabs_state`` arrives sans *tab_id*."""
         deadline = asyncio.get_event_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
@@ -393,7 +390,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
                 remaining, 0, "no tabs_state without the closed tab arrived"
             )
             line = await asyncio.wait_for(reader.readline(), timeout=remaining)
-            self.assertTrue(line, "UDS connection closed unexpectedly")
+            self.assertTrue(line, "local connection closed unexpectedly")
             msg = json.loads(line.decode("utf-8"))
             if isinstance(msg, dict) and msg.get("type") == "tabs_state":
                 ids = [t.get("tabId") for t in msg.get("tabs", [])]
@@ -417,18 +414,18 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         registry = self.server._vscode_server.tab_registry
         registry.update_tab(closed_tab, title="busy chat", create=True)
 
-        # The UDS ready marks the connection as an attached webview,
+        # The local ready marks the connection as an attached webview,
         # which is what makes the canonical tab count (regression 2).
-        uds_reader, uds_writer = await self._connect_uds("placeholder-tab")
+        local_reader, local_writer = await self._connect_local("placeholder-tab")
         await asyncio.sleep(0.1)
 
         # Real close path: registry removal + tabs_state broadcast.
-        uds_writer.write(
+        local_writer.write(
             (json.dumps({"type": "closeTab", "tabId": closed_tab}) + "\n")
             .encode("utf-8")
         )
-        await uds_writer.drain()
-        await self._wait_uds_tabs_state_without(uds_reader, closed_tab)
+        await local_writer.drain()
+        await self._wait_local_tabs_state_without(local_reader, closed_tab)
 
         # The task outlives the close: its subscription to the closed
         # tab id is deliberately retained until the task finishes.
@@ -437,7 +434,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
             _talk_event(self.task_id, "talk-endpoint-4")
         )
 
-        talks = await self._collect_uds_talks(uds_reader, 1)
+        talks = await self._collect_local_talks(local_reader, 1)
         self.assertEqual(len(talks), 1, "talk copy for the tab never arrived")
         self.assertEqual(talks[0]["tabId"], closed_tab)
         self.assertFalse(
@@ -472,16 +469,16 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
 
         # Attach the webview while the tab is canonical and address
         # the tab so the connection records interest in it.
-        uds_reader, uds_writer = await self._connect_uds("placeholder-tab")
-        uds_writer.write(
+        local_reader, local_writer = await self._connect_local("placeholder-tab")
+        local_writer.write(
             (json.dumps({"type": "getTabsState", "tabId": stale_tab}) + "\n")
             .encode("utf-8")
         )
-        await uds_writer.drain()
+        await local_writer.drain()
         await asyncio.sleep(0.2)
         printer = self.server._printer
         with printer._ws_lock:
-            self.assertIn(stale_tab, printer._local_uds_tab_counts)
+            self.assertIn(stale_tab, printer._local_tab_counts)
 
         # Shrink the registry WITHOUT the server close path: nothing
         # server-side marks or prunes the tab.
@@ -489,7 +486,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
 
         # Repeated ready on the SAME connection reconciles its interest
         # to the tabs it announces, dropping the stale entry.
-        uds_writer.write(
+        local_writer.write(
             (
                 json.dumps({
                     "type": "ready",
@@ -498,17 +495,17 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
                 }) + "\n"
             ).encode("utf-8")
         )
-        await uds_writer.drain()
+        await local_writer.drain()
         await asyncio.sleep(0.3)
         with printer._ws_lock:
-            self.assertNotIn(stale_tab, printer._local_uds_tab_counts)
+            self.assertNotIn(stale_tab, printer._local_tab_counts)
 
         self.server._printer.subscribe_tab(self.task_id, stale_tab)
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-endpoint-5")
         )
 
-        talks = await self._collect_uds_talks(uds_reader, 1)
+        talks = await self._collect_local_talks(local_reader, 1)
         self.assertEqual(len(talks), 1, "talk copy for the tab never arrived")
         self.assertEqual(talks[0]["tabId"], stale_tab)
         self.assertFalse(
@@ -528,7 +525,7 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
     async def test_disconnect_unregisters_registry_synced_tabs(self) -> None:
         """Disconnect detaches the webview: registry tabs stop counting.
 
-        After the only UDS client disconnects, a talk for a registry
+        After the only local client disconnects, a talk for a registry
         tab must no longer trigger daemon playback: the disconnect
         cleanup drops the connection's webview mark along with its
         interest set.
@@ -536,21 +533,21 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         bg_tab = "bg-tab-" + uuid.uuid4().hex[:8]
         registry = self.server._vscode_server.tab_registry
         registry.update_tab(bg_tab, title="background chat", create=True)
-        _reader, writer = await self._connect_uds("placeholder-tab")
+        _reader, writer = await self._connect_local("placeholder-tab")
         await asyncio.sleep(0.1)
         writer.close()
         await writer.wait_closed()
         # The server runs the disconnect cleanup on its own task once it
         # reads EOF; under load that lands well after ``wait_closed``.
-        # ``unregister_local_uds_tabs`` drops the webview mark and the
+        # ``unregister_local_tabs`` drops the webview mark and the
         # interest set in one locked step, so the placeholder tab
         # leaving the shown set proves the mark is gone too.
         printer = self.server._printer
         deadline = asyncio.get_event_loop().time() + 5.0
-        while printer.shown_local_uds_tabs(["placeholder-tab"]):
+        while printer.shown_local_tabs(["placeholder-tab"]):
             self.assertLess(
                 asyncio.get_event_loop().time(), deadline,
-                "daemon never ran the UDS disconnect cleanup",
+                "daemon never ran the local disconnect cleanup",
             )
             await asyncio.sleep(0.01)
 
@@ -562,6 +559,6 @@ class TestTalkEndpointMuting(IsolatedAsyncioTestCase):
         self.assertEqual(
             len(list(self.marker_dir.glob("*.json"))),
             0,
-            "no UDS webview is connected anymore, so the daemon must "
+            "no local webview is connected anymore, so the daemon must "
             "not play the clip on its own speakers",
         )

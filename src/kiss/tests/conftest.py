@@ -170,11 +170,10 @@ _th._DB_PATH = _th._KISS_DIR / "sorcar.db"
 DEFAULT_MODEL = "claude-opus-4-6"
 
 # Platform gates.  A test that exercises a POSIX-only mechanism (pty,
-# fcntl semantics, rlimits, signals, Unix-domain sockets, systemd,
-# ``chmod``-based permission denial, ``bash`` scripts) skips on Windows
-# with a reason naming the mechanism.  Use ``posix_only(...)`` for the
-# mechanism itself, ``requires_unix_sockets`` for the daemon's UDS
-# channel, and ``is_root()`` instead of ``os.geteuid() == 0``.
+# fcntl semantics, rlimits, signals, systemd, ``chmod``-based permission
+# denial, ``bash`` scripts) skips on Windows with a reason naming the
+# mechanism.  Use ``posix_only(...)`` for the mechanism itself and
+# ``is_root()`` instead of ``os.geteuid() == 0``.
 IS_WINDOWS = sys.platform == "win32"
 
 
@@ -188,12 +187,6 @@ def posix_only(reason: str) -> pytest.MarkDecorator:
         A ``skipif`` mark that fires on Windows.
     """
     return pytest.mark.skipif(IS_WINDOWS, reason=f"POSIX-only: {reason}")
-
-
-requires_unix_sockets = pytest.mark.skipif(
-    not hasattr(socket, "AF_UNIX"),
-    reason="Unix-domain sockets are unavailable on this platform",
-)
 
 
 def is_root() -> bool:
@@ -872,22 +865,6 @@ def _isolated_tab_registry() -> Iterator[None]:
         except OSError:
             pass
     yield
-
-
-@pytest.fixture
-def uds_tmp_path() -> Iterator[Path]:
-    """A short-named temporary directory for Unix-domain socket files.
-
-    ``sun_path`` is capped at 104 bytes on macOS (108 on Linux) and
-    pytest's ``tmp_path`` already spends ~90 of them on
-    ``/private/var/folders/.../pytest-of-<user>/pytest-<n>/<test-name>0``,
-    so a ``tmp_path / "sorcar.sock"`` fails to bind with ``AF_UNIX path
-    too long``.  Tests that must actually bind or connect a socket put
-    it under this directory instead; everything else stays in
-    ``tmp_path``.
-    """
-    with tempfile.TemporaryDirectory(prefix="kiss-uds-") as directory:
-        yield Path(directory)
 
 
 @pytest.fixture

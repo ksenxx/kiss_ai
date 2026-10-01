@@ -48,7 +48,7 @@ probe_decisions = mod.test_decisions
 probe_capabilities = mod.test_model_capabilities
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_README = _REPO_ROOT / "README.md"
+_MODELS = _REPO_ROOT / "MODELS.md"
 
 JEV = "openrouter/~typesafe/jev-latest"
 JEV_PINNED = "openrouter/typesafe/jev-1.13"
@@ -282,10 +282,10 @@ def test_apply_and_readme_sync_record_decisions_models(
     assert written[JEV_PINNED]["input_price_per_1M"] == 0.042
     assert "dec" not in written["openrouter/openai/gpt-4o"]
 
-    readme = tmp_path / "README.md"
-    shutil.copy(_README, readme)
+    readme = tmp_path / "MODELS.md"
+    shutil.copy(_MODELS, readme)
     assert sync_readme_catalog(readme, catalog) is True
-    text = readme.read_text(encoding="utf-8")  # the README is UTF-8, not the Windows code page
+    text = readme.read_text(encoding="utf-8")  # MODELS.md is UTF-8, not the Windows code page
     assert "- **1** generation-capable models" in text
     assert "- **0** embedding models" in text
     assert "- **2** decision models" in text

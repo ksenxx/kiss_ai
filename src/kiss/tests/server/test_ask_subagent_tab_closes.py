@@ -25,8 +25,8 @@ client, and it must not come back:
    child has no such owner, which is what made it reappear.
 
 Only the LLM boundary (``RelentlessAgent.run``) is stubbed; the daemon
-runs the parent, accepts the ``/ask`` over its own socket, persists the
-child under the parent and replays both for real.
+runs the parent, accepts the ``/ask`` over its own local endpoint,
+persists the child under the parent and replays both for real.
 """
 
 from __future__ import annotations
@@ -38,10 +38,7 @@ from typing import Any
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.tests.conftest import requires_unix_sockets
-from kiss.tests.server.test_run_agent_subagent_tab import DaemonUdsHarness
-
-pytestmark = requires_unix_sockets
+from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 PARENT_TAB_ID = "webtab-asker-1"
 VIEWER_SUB_TAB_ID = "webtab-asker-1__sub_child"
@@ -53,18 +50,18 @@ def _result_text() -> str:
     return "success: true\nis_continue: false\nsummary: done\n"
 
 
-class AskSubagentTabClosesTest(DaemonUdsHarness):
+class AskSubagentTabClosesTest(DaemonLocalHarness):
     """The ``/ask`` child's tab is closed once its run ends, everywhere."""
 
     def setUp(self) -> None:
         super().setUp()
         # The daemon-side /ask dispatch goes back through the daemon's
-        # own socket, which the scheduler records at boot.
-        self._saved_daemon_sock = cron_agent._daemon_sock_path
-        cron_agent._daemon_sock_path = self.sock_path
+        # own local endpoint, which the scheduler records at boot.
+        self._saved_daemon_endpoint = cron_agent._daemon_endpoint_file
+        cron_agent._daemon_endpoint_file = str(self.endpoint_file)
 
     def tearDown(self) -> None:
-        cron_agent._daemon_sock_path = self._saved_daemon_sock
+        cron_agent._daemon_endpoint_file = self._saved_daemon_endpoint
         super().tearDown()
 
     def _install_stub(  # type: ignore[override]

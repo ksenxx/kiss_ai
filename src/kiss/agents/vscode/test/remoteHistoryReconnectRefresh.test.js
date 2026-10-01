@@ -344,7 +344,7 @@ function testVsCodeWebviewOpenSidebarRefetches() {
   assert.ok(
     lastGetHistory(posted),
     'VS Code webview: daemon reconnect must refetch history for an ' +
-      'OPEN sidebar (the UDS path has no ready-time nudge)',
+      'OPEN sidebar (the local endpoint path has no ready-time nudge)',
   );
   win.close();
   console.log('PASS VS Code webview open sidebar refetches on reconnect');

@@ -114,7 +114,7 @@ on the daemon.
    │ validate path exists                    │ import agent.py
    │ resolve to absolute                     │ for each PARAM_FIELDS entry:
    │ send JSON {"agentPath": "…", …}        │   if X defined & callable:
-   │ over Unix-domain socket                 │     call X()
+   │ over the local WSS endpoint             │     call X()
    │                                         │     type-check return value
    ▼                                         │     stage override
  block, read events ◄───────────────────     │ apply staged overrides to cmd
@@ -150,7 +150,7 @@ on the daemon.
 ## Overridable parameters
 
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`sock_path`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`,
+`endpoint_file`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`,
 `side_channel`, and `extension_agent_path` itself has a corresponding
 getter the SEA may define.  The getter is named `X()` for parameter `X`,
 except `append_basic_tools`, whose getter is
@@ -209,7 +209,7 @@ diagnostic instead.
 The `/<name>` rewrite makes the tab's agent call `run_agent`, whose
 wait defaults to 300 s and stops the sub-task when it runs out.  An SEA
 whose runs take longer (`/write_paper` returns 6 h, `/review_paper`
-2 h, `/revise_and_review_paper` 24 h) defines `dispatch_timeout()`;
+2 h, `/revise_and_review_paper` 24 h, `/write` 1 h) defines `dispatch_timeout()`;
 the directive then carries `timeout = "<seconds>"`.  A missing getter,
 a value that is not a positive number, or a script that fails to
 import adds no line, so the relay behaves as before.  Not a run
@@ -270,7 +270,7 @@ The parameters without getters:
 - **`stop_on_timeout`** — whether a `timeout` expiry also stops the
   task, awaiting the stop's confirmation (default `False`: the task
   keeps running); a client-side choice the script must not override.
-- **`sock_path`** — selects which daemon to connect to; the script
+- **`endpoint_file`** — selects which daemon to connect to; the script
   already runs on that daemon.
 - **`parent_task_id` / `parent_tab_id` / `parent_reviewer`** — the
   CALLING task's identity (how `run_agent` nests a dispatched run under
@@ -890,7 +890,7 @@ def run(
     docker_image: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
-    sock_path: str | Path | None = None,
+    endpoint_file: str | Path | None = None,
 ) -> TaskResult
 ```
 
@@ -993,7 +993,8 @@ class TaskResult:
   `/task_update` (reports what a running task has done so far),
   `/write` (writes prose for a general audience in concise, professional
   American English that reads as human-written; its only getters are
-  `description()` and `add_to_system_prompt()`), `/write_paper` (writes
+  `description()`, `add_to_system_prompt()` and `dispatch_timeout()`,
+  1 h), `/write_paper` (writes
   or revises a research paper), and `/dummy`
   (`seas/dummy/dummy_sea.py`, an SEA whose only getter is
   `description()`, is what `run_agent` runs when its `agent` argument

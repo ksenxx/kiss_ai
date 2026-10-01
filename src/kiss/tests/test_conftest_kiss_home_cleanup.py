@@ -158,6 +158,13 @@ def test_import_then_exit_removes_home(tmp_path: Path) -> None:
 def test_queued_event_at_exit_does_not_recreate_home(tmp_path: Path) -> None:
     """An event still queued at exit is drained before the home is removed."""
     (home,) = _run_python(_QUEUE_EVENT_AT_EXIT, tmp_path)
+    if sys.platform == "win32":
+        # The drain reopens sorcar.db and the connection is deliberately
+        # left open (see ``_remove_test_kiss_home``); Windows cannot
+        # delete an open file, so only the database may survive.
+        leftovers = [p.name for p in Path(home).rglob("*")] if Path(home).exists() else []
+        assert all(name.startswith("sorcar.db") for name in leftovers), leftovers
+        return
     assert not Path(home).exists()
     assert list(tmp_path.glob("kiss_test_*")) == []
 

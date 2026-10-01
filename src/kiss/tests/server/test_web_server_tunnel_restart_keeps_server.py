@@ -57,7 +57,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
             port=_free_port(),
             use_tunnel=False,
             url_file=tmp / "remote-url.json",
-            uds_path=tmp / "sorcar.sock",
+            local_endpoint_file=tmp / "sorcar-local.json",
             ntfy_base_url=unroutable_base_url(),
         )
         await self.server._setup_server()

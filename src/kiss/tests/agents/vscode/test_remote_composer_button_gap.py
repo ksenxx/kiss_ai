@@ -47,9 +47,7 @@ negative gaps.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import threading
-import uuid
 from pathlib import Path
 
 import pytest
@@ -86,8 +84,8 @@ _ENTER_RUNNING_STATE_JS = """
 # The served chat.html boots with #app hidden (display:none) and only
 # main.js's setServerLoading(false) reveals it — an event driven by
 # the daemon connection, which this pure-layout test has no stake in
-# (and which occasionally never fires here because no daemon listens
-# on the test UDS socket). Reveal the UI exactly the way
+# (and which occasionally never fires here because the page is loaded
+# without authenticating). Reveal the UI exactly the way
 # setServerLoading(false) does, so the geometry is deterministic.
 _REVEAL_APP_JS = """
 () => {
@@ -217,9 +215,6 @@ def _start_live_server(
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"
     _generate_self_signed_cert(certfile, keyfile)
-    # macOS caps AF_UNIX paths at 104 bytes; pytest's tmp_path can
-    # exceed that, so the socket gets its own short temp name.
-    uds_path = Path(tempfile.gettempdir()) / f"kgap-{uuid.uuid4().hex[:8]}.sock"
 
     async def scenario() -> None:
         server = RemoteAccessServer(
@@ -229,7 +224,7 @@ def _start_live_server(
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp_path / "remote-url.json",
-            uds_path=uds_path,
+            local_endpoint_file=tmp_path / "sorcar-local.json",
         )
         started = False
         try:
@@ -248,7 +243,6 @@ def _start_live_server(
         finally:
             if started:
                 await server.stop_async()
-            uds_path.unlink(missing_ok=True)
 
     asyncio.run(scenario())
 

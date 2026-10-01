@@ -4,10 +4,12 @@
 # add your name here
 """End-to-end tests of the bundled ``/write`` agent (:mod:`kiss.agents.seas.write.write_sea`).
 
-The SEA defines ``description()`` and ``add_to_system_prompt()`` only, so
-the tests check the two things that matter: the slash command and the
-``run_agent`` loader resolve to this file and stage its protocol as an
-addition to the system prompt, and a real :class:`ChatSorcarAgent` run
+The SEA defines ``description()``, ``add_to_system_prompt()`` and
+``dispatch_timeout()`` only, so the tests check the things that matter: the
+slash command resolves to this file and carries the one-hour ``timeout`` (the
+default 300 s ``run_agent`` wait stopped a README rewrite before it was
+returned), the ``run_agent`` loader stages its protocol as an addition to the
+system prompt, and a real :class:`ChatSorcarAgent` run
 configured that way (against the scripted local chat-completions server)
 sends the default system prompt with the protocol added, never replaced.
 """
@@ -66,8 +68,10 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     assert rewritten is not None
     prompt, path = rewritten
     assert path == _SEA_PATH
-    assert f'agent = "{_SEA_PATH}"' in prompt
+    directive = f'agent = "{_SEA_PATH}"\n  task  = the text below, verbatim\n  timeout = "3600"\n'
+    assert directive in prompt
     assert prompt.endswith("TASK TEXT FOR run_agent:\na release note from CHANGELOG.md")
+    assert write_sea.dispatch_timeout() == write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
 
 
 def test_loader_adds_the_protocol_after_the_callers_suffix() -> None:

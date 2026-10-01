@@ -2,13 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for README per-provider model-list syncing.
+"""End-to-end tests for per-provider model-list syncing in MODELS.md.
 
 ``update_models.py``'s ``sync_readme_catalog`` historically rewrote only the
-*counts* in README.md's "Models Supported" section, so the full per-provider
-model lists inside the ``<details>`` blocks could silently drift from
+*counts* of the catalog section, so the full per-provider model lists inside
+the ``<details>`` blocks (now in ``MODELS.md``) could silently drift from
 ``MODEL_INFO.json``. These tests exercise the rewriter end-to-end on real
-files copied to a temp dir and verify that it now regenerates every list.
+files copied to a temp dir and verify that it regenerates every list, and
+that the README's totals are synced without a model list of their own.
 """
 
 from __future__ import annotations
@@ -17,20 +18,61 @@ import json
 import shutil
 from pathlib import Path
 
-from kiss.scripts.update_models import sync_readme_catalog
+import kiss.scripts.update_models as update_models
+from kiss.scripts.update_models import sync_catalog_docs, sync_readme_catalog
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _README = _REPO_ROOT / "README.md"
+_MODELS = _REPO_ROOT / "MODELS.md"
 _MODEL_INFO = _REPO_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
 
 
 def _copy_repo_files(tmp_path: Path) -> tuple[Path, Path]:
-    """Copy the repo's README.md and MODEL_INFO.json into ``tmp_path``."""
-    readme = tmp_path / "README.md"
+    """Copy the repo's MODELS.md and MODEL_INFO.json into ``tmp_path``."""
+    readme = tmp_path / "MODELS.md"
     model_info = tmp_path / "MODEL_INFO.json"
-    shutil.copy(_README, readme)
+    shutil.copy(_MODELS, readme)
     shutil.copy(_MODEL_INFO, model_info)
     return readme, model_info
+
+
+def test_repo_readme_totals_are_in_sync(tmp_path: Path) -> None:
+    """The checked-in README's catalog totals match the bundled catalog.
+
+    The README carries no model list, so a sync must be a no-op on it.
+    """
+    readme = tmp_path / "README.md"
+    shutil.copy(_README, readme)
+    pristine = readme.read_text(encoding="utf-8")
+    assert "<details>\n<summary><strong>OpenAI (" not in pristine
+    assert sync_readme_catalog(readme, _MODEL_INFO) is False
+    assert readme.read_text(encoding="utf-8") == pristine
+
+
+def test_sync_catalog_docs_updates_both_files(tmp_path: Path, monkeypatch) -> None:
+    """``sync_catalog_docs`` repairs README.md and MODELS.md and skips a missing file."""
+    readme = tmp_path / "README.md"
+    models = tmp_path / "MODELS.md"
+    shutil.copy(_README, readme)
+    shutil.copy(_MODELS, models)
+    pristine_readme = readme.read_text(encoding="utf-8")
+    pristine_models = models.read_text(encoding="utf-8")
+    monkeypatch.setattr(update_models, "README_PATH", readme)
+    monkeypatch.setattr(update_models, "MODELS_PATH", models)
+    monkeypatch.setattr(update_models, "MODEL_INFO_PATH", _MODEL_INFO)
+
+    assert sync_catalog_docs() is False
+
+    readme.write_text(
+        pristine_readme.replace("ships a catalog of **", "ships a catalog of **1"), encoding="utf-8"
+    )
+    models.write_text(pristine_models.replace("| Z.AI | 8 |", "| Z.AI | 999 |"), encoding="utf-8")
+    assert sync_catalog_docs() is True
+    assert readme.read_text(encoding="utf-8") == pristine_readme
+    assert models.read_text(encoding="utf-8") == pristine_models
+
+    models.unlink()
+    assert sync_catalog_docs() is False
 
 
 def test_repo_readme_lists_are_in_sync(tmp_path: Path) -> None:

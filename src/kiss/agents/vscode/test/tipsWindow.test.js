@@ -7,47 +7,9 @@
 
 const assert = require('assert');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const Module = require('module');
 
 const projectRoot = path.resolve(__dirname, '..');
-
-global.__kissVscodeStub = {
-  Uri: {
-    joinPath(base, ...parts) {
-      return {fsPath: path.join(base.fsPath, ...parts)};
-    },
-  },
-  workspace: {
-    isTrusted: true,
-    workspaceFolders: [],
-    getConfiguration() {
-      return {get: () => undefined};
-    },
-  },
-};
-const origResolve = Module._resolveFilename;
-Module._resolveFilename = function (request, parent, ...rest) {
-  if (request === 'vscode') return require.resolve('./_vscode-stub.js');
-  return origResolve.call(this, request, parent, ...rest);
-};
-
-const sourcePath = path.join(projectRoot, 'out', 'SorcarTab.js');
-assert.ok(
-  fs.existsSync(sourcePath),
-  `compiled extension missing: ${sourcePath} — run \`tsc -p .\` first`,
-);
-delete require.cache[require.resolve(sourcePath)];
-const {getTips, getVersion, claimTipsPopup, buildChatHtml} =
-  require(sourcePath);
-
-assert.strictEqual(typeof getTips, 'function', 'getTips must be exported');
-assert.strictEqual(
-  typeof claimTipsPopup,
-  'function',
-  'claimTipsPopup must be exported',
-);
 
 let passed = 0;
 const failures = [];
@@ -62,232 +24,6 @@ function test(name, fn) {
     console.log(`  FAIL - ${name}: ${err && err.message}`);
   }
 }
-
-function mkTmp(prefix) {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function withSandbox(fn) {
-  const kissHome = path.join(mkTmp('kiss-tips-home-'), 'kisshome');
-  const tipsFile = path.join(mkTmp('kiss-tips-md-'), 'TIPS.md');
-  const prevHome = process.env.KISS_HOME;
-  const prevTips = process.env.KISS_TIPS_PATH;
-  const prevProject = process.env.KISS_PROJECT_PATH;
-  process.env.KISS_HOME = kissHome;
-  process.env.KISS_TIPS_PATH = tipsFile;
-  delete process.env.KISS_PROJECT_PATH;
-  const setTips = content => fs.writeFileSync(tipsFile, content);
-  try {
-    fn({kissHome, tipsFile, setTips});
-  } finally {
-    if (prevHome === undefined) delete process.env.KISS_HOME;
-    else process.env.KISS_HOME = prevHome;
-    if (prevTips === undefined) delete process.env.KISS_TIPS_PATH;
-    else process.env.KISS_TIPS_PATH = prevTips;
-    if (prevProject === undefined) delete process.env.KISS_PROJECT_PATH;
-    else process.env.KISS_PROJECT_PATH = prevProject;
-  }
-}
-
-test('getTips parses the body after every "# Tip" line', () => {
-  withSandbox(({setTips}) => {
-    setTips(
-      '# Tip\n\n## First tip\n- bullet one\n\n# Tip \n\n## Second tip\n\n' +
-        'Some **bold** text.\n\n# Tip\n\nThird tip body.\n',
-    );
-    assert.deepStrictEqual(getTips(), [
-      '## First tip\n- bullet one',
-      '## Second tip\n\nSome **bold** text.',
-      'Third tip body.',
-    ]);
-  });
-});
-
-test('getTips ignores content before the first "# Tip" line', () => {
-  withSandbox(({setTips}) => {
-    setTips('Preamble to ignore\n\n# Tip\n\nOnly tip.\n');
-    assert.deepStrictEqual(getTips(), ['Only tip.']);
-  });
-});
-
-test('getTips skips tips with empty bodies', () => {
-  withSandbox(({setTips}) => {
-    setTips('# Tip\n\n   \n\n# Tip\n\nReal tip.\n\n# Tip\n');
-    assert.deepStrictEqual(getTips(), ['Real tip.']);
-  });
-});
-
-test('getTips does not split on "## Tip" or indented "# Tip" lines', () => {
-  withSandbox(({setTips}) => {
-    setTips('# Tip\n\nBody with\n## Tip heading\nand  # Tip inline\nend.\n');
-    assert.deepStrictEqual(getTips(), [
-      'Body with\n## Tip heading\nand  # Tip inline\nend.',
-    ]);
-  });
-});
-
-test('getTips returns [] when the tips file is missing', () => {
-  withSandbox(() => {
-    assert.deepStrictEqual(getTips(), []);
-  });
-});
-
-test('getTips reads <kissRoot>/src/kiss/TIPS.md without the env override', () => {
-  withSandbox(() => {
-    delete process.env.KISS_TIPS_PATH;
-    const root = mkTmp('kiss-tips-root-');
-    fs.writeFileSync(
-      path.join(root, 'pyproject.toml'),
-      '[project]\nname = "kiss"\n',
-    );
-    fs.mkdirSync(path.join(root, 'src', 'kiss'), {recursive: true});
-    fs.writeFileSync(
-      path.join(root, 'src', 'kiss', 'TIPS.md'),
-      '# Tip\n\nBundled tip.\n',
-    );
-    process.env.KISS_PROJECT_PATH = root;
-    assert.deepStrictEqual(getTips(), ['Bundled tip.']);
-  });
-});
-
-test('getTips returns [] when no KISS project root can be found', () => {
-  if (fs.existsSync(path.join(projectRoot, 'kiss_project'))) return;
-  withSandbox(() => {
-    delete process.env.KISS_TIPS_PATH;
-    assert.deepStrictEqual(getTips(), []);
-  });
-});
-
-test('the bundled src/kiss/TIPS.md yields at least one non-empty tip', () => {
-  const bundled = path.resolve(projectRoot, '..', '..', 'TIPS.md');
-  const prev = process.env.KISS_TIPS_PATH;
-  process.env.KISS_TIPS_PATH = bundled;
-  try {
-    const tips = getTips();
-    assert.ok(tips.length > 0, 'bundled TIPS.md must produce tips');
-    for (const tip of tips) {
-      assert.ok(tip.trim().length > 0, 'no empty tips');
-    }
-  } finally {
-    if (prev === undefined) delete process.env.KISS_TIPS_PATH;
-    else process.env.KISS_TIPS_PATH = prev;
-  }
-});
-
-/** The `TIPS_SHOWN*` markers of a $KISS_HOME, sorted. */
-function tipsMarkers(kissHome) {
-  return fs
-    .readdirSync(kissHome)
-    .filter(n => n.startsWith('TIPS_SHOWN'))
-    .sort();
-}
-
-test('claimTipsPopup is true exactly once per installation and version', () => {
-  withSandbox(({kissHome}) => {
-    assert.strictEqual(claimTipsPopup(), true);
-    const safe = (getVersion() || 'unknown').replace(/[^A-Za-z0-9.]/g, '_');
-    assert.deepStrictEqual(
-      tipsMarkers(kissHome),
-      ['TIPS_SHOWN-' + safe],
-      'first call must create the per-version TIPS_SHOWN marker',
-    );
-    assert.strictEqual(claimTipsPopup(), false);
-    assert.strictEqual(claimTipsPopup(), false);
-  });
-});
-
-test('claimTipsPopup is false when the marker cannot be written', () => {
-  withSandbox(() => {
-    const blocker = path.join(mkTmp('kiss-tips-blocked-'), 'file');
-    fs.writeFileSync(blocker, 'not a directory');
-    process.env.KISS_HOME = path.join(blocker, 'kiss');
-    assert.strictEqual(claimTipsPopup(), false);
-  });
-});
-
-function renderChatHtml() {
-  const extensionUri = {fsPath: projectRoot};
-  const webview = {
-    cspSource: 'vscode-webview://stub',
-    asWebviewUri(uri) {
-      // Like the real API, answer a URI (forward slashes even on Windows).
-      const urlPath = uri.fsPath.split(path.sep).join('/');
-      return {toString: () => 'vscode-webview://' + urlPath};
-    },
-  };
-  return buildChatHtml(webview, extensionUri, 'test-model');
-}
-
-test('buildChatHtml injects window.__TIPS__ with show:true on fresh install', () => {
-  withSandbox(({setTips}) => {
-    setTips('# Tip\n\nHello **tips**.\n');
-    const html = renderChatHtml();
-    assert.ok(
-      html.includes('window.__TIPS__'),
-      'chat HTML must define window.__TIPS__',
-    );
-    const m = html.match(/window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/);
-    assert.ok(m, 'window.__TIPS__ must be assigned a JSON object literal');
-    const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {
-      tips: ['Hello **tips**.'],
-      show: true,
-      version: getVersion(),
-    });
-    assert.ok(
-      /src="[^"]*\/media\/tips\.js\?v=[0-9a-f]{16}"/.test(html),
-      'tips.js must be loaded with a content-hash cache-buster',
-    );
-    assert.ok(!html.includes('{{TIPS'), 'no TIPS placeholder may survive');
-  });
-});
-
-test('buildChatHtml injects show:false after the first render', () => {
-  withSandbox(({setTips}) => {
-    setTips('# Tip\n\nHello.\n');
-    renderChatHtml();
-    const m = renderChatHtml().match(
-      /window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/,
-    );
-    assert.ok(m, 'window.__TIPS__ must be assigned on every render');
-    const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {
-      tips: ['Hello.'],
-      show: false,
-      version: getVersion(),
-    });
-  });
-});
-
-test('buildChatHtml does not claim the popup when no tips exist', () => {
-  withSandbox(({kissHome}) => {
-    const html = renderChatHtml();
-    const m = html.match(/window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/);
-    assert.ok(m, 'window.__TIPS__ must be assigned even with no tips');
-    const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg, {tips: [], show: false, version: getVersion()});
-    assert.deepStrictEqual(
-      tipsMarkers(kissHome),
-      [],
-      'empty or missing tips should not claim the popup for this version',
-    );
-  });
-});
-
-test('buildChatHtml escapes </script> inside tip bodies', () => {
-  withSandbox(({setTips}) => {
-    setTips('# Tip\n\nUse `</script>` carefully.\n');
-    const html = renderChatHtml();
-    const m = html.match(/window\.__TIPS__\s*=\s*(\{.*?\});<\/script>/);
-    assert.ok(m, 'window.__TIPS__ must still parse');
-    assert.ok(
-      !m[1].includes('</script>'),
-      'raw </script> must not appear inside the injected JSON',
-    );
-    const cfg = JSON.parse(m[1].replace(/<\\\//g, '</'));
-    assert.deepStrictEqual(cfg.tips, ['Use `</script>` carefully.']);
-  });
-});
 
 const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
 
@@ -560,6 +296,24 @@ function loadTipsDomWithStorage(cfg, seenVersion) {
   run('panelCopy.js');
   return dom.window;
 }
+
+test('a tipsData bootstrap after load opens the tips like an embedded config', () => {
+  // The VS Code webview starts with an empty config; the daemon's
+  // `tipsData` answer to `ready` reaches tips.js through
+  // window.__kissApplyTipsConfig (main.js) and opens the window once.
+  const win = loadTipsDom({tips: [], show: false, version: ''});
+  assert.strictEqual(win.document.querySelector('kiss-tips-panel'), null);
+  win.__kissApplyTipsConfig({tips: THREE_TIPS, show: true, version: '9.9.9'});
+  const {counter} = panelParts(win);
+  assert.strictEqual(counter.textContent.trim(), '1 / 3');
+  assert.deepStrictEqual(win.__TIPS__.tips, THREE_TIPS, 'the button reuses the tips');
+  win.__kissApplyTipsConfig({tips: THREE_TIPS, show: true, version: '9.9.9'});
+  assert.strictEqual(
+    win.document.querySelectorAll('kiss-tips-panel').length,
+    1,
+    'a second bootstrap (reconnect) never stacks a second window',
+  );
+});
 
 test('with a version, the tips auto-open once per version per browser', () => {
   const cfg = {tips: THREE_TIPS, show: true, version: '2026.10.1'};

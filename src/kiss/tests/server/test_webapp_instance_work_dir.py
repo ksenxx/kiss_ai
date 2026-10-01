@@ -9,7 +9,7 @@ instance.  The instance pins its work_dir in ``sessionStorage`` (key
 ``sorcar-work-dir``, scoped per tab) via the WS shim's ``postMessage``
 hook, and the shim replays ``setWorkDir`` to the server right after
 every successful (re)authentication — mirroring how each VS Code
-window re-announces its workspace folder on every UDS (re)connect.
+window re-announces its workspace folder on every local (re)connect.
 Server-side, the server API dispatcher
 (``kiss.server.sorcar.ServerApi.dispatch``) records the folder per
 connection and stamps it onto every later command from the same
@@ -294,7 +294,7 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self._sockets: list[ClientConnection] = []

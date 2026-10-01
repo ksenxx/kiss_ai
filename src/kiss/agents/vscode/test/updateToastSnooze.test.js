@@ -5,7 +5,7 @@
 
 // End-to-end webview tests for the "Remind me later" action on the
 // daemon-driven sticky update toast: clicking it posts a
-// `snoozeUpdate` command (VS Code: forwarded to the daemon over UDS;
+// `snoozeUpdate` command (VS Code: forwarded to the daemon over the local WSS;
 // webapp: sent straight over WSS), and an `update_available` event
 // carrying `snoozed: true` suppresses the toast while keeping the
 // passive settings-button badge.

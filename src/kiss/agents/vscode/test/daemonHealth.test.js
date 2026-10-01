@@ -15,8 +15,8 @@ const {
   probeDaemonHealth,
   daemonHasActiveTasks,
   decideRestart,
-} = require('../src/daemonHealth');
-const {fakeSockPath} = require('./fakeSock');
+} = require('../out/daemonHealth');
+const {createFakeDaemon, fakeEndpointPath} = require('./fakeDaemon');
 
 let passed = 0;
 const failures = [];
@@ -58,13 +58,13 @@ function pickClosedPort() {
   });
 }
 
-function listenUds(sockPath, response) {
+function listenDaemon(endpointPath, response) {
   return new Promise((resolve, reject) => {
     try {
-      if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+      if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
     } catch {
     }
-    const server = net.createServer(sock => {
+    const server = createFakeDaemon(sock => {
       let buf = '';
       sock.setEncoding('utf-8');
       sock.on('data', chunk => {
@@ -90,12 +90,12 @@ function listenUds(sockPath, response) {
       sock.on('error', () => { });
     });
     server.once('error', reject);
-    server.listen(sockPath, () => {
+    server.listen(endpointPath, () => {
       resolve({
         close: () => new Promise(res => {
           server.close(() => {
             try {
-              if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+              if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
             } catch { }
             res();
           });
@@ -133,24 +133,24 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
       `probe took ${Date.now() - t0}ms — too slow`);
   });
 
-  await test('daemonHasActiveTasks: returns {ok:false, reason:"sock-missing"} when the socket file does not exist', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'missing.sock');
-    const res = await daemonHasActiveTasks(sockPath, 500);
+  await test('daemonHasActiveTasks: returns {ok:false, reason:"endpoint-missing"} when the endpoint file does not exist', async () => {
+    const endpointPath = fakeEndpointPath(tmpRoot, 'missing.json');
+    const res = await daemonHasActiveTasks(endpointPath, 500);
     assert.strictEqual(res.ok, false);
-    assert.strictEqual(res.reason, 'sock-missing');
+    assert.strictEqual(res.reason, 'endpoint-missing');
   });
 
-  await test('daemonHasActiveTasks: parses count=2 and the tabs list from a real UDS server', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'busy.sock');
+  await test('daemonHasActiveTasks: parses count=2 and the tabs list from a real WebSocket daemon', async () => {
+    const endpointPath = fakeEndpointPath(tmpRoot, 'busy.json');
     const tabs = [
       'ad4ecb65-2878-4c2c-9736-3bb9be18814a(task=74)',
       'beadbabe-1111-2222-3333-444455556666(task=99)',
     ];
-    const server = await listenUds(sockPath, {
+    const server = await listenDaemon(endpointPath, {
       type: 'activeTasksResponse', count: 2, tabs,
     });
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(endpointPath, 1500);
       assert.strictEqual(res.ok, true);
       assert.strictEqual(res.count, 2);
       assert.deepStrictEqual(res.tabs, tabs);
@@ -160,12 +160,12 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: parses count=0 correctly (idle daemon)', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'idle.sock');
-    const server = await listenUds(sockPath, {
+    const endpointPath = fakeEndpointPath(tmpRoot, 'idle.json');
+    const server = await listenDaemon(endpointPath, {
       type: 'activeTasksResponse', count: 0, tabs: [],
     });
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(endpointPath, 1500);
       assert.strictEqual(res.ok, true);
       assert.strictEqual(res.count, 0);
       assert.deepStrictEqual(res.tabs, []);
@@ -175,10 +175,10 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: returns {ok:false, reason:"timeout"} when the server never replies', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'silent.sock');
-    const server = await listenUds(sockPath, null);
+    const endpointPath = fakeEndpointPath(tmpRoot, 'silent.json');
+    const server = await listenDaemon(endpointPath, null);
     try {
-      const res = await daemonHasActiveTasks(sockPath, 200);
+      const res = await daemonHasActiveTasks(endpointPath, 200);
       assert.strictEqual(res.ok, false);
       assert.strictEqual(res.reason, 'timeout');
     } finally {
@@ -187,10 +187,10 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: skips non-JSON broadcast noise and times out instead of mis-reporting', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'gibberish.sock');
-    const server = await listenUds(sockPath, 'gibberish');
+    const endpointPath = fakeEndpointPath(tmpRoot, 'gibberish.json');
+    const server = await listenDaemon(endpointPath, 'gibberish');
     try {
-      const res = await daemonHasActiveTasks(sockPath, 200);
+      const res = await daemonHasActiveTasks(endpointPath, 200);
       assert.strictEqual(res.ok, false);
       assert.strictEqual(res.reason, 'timeout');
     } finally {
@@ -199,10 +199,10 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: skips broadcast lines that are not the awaited response (times out instead of mis-reporting)', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'wrong.sock');
-    const server = await listenUds(sockPath, {type: 'something-else'});
+    const endpointPath = fakeEndpointPath(tmpRoot, 'wrong.json');
+    const server = await listenDaemon(endpointPath, {type: 'something-else'});
     try {
-      const res = await daemonHasActiveTasks(sockPath, 200);
+      const res = await daemonHasActiveTasks(endpointPath, 200);
       assert.strictEqual(res.ok, false);
       assert.strictEqual(res.reason, 'timeout');
     } finally {
@@ -211,12 +211,12 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: tolerates a stray broadcast line that precedes the real activeTasksResponse', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'prefixed.sock');
+    const endpointPath = fakeEndpointPath(tmpRoot, 'prefixed.json');
     const server = await new Promise((resolve, reject) => {
       try {
-        if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath);
+        if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
       } catch { }
-      const srv = net.createServer(s => {
+      const srv = createFakeDaemon(s => {
         let inBuf = '';
         s.setEncoding('utf-8');
         s.on('data', c => {
@@ -238,16 +238,16 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
         s.on('error', () => { });
       });
       srv.once('error', reject);
-      srv.listen(sockPath, () => resolve({
+      srv.listen(endpointPath, () => resolve({
         close: () => new Promise(res => srv.close(() => {
-          try { if (fs.existsSync(sockPath)) fs.unlinkSync(sockPath); }
+          try { if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath); }
           catch { }
           res();
         })),
       }));
     });
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(endpointPath, 1500);
       assert.strictEqual(res.ok, true,
         `expected to skip stray broadcast and parse the real ` +
         `response; got: ${JSON.stringify(res)}`);
@@ -258,13 +258,13 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
   });
 
   await test('daemonHasActiveTasks: an OLD-daemon "Unknown command: activeTasksQuery" error is INCONCLUSIVE (must not authorize a restart)', async () => {
-    const sockPath = fakeSockPath(tmpRoot, 'old-daemon.sock');
-    const server = await listenUds(sockPath, {
+    const endpointPath = fakeEndpointPath(tmpRoot, 'old-daemon.json');
+    const server = await listenDaemon(endpointPath, {
       type: 'error',
       text: 'Unknown command: activeTasksQuery',
     });
     try {
-      const res = await daemonHasActiveTasks(sockPath, 1500);
+      const res = await daemonHasActiveTasks(endpointPath, 1500);
       assert.strictEqual(res.ok, false,
         `expected ok:false on old-daemon error; got: ${JSON.stringify(res)}`);
       assert.strictEqual(res.reason, 'unsupported-query');
@@ -356,17 +356,17 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
       `expected the skip reason to flag the uncertainty; got: ${decision.reason}`);
   });
 
-  await test('decideRestart: RESTARTS when daemon is ALIVE but UDS socket file is missing (Update-button hang fix)', () => {
+  await test('decideRestart: RESTARTS when daemon is ALIVE but endpoint file is missing (Update-button hang fix)', () => {
     const decision = decideRestart({
       fingerprintMatches: true,
       health: 'alive',
-      activeTasks: {ok: false, reason: 'sock-missing'},
+      activeTasks: {ok: false, reason: 'endpoint-missing'},
     });
     assert.strictEqual(decision.skip, false,
-      `expected restart when daemon is alive but UDS socket file is missing; ` +
+      `expected restart when daemon is alive but endpoint file is missing; ` +
       `got: ${JSON.stringify(decision)}`);
-    assert.ok(/unreachable-uds/.test(decision.reason),
-      `expected the restart reason to flag the unreachable UDS; got: ${decision.reason}`);
+    assert.ok(/unreachable-local/.test(decision.reason),
+      `expected the restart reason to flag the unreachable local endpoint; got: ${decision.reason}`);
   });
 
   await test('decideRestart: still SKIPS restart when daemon is ALIVE and active-tasks probe TIMED OUT (task 3192 protection preserved)', () => {
@@ -381,17 +381,17 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     assert.ok(/alive-uncertain/.test(decision.reason));
   });
 
-  await test('decideRestart: unreachable-uds restart wins over fingerprintMatches', () => {
+  await test('decideRestart: unreachable-local restart wins over fingerprintMatches', () => {
     const decision = decideRestart({
       fingerprintMatches: true,
       health: 'alive',
-      activeTasks: {ok: false, reason: 'sock-missing'},
+      activeTasks: {ok: false, reason: 'endpoint-missing'},
     });
     assert.strictEqual(decision.skip, false);
-    assert.ok(/unreachable-uds/.test(decision.reason));
+    assert.ok(/unreachable-local/.test(decision.reason));
   });
 
-  await test('decideRestart: explicit active-tasks reply still wins over sock-missing (defensive ordering)', () => {
+  await test('decideRestart: explicit active-tasks reply still wins over endpoint-missing (defensive ordering)', () => {
     const decision = decideRestart({
       fingerprintMatches: false,
       health: 'alive',
@@ -405,7 +405,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     const decision = decideRestart({
       fingerprintMatches: false,
       health: 'unknown',
-      activeTasks: {ok: false, reason: 'sock-missing'},
+      activeTasks: {ok: false, reason: 'endpoint-missing'},
     });
     assert.strictEqual(decision.skip, false);
   });
@@ -414,7 +414,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     const decision = decideRestart({
       fingerprintMatches: true,
       health: 'dead',
-      activeTasks: {ok: false, reason: 'sock-missing'},
+      activeTasks: {ok: false, reason: 'endpoint-missing'},
     });
     assert.strictEqual(decision.skip, false);
   });
@@ -429,16 +429,16 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     assert.strictEqual(decision.reason, 'active-tasks');
   });
 
-  await test('end-to-end: alive TCP + UDS reporting 1 active task → skip("active-tasks")', async () => {
+  await test('end-to-end: alive TCP + endpoint reporting 1 active task → skip("active-tasks")', async () => {
     const {port, close: closeTcp} = await listenTcp();
-    const sockPath = fakeSockPath(tmpRoot, 'e2e.sock');
+    const endpointPath = fakeEndpointPath(tmpRoot, 'e2e.json');
     const tabs = ['ad4ecb65-2878-4c2c-9736-3bb9be18814a(task=74)'];
-    const uds = await listenUds(sockPath, {
+    const daemon = await listenDaemon(endpointPath, {
       type: 'activeTasksResponse', count: 1, tabs,
     });
     try {
       const health = await probeDaemonHealth(port, 1500);
-      const activeTasks = await daemonHasActiveTasks(sockPath, 1500);
+      const activeTasks = await daemonHasActiveTasks(endpointPath, 1500);
       const decision = decideRestart({
         fingerprintMatches: false,
         health,
@@ -451,7 +451,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
       assert.strictEqual(decision.reason, 'active-tasks');
     } finally {
       await closeTcp();
-      await uds.close();
+      await daemon.close();
     }
   });
 })()

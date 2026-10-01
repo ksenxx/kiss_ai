@@ -34,7 +34,8 @@ import pytest
 
 from kiss.server.explorer import git_worktrees
 from kiss.server.fs_actions import FIND_MAX_MATCHES, fs_action
-from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import IS_WINDOWS, is_root, posix_only
+from kiss.tests.local_ws import open_local_connection
 from kiss.tests.server.test_explorer_scm_commands import (
     ExplorerHarness,
     _git,
@@ -67,11 +68,11 @@ def worktree(harness: ExplorerHarness) -> Path:
     _git(harness.work_dir, "config", "user.name", "Test Author")
     _git(harness.work_dir, "config", "user.email", "author@example.com")
     _git(harness.work_dir, "worktree", "add", "-q", "-b", "kiss/wt-task", str(wt))
-    (wt / "task.txt").write_text("worktree-commit-sentinel-91af\n")
+    (wt / "task.txt").write_text("worktree-commit-sentinel-91af\n", newline="\n")
     _git(wt, "add", "-A")
     _git(wt, "commit", "-q", "-m", "worktree: add task.txt")
-    (wt / "README.md").write_text("# readme edited in the worktree\n")
-    (wt / "wt-untracked.txt").write_text("worktree-untracked-sentinel-5e2d\n")
+    (wt / "README.md").write_text("# readme edited in the worktree\n", newline="\n")
+    (wt / "wt-untracked.txt").write_text("worktree-untracked-sentinel-5e2d\n", newline="\n")
     (harness.work_dir / "report.pdf").write_bytes(_PDF_BYTES)
     (harness.work_dir / "dot.png").write_bytes(_PNG_BYTES)
     return wt
@@ -222,6 +223,182 @@ class TestGitShow:
         finally:
             _git(harness.work_dir, "reset", "-q", "--soft", "HEAD~1")
             _git(harness.work_dir, "reset", "-q", "dot.png")
+
+    def test_diff_of_a_commit_file_is_parent_versus_commit(
+        self, harness, worktree,
+    ) -> None:
+        """``mode: "diff"`` returns both sides of one file's change: the
+        first parent on the left, the commit on the right; a renamed
+        file's left side comes from ``origPath``."""
+        reply = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["second"],
+             "path": "dir/nested.py", "mode": "diff", "token": "d1"},
+            "gitShow",
+        )
+        assert "error" not in reply
+        assert reply["mode"] == "diff"
+        assert reply["parent"] == harness.shas["first"]
+        assert reply["original"] == "" and reply["originalMissing"] is True
+        assert reply["modified"] == "x = 1  # nested-sentinel-4f2a\n"
+        assert reply["modifiedMissing"] is False
+        assert reply["truncated"] is False
+        renamed = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["second"], "path": "b.txt",
+             "origPath": "a.txt", "mode": "diff", "token": "d2"},
+            "gitShow",
+        )
+        assert renamed["original"] == "a\n" and renamed["modified"] == "a\n"
+        assert renamed["originalPath"] == "a.txt"
+        # A root commit has no parent: the left side is empty.
+        root = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["first"], "path": "a.txt",
+             "mode": "diff", "token": "d3"},
+            "gitShow",
+        )
+        assert root["parent"] == "" and root["originalMissing"] is True
+        assert root["modified"] == "a\n"
+        # A merge commit diffs against its FIRST parent (main), so the
+        # feature branch's file is new there.
+        merge = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["merge"],
+             "path": "feature.txt", "mode": "diff", "token": "d4"},
+            "gitShow",
+        )
+        assert merge["parent"] == harness.shas["main_only"]
+        assert merge["originalMissing"] is True
+        assert merge["modified"] == "feature-file-sentinel-7c1e\n"
+
+    def test_diff_of_the_working_tree_is_head_versus_disk(
+        self, harness, worktree,
+    ) -> None:
+        """An empty ``sha`` diffs HEAD against the working tree of the
+        worktree named by ``workDir``: a modified, a deleted and an
+        untracked file each show the right missing side."""
+        modified = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "README.md",
+             "mode": "diff", "token": "d5"},
+            "gitShow",
+        )
+        assert "error" not in modified
+        assert modified["parent"] == harness.shas["merge"]
+        assert modified["original"] == "# readme\n"
+        assert modified["modified"] == "# readme changed\n"
+        deleted = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "b.txt",
+             "mode": "diff", "token": "d6"},
+            "gitShow",
+        )
+        assert deleted["original"] == "a\n"
+        assert deleted["modifiedMissing"] is True and deleted["modified"] == ""
+        untracked = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "untracked.txt",
+             "mode": "diff", "token": "d7"},
+            "gitShow",
+        )
+        assert untracked["originalMissing"] is True
+        assert untracked["modified"] == "u\n"
+        # Inside the linked worktree the diff is against ITS HEAD and
+        # ITS copy of the file.
+        wt = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "README.md", "mode": "diff",
+             "workDir": str(worktree), "token": "d8"},
+            "gitShow",
+        )
+        assert wt["original"] == "# readme\n"
+        assert wt["modified"] == "# readme edited in the worktree\n"
+
+    def test_diff_errors(self, harness, worktree) -> None:
+        binary = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "dot.png",
+             "mode": "diff", "token": "d9"},
+            "gitShow",
+        )
+        assert binary["error"] == "Cannot display binary file: dot.png"
+        bad = _request(
+            harness,
+            {"type": "gitShow", "sha": "zzz", "path": "a.txt",
+             "mode": "diff", "token": "d10"},
+            "gitShow",
+        )
+        assert bad["error"] == "Not a commit id: zzz"
+        unknown = _request(
+            harness,
+            {"type": "gitShow", "sha": "abcdef0", "path": "a.txt",
+             "mode": "diff", "token": "d11"},
+            "gitShow",
+        )
+        assert unknown["error"] == "Unknown commit: abcdef0"
+        no_path = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["first"],
+             "mode": "diff", "token": "d12"},
+            "gitShow",
+        )
+        assert no_path["error"] == "Not a repository path: "
+        absolute = _request(
+            harness,
+            {"type": "gitShow", "sha": harness.shas["first"], "path": "a.txt",
+             "origPath": "/etc/passwd", "mode": "diff", "token": "d13"},
+            "gitShow",
+        )
+        assert absolute["error"] == "Not a repository path: /etc/passwd"
+        # A path climbing out of the repository is refused on either
+        # side, in both the commit and the working-tree modes.
+        outside = Path(harness.tmpdir) / "outside.txt"
+        outside.write_text("outside-sentinel\n")
+        for sha, orig in (("", ""), ("", "README.md"), (harness.shas["first"], "")):
+            climb = _request(
+                harness,
+                {"type": "gitShow", "sha": sha, "path": "../outside.txt",
+                 "origPath": orig, "mode": "diff", "token": "d15"},
+                "gitShow",
+            )
+            assert climb["error"] == "Not a repository path: ../outside.txt"
+        climb_orig = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "README.md",
+             "origPath": "dir/../../outside.txt", "mode": "diff", "token": "d16"},
+            "gitShow",
+        )
+        assert climb_orig["error"] == "Not a repository path: dir/../../outside.txt"
+        plain = _request(
+            harness,
+            {"type": "gitShow", "sha": "", "path": "only.txt", "mode": "diff",
+             "workDir": str(harness.plain_dir), "token": "d14"},
+            "gitShow",
+        )
+        assert plain["error"].startswith("Not a git repository")
+
+    @posix_only("symbolic links")
+    def test_diff_of_a_symlink_shows_the_link_text(self, harness, worktree) -> None:
+        """A working-tree symlink diffs as git sees it — its target text
+        — and is never followed (a link out of the repository does not
+        leak the target file)."""
+        outside = Path(harness.tmpdir) / "link-target.txt"
+        outside.write_text("link-target-sentinel\n")
+        link = harness.work_dir / "link.txt"
+        link.symlink_to("../link-target.txt")
+        try:
+            reply = _request(
+                harness,
+                {"type": "gitShow", "sha": "", "path": "link.txt",
+                 "mode": "diff", "token": "d17"},
+                "gitShow",
+            )
+            assert "error" not in reply
+            assert reply["originalMissing"] is True
+            assert reply["modified"] == "../link-target.txt"
+        finally:
+            link.unlink()
 
     def test_compare_with_a_revision(self, harness) -> None:
         reply = _request(
@@ -691,9 +868,8 @@ class TestOpenBinaryFiles:
         assert "background" not in plain
 
 
-@requires_unix_sockets
-class TestUdsDrop:
-    """VS Code windows (UDS peers) never get the remote-only replies."""
+class TestLocalDrop:
+    """VS Code windows (local peers) never get the remote-only replies."""
 
     @pytest.mark.parametrize(
         "payload",
@@ -703,11 +879,11 @@ class TestUdsDrop:
             {"type": "fsAction", "action": "delete", "path": "/nope"},
         ],
     )
-    def test_uds_delivered_commands_produce_no_reply(self, harness, payload) -> None:
+    def test_local_delivered_commands_produce_no_reply(self, harness, payload) -> None:
         import asyncio
 
-        async def _over_uds() -> list[dict]:
-            reader, writer = await asyncio.open_unix_connection(str(harness.uds_path))
+        async def _over_local() -> list[dict]:
+            reader, writer = await open_local_connection(harness.server)
             writer.write((json.dumps(payload) + "\n").encode())
             await writer.drain()
             # A control command that always answers, to bound the wait.
@@ -725,7 +901,7 @@ class TestUdsDrop:
             writer.close()
             return got
 
-        got = harness.run(_over_uds())
+        got = harness.run(_over_local())
         assert all(
             m.get("type") not in ("gitShow", "gitActionResult", "fsResult")
             for m in got

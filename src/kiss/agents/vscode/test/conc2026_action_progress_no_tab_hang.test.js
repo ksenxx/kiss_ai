@@ -38,7 +38,8 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
-const {fakeSockPath} = require('./fakeSock');
+const {fakeEndpointPath} = require('./fakeDaemon');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const OUT_DIR = path.join(__dirname, '..', 'out');
 if (!fs.existsSync(path.join(OUT_DIR, 'SorcarSidebarView.js'))) {
@@ -161,14 +162,14 @@ for (const f of fs.readdirSync(OUT_DIR)) {
   fs.writeFileSync(path.join(outCopy, f), src);
 }
 
-// A real (silent) UDS daemon stand-in.  Refusing the connection instead
+// A real (silent) local daemon stand-in.  Refusing the connection instead
 // would fire the client's 'disconnect' on every reconnect attempt, and
 // the view's disconnect handler resolves EVERY pending worktree action —
 // masking exactly the hang this test exists to catch.
-process.env.KISS_SORCAR_SOCK = fakeSockPath(tmpRoot, 'daemon.sock');
+process.env.KISS_SORCAR_LOCAL = fakeEndpointPath(tmpRoot, 'daemon.json');
 process.env.KISS_HOME = path.join(tmpRoot, 'kiss-home');
-const daemon = net.createServer(sock => sock.on('error', () => {}));
-daemon.listen(process.env.KISS_SORCAR_SOCK);
+const daemon = createFakeDaemon(sock => sock.on('error', () => {}));
+daemon.listen(process.env.KISS_SORCAR_LOCAL);
 
 function makeUri(fsPath) {
   return {fsPath, scheme: 'file', toString: () => `file://${fsPath}`};

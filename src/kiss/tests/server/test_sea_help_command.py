@@ -23,10 +23,7 @@ from kiss.agents.sorcar import persistence, sea_commands
 from kiss.core.config import kiss_home
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
-
-pytestmark = requires_unix_sockets
 
 
 class SeaHelpCommandTest(DaemonRunApiHarness):
@@ -71,7 +68,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
             "/sh help",
             work_dir=self.repo,
             use_worktree=True,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True, result
@@ -108,7 +105,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
         result = sorcar.run(
-            "/echo HELP", work_dir=self.repo, sock_path=self.sock_path, timeout=60,
+            "/echo HELP", work_dir=self.repo, endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is True, result
         assert result.text == "Echoes; use /echo <text>."
@@ -118,7 +115,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         result = sorcar.run(
             "/echo help me",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             chat_id=first_chat,
             timeout=60,
         )
@@ -134,7 +131,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
         result = sorcar.run(
-            "/nodesc help", work_dir=self.repo, sock_path=self.sock_path, timeout=60,
+            "/nodesc help", work_dir=self.repo, endpoint_file=self.endpoint_file, timeout=60,
         )
         assert result.success is False, result
         assert "nodesc_sea.py" in result.text and "description()" in result.text, result

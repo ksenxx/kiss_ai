@@ -7,7 +7,7 @@
 ``RemoteAccessServer`` periodically polls PyPI for the latest
 ``kiss-agent-framework`` release and broadcasts an
 ``update_available`` event to every connected client when the
-installed version is older.  The VS Code webview (UDS) and the
+installed version is older.  The VS Code webview (local WSS) and the
 remote browser webview (WSS) both receive this event and decorate
 the "Update" button in the settings panel with a green download
 icon so the user notices that an upgrade is waiting.
@@ -33,7 +33,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -123,14 +123,13 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         from kiss.server.web_server import _generate_self_signed_cert
         _generate_self_signed_cert(certfile, keyfile)
 
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
 
@@ -144,15 +143,15 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect_uds(
+    async def _connect_local(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        return await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        return await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
 
     async def _send_ready(
-        self, writer: asyncio.StreamWriter, tab_id: str,
+        self, writer: LocalWriter, tab_id: str,
     ) -> None:
         writer.write(
             json.dumps(
@@ -163,7 +162,7 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
 
     async def _wait_for_event(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         timeout: float = 5.0,
         max_events: int = 200,
@@ -171,7 +170,7 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
             if not line:
-                raise AssertionError("UDS closed before " + wanted_type)
+                raise AssertionError("local connection closed before " + wanted_type)
             msg = json.loads(line.decode("utf-8"))
             if isinstance(msg, dict) and msg.get("type") == wanted_type:
                 return msg
@@ -179,15 +178,14 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
 
 
 class TestUpdateAvailableBroadcast(_UpdateCheckTestBase):
-    """End-to-end: newer PyPI version is broadcast over UDS."""
+    """End-to-end: newer PyPI version is broadcast over the local channel."""
 
     PYPI_VERSION = "2099.1.1"
     PYPI_PAYLOAD = {"info": {"version": "2099.1.1"}}
 
-    @requires_unix_sockets
     async def test_update_available_broadcast_to_new_client(self) -> None:
         """A client that connects gets an ``update_available`` event."""
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-update-1")
             ev = await self._wait_for_event(reader, "update_available")
@@ -223,9 +221,8 @@ class TestUpdateAvailableSameVersion(_UpdateCheckTestBase):
         type(self).PYPI_PAYLOAD = {"info": {"version": __version__}}
         await super().asyncSetUp()
 
-    @requires_unix_sockets
     async def test_event_marks_not_available_when_current(self) -> None:
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-update-2")
             ev = await self._wait_for_event(reader, "update_available")
@@ -244,10 +241,9 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
     PYPI_PAYLOAD = None
     PYPI_STATUS = 500
 
-    @requires_unix_sockets
     async def test_failing_pypi_does_not_break_server(self) -> None:
         await asyncio.sleep(1.0)
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-update-3")
             focus = await self._wait_for_event(reader, "focusInput",
@@ -346,11 +342,10 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
             ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
             shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
 
-    @requires_unix_sockets
     async def test_stale_daemon_reports_latest_installed_version(
         self,
     ) -> None:
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-stale-daemon")
             ev = await self._wait_for_event(reader, "update_available")
@@ -407,11 +402,10 @@ class TestUpdateAvailableEmptyExtensionsRootFallback(_UpdateCheckTestBase):
             ws._INSTALLED_EXTENSIONS_ROOT = self._saved_ext_root
             shutil.rmtree(self._ext_root_tmp, ignore_errors=True)
 
-    @requires_unix_sockets
     async def test_bundled_version_used_when_no_installed_extensions(
         self,
     ) -> None:
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-fallback")
             ev = await self._wait_for_event(reader, "update_available")

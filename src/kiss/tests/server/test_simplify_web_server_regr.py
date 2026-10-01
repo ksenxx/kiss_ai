@@ -8,7 +8,7 @@ Covers the exact code paths refactored by the web_server.py
 simplification pass:
 
 * ``WebPrinter`` endpoint add/remove + broadcast fan-out over a real
-  Unix-domain socket connection (shared add/remove helper refactor).
+  local WebSocket connection (shared add/remove helper refactor).
 * ``_handle_run_update`` connId-stamped ``error`` / ``notice`` events
   (shared stamped-broadcast helper).
 * ``stop_async`` cancelling the watchdog and version-check tasks
@@ -42,7 +42,8 @@ from kiss.server.web_server import (
     _get_local_ips,
     _version_tuple,
 )
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 
 class TestPureHelpers(unittest.TestCase):
@@ -77,7 +78,7 @@ class TestTunnelStateReset(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         return RemoteAccessServer(
             url_file=tmpdir / "remote-url.json",
-            uds_path=tmpdir / "sorcar.sock",
+            local_endpoint_file=tmpdir / "sorcar-local.json",
         )
 
     def _seed(self, server: RemoteAccessServer) -> None:
@@ -132,18 +133,17 @@ def _restore_persistence(saved: tuple[Any, Any, Any]) -> None:
 
 
 class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
-    """E2E tests over a real running RemoteAccessServer (WSS + UDS)."""
+    """E2E tests over a real running RemoteAccessServer (WSS)."""
 
     async def asyncSetUp(self) -> None:
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp-live-")
         self.saved = _redirect_persistence(self.tmpdir)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.server._install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._update_log_path = Path(self.tmpdir) / "update.log"
@@ -157,36 +157,36 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    async def _connect_uds(
+    async def _connect_local(
         self,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    ) -> tuple[LocalReader, LocalWriter]:
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self.addAsyncCleanup(self._close_writer, writer)
         return reader, writer
 
-    async def _close_writer(self, writer: asyncio.StreamWriter) -> None:
+    async def _close_writer(self, writer: LocalWriter) -> None:
         writer.close()
         try:
             await writer.wait_closed()
         except Exception:
             pass
 
-    async def _send(self, writer: asyncio.StreamWriter, msg: dict) -> None:
+    async def _send(self, writer: LocalWriter, msg: dict) -> None:
         writer.write(json.dumps(msg).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         wanted_type: str,
         max_events: int = 50,
         timeout: float = 2.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg: dict[str, Any] = json.loads(line.decode("utf-8"))
             if msg.get("type") == wanted_type:
                 return msg
@@ -210,7 +210,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
                 "KISS_UPDATE_BOOTSTRAP_URL",
                 saved_url,
             )
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
         self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
@@ -229,7 +229,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         (root / "install.sh").write_text(
             f"#!/bin/bash\necho done > {marker}\n",
         )
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
         self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
@@ -262,7 +262,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         (root / "scripts" / "install.sh").write_text(
             f'#!/bin/bash\necho "$KISS_NONINTERACTIVE" > {boot_marker}\n',
         )
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
         self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
@@ -311,7 +311,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         )
         (scripts / "install.sh").write_text("#!/bin/bash\ntrue\n")
         scripts.chmod(0o000)
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         await self._send(writer, {"type": "runUpdate"})
         notice = await self._drain_until(reader, "notice")
         self.assertIn(f"update of {PRODUCT_NAME}", str(notice.get("text")))
@@ -337,14 +337,15 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(version.cancelled() or version.done())
 
 
-    @requires_unix_sockets
-    async def test_broadcast_reaches_uds_and_stops_after_removal(self) -> None:
-        """Tab-stamped broadcasts fan out to UDS writers until removed."""
-        reader, writer = await self._connect_uds()
+    async def test_broadcast_reaches_local_clients_and_stops_after_removal(
+        self,
+    ) -> None:
+        """Tab-stamped broadcasts fan out to local clients until removed."""
+        reader, writer = await self._connect_local()
         writers: list[Any] = []
         for _ in range(100):
             with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
+                writers = list(self.server._printer._local_clients)
             if writers:
                 break
             await asyncio.sleep(0.02)
@@ -354,7 +355,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         )
         msg = await self._drain_until(reader, "notice")
         self.assertEqual(msg.get("text"), "hello")
-        self.server._printer.remove_uds_writer(writers[0])
+        self.server._printer.remove_local_client(writers[0])
         self.server._printer.broadcast(
             {"type": "notice", "text": "gone", "tabId": "t1"},
         )

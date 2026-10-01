@@ -810,7 +810,7 @@ Details worth knowing:
 - **`<task>` blocks stay intact.** A prompt such as `/deploy <task>build</task><task>publish</task>` reaches the SEA as one sub-task with the tags in place; the daemon does not split it into two Sorcar tasks.
 - **History keeps what you typed.** The task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`, not the rewritten directive.
 - **Where the sub-task runs.** A path-named SEA runs in the calling chat's working directory through the standard task lifecycle (worktree, auto-commit), unless the SEA's own `work_dir()`, `use_worktree()`, or `auto_commit()` getters say otherwise.
-- **How long it may run.** `run_agent` waits 300 seconds by default and stops the sub-task when the wait runs out. An SEA that works longer defines `dispatch_timeout()` returning the seconds it needs (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h); the directive then adds `timeout = "<seconds>"`. A missing getter or a value that is not a positive number leaves the directive as before.
+- **How long it may run.** `run_agent` waits 300 seconds by default and stops the sub-task when the wait runs out. An SEA that works longer defines `dispatch_timeout()` returning the seconds it needs (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h, `/write` 1 h); the directive then adds `timeout = "<seconds>"`. A missing getter or a value that is not a positive number leaves the directive as before.
 
 ## Add your own command in three steps
 

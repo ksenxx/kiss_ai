@@ -349,7 +349,7 @@ class TestF8SpawnCloudflaredRetries(unittest.TestCase):
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         server._spawn_cloudflared(["--url", "http://127.0.0.1:1"], retries=3)
         proc = server._tunnel_proc
@@ -369,12 +369,11 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-live-")
         self.saved = _redirect_persistence(self.tmpdir)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=0,
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self._stopped = False

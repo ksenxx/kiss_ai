@@ -14,7 +14,7 @@ two identities — closing the canonical id removed the registry row
 but left the ``AgentState`` (and any worktree it owns) behind.
 
 These tests drive ``openTab`` / ``run`` / ``closeTab`` through a real
-``wss://`` connection and a real UDS connection and assert that after
+``wss://`` connection and a real local connection and assert that after
 closing with the canonical id NO backend bookkeeping for the tab
 remains, under either spelling.
 """
@@ -37,7 +37,7 @@ from websockets.asyncio.client import connect
 import kiss.core.vscode_config as vc
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 RAW_TAB = "  tab-1 "
 CANON_TAB = "tab-1"
@@ -70,14 +70,13 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
         certfile, keyfile = self.tmpdir / "cert.pem", self.tmpdir / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
         self.port = _free_port()
-        self.uds_path = self.tmpdir / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.tmpdir / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         await self.server.start_async()
@@ -211,13 +210,12 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             self.assertEqual(reply["tabId"], "")
         self._assert_no_backend_trace()
 
-    @requires_unix_sockets
-    async def test_uds_padded_tab_id_registers_one_local_tab(self) -> None:
-        reader, writer = await asyncio.open_unix_connection(str(self.uds_path))
+    async def test_local_padded_tab_id_registers_one_local_tab(self) -> None:
+        reader, writer = await open_local_connection(self.server)
 
         async def recv() -> str:
             line = await reader.readline()
-            self.assertTrue(line, "UDS connection closed")
+            self.assertTrue(line, "local connection closed")
             return line.decode("utf-8")
 
         try:
@@ -238,14 +236,14 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             self.assertEqual([t["tabId"] for t in tabs["tabs"]], [CANON_TAB])
             printer = self.server._printer
             with printer._ws_lock:
-                local_tabs = dict(printer._local_uds_tab_counts)
+                local_tabs = dict(printer._local_tab_counts)
             # ONE interest entry for the opened tab, keyed by the
             # canonical id (the padded spelling never reaches the
             # bookkeeping), and the talk fan-out counts the tab as
             # shown by the attached local webview.
             self.assertEqual(local_tabs, {"placeholder": 1, CANON_TAB: 1})
             self.assertEqual(
-                printer.shown_local_uds_tabs([CANON_TAB]), {CANON_TAB},
+                printer.shown_local_tabs([CANON_TAB]), {CANON_TAB},
             )
 
             writer.write(
@@ -259,9 +257,9 @@ class TestTabIdNormalisedAtBoundary(IsolatedAsyncioTestCase):
             # removes the tab from the registry: the fan-out no longer
             # counts it as shown.
             with printer._ws_lock:
-                local_tabs = dict(printer._local_uds_tab_counts)
+                local_tabs = dict(printer._local_tab_counts)
             self.assertEqual(local_tabs, {"placeholder": 1})
-            self.assertEqual(printer.shown_local_uds_tabs([CANON_TAB]), set())
+            self.assertEqual(printer.shown_local_tabs([CANON_TAB]), set())
         finally:
             writer.close()
             await writer.wait_closed()

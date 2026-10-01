@@ -14,7 +14,7 @@ disappears and stays away across window reloads until the snooze
 expires or a NEWER release ships.
 
 These tests reuse the real-server harness of
-``test_update_available_check`` (real UDS connections, a real local
+``test_update_available_check`` (real local connections, a real local
 HTTP server impersonating PyPI, no mocks) and redirect the daemon's
 KISS home to a temp dir so the real ``~/.kiss/.update-check.json``
 is never touched.
@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 import kiss.server.web_server as ws
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter
 from kiss.tests.server.test_update_available_check import _UpdateCheckTestBase
 
 _DAY_MS = 24 * 60 * 60 * 1000
@@ -63,14 +63,14 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
     def _write_cache(self, data: dict[str, object]) -> None:
         self._cache_path().write_text(json.dumps(data), encoding="utf-8")
 
-    async def _snooze(self, writer: asyncio.StreamWriter, latest: str) -> None:
+    async def _snooze(self, writer: LocalWriter, latest: str) -> None:
         writer.write(
             json.dumps({"type": "snoozeUpdate", "latest": latest})
             .encode("utf-8") + b"\n",
         )
         await writer.drain()
 
-    async def _close(self, writer: asyncio.StreamWriter) -> None:
+    async def _close(self, writer: LocalWriter) -> None:
         writer.close()
         try:
             await writer.wait_closed()
@@ -79,7 +79,7 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
 
     async def _wait_for_snoozed(
         self,
-        reader: asyncio.StreamReader,
+        reader: LocalReader,
         want: bool,
         timeout: float = 5.0,
     ) -> dict[str, object]:
@@ -104,13 +104,12 @@ class _SnoozeTestBase(_UpdateCheckTestBase):
                 return ev
 
 
-@requires_unix_sockets
 class TestSnoozeUpdateCommand(_SnoozeTestBase):
     """The ``snoozeUpdate`` command records and rebroadcasts the snooze."""
 
     async def test_snooze_records_and_rebroadcasts(self) -> None:
         """Clicking "Remind me later" silences every window at once."""
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-snooze-1")
             ev = await self._wait_for_event(reader, "update_available")
@@ -134,7 +133,7 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
 
     async def test_reload_after_snooze_stays_snoozed(self) -> None:
         """The reported bug: the toast must NOT reappear on window reload."""
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-snooze-2")
             await self._wait_for_event(reader, "update_available")
@@ -144,7 +143,7 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
             await self._close(writer)
 
         # A brand-new connection simulates the reloaded window.
-        reader2, writer2 = await self._connect_uds()
+        reader2, writer2 = await self._connect_local()
         try:
             await self._send_ready(writer2, "tab-snooze-2-reloaded")
             ev = await self._wait_for_event(reader2, "update_available")
@@ -161,7 +160,7 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
     async def test_snooze_preserves_extension_cooldown_fields(self) -> None:
         """The extension's fetch-cooldown fields survive the snooze write."""
         self._write_cache({"lastCheckMs": 123456, "lastLatest": "2099.1.0"})
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-snooze-3")
             await self._wait_for_event(reader, "update_available")
@@ -177,7 +176,7 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
     async def test_snooze_without_latest_falls_back_to_cache(self) -> None:
         """A version-less snooze uses the cache's last known latest."""
         self._write_cache({"lastCheckMs": 1, "lastLatest": "2099.1.1"})
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-snooze-4")
             await self._wait_for_event(reader, "update_available")
@@ -191,7 +190,6 @@ class TestSnoozeUpdateCommand(_SnoozeTestBase):
         self.assertEqual(cache["snoozedLatest"], "2099.1.1")
 
 
-@requires_unix_sockets
 class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
     """A snooze written by the extension host silences the daemon toast."""
 
@@ -204,7 +202,7 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
             "snoozeUntilMs": int(time.time() * 1000) + _DAY_MS,
             "snoozedLatest": "2099.1.1",
         })
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-ext-snooze")
             ev = await self._wait_for_event(reader, "update_available")
@@ -221,7 +219,7 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
             "snoozeUntilMs": int(time.time() * 1000) - 1,
             "snoozedLatest": "2099.1.1",
         })
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-expired-snooze")
             ev = await self._wait_for_event(reader, "update_available")
@@ -238,7 +236,7 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
             "snoozeUntilMs": int(time.time() * 1000) + _DAY_MS,
             "snoozedLatest": "2099.1.0",  # older than PyPI's 2099.1.1
         })
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-breakthrough")
             ev = await self._wait_for_event(reader, "update_available")
@@ -250,7 +248,7 @@ class TestSnoozedStateFromExtensionFile(_SnoozeTestBase):
     async def test_corrupt_cache_is_ignored_and_overwritten(self) -> None:
         """A corrupt cache file neither crashes nor snoozes; snooze heals it."""
         self._cache_path().write_text("not json{", encoding="utf-8")
-        reader, writer = await self._connect_uds()
+        reader, writer = await self._connect_local()
         try:
             await self._send_ready(writer, "tab-corrupt")
             ev = await self._wait_for_event(reader, "update_available")

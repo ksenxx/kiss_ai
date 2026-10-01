@@ -9,7 +9,7 @@ Feature under test
 Every agent in ``kiss/agents/third_party_agents/`` must launch through
 ``run_agent_via_kiss_web``, which is implemented ON TOP OF the public
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
-connects to a daemon's Unix-domain socket, sends the documented ``run``
+connects to a daemon's local endpoint, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
 ``tools=`` *file path* contract: the agent's OWN module is the tools
 file, and the daemon imports it and calls its top-level ``tools()``
@@ -21,11 +21,11 @@ the passed instance.
 Test strategy (no mocks)
 ------------------------
 A real :class:`kiss.server.web_server.RemoteAccessServer` is served on
-a temporary Unix-domain socket (the production daemon transport) with
+a temporary loopback WSS endpoint (the production local transport) with
 isolated persistence/config.  The only replaced boundary is the LLM
 itself: ``RelentlessAgent.run`` (``SorcarAgent.__mro__[1].run``) is
 swapped for a stub returning canned YAML (precedent:
-``test_server_sorcar_run.py``), so the daemon's full pipeline — UDS
+``test_server_sorcar_run.py``), so the daemon's full pipeline — local
 dispatch → ``_cmd_run`` → worker thread → tools-file loading → event
 broadcast → status end — executes for real without model API calls.
 """
@@ -57,7 +57,6 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
 
 STUB_SUMMARY = "stub summary done"
 
@@ -78,13 +77,8 @@ def _init_repo(repo: str) -> None:
     git("commit", "-q", "-m", "seed")
 
 
-@requires_unix_sockets
 class _ApiLaunchBase(unittest.TestCase):
-    """Real daemon over a temp UDS; only the LLM boundary is stubbed.
-
-    The daemon's local API is a Unix-domain socket, so every subclass
-    (which inherits this mark) skips on Windows.
-    """
+    """Real daemon over a temp local endpoint; only the LLM boundary is stubbed."""
 
     def setUp(self) -> None:
         # Every global mutation registers its restoration with
@@ -92,7 +86,7 @@ class _ApiLaunchBase(unittest.TestCase):
         # when ``setUp`` itself fails partway, unlike ``tearDown``.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-api-launch-")
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
@@ -123,29 +117,24 @@ class _ApiLaunchBase(unittest.TestCase):
         self.loop_thread.start()
         self.addCleanup(self._stop_loop)
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
-        self.addCleanup(self._shutdown_uds_server)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
+        self.addCleanup(self._shutdown_server)
 
-        self._saved_sock_override = launcher._SOCK_PATH_OVERRIDE
-        launcher._SOCK_PATH_OVERRIDE = self.sock_path
-        self.addCleanup(self._restore_sock_override)
+        self._saved_endpoint_override = launcher._ENDPOINT_FILE_OVERRIDE
+        launcher._ENDPOINT_FILE_OVERRIDE = self.endpoint_file
+        self.addCleanup(self._restore_endpoint_override)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
         self.addCleanup(self._restore_run_and_discard_agents)
         self.stub_calls: list[dict[str, Any]] = []
 
-    def _restore_sock_override(self) -> None:
-        launcher._SOCK_PATH_OVERRIDE = self._saved_sock_override
+    def _restore_endpoint_override(self) -> None:
+        launcher._ENDPOINT_FILE_OVERRIDE = self._saved_endpoint_override
 
     def _restore_run_and_discard_agents(self) -> None:
         self._parent_class.run = self._original_run
@@ -157,17 +146,11 @@ class _ApiLaunchBase(unittest.TestCase):
                     pass
         agent_state.agent_states.clear()
 
-    def _shutdown_uds_server(self) -> None:
+    def _shutdown_server(self) -> None:
         async def _shutdown() -> None:
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            # Closes the listener (and with it every established local
+            # connection) and joins the handlers before the loop stops.
+            await self.server.stop_async()
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -180,7 +163,7 @@ class _ApiLaunchBase(unittest.TestCase):
         try:
             asyncio.run_coroutine_threadsafe(
                 _shutdown(), self.loop,
-            ).result(timeout=5)
+            ).result(timeout=30)
         except Exception:
             pass
 
@@ -281,7 +264,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "hello slack task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls, "the daemon never ran the task"
         call = self.stub_calls[0]
@@ -308,7 +291,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "auth prompt task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         prompt = str(self.stub_calls[0]["kwargs"].get("prompt_template", ""))
         assert "Slack Authentication" in prompt
@@ -350,7 +333,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 agent,
                 "use the tools",
                 work_dir=self.repo,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
             )
         finally:
             if saved_home is None:
@@ -401,7 +384,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "use the tools",
             work_dir=self.repo,
             tools=str(tools_py),
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == "explicit tools ok"
         log = Path(self.tmpdir) / "tool_calls.log"
@@ -467,7 +450,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "note task",
             work_dir=self.repo,
             tools=str(agent_py),
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == "recorded:from daemon"
         assert notes.read_text().splitlines() == ["from daemon"], (
@@ -492,7 +475,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(workspace="teamspace"),
             "ws task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert seen == ["teamspace"], (
             "the daemon-side tools() must see the launch workspace"
@@ -523,7 +506,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 SlackAgent(workspace=workspace),
                 f"task-{key}",
                 work_dir=self.repo,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
             )
 
         thread_a = threading.Thread(target=launch, args=("A", "wsA"), daemon=True)
@@ -573,7 +556,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "no backend",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls
 
@@ -586,7 +569,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             max_budget=1.25,
             model_config={"base_url": "http://localhost:9999/v1"},
             web_tools=False,
@@ -621,7 +604,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             append_basic_tools=False,
         )
         agent = self.stub_calls[0]["agent"]
@@ -656,7 +639,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             append_to_system_prompt="\nLAUNCHER-SYS-SUFFIX-2210",
             append_to_prompt="\nLAUNCHER-PROMPT-SUFFIX-2210",
         )
@@ -676,7 +659,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             max_budget=0.0,
         )
         assert self.stub_calls[0]["kwargs"].get("max_budget") == 0.0
@@ -689,7 +672,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             SlackAgent(),
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         call = self.stub_calls[0]
         budget = call["kwargs"].get("max_budget")
@@ -709,7 +692,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "task",
             model_name="gpt-5.5",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert self.stub_calls[0]["kwargs"].get("model_name") == "gpt-5.5"
 
@@ -722,7 +705,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "stats task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert agent.total_tokens_used == 1234
         assert abs(agent.budget_used - 0.4567) < 1e-9
@@ -737,7 +720,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
@@ -753,7 +736,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
@@ -768,7 +751,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             agent,
             "   ",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         parsed = yaml.safe_load(result)
         assert parsed["success"] is False
@@ -784,7 +767,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 SlackAgent(),
                 "task",
                 work_dir=self.repo,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
                 timeout=0.5,
             )
             assert result == "", "timed-out launch must return empty result"
@@ -805,22 +788,22 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 "task",
                 work_dir=self.repo,
                 tools=str(Path(self.tmpdir) / "missing_tools.py"),
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
             )
         assert not self.stub_calls, "no task may start for a bad tools file"
 
 
 class TestInProcessDaemonBootstrap(_ApiLaunchBase):
-    """Launches without a socket start the process-global daemon."""
+    """Launches without an endpoint override start the process-global daemon."""
 
     def test_global_daemon_started_once_and_reused(self) -> None:
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         self._install_stub(summary="global daemon ok")
-        saved_override = launcher._SOCK_PATH_OVERRIDE
+        saved_override = launcher._ENDPOINT_FILE_OVERRIDE
         saved_api_server = launcher._API_SERVER
-        saved_api_server_sock = launcher._API_SERVER_SOCK
-        launcher._SOCK_PATH_OVERRIDE = None
+        saved_api_server_endpoint = launcher._API_SERVER_ENDPOINT
+        launcher._ENDPOINT_FILE_OVERRIDE = None
         try:
             result = run_agent_via_kiss_web(
                 SlackAgent(),
@@ -829,9 +812,9 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
             )
             assert yaml.safe_load(result)["summary"] == "global daemon ok"
             assert launcher._API_SERVER is not None
-            first_sock = launcher._API_SERVER_SOCK
-            assert Path(first_sock).exists(), (
-                "the in-process daemon must serve a real UDS"
+            first_endpoint = launcher._API_SERVER_ENDPOINT
+            assert Path(first_endpoint).exists(), (
+                "the in-process daemon must publish a real endpoint file"
             )
             server_before = launcher._API_SERVER
             result2 = run_agent_via_kiss_web(
@@ -843,11 +826,11 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
             assert launcher._API_SERVER is server_before, (
                 "the process-global daemon must be created exactly once"
             )
-            assert launcher._API_SERVER_SOCK == first_sock
+            assert launcher._API_SERVER_ENDPOINT == first_endpoint
         finally:
-            launcher._SOCK_PATH_OVERRIDE = saved_override
+            launcher._ENDPOINT_FILE_OVERRIDE = saved_override
             created = launcher._API_SERVER
-            created_sock = launcher._API_SERVER_SOCK
+            created_endpoint = launcher._API_SERVER_ENDPOINT
             if created is not None and created is not saved_api_server:
                 # The process-global daemon was created against this
                 # test's temporary persistence/config environment; shut
@@ -882,12 +865,12 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
                             thread.join(timeout=5)
                     if not created_loop.is_running():
                         created_loop.close()
-                if created_sock:
+                if created_endpoint:
                     shutil.rmtree(
-                        Path(created_sock).parent, ignore_errors=True,
+                        Path(created_endpoint).parent, ignore_errors=True,
                     )
             launcher._API_SERVER = saved_api_server
-            launcher._API_SERVER_SOCK = saved_api_server_sock
+            launcher._API_SERVER_ENDPOINT = saved_api_server_endpoint
 
 
 class TestCarrierAgentDirectRuns(_ApiLaunchBase):
@@ -1043,7 +1026,7 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "carrier task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
@@ -1060,7 +1043,7 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "first task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         first_chat = agent.chat_id
         assert first_chat
@@ -1078,7 +1061,7 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             resumed,
             "second task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert resumed.chat_id == first_chat, "existing chat id must be kept"
         assert "first task" in prompts[0], (
@@ -1093,7 +1076,7 @@ class TestKissWebChatCarrierAgents(_ApiLaunchBase):
             agent,
             "wt task",
             work_dir=self.repo,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result

@@ -14,7 +14,8 @@ Covered contracts
 2. The install must still complete (marker written, completion banner
    logged) when the terminal dies mid-step.
 3. ``install.sh`` must NEVER touch the kiss-web daemon: no kill, no
-   ``~/.kiss/sorcar.sock`` removal, no ``launchctl kickstart`` /
+   ``~/.kiss/sorcar-local.json`` (local endpoint file) removal, no
+   ``launchctl kickstart`` /
    ``systemctl restart``.  Restarting kiss-web is owned entirely by the
    VS Code extension's DependencyInstaller (``restartKissWebDaemon``,
    fingerprint mismatch after the reload), which also defers while tasks
@@ -35,7 +36,7 @@ and runs it attached to a REAL PTY with:
   kill-by-port logic would really SIGTERM the dummy and be caught,
 * stub ``launchctl``/``systemctl`` that LOG their invocations (and keep
   the REAL kiss-web service on the development machine safe),
-* a sandboxed ``$HOME`` so marker/socket files land in a tmp dir.
+* a sandboxed ``$HOME`` so marker/endpoint files land in a tmp dir.
 
 No mocks or patches — real bash, real tee, real PTY, real processes.
 """
@@ -119,7 +120,7 @@ def _build_sandbox(
     """
     home = tmp_path / "home"
     (home / ".kiss").mkdir(parents=True)
-    (home / ".kiss" / "sorcar.sock").write_bytes(b"")
+    (home / ".kiss" / "sorcar-local.json").write_bytes(b"{}")
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     project = tmp_path / "project"
@@ -407,7 +408,7 @@ def test_step_5_5_never_touches_kiss_web(tmp_path: Path) -> None:
 
     Even with a supervisor config whose binary exists and is executable
     (i.e. a restart WOULD succeed right now), the block must leave the
-    running daemon, its UDS socket file, and the supervisors alone.
+    running daemon, its local endpoint file, and the supervisors alone.
     Restarting kiss-web is owned by the extension's DependencyInstaller
     (``restartKissWebDaemon``) during extension installation/activation.
     """
@@ -419,10 +420,10 @@ def test_step_5_5_never_touches_kiss_web(tmp_path: Path) -> None:
         text = out.decode("utf-8", errors="replace")
         assert rc == 0, f"step [5/5] harness failed rc={rc}:\n{text}"
         os.kill(_dummy_daemon_pid(tmp_path), 0)
-        sock = tmp_path / "home" / ".kiss" / "sorcar.sock"
-        assert sock.exists(), (
-            "install.sh removed ~/.kiss/sorcar.sock — it must leave the "
-            "daemon's socket alone."
+        endpoint_file = tmp_path / "home" / ".kiss" / "sorcar-local.json"
+        assert endpoint_file.exists(), (
+            "install.sh removed ~/.kiss/sorcar-local.json — it must leave "
+            "the daemon's local endpoint file alone."
         )
         supervisor_log = tmp_path / "supervisor-calls.log"
         assert not supervisor_log.exists(), (

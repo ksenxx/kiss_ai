@@ -52,7 +52,7 @@ class TestSigtermFallbackWithoutThreads(unittest.TestCase):
         server = RemoteAccessServer(
             use_tunnel=False,
             url_file=tmp_dir / "remote-url.json",
-            uds_path=tmp_dir / "kiss.sock",
+            local_endpoint_file=tmp_dir / "sorcar-local.json",
         )
         loop = asyncio.new_event_loop()
         loop_thread = threading.Thread(target=loop.run_forever, daemon=True)

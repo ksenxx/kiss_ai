@@ -103,7 +103,7 @@ class _ServerHarness:
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp / "remote-url.json",
-            uds_path=tmp / "sorcar.sock",
+            local_endpoint_file=tmp / "sorcar-local.json",
             work_dir=str(self.work_dir),
         )
         self.loop = asyncio.new_event_loop()

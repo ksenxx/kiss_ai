@@ -28,9 +28,7 @@ delivers daemon events exactly like that) — and click the real pill.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 import threading
-import uuid
 from pathlib import Path
 
 import pytest
@@ -199,9 +197,7 @@ def _start_live_server(
     certfile = tmp_path / "cert.pem"
     keyfile = tmp_path / "key.pem"
     _generate_self_signed_cert(certfile, keyfile)
-    # macOS caps AF_UNIX paths at 104 bytes; pytest's tmp_path can
-    # exceed that, so the socket gets its own short temp name.
-    uds_path = Path(tempfile.gettempdir()) / f"kmdd-{uuid.uuid4().hex[:8]}.sock"
+    endpoint_file = tmp_path / "sorcar-local.json"
 
     async def scenario() -> None:
         server = RemoteAccessServer(
@@ -211,7 +207,7 @@ def _start_live_server(
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp_path / "remote-url.json",
-            uds_path=uds_path,
+            local_endpoint_file=endpoint_file,
         )
         started = False
         try:
@@ -230,7 +226,6 @@ def _start_live_server(
         finally:
             if started:
                 await server.stop_async()
-            uds_path.unlink(missing_ok=True)
 
     asyncio.run(scenario())
 

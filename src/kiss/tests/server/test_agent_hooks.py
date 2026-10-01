@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for agent-script ``llm_call_hook``/``tool_call_hook``.
 
-Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
-temporary Unix-domain socket (the :class:`DaemonRunApiHarness` from
+Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` with a
+temporary local endpoint file (the :class:`DaemonRunApiHarness` from
 ``test_append_basic_tools``) and drive ``kiss.server.sorcar.run``
 against it with an ``extension_agent_path`` agent script.  The only
 replaced boundary is the LLM itself: the per-session executor's
@@ -31,10 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.server import sorcar
-from kiss.tests.conftest import requires_unix_sockets
 from kiss.tests.server.test_append_basic_tools import DaemonRunApiHarness
-
-pytestmark = requires_unix_sockets
 
 
 class AgentScriptHooksApiTest(DaemonRunApiHarness):
@@ -128,7 +125,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=self._write_hooks_agent(),
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -159,7 +156,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             "task without hooks",
             work_dir=self.repo,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -206,7 +203,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
@@ -235,7 +232,7 @@ class AgentScriptHooksApiTest(DaemonRunApiHarness):
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
-            sock_path=self.sock_path,
+            endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is False

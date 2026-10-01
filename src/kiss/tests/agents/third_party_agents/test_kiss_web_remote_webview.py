@@ -5,9 +5,9 @@
 """E2E: a third-party agent launched via ``kiss.server.sorcar.run`` is
 visible and interactable from a remote webview.
 
-Wires up a real :class:`RemoteAccessServer` on a temporary UDS path
-(the same transport the production ``kiss-web`` daemon serves to
-browser/VS Code webviews), launches a
+Wires up a real :class:`RemoteAccessServer` with a temporary local
+endpoint (the same WSS transport the production ``kiss-web`` daemon
+serves to browser/VS Code webviews), launches a
 ``third_party_agents.slack_sea.SlackAgent`` through
 ``run_agent_via_kiss_web`` (i.e. through the ``kiss.server.sorcar.run``
 API against that daemon), and asserts:
@@ -42,6 +42,7 @@ from typing import Any, cast
 
 import yaml
 
+from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._kiss_web_launcher import (
@@ -50,17 +51,16 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
 from kiss.core import vscode_config
 from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
 STUB_SUMMARY = "remote webview stub done"
 
 
-@requires_unix_sockets
 class TestRemoteWebviewInteraction(unittest.TestCase):
     """Third-party agent tasks are open/interactable via remote webview.
 
-    The daemon under test is reached over its Unix-domain socket (the
-    launcher's private UDS), which Windows does not have.
+    The daemon under test is reached over its local WSS channel (the
+    launcher's private endpoint file).
     """
 
     def setUp(self) -> None:
@@ -69,7 +69,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         # when ``setUp`` itself fails partway, unlike ``tearDown``.
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-webview-")
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
+        self.endpoint_file = str(Path(self.tmpdir) / "sorcar-local.json")
         self.repo = str(Path(self.tmpdir) / "repo")
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         subprocess.run(
@@ -105,20 +105,15 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self.addCleanup(self._stop_loop)
 
         self.server = RemoteAccessServer(
-            uds_path=self.sock_path, work_dir=self.repo,
+            local_endpoint_file=self.endpoint_file, work_dir=self.repo,
         )
-        self.server._printer._loop = self.loop
-        self.server._loop = self.loop
 
-        self._viewer_writer: asyncio.StreamWriter | None = None
+        self._viewer_writer: LocalWriter | None = None
         self._reader_task: concurrent.futures.Future[None] | None = None
-        self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
-            asyncio.start_unix_server(
-                self.server._uds_handler, path=self.sock_path,
-            ),
-            self.loop,
-        ).result(timeout=5)
-        self.addCleanup(self._shutdown_uds_server)
+        asyncio.run_coroutine_threadsafe(
+            self.server.start_private_async(), self.loop,
+        ).result(timeout=30)
+        self.addCleanup(self._shutdown_server)
 
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
@@ -127,7 +122,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
     def _restore_run(self) -> None:
         self._parent_class.run = self._original_run
 
-    def _shutdown_uds_server(self) -> None:
+    def _shutdown_server(self) -> None:
         async def _shutdown() -> None:
             try:
                 if self._viewer_writer is not None:
@@ -135,15 +130,13 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                     await self._viewer_writer.wait_closed()
             except Exception:
                 pass
-            with self.server._printer._ws_lock:
-                writers = list(self.server._printer._uds_writers)
-            for writer in writers:
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-            self.uds_server.close()
-            await self.uds_server.wait_closed()
+            ws_server = self.server._ws_server
+            if ws_server is not None:
+                ws_server.close()
+                await ws_server.wait_closed()
+            local_endpoint.remove_endpoint_if_owned(
+                self.server._local_endpoint_file, self.server._local_token,
+            )
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -188,16 +181,14 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             vscode_config.CONFIG_PATH = saved_path
 
     def _open_viewer(self) -> tuple[
-        asyncio.StreamWriter, list[dict[str, Any]], threading.Event,
+        LocalWriter, list[dict[str, Any]], threading.Event,
     ]:
-        """Open a remote-webview UDS connection and drain its inbox."""
+        """Open a remote-webview local connection and drain its inbox."""
 
         async def _open() -> tuple[
-            asyncio.StreamReader, asyncio.StreamWriter,
+            LocalReader, LocalWriter,
         ]:
-            return await asyncio.open_unix_connection(
-                self.sock_path, limit=16 * 1024 * 1024,
-            )
+            return await open_local_connection(self.server)
 
         reader, writer = asyncio.run_coroutine_threadsafe(
             _open(), self.loop,
@@ -223,21 +214,21 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         )
         return writer, received, got
 
-    def _wait_for_uds_writer(
+    def _wait_for_local_client(
         self, expected_count: int, timeout: float = 5.0,
     ) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self.server._printer._ws_lock:
                 if len(
-                    self.server._printer._uds_writers
+                    self.server._printer._local_clients
                 ) >= expected_count:
                     return
             time.sleep(0.02)
-        raise AssertionError("UDS viewer connection never registered")
+        raise AssertionError("local viewer connection never registered")
 
     def _send_from_viewer(self, cmd: dict[str, Any]) -> None:
-        """Send a JSON command over the viewer's UDS connection."""
+        """Send a JSON command over the viewer's local connection."""
         writer = self._viewer_writer
         assert writer is not None
 
@@ -306,7 +297,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self._parent_class.run = stub_run
 
         _writer, received, _got = self._open_viewer()
-        self._wait_for_uds_writer(1)
+        self._wait_for_local_client(1)
 
         agent = SlackAgent()
         out: dict[str, Any] = {}
@@ -316,7 +307,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 agent,
                 "remote webview task",
                 work_dir=self.repo,
-                sock_path=self.sock_path,
+                endpoint_file=self.endpoint_file,
             )
 
         t = threading.Thread(target=launch, daemon=True)

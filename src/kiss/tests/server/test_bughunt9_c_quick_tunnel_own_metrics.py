@@ -118,7 +118,7 @@ class TestQuickTunnelPrefersOwnMetricsPort(unittest.TestCase):
                 host="127.0.0.1",
                 use_tunnel=False,
                 url_file=Path(tmp) / "remote-url.json",
-                uds_path=Path(tmp) / "sorcar.sock",
+                local_endpoint_file=Path(tmp) / "sorcar-local.json",
             )
             try:
                 url = srv._start_quick_tunnel()

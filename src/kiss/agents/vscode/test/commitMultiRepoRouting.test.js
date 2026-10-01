@@ -33,6 +33,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
+const {createFakeDaemon} = require('./fakeDaemon');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
@@ -44,17 +45,17 @@ assert.ok(
 );
 
 if (process.platform === 'win32') {
-  console.log('SKIP: UDS tests require a POSIX platform');
+  console.log('SKIP: local-endpoint test require a POSIX platform');
   process.exit(0);
 }
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-commit-multi-'));
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
+const endpointPath = path.join(tmpHome, '.kiss', 'sorcar-local.json');
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
-process.env.KISS_SORCAR_SOCK = sockPath;
+process.env.KISS_SORCAR_LOCAL = endpointPath;
 
 // Two repositories, side by side, the way a multi-root workspace or a
 // repo with a vendored sub-checkout looks to the git extension.
@@ -205,7 +206,7 @@ stubModule(path.join(OUT_DIR, 'DependencyInstaller.js'), {
   ensureDependencies: () => Promise.resolve(),
 });
 stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
-  isReloadReady: () => ({codeReady: false, socketUp: false, size: 0}),
+  isReloadReady: () => ({codeReady: false, daemonUp: false, size: 0}),
 });
 stubModule(path.join(OUT_DIR, 'kissPaths.js'), {
   findKissProject: () => path.join(tmpHome, 'kiss_project'),
@@ -230,7 +231,7 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
 // A real daemon: a real unix socket speaking the real line protocol.
 const daemonLines = [];
 let daemonSock = null;
-const server = net.createServer(sock => {
+const server = createFakeDaemon(sock => {
   daemonSock = sock;
   let buf = '';
   sock.on('data', d => {
@@ -271,7 +272,7 @@ async function waitFor(predicate, message, timeoutMs = 4000) {
 
 async function runTests() {
   await new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 
   delete require.cache[require.resolve(extensionPath)];

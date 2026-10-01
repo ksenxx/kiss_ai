@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Sorcar daemon transports: UDS vs local WSS</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><style>
+body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;color:#222;line-height:1.5}
+h1{font-size:1.7rem} h2{margin-top:2.5rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
+table{border-collapse:collapse;width:100%;font-size:.86rem;margin:1rem 0} th,td{border:1px solid #ddd;padding:.3rem .5rem;text-align:right}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left} thead th{background:#f4f4f4}
+code{background:#f4f4f4;padding:0 .25rem;border-radius:3px} figure{margin:1.5rem 0} figcaption{font-size:.85rem;color:#555}
+.note{background:#f8f6ee;border-left:4px solid #c9622b;padding:.6rem 1rem}
+</style></head>
+<body>
+<h1>Sorcar daemon transports: Unix socket vs local WSS</h1>
+<p>Measured with <code>scripts/transport_bench/run_bench.py</code> against one real
+<code>kiss-web</code> daemon serving both transports at once. $rounds measured rounds
+(after a discarded warm-up pass), transport order alternated each round; every number below is
+the median across rounds (peak RSS: the maximum). Python $python.</p>
+
+$findings
+
+<h2>What was measured</h2>
+<table><thead><tr><th>workload</th><th>what happens</th><th>latency reported</th></tr></thead><tbody>
+<tr><td><code>connect</code></td><td>$connects fresh connections; WSS includes TCP + TLS + WebSocket upgrade + <code>auth</code> handshake, UDS only <code>connect(2)</code></td><td>connect start → first <code>pong</code></td></tr>
+<tr><td><code>ping</code></td><td>$pings sequential <code>ping</code> → <code>pong</code> on one persistent connection</td><td>round trip</td></tr>
+<tr><td><code>models</code></td><td>$models_reqs sequential <code>getModels</code> → <code>models</code> (multi-KB catalog reply)</td><td>round trip</td></tr>
+<tr><td><code>burst_c&lt;C&gt;_b&lt;B&gt;_g&lt;G&gt;</code></td><td>the daemon broadcasts $burst_events events of ≈B bytes from a worker thread (as agent threads emit tokens) to C connected clients, G µs apart (G=0: as fast as possible)</td><td>one-way, daemon emit → client parse (shared <code>CLOCK_MONOTONIC</code>)</td></tr>
+<tr><td><code>task_n&lt;N&gt;_g&lt;G&gt;_v&lt;V&gt;</code></td><td>a real agent task in the daemon; a stand-in model streams N text chunks of $chunk_chars chars G µs apart, then calls <code>finish</code>; V extra connections watch the same stream</td><td>one-way per <code>text_delta</code></td></tr>
+</tbody></table>
+<p>CPU: the daemon reports <code>time.process_time_ns()</code> (all threads) at the start and end of each
+measured window; the window opens after the workload's connections are established and closes before they are
+torn down (for <code>connect</code> the setup is the workload). "µs/round trip" and "µs/event" divide the daemon's
+CPU by the replies or delivered stream events in the window; lifecycle events such as <code>status</code> are not
+counted. Memory: <code>VmRSS</code>/<code>VmHWM</code> from <code>/proc</code>, peak reset at window start, and
+"peak" is the largest of the high-water mark and the before/after RSS readings (procfs RSS counters are per-thread
+cached estimates). Client CPU is the benchmark process's own <code>getrusage</code>.
+Daemon idle reference (no clients connected, 2 s, measured before each transport's pass): </p>
+<table><thead><tr><th>transport measured next</th><th>daemon CPU %</th><th>RSS</th></tr></thead><tbody>$idle_rows</tbody></table>
+
+<h2>Charts</h2>
+$figs
+
+<h2>Command round trips</h2>
+$rr_table
+<h2>Broadcast bursts</h2>
+$burst_table
+<h2>Real streamed agent tasks</h2>
+$task_table
+
+<h2>Caveats</h2>
+<ul>
+<li>Same machine, loopback TLS, self-signed certificate; a real remote client adds network latency that dwarfs every number here.</li>
+<li>The WSS client is the Python <code>websockets</code> library, not a browser. Browsers also negotiate permessage-deflate, so <code>wss</code> is the closer analogue; <code>wss-nocomp</code> isolates TLS + framing from compression.</li>
+<li>The daemon's CPU during real tasks includes the agent itself (model call, persistence, printer), which is identical across transports; the differences are the transport share.</li>
+<li>Flood latencies are queueing delay behind earlier events in the same burst, so they measure throughput, not idle-path latency; the paced bursts and paced tasks measure the latter.</li>
+<li>Percentiles are nearest-rank over each round's samples, then the median across $rounds rounds on a shared 80-core host; p99 and max are sensitive to scheduler noise.</li>
+<li>The stand-in model emits fixed 40-character chunks, not real tokens; "per chunk" figures are per streamed <code>text_delta</code> event.</li>
+</ul>
+<p><small>Raw data: <code>$results_path</code> (regenerate with <code>uv run python scripts/transport_bench/run_bench.py</code>, render with <code>scripts/transport_bench/report.py</code>).</small></p>
+</body></html>

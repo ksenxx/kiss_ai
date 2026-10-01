@@ -116,7 +116,7 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=Path(self.tmpdir) / "sorcar.sock",
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         await self.server.start_async()
         self._sockets: list[ClientConnection] = []

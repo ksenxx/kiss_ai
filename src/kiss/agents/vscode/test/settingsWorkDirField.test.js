@@ -200,7 +200,8 @@ function testRemoteInstancePrefersItsOwnPin() {
     'a page that already pinned a folder must not re-adopt the one ' +
       'another instance happened to store last',
   );
-  // And it scopes its shared tabs by its OWN pin, not the stored value.
+  // The pin never filters the shared tab bar: every registry tab is
+  // shown on every surface, whatever folder it runs in.
   send(win, {
     type: 'tabs_state',
     tabs: [
@@ -210,8 +211,8 @@ function testRemoteInstancePrefersItsOwnPin() {
   });
   assert.deepStrictEqual(
     tabBarIds(win),
-    ['mine-1'],
-    'the tab bar shows the tabs of the pinned folder only',
+    ['mine-1', 'other-1'],
+    'the tab bar shows every registry tab regardless of the pin',
   );
   win.close();
   console.log('  ok - a pinned web client keeps its own working directory');
@@ -230,7 +231,11 @@ function testRemoteInstanceAdoptsStoredWorkDirWhenUnpinned() {
     type: 'tabs_state',
     tabs: [tabEntry('p-1', '/srv/project'), tabEntry('q-1', '/srv/other')],
   });
-  assert.deepStrictEqual(tabBarIds(win), ['p-1'], 'and scopes by it');
+  assert.deepStrictEqual(
+    tabBarIds(win),
+    ['p-1', 'q-1'],
+    'and still shows every registry tab: the pin is where tasks run, not a filter',
+  );
   win.close();
   console.log('  ok - an unpinned web client adopts the stored directory');
 }

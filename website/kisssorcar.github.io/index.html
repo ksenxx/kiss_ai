@@ -161,12 +161,17 @@
 
     .hero-mark, .screenshot { max-width: 960px; margin-left: auto; margin-right: auto; }
     .hero-mark { margin-bottom: 1.5rem; }
-    /* The logo PNG has a transparent background, so the artwork blends
-       seamlessly with the page in both themes; a soft drop-shadow lifts it. */
+    /* Two transparent-background logos, same pair as the VS Code / remote
+       welcome page: navy wordmark for the light theme, light wordmark for
+       the dark theme. Selected by html[data-theme] (not prefers-color-scheme)
+       so the logo follows the site's own theme toggle. */
     .hero-logo {
       display: block; width: 100%; height: auto;
       filter: drop-shadow(0 6px 24px rgba(25,118,210,0.14));
     }
+    .hero-logo-dark { display: none; }
+    html[data-theme="dark"] .hero-logo-light { display: none; }
+    html[data-theme="dark"] .hero-logo-dark { display: block; }
 
     .hero-quote { margin: 1.5rem auto 0; max-width: 640px; text-align: center; }
     .hero-quote blockquote {
@@ -1952,7 +1957,8 @@
   <div class="hero">
     <canvas id="magic-dust" aria-hidden="true"></canvas>
     <div class="hero-mark">
-      <img src="assets/KISS-Sorcar.png" alt="KISS Sorcar" class="hero-logo">
+      <img src="assets/KISS-Sorcar.png" alt="KISS Sorcar" class="hero-logo hero-logo-light">
+      <img src="assets/KISS-Sorcar-Dark.png" alt="KISS Sorcar" class="hero-logo hero-logo-dark">
       <figure class="hero-quote">
         <blockquote>Everything should be made as simple as possible, but not simpler.</blockquote>
         <figcaption>&mdash; Albert Einstein</figcaption>
@@ -3079,7 +3085,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
               <div class="l">embedding models</div>
             </div>
           </div>
-          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#models-supported">full per-provider model list</a> in the README, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
+          <p style="margin-top:0.9rem;font-size:0.88rem;">See the <a href="https://github.com/ksenxx/kiss_ai/blob/main/MODELS.md">full per-provider model list</a> in MODELS.md, including the <code>cc/*</code> and <code>codex/*</code> namespaces that let KISS Sorcar run on top of the Claude Code and Codex CLIs.</p>
         </div>
       </div>
     </div>

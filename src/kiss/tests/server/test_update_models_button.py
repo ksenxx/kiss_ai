@@ -13,8 +13,8 @@ $KISS_HOME/MODEL_INFO.json`` as a detached subprocess logging to
 ``~/.kiss/update_models.log``, guards against concurrent runs, and
 reports the exit to the clicking window only.
 
-Every test drives the REAL :class:`RemoteAccessServer` over its UDS
-protocol (same harness as
+Every test drives the REAL :class:`RemoteAccessServer` over its local
+WSS channel (same harness as
 ``test_audit0902_fix2_vscode_update_exit_report``) with the updater argv
 pointed at real stub scripts — no mocks or doubles.
 """
@@ -34,7 +34,7 @@ from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import requires_unix_sockets
+from kiss.tests.local_ws import open_local_connection
 
 SUCCEEDING_UPDATER = """
 import sys
@@ -86,20 +86,19 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(certfile, keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=_find_free_port(),
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=Path(self.tmpdir) / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=Path(self.tmpdir) / "sorcar-local.json",
         )
         self.log_path = Path(self.tmpdir) / "update_models.log"
         self.server._update_models_log_path = self.log_path
         self.release = Path(self.tmpdir) / "release"
         await self.server.start_async()
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[Any] = []
 
     async def asyncTearDown(self) -> None:
         self.release.write_text("")
@@ -127,27 +126,27 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         script.write_text(body)
         self.server._update_models_argv = [sys.executable, str(script)]
 
-    async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+    async def _connect(self) -> tuple[Any, Any]:
+        reader, writer = await open_local_connection(
+            self.server, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         return reader, writer
 
-    async def _send(self, writer: asyncio.StreamWriter, cmd: dict[str, Any]) -> None:
+    async def _send(self, writer: Any, cmd: dict[str, Any]) -> None:
         writer.write(json.dumps(cmd).encode("utf-8") + b"\n")
         await writer.drain()
 
     async def _drain_until(
         self,
-        reader: asyncio.StreamReader,
+        reader: Any,
         predicate: Callable[[dict[str, Any]], bool],
         max_events: int = 100,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         for _ in range(max_events):
             line = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            assert line, "UDS closed unexpectedly"
+            assert line, "local connection closed unexpectedly"
             msg = json.loads(line.decode("utf-8"))
             assert isinstance(msg, dict)
             if predicate(msg):
@@ -155,7 +154,7 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         raise AssertionError(f"predicate never matched within {max_events} events")
 
     async def _banners_before_probe(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self, reader: Any, writer: Any,
     ) -> list[dict[str, Any]]:
         """Return the notice/error events queued on a window before a probe."""
         await self._send(writer, {"type": "activeTasksQuery"})
@@ -176,7 +175,6 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.025)
         raise AssertionError("updater never spawned")
 
-    @requires_unix_sockets
     async def test_success_notifies_the_clicking_window_only(self) -> None:
         self._updater_stub(SUCCEEDING_UPDATER)
         reader_a, writer_a = await self._connect()
@@ -196,7 +194,6 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         # The other window saw none of it.
         self.assertEqual(await self._banners_before_probe(reader_b, writer_b), [])
 
-    @requires_unix_sockets
     async def test_failure_reports_the_exit_code_and_log_path(self) -> None:
         self._updater_stub(FAILING_UPDATER)
         reader_a, writer_a = await self._connect()
@@ -209,7 +206,6 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIn(str(self.log_path), text)
         self.assertIn("boom", self.log_path.read_text())
 
-    @requires_unix_sockets
     async def test_second_click_while_running_is_refused(self) -> None:
         self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
         reader_a, writer_a = await self._connect()
@@ -230,7 +226,6 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         done = await self._drain_until(reader_a, _has_type("notice"))
         self.assertIn("complete", str(done.get("text", "")))
 
-    @requires_unix_sockets
     async def test_spawn_failure_is_reported_and_starts_no_watcher(self) -> None:
         self._updater_stub(SUCCEEDING_UPDATER)
         blocker = Path(self.tmpdir) / "not-a-dir"
@@ -247,7 +242,6 @@ class TestUpdateModelsCommand(IsolatedAsyncioTestCase):
         self.assertIsNone(self.server._update_models_watch_task)
         self.assertFalse(self.server._update_models_starting)
 
-    @requires_unix_sockets
     async def test_stop_cancels_a_pending_watcher(self) -> None:
         self._updater_stub(HELD_UPDATER.format(release=str(self.release)))
         reader_a, writer_a = await self._connect()

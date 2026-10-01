@@ -14,7 +14,7 @@ and announced too.  The consumer must claim the marker atomically,
 validate its JSON and only then schedule the toast.
 
 Each test pre-creates a marker of one kind next to the url file,
-starts a real daemon, connects a real UDS client and observes whether
+starts a real daemon, connects a real local client and observes whether
 the toast is broadcast (a probe command bounds the wait).
 """
 
@@ -34,7 +34,8 @@ from unittest import IsolatedAsyncioTestCase, skipIf
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as web_server_mod
 from kiss.server.web_server import RemoteAccessServer, _generate_self_signed_cert
-from kiss.tests.conftest import is_root, posix_only, requires_unix_sockets
+from kiss.tests.conftest import is_root, posix_only
+from kiss.tests.local_ws import LocalWriter, open_local_connection
 
 _VALID_MARKER = json.dumps({"requested_at": 0.0, "conn_id": ""})
 
@@ -45,7 +46,6 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-@requires_unix_sockets
 class TestResetMarkerClaim(IsolatedAsyncioTestCase):
     """Only a claimed, valid marker produces the restart-complete toast."""
 
@@ -65,9 +65,9 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         self.certfile = Path(self.tmpdir) / "cert.pem"
         self.keyfile = Path(self.tmpdir) / "key.pem"
         _generate_self_signed_cert(self.certfile, self.keyfile)
-        self.uds_path = Path(self.tmpdir) / "sorcar.sock"
+        self.endpoint_file = Path(self.tmpdir) / "sorcar-local.json"
         self.server: RemoteAccessServer | None = None
-        self._writers: list[asyncio.StreamWriter] = []
+        self._writers: list[LocalWriter] = []
 
     async def asyncTearDown(self) -> None:
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = self._saved_delay
@@ -92,7 +92,7 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
             certfile=str(self.certfile),
             keyfile=str(self.keyfile),
             url_file=self.url_dir / "remote-url.json",
-            uds_path=self.uds_path,
+            local_endpoint_file=self.endpoint_file,
         )
         await self.server.start_async()
         return self.server
@@ -104,8 +104,8 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         present 0.1 s after startup; a ``activeTasksQuery`` probe sent
         well after that bounds the read loop.
         """
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path), limit=16 * 1024 * 1024,
+        reader, writer = await open_local_connection(
+            self.endpoint_file, limit=16 * 1024 * 1024,
         )
         self._writers.append(writer)
         await asyncio.sleep(0.6)
@@ -115,7 +115,7 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         await writer.drain()
         for _ in range(200):
             line = await asyncio.wait_for(reader.readline(), timeout=10.0)
-            self.assertTrue(line, "UDS closed unexpectedly")
+            self.assertTrue(line, "local connection closed unexpectedly")
             msg: dict[str, Any] = json.loads(line.decode("utf-8"))
             if (
                 msg.get("type") == "notification"
