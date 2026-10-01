@@ -20,6 +20,7 @@ uses a real ``diff.external`` helper that hangs.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import time
@@ -152,21 +153,36 @@ def test_stdout_head_watchdog_kills_a_hung_git_and_reports_truncation(
     _git(repo, "add", "README.md")
     hang = tmp_path / "hang.sh"
     hang.write_text(
-        "#!/bin/sh\necho PARTIAL-LINE\necho more\nsleep 30\n", encoding="utf-8", newline="\n",
+        '#!/bin/sh\n[ -n "$HANG_WARM_UP" ] && exit 0\n'
+        "echo PARTIAL-LINE\necho more\nsleep 30\n",
+        encoding="utf-8",
+        newline="\n",
     )
     hang.chmod(0o755)
-    started = time.monotonic()
     # git hands diff.external to its POSIX shell (Git bash on Windows), where
     # a native ``C:\...`` path loses its backslashes: use forward slashes.
+    external = f"diff.external={hang.as_posix()}"
+    # Run the helper once before timing: macOS assesses a freshly written
+    # executable on its first exec (0.1-0.7 s measured), which with the
+    # 0.5 s watchdog below used to kill git before the helper had printed
+    # anything, so the test saw "" instead of the partial output.
+    subprocess.run(
+        ["git", "-c", external, "diff", "--cached"],
+        cwd=str(repo), check=True, capture_output=True,
+        env={**os.environ, "HANG_WARM_UP": "1"},
+    )
+    started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="kiss.agents.sorcar.git_worktree"):
         text, truncated = _git_stdout_head(
-            "-c", f"diff.external={hang.as_posix()}", "diff", "--cached",
-            cwd=repo, max_bytes=10_000, timeout=0.5,
+            "-c", external, "diff", "--cached", cwd=repo, max_bytes=10_000, timeout=0.5,
         )
     assert time.monotonic() - started < 10
     assert truncated is True
     assert text == "PARTIAL-LINE\nmore"
-    assert any("timed out after" in r.getMessage() for r in caplog.records)
+    # The message names the timeout that fired, not the module default.
+    assert any("timed out after 0.5s" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
 
 
 def test_has_staged_changes_reports_git_failures(

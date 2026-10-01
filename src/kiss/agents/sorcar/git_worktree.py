@@ -461,11 +461,14 @@ def _kill_git(proc: subprocess.Popen[Any]) -> None:
 
 
 def _kill_git_on_timeout(
-    proc: subprocess.Popen[Any], args: tuple[str, ...], timed_out: threading.Event,
+    proc: subprocess.Popen[Any],
+    args: tuple[str, ...],
+    timed_out: threading.Event,
+    timeout: float,
 ) -> None:
     """Watchdog callback of :func:`_git_stdout_head`: record and kill."""
     timed_out.set()
-    logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
+    logger.warning("git %s timed out after %ss", args, timeout)
     _kill_git(proc)
 
 
@@ -506,7 +509,9 @@ def _git_stdout_head(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env,
     )
     timed_out = threading.Event()
-    timer = threading.Timer(timeout, _kill_git_on_timeout, args=(proc, args, timed_out))
+    timer = threading.Timer(
+        timeout, _kill_git_on_timeout, args=(proc, args, timed_out, timeout),
+    )
     timer.daemon = True
     timer.start()
     stdout = proc.stdout
