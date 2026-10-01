@@ -698,7 +698,11 @@ async def _park_until_stopped(
     killed, crashed, or restarted: the task stays parked, ``session``
     stays set, and every later tool call blocks on the dead transport
     until ``CALL_TIMEOUT``.  Pinging while idle turns that into a prompt
-    error, which the manager turns into a reconnect.
+    error, which the manager turns into a reconnect.  No ping is sent
+    while a call is in flight: a server whose loop is busy in a long
+    sync tool handler cannot answer the ping, and failing it would tear
+    the session down under a valid call (a dead server is caught by the
+    call's own ``CALL_TIMEOUT``).
 
     Args:
         conn: The connection being maintained.
@@ -714,6 +718,8 @@ async def _park_until_stopped(
             await asyncio.wait_for(conn.stop.wait(), timeout=health_interval)
             return
         except TimeoutError:
+            if conn.in_flight:
+                continue
             await asyncio.wait_for(session.send_ping(), timeout=health_interval)
 
 
@@ -1103,8 +1109,10 @@ class MCPManager:
             if self._shut_down:
                 return
             self._shut_down = True
-        if not self._loop.is_running():
-            return
+        # No ``is_running()`` guard: right after construction the loop
+        # thread may not have entered ``run_forever`` yet, and a stop
+        # scheduled on a not-yet-running loop still takes effect as soon
+        # as it starts, so the thread never outlives this call.
         self.disconnect_all()
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)

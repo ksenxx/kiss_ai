@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -28,10 +27,6 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.gdocs.gdocs_sea as gdocs_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.gdocs.gdocs_sea import (
     _SERVICE,
     GoogleDocsAgent,
@@ -43,6 +38,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = TOKEN
 
@@ -91,9 +87,7 @@ _DOCUMENT = {
                                     "content": [
                                         {
                                             "paragraph": {
-                                                "elements": [
-                                                    {"textRun": {"content": "Cell A\n"}}
-                                                ]
+                                                "elements": [{"textRun": {"content": "Cell A\n"}}]
                                             }
                                         }
                                     ]
@@ -102,9 +96,7 @@ _DOCUMENT = {
                                     "content": [
                                         {
                                             "paragraph": {
-                                                "elements": [
-                                                    {"textRun": {"content": "Cell B\n"}}
-                                                ]
+                                                "elements": [{"textRun": {"content": "Cell B\n"}}]
                                             }
                                         }
                                     ]
@@ -133,11 +125,7 @@ _TABBED_DOCUMENT = {
             "documentTab": {
                 "body": {
                     "content": [
-                        {
-                            "paragraph": {
-                                "elements": [{"textRun": {"content": "Tab one.\n"}}]
-                            }
-                        }
+                        {"paragraph": {"elements": [{"textRun": {"content": "Tab one.\n"}}]}}
                     ]
                 }
             },
@@ -149,9 +137,7 @@ _TABBED_DOCUMENT = {
                             "content": [
                                 {
                                     "paragraph": {
-                                        "elements": [
-                                            {"textRun": {"content": "Child tab.\n"}}
-                                        ]
+                                        "elements": [{"textRun": {"content": "Child tab.\n"}}]
                                     }
                                 }
                             ]
@@ -165,11 +151,7 @@ _TABBED_DOCUMENT = {
             "documentTab": {
                 "body": {
                     "content": [
-                        {
-                            "paragraph": {
-                                "elements": [{"textRun": {"content": "Tab two.\n"}}]
-                            }
-                        }
+                        {"paragraph": {"elements": [{"textRun": {"content": "Tab two.\n"}}]}}
                     ]
                 }
             },
@@ -205,7 +187,7 @@ class _DocsRequestHandler(BaseHTTPRequestHandler):
 
     def _record(self, body: Any) -> None:
         parsed = urlparse(self.path)
-        cast(_DocsServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": parsed.path,
@@ -273,31 +255,17 @@ class _DocsRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _DocsServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _DocsRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def docs_server():
-    """Start the emulated Docs/Drive server on a free port; yield (base_url, server)."""
-    server = _DocsServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Docs/Drive server on a free port; yield the recording server."""
+    yield from serve_recording(_DocsRequestHandler)
 
 
 @pytest.fixture()
 def backend(docs_server, composio):
     """A connected backend pointed at the emulated server."""
-    base_url, server = docs_server
+    server = docs_server
+    base_url = server.base_url
     connect(composio, _SERVICE)
     b = GoogleDocsChannelBackend()
     b._base_url = base_url
@@ -464,9 +432,7 @@ def test_insert_text(backend) -> None:
     result = json.loads(b.gdocs_insert_text("doc123", "hi", 7))
     assert result == {"ok": True, "document_id": "doc123"}
     req = server.requests[-1]
-    assert req["body"] == {
-        "requests": [{"insertText": {"location": {"index": 7}, "text": "hi"}}]
-    }
+    assert req["body"] == {"requests": [{"insertText": {"location": {"index": 7}, "text": "hi"}}]}
 
 
 def test_batch_update(backend) -> None:
@@ -510,8 +476,7 @@ def test_list_documents_escapes_query(backend) -> None:
     assert result["ok"] is True
     req = server.requests[-1]
     assert req["query"]["q"] == [
-        "mimeType='application/vnd.google-apps.document'"
-        " and name contains 'Bob\\'s plan'"
+        "mimeType='application/vnd.google-apps.document' and name contains 'Bob\\'s plan'"
     ]
     assert req["query"]["pageSize"] == ["5"]
 

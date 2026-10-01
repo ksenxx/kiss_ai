@@ -5,7 +5,7 @@
 """End-to-end tests for Muse-auth on Slack, Firecrawl, and Brave Search.
 
 SEA style, mirroring ``test_muse_auth.py``: a REAL Muse-auth daemon
-subprocess plus a REAL local HTTP server (stdlib ``ThreadedHTTPServer``)
+subprocess plus a REAL local HTTP server (``RecordingServer``)
 emulating the Slack / Firecrawl / Brave Search REST APIs — no mocks,
 patches, or fakes.  The emulated API asserts every request arriving at
 the "network" carries the REAL credential in the right header (proving
@@ -49,7 +49,7 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import ThreadedHTTPServer, stop_http_server
+from kiss.agents.third_party_agents._backend_utils import stop_http_server
 from kiss.agents.third_party_agents.brave.brave_sea import BraveSearchChannelBackend
 from kiss.agents.third_party_agents.brave.brave_sea import _config as brave_config
 from kiss.agents.third_party_agents.firecrawl.firecrawl_sea import FirecrawlChannelBackend
@@ -83,6 +83,7 @@ from kiss.tests.agents.third_party_agents.muse_test_utils import (
     setup_muse_env,
     teardown_muse_env,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 from kiss.tests.agents.third_party_agents.slack_oauth_test_utils import (
     CLIENT_ID,
     SlackOAuthState,
@@ -136,9 +137,7 @@ class _ApiHandler(BaseHTTPRequestHandler):
             content_type = "application/gzip"
         else:
             port = self.server.server_address[1]
-            upload_url = (
-                self.server.upload_url_override or f"http://127.0.0.1:{port}/upload/file"
-            )
+            upload_url = self.server.upload_url_override or f"http://127.0.0.1:{port}/upload/file"
             payload = json.dumps(
                 {
                     "ok": True,
@@ -178,12 +177,11 @@ class _ApiHandler(BaseHTTPRequestHandler):
         """Silence request logging."""
 
 
-class _ApiServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records requests for verification."""
+class _ApiServer(RecordingServer):
+    """Recording server with per-test behaviour knobs."""
 
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _ApiHandler)
-        self.requests: list[dict[str, Any]] = []
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
         # When set, files.getUploadURLExternal replies point uploads at
         # this URL instead of this server (rogue-host upload tests).
         self.upload_url_override: str = ""
@@ -193,28 +191,11 @@ class _ApiServer(ThreadedHTTPServer):
         # Slack's oauth.v2.access token endpoint (sign-in and refresh).
         self.oauth = SlackOAuthState()
 
-    def header(self, name: str, index: int = -1) -> str:
-        """Return a recorded request header (case-insensitive).
-
-        Args:
-            name: Header name.
-            index: Which recorded request to inspect (default: last).
-
-        Returns:
-            The header value, or ``""`` when absent.
-        """
-        headers = self.requests[index]["headers"]
-        return next((v for k, v in headers.items() if k.lower() == name.lower()), "")
-
 
 @pytest.fixture()
 def api_server() -> Any:
     """Run the emulated REST API on a loopback port."""
-    server = _ApiServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    stop_http_server(server, thread)
+    yield from serve_recording(_ApiHandler, _ApiServer)
 
 
 @pytest.fixture()
@@ -611,13 +592,11 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
 
     # A rogue upload URL on an unallowlisted host is refused BEFORE any
     # content leaves the machine.
-    rogue = _ApiServer(("127.0.0.2", 0))
+    rogue = _ApiServer(("127.0.0.2", 0), _ApiHandler)
     rogue_thread = threading.Thread(target=rogue.serve_forever, daemon=True)
     rogue_thread.start()
     try:
-        api_server.upload_url_override = (
-            f"http://127.0.0.2:{rogue.server_address[1]}/upload/steal"
-        )
+        api_server.upload_url_override = f"http://127.0.0.2:{rogue.server_address[1]}/upload/steal"
         with pytest.raises(SlackRequestError, match="Failed to upload"):
             backend.upload_file("C1", "TOP SECRET CONTENT", "secret.txt")
         assert rogue.requests == []
@@ -626,9 +605,7 @@ def test_slack_upload_goes_through_boundary(muse_env: Path, api_server: _ApiServ
         # host must not be followed: the redirect keeps the POST body,
         # so following it would ship the content off the allowlist.
         api_server.upload_url_override = ""
-        api_server.upload_redirect_to = (
-            f"http://127.0.0.2:{rogue.server_address[1]}/upload/stolen"
-        )
+        api_server.upload_redirect_to = f"http://127.0.0.2:{rogue.server_address[1]}/upload/stolen"
         with pytest.raises(SlackRequestError, match="carry the request body"):
             backend.upload_file("C1", "TOP SECRET CONTENT", "secret.txt")
         assert rogue.requests == []
@@ -807,9 +784,7 @@ def test_slack_unreachable_api_stores_nothing(
     assert agent._backend._client is None
 
 
-def test_firecrawl_base_url_survives_key_removal(
-    muse_env: Path, api_server: _ApiServer
-) -> None:
+def test_firecrawl_base_url_survives_key_removal(muse_env: Path, api_server: _ApiServer) -> None:
     """Removing api_key after migration keeps the self-hosted base_url."""
     base_url = f"http://127.0.0.1:{api_server.server_address[1]}/proxy/firecrawl"
     firecrawl_config.save({"api_key": _REAL_FIRECRAWL_KEY, "base_url": base_url})
@@ -915,8 +890,7 @@ def test_store_credentials_validation(muse_env: Path) -> None:
     clear_credentials("firecrawl")
 
 
-def test_cli_import_slack_and_token_services(muse_env: Path,
-                                             capsys: pytest.CaptureFixture) -> None:
+def test_cli_import_slack_and_token_services(muse_env: Path, capsys: pytest.CaptureFixture) -> None:
     """The CLI migrates slack/firecrawl/brave_search legacy credentials."""
     # slack: default workspace token file is migrated and deleted.
     assert muse_cli.main(["import", "slack"]) == 1  # no legacy token yet
@@ -948,8 +922,9 @@ def test_cli_import_slack_and_token_services(muse_env: Path,
         assert service in status_out
 
 
-def test_legacy_mode_untouched(isolated_kiss_home: Path, api_server: _ApiServer,
-                               monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_mode_untouched(
+    isolated_kiss_home: Path, api_server: _ApiServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """With KISS_MUSE_AUTH=0 the connectors use plaintext directly."""
     from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent, _make_backend
 

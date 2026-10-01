@@ -362,9 +362,8 @@ def is_root_dir(path: str) -> bool:
     Root-equivalent spellings (``/./``, ``/..``, ``C:\\.\\``) are
     normalized before the check so they cannot slip past a literal
     comparison.  Windows UNC roots (``\\\\server\\share``) are NOT
-    detected: the daemon serves a POSIX filesystem (its transport is a
-    Unix-domain socket), where a double-slash prefix is a legal path,
-    so classifying it as a root would blank legitimate directories.
+    detected: on POSIX a double-slash prefix is a legal path, so
+    classifying it as a root would blank legitimate directories.
 
     Args:
         path: The candidate directory path (any string).

@@ -1601,8 +1601,12 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
+        # One snapshot for both the text and the structured fields, so a
+        # reclaim landing between two reads cannot make them disagree.
         budget, tokens, steps = self.usage_snapshot()
-        net_budget, net_tokens, net_steps = self._usage_net_of_printer_offsets()
+        net_budget, net_tokens, net_steps = self._usage_net_of_printer_offsets(
+            (budget, tokens, steps),
+        )
         self.printer.print(
             f"Steps: {steps}/{self.max_steps}, Total tokens: {tokens:,}, "
             f"Budget: ${budget:.4f}/${self.max_budget:.2f}, ",
@@ -1612,7 +1616,9 @@ class RelentlessAgent(Base):
             total_steps=net_steps,
         )
 
-    def _usage_net_of_printer_offsets(self) -> tuple[float, int, int]:
+    def _usage_net_of_printer_offsets(
+        self, snapshot: tuple[float, int, int] | None = None,
+    ) -> tuple[float, int, int]:
         """Return this task's cumulative ``(budget, tokens, steps)`` minus the printer offsets.
 
         The printer adds its per-task offsets to every event's totals,
@@ -1622,6 +1628,10 @@ class RelentlessAgent(Base):
         them around the print, and an asynchronously injected stop
         could skip the restoration (round-4 finding 5).
 
+        Args:
+            snapshot: A :meth:`usage_snapshot` triple already taken by
+                the caller; a fresh one is taken when ``None``.
+
         Returns:
             The net ``(budget, tokens, steps)`` triple.
         """
@@ -1630,7 +1640,7 @@ class RelentlessAgent(Base):
         steps_offset = int(getattr(self.printer, "steps_offset", 0) or 0)
         # One coherent triple (see usage_snapshot): three separate
         # property reads could tear across a concurrent bank.
-        budget, tokens, steps = self.usage_snapshot()
+        budget, tokens, steps = snapshot if snapshot is not None else self.usage_snapshot()
         return budget - budget_offset, tokens - tokens_offset, steps - steps_offset
 
     def run(

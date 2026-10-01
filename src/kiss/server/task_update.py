@@ -385,11 +385,14 @@ class TaskUpdateRunner:
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             log.warning("task update for %s failed", task_id, exc_info=True)
-        with self._lock:
-            upd = self._updates.setdefault(task_id, TaskUpdate())
-            if text:
-                upd.text = text
-            upd.error = error
-            upd.cost = cost
-            upd.running = False
-            upd.finished_at = time.time()
+        finally:
+            # Also on a BaseException: a report pinned on ``running``
+            # would never be restarted by ``poll`` nor pruned.
+            with self._lock:
+                upd = self._updates.setdefault(task_id, TaskUpdate())
+                if text:
+                    upd.text = text
+                upd.error = error
+                upd.cost = cost
+                upd.running = False
+                upd.finished_at = time.time()

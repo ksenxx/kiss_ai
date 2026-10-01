@@ -12,7 +12,7 @@ one CLI invocation instead of driving a turn-by-turn KISS tool loop:
 - exactly one CLI subprocess is spawned for the whole run;
 - the system prompt reaches ``claude`` as ``--append-system-prompt`` and
   ``codex`` (whose CLI has no such flag) appended to the task after
-  ``CLI_SYSTEM_PROMPT_HEADER`` (``"\\n\\n# You new system prompt
+  ``CLI_SYSTEM_PROMPT_HEADER`` (``"\\n\\n# Your new system prompt
   follows:\\n"``) — never a ``--system-prompt`` flag or ``[System]:`` prefix;
 - KISS tool descriptions are never injected into the prompt;
 - the CLI's final message is returned wrapped in the registered ``finish``
@@ -173,7 +173,7 @@ def test_agentic_run_is_single_shot_with_appended_system_prompt(
     assert len(calls) == 1, "the whole task must run in exactly one CLI invocation"
     prompt = calls[0]["prompt"]
     argv = calls[0]["argv"]
-    assert CLI_SYSTEM_PROMPT_HEADER == "\n\n# You new system prompt follows:\n"
+    assert CLI_SYSTEM_PROMPT_HEADER == "\n\n# Your new system prompt follows:\n"
     if cli_name == "claude":
         assert prompt == TASK
         assert argv[argv.index("--append-system-prompt") + 1] == SYSTEM_PROMPT

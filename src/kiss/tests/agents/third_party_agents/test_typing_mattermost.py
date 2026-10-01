@@ -12,13 +12,19 @@ actual wire behavior with no mocks or test doubles.
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from http.server import BaseHTTPRequestHandler
+from typing import Any, cast
 
 import pytest
 
 from kiss.agents.third_party_agents.mattermost.mattermost_sea import MattermostChannelBackend
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
+
+
+class _MattermostServer(RecordingServer):
+    """Recording server whose POST reply status the test can set."""
+
+    response_status = 200
 
 
 class _RecordingHandler(BaseHTTPRequestHandler):
@@ -28,10 +34,11 @@ class _RecordingHandler(BaseHTTPRequestHandler):
         """Record the POST request and respond with the configured status."""
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode() if length else ""
-        self.server.requests.append(  # type: ignore[attr-defined]
-            ("POST", self.path, body, dict(self.headers))
+        server = cast(_MattermostServer, self.server)
+        server.requests.append(
+            {"method": "POST", "path": self.path, "body": body, "headers": dict(self.headers)}
         )
-        status = self.server.response_status  # type: ignore[attr-defined]
+        status = server.response_status
         payload = json.dumps({"status": "OK" if status == 200 else "error"}).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -46,46 +53,34 @@ class _RecordingHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def mm_server():
     """Start a recording HTTP server that mimics the Mattermost REST API."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _RecordingHandler)
-    server.requests = []  # type: ignore[attr-defined]
-    server.response_status = 200  # type: ignore[attr-defined]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=5)
+    yield from serve_recording(_RecordingHandler, _MattermostServer)
 
 
-def _make_backend(server: ThreadingHTTPServer) -> MattermostChannelBackend:
+def _make_backend(server: RecordingServer) -> MattermostChannelBackend:
     """Create a Mattermost backend pointed at the local recording server."""
-    port = server.server_address[1]
-    return MattermostChannelBackend(
-        base_url=f"http://127.0.0.1:{port}", token="test-token"
-    )
+    return MattermostChannelBackend(base_url=server.base_url, token="test-token")
 
 
 def test_send_typing_posts_typing_endpoint(mm_server) -> None:
     """send_typing must POST /api/v4/users/me/typing with channel_id and bearer auth."""
     backend = _make_backend(mm_server)
     backend.send_typing("chan1")
-    requests_seen = mm_server.requests
-    assert len(requests_seen) == 1
-    method, path, body, headers = requests_seen[0]
-    assert method == "POST"
-    assert path == "/api/v4/users/me/typing"
-    assert json.loads(body) == {"channel_id": "chan1"}
-    assert headers.get("Authorization") == "Bearer test-token"
-    assert headers.get("Content-Type") == "application/json"
+    assert len(mm_server.requests) == 1
+    request = mm_server.requests[0]
+    assert request["method"] == "POST"
+    assert request["path"] == "/api/v4/users/me/typing"
+    assert json.loads(request["body"]) == {"channel_id": "chan1"}
+    assert request["headers"].get("Authorization") == "Bearer test-token"
+    assert request["headers"].get("Content-Type") == "application/json"
 
 
 def test_send_typing_includes_parent_id_for_thread(mm_server) -> None:
     """A non-empty thread_ts must be sent as parent_id alongside channel_id."""
     backend = _make_backend(mm_server)
     backend.send_typing("chan1", thread_ts="root42")
-    _, path, body, _ = mm_server.requests[0]
-    assert path == "/api/v4/users/me/typing"
-    assert json.loads(body) == {"channel_id": "chan1", "parent_id": "root42"}
+    request = mm_server.requests[0]
+    assert request["path"] == "/api/v4/users/me/typing"
+    assert json.loads(request["body"]) == {"channel_id": "chan1", "parent_id": "root42"}
 
 
 def test_send_typing_swallows_http_error(mm_server) -> None:
@@ -120,10 +115,6 @@ def test_send_typing_without_channel_id_is_noop(mm_server) -> None:
 
 def test_send_typing_strips_trailing_slash_in_base_url(mm_server) -> None:
     """A trailing slash in base_url must not produce a double slash in the path."""
-    port = mm_server.server_address[1]
-    backend = MattermostChannelBackend(
-        base_url=f"http://127.0.0.1:{port}/", token="test-token"
-    )
+    backend = MattermostChannelBackend(base_url=f"{mm_server.base_url}/", token="test-token")
     backend.send_typing("chan1")
-    _, path, _, _ = mm_server.requests[0]
-    assert path == "/api/v4/users/me/typing"
+    assert mm_server.requests[0]["path"] == "/api/v4/users/me/typing"

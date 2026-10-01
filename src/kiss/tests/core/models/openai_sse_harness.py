@@ -78,6 +78,12 @@ class Reply:
             (or a proxy in front of it) that received the request and then
             reset the connection.  The SDK surfaces this as
             ``APIConnectionError``.
+        headers_gate: When set, the handler reads the request and then
+            writes nothing at all — not even the status line — until this
+            event fires (bounded), after which it sends the reply as
+            usual.  An overloaded gateway that accepted the connection
+            and queued the request: the phase no stream watchdog can see
+            because there is no stream yet.
     """
 
     status: int = 200
@@ -87,6 +93,7 @@ class Reply:
     chunk_gate: threading.Event | None = None
     hold: threading.Event | None = None
     drop: bool = False
+    headers_gate: threading.Event | None = None
 
 
 def chat_chunk(payload: dict[str, Any]) -> bytes:
@@ -136,13 +143,20 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         with server.lock:
             server.requests.append(request)
         reply = server.responder(request)
+        if reply.headers_gate is not None:
+            reply.headers_gate.wait(timeout=_HOLD_TIMEOUT)
         if reply.drop:
             self.close_connection = True
             return
-        if reply.json_body is not None:
-            self._write_json(reply)
-            return
-        self._write_sse(reply)
+        try:
+            if reply.json_body is not None:
+                self._write_json(reply)
+            else:
+                self._write_sse(reply)
+        except OSError:
+            # The client gave up (its own timeout) before the reply went
+            # out — the expected end of a ``headers_gate`` scenario.
+            server.client_disconnected.set()
 
     def _write_json(self, reply: Reply) -> None:
         """Write a complete JSON reply, keeping the connection alive."""

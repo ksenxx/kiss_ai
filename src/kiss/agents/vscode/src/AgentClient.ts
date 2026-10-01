@@ -70,8 +70,15 @@ interface PendingSend {
 export class AgentClient extends EventEmitter {
   private _ws: WsClient | null = null;
   private _authenticated = false;
+  /**
+   * Whether the current outage has been reported with `disconnect`.
+   * The endpoint file is polled every 100 ms while absent; each poll is
+   * a failed attempt, but only the first one is news to the listeners.
+   */
+  private _downAnnounced = false;
   private _pendingSends: PendingSend[] = [];
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private _authTimer: ReturnType<typeof setTimeout> | null = null;
   private _reconnectAttempts: number = 0;
   private _connectedAt: number = 0;
   private _disposed: boolean = false;
@@ -101,7 +108,9 @@ export class AgentClient extends EventEmitter {
   }
 
   connect(): void {
-    if (this._ws || this._disposed) return;
+    // A pending reconnect timer already guarantees the next attempt;
+    // starting one now (from `sendCommand`) would bypass the back-off.
+    if (this._ws || this._disposed || this._reconnectTimer) return;
     const endpoint = readLocalEndpoint(this._endpointPath);
     if (!endpoint) {
       // No daemon has published an endpoint (yet).
@@ -128,7 +137,6 @@ export class AgentClient extends EventEmitter {
     });
     this._ws = ws;
     this._authenticated = false;
-    let authTimer: NodeJS.Timeout | null = null;
 
     ws.on('open', () => {
       if (this._disposed || this._ws !== ws) {
@@ -136,8 +144,8 @@ export class AgentClient extends EventEmitter {
         return;
       }
       ws.send(JSON.stringify({type: 'auth', token: endpoint.token}));
-      authTimer = setTimeout(() => {
-        authTimer = null;
+      this._authTimer = setTimeout(() => {
+        this._authTimer = null;
         if (this._ws !== ws || this._authenticated) return;
         console.error('[AgentClient] daemon did not answer the auth frame');
         ws.destroy();
@@ -165,17 +173,14 @@ export class AgentClient extends EventEmitter {
 
     ws.on('error', (err: Error) => {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ECONNREFUSED') {
+      if (code !== 'ECONNREFUSED') {
         console.error('[AgentClient] connection error:', err.message);
       }
     });
 
     ws.on('close', () => {
-      if (authTimer) {
-        clearTimeout(authTimer);
-        authTimer = null;
-      }
       if (this._ws !== ws) return;
+      this._clearAuthTimer();
       this._ws = null;
       this._authenticated = false;
       if (
@@ -185,7 +190,7 @@ export class AgentClient extends EventEmitter {
         this._reconnectAttempts = 0;
       }
       this._connectedAt = 0;
-      this.emit('disconnect');
+      this._announceDown();
       if (this._disposed) return;
       this._scheduleReconnect();
     });
@@ -205,7 +210,7 @@ export class AgentClient extends EventEmitter {
   private _failAttempt(retryMs: number): void {
     setImmediate(() => {
       if (this._disposed || this._ws) return;
-      this.emit('disconnect');
+      this._announceDown();
       if (this._reconnectTimer) return;
       this._reconnectTimer = setTimeout(() => {
         this._reconnectTimer = null;
@@ -232,7 +237,9 @@ export class AgentClient extends EventEmitter {
    */
   private _handleAuthReply(ws: WsClient, msg: Record<string, unknown>): void {
     if (msg.type === 'auth_ok' && msg.local === true) {
+      this._clearAuthTimer();
       this._authenticated = true;
+      this._downAnnounced = false;
       this._connectedAt = Date.now();
       if (this._preamble) ws.send(JSON.stringify(this._preamble));
       const cutoff = Date.now() - this._pendingTtlMs;
@@ -309,12 +316,27 @@ export class AgentClient extends EventEmitter {
     this.emit('commandDropped', item.cmd, reason);
   }
 
+  /** Emit `disconnect` once per outage, on the connected->down transition. */
+  private _announceDown(): void {
+    if (this._downAnnounced) return;
+    this._downAnnounced = true;
+    this.emit('disconnect');
+  }
+
+  private _clearAuthTimer(): void {
+    if (this._authTimer) {
+      clearTimeout(this._authTimer);
+      this._authTimer = null;
+    }
+  }
+
   dispose(): void {
     this._disposed = true;
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    this._clearAuthTimer();
     if (this._ws) {
       // Disposal is cancellation, not a graceful goodbye: a closing
       // handshake would keep the socket -- and whatever it still has

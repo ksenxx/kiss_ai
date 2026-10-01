@@ -39,6 +39,7 @@ import time
 import pytest
 from playwright.sync_api import sync_playwright
 
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
@@ -73,7 +74,7 @@ def test_overlay_lifts_when_auth_beats_main_js_load(browser, harness) -> None:
 
     page.route("**/main.js*", _stall_main_js)
     try:
-        page.goto(harness.base_url + "/")
+        goto_retrying_network_change(page, harness.base_url + "/")
         # 30 s matches every other Playwright wait in the suite: 15 s
         # proved too tight when the full suite runs ~30 pytest
         # processes in parallel and Chromium startup is CPU-starved.
@@ -100,7 +101,7 @@ def test_overlay_lifts_on_normal_load(browser, harness) -> None:
     context = browser.new_context(ignore_https_errors=True)
     page = context.new_page()
     try:
-        page.goto(harness.base_url + "/")
+        goto_retrying_network_change(page, harness.base_url + "/")
         page.wait_for_selector("#task-input", state="visible", timeout=30000)
     finally:
         context.close()

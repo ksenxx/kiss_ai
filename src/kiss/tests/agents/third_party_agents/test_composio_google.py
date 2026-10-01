@@ -359,18 +359,9 @@ def test_finish_connect_unknown_account_error(composio: _FakeComposio) -> None:
 def test_finish_connect_keeps_waiting_through_inactive(composio: _FakeComposio) -> None:
     """INACTIVE is not terminal: the wait continues until the account activates."""
     assert cg.start_connect("gmail", "Gmail")["ok"]
-    composio.accounts["ca_new"] = ["INACTIVE"]
-
-    def activate() -> None:
-        composio.accounts["ca_new"] = ["ACTIVE"]
-
-    timer = threading.Timer(1.5, activate)
-    timer.start()
-    try:
-        answer = cg.finish_connect("gmail", "Gmail")
-    finally:
-        timer.cancel()
-        timer.join()
+    # The fake replies with one status per poll: INACTIVE first, then ACTIVE.
+    composio.accounts["ca_new"] = ["INACTIVE", "ACTIVE"]
+    answer = cg.finish_connect("gmail", "Gmail")
     assert answer == {"ok": True, "message": "Gmail connected through Composio."}
     assert _state("gmail") == {"connected_account_id": "ca_new"}
     # The status was polled more than once before it turned ACTIVE.

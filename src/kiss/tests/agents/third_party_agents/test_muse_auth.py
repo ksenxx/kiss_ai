@@ -832,25 +832,27 @@ def test_boundary_strips_token_on_cross_host_redirect(muse_env: Path) -> None:
     downstream = _RedirectServer(("127.0.0.1", 0))
     dthread = threading.Thread(target=downstream.serve_forever, daemon=True)
     dthread.start()
-    upstream = _RedirectServer(("127.0.0.1", 0))
-    upstream.redirect_to = f"http://localhost:{downstream.server_address[1]}/final"
-    uthread = threading.Thread(target=upstream.serve_forever, daemon=True)
-    uthread.start()
     try:
-        store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
-        handle = mint_surrogate("google_drive")
-        assert handle is not None
-        session = MuseBoundarySession("google_drive")
-        port = upstream.server_address[1]
-        resp = session.get(
-            f"http://127.0.0.1:{port}/start",
-            headers={"Authorization": f"Bearer {handle.token}"},
-        )
-        assert resp.status_code == 200
-        # The upstream (allowlisted) host saw the real token; the
-        # cross-host (localhost, not allowlisted) target did NOT.
-        assert upstream.requests[0]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
-        assert downstream.requests[-1]["auth"] == ""
+        upstream = _RedirectServer(("127.0.0.1", 0))
+        upstream.redirect_to = f"http://localhost:{downstream.server_address[1]}/final"
+        uthread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        uthread.start()
+        try:
+            store_credentials("google_drive", _google_info(_REAL_DRIVE_TOKEN), [])
+            handle = mint_surrogate("google_drive")
+            assert handle is not None
+            session = MuseBoundarySession("google_drive")
+            port = upstream.server_address[1]
+            resp = session.get(
+                f"http://127.0.0.1:{port}/start",
+                headers={"Authorization": f"Bearer {handle.token}"},
+            )
+            assert resp.status_code == 200
+            # The upstream (allowlisted) host saw the real token; the
+            # cross-host (localhost, not allowlisted) target did NOT.
+            assert upstream.requests[0]["auth"] == f"Bearer {_REAL_DRIVE_TOKEN}"
+            assert downstream.requests[-1]["auth"] == ""
+        finally:
+            stop_http_server(upstream, uthread)
     finally:
         stop_http_server(downstream, dthread)
-        stop_http_server(upstream, uthread)

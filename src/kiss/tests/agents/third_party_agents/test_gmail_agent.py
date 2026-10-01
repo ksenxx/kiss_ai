@@ -15,16 +15,11 @@ from __future__ import annotations
 
 import base64
 import json
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 
 import pytest
 
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents._composio_google import connected_account_id
 from kiss.agents.third_party_agents.gmail.gmail_sea import (
     _SERVICE,
@@ -40,6 +35,7 @@ from kiss.tests.agents.third_party_agents.composio_test_utils import (
     reset_state,
     start_fake_composio,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +149,7 @@ class _GmailHandler(BaseHTTPRequestHandler):
     """Answers the profile call for the Composio-injected token, else 401."""
 
     def _reply(self) -> None:
-        cast(_GmailServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {"method": self.command, "path": self.path}
         )
         if self.path.split("?", 1)[0].endswith("/users/me/profile") and (
@@ -212,14 +208,6 @@ class _GmailHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _GmailServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _GmailHandler)
-        self.requests: list[dict[str, str]] = []
-
-
 @pytest.fixture()
 def gmail_server(monkeypatch):
     """Run a local Gmail endpoint behind the local Composio emulator.
@@ -229,18 +217,11 @@ def gmail_server(monkeypatch):
         to gmail.googleapis.com rerouted to the local endpoint) and the
         local Gmail server.
     """
-    server = _GmailServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with recording_server(_GmailHandler) as server:
         for composio in start_fake_composio(monkeypatch):
-            composio.upstream_overrides["https://gmail.googleapis.com"] = (
-                f"http://127.0.0.1:{server.server_address[1]}"
-            )
+            composio.upstream_overrides["https://gmail.googleapis.com"] = server.base_url
             connect(composio, _SERVICE)
             yield composio, server
-    finally:
-        stop_http_server(server, thread)
 
 
 def _make_error_backend(composio) -> GmailChannelBackend:

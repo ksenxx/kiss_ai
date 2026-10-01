@@ -25,10 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +46,7 @@ from kiss.agents.third_party_agents.whatsapp.whatsapp_sea import (
     main,
     tools,
 )
+from kiss.tests.agents.third_party_agents.whatsapp_bridge import BridgeServer, bridge_server
 
 # ----------------------------------------------------------------------
 # Fixtures and helpers
@@ -134,52 +132,6 @@ def _make_paired_session(repo_dir: Path, paired: bool = True) -> Path:
     conn.commit()
     conn.close()
     return db
-
-
-class _BridgeHandler(BaseHTTPRequestHandler):
-    """Real HTTP handler speaking the whatsapp-mcp bridge REST protocol."""
-
-    def do_GET(self) -> None:  # noqa: N802 – http.server API
-        # Go's mux answers GET on the POST-only /api/send with 405.
-        self.send_response(405)
-        self.end_headers()
-        self.wfile.write(b"Method not allowed\n")
-
-    def do_POST(self) -> None:  # noqa: N802 – http.server API
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
-        self.server.recorded.append((self.path, body))  # type: ignore[attr-defined]
-        payload = json.dumps(self.server.response_body).encode()  # type: ignore[attr-defined]
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args: Any) -> None:  # type: ignore[override]
-        pass
-
-
-def _start_bridge_server(
-    response_body: dict[str, Any],
-) -> tuple[ThreadingHTTPServer, int]:
-    """Start a local HTTP server standing in for the bridge REST API."""
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _BridgeHandler)
-    server.response_body = response_body  # type: ignore[attr-defined]
-    server.recorded = []  # type: ignore[attr-defined]
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, server.server_address[1]
-
-
-@contextmanager
-def _bridge_server(response_body: dict[str, Any]) -> Iterator[tuple[ThreadingHTTPServer, int]]:
-    """Run a bridge stand-in server for the block, shutting it down afterwards."""
-    server, port = _start_bridge_server(response_body)
-    try:
-        yield server, port
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 # A genuine qrterminal.GenerateHalfBlock-shaped block (charset {█ ▀ ▄ space}).
@@ -497,15 +449,18 @@ class TestChannelProtocol:
         assert flags == {"m1": False, "m2": True, "m3": False}
 
     def test_send_message_posts_to_bridge(self, tmp_path: Path) -> None:
-        with _bridge_server({"success": True, "message": "sent"}) as (server, port):
+        with bridge_server({"success": True, "message": "sent"}) as server:
+            port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             backend.send_message("+1 (415) 555-0001", "hello")
-            path, body = server.recorded[0]  # type: ignore[attr-defined]
-            assert path == "/api/send"
-            assert body == {"recipient": "14155550001", "message": "hello"}
+            assert server.requests[0] == {
+                "path": "/api/send",
+                "json": {"recipient": "14155550001", "message": "hello"},
+            }
 
     def test_send_message_raises_on_bridge_error(self, tmp_path: Path) -> None:
-        with _bridge_server({"success": False, "message": "not on WhatsApp"}) as (server, port):
+        with bridge_server({"success": False, "message": "not on WhatsApp"}) as server:
+            port = server.server_address[1]
             backend = WhatsAppChannelBackend(repo_dir=str(tmp_path), bridge_port=port)
             with pytest.raises(RuntimeError, match="not on WhatsApp"):
                 backend.send_message("14155550001", "hello")
@@ -532,8 +487,8 @@ class TestChannelProtocol:
     def test_connect_paired_and_running(self, channel_state: Any, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
-        with _bridge_server({"success": True, "message": ""}) as (server, port):
-            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
+        with bridge_server({"success": True, "message": ""}) as server:
+            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
             backend = WhatsAppChannelBackend()
             assert backend.connect() is True
             assert "connected" in backend.connection_info
@@ -552,20 +507,26 @@ class TestChannelProtocol:
 
 
 class TestRestTools:
-    def setup_method(self) -> None:
-        self.server, self.port = _start_bridge_server({"success": True, "message": "ok"})
-        self.backend = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=self.port)
+    server: BridgeServer
+    backend: WhatsAppChannelBackend
 
-    def teardown_method(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
+    @pytest.fixture(autouse=True)
+    def _bridge(self) -> Iterator[None]:
+        """A fresh bridge stand-in answering ``ok`` and a backend pointed at it."""
+        with bridge_server({"success": True, "message": "ok"}) as server:
+            self.server = server
+            self.backend = WhatsAppChannelBackend(
+                repo_dir="/nonexistent", bridge_port=server.server_address[1]
+            )
+            yield
 
     def test_send_whatsapp_message(self) -> None:
         data = json.loads(self.backend.send_whatsapp_message("+14155550001", "yo"))
         assert data == {"ok": True, "message": "ok"}
-        path, body = self.server.recorded[0]  # type: ignore[attr-defined]
-        assert path == "/api/send"
-        assert body == {"recipient": "14155550001", "message": "yo"}
+        assert self.server.requests[0] == {
+            "path": "/api/send",
+            "json": {"recipient": "14155550001", "message": "yo"},
+        }
 
     def test_send_whatsapp_message_requires_recipient(self) -> None:
         data = json.loads(self.backend.send_whatsapp_message("  ", "yo"))
@@ -576,8 +537,7 @@ class TestRestTools:
         f.write_bytes(b"png")
         data = json.loads(self.backend.send_whatsapp_file(_GROUP, str(f)))
         assert data["ok"] is True
-        _, body = self.server.recorded[0]  # type: ignore[attr-defined]
-        assert body == {"recipient": _GROUP, "media_path": str(f)}
+        assert self.server.requests[0]["json"] == {"recipient": _GROUP, "media_path": str(f)}
 
     def test_send_whatsapp_file_missing(self) -> None:
         data = json.loads(self.backend.send_whatsapp_file(_GROUP, "/no/such/file"))
@@ -594,8 +554,7 @@ class TestRestTools:
         f.write_bytes(b"OggS")
         data = json.loads(self.backend.send_whatsapp_audio_message("14155550001", str(f)))
         assert data["ok"] is True
-        _, body = self.server.recorded[0]  # type: ignore[attr-defined]
-        assert body["media_path"] == str(f)
+        assert self.server.requests[0]["json"]["media_path"] == str(f)
 
     def test_send_whatsapp_audio_missing_file(self) -> None:
         data = json.loads(self.backend.send_whatsapp_audio_message("1", "/no/file.mp3"))
@@ -615,7 +574,7 @@ class TestRestTools:
         assert "send_whatsapp_file" in data["error"]
 
     def test_download_whatsapp_media(self) -> None:
-        self.server.response_body = {  # type: ignore[attr-defined]
+        self.server.response_body = {
             "success": True,
             "message": "Successfully downloaded image media",
             "filename": "photo.jpg",
@@ -623,9 +582,10 @@ class TestRestTools:
         }
         data = json.loads(self.backend.download_whatsapp_media("m3", _ALICE))
         assert data["ok"] is True and data["file_path"] == "/abs/photo.jpg"
-        path, body = self.server.recorded[0]  # type: ignore[attr-defined]
-        assert path == "/api/download"
-        assert body == {"message_id": "m3", "chat_jid": _ALICE}
+        assert self.server.requests[0] == {
+            "path": "/api/download",
+            "json": {"message_id": "m3", "chat_jid": _ALICE},
+        }
 
     def test_download_whatsapp_media_bridge_down(self) -> None:
         backend = WhatsAppChannelBackend(repo_dir="/nonexistent", bridge_port=1)
@@ -711,8 +671,8 @@ class TestAgentAndAuthTools:
         (bridge / "main.go").write_text("package main")
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
         _make_paired_session(tmp_path)
-        with _bridge_server({"success": True, "message": ""}) as (server, port):
-            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
+        with bridge_server({"success": True, "message": ""}) as server:
+            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
             status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is True
             assert status["next_step"].startswith("Ready")
@@ -722,8 +682,8 @@ class TestAgentAndAuthTools:
         bridge.mkdir(parents=True)
         (bridge / "main.go").write_text("package main")
         (bridge / "kiss-whatsapp-bridge").write_text("bin")
-        with _bridge_server({"success": True, "message": ""}) as (server, port):
-            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
+        with bridge_server({"success": True, "message": ""}) as server:
+            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
             status = json.loads(_auth_tools(WhatsAppAgent())["check_whatsapp_auth"]())
             assert status["bridge_running"] is True and status["paired"] is False
             assert "get_whatsapp_qr_code" in status["next_step"]
@@ -770,8 +730,9 @@ class TestAgentAndAuthTools:
         assert cfg["bridge_port"] == "18042"
 
     def test_authenticate_clone_failure_reported(self, tmp_path: Path) -> None:
-        # Cloning into a path whose parent is an existing *file* makes the
-        # real `git clone` fail; the error must be surfaced.
+        # A repo path whose parent is an existing *file* makes the
+        # `repo.parent.mkdir(...)` before the clone fail; the OSError must
+        # be surfaced as an error (and no `git clone` is spawned).
         parent = tmp_path / "blocker"
         parent.write_text("i am a file")
         result = json.loads(
@@ -780,6 +741,7 @@ class TestAgentAndAuthTools:
             )
         )
         assert result["ok"] is False
+        assert "Cannot create" in result["error"]
 
     def test_start_bridge_requires_build(self, tmp_path: Path) -> None:
         _config.save({"repo_dir": str(tmp_path / "nowhere"), "bridge_port": "1"})
@@ -787,8 +749,8 @@ class TestAgentAndAuthTools:
         assert result["ok"] is False and "authenticate_whatsapp" in result["error"]
 
     def test_start_bridge_short_circuits_when_running(self, tmp_path: Path) -> None:
-        with _bridge_server({"success": True, "message": ""}) as (server, port):
-            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
+        with bridge_server({"success": True, "message": ""}) as server:
+            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
             result = json.loads(_auth_tools(WhatsAppAgent())["start_whatsapp_bridge"]())
             assert result == {"ok": True, "message": "Bridge already running."}
 
@@ -906,8 +868,8 @@ class TestAgentAndAuthTools:
     def test_clear_refuses_unowned_running_bridge(self, tmp_path: Path) -> None:
         _make_db(tmp_path)
         _make_paired_session(tmp_path)
-        with _bridge_server({"success": True, "message": ""}) as (server, port):
-            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(port)})
+        with bridge_server({"success": True, "message": ""}) as server:
+            _config.save({"repo_dir": str(tmp_path), "bridge_port": str(server.server_address[1])})
             message = _auth_tools(WhatsAppAgent())["clear_whatsapp_auth"]()
         assert "Refusing to clear" in message
         assert (tmp_path / "whatsapp-bridge" / "store" / "whatsapp.db").exists()

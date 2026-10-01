@@ -28,7 +28,6 @@ import json
 import shutil
 import stat
 import sys
-import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -36,16 +35,13 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.brave.brave_sea as brave_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.brave.brave_sea import (
     BraveSearchAgent,
     BraveSearchChannelBackend,
     _clamp,
     _config,
 )
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _API_KEY = "test-brave-key"
 
@@ -82,11 +78,7 @@ _WEB_RESPONSE = {
 }
 
 _WEB_RESPONSE_PLAIN = {
-    "web": {
-        "results": [
-            {"title": "Plain", "url": "https://plain.example", "description": "d"}
-        ]
-    }
+    "web": {"results": [{"title": "Plain", "url": "https://plain.example", "description": "d"}]}
 }
 
 _NEWS_RESPONSE = {
@@ -150,7 +142,7 @@ class _BraveRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         parsed = urlparse(self.path)
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        cast(_BraveServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": parsed.path,
@@ -186,31 +178,17 @@ class _BraveRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _BraveServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _BraveRequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def brave_server():
-    """Start the emulated Brave API server on a free port; yield (base_url, server)."""
-    server = _BraveServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated Brave API server on a free port; yield the recording server."""
+    yield from serve_recording(_BraveRequestHandler)
 
 
 @pytest.fixture()
 def backend(brave_server):
     """A backend pointed at the emulated server with the valid token."""
-    base_url, server = brave_server
+    server = brave_server
+    base_url = server.base_url
     b = BraveSearchChannelBackend()
     b._base_url = base_url
     b._api_key = _API_KEY
@@ -551,7 +529,7 @@ def test_brave_video_search_empty_query(backend) -> None:
 
 def test_wrong_token_returns_ok_false(brave_server) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = brave_server
+    base_url = brave_server.base_url
     b = BraveSearchChannelBackend()
     b._base_url = base_url
     b._api_key = "wrong-token"

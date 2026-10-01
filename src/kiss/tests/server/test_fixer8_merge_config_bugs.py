@@ -40,8 +40,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.git_worktree import _git
 from kiss.server.autocomplete import _AutocompleteMixin, _ghost_suffix
-from kiss.server.diff_merge import _git
 from kiss.server.file_index import FileIndex, FileIndexRegistry
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
@@ -237,7 +237,7 @@ class TestPorcelainPathsFallbackParser:
         _run_git(repo, "mv", "a.txt", "b.txt")
         (repo / " padded .txt").write_text("x\n")
 
-        status = _git(str(repo), "status", "--porcelain")
+        status = _git("status", "--porcelain", cwd=str(repo))
         assert status.returncode == 0
         files = _porcelain_paths(status.stdout, rename_both_sides=True)
 
@@ -253,7 +253,7 @@ class TestPorcelainPathsFallbackParser:
         _make_repo(repo)
         _run_git(repo, "mv", "a.txt", "b.txt")
 
-        status = _git(str(repo), "status", "--porcelain")
+        status = _git("status", "--porcelain", cwd=str(repo))
         files = _porcelain_paths(status.stdout)
 
         assert files == ["b.txt"]
@@ -266,7 +266,7 @@ class TestPorcelainPathsFallbackParser:
         _make_repo(repo)
         (repo / 'we"ird.txt').write_text("x\n")
 
-        status = _git(str(repo), "status", "--porcelain")
+        status = _git("status", "--porcelain", cwd=str(repo))
         files = _porcelain_paths(status.stdout)
 
         assert 'we"ird.txt' in files

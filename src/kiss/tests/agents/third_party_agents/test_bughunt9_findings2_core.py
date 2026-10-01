@@ -2,21 +2,13 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 9 (findings-2 audit): persistence, git_worktree, skills,
-and channel-CLI helper regressions.
+"""Bug-hunt 9 (findings-2 audit), channel-CLI helper regression.
 
-Covers, end-to-end with real files/processes/DBs (no mocks/patches):
-
-* S2-01 — ``_stop_event_writer`` must never strand late-enqueued events.
-* S2-03 — prefix autocomplete must return distinct older matches even
-  when many newer duplicates exist.
-* S2-04 — ``has_uncommitted_changes`` must treat a failing ``git
-  status`` as dirty (never report clean on error).
-* S2-05 — ``copy_dirty_state`` must raise on a failing ``git status``
-  instead of silently omitting the user's dirty state.
-* S2-30 — ``copy_dirty_state`` must mirror dirty submodule content.
-* S2-07 — one invalid-UTF-8 SKILL.md file must not abort discovery.
 * S2-22 — ``--max_budget`` rejects nan/inf/zero/negative values.
+
+The persistence, git_worktree and skills findings of the same audit
+(S2-01/03/04/05/30/07) are covered in
+``tests/agents/sorcar/test_bughunt9_findings2_core.py``.
 """
 
 from __future__ import annotations

@@ -13,7 +13,6 @@ test modules used to define locally.
 from __future__ import annotations
 
 import socket
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -81,20 +80,12 @@ def _isolated_slack_dir(
 ) -> Path:
     """Redirect Slack token storage to a per-test temporary directory.
 
-    ``slack_sea._SLACK_DIR`` is a module global built from ``Path.home()``,
-    so tests that save or clear tokens would otherwise touch the real user
-    token file and race with concurrent pytest processes. Some test modules
-    also import ``_SLACK_DIR`` by value, so their own module binding is
-    patched too when present.
+    ``slack_sea._slack_dir()`` resolves ``$KISS_HOME`` lazily, which already
+    keeps parallel pytest processes apart; patching it here additionally
+    gives every *test* a fresh, not-yet-created directory, so a token saved
+    by one test is never visible to the next.  The returned path is the
+    directory the product code will use for the duration of the test.
     """
     isolated = tmp_path / "slack"
-    monkeypatch.setattr(slack_agent_mod, "_SLACK_DIR", isolated)
-    for mod_name in (
-        "kiss.tests.agents.third_party_agents.test_slack_agent",
-        "kiss.tests.agents.third_party_agents.test_slack_channel_backend",
-        "kiss.tests.agents.third_party_agents.test_run_once",
-    ):
-        mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, "_SLACK_DIR"):
-            monkeypatch.setattr(mod, "_SLACK_DIR", isolated)
+    monkeypatch.setattr(slack_agent_mod, "_slack_dir", lambda: isolated)
     return isolated

@@ -763,17 +763,23 @@ class TestCodexModel:
         assert "hmm" in tokens
         assert thinking == [True, False, True, False, True, False]
 
-    def test_parse_stream_events_text_and_thinking_deltas(self) -> None:
+    def test_parse_stream_events_ignores_unknown_event_types(self) -> None:
+        """Event types ``codex exec --json`` never emits are skipped.
+
+        ``text_delta`` / ``thinking_delta`` / ``thinking_start`` /
+        ``thinking_end`` were dead branches (audit R1, 2026-10-01); the
+        parser must neither render nor fail on unknown events.
+        """
         m = self.make_codex()
         events = [
             {"type": "text_delta", "delta": {"type": "text_delta", "text": "Hi "}},
-            {"type": "text_delta", "delta": {"type": "text_delta", "text": "there"}},
             {"type": "thinking_delta", "delta": {"type": "thinking_delta", "text": "T"}},
             {"type": "thinking_start"},
             {"type": "thinking_end"},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}},
         ]
         content, _result, err = m._parse_stream_events(json.dumps(e) for e in events)
-        assert content == "Hi there"
+        assert content == "ok"
         assert err is None
 
     def test_parse_stream_events_error(self) -> None:

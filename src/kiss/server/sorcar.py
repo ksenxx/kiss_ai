@@ -511,7 +511,7 @@ class ServerBackend(Protocol):
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
 
     async def _handle_open_file(
-        self, cmd: dict[str, Any], endpoint: Any, native: bool = False,
+        self, cmd: dict[str, Any], endpoint: Any, is_local: bool = False,
     ) -> None: ...
 
     async def _handle_save_file(
@@ -594,7 +594,7 @@ class ServerBackend(Protocol):
         self,
         cmd: dict[str, Any],
         endpoint: Any = None,
-        native: bool = False,
+        is_local: bool = False,
     ) -> None: ...
 
     async def _send_welcome_info(self) -> None: ...
@@ -935,7 +935,7 @@ class ServerApi:
             except Exception:
                 pass
             return None
-        password = load_config().get("remote_password", "")
+        password = (await asyncio.to_thread(load_config)).get("remote_password", "")
         if not password and not backend._peer_is_loopback(websocket):
             # Defense in depth for the empty-password localhost-only
             # lockdown (primary gate: the transport's
@@ -967,13 +967,30 @@ class ServerApi:
                     }))
                     await websocket.close()
                     return None
+                # Re-load the configured password before every compare
+                # so a change made while this connection awaited
+                # credentials takes effect NOW.  Without the reload, a
+                # stale snapshot taken at handshake start would keep
+                # accepting the OLD password — and, worse, clearing the
+                # password would not subject an already-admitted
+                # non-loopback peer to the localhost-only rule below.
+                password = (
+                    await asyncio.to_thread(load_config)
+                ).get("remote_password", "")
+                if not password and not backend._peer_is_loopback(
+                    websocket,
+                ):
+                    await self._refuse_no_password_remote(websocket, ip)
+                    return None
                 # Re-check the lockout BEFORE comparing or accepting the
-                # submitted credential: a peer socket may have tripped
-                # the per-IP threshold while this already-admitted
-                # connection was waiting for the user's input.  Without
-                # this check, any number of sockets admitted while the
-                # failure count was below the limit could still redeem
-                # a guessed password after the lock engaged.
+                # submitted credential, with no await between this check
+                # and the compare: a peer socket may have tripped the
+                # per-IP threshold while this already-admitted
+                # connection was waiting for the user's input or for the
+                # config reload above.  Without this check, any number
+                # of sockets admitted while the failure count was below
+                # the limit could still redeem a guessed password after
+                # the lock engaged.
                 lock_remaining = backend._auth_lock_remaining(ip)
                 if lock_remaining > 0.0:
                     logger.warning(
@@ -985,19 +1002,6 @@ class ServerApi:
                         "retry_after": math.ceil(lock_remaining),
                     }))
                     await websocket.close()
-                    return None
-                # Re-load the configured password before every compare
-                # so a change made while this connection awaited
-                # credentials takes effect NOW.  Without the reload, a
-                # stale snapshot taken at handshake start would keep
-                # accepting the OLD password — and, worse, clearing the
-                # password would not subject an already-admitted
-                # non-loopback peer to the localhost-only rule below.
-                password = load_config().get("remote_password", "")
-                if not password and not backend._peer_is_loopback(
-                    websocket,
-                ):
-                    await self._refuse_no_password_remote(websocket, ip)
                     return None
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
@@ -1221,8 +1225,8 @@ class ServerApi:
         of the task, in the task's chat; its cost counts towards the
         task), later polls re-run it every 10 minutes, and a poll with
         ``refresh: true`` (the panel's refresh button) re-runs it at
-        once.  Served on BOTH transports — the direct ``taskUpdate``
-        reply goes back to whichever endpoint (local or remote) asked.
+        once.  The direct ``taskUpdate`` reply goes back to the asking
+        endpoint, local or remote.
 
         Args:
             cmd: The ``getTaskUpdate`` command (``tabId``, optional
@@ -1518,9 +1522,10 @@ class ServerApi:
 
         LOCAL CLIENTS ONLY: unlike ``getConfig`` (whose reply is
         shaped for the settings panel), this returns the config
-        verbatim — including ``remote_password`` — so a remote WSS
-        browser must never receive it.  A WSS-delivered command is
-        dropped as a defensive no-op.
+        verbatim — including ``remote_password`` — so a remote
+        browser must never receive it.  A command from a remote,
+        password-authenticated connection is dropped as a defensive
+        no-op.
 
         Args:
             cmd: The ``readKissConfig`` command.
@@ -1542,10 +1547,11 @@ class ServerApi:
         instead of rewriting the file itself.  The reply is a direct
         ``kissConfigSaved`` acknowledgement event.
 
-        LOCAL CLIENTS ONLY: a remote WSS browser must not be
+        LOCAL CLIENTS ONLY: a remote browser must not be
         able to change ``remote_password`` or any other daemon
-        setting through this raw channel; a WSS-delivered command is
-        dropped as a defensive no-op.
+        setting through this raw channel; a command from a remote,
+        password-authenticated connection is dropped as a defensive
+        no-op.
 
         Args:
             cmd: The ``writeKissConfig`` command carrying ``config``.
@@ -1570,10 +1576,11 @@ class ServerApi:
         this connection and stopped on disconnect.
 
         LOCAL CLIENTS ONLY: the listener captures this
-        machine's microphone, so a remote WSS browser must not
+        machine's microphone, so a remote browser must not
         control it (browser-mode voice capture stays in-page via
-        ``voiceTranscribe``); a WSS-delivered command is dropped as a
-        defensive no-op.
+        ``voiceTranscribe``); a command from a remote,
+        password-authenticated connection is dropped as a defensive
+        no-op.
 
         Args:
             cmd: The ``voiceWakeStart`` command.

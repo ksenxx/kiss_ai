@@ -5,7 +5,7 @@
 """Round-2 bug-hunt integration tests for BlueBubbles, Nextcloud Talk, and
 Synology Chat channel backends.
 
-No mock/patch libraries: real in-process ``ThreadingHTTPServer`` instances
+No mock/patch libraries: real in-process ``RecordingServer`` instances
 record every request (method/path/query/body) and return BlueBubbles-,
 Nextcloud-OCS-, and Synology-shaped JSON.  Backends read their server URL
 from ``~/.kiss/third_party_agents/*/config.json``; configs touched by the
@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 import urllib.request
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -32,25 +30,29 @@ from kiss.agents.third_party_agents.nextcloud import nextcloud_sea as nc_mod
 from kiss.agents.third_party_agents.nextcloud.nextcloud_sea import NextcloudTalkChannelBackend
 from kiss.agents.third_party_agents.synology import synology_sea as syno_mod
 from kiss.agents.third_party_agents.synology.synology_sea import SynologyChatChannelBackend
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, recording_server
 
 Responder = Callable[[str, str, dict[str, list[str]], bytes], tuple[int, dict[str, Any]]]
 
 
-class _RecordingServer(ThreadingHTTPServer):
-    """HTTP server that records requests and serves configurable JSON."""
+def _ok_responder(
+    method: str, path: str, query: dict[str, list[str]], body: bytes
+) -> tuple[int, dict[str, Any]]:
+    return 200, {}
 
-    daemon_threads = True
-    allow_reuse_address = True
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.requests: list[dict[str, Any]] = []
-        self.responder: Responder = lambda method, path, query, body: (200, {})
+class _ResponderServer(RecordingServer):
+    """Recording server whose JSON answers come from a swappable ``responder``."""
+
+    def __init__(self, address: tuple[str, int], handler: type) -> None:
+        super().__init__(address, handler)
+        self.responder: Responder = _ok_responder
 
 
 class _Handler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
-        srv = cast(_RecordingServer, self.server)
+        srv = cast(_ResponderServer, self.server)
         parsed = urlsplit(self.path)
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
@@ -85,34 +87,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args: Any) -> None:  # type: ignore[override]
         pass
-
-
-def _start_server() -> tuple[_RecordingServer, str]:
-    server = _RecordingServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, f"http://127.0.0.1:{server.server_address[1]}"
-
-
-def _stop_server(server: _RecordingServer) -> None:
-    server.shutdown()
-    server.server_close()
-
-
-def _backup_config(path: Path) -> str | None:
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-        return backup
-    return None
-
-
-def _restore_config(path: Path, backup: str | None) -> None:
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
 
 
 _BB_MSG_PENDING = {
@@ -153,13 +127,13 @@ def _bb_responder(messages: list[dict[str, Any]], send_status: int = 200) -> Res
 class TestBlueBubbles:
     """BlueBubbles backend: cursor handling, chat filtering, send errors."""
 
-    def setup_method(self) -> None:
-        self._backup = _backup_config(bb_mod._config.path)
-        self._server, self._url = _start_server()
-
-    def teardown_method(self) -> None:
-        _stop_server(self._server)
-        _restore_config(bb_mod._config.path, self._backup)
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        """Clean BlueBubbles config plus a fresh recording server per test."""
+        with config_backup(bb_mod._config.path):
+            with recording_server(_Handler, _ResponderServer) as server:
+                self._server, self._url = server, server.base_url
+                yield
 
     def _make_backend(self) -> BlueBubblesChannelBackend:
         backend = BlueBubblesChannelBackend()
@@ -234,9 +208,7 @@ def _nc_ocs(status: int, data: Any) -> dict[str, Any]:
     return {"ocs": {"meta": {"status": "ok", "statuscode": status}, "data": data}}
 
 
-def _nc_responder(
-    chat_messages: list[dict[str, Any]], post_statuscode: int = 201
-) -> Responder:
+def _nc_responder(chat_messages: list[dict[str, Any]], post_statuscode: int = 201) -> Responder:
     def respond(
         method: str, path: str, query: dict[str, list[str]], body: bytes
     ) -> tuple[int, dict[str, Any]]:
@@ -264,18 +236,16 @@ _NC_MESSAGES = [
 class TestNextcloudTalk:
     """Nextcloud Talk backend: URL normalization, poll cursor/ts, send/join."""
 
-    def setup_method(self) -> None:
-        self._backup = _backup_config(nc_mod._config.path)
-        self._server, self._url = _start_server()
-
-    def teardown_method(self) -> None:
-        _stop_server(self._server)
-        _restore_config(nc_mod._config.path, self._backup)
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        """Clean Nextcloud config plus a fresh recording server per test."""
+        with config_backup(nc_mod._config.path):
+            with recording_server(_Handler, _ResponderServer) as server:
+                self._server, self._url = server, server.base_url
+                yield
 
     def _save_config_with_trailing_slash(self) -> None:
-        nc_mod._config.save(
-            {"url": self._url + "/", "username": "bot", "password": "pw"}
-        )
+        nc_mod._config.save({"url": self._url + "/", "username": "bot", "password": "pw"})
 
     def test_urls_single_slash_with_trailing_slash_config(self) -> None:
         """All load sites must rstrip('/') the configured URL: no '//' after host."""
@@ -299,9 +269,7 @@ class TestNextcloudTalk:
         self._server.responder = _nc_responder(_NC_MESSAGES)
         agent = nc_mod.NextcloudTalkAgent()
         auth_tools = {t.__name__: t for t in agent._get_auth_tools()}
-        result = json.loads(
-            auth_tools["authenticate_nextcloud"](self._url + "/", "bot", "pw")
-        )
+        result = json.loads(auth_tools["authenticate_nextcloud"](self._url + "/", "bot", "pw"))
         assert result["ok"] is True
         saved = json.loads(nc_mod._config.path.read_text())
         assert saved["url"] == self._url
@@ -371,20 +339,21 @@ class TestNextcloudTalk:
         assert join_reqs[0]["method"] == "POST"
 
 
-
 class TestSynologyChat:
     """Synology Chat backend: webhook form parsing, send body, poll drain."""
 
-    def setup_method(self) -> None:
-        self._backup = _backup_config(syno_mod._config.path)
-        self._server, self._url = _start_server()
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        """Clean Synology config plus a fresh recording server per test."""
         self._backend: SynologyChatChannelBackend | None = None
-
-    def teardown_method(self) -> None:
-        if self._backend is not None:
-            self._backend.disconnect()
-        _stop_server(self._server)
-        _restore_config(syno_mod._config.path, self._backup)
+        with config_backup(syno_mod._config.path):
+            with recording_server(_Handler, _ResponderServer) as server:
+                self._server, self._url = server, server.base_url
+                try:
+                    yield
+                finally:
+                    if self._backend is not None:
+                        self._backend.disconnect()
 
     def _post_webhook(self, fields: dict[str, str]) -> None:
         assert self._backend is not None and self._backend._webhook_server is not None
@@ -399,7 +368,8 @@ class TestSynologyChat:
             assert resp.status == 200
 
     def test_webhook_parses_synology_form_fields(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Synology outgoing webhooks POST form fields directly (not a
         Slack-style payload= JSON blob); the handler must parse them and
@@ -416,7 +386,9 @@ class TestSynologyChat:
         syno_mod._config.save({"webhook_url": self._url + "/webhook", "token": "sekret"})
         self._backend = SynologyChatChannelBackend()
         monkeypatch.setattr(
-            SynologyChatChannelBackend._start_webhook_server, "__defaults__", (0,),
+            SynologyChatChannelBackend._start_webhook_server,
+            "__defaults__",
+            (0,),
         )
         assert self._backend.connect() is True
         assert self._backend._webhook_url == self._url + "/webhook"

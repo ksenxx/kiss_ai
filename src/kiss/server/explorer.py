@@ -26,7 +26,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from kiss.server.diff_merge import _git
+from kiss.agents.sorcar.git_worktree import _git, repo_lock
 
 EXPLORER_EXCLUDED_NAMES: frozenset[str] = frozenset(
     {".git", ".svn", ".hg", ".DS_Store", "Thumbs.db"}
@@ -114,13 +114,14 @@ def _entry_sort_key(item: dict[str, Any]) -> tuple[str, str]:
 def _run_git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run git, turning a missing/unlaunchable ``git`` into a failed result.
 
-    :func:`kiss.server.diff_merge._git` raises ``OSError`` (e.g.
-    ``FileNotFoundError``) when the executable itself cannot start; the
-    providers here must always produce a reply, so that becomes an
-    ordinary non-zero result whose ``stderr`` carries the reason.
+    :func:`kiss.agents.sorcar.git_worktree._git` raises ``OSError``
+    (e.g. ``FileNotFoundError``) when the executable itself cannot
+    start; the providers here must always produce a reply, so that
+    becomes an ordinary non-zero result whose ``stderr`` carries the
+    reason.
     """
     try:
-        return _git(cwd, *args)
+        return _git(*args, cwd=cwd)
     except OSError as exc:
         return subprocess.CompletedProcess(
             ["git", *args], 127, "", f"git could not be run: {exc}"
@@ -964,7 +965,11 @@ def git_action(
         if is_merge:
             args += ["-m", "1"]
         args += [sha]
-    result = _run_git(repo, *args)
+    # The action moves HEAD / the index of the main tree; every other
+    # main-tree mutation (auto-commit, the worktree merge transaction,
+    # spare-worktree creation) is serialised by the same per-repo lock.
+    with repo_lock(Path(repo)):
+        result = _run_git(repo, *args)
     # A hook can print anything; bound what goes on the wire.
     output, _ = _truncate((result.stdout + result.stderr).strip())
     if result.returncode != 0:

@@ -266,7 +266,7 @@ class FakeDaemon extends EventEmitter {
     });
     // Node binds a loopback TCP listener synchronously inside listen(),
     // so the endpoint file can be published before this returns — the
-    // way a Unix socket file appeared as soon as listen() was called.
+    // way the old socket file appeared as soon as listen() was called.
     // Callers that connect right after listen() (without awaiting the
     // callback) therefore find the daemon on their first attempt.
     if (this._server.address()) publish();
@@ -294,7 +294,7 @@ class FakeDaemon extends EventEmitter {
 
   /**
    * Stop accepting connections and remove the endpoint file, like
-   * `net.Server#close` on a Unix socket (libuv unlinks the path).
+   * `net.Server#close` did for the old socket path (libuv unlinked it).
    * Existing connections survive; `cb` runs once they have all ended.
    * Use {@link destroyConnections} to end them.
    */

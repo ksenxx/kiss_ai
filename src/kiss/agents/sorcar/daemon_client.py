@@ -1042,7 +1042,16 @@ def run(
                         timeout_msg,
                         _to_task_result(result_event, chat_id, task_id, totals_event),
                     )
-                elif started:
+                elif started or result_event is not None:
+                    # A result before any ``running=true`` means the
+                    # task failed during the daemon's setup (chat /
+                    # work-dir resolution, a stop injected before the
+                    # initial status): ``_run_task`` broadcasts its
+                    # failure ``result`` and then the terminal status
+                    # from its ``finally``.  Without ``result_event``
+                    # in this condition that terminal status would be
+                    # ignored and the loop would wait out the whole
+                    # timeout (forever with ``timeout=None``).
                     return _to_task_result(result_event, chat_id, task_id, totals_event)
     except BaseException as exc:
         aborted = exc

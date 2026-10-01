@@ -20,20 +20,14 @@ the actual HTTP traffic the backend produces:
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 from kiss.agents.third_party_agents.discord.discord_sea import DiscordChannelBackend, _config
-
-
-class _RecordingServer(ThreadingHTTPServer):
-    """HTTP server that records every request it handles."""
-
-    def __init__(self, address: tuple[str, int], handler: type) -> None:
-        super().__init__(address, handler)
-        self.requests: list[dict[str, Any]] = []
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 
 class _DiscordHandler(BaseHTTPRequestHandler):
@@ -52,7 +46,7 @@ class _DiscordHandler(BaseHTTPRequestHandler):
 
     def _record(self, body: Any = None) -> None:
         parts = urlsplit(self.path)
-        cast(_RecordingServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": parts.path,
@@ -107,36 +101,34 @@ class _DiscordHandler(BaseHTTPRequestHandler):
         self._respond(403, {"message": "Missing Permissions", "code": 50013})
 
 
+@pytest.fixture(scope="class")
+def discord_server():
+    """One Discord-shaped recording server for the whole test class."""
+    yield from serve_recording(_DiscordHandler)
+
+
 class TestDiscordBackendBugs:
     """End-to-end tests against a local Discord-shaped HTTP server."""
 
-    server: _RecordingServer
-    api_base: str
+    server: RecordingServer
+    backend: DiscordChannelBackend
 
-    @classmethod
-    def setup_class(cls) -> None:
-        cls.server = _RecordingServer(("127.0.0.1", 0), _DiscordHandler)
-        thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        thread.start()
-        cls.api_base = f"http://127.0.0.1:{cls.server.server_address[1]}"
-
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-
-    def setup_method(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _fresh_backend(self, discord_server: RecordingServer):
+        """Clear the recorded requests and build a backend aimed at the server."""
+        self.server = discord_server
         self.server.requests.clear()
-        self._backup = _config.path.read_text() if _config.path.exists() else None
+        backup = _config.path.read_text() if _config.path.exists() else None
         _config.save({"bot_token": "test-token"})
-        self.backend = DiscordChannelBackend(api_base=self.api_base)
+        self.backend = DiscordChannelBackend(api_base=discord_server.base_url)
         self.backend._token = "test-token"
-
-    def teardown_method(self) -> None:
-        if self._backup is not None:
-            _config.path.write_text(self._backup)
-        elif _config.path.exists():
-            _config.path.unlink()
+        try:
+            yield
+        finally:
+            if backup is not None:
+                _config.path.write_text(backup)
+            elif _config.path.exists():
+                _config.path.unlink()
 
     def _paths(self) -> list[str]:
         return [r["path"] for r in self.server.requests]

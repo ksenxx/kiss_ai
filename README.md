@@ -6,7 +6,7 @@
   <img alt="KISS Sorcar" src="https://raw.githubusercontent.com/ksenxx/kiss_ai/main/assets/KISS-Sorcar-Logo.png">
 </picture>
 
-[![Version](https://img.shields.io/badge/version-2026.9.29-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.10.0-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -71,7 +71,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~3000** | Unknown | Unknown |
-| **Models in bundled catalog** | 706 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 709 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -101,7 +101,7 @@ The [HarnessTax](https://harnesstax.github.io/) study (Pan, Yang, Arabzadeh, Chi
   <img src="assets/tb2-success-by-model.png" alt="Percentage of Terminal-Bench 2.0 attempts solved per model under KISS Sorcar, Pi, Codex CLI, and Claude Code" width="100%">
 </div>
 
-Thirty tasks is a small sample (the pooled 95% interval, 63.8 to 85.9, contains all three published means), so we reran Pi ourselves, paired, on Claude Fable 5 with no turn cap and the same price table. On the study's 30 tasks KISS Sorcar solved 80.0% of attempts to Pi's 68.9%, a gap of **+11.1 points (95% interval +3.3 to +20.0)** for five cents more per attempt; on the 57 tasks the study did not sample, 82.5% to 71.9%, a gap of **+10.5 points (+2.9 to +18.7)** for 63 cents more. Only Pi was rerun, on one model, and the benchmark exercises the loop, six tools, and the coding rules with the discovery procedures, memory, reviewer, and IDE features switched off. Full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html); method and intervals: [the paper](https://kisssorcar.github.io/assets/kiss_sorcar.pdf), Section 5; runners and per-attempt records: `benchmarkings/harnesstax/` and `papers/kisssorcar/evidence/tb2_trials.json`.
+Thirty tasks is a small sample (the pooled 95% interval, 63.8 to 85.9, contains all three published means), so we reran Pi ourselves, paired, on Claude Fable 5 with no turn cap and the same price table. On the study's 30 tasks KISS Sorcar solved 80.0% of attempts to Pi's 68.9%, a gap of **+11.1 points (95% interval +3.3 to +20.0)** for five cents more per attempt; on the 57 tasks the study did not sample, 82.5% to 71.9%, a gap of **+10.5 points (+2.9 to +18.7)** for 63 cents more. Only Pi was rerun, on one model, and the benchmark exercises the loop, six tools, and the coding rules with the discovery procedures, memory, reviewer, and IDE features switched off. Full write-up: [The Harness Tax, Audited](https://kisssorcar.github.io/blog/harness-tax-terminal-bench-blog.html); method and intervals: [the paper](https://kisssorcar.github.io/assets/kiss_sorcar.pdf), Section 5; per-attempt records: `papers/kisssorcar/evidence/tb2_trials.json`; the runners live in the separate `benchmarkings` package (a sibling checkout, or `KISS_BENCHMARKINGS_DIR`), which the paper scripts under `papers/kisssorcar/` locate.
 
 ## What is in the Name
 
@@ -119,7 +119,7 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools KISS Sorcar needs, builds and installs the VS Code extension, waits for the daemon the extension starts, trusts the daemon's local certificate authority in your browsers (`kiss-web --trust-ca`), and opens the web app at `https://127.0.0.1:PORT`; on a remote machine it prints the cloudflared URL to open on your own device instead.
 
-When a new release is available, the update toast in the chat panel offers **Update** and **Update when idle**; the daemon installs an idle update as soon as no task is running, and VS Code reloads its window on its own once the new extension is in place. If the update fails, run the installation command again. It will not delete your history. After an install or update the chat panel shows the tips from `src/kiss/TIPS.md` once per version. Branding (`src/kiss/agents/vscode/media/brand.json` and a git-ignored `.brand/` overlay for white-label builds) and the installer's steps are described in [FEATURES.md](FEATURES.md#20-installation-deployment-docker-and-release).
+When a new release is available, the update toast in the chat panel offers **Update** and **Update when idle**; the daemon installs an idle update as soon as no task is running, and VS Code reloads its window on its own once the new extension is in place. While the installer runs (from the Update button, the web app, or `./install.sh` in a terminal), VS Code shows its current step (`[4/5] Building VS Code extension...`) as a non-blocking progress notification, read from `~/.kiss/.install-progress` and closed when the installer exits. If the update fails, run the installation command again. It will not delete your history. After an install or update the chat panel shows the tips from `src/kiss/TIPS.md` once per version. Branding (`src/kiss/agents/vscode/media/brand.json` and a git-ignored `.brand/` overlay for white-label builds) and the installer's steps are described in [FEATURES.md](FEATURES.md#20-installation-deployment-docker-and-release).
 
 ### Python package install
 
@@ -171,15 +171,15 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - **Persistent agent memory** (on by default): Markdown pages under `~/.kiss/memories` with a vector index, plus a per-repository memory for tasks run inside a git checkout. Toggle it in Settings or with `KISS_USE_MEMORY=0`.
 - Wake-word voice chat ("Hey Sorcar, …") via the mic button, including steering a running agent by voice.
 - Live steering: inject a message into a running agent or switch its model mid-run; wrap the message in `<task>…</task>` to queue it as the next task instead.
-- Tab mirroring: every VS Code window and web client on the same workspace shows the same tabs, and a sub-agent opens a nested tab of its own that closes when it finishes.
+- Tab mirroring: every VS Code window and web client shows the same tabs, whatever folder each has open (the daemon owns the one canonical tab list), and a sub-agent opens a nested tab of its own that closes when it finishes.
 - A **Browser tab** that streams a real browser running next to the daemon to every surface; an agent's `show_browser()` moves the page it is browsing into that tab when a login, CAPTCHA, or live demo needs you.
 - Scheduled automations: ask in plain language ("every weekday at 9am, summarize my unread Slack messages") and the built-in cron agent (`kiss-cron` from the shell) creates, lists, pauses, resumes, or removes the schedule. Schedules are kept in Pacific time, and a job can deliver its result to a messaging channel.
 
-The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device. Its desktop mode adds a **Task Info sidebar** with live token, cost, and step metrics and an agent-written progress report for the running task, plus **Schedule**, **Apps** (channel sign-in state; click one to connect it), and **Spend** panels. File links open in **content tabs** with a Monaco editor, Markdown/HTML preview, and a PDF viewer. Sections 15 to 19 of [FEATURES.md](FEATURES.md) describe each of these in full.
+The remote web app is the same interface served over a cloudflared tunnel: copy the URL and password from the Settings panel and open it on any device; the browser tab is titled `KISS Sorcar: <machine name>` so several servers are easy to tell apart. Its desktop mode adds a **Task Info sidebar** with live token, cost, and step metrics and an agent-written progress report for the running task, plus **Schedule**, **Apps** (channel sign-in state; click one to connect it), and **Spend** panels, and an activity bar with an **Explorer** (workspace file tree with Ctrl/Cmd-click, Shift-click, and Ctrl/Cmd+A multi-select) and a **Source Control** view (changes grouped per worktree, with foldable sections, and a commit graph whose file rows open a side-by-side diff). File links open in **content tabs** with a Monaco editor, Markdown/HTML preview, and a PDF viewer. Sections 15 to 19 of [FEATURES.md](FEATURES.md) describe each of these in full.
 
 ### The `kiss-web` daemon
 
-The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
+The `kiss-web` daemon hosts the agents, chat sessions, and the web app, and services every client command over WSS (port 8787 by default). Browsers sign in with the password from Settings; same-machine clients (the VS Code extension, the Python client, cron jobs, and channel agents) present a per-start token the daemon writes to `~/.kiss/sorcar-local.json` (`KISS_SORCAR_LOCAL` overrides the path). The VS Code extension starts it automatically; you can also manage it yourself:
 
 ```bash
 # Start the daemon (serves the web app and the extension).
@@ -285,7 +285,7 @@ The complete catalog, credentials, and 26 worked examples are in [src/kiss/agent
 
 ## Models Supported
 
-KISS Sorcar ships a catalog of **706 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); the per-provider counts and the full model list are in [MODELS.md](MODELS.md). Models are grouped by the provider that routes them, so the `cc/*` and `codex/*` namespaces (Claude Code CLI and Codex CLI) are categories of their own, and the open-weight `openai/gpt-oss-*` and `google/gemma-*` models count under Together AI, which serves them.
+KISS Sorcar ships a catalog of **709 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding, `dec` typed decisions via OpenRouter's `/api/alpha/decisions`). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json); the per-provider counts and the full model list are in [MODELS.md](MODELS.md). Models are grouped by the provider that routes them, so the `cc/*` and `codex/*` namespaces (Claude Code CLI and Codex CLI) are categories of their own, and the open-weight `openai/gpt-oss-*` and `google/gemma-*` models count under Together AI, which serves them.
 
 Cost and budget tracking use the catalog prices, except for `openrouter/*` models, where the cost OpenRouter reports for each response is billed instead, since the same model id is priced differently per upstream route. A response the adapters reject after the provider has billed it still counts towards the task's cost and budget, and the task total shown in the UI includes the task classifier's spend, every earlier session of a task continued after a crash, and the whole spend of the sub-tasks the task dispatches with `run_agent` and `run_parallel`.
 

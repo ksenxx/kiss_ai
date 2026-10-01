@@ -3433,78 +3433,88 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
 
 
 class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
-    """Test _start_quick_tunnel metrics API fallback path."""
+    """Test _start_quick_tunnel's metrics fallback when no URL is ever found.
+
+    A fake ``cloudflared`` is put first on ``PATH`` (``_start_quick_tunnel``
+    always spawns its own process, so pre-seeding ``_tunnel_proc`` would
+    just be overwritten and the real cloudflared on the host would start a
+    live trycloudflare tunnel) and the foreign-process metrics scan is
+    stubbed out so a cloudflared of another kiss-web on this host cannot
+    hand the test a URL.
+    """
 
     async def asyncSetUp(self) -> None:
+        import kiss.server.web_server as ws_mod
+
         self.port = _find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
+        self._tmpdir = tempfile.mkdtemp()
+        self._old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
+        self._orig_discover = ws_mod._discover_tunnel_url_from_metrics
+        ws_mod._discover_tunnel_url_from_metrics = lambda: None  # type: ignore[assignment]
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            use_tunnel=False,
+            work_dir=tempfile.mkdtemp(),
+        )
 
     async def asyncTearDown(self) -> None:
+        import shutil
+
+        import kiss.server.web_server as ws_mod
+
+        ws_mod._discover_tunnel_url_from_metrics = self._orig_discover  # type: ignore[assignment]
+        os.environ["PATH"] = self._old_path
+        self.server._terminate_tunnel_proc()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
+    def _install_fake_cloudflared(self, body: str) -> Path:
+        """Write a fake ``cloudflared`` script on PATH; returns its pid file."""
+        pid_file = Path(self._tmpdir) / "cloudflared.pid"
+        cf = Path(self._tmpdir) / "cloudflared"
+        cf.write_text(f"#!/bin/bash\necho $$ > '{pid_file}'\n{body}")
+        cf.chmod(0o755)
+        return pid_file
+
+    @_FAKE_SCRIPT_ON_PATH
     @pytest.mark.slow
     async def test_quick_tunnel_no_url_from_stderr(self) -> None:
-        """When stderr doesn't contain URL, falls back to metrics API."""
-        import sys
+        """No URL on stderr and none from metrics: returns None, kills the process."""
+        # exec: SIGTERM to the tracked pid must end the whole fake, not
+        # orphan a ``sleep`` child.
+        pid_file = self._install_fake_cloudflared(
+            'echo "INF Starting tunnel" >&2\nexec sleep 120\n'
+        )
+        self.assertIsNone(self.server._start_quick_tunnel())
+        # F4-11: a live cloudflared whose URL never surfaced is terminated so
+        # the watchdog can start a fresh one instead of guarding it forever.
+        self.assertIsNone(self.server._tunnel_proc)
+        pid = int(pid_file.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
 
-        server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
-        )
-        script = (
-            "import sys, time\n"
-            'sys.stderr.write("INF Starting tunnel\\n")\n'
-            "sys.stderr.flush()\n"
-            "time.sleep(2)\n"
-        )
-        proc = subprocess.Popen(
-            [sys.executable, "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            server._tunnel_proc = proc  # type: ignore[assignment]
-            url = server._start_quick_tunnel()
-            self.assertTrue(url is None or isinstance(url, str))
-        finally:
-            proc.terminate()
-            proc.wait()
-
+    @_FAKE_SCRIPT_ON_PATH
     @pytest.mark.slow
     async def test_quick_tunnel_process_dies_during_fallback(self) -> None:
-        """When cloudflared dies during metrics fallback, returns None."""
-        import sys
-
-        server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-            work_dir=tempfile.mkdtemp(),
+        """cloudflared exits while the metrics poll is running: returns None."""
+        # Closing stderr ends the URL reader at once while the process stays
+        # alive, so the metrics poll loop is what observes the exit.
+        self._install_fake_cloudflared(
+            'echo "INF Starting tunnel" >&2\nexec 2>&-\nsleep 3\nexit 1\n'
         )
-        script = "import sys; sys.stderr.write('error\\n'); sys.exit(1)\n"
-        proc = subprocess.Popen(
-            [sys.executable, "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        try:
-            server._tunnel_proc = proc  # type: ignore[assignment]
-            url = server._start_quick_tunnel()
-            self.assertTrue(url is None or isinstance(url, str))
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                proc.wait()
+        self.assertIsNone(self.server._start_quick_tunnel())
+        proc = self.server._tunnel_proc
+        assert proc is not None
+        self.assertEqual(proc.poll(), 1)
 
 
 class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
@@ -5086,7 +5096,9 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
             f.write(
                 "#!/bin/bash\n"
                 'echo "starting up..." >&2\n'
-                "sleep 300\n"
+                # exec: SIGTERM to the tracked pid must end the whole
+                # fake cloudflared, not orphan a ``sleep`` child.
+                "exec sleep 300\n"
             )
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path

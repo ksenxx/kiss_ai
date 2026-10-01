@@ -122,7 +122,9 @@ _model_sea_cache: dict[Path, tuple[tuple[int, int, int], bool]] = {}
 
 # Watcher-thread coordination.
 _watcher_thread: threading.Thread | None = None
-_watcher_stop = threading.Event()
+# The running poller's own stop event (one per thread: a stopped poller
+# still finishing a scan must not resume on a successor's cleared flag).
+_watcher_stop: threading.Event | None = None
 
 
 def seas_md_path() -> Path:
@@ -863,19 +865,8 @@ def start_registry_watcher(
             0.1 s to keep tests fast and above at 60 s to keep it
             useful.
     """
-    global _watcher_thread
+    global _watcher_thread, _watcher_stop
     interval = max(0.1, min(60.0, float(poll_interval)))
-    with _lock:
-        if _watcher_thread is not None and _watcher_thread.is_alive():
-            return
-        _watcher_stop.clear()
-        thread = threading.Thread(
-            target=_watcher_loop,
-            args=(interval,),
-            name="kiss-sea-registry-watcher",
-            daemon=True,
-        )
-        _watcher_thread = thread
     # Always emit the first refresh synchronously so the very first
     # ``list_commands`` from a client cannot race the watcher's first
     # tick, then hand ongoing rescans to the poller.
@@ -883,7 +874,21 @@ def start_registry_watcher(
         refresh_registry()
     except Exception:  # pragma: no cover - registry rescan is best-effort
         logger.debug("initial SEA registry refresh failed", exc_info=True)
-    thread.start()
+    # Create, start and publish the thread in one critical section so
+    # ``stop_registry_watcher`` can never join an unstarted thread and a
+    # concurrent second start cannot spawn a second poller.
+    with _lock:
+        if _watcher_thread is not None and _watcher_thread.is_alive():
+            return
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=_watcher_loop,
+            args=(interval, stop),
+            name="kiss-sea-registry-watcher",
+            daemon=True,
+        )
+        thread.start()
+        _watcher_thread, _watcher_stop = thread, stop
 
 
 def stop_registry_watcher(timeout: float = 5.0) -> None:
@@ -893,25 +898,25 @@ def stop_registry_watcher(timeout: float = 5.0) -> None:
     a poller that outlives the timeout is left as a daemon thread
     (daemon threads die with the interpreter).  Idempotent.
     """
-    global _watcher_thread
+    global _watcher_thread, _watcher_stop
     with _lock:
-        thread = _watcher_thread
-        _watcher_thread = None
-    if thread is None:
-        return
-    _watcher_stop.set()
+        thread, stop = _watcher_thread, _watcher_stop
+        _watcher_thread = _watcher_stop = None
+        if thread is None or stop is None:
+            return
+        stop.set()
     thread.join(timeout=timeout)
 
 
-def _watcher_loop(interval: float) -> None:
+def _watcher_loop(interval: float, stop: threading.Event) -> None:
     """Body of the background poller thread.
 
-    Rebuilds the registry every *interval* seconds until
-    :attr:`_watcher_stop` is signalled.  Every rescan is wrapped in
+    Rebuilds the registry every *interval* seconds until *stop* (this
+    poller's own event) is signalled.  Every rescan is wrapped in
     ``try/except`` so a transient filesystem error (e.g. a folder
     that appears mid-edit) cannot kill the watcher.
     """
-    while not _watcher_stop.wait(interval):
+    while not stop.wait(interval):
         try:
             refresh_registry()
         except Exception:  # pragma: no cover - watcher must never die

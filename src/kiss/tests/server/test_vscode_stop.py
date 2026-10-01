@@ -71,6 +71,11 @@ class TestVSCodeServerStop(unittest.TestCase):
                         "prompt": "Count to one trillion very slowly",
                         "model": "claude-opus-4-6",
                         "workDir": kiss_root,
+                        # Run in place: with a worktree the stop would land
+                        # during ``git worktree add`` on this very repo and
+                        # leave that git process (and a stale kiss/wt-*
+                        # branch) behind; stop handling is what is tested.
+                        "useWorktree": False,
                     })
                 except BaseException as exc:  # pragma: no cover - fail
                     dispatch_errors.append(exc)
@@ -122,6 +127,12 @@ class TestVSCodeServerStop(unittest.TestCase):
             if task_thread is not None:
                 task_thread.join(timeout=60)
             agent_state.agent_states.clear()
+            # A spare-worktree refill may have been scheduled for this repo
+            # (a background ``git worktree add``); join and remove it so
+            # the test does not leave git running.
+            from kiss.agents.sorcar import worktree_pool
+
+            worktree_pool.discard_all()
 
 
 class TestForceStopMechanism(unittest.TestCase):

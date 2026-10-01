@@ -20,14 +20,18 @@ entry is refused unless the client confirmed the replacement
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
 
 FS_ACTIONS: frozenset[str] = frozenset(
     {
@@ -282,6 +286,41 @@ class _CappedOutput:
         self.stderr = ""
         self.truncated = False
         self.timed_out = False
+        # Set (under ``guard``) once the result is decided: the cap was
+        # hit or the process exited.  Stdout EOF alone does not decide
+        # it (a process may close stdout and run on), so the timer can
+        # tell a slow command from a finished one.
+        self.finished = False
+        self.guard = threading.Lock()
+
+
+def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
+    """Kill *proc* together with every process in its group.
+
+    A group that is already gone is fine; ``proc.kill()`` is the
+    fallback when the group cannot be signalled (it is a no-op on an
+    exited process).
+    """
+    try:
+        kill_process_group(proc.pid, SIGKILL)
+    except OSError:
+        proc.kill()
+
+
+def _on_timeout(proc: subprocess.Popen[bytes], out: _CappedOutput) -> None:
+    """Flag the timeout and kill the tree unless the result is already decided.
+
+    Decided on *out.finished* rather than ``proc.poll()``: the leader
+    may have exited while a descendant still holds the stdout pipe, and
+    that read would otherwise block for as long as the descendant lives.
+    Runs from the timer (the reader is blocked on the pipe) and from
+    the reader itself when the process outlives stdout EOF.
+    """
+    with out.guard:
+        if out.finished:
+            return
+        out.timed_out = True
+    _kill_tree(proc)
 
 
 def _drain_stderr(stream: Any, out: _CappedOutput) -> None:
@@ -308,7 +347,11 @@ def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> 
     diff of two huge files costs the daemon at most *limit* bytes.
     """
     out = _CappedOutput()
-    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+    # Own process group: ``read()`` below returns EOF only once every
+    # writer of the pipe is gone, so a grandchild that inherited stdout
+    # (an external diff tool, a pager) must die with git or the timeout
+    # could never be enforced.
+    proc = popen_process_group(
         cmd, cwd=cwd, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -317,12 +360,8 @@ def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> 
         target=_drain_stderr, args=(proc.stderr, out), daemon=True,
     )
     err_thread.start()
-
-    def _timed_out() -> None:
-        out.timed_out = True
-        proc.kill()
-
-    timer = threading.Timer(timeout, _timed_out)
+    deadline = time.monotonic() + timeout
+    timer = threading.Timer(timeout, _on_timeout, args=(proc, out))
     timer.start()
     chunks: list[bytes] = []
     size = 0
@@ -335,14 +374,36 @@ def _run_capped(cmd: list[str], cwd: str | None, limit: int, timeout: float) -> 
             size += len(chunk)
             if size > limit:
                 out.truncated = True
-                proc.kill()
                 break
+        if out.truncated:
+            # Decided before the kill: a timer firing in between must
+            # not relabel the capped result as timed out.
+            with out.guard:
+                out.finished = True
+            _kill_tree(proc)
         proc.stdout.close()
-        proc.wait()
+        # Stdout EOF is not exit: the deadline stays armed until the
+        # process is gone (the timer may fire meanwhile and kill it).
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            _on_timeout(proc, out)
+            # A SIGKILLed process that still does not exit is stuck in
+            # the kernel; report it (returncode -1) rather than wait.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+        with out.guard:
+            out.finished = True
+        err_thread.join(timeout=1)
+        if err_thread.is_alive():
+            # The command is done but a stray group member still holds
+            # the stderr pipe: it has nothing left to say.
+            _kill_tree(proc)
+            err_thread.join(timeout=5)
     finally:
         timer.cancel()
-    err_thread.join(timeout=5)
-    out.returncode = proc.returncode
+    if proc.returncode is not None:
+        out.returncode = proc.returncode
     out.stdout = b"".join(chunks)[:limit]
     return out
 
@@ -418,7 +479,7 @@ def compare_files(a: str, b: str) -> dict[str, Any]:
             return {"error": f"Not a file: {p}"}
     try:
         proc = _run_capped(
-            ["git", "diff", "--no-color", "--no-index", "--", a, b],
+            ["git", "diff", "--no-color", "--no-ext-diff", "--no-index", "--", a, b],
             None, TEXT_MAX_BYTES, _DIFF_TIMEOUT_S,
         )
     except OSError as exc:

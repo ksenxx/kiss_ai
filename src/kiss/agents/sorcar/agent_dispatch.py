@@ -152,8 +152,9 @@ def stop_unconfirmed_error(name: str, timeout: float) -> str:
     (``daemon_client.StopUnconfirmedTimeoutError``), so the sub-task may
     still be running.  Programmatic callers of the tool
     (``cron_agent._run_prompt_job``) compare the reply against this
-    exact string — never a substring, which unrelated text such as a
-    socket path in a connection error could contain — to keep the run's
+    exact string — never a substring, which unrelated text such as an
+    endpoint URL or file path in a connection error could contain — to
+    keep the run's
     scratch directory instead of deleting it under a possibly live task.
 
     Args:

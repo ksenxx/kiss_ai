@@ -5,7 +5,7 @@
 
 // End-to-end tests for editor-tabs mode's TAB STATUS (icon + title
 // prefix) and finished-task reveal (out/SorcarPanelManager.js +
-// out/SorcarSidebarView.js) against a real Unix-domain-socket daemon
+// out/SorcarSidebarView.js) against a real local-WSS daemon
 // stub:
 //  - `panelTitle {state:'running'}` swaps the tab ICON to the green ring
 //    spinner (media/spinner-running.svg, SMIL-rotated like the

@@ -20,7 +20,7 @@
 // user was left with an empty box, no countdown and no error.
 //
 // The real compiled extension and the real SorcarSidebarView are driven
-// here; the daemon is a real unix domain socket speaking the real line
+// here; the daemon is a real local WebSocket server speaking the real line
 // protocol. Only the VS Code API surface and the git extension -- which
 // do not exist outside VS Code -- are stubbed.
 
@@ -212,7 +212,7 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
   }),
 });
 
-// A real daemon: a real unix socket speaking the real line protocol.
+// A real daemon: a real local WebSocket server speaking the real line protocol.
 const daemonLines = [];
 let daemonSock = null;
 const server = createFakeDaemon(sock => {

@@ -9,16 +9,14 @@ Holds the pieces that ``persistence.py``, ``git_worktree.py``,
 module coordinating across threads or processes) previously duplicated
 with drifting semantics: the ``KISS_RACE_DELAY`` test hook that widens
 read-modify-write windows in concurrency tests.  The ``pid_alive``
-liveness probe is re-exported from :mod:`kiss.core.processes`, and
-cross-process file locks live in :mod:`kiss.core.file_lock`.
+liveness probe lives in :mod:`kiss.core.processes` and cross-process
+file locks in :mod:`kiss.core.file_lock`.
 """
 
 from __future__ import annotations
 
 import os
 import time
-
-from kiss.core.processes import pid_alive as pid_alive  # noqa: F401 — shared probe
 
 
 def _race_delay() -> None:

@@ -36,12 +36,8 @@ from pathlib import Path
 
 from kiss.agents.third_party_agents.signal.signal_sea import _config as _signal_config
 from kiss.agents.third_party_agents.sms.sms_sea import _config as _sms_config
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 from kiss.tests.conftest import install_cli_script
-
-_SIGNAL_CONFIG = _signal_config.path
-_SIGNAL_BACKUP = _SIGNAL_CONFIG.with_suffix(".json.bughunt2-bak")
-_SMS_CONFIG = _sms_config.path
-_SMS_BACKUP = _SMS_CONFIG.with_suffix(".json.bughunt2-bak")
 
 # A Python program (not a shell script) so the same stand-in runs on
 # Windows, where ``install_cli_script`` adds the ``.cmd`` shim.
@@ -69,20 +65,6 @@ sys.exit(0)
 """
 
 
-def _backup_config(config: Path, backup: Path) -> None:
-    """Move an existing config file aside so tests can install their own."""
-    backup.unlink(missing_ok=True)
-    if config.exists():
-        shutil.move(str(config), str(backup))
-
-
-def _restore_config(config: Path, backup: Path) -> None:
-    """Restore the original config file (or remove the test one)."""
-    config.unlink(missing_ok=True)
-    if backup.exists():
-        shutil.move(str(backup), str(config))
-
-
 class TestSignalBackend(unittest.TestCase):
     """End-to-end tests driving SignalChannelBackend through a real fake signal-cli."""
 
@@ -99,8 +81,7 @@ class TestSignalBackend(unittest.TestCase):
         self._old_path = os.environ["PATH"]
         os.environ["PATH"] = self._tmpdir + os.pathsep + self._old_path
         self.addCleanup(os.environ.__setitem__, "PATH", self._old_path)
-        _backup_config(_SIGNAL_CONFIG, _SIGNAL_BACKUP)
-        self.addCleanup(_restore_config, _SIGNAL_CONFIG, _SIGNAL_BACKUP)
+        self.enterContext(config_backup(_signal_config.path))
         from kiss.agents.third_party_agents.signal.signal_sea import (
             SignalChannelBackend,
             _config,
@@ -157,9 +138,7 @@ class TestSignalBackend(unittest.TestCase):
         }
         self._backend.bind_channel_state(state)
         messages, _ = self._backend.poll_messages("+1AAA", "", limit=10)
-        self.assertEqual(
-            [m["text"] for m in messages], ["parked A0", "hello A1", "hello A2"]
-        )
+        self.assertEqual([m["text"] for m in messages], ["parked A0", "hello A1", "hello A2"])
         self.assertEqual(
             [(e["user"], e["text"]) for e in state["pending_envelopes"]],
             [("+1CCC", "parked C"), ("+1BBB", "hello B")],
@@ -191,12 +170,8 @@ class TestSMSBackend(unittest.TestCase):
     """Tests for SMSChannelBackend config contract and bot detection."""
 
     def setUp(self) -> None:
-        """Back up any existing SMS config."""
-        _backup_config(_SMS_CONFIG, _SMS_BACKUP)
-
-    def tearDown(self) -> None:
-        """Restore the original SMS config."""
-        _restore_config(_SMS_CONFIG, _SMS_BACKUP)
+        """Back up any existing SMS config; it is restored at cleanup."""
+        self.enterContext(config_backup(_sms_config.path))
 
     def test_config_without_from_number_is_invalid(self) -> None:
         """A legacy config lacking from_number must be rejected by connect()."""
@@ -284,12 +259,16 @@ class TestSMSBackend(unittest.TestCase):
             ):
                 """Swap the URL's host for the emulator and really send."""
                 parts = urlsplit(url)
-                local = urlunsplit(
-                    ("http", local_netloc, parts.path, parts.query, parts.fragment)
-                )
+                local = urlunsplit(("http", local_netloc, parts.path, parts.query, parts.fragment))
                 return super().request(
-                    method, local, params=params, data=data, headers=headers,
-                    auth=auth, timeout=timeout, allow_redirects=allow_redirects,
+                    method,
+                    local,
+                    params=params,
+                    data=data,
+                    headers=headers,
+                    auth=auth,
+                    timeout=timeout,
+                    allow_redirects=allow_redirects,
                 )
 
         try:

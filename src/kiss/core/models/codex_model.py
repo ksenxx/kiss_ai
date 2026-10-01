@@ -41,7 +41,6 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     _parse_text_based_tool_calls,
-    _ToolCallFilteredStream,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,23 +284,6 @@ class CodexModel(CLITextModel):
                     output = item.get("aggregated_output", "")
                     if output:
                         self._emit_as_thinking(output)
-            elif event_type == "text_delta":
-                delta = event.get("delta", {})
-                if isinstance(delta, dict) and delta.get("type") == "text_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        content += text
-                        self._invoke_token_callback(text)
-            elif event_type == "thinking_delta":
-                delta = event.get("delta", {})
-                if isinstance(delta, dict) and delta.get("type") == "thinking_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        self._emit_as_thinking(text)
-            elif event_type == "thinking_start":
-                self._invoke_thinking_callback(True)
-            elif event_type == "thinking_end":
-                self._invoke_thinking_callback(False)
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
             elif event_type in ("error", "turn.failed"):
@@ -341,12 +323,8 @@ class CodexModel(CLITextModel):
         Returns:
             Tuple of ``(function_calls, content, response)``.
         """
-        original_config = self._install_tools_prompt_in_system_instruction(function_map)
-        try:
-            with _ToolCallFilteredStream(self):
-                content, response = self.generate()
-        finally:
-            self.model_config = original_config
+        with self._tools_prompt_installed(function_map):
+            content, response = self.generate()
 
         function_calls = _parse_text_based_tool_calls(content)
 

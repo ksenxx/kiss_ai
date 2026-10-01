@@ -7,7 +7,7 @@ mangled by over-eager whitespace stripping.
 
 Two independent stripping bugs, one per assigned source file:
 
-* ``diff_merge._capture_untracked`` applied ``line.strip()`` to every
+* ``merge_flow._capture_untracked`` applied ``line.strip()`` to every
   ``git ls-files --others`` output line.  A new untracked file whose
   name ends (or begins) with a space — legal on every POSIX
   filesystem, and NOT C-quoted by git (space is a printable
@@ -37,7 +37,7 @@ from pathlib import Path
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.diff_merge import _capture_untracked
+from kiss.server.merge_flow import _capture_untracked
 from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import IS_WINDOWS
 
