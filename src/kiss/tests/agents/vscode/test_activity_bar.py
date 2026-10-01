@@ -70,9 +70,20 @@ def _dismiss_update_toast(page, harness: ExplorerHarness) -> None:
 
 @pytest.fixture(scope="module")
 def browser():
-    """One shared headless Chromium for every test in this module."""
+    """One shared headless Chromium for every test in this module.
+
+    ``--ignore-certificate-errors`` makes the first TLS handshake of every
+    request accept the harness's self-signed certificate.  With only the
+    context's ``ignore_https_errors`` Chromium rejects the certificate
+    once per request and restarts the transaction, and a restarted
+    request can be bound to connect jobs opened for the other ~20
+    not-yet-restarted page requests, each failing on the certificate
+    again; after 32 such restarts the request fails with
+    ``net::ERR_TOO_MANY_RETRIES`` (Chromium issue 40418163); that is the
+    failure once seen on this module's initial ``page.goto`` under load.
+    """
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
+        b = p.chromium.launch(headless=True, args=["--ignore-certificate-errors"])
         yield b
         b.close()
 
