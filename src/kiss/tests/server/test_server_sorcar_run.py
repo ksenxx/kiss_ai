@@ -795,7 +795,9 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.success is False
         assert "ToolsFileError" in result.text
         assert "SystemExit" in result.text
-        assert tools_path in result.text
+        # The diagnostic quotes the resolved path with repr() (doubled
+        # backslashes on Windows, /private/var on macOS).
+        assert repr(str(Path(tools_path).resolve())) in result.text
         assert "tool_lists" not in seen
 
     def test_broken_tools_file_stops_task_with_diagnostic(self) -> None:

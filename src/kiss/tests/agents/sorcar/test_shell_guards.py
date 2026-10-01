@@ -13,7 +13,9 @@ when a Docker daemon is running, through ``DockerManager``.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -168,10 +170,13 @@ def test_bash_refuses_destructive_commands_without_running_them(tmp_path: Path) 
     assert tools.Bash(f"rm -rf {tmp_path}", "wipe in background", background=True) == (
         DESTRUCTIVE_VERDICT)
     assert keep.read_text() == "keep"
-    assert tools.Bash(f"rm -rf {tmp_path}/build && echo gone", "allowed").strip() == "gone"
+    # as_posix: bash would eat the backslashes of a Windows path.
+    build = (tmp_path / "build").as_posix()
+    assert tools.Bash(f"rm -rf {build} && echo gone", "allowed").strip() == "gone"
     assert not (tmp_path / "build").exists()
 
 
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
 def test_bash_lifts_install_timeout(tmp_path: Path) -> None:
     """A build asked to run with a 1 s timeout is not killed after 1 s."""
     (tmp_path / "Makefile").write_text("all:\n\tsleep 2; echo built\n")
@@ -189,6 +194,7 @@ def test_bash_lifts_install_timeout(tmp_path: Path) -> None:
         "Error: Command execution timeout")
 
 
+@pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
 def test_run_commands_parallel_guards_each_command(tmp_path: Path) -> None:
     """A destructive command in a batch is refused; its siblings still run."""
     keep = tmp_path / "keep.txt"
@@ -196,7 +202,7 @@ def test_run_commands_parallel_guards_each_command(tmp_path: Path) -> None:
     (tmp_path / "Makefile").write_text("all:\n\tsleep 2; echo built\n")
     tools = UsefulTools(work_dir=str(tmp_path))
     report = tools.run_commands_parallel(
-        f'["rm -rf {tmp_path}", "echo sibling", "make"]', timeout_seconds=1)
+        json.dumps([f"rm -rf {tmp_path}", "echo sibling", "make"]), timeout_seconds=1)
     assert DESTRUCTIVE_VERDICT in report
     assert "sibling" in report
     assert "built" in report

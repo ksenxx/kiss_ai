@@ -665,17 +665,21 @@ class TestCommitMessageGenerationDedup(_ServerHarness):
         self.calls_log = Path(self.tmpdir) / "diff-calls.log"
         self.release_file = Path(self.tmpdir) / "diff-release"
         blocker = Path(self.tmpdir) / "blocking-diff.sh"
+        # POSIX paths and LF endings: Git for Windows runs the script
+        # with its bundled sh, which neither tolerates CRLF nor keeps
+        # the backslashes of a Windows path.
         blocker.write_text(
             "#!/bin/sh\n"
-            f'echo call >> "{self.calls_log}"\n'
-            f'while [ ! -f "{self.release_file}" ]; do sleep 0.02; done\n'
+            f'echo call >> "{self.calls_log.as_posix()}"\n'
+            f'while [ ! -f "{self.release_file.as_posix()}" ]; do sleep 0.02; done\n'
             "exit 0\n",
+            newline="\n",
         )
         blocker.chmod(0o755)
         _git(self.work_dir, "init", "-q")
         _git(self.work_dir, "config", "user.email", "h@example.com")
         _git(self.work_dir, "config", "user.name", "Kiss Test")
-        _git(self.work_dir, "config", "diff.external", str(blocker))
+        _git(self.work_dir, "config", "diff.external", blocker.as_posix())
         (self.work_dir / "file.txt").write_text("one\n")
         _git(self.work_dir, "add", "file.txt")
         _git(self.work_dir, "-c", "diff.external=", "commit", "-q", "-m", "init")

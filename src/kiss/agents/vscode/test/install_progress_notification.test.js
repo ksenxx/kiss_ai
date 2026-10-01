@@ -183,7 +183,11 @@ async function testWatcherEdgeCases() {
   );
 
   assert.strictEqual(isInstallerAlive(process.pid), true, 'own pid is alive');
-  assert.strictEqual(isInstallerAlive(deadPid()), false, 'exited pid is dead');
+  if (process.platform !== 'win32') {
+    // On Windows the MSYS `$$` is not a Windows pid, so the liveness
+    // check is skipped there by design (isInstallerAlive is always true).
+    assert.strictEqual(isInstallerAlive(deadPid()), false, 'exited pid is dead');
+  }
   if (process.getuid && process.getuid() !== 0) {
     // kill(1, 0) fails with EPERM for a non-root user: the process exists.
     assert.strictEqual(isInstallerAlive(1), true, 'EPERM counts as alive');

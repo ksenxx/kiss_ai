@@ -442,9 +442,8 @@ async function runTests() {
   );
   assert.strictEqual(inputValues.length, 0, 'nothing pasted for empty sel');
   assert.strictEqual(
-    daemonCmds.filter(
-      c => c.type === 'submit' || c.type === 'appendUserMessage',
-    ).length,
+    daemonCmds.filter(c => c.type === 'submit' || c.type === 'appendUserMessage')
+      .length,
     0,
     'nothing submitted for empty selection / missing editor',
   );
@@ -452,9 +451,8 @@ async function runTests() {
   wvv1.webviewView.webview.postMessage({type: 'insertAndSubmit', text: ''});
   await sleep(100);
   assert.strictEqual(
-    daemonCmds.filter(
-      c => c.type === 'submit' || c.type === 'appendUserMessage',
-    ).length,
+    daemonCmds.filter(c => c.type === 'submit' || c.type === 'appendUserMessage')
+      .length,
     0,
     'insertAndSubmit without text must not submit anything',
   );
@@ -551,9 +549,9 @@ async function runTests() {
     provider3.resolveWebviewView(wvv3.webviewView, {}, {});
     wvv3.wire();
     setTimeout(() => {
-      // Listen before the scripts load: main.js posts `ready` while
-      // loading and the host answers synchronously with the held
-      // insertAndSubmit, so the paste happens inside this eval.
+      // Listen before the scripts run: the host posts the held paste
+      // the moment the webview reports `ready`, which the stub
+      // delivers synchronously from inside evalWebviewScripts.
       const inp3 = ctx3.win.document.getElementById('task-input');
       inp3.addEventListener('input', () => slowInputValues.push(inp3.value));
       evalWebviewScripts(ctx3.win);
@@ -563,14 +561,22 @@ async function runTests() {
   const SEL5 = 'summarize the selected code';
   vscodeStub.window.activeTextEditor = makeEditor(ws, SEL5);
   daemonCmds.length = 0;
-  // The command returns as soon as the chat is revealed; the host holds
-  // the prompt and posts it on the webview's `ready`, which this slow
-  // webview sends ~600 ms later.  Wait for that deferred paste.
+  // The command returns as soon as the sidebar is revealed; the prompt
+  // is held until the webview's `ready` handshake (600 ms away here)
+  // and forwarded to the daemon from the composer after that, so wait
+  // for the paste and the daemon `submit` rather than a fixed interval.
   await registeredCommands.get('kissSorcar.runSelection')();
-  for (let i = 0; i < 40 && !slowInputValues.includes(SEL5); i++) {
-    await sleep(100);
+  for (
+    let i = 0;
+    i < 80 &&
+    !(
+      slowInputValues.includes(SEL5) &&
+      daemonCmds.some(c => c.type === 'submit')
+    );
+    i++
+  ) {
+    await sleep(50);
   }
-  await sleep(300);
 
   assert.ok(
     slowInputValues.includes(SEL5),

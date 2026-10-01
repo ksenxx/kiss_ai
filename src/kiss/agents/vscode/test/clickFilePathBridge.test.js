@@ -209,7 +209,9 @@ async function runTests() {
   );
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-bridge-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-bridge-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
   const realFile = path.join(ws, 'src', 'app.py');

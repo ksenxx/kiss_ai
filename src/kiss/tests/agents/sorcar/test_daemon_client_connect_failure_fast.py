@@ -17,7 +17,9 @@ as soon as the connect fails.
 from __future__ import annotations
 
 import os
+import re
 import socket
+import sys
 import time
 from pathlib import Path
 
@@ -26,14 +28,18 @@ import pytest
 from kiss.agents.sorcar import local_endpoint
 from kiss.agents.sorcar.daemon_client import run
 
+# "Immediately" is bounded by the OS: Windows reports a refused loopback
+# connect only after ~2 s of SYN retransmits (POSIX: well under 10 ms).
+_FAST_SECONDS = 4.0 if sys.platform == "win32" else 2.0
+
 
 def test_missing_endpoint_file_raises_connection_error_immediately(tmp_path: Path) -> None:
     """No endpoint file: ``ConnectionError`` names the path and arrives well under a second."""
     endpoint_file = tmp_path / "no-such-daemon.json"
     started = time.monotonic()
-    with pytest.raises(ConnectionError, match=str(endpoint_file)):
+    with pytest.raises(ConnectionError, match=re.escape(str(endpoint_file))):
         run("hello", endpoint_file=endpoint_file)
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < _FAST_SECONDS
 
 
 def test_stale_endpoint_file_raises_connection_error_immediately(tmp_path: Path) -> None:
@@ -54,4 +60,4 @@ def test_stale_endpoint_file_raises_connection_error_immediately(tmp_path: Path)
     started = time.monotonic()
     with pytest.raises(ConnectionError, match="Cannot connect to the sorcar daemon"):
         run("hello", endpoint_file=endpoint_file)
-    assert time.monotonic() - started < 2.0
+    assert time.monotonic() - started < _FAST_SECONDS

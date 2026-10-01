@@ -2,15 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The daemon resolves a VS Code window's file links over the Unix socket.
+"""The daemon resolves a VS Code window's file links over the local endpoint.
 
 The extension host used to resolve its webview's ``checkPaths`` and
 ``openFile`` itself (workspace root, then the tab's pending worktree)
-while the daemon dropped the same commands from UDS clients as no-ops.
+while the daemon dropped the same commands from local clients as no-ops.
 Now the host forwards both, and the daemon's ``_resolve_tab_file`` is
 the one resolution every surface uses:
 
-* ``checkPaths`` is answered with ``pathsExist`` on the requesting UDS
+* ``checkPaths`` is answered with ``pathsExist`` on the requesting local
   connection, exactly as for a browser;
 * ``openFile`` is answered with ``openResolvedFile`` — the resolved
   path (plus the request's ``line``) the host opens in a real editor
@@ -20,7 +20,7 @@ the one resolution every surface uses:
 Both honour the tab's pending worktree, so a report a worktree task
 committed on its un-merged branch is clickable and opens from the
 worktree copy.  The tests drive a real ``RemoteAccessServer`` over a
-real UDS connection.
+real connection to its token-authenticated local WSS endpoint.
 """
 
 from __future__ import annotations

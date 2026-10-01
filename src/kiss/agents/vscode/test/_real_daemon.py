@@ -6,10 +6,10 @@
 
 Started by ``test/_realDaemon.js`` as ``uv run python _real_daemon.py
 <work_dir>``: serves a real :class:`RemoteAccessServer` on a loopback
-WSS port and publishes it in the local endpoint file under
-``$KISS_HOME`` (the temp home the JS test set up, which the compiled
-extension host reads to connect), prints ``READY`` once it listens, and
-exits when its stdin closes.
+WSS port, publishing its token-authenticated endpoint in
+``$KISS_HOME/sorcar-local.json`` (the temp home the JS test set up, which
+the compiled extension host reads to connect), prints ``READY`` once it
+listens, and exits when its stdin closes.
 
 Every non-empty stdin line is a JSON event the test wants broadcast to
 the connected clients through the daemon's own printer — a stand-in for
@@ -25,7 +25,6 @@ import json
 import socket
 import sys
 
-from kiss.agents.sorcar.local_endpoint import default_endpoint_path
 from kiss.server.web_server import RemoteAccessServer
 
 
@@ -42,7 +41,6 @@ async def main(work_dir: str) -> None:
         host="127.0.0.1",
         port=_free_port(),
         work_dir=work_dir,
-        local_endpoint_file=default_endpoint_path(),
         use_tunnel=False,
     )
     await server.start_async()

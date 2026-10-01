@@ -218,7 +218,9 @@ async function runTests() {
   delete require.cache[require.resolve(sourcePath)];
   const {SorcarSidebarView} = require(sourcePath);
 
-  const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-htmltab-ws-'));
+  const ws = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-htmltab-ws-')),
+  );
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
   daemon = await startRealDaemon(UV, ws, process.env);
@@ -389,7 +391,9 @@ async function runTests() {
   //    remote webapp always opened absolute paths), so a report an agent
   //    wrote under /tmp or ~ is one click away in VS Code as well.
   clear();
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-out-'));
+  const outside = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-out-')),
+  );
   tmpDirs.push(outside);
   const outsideHtml = path.join(outside, 'report.html');
   fs.writeFileSync(outsideHtml, '<p>outside</p>');

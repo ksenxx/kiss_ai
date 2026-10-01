@@ -5,9 +5,8 @@
 
 'use strict';
 
-// E2E tests for AgentClient.setPreamble(), driven against a real local
-// WebSocket daemon stand-in (test/fakeDaemon.js) found through its
-// endpoint file, exactly as the production client finds the daemon.
+// E2E tests for AgentClient.setPreamble(), driven against a REAL
+// WebSocket daemon stand-in (test/fakeDaemon.js, no mocks).
 //
 // The daemon pins a connection's workspace folder from `setWorkDir` and
 // stamps that pin on every later command sent without a workDir -- the
@@ -32,7 +31,7 @@ if (!fs.existsSync(OUT_AGENT_CLIENT)) {
 const {AgentClient} = require(OUT_AGENT_CLIENT);
 
 const tmpDirs = [];
-function tmpSock(name) {
+function tmpEndpoint(name) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-acp-'));
   tmpDirs.push(dir);
   return path.join(dir, name);
@@ -40,17 +39,17 @@ function tmpSock(name) {
 function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
-function listen(server, sockPath) {
+function listen(server, endpointPath) {
   return new Promise((res, rej) =>
-    server.listen(sockPath, err => (err ? rej(err) : res())),
+    server.listen(endpointPath, err => (err ? rej(err) : res())),
   );
 }
 function close(server) {
   return new Promise(r => server.close(r));
 }
 
-// Collect the newline-framed commands of every connection a server sees,
-// one array per connection, in arrival order.
+// Collect the newline-framed commands of every authenticated connection
+// a fake daemon sees, one array per connection, in arrival order.
 function recordingServer() {
   const connections = [];
   const server = createFakeDaemon(conn => {
@@ -72,8 +71,8 @@ function recordingServer() {
 // 1. A command queued during an outage is delivered AFTER the preamble,
 //    and a command sent from the connect handler after both.
 async function testPreambleLeadsQueuedCommands() {
-  const sockPath = tmpSock('preamble.json');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpEndpoint('preamble.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -86,7 +85,7 @@ async function testPreambleLeadsQueuedCommands() {
   await delay(100);
 
   const {server, connections} = recordingServer();
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.once('connect', resolve);
     client.connect();
@@ -110,8 +109,8 @@ async function testPreambleLeadsQueuedCommands() {
 // 2. Every reconnect repeats the (current) preamble: a fresh daemon
 //    connection starts with no pin.
 async function testPreambleRepeatsOnReconnect() {
-  const sockPath = tmpSock('preamble-again.json');
-  const client = new AgentClient(sockPath, {
+  const endpointPath = tmpEndpoint('preamble-again.json');
+  const client = new AgentClient(endpointPath, {
     reconnectBaseMs: 40,
     reconnectMaxMs: 120,
     pendingTtlMs: 5000,
@@ -119,7 +118,7 @@ async function testPreambleRepeatsOnReconnect() {
   client.setPreamble({type: 'setWorkDir', workDir: '/ws/first'});
 
   const first = recordingServer();
-  await listen(first.server, sockPath);
+  await listen(first.server, endpointPath);
   await new Promise(resolve => {
     client.once('connect', resolve);
     client.connect();
@@ -141,7 +140,7 @@ async function testPreambleRepeatsOnReconnect() {
   await delay(100);
 
   const second = recordingServer();
-  await listen(second.server, sockPath);
+  await listen(second.server, endpointPath);
   await new Promise(resolve => client.once('connect', resolve));
   await delay(150);
 
@@ -160,14 +159,14 @@ async function testPreambleRepeatsOnReconnect() {
 
 // 3. No preamble (or a cleared one): nothing extra is written.
 async function testClearedPreambleWritesNothing() {
-  const sockPath = tmpSock('no-preamble.json');
-  const client = new AgentClient(sockPath, {pendingTtlMs: 5000});
+  const endpointPath = tmpEndpoint('no-preamble.json');
+  const client = new AgentClient(endpointPath, {pendingTtlMs: 5000});
   client.setPreamble({type: 'setWorkDir', workDir: '/ws/x'});
   client.setPreamble(null);
   client.sendCommand({type: 'getModels'});
 
   const {server, connections} = recordingServer();
-  await listen(server, sockPath);
+  await listen(server, endpointPath);
   await new Promise(resolve => {
     client.once('connect', resolve);
     client.connect();

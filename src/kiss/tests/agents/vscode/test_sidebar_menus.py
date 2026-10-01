@@ -64,6 +64,25 @@ def _row_at(path: str, cls: str = "") -> str:
     return f".explorer-row{cls}[data-explorer-path='{_css(path)}']"
 
 
+def _click_root_button(page, root: str, action: str) -> None:
+    """Hover *root*'s Explorer row and click its ``set`` / ``remove`` button.
+
+    The buttons are shown by the row's ``:hover`` rule.  A tree
+    re-render after the hover (a late explorer refresh from the daemon)
+    replaces the row and the mouse, not having moved, leaves the new
+    row un-hovered, so the hover is repeated until the button of the
+    current row is visible.
+    """
+    row = page.locator(_row_at(root, ".is-root"))
+    button = page.locator(f"{_row_at(root, '.is-root')} .explorer-root-{action}")
+    for _ in range(50):
+        row.hover()
+        if button.is_visible():
+            break
+        page.wait_for_timeout(100)
+    button.click()
+
+
 def _open_page(browser, harness):
     """Open the remote page in desktop mode with clipboard access and
     record the WS frames the client sends."""
@@ -701,11 +720,16 @@ def _selected_names(page) -> list[str]:
 
 
 def _read_clipboard(page, slot: str) -> str:
+    """Return the clipboard text with its line breaks normalized to LF.
+
+    Chromium hands multi-line text to the Windows clipboard as CRLF, so
+    the ``'\\n'``-joined paths come back with a ``\\r`` per line there.
+    """
     page.wait_for_function(
         f"navigator.clipboard.readText().then(t => window.{slot} = t) && true",
     )
     page.wait_for_function(f"typeof window.{slot} === 'string'", timeout=5000)
-    return str(page.evaluate(f"window.{slot}"))
+    return str(page.evaluate(f"window.{slot}")).replace("\r\n", "\n")
 
 
 def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree):
@@ -735,14 +759,16 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         assert _explorer_row(page, "a.txt").get_attribute("aria-selected") == "true"
         # Ctrl-click adds a row without opening it; Shift-click selects
         # from the anchor (the last row clicked) to the target.
-        _explorer_row(page, "c.txt").click(modifiers=["Control"])
+        # ControlOrMeta: on macOS Ctrl-click is the context-menu gesture
+        # (Chromium fires ``contextmenu``), so Cmd-click is the toggle.
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["a.txt", "c.txt"]
         _explorer_row(page, "d.txt").click(modifiers=["Shift"])
         assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
         page.wait_for_timeout(300)
         assert page.locator(".chat-tab").count() == tabs_before + 1
         # Ctrl-click on a selected row deselects it.
-        _explorer_row(page, "a.txt").click(modifiers=["Control"])
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["c.txt", "d.txt"]
 
         # The menu of a selected row is the multi-selection menu.
@@ -802,7 +828,7 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         page.keyboard.press("ArrowRight")
         assert _selected_names(page) == ["a.txt"]
         # Ctrl+A selects every visible row, Escape clears the selection.
-        page.keyboard.press("Control+a")
+        page.keyboard.press("ControlOrMeta+a")
         selected = _selected_names(page)
         assert {"multi", "a.txt", "b.txt", "c.txt", "d.txt"} <= set(selected)
         assert len(selected) == page.locator(".explorer-row").count()
@@ -811,9 +837,9 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
 
         # Three files, the Delete key on one of them: one confirmation
         # for all three, then every one is gone (b.txt survives).
-        _explorer_row(page, "a.txt").click(modifiers=["Control"])
-        _explorer_row(page, "c.txt").click(modifiers=["Control"])
-        _explorer_row(page, "d.txt").click(modifiers=["Control"])
+        _explorer_row(page, "a.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "c.txt").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "d.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["a.txt", "c.txt", "d.txt"]
         _explorer_row(page, "d.txt").press("Delete")
         message = _answer_confirm(page, "fs-delete", accept=True)
@@ -832,8 +858,8 @@ def test_explorer_multi_select_and_multi_target_menu(browser, harness, worktree)
         deletes_before = len(
             [f for f in _sent(frames, "fsAction") if f["action"] == "delete"],
         )
-        _explorer_row(page, "multi").click(modifiers=["Control"])
-        _explorer_row(page, "b.txt").click(modifiers=["Control"])
+        _explorer_row(page, "multi").click(modifiers=["ControlOrMeta"])
+        _explorer_row(page, "b.txt").click(modifiers=["ControlOrMeta"])
         assert _selected_names(page) == ["multi", "b.txt"]
         # Opened on the child, the menu is still the FOLDER's single-row
         # menu (the selection reduces to the folder).
@@ -877,7 +903,7 @@ def test_explorer_multi_copy_pastes_every_entry(browser, harness, worktree):
         page.wait_for_selector(_explorer_row_sel("/multi-src", ".is-dir"), timeout=15000)
         _explorer_row(page, "multi-src").click()
         page.wait_for_selector(_explorer_row_sel("/multi-src/two.txt"), timeout=15000)
-        _explorer_row(page, "one.txt").click(modifiers=["Control"])
+        _explorer_row(page, "one.txt").click(modifiers=["ControlOrMeta"])
         _explorer_row(page, "two.txt").click(modifiers=["Shift"])
         assert _selected_names(page) == ["one.txt", "two.txt"]
         _explorer_row(page, "one.txt").click(button="right")
@@ -2043,8 +2069,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         # Set as Working Directory (the buttons show on hover): the daemon
         # and the saved config follow, the old working directory stays
         # listed as an added folder.
-        plain_root.hover()
-        page.locator(".explorer-root-set").first.click()
+        _click_root_button(page, plain, "set")
         _wait_first_root(page, plain)
         assert _root_paths(page) == [plain, repo]
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
@@ -2062,8 +2087,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         # Remove the plain folder with its button: gone from the tree and
         # from storage, still on disk.
         fs_before = len(_sent(frames, "fsAction"))
-        page.locator(_row_at(plain, ".is-root")).hover()
-        page.locator(".explorer-root-remove").first.click()
+        _click_root_button(page, plain, "remove")
         page.wait_for_function(
             "document.querySelectorAll('#explorer-tree > .explorer-row.is-root').length === 1",
             timeout=15000,
