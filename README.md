@@ -58,7 +58,7 @@ ______________________________________________________________________
 </details>
 
 <div align="center">
-  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
+  <img src="assets/KISS-Sorcar-UI.png" alt="KISS Sorcar UI" width="100%">
 </div>
 
 ## KISS Sorcar vs Claude Code vs Cursor
