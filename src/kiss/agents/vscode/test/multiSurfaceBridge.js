@@ -258,7 +258,13 @@ function openSurface(cmd) {
     surface.errors,
   );
   surfaces.set(cmd.name, surface);
-  connectSocket(surface, () => out({op: 'opened', name: cmd.name}));
+  // Like the shim after `auth_ok` (and the VS Code host on connect):
+  // tell the app the daemon is up, so a later drop counts as an
+  // outage whose reconnect re-sends `ready`.
+  connectSocket(surface, () => {
+    dispatchToWebview(surface, {type: 'daemonStatus', connected: true});
+    out({op: 'opened', name: cmd.name});
+  });
 }
 
 // The remote webapp's shim keeps the page up while its WebSocket is

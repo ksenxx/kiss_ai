@@ -382,6 +382,11 @@ function testReconnectResendsReadyWithCurrentTabs() {
     type: 'tabs_state',
     tabs: [snapshotEntry('t1', 'bound tab', 'chat-7', '/w7')],
   });
+  // The daemon was up (it answered the boot ready with that snapshot):
+  // a later outage is a real reconnect.  A cold start -- connected:false
+  // before any connected:true -- must NOT re-ready (the boot ready is
+  // still queued in the host and goes out on auth).
+  send(win, {type: 'daemonStatus', connected: true});
   posted.length = 0;
   send(win, {type: 'daemonStatus', connected: false});
   send(win, {type: 'daemonStatus', connected: true});

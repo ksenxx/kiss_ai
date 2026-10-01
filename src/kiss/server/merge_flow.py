@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
+    _git,
     _porcelain_entries,
     _unquote_git_path,
     repo_lock,
@@ -38,7 +39,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.diff_merge import _capture_untracked, _git
 from kiss.server.helpers import generate_commit_message_from_diff
 from kiss.server.json_printer import stamp_event_ts
 from kiss.server.merge_conflict_resolver import resolve_merge_conflict
@@ -49,17 +49,38 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolved_commit_dir(work_dir: str) -> Path:
+    """Return the directory an autocommit of *work_dir* actually acts on.
+
+    A *work_dir* under a now-deleted ``.kiss-worktrees/kiss_wt-*``
+    checkout is remapped to the parent repository
+    (:func:`_stale_worktree_fallback`); every other path is returned
+    unchanged.  The one place this remap is written, so the
+    dispatcher's busy-check + claim, the worker's staging and the
+    sibling-repo pass cannot disagree about the repository.
+
+    Args:
+        work_dir: The submitted working directory (possibly stale).
+
+    Returns:
+        The post-fallback directory.
+    """
+    work_path = Path(work_dir)
+    if not work_path.exists():
+        fallback = _stale_worktree_fallback(work_path)
+        if fallback is not None:
+            return fallback
+    return work_path
+
+
 def _effective_commit_repo(work_dir: str) -> Path | None:
     """Return the repository an autocommit of *work_dir* will mutate.
 
-    Applies the SAME stale-worktree fallback as
-    ``_autocommit_changes``: a *work_dir* under a now-deleted
-    ``.kiss-worktrees/kiss_wt-*`` checkout is remapped to the parent
-    repository before discovery.  The manual-commit dispatcher uses
-    this so its busy-check + claim protect the repository the worker
-    actually stages — claiming the raw submitted path let the worker's
-    in-flight fallback mutate the parent repository unprotected
-    (gpt-5.6-sol review 2, missed wiring 1).
+    The manual-commit dispatcher uses this so its busy-check + claim
+    protect the repository the worker actually stages — claiming the
+    raw submitted path let the worker's in-flight stale-worktree
+    fallback mutate the parent repository unprotected (gpt-5.6-sol
+    review 2, missed wiring 1).
 
     Args:
         work_dir: The submitted working directory (possibly stale).
@@ -68,12 +89,37 @@ def _effective_commit_repo(work_dir: str) -> Path | None:
         The repository root the commit will mutate, or ``None`` when
         the (post-fallback) path is not inside a git repository.
     """
-    work_path = Path(work_dir)
-    if not work_path.exists():
-        fallback = _stale_worktree_fallback(work_path)
-        if fallback is not None:
-            work_path = fallback
-    return GitWorktreeOps.discover_repo(work_path)
+    return GitWorktreeOps.discover_repo(_resolved_commit_dir(work_dir))
+
+
+def _commit_message_or_fallback(
+    diff_text: str, *, user_prompt: str | None, task_result: str | None,
+) -> str:
+    """Return the LLM-generated commit message for *diff_text*, or a fallback.
+
+    Both auto-commit passes (the work_dir repository and the sibling
+    repositories touched by sub-agents) commit with a fixed message
+    when the model call fails or returns nothing, instead of leaving
+    the verified-non-empty staged changes uncommitted.
+
+    Args:
+        diff_text: The staged diff to describe.
+        user_prompt: The task's prompt, or ``None`` for a manual commit.
+        task_result: The task's result summary, or ``None``.
+
+    Returns:
+        The commit message.
+    """
+    try:
+        return (
+            generate_commit_message_from_diff(
+                diff_text, user_prompt=user_prompt, task_result=task_result,
+            )
+            or "Auto-commit"
+        )
+    except Exception:
+        logger.debug("Commit message generation failed; using fallback", exc_info=True)
+        return "kiss: auto-commit agent changes"
 
 
 def _same_repo(repo: Path, claimed: Path | None) -> bool:
@@ -234,20 +280,13 @@ def _porcelain_paths(
 
     Shared by :meth:`_MergeFlowMixin._main_dirty_files` and the
     porcelain fallback of
-    :meth:`_MergeFlowMixin._get_worktree_changed_files` so the two
-    parsers cannot drift apart.  Like :func:`_unquoted_name_lines`,
-    the path tail (``line[3:]``) is NOT ``strip()``-ed and the output
-    is split on ``\\n`` only: space-adjacent filenames are legal, and
-    stripping would mangle any that git leaves unquoted.
-
-    Rename/copy entries (``R  old -> new``) are split on the `` -> ``
-    boundary (respecting quoting) instead of being emitted as one
-    bogus ``"old -> new"`` path.
-
-    Thin wrapper over the shared
+    :meth:`_MergeFlowMixin._get_worktree_changed_files`; a thin
+    wrapper over the shared
     :func:`kiss.agents.sorcar.git_worktree._porcelain_entries` parser
     (also backing ``GitWorktreeOps.copy_dirty_state``) so the porcelain
-    parsers cannot drift apart.
+    parsers cannot drift apart.  Rename/copy entries (``R  old -> new``)
+    are split on the `` -> `` boundary instead of being emitted as one
+    bogus ``"old -> new"`` path.
 
     Args:
         output: Raw stdout from a ``git status --porcelain`` command.
@@ -272,6 +311,23 @@ def _porcelain_paths(
     return files
 
 
+def _capture_untracked(work_dir: str) -> set[str]:
+    """Return the set of untracked files in the repo.
+
+    Args:
+        work_dir: Repository root directory.
+
+    Returns:
+        Set of untracked file paths relative to work_dir.
+    """
+    result = _git("ls-files", "--others", "--exclude-standard", cwd=work_dir)
+    return {
+        _unquote_git_path(line)
+        for line in result.stdout.split("\n")
+        if line
+    }
+
+
 def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     """Check if *sha* refers to a valid commit object in *git_dir*.
 
@@ -282,7 +338,7 @@ def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     Returns:
         True if *sha* is a commit that exists in the repo.
     """
-    check = _git(git_dir, "cat-file", "-t", sha)
+    check = _git("cat-file", "-t", sha, cwd=git_dir)
     return check.returncode == 0 and check.stdout.strip() == "commit"
 
 
@@ -376,7 +432,7 @@ class _MergeFlowMixin:
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
         if repo is None:
             return []
-        result = _git(work_dir, "status", "--porcelain", "-uall")
+        result = _git("status", "--porcelain", "-uall", cwd=work_dir)
         if result.returncode != 0:
             return []
         return _porcelain_paths(result.stdout)
@@ -521,12 +577,8 @@ class _MergeFlowMixin:
         # bug 2).
         held_claims: list[Any] = []
         try:
-            work_path = Path(work_dir)
-            if not work_path.exists():
-                fallback = _stale_worktree_fallback(work_path)
-                if fallback is not None:
-                    work_dir = str(fallback)
-                    work_path = fallback
+            work_path = _resolved_commit_dir(work_dir)
+            work_dir = str(work_path)
             repo = GitWorktreeOps.discover_repo(work_path)
             if repo is None:
                 self._broadcast_autocommit_done(
@@ -588,7 +640,7 @@ class _MergeFlowMixin:
                         "message": "Staging changes…",
                         "tabId": tab_id,
                     })
-                add_result = _git(work_dir, "add", "-A")
+                add_result = _git("add", "-A", cwd=work_dir)
                 if add_result.returncode != 0:
                     err = (add_result.stderr or "").strip()
                     first_line = err.splitlines()[0] if err else "git add failed"
@@ -633,13 +685,8 @@ class _MergeFlowMixin:
                     task_result = (
                         prompt_state.last_result_summary if prompt_state else ""
                     ) or None
-                msg = (
-                    generate_commit_message_from_diff(
-                        diff_text,
-                        user_prompt=user_prompt,
-                        task_result=task_result,
-                    )
-                    or "Auto-commit"
+                msg = _commit_message_or_fallback(
+                    diff_text, user_prompt=user_prompt, task_result=task_result,
                 )
                 if not manual:
                     self.printer.broadcast({
@@ -652,7 +699,7 @@ class _MergeFlowMixin:
                 # pre-commit hook rejection text, identity/config
                 # errors, … — can be reported to the user instead of
                 # a guess.
-                commit_result = _git(work_dir, "commit", "-m", msg)
+                commit_result = _git("commit", "-m", msg, cwd=work_dir)
                 ok = commit_result.returncode == 0
             if ok:
                 msg_lines = msg.splitlines()
@@ -782,7 +829,9 @@ class _MergeFlowMixin:
         try:
             repos = _group_paths_by_repo(
                 paths,
-                exclude_repo=_repo_of_dir(work_dir or self.work_dir),
+                exclude_repo=_repo_of_dir(
+                    str(_resolved_commit_dir(work_dir or self.work_dir)),
+                ),
                 base_dir=work_dir or self.work_dir,
             )
         except Exception:  # pragma: no cover — defensive grouping
@@ -879,9 +928,7 @@ class _MergeFlowMixin:
         lit = "--literal-pathspecs"
         recorded = {os.path.normpath(p) for p in paths}
         with repo_lock(repo):
-            status = _git(
-                str(repo), lit, "status", "--porcelain", "--", *paths,
-            )
+            status = _git(lit, "status", "--porcelain", "--", *paths, cwd=str(repo))
             if status.returncode != 0:
                 logger.debug(
                     "git status failed in %s: %s", repo, status.stderr,
@@ -914,7 +961,7 @@ class _MergeFlowMixin:
                     ),
                 )
                 return
-            add_result = _git(str(repo), lit, "add", "-A", "--", *changed)
+            add_result = _git(lit, "add", "-A", "--", *changed, cwd=str(repo))
             if add_result.returncode != 0:
                 err = (add_result.stderr or "").strip()
                 first_line = err.splitlines()[0] if err else "git add failed"
@@ -925,7 +972,7 @@ class _MergeFlowMixin:
                 return
             # ``--quiet`` exits 1 when the paths differ, 0 when they do
             # not, and anything else on failure.
-            diff = _git(str(repo), lit, "diff", "--cached", "--quiet", "--", *changed)
+            diff = _git(lit, "diff", "--cached", "--quiet", "--", *changed, cwd=str(repo))
             if diff.returncode not in (0, 1):
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
@@ -948,29 +995,15 @@ class _MergeFlowMixin:
             task_result = (
                 prompt_state.last_result_summary if prompt_state else ""
             ) or None
-            try:
-                msg = (
-                    generate_commit_message_from_diff(
-                        diff_text,
-                        user_prompt=user_prompt,
-                        task_result=task_result,
-                    )
-                    or "Auto-commit"
-                )
-            except Exception:
-                logger.debug(
-                    "Commit message generation failed; using fallback",
-                    exc_info=True,
-                )
-                msg = "kiss: auto-commit agent changes"
+            msg = _commit_message_or_fallback(
+                diff_text, user_prompt=user_prompt, task_result=task_result,
+            )
             # Pathspec-limited commit: takes the listed paths from the
             # working tree / index and leaves every OTHER staged entry
             # in the user's index exactly as it was.  A plain
             # ``git commit`` here would sweep the user's own staged
             # work into the task's commit.
-            commit = _git(
-                str(repo), lit, "commit", "-m", msg, "--", *changed,
-            )
+            commit = _git(lit, "commit", "-m", msg, "--", *changed, cwd=str(repo))
             ok = commit.returncode == 0
         if ok:
             subject = _commit_subject(msg)
@@ -1351,21 +1384,21 @@ class _MergeFlowMixin:
             orig_fork = f"{wt.baseline_commit}^"
             wt_fork: str = wt.baseline_commit
         else:
-            mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
+            mb = _git("merge-base", "HEAD", wt.original_branch, cwd=str(wt_dir))
             if mb.returncode != 0 or not mb.stdout.strip():
                 return False
             orig_fork = wt_fork = mb.stdout.strip()
 
         orig_diff = _git(
-            str(wt.repo_root), "diff", "--name-only", "--no-renames",
-            orig_fork, wt.original_branch,
+            "diff", "--name-only", "--no-renames", orig_fork, wt.original_branch,
+            cwd=str(wt.repo_root),
         )
         orig_files = (
             set(_unquoted_name_lines(orig_diff.stdout))
             if orig_diff.returncode == 0 else set()
         )
 
-        wt_diff = _git(str(wt_dir), "diff", "--name-only", "--no-renames", wt_fork)
+        wt_diff = _git("diff", "--name-only", "--no-renames", wt_fork, cwd=str(wt_dir))
         wt_files = (
             set(_unquoted_name_lines(wt_diff.stdout))
             if wt_diff.returncode == 0 else set()
@@ -1415,7 +1448,7 @@ class _MergeFlowMixin:
         """
         if baseline and _is_valid_baseline(git_dir, baseline):
             return baseline
-        mb = _git(git_dir, "merge-base", tip, original_branch)
+        mb = _git("merge-base", tip, original_branch, cwd=git_dir)
         if mb.returncode == 0 and mb.stdout.strip():
             return mb.stdout.strip()
         return original_branch
@@ -1458,9 +1491,7 @@ class _MergeFlowMixin:
             base_ref = self._resolve_base_ref(
                 str(wt_dir), wt._baseline_commit, original_branch,
             )
-            tracked = _git(
-                str(wt_dir), "diff", "--name-only", "--no-renames", base_ref,
-            )
+            tracked = _git("diff", "--name-only", "--no-renames", base_ref, cwd=str(wt_dir))
             if tracked.returncode == 0:
                 files = _unquoted_name_lines(tracked.stdout)
             else:
@@ -1473,7 +1504,7 @@ class _MergeFlowMixin:
                 # commits unique to this worktree (not reachable from
                 # any other branch) so committed work is never
                 # mistaken for a clean worktree.
-                status = _git(str(wt_dir), "status", "--porcelain")
+                status = _git("status", "--porcelain", cwd=str(wt_dir))
                 files = _porcelain_paths(
                     status.stdout, rename_both_sides=True,
                 )
@@ -1482,7 +1513,7 @@ class _MergeFlowMixin:
                 if wt._wt_branch:
                     unique_args.append(f"--exclude={wt._wt_branch}")
                 unique_args.append("--branches")
-                unique = _git(str(wt_dir), *unique_args)
+                unique = _git(*unique_args, cwd=str(wt_dir))
                 if unique.returncode == 0:
                     files.extend(_unquoted_name_lines(unique.stdout))
             files.extend(_capture_untracked(str(wt_dir)))
@@ -1494,9 +1525,10 @@ class _MergeFlowMixin:
             repo_root, wt._baseline_commit, original_branch,
             tip=wt._wt_branch,
         )
-        result = _git(repo_root, "diff", "--name-only", "--no-renames",
-                      base_ref,
-                      wt._wt_branch)
+        result = _git(
+            "diff", "--name-only", "--no-renames", base_ref, wt._wt_branch,
+            cwd=repo_root,
+        )
         return (
             _unquoted_name_lines(result.stdout)
             if result.returncode == 0 else []
@@ -1643,7 +1675,7 @@ class _MergeFlowMixin:
             return False
         if repo_root is None:
             return True
-        status = _git(str(repo_root), "status", "--porcelain", "-uno")
+        status = _git("status", "--porcelain", "-uno", cwd=str(repo_root))
         return status.returncode != 0 or bool(status.stdout.strip())
 
     def _defer_worktree_merge(self, state: AgentState) -> str:
@@ -1697,7 +1729,7 @@ class _MergeFlowMixin:
         """
         if repo is None:
             return
-        status = _git(str(repo), "status", "--porcelain", "-uno")
+        status = _git("status", "--porcelain", "-uno", cwd=str(repo))
         if status.returncode != 0 or status.stdout.strip():
             # Dirty — or unknown, when git itself failed: the changes
             # are not known to be committed, so the deferral stands
@@ -2167,7 +2199,7 @@ class _MergeFlowMixin:
                 "success": True,
                 "message": "Nothing to discard: the working tree is clean.",
             }
-        reset = _git(str(repo), "reset", "--hard")
+        reset = _git("reset", "--hard", cwd=str(repo))
         if reset.returncode != 0:
             return {
                 "success": False,
@@ -2176,7 +2208,7 @@ class _MergeFlowMixin:
                     + (reset.stderr or reset.stdout).strip()
                 ),
             }
-        clean = _git(str(repo), "clean", "-fd")
+        clean = _git("clean", "-fd", cwd=str(repo))
         if clean.returncode != 0:
             return {
                 "success": False,

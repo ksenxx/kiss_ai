@@ -48,6 +48,8 @@ from importlib import import_module
 from types import ModuleType
 from urllib.parse import parse_qs, quote_plus, urlparse
 
+from kiss.core.processes import kill_process_group
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -111,6 +113,32 @@ def chrome_channel() -> str:
     if any(os.path.exists(path) for path in _CHROME_PATHS):
         return "chrome"  # pragma: no cover — needs Google Chrome installed
     return "chromium"
+
+
+def disabled_blink_features(unattended: bool) -> str:
+    """Return the ``--disable-blink-features=...`` switch for a Chromium launch.
+
+    ``AutomationControlled`` is always disabled: Chromium forces
+    ``navigator.webdriver`` on for any ``--remote-debugging-*`` flag and
+    only this switch clears it.  An *unattended* browser (headless, or
+    headed on an Xvfb display nobody looks at) also disables ``WebAuth``:
+    a security-key or passkey request there opens Chrome's native modal
+    dialog, which is neither streamed to the Browser tab nor visible to
+    the agent and which swallows every click on the page underneath
+    (Duo's "Use your security key" prompt wedged the Browser tab this
+    way).  No key can be plugged into such a browser anyway; without the
+    API, sign-in pages offer their other methods instead.
+
+    Args:
+        unattended: True when no human can see the browser's own window.
+
+    Returns:
+        The complete command-line switch.
+    """
+    features = ["AutomationControlled"]
+    if unattended:
+        features.append("WebAuth")
+    return "--disable-blink-features=" + ",".join(features)
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +248,22 @@ def _killpg(proc: subprocess.Popen[bytes]) -> None:
         proc: Wrapper started with ``start_new_session=True``.
     """
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        kill_process_group(proc.pid, signal.SIGTERM)
     except ProcessLookupError:  # pragma: no cover — group already reaped
         pass
     try:
         proc.wait(timeout=5)
+        return
     except subprocess.TimeoutExpired:  # pragma: no cover — Xvfb ignores SIGTERM only when wedged
-        os.killpg(proc.pid, signal.SIGKILL)
+        pass
+    try:  # pragma: no cover — reached only when SIGTERM was ignored
+        kill_process_group(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)  # reap: no zombie wrapper until Popen GC
+    except subprocess.TimeoutExpired:
+        logger.debug("Xvfb wrapper %s did not exit after SIGKILL", proc.pid)
 
 
 def stop_virtual_display() -> None:

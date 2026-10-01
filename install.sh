@@ -372,6 +372,9 @@ LAST_SIGNAL_TS=0
 # — used by ``handle_interrupt`` to forcibly stop it on a confirmed
 # double-interrupt (since the child ignores SIGINT by design).
 CURRENT_CMD_PID=""
+# PID of that command's heartbeat subshell, stopped alongside it on abort
+# so it does not outlive the script by up to one HEARTBEAT_INTERVAL.
+CURRENT_HB_PID=""
 # The ``confirm`` question currently waiting for an answer, if any.  A
 # single Ctrl-C at a question runs ``handle_interrupt`` but, on bash 5,
 # leaves the ``read`` waiting; re-printing the question after the notice
@@ -390,6 +393,9 @@ handle_interrupt() {
             kill -TERM "$CURRENT_CMD_PID" 2>/dev/null || true
             sleep 1
             kill -KILL "$CURRENT_CMD_PID" 2>/dev/null || true
+        fi
+        if [ -n "$CURRENT_HB_PID" ]; then
+            kill "$CURRENT_HB_PID" 2>/dev/null || true
         fi
         echo "   Re-run 'bash $0' to resume; the build cache is preserved."
         exit 130
@@ -464,15 +470,22 @@ run_with_heartbeat() {
     local cmd_pid=$!
     CURRENT_CMD_PID=$cmd_pid
     # Heartbeat loop runs in its own subshell so a failing ``sleep`` (rare)
-    # cannot abort the parent script under ``set -e``.  We deliberately do
-    # NOT trap INT/TERM here: the parent's cleanup at end-of-function uses
-    # SIGTERM to stop the heartbeat, and a stray SIGINT killing the
-    # heartbeat is harmless — at worst one elapsed-time message is lost;
-    # the wrapped command itself stays alive via its own SIG_IGN above.
+    # cannot abort the parent script under ``set -e``.  The parent's
+    # cleanup at end-of-function stops it with SIGTERM; the TERM trap
+    # takes the current ``sleep`` down with it.  Without the trap bash
+    # would die but leave that ``sleep`` (a foreground child blocked for
+    # up to HEARTBEAT_INTERVAL seconds) orphaned after every wrapped
+    # command.  A stray SIGINT cannot reach this subshell: bash starts
+    # background jobs with SIGINT ignored, and the wrapped command stays
+    # alive via its own SIG_IGN above.
     (
         set +e
+        hb_sleep_pid=""
+        trap 'kill "$hb_sleep_pid" 2>/dev/null; wait "$hb_sleep_pid" 2>/dev/null; exit 0' TERM
         while kill -0 "$cmd_pid" 2>/dev/null; do
-            sleep "$HEARTBEAT_INTERVAL"
+            sleep "$HEARTBEAT_INTERVAL" &
+            hb_sleep_pid=$!
+            wait "$hb_sleep_pid"
             if kill -0 "$cmd_pid" 2>/dev/null; then
                 local elapsed=$(( $(date +%s) - start ))
                 printf "   … %s still running (%ds elapsed)\n" "$label" "$elapsed"
@@ -480,6 +493,7 @@ run_with_heartbeat() {
         done
     ) 9>&- &
     local hb_pid=$!
+    CURRENT_HB_PID=$hb_pid
     # Use ``+e`` so a non-zero exit from the wrapped command is returned to
     # the caller instead of aborting the whole script — callers (e.g. the
     # npm ci retry loop) need to inspect the exit code.  ``wait`` itself
@@ -501,6 +515,7 @@ run_with_heartbeat() {
     done
     set -e
     CURRENT_CMD_PID=""
+    CURRENT_HB_PID=""
     kill "$hb_pid" 2>/dev/null || true
     wait "$hb_pid" 2>/dev/null || true
     return $rc

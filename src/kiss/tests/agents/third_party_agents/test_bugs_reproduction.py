@@ -2,11 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests that reproduce bugs listed in bugs.md.
+"""Regression tests for bugs fixed in the channel agents.
 
-Each test demonstrates the buggy behavior. All tests should FAIL
-until the corresponding bug is fixed. No mocks, patches, fakes,
-or test doubles are used.
+Each test pins the fixed behaviour against a real backend (no mocks,
+patches, fakes, or test doubles).
 
 The bug I6 test, which depends only on ``kiss.agents.sorcar``, lives
 in ``kiss.tests.agents.sorcar.test_bugs_reproduction``.

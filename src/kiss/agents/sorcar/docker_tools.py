@@ -174,8 +174,6 @@ class DockerTools:
             f"import base64, sys\n"
             f"old = base64.b64decode('{b64_old}').decode()\n"
             f"new = base64.b64decode('{b64_new}').decode()\n"
-            f"if old == new:\n"
-            f"    print('Error: new_string must be different from old_string'); sys.exit(1)\n"
             f"path = sys.argv[1]\n"
             f"try:\n"
             f"    content = open(path, encoding='utf-8').read()\n"

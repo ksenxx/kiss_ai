@@ -22,7 +22,6 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 
 import pytest
 
@@ -36,22 +35,7 @@ from kiss.agents.third_party_agents.irc.irc_sea import IRCChannelBackend
 from kiss.agents.third_party_agents.irc.irc_sea import _config as _irc_config
 from kiss.agents.third_party_agents.line.line_sea import LineChannelBackend
 from kiss.agents.third_party_agents.zalo.zalo_sea import ZaloChannelBackend
-
-
-def _backup_config(path: Path) -> str | None:
-    if path.exists():
-        backup = path.read_text()
-        path.unlink()
-        return backup
-    return None
-
-
-def _restore_config(path: Path, backup: str | None) -> None:
-    if backup is not None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(backup)
-    elif path.exists():
-        path.unlink()
+from kiss.tests.agents.third_party_agents.channel_config_backup import config_backup
 
 
 class _FakeIRCServer:
@@ -127,15 +111,17 @@ class _FakeIRCServer:
 class TestIRCBugs:
     """IRC bugs (A)-(D) against a real local TCP server."""
 
-    def setup_method(self) -> None:
-        self._backup = _backup_config(_irc_config.path)
-        self.server = _FakeIRCServer()
-        self.backend = IRCChannelBackend()
-
-    def teardown_method(self) -> None:
-        self.backend.disconnect()
-        self.server.close()
-        _restore_config(_irc_config.path, self._backup)
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        """Clean IRC config, a fake IRC server and a backend per test."""
+        with config_backup(_irc_config.path):
+            self.server = _FakeIRCServer()
+            self.backend = IRCChannelBackend()
+            try:
+                yield
+            finally:
+                self.backend.disconnect()
+                self.server.close()
 
     def test_use_tls_false_connects_plaintext(self) -> None:
         """(A) connect_irc(use_tls=False) must not attempt TLS."""
@@ -205,13 +191,15 @@ class TestIRCFreshDaemonTools:
     reporting success while sending nothing.
     """
 
-    def setup_method(self) -> None:
-        self._backup = _backup_config(_irc_config.path)
-        self.server = _FakeIRCServer()
-
-    def teardown_method(self) -> None:
-        self.server.close()
-        _restore_config(_irc_config.path, self._backup)
+    @pytest.fixture(autouse=True)
+    def _isolated(self):
+        """Clean IRC config and a fake IRC server per test."""
+        with config_backup(_irc_config.path):
+            self.server = _FakeIRCServer()
+            try:
+                yield
+            finally:
+                self.server.close()
 
     def test_tools_post_message_connects_on_demand(self) -> None:
         """tools()' fresh backend lazily connects and really sends."""

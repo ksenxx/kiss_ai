@@ -333,6 +333,74 @@ def test_call_tool_reconnects_after_the_server_dies(
     assert len(manager._connections) == 1
 
 
+def test_health_ping_does_not_tear_down_a_busy_connection(
+    manager: MCPManager, server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A long sync tool call outlives several health intervals unharmed.
+
+    FastMCP runs a sync tool handler inline on the server's loop, so the
+    server cannot answer a ping while ``block_until`` runs.  With the
+    manager's 0.5 s health interval a 1.5 s call spans three ping slots;
+    a ping sent during the call times out, unwinds the session under
+    the pending ``call_tool`` and kills a healthy, busy server.  The
+    ping must be skipped while a call is in flight.
+    """
+    pid_file = tmp_path / "busy_pid"
+    config = _config(server_script, pid_file)
+    key = _connection_key(config)
+    conn = manager.connect(config)
+    assert conn.session is not None, conn.error
+    pid = _wait_for_pid_file(pid_file)
+
+    started = tmp_path / "ping-started"
+    release = tmp_path / "ping-release"
+    answer: list[str] = []
+    caller = threading.Thread(
+        target=lambda: answer.append(
+            manager.call_tool(
+                key, "block_until", {"started": str(started), "release": str(release)},
+            )
+        ),
+        name="mcp-ping-caller",
+        daemon=True,
+    )
+    caller.start()
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline and not started.exists():
+            time.sleep(0.02)
+        assert started.exists(), "the tool call never reached the server"
+        time.sleep(1.5)  # three health intervals with the server's loop blocked
+    finally:
+        release.write_text("go", encoding="utf-8")
+    caller.join(timeout=120)
+    assert not caller.is_alive()
+    assert answer == ["released"], f"the in-flight call was broken by a ping: {answer}"
+    assert not conn.error, conn.error
+    assert conn.session is not None, "the busy connection was torn down"
+    assert manager._connections.get(key) is conn
+    assert _alive(pid), "the busy server was killed"
+    # The connection is idle again: it must still answer and keep pinging fine.
+    assert manager.call_tool(key, "add", {"a": 1, "b": 2}) == "3"
+
+
+def test_shutdown_right_after_construction_stops_the_loop_thread() -> None:
+    """``shutdown()`` must stop the loop even before ``run_forever`` began.
+
+    ``__init__`` starts the loop thread and returns; the loop reports
+    ``is_running()`` only once the thread has entered ``run_forever``.
+    A shutdown that returned early in that window left the daemon thread
+    spinning for the rest of the process.  Many back-to-back cycles make
+    the window likely to be hit at least once.
+    """
+    for _ in range(50):
+        mgr = MCPManager(idle_timeout_s=0.3, max_connections=2, health_interval_s=0.5)
+        mgr.shutdown()
+        mgr._thread.join(timeout=10)
+        assert not mgr._thread.is_alive(), "manager loop thread outlived shutdown()"
+        assert not mgr._loop.is_running()
+
+
 def test_token_lock_does_not_stall_other_mcp_calls(
     manager: MCPManager, server_script: Path, tmp_path: Path, real_stdin: None,
 ) -> None:

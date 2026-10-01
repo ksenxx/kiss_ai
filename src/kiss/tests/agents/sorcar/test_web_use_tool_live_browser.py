@@ -508,7 +508,10 @@ def test_page_that_stays_wedged_after_interrupt_is_closed_alone(tool, service, s
     started = time.monotonic()
     result = tool.press_key("a")
     assert time.monotonic() - started < wut._INPUT_WATCHDOG_SECS + 30
-    assert isinstance(result, str)
+    # Whether the interrupt frees the key press (so the tool goes on to
+    # read the page) or the close does, the lost page is reported, never
+    # swapped for a fresh blank tab that makes the press look successful.
+    assert result.startswith("Error pressing key 'a'"), result
     _wait(lambda: _events(printer, "closeBrowserTab", tab_id=tab_id), "hung tab closed")
     assert svc._context is not None and len(svc._pages) == 1
     assert tool.go_to_url(f"{server}/inert").startswith("Page:")

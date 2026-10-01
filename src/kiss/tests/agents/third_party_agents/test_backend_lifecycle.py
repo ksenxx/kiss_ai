@@ -4,7 +4,6 @@
 # add your name here
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from typing import Any, cast
@@ -36,7 +35,6 @@ class _FakeSocket:
 
 def test_webhook_connect_failure_is_reported() -> None:
     backend = LineChannelBackend()
-    backend._message_queue = queue.Queue()
     assert backend._start_webhook_server(port=0)
     try:
         assert backend._webhook_server is not None

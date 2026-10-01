@@ -57,12 +57,12 @@ class TestLocalSendTimeout(unittest.IsolatedAsyncioTestCase):
 
     async def _handler(self, ws: ServerConnection) -> None:
         """Register *ws* with the printer as a local peer until it closes."""
-        self.printer.add_local_client(ws)
+        self.printer.add_client(ws, local=True)
         await self.registered.put(ws)
         try:
             await ws.wait_closed()
         finally:
-            self.printer.remove_local_client(ws)
+            self.printer.remove_client(ws)
 
     async def _connect(self) -> tuple[ClientConnection, ServerConnection]:
         """Open one local peer; return (client side, server-side endpoint)."""

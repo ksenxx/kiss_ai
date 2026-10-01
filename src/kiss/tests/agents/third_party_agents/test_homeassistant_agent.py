@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import stat
 import sys
-import threading
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler
 from typing import Any, cast
@@ -28,16 +27,13 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import kiss.agents.third_party_agents.homeassistant.homeassistant_sea as ha_mod
-from kiss.agents.third_party_agents._backend_utils import (
-    ThreadedHTTPServer,
-    stop_http_server,
-)
 from kiss.agents.third_party_agents.homeassistant.homeassistant_sea import (
     HomeAssistantAgent,
     HomeAssistantChannelBackend,
     _config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.agents.third_party_agents.recording_http import RecordingServer, serve_recording
 
 _TOKEN = "test-ha-token"
 
@@ -62,7 +58,7 @@ class _HARequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _record(self, body: dict[str, Any] | None) -> None:
-        cast(_HAServer, self.server).requests.append(
+        cast(RecordingServer, self.server).requests.append(
             {
                 "method": self.command,
                 "path": self.path,
@@ -116,31 +112,17 @@ class _HARequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-class _HAServer(ThreadedHTTPServer):
-    """ThreadedHTTPServer that records every request it receives."""
-
-    def __init__(self, address: tuple[str, int]) -> None:
-        super().__init__(address, _HARequestHandler)
-        self.requests: list[dict[str, Any]] = []
-
-
 @pytest.fixture()
 def ha_server():
-    """Start the emulated HA REST server on a free port; yield (base_url, server)."""
-    server = _HAServer(("127.0.0.1", 0))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        yield base_url, server
-    finally:
-        stop_http_server(server, thread)
+    """Start the emulated HA REST server on a free port; yield the recording server."""
+    yield from serve_recording(_HARequestHandler)
 
 
 @pytest.fixture()
 def backend(ha_server):
     """A backend pointed at the emulated server with the valid token."""
-    base_url, server = ha_server
+    server = ha_server
+    base_url = server.base_url
     b = HomeAssistantChannelBackend()
     b._base_url = base_url
     b._token = _TOKEN
@@ -246,7 +228,7 @@ def test_connect_without_config_fails() -> None:
 
 def test_connect_with_config_succeeds(ha_server) -> None:
     """connect() loads persisted config into the backend."""
-    base_url, _ = ha_server
+    base_url = ha_server.base_url
     _config.save({"base_url": base_url, "token": _TOKEN})
     b = HomeAssistantChannelBackend()
     assert b.connect() is True
@@ -429,7 +411,7 @@ def test_send_message_default_title(backend) -> None:
 
 def test_unauthorized_token_returns_ok_false(ha_server) -> None:
     """A 401 from the server yields ok:false JSON from every tool — no exception."""
-    base_url, _ = ha_server
+    base_url = ha_server.base_url
     b = HomeAssistantChannelBackend()
     b._base_url = base_url
     b._token = "wrong-token"
@@ -466,7 +448,7 @@ def test_connection_refused_returns_ok_false() -> None:
 
 def test_send_message_raises_on_failure(ha_server) -> None:
     """send_message raises RuntimeError on failure so ChannelRunner can retry."""
-    base_url, _ = ha_server
+    base_url = ha_server.base_url
     b = HomeAssistantChannelBackend()
     b._base_url = base_url
     b._token = "wrong-token"

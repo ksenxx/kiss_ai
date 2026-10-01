@@ -63,6 +63,7 @@ from kiss.agents.third_party_agents._oauth_apps import (
     oauth_client_id,
 )
 from kiss.agents.third_party_agents.muse_auth.client import MuseAuthError
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,16 @@ def _advance_cursor(messages: list[dict[str, Any]], oldest: str) -> str:
             new_oldest = f"{ts + 0.000001:.6f}"
     return new_oldest
 
-_SLACK_DIR = Path.home() / ".kiss" / "third_party_agents" / "slack"
+
+def _slack_dir() -> Path:
+    """Return the Slack token directory, ``$KISS_HOME/third_party_agents/slack``.
+
+    Resolved lazily on every call (like ``ChannelConfig.path``) so a
+    ``KISS_HOME`` set after import, or a process that re-executes this
+    module as a tools file, never reads the developer's real tokens.
+    """
+    return kiss_home() / "third_party_agents" / "slack"
+
 
 # User-token scopes the Slack tools need.  Slack grants only user
 # scopes to a localhost redirect, so the KISS app requests these as
@@ -187,7 +197,7 @@ def _token_path(workspace: str = "default") -> Path:
     Returns:
         Path to ``~/.kiss/third_party_agents/slack/{workspace}/token.json``.
     """
-    return _SLACK_DIR / workspace / "token.json"
+    return _slack_dir() / workspace / "token.json"
 
 
 def _migrate_legacy_token() -> None:
@@ -197,7 +207,7 @@ def _migrate_legacy_token() -> None:
     ``~/.kiss/third_party_agents/slack/default/token.json`` if the legacy file
     exists and the new location does not.
     """
-    legacy = _SLACK_DIR / "token.json"
+    legacy = _slack_dir() / "token.json"
     dest = _token_path("default")
     if legacy.is_file() and not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1396,7 +1406,7 @@ def _delete_workspace(workspace: str) -> None:
     Args:
         workspace: Workspace identifier to delete.
     """
-    ws_dir = _SLACK_DIR / workspace
+    ws_dir = _slack_dir() / workspace
     vault_file = _workspace_vault_file(workspace)
     if not ws_dir.is_dir() and not vault_file.exists():
         print(f"Workspace {workspace!r} not found.")
@@ -1422,8 +1432,9 @@ def _list_workspaces() -> None:
     status, team name, and signed-in user.
     """
     workspaces: list[str] = []
-    if _SLACK_DIR.is_dir():
-        for entry in sorted(_SLACK_DIR.iterdir()):
+    slack_dir = _slack_dir()
+    if slack_dir.is_dir():
+        for entry in sorted(slack_dir.iterdir()):
             has_token = (entry / "token.json").is_file()
             if entry.is_dir() and (has_token or _workspace_vault_file(entry.name).exists()):
                 workspaces.append(entry.name)

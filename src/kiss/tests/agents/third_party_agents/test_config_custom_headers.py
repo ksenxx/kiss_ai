@@ -2,19 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests that custom HTTP headers can be configured via the settings panel.
+"""The channel CLI ``--header`` option flows into ``model_config["extra_headers"]``.
 
-The settings panel has a textarea (after the custom endpoint field) where
-users can enter custom HTTP headers in ``Key:Value`` format, one per line.
-These headers flow through to the model via ``model_config["extra_headers"]``.
+``_channel_cli._build_run_kwargs`` parses repeated ``Key:Value`` headers
+and leaves ``extra_headers`` unset when none are given.
 """
 
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
-
-_VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 
 
 class TestCLIHeadersFlow(unittest.TestCase):
