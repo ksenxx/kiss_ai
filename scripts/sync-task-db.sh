@@ -17,18 +17,20 @@
 #
 # Two passes, in this order:
 #
-#   1. remote -> here.  The remote takes a consistent snapshot of its database
-#      (``VACUUM INTO``, so a running web app there is not disturbed), the
-#      recorded work directories in that snapshot are re-pointed at *this*
-#      checkout, and src/kiss/scripts/sync_db.py merges the rows this machine
-#      is missing into ~/.kiss/sorcar.db in place.  Only the delta crosses the
-#      network, and nothing here is deleted or overwritten wholesale: a local
-#      web app can keep running throughout.  When this machine has no database
-#      at all, the snapshot is downloaded in full instead, verified, and put in
-#      place.
-#   2. here -> remote.  The mirror image: a snapshot of this machine's
-#      database, its work directories re-pointed at the deployment, then a
-#      delta merge into the remote's database in place.
+#   1. remote -> here.  src/kiss/scripts/sync_db.py asks the remote what this
+#      machine lacks, builds a small delta of just those rows on the remote,
+#      brings it here, re-points the work directories recorded in it at
+#      *this* checkout, and merges it into ~/.kiss/sorcar.db in place.  Only
+#      the delta crosses the network, neither database is copied or scanned
+#      (the history is append-only, and sync_db.py seeks straight to the rows
+#      above what the other side holds), and nothing here is deleted or
+#      overwritten wholesale: the web apps on both machines keep running
+#      throughout.  When this machine has no database at all, the remote
+#      takes a consistent snapshot (``VACUUM INTO``), which is downloaded in
+#      full instead, verified, and put in place.
+#   2. here -> remote.  The mirror image: a delta of this machine's rows,
+#      minus the tasks still running here, its work directories re-pointed at
+#      the deployment, merged into the remote's database in place.
 #
 # Nothing is lost, by construction:
 #
@@ -43,9 +45,9 @@
 #     replaces the older one, so both machines end up with the fresher
 #     summary of every chat.
 #   * Neither live database is ever rewritten by the relocation step: work
-#     directories are translated in the throw-away snapshot that travels, and
-#     a relocation that fails stops its direction rather than let one
-#     machine's paths overwrite the other's.
+#     directories are translated in the throw-away delta (or snapshot) that
+#     travels, and a relocation that fails stops its direction rather than
+#     let one machine's paths overwrite the other's.
 #   * Pass 1 runs first so that the tasks which ran only on the remote are
 #     already safe here before pass 2 touches anything there.
 #   * The one destructive operation is pass 2's fallback: replacing the
@@ -61,8 +63,8 @@
 #     it replaces is kept as ~/.kiss/sorcar.db.replaced-<time>, complete: the
 #     pages that were still only in its -wal are folded into it first, and if
 #     they cannot be, that -wal is kept alongside instead.  An older backup is
-#     never written over, and the three tables no sync moves — that machine's
-#     own usage counters — are carried from that file into the database which
+#     never written over, and the tables no sync moves — that machine's own
+#     usage counters — are carried from that file into the database which
 #     replaced it.
 #   * The fallback stops the remote web app, and stopping it kills the task it
 #     is running, so it refuses to run while one is: SORCAR_FORCE_RESTART=1
@@ -81,7 +83,9 @@
 #     runs, all three keep changing, so copying them one after another over a
 #     slow link produces a set that never existed at any single instant.
 #     ``VACUUM INTO`` instead yields one self-contained file holding one
-#     consistent point in time.
+#     consistent point in time.  It rewrites the whole database, so it is
+#     taken only when a whole database has to travel -- never for the delta
+#     merge, which reads the live database at one instant on its own.
 #   * A kiss-web left running on the remote from an earlier deploy holds the
 #     old database open.  Deleting the file underneath it makes it create a
 #     fresh empty one; the upload then lands on that same inode, and the first
@@ -144,6 +148,12 @@ REMOTE_SNAPSHOT='$HOME/.kiss/sorcar.db.outgoing'
 
 TMP_DIR="$(mktemp -d)"
 SNAPSHOT="$TMP_DIR/sorcar.db"
+# The helper sync_db.py runs on each delta before merging it, and the files it
+# needs (see "What is done to the rows before they travel" below).
+PREPARE_DELTA="$TMP_DIR/prepare-delta.sh"
+OMIT_LIVE_TASKS="$TMP_DIR/omit-live-tasks.py"
+LIVE_TASK_IDS="$TMP_DIR/live-task-ids"
+export RELOCATE OMIT_LIVE_TASKS
 
 # One exit path for everything that has to be undone, armed before any of it
 # happens: an ssh connection can drop after the remote has already acted.
@@ -168,10 +178,10 @@ REMOTE_FINGERPRINT_AT_PULL=""
 # Set by anything that did not do what it set out to do.  Such a run has not
 # synced the two machines, and must not report that it has.
 INCOMPLETE=0
-# IDs that were live on this machine before any remote rows were merged here.
-# After the pull, row contents alone cannot say which machine a live task came
-# from, and a genuinely remote task must survive a forced replacement.
-LOCAL_LIVE_TASK_IDS=""
+# $LIVE_TASK_IDS (declared below) lists the ids that were live on this machine
+# before any remote rows were merged here.  After the pull, row contents alone
+# cannot say which machine a live task came from, and a genuinely remote task
+# must survive a forced replacement.
 
 # Report a step that failed without giving up on the rest of the sync: the
 # other direction, or the other machine, may still have work that can travel.
@@ -267,36 +277,93 @@ capture_live_local_tasks() {
         return 0
     }
     ((count > 0)) || return 0
-    LOCAL_LIVE_TASK_IDS="$(printf '%s\n' "$answer" | tail -n +2 | sed 's/ [^ ]*$//')"
+    printf '%s\n' "$answer" | tail -n +2 | sed 's/ [^ ]*$//' > "$LIVE_TASK_IDS"
 }
 
-# Leave the captured local rows out of the outgoing snapshot.  Completed tasks,
-# stale interrupted tasks, and live tasks pulled from the remote still travel;
-# deferred local work travels on the next sync after it finishes.  The live
-# database itself is never changed.
-omit_live_tasks_from_snapshot() {
-    local removed
-    [[ -n "$LOCAL_LIVE_TASK_IDS" ]] || return 0
-    removed="$(printf '%s\n' "$LOCAL_LIVE_TASK_IDS" \
-        | python3 -c 'import sqlite3, sys
-snapshot = sys.argv[1]
+# ---------------------------------------------------------------------------
+# What is done to the rows before they travel
+#
+# sync_db.py builds a delta holding just the rows the other machine lacks and,
+# told so with --edit-delta, runs this helper on it before merging it -- on
+# this machine, whichever way the rows are going.  The fallback runs the same
+# helper on the whole snapshot it uploads.  Two things happen to the file,
+# never to a live database:
+#
+#   * Live local tasks are held back (sending only): their rows are deleted
+#     from the file.  Completed tasks, stale interrupted tasks and live tasks
+#     pulled from the remote still travel; deferred local work travels on the
+#     next sync after it finishes.
+#   * Work directories recorded under the sending checkout are re-pointed at
+#     the receiving one, so the History panel there shows the tasks instead
+#     of filtering them out.  A failure here stops the direction it belongs
+#     to -- rows carrying the sending machine's paths would hide tasks that
+#     were visible before -- and nothing has been sent at that point, so
+#     refusing costs only this run: the helper exits non-zero and sync_db.py
+#     merges nothing.
+#
+# Both are files rather than functions because sync_db.py runs the helper as a
+# command of its own.
+# ---------------------------------------------------------------------------
+cat > "$OMIT_LIVE_TASKS" <<'PY'
+"""Delete the tasks whose ids arrive on stdin, with their events; print how many."""
+import sqlite3
+import sys
+
 task_ids = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
-con = sqlite3.connect(snapshot, timeout=60)
+con = sqlite3.connect(sys.argv[1], timeout=60)
 try:
     con.execute("CREATE TEMP TABLE live_local_tasks(id TEXT PRIMARY KEY)")
     con.executemany("INSERT INTO live_local_tasks(id) VALUES (?)",
                     ((task_id,) for task_id in task_ids))
-    con.execute("DELETE FROM events WHERE task_id IN"
-                " (SELECT id FROM live_local_tasks)")
-    removed = con.execute("DELETE FROM task_history WHERE id IN"
-                          " (SELECT id FROM live_local_tasks)").rowcount
+    con.execute("DELETE FROM events WHERE task_id IN (SELECT id FROM live_local_tasks)")
+    removed = con.execute(
+        "DELETE FROM task_history WHERE id IN (SELECT id FROM live_local_tasks)").rowcount
     con.commit()
     print(removed)
 finally:
-    con.close()' "$SNAPSHOT")"
-    if ((removed > 0)); then
-        info "Deferred $removed live local task(s); they will sync after they finish."
-    fi
+    con.close()
+PY
+
+cat > "$PREPARE_DELTA" <<'SH'
+#!/bin/bash
+# Usage: prepare-delta.sh FILE FROM_DIR TO_DIR [LIVE_TASK_IDS_FILE]
+# Shape the rows about to travel, in the file that carries them (see
+# "What is done to the rows before they travel" in sync-task-db.sh).
+set -euo pipefail
+file="$1" from_dir="$2" to_dir="$3" live_ids="${4:-}"
+info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
+warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
+if [[ -n "$live_ids" && -s "$live_ids" ]]; then
+    removed="$(python3 "$OMIT_LIVE_TASKS" "$file" < "$live_ids")"
+    (( removed == 0 )) \
+        || info "Deferred $removed live local task(s); they will sync after they finish."
+fi
+[[ -n "$from_dir" && -n "$to_dir" ]] || exit 0
+if ! moved="$(python3 "$RELOCATE" "$file" "$from_dir" "$to_dir")"; then
+    warn "Could not re-point the recorded work directories from $from_dir to $to_dir" \
+         "— nothing was sent."
+    exit 1
+fi
+(( moved == 0 )) || info "Re-pointed $moved task(s) from $from_dir to $to_dir."
+SH
+
+# The --edit-delta command for one direction: the helper above, its arguments
+# quoted for the shell sync_db.py hands the command to, with sync_db.py's
+# ``{}`` standing for the delta.
+prepare_delta_command() {
+    local from_dir="$1" to_dir="$2" live_ids="${3:-}"
+    printf 'bash %s {} %s %s %s' "$(shquote "$PREPARE_DELTA")" \
+        "$(shquote "$from_dir")" "$(shquote "$to_dir")" "$(shquote "$live_ids")"
+}
+
+# Nothing travels between two checkouts' paths without the script that
+# translates them: with it missing, rows would arrive carrying paths the
+# receiving machine does not recognise, hidden from its History panel.
+relocation_ready() {
+    [[ -n "$LOCAL_DIR" && -n "$REMOTE_DIR" && ! -f "$RELOCATE" ]] || return 0
+    incomplete "$RELOCATE is missing — refusing to sync work directories" \
+               "this machine does not recognise."
+    return 1
 }
 
 # What the remote's database holds, in one line, for comparing two moments in
@@ -321,74 +388,32 @@ con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
 print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])' "$1"
 }
 
-# Rewrite the work directories of a snapshot so the receiving machine's
-# History panel shows the tasks instead of filtering them out.  Only the paths
-# inside the project move; a database that records none is left alone.
-#
-# A failure here stops the direction it belongs to: rows carrying the sending
-# machine's paths would be written over rows that carry the receiving
-# machine's, hiding tasks that were visible before.  Nothing has been sent at
-# this point, so refusing costs only this run.
-relocate_snapshot() {
-    local snapshot="$1" from_dir="$2" to_dir="$3" moved
-    [[ -n "$LOCAL_DIR" && -n "$REMOTE_DIR" ]] || return 0
-    if [[ ! -f "$RELOCATE" ]]; then
-        incomplete "$RELOCATE is missing — refusing to sync work directories" \
-                   "this machine does not recognise."
-        return 1
-    fi
-    if ! moved="$(python3 "$RELOCATE" "$snapshot" "$from_dir" "$to_dir")"; then
-        incomplete "Could not re-point the recorded work directories" \
-                   "from $from_dir to $to_dir — nothing was sent."
-        return 1
-    fi
-    info "Re-pointed $moved task(s) from $from_dir to $to_dir."
-}
-
 # ---------------------------------------------------------------------------
 # Pass 1: bring back what ran on the remote
 #
-# The snapshot is taken and rewritten on the remote, so that the rows arriving
-# here already carry this machine's paths.  sync_db.py matches tasks by their
+# sync_db.py reads the remote's live database at one instant and brings back
+# only the rows this machine lacks; the work directories in that delta are
+# re-pointed here before it is merged.  sync_db.py matches tasks by their
 # unique, immutable id, so a repeated sync moves nothing.
 # ---------------------------------------------------------------------------
 pull_from_remote() {
-    local remote_tasks
-    step "Snapshotting the task database on $TARGET ..."
-    REMOTE_SNAPSHOT_MADE=1
-    if ! remote_tasks="$(ssh "$TARGET" 'python3 -' < "$TMP_DIR/remote-snapshot.py")" \
-            || [[ ! "$remote_tasks" =~ ^[0-9]+$ ]]; then
-        incomplete "Could not snapshot the task database on $TARGET" \
-                   "(no space in ~/.kiss, or a stuck writer?) — nothing brought back."
-        return 0
-    fi
-    info "$TARGET holds $remote_tasks task(s)."
-    # What the snapshot holds, which is what this pass is about to bring here.
-    # Taken from the snapshot rather than from the live database, so that it
-    # describes exactly the rows that travel.
-    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint "$REMOTE_SNAPSHOT")"
-
-    if [[ -n "$LOCAL_DIR" && -n "$REMOTE_DIR" ]]; then
-        if [[ ! -f "$RELOCATE" ]]; then
-            incomplete "$RELOCATE is missing — nothing brought back from $TARGET."
-            return 0
-        fi
-        if ! ssh "$TARGET" "python3 - \"$REMOTE_SNAPSHOT\" $(shquote "$REMOTE_DIR") \
-                $(shquote "$LOCAL_DIR")" < "$RELOCATE" >/dev/null; then
-            incomplete "Could not re-point $TARGET's work directories at $LOCAL_DIR" \
-                       "— nothing brought back, so its paths cannot overwrite yours."
-            return 0
-        fi
-    fi
-
     if [[ ! -f "$DB" ]]; then
-        download_remote_db "$remote_tasks"
+        download_remote_db
         return 0
     fi
-    step "Merging $TARGET's tasks into $DB ..."
+    relocation_ready || return 0
     if [[ ! -f "$SYNC_DB" ]]; then
         incomplete "$SYNC_DB is missing — $TARGET's tasks were left there."
-    elif python3 "$SYNC_DB" "$TARGET:~/.kiss/sorcar.db.outgoing" "$DB"; then
+        return 0
+    fi
+    # What the remote holds, for pass 2's fallback to compare against.  Taken
+    # before the rows travel: whatever is written there from this instant on
+    # may or may not have come here, so it counts as a change -- the safe
+    # side to err on.
+    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint '$HOME/.kiss/sorcar.db')"
+    step "Merging $TARGET's tasks into $DB ..."
+    if python3 "$SYNC_DB" "$TARGET:~/.kiss/sorcar.db" "$DB" \
+            --edit-delta "$(prepare_delta_command "$REMOTE_DIR" "$LOCAL_DIR")"; then
         info "This machine's task database now holds $TARGET's tasks too."
         PULL_COMPLETE=1
     else
@@ -399,12 +424,33 @@ pull_from_remote() {
 
 # ---------------------------------------------------------------------------
 # Pass 1, first time on this machine: no database to merge into, so take the
-# remote's snapshot whole.  It is verified before it is put in place, and a
-# database that appeared meanwhile (a web app starting up as this ran) is
-# merged into rather than replaced.
+# remote's database whole.  The remote snapshots it (``VACUUM INTO``, so a
+# running web app there is not disturbed), re-points the work directories in
+# the snapshot at this checkout, and the snapshot is downloaded, verified, and
+# put in place.  A database that appeared meanwhile (a web app starting up as
+# this ran) is merged into rather than replaced.
 # ---------------------------------------------------------------------------
 download_remote_db() {
-    local expected="$1" got incoming="$TMP_DIR/incoming.db"
+    local expected got incoming="$TMP_DIR/incoming.db"
+    step "Snapshotting the task database on $TARGET ..."
+    REMOTE_SNAPSHOT_MADE=1
+    if ! expected="$(ssh "$TARGET" 'python3 -' < "$TMP_DIR/remote-snapshot.py")" \
+            || [[ ! "$expected" =~ ^[0-9]+$ ]]; then
+        incomplete "Could not snapshot the task database on $TARGET" \
+                   "(no space in ~/.kiss, or a stuck writer?) — nothing brought back."
+        return 0
+    fi
+    # What the snapshot holds is exactly what travels, so pass 2's fallback
+    # compares against the snapshot's fingerprint.
+    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint "$REMOTE_SNAPSHOT")"
+    relocation_ready || return 0
+    if [[ -n "$LOCAL_DIR" && -n "$REMOTE_DIR" ]] \
+            && ! ssh "$TARGET" "python3 - \"$REMOTE_SNAPSHOT\" $(shquote "$REMOTE_DIR") \
+                $(shquote "$LOCAL_DIR")" < "$RELOCATE" >/dev/null; then
+        incomplete "Could not re-point $TARGET's work directories at $LOCAL_DIR" \
+                   "— nothing brought back, so its paths cannot overwrite yours."
+        return 0
+    fi
     step "Downloading $expected task(s) from $TARGET ..."
     ssh "$TARGET" "gzip -1 -c \"$REMOTE_SNAPSHOT\"" | gzip -dc > "$incoming" \
         || { incomplete "Downloading the task database from $TARGET failed."; return 0; }
@@ -439,27 +485,19 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])' "$incomin
 # Pass 2: send what ran here
 #
 # The delta merge is the rule: sync_db.py asks the remote what it already has,
-# ships only the missing task and event rows, and merges them in one
-# transaction — so a repeated deploy moves kilobytes instead of gigabytes, the
-# remote web app never has to stop, and the tasks that ran only there survive.
+# ships only the missing task and event rows -- read from the live database
+# here at one instant, minus the tasks still running -- and merges them in one
+# transaction — so a repeated deploy moves kilobytes instead of gigabytes,
+# neither web app has to stop, and the tasks that ran only there survive.
 # ---------------------------------------------------------------------------
 push_to_remote() {
-    local tasks
-    step "Snapshotting $DB ..."
-    snapshot_local_db \
-        || die "Could not snapshot $DB (no space in $TMP_DIR, or a stuck writer?)."
-    omit_live_tasks_from_snapshot
-    tasks="$(count_tasks "$SNAPSHOT" 2>/dev/null || true)"
-    [[ "$tasks" =~ ^[0-9]+$ ]] || die "The snapshot of $DB is not a readable database."
-    info "Snapshot taken: $tasks tasks, $(du -h "$SNAPSHOT" | cut -f1)."
-
-    relocate_snapshot "$SNAPSHOT" "$LOCAL_DIR" "$REMOTE_DIR" || return 0
-
+    relocation_ready || return 0
     if [[ ! -f "$SYNC_DB" ]]; then
         warn "$SYNC_DB is missing — uploading the database in full instead."
     elif [[ "$REMOTE_DB_STATE" == "ok" ]]; then
-        step "Merging $tasks task(s) into $TARGET:~/.kiss/sorcar.db ..."
-        if python3 "$SYNC_DB" "$SNAPSHOT" "$TARGET:~/.kiss/sorcar.db"; then
+        step "Merging this machine's tasks into $TARGET:~/.kiss/sorcar.db ..."
+        if python3 "$SYNC_DB" "$DB" "$TARGET:~/.kiss/sorcar.db" \
+                --edit-delta "$(prepare_delta_command "$LOCAL_DIR" "$REMOTE_DIR" "$LIVE_TASK_IDS")"; then
             info "Task database synced on $TARGET."
             return 0
         fi
@@ -470,7 +508,27 @@ push_to_remote() {
         info "No usable task database on $TARGET yet ($REMOTE_DB_STATE)."
     fi
     may_replace_remote_db || return 0
-    upload_whole_db "$tasks"
+    snapshot_outgoing_db || return 0
+    upload_whole_db "$SNAPSHOT_TASKS"
+}
+
+# The whole database as the fallback uploads it: a consistent copy of the live
+# one, shaped by the same helper as a delta (live local tasks held back, work
+# directories re-pointed at the deployment).  Leaves the number of tasks it
+# holds, which the upload verifies on arrival, in SNAPSHOT_TASKS.
+SNAPSHOT_TASKS=""
+snapshot_outgoing_db() {
+    step "Snapshotting $DB ..."
+    snapshot_local_db \
+        || die "Could not snapshot $DB (no space in $TMP_DIR, or a stuck writer?)."
+    if ! bash "$PREPARE_DELTA" "$SNAPSHOT" "$LOCAL_DIR" "$REMOTE_DIR" "$LIVE_TASK_IDS"; then
+        incomplete "The snapshot of $DB could not be prepared for $TARGET — nothing was sent."
+        return 1
+    fi
+    SNAPSHOT_TASKS="$(count_tasks "$SNAPSHOT" 2>/dev/null || true)"
+    [[ "$SNAPSHOT_TASKS" =~ ^[0-9]+$ ]] \
+        || die "The snapshot of $DB is not a readable database."
+    info "Snapshot taken: $SNAPSHOT_TASKS tasks, $(du -h "$SNAPSHOT" | cut -f1)."
 }
 
 # ---------------------------------------------------------------------------
@@ -751,9 +809,9 @@ carry_over_counters() {
 }
 
 # ---------------------------------------------------------------------------
-# The script the remote runs for pass 1's snapshot.  It is a file rather than
-# a heredoc inside a command substitution so that a failing ssh can be caught
-# instead of aborting the whole sync.
+# The script the remote runs for the snapshot a first sync downloads.  It is a
+# file rather than a heredoc inside a command substitution so that a failing
+# ssh can be caught instead of aborting the whole sync.
 # ---------------------------------------------------------------------------
 cat > "$TMP_DIR/remote-snapshot.py" <<'PY'
 """Copy this machine's live task database to a self-contained snapshot."""

@@ -476,11 +476,17 @@ def test_target_without_the_schema_is_reported(tmp_path: Path) -> None:
     assert "task_history" in done.stderr
 
 
-def test_missing_event_below_the_highest_one_is_healed(tmp_path: Path) -> None:
-    """A hole in the target's event sequence is filled on the next sync."""
+def test_only_events_above_the_targets_highest_seq_travel(tmp_path: Path) -> None:
+    """Events are append-only, so a routine sync never looks below the highest seq.
+
+    A hole the writer never produces is not searched for -- that is what
+    keeps the sync from reading the events table -- so it stays until a
+    ``--full`` sync ships everything and the merge's de-duplication fills
+    it.
+    """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    add_task(src, "a", events=3)
+    add_task(src, "a", events=4)
     src.close()
     dst = make_db(target)
     add_task(dst, "a", events=0)
@@ -491,8 +497,48 @@ def test_missing_event_below_the_highest_one_is_healed(tmp_path: Path) -> None:
     done = sync(str(source), str(target))
 
     assert done.returncode == 0, done.stderr
-    assert event_keys(target) == [("a", 1), ("a", 2), ("a", 3)]
+    assert event_keys(target) == [("a", 1), ("a", 3), ("a", 4)]
     assert "1 event row(s) added" in done.stdout
+
+    done = sync("--full", str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert event_keys(target) == [("a", 1), ("a", 2), ("a", 3), ("a", 4)]
+    assert "1 event row(s) added" in done.stdout
+
+
+def test_a_task_the_target_has_without_events_gets_them_all(tmp_path: Path) -> None:
+    """A task row that arrived ahead of its events reports no highest seq."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=3)
+    add_task(src, "b", events=2)
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "a", events=0)
+    add_task(dst, "b", events=2)
+    dst.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert event_keys(target) == [("a", 1), ("a", 2), ("a", 3), ("b", 1), ("b", 2)]
+    assert "3 event row(s) added" in done.stdout
+
+
+def test_events_of_a_task_without_a_task_row_do_not_travel(tmp_path: Path) -> None:
+    """``events.task_id`` references ``task_history``; orphans are never looked at."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=1)
+    append_events(src, "orphan", 1, 2)
+    src.close()
+    make_db(target).close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert event_keys(target) == [("a", 1)]
 
 
 def test_schema_mismatch_is_refused(tmp_path: Path) -> None:
@@ -586,8 +632,10 @@ def test_unexpected_constraint_failure_aborts_the_merge(tmp_path: Path) -> None:
     assert event_keys(target) == []
 
 
-def test_repeated_sequence_in_the_target_still_heals(tmp_path: Path) -> None:
-    """A duplicated event does not disguise a hole as a complete run."""
+def test_a_hole_in_a_target_without_the_unique_index_is_filled_by_full(
+    tmp_path: Path,
+) -> None:
+    """``--full`` fills a hole through the anti-join path too, without duplicating."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source, unique_event_index=False)
     add_task(src, "a", events=3)
@@ -599,10 +647,10 @@ def test_repeated_sequence_in_the_target_still_heals(tmp_path: Path) -> None:
     append_events(dst, "a", 3, 1)
     dst.close()
 
-    done = sync(str(source), str(target))
+    done = sync("--full", str(source), str(target))
 
     assert done.returncode == 0, done.stderr
-    assert ("a", 2) in event_keys(target)
+    assert event_keys(target) == [("a", 1), ("a", 1), ("a", 2), ("a", 3)]
 
 
 def test_partial_unique_index_on_the_target(tmp_path: Path) -> None:
@@ -953,3 +1001,117 @@ def test_chat_summaries_with_different_columns_are_refused(tmp_path: Path) -> No
     assert done.returncode == 1
     assert "schemas for 'chat_summaries' differ" in done.stderr
     assert task_ids(target) == []
+
+
+EDIT_SCRIPT = (
+    "import sqlite3,sys\n"
+    "c=sqlite3.connect(sys.argv[1])\n"
+    "count='SELECT count(*) FROM task_history'\n"
+    "before=c.execute(count).fetchone()[0]\n"
+    "c.execute(sys.argv[2])\n"
+    "c.commit()\n"
+    "print('tasks', before, '->', c.execute(count).fetchone()[0])\n"
+)
+
+
+def edit_command(tmp_path: Path, sql: str) -> str:
+    """Build an ``--edit-delta`` command that runs one SQL statement on the delta.
+
+    Args:
+        tmp_path: Directory the helper script is written to.
+        sql: Statement to run against the delta.
+
+    Returns:
+        A shell command naming the delta as ``{}``.
+    """
+    script = tmp_path / "edit.py"
+    script.write_text(EDIT_SCRIPT)
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {{}} {shlex.quote(sql)}"
+
+
+def test_edit_delta_rewrites_and_drops_rows_before_the_merge(tmp_path: Path) -> None:
+    """The commands run in order, see only the rows about to travel, and shape what arrives."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=1, result="/laptop/kiss")
+    add_task(src, "b", events=2, result="/laptop/kiss")
+    add_task(src, "live", events=5)
+    src.close()
+    dst = make_db(target)
+    add_task(dst, "a", events=1, result="kept")
+    dst.close()
+    edit = edit_command(tmp_path, "")
+    drop_live = edit.replace("''", shlex.quote("DELETE FROM task_history WHERE id = 'live'"))
+    drop_live_events = edit.replace(
+        "''", shlex.quote("DELETE FROM events WHERE task_id = 'live'")
+    )
+    relocate = edit.replace(
+        "''",
+        shlex.quote("UPDATE task_history SET result = replace(result, '/laptop/', '/server/')"),
+    )
+
+    done = sync(
+        str(source),
+        str(target),
+        "--edit-delta",
+        drop_live,
+        "--edit-delta",
+        drop_live_events,
+        "--edit-delta",
+        relocate,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "1 task row(s) added, 2 event row(s) added" in done.stdout
+    # The first command saw the two task rows the target lacked, the later ones one.
+    assert done.stdout.startswith("tasks 2 -> 1\ntasks 1 -> 1\ntasks 1 -> 1\n")
+    assert rows(target, "SELECT id, result FROM task_history ORDER BY id") == [
+        ("a", "kept"),
+        ("b", "/server/kiss"),
+    ]
+    assert event_keys(target) == [("a", 1), ("b", 1), ("b", 2)]
+
+
+def test_a_failing_edit_delta_stops_the_sync_before_the_merge(tmp_path: Path) -> None:
+    """Nothing is merged when a command exits non-zero, and the sync says which."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", events=2)
+    src.close()
+    make_db(target).close()
+
+    done = sync(str(source), str(target), "--edit-delta", "exit 3")
+
+    assert done.returncode == 1
+    assert "delta edit exited with 3: exit 3" in done.stderr
+    assert task_ids(target) == []
+    assert event_keys(target) == []
+
+
+def test_edit_delta_sees_the_source_columns_and_a_quoted_path(tmp_path: Path) -> None:
+    """The delta carries the source's tables, at a path quoted for the shell."""
+    source, target = tmp_path / "with space", tmp_path / "dst.db"
+    source.mkdir()
+    source = source / "src.db"
+    src = make_db(source)
+    add_task(src, "a", events=1)
+    src.close()
+    make_db(target).close()
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import sqlite3,sys\n"
+        "c=sqlite3.connect(sys.argv[1])\n"
+        "print(sorted(r[0] for r in c.execute("
+        "\"SELECT name FROM sqlite_master WHERE type='table'\")))\n"
+    )
+
+    done = sync(
+        str(source),
+        str(target),
+        "--edit-delta",
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(probe))} {{}}",
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert "['events', 'sqlite_sequence', 'task_history']" in done.stdout
+    assert event_keys(target) == [("a", 1)]

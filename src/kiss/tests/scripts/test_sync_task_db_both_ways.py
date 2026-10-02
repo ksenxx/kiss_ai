@@ -385,12 +385,40 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
     ) -> None:
         """The remote's rows must be here before its database is replaced.
 
-        The snapshot the pull reads cannot be written (a directory sits
-        in its place), so nothing comes back.  A run that reported
-        success and pushed on would leave the server's tasks nowhere but
-        on the server — and the next fallback would bury them.
+        The remote's ``events`` table lacks the ``seq`` column the sync
+        orders events by, so the pull cannot read what the remote has
+        and nothing comes back.  A run that reported success and pushed
+        on would leave the server's tasks nowhere but on the server — and
+        the next fallback would bury them.
         """
         _make_db(self.local_db, ["L1"])
+        con = sqlite3.connect(self.remote_db)
+        con.executescript(
+            "CREATE TABLE task_history(id TEXT PRIMARY KEY, work_dir TEXT);"
+            "CREATE TABLE events(task_id TEXT, event_json TEXT);"
+            f"INSERT INTO task_history VALUES ('R1', '{_SERVER}');"
+        )
+        con.commit()
+        con.close()
+
+        result = self._sync(_LAPTOP, _SERVER)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not merge", result.stdout)
+        self.assertIn("Refusing to replace", result.stdout)
+        self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["R1"])
+        self.assertEqual(_backups(self.remote_kiss), [])
+
+    def test_a_first_sync_that_cannot_snapshot_the_remote_brings_nothing(
+        self,
+    ) -> None:
+        """With no database here, the remote's is downloaded whole from a snapshot.
+
+        The snapshot cannot be written (a directory sits in its place), so
+        nothing comes back, and the remote's database -- the only copy of
+        its tasks -- is not replaced by this machine's.
+        """
         _make_db(self.remote_db, ["R1"])
         (self.remote_kiss / "sorcar.db.outgoing").mkdir()
 
@@ -398,7 +426,8 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Could not snapshot", result.stdout)
-        self.assertEqual(sorted(_tasks(self.local_db)), ["L1"])
+        self.assertFalse(self.local_db.exists())
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["R1"])
         self.assertEqual(_backups(self.remote_kiss), [])
 
     def test_an_unreachable_remote_is_not_reported_as_synced(self) -> None:

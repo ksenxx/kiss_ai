@@ -22,9 +22,8 @@ How it works (three phases, each run on the machine that owns the
 database, so a database file is never copied across machines):
 
 1. ``_manifest`` runs on TARGET and emits a small gzipped JSON summary
-   of what TARGET already has: the ``task_history.id`` values it holds,
-   and the lowest and highest ``events.seq`` plus the number of distinct
-   sequence numbers per task.
+   of what TARGET already has: every ``task_history.id`` it holds, each
+   with the highest ``events.seq`` TARGET has for that task.
 2. ``_extract`` runs on SOURCE, reads that summary, and builds a
    throw-away *delta* database holding only the rows TARGET is missing.
    The delta is streamed back gzipped.
@@ -36,11 +35,21 @@ multi-gigabyte ``sorcar.db`` down to seconds.  Rows are matched by their
 stable natural keys -- ``task_history.id`` for tasks and
 ``(task_id, seq)`` for events -- and ``events.id`` (an ``AUTOINCREMENT``
 rowid that means different things in different databases) is never
-copied, so syncing the same pair of databases twice is a no-op.  When
-TARGET holds an unbroken run of a task's events, only events outside
-that run travel; when the run has a gap -- left by an interrupted
-earlier sync, say -- the source ships that task's events in full and the
-gap heals.
+copied, so syncing the same pair of databases twice is a no-op.
+
+The history tables are append-only, and the sync leans on that: a task
+row is never modified or deleted once written, and a task's events are
+only ever appended, each with the next ``seq``, so the highest ``seq``
+TARGET holds says exactly which of SOURCE's events it lacks -- the ones
+above it, and nothing below.  Neither phase therefore reads the events
+table itself: the manifest finds each task's highest ``seq`` with one
+index seek per task, and the extract seeks straight to the events above
+it, so a routine sync costs the same whether the databases hold a
+thousand events or ten million.  A hole below a task's highest ``seq``
+(which the writer never produces) is not looked for; ``--full`` ships
+everything and fills one.  Every event belongs to a task row -- the
+``events.task_id`` column references ``task_history`` -- so an event of
+a task SOURCE has no row for never travels.
 
 Both databases must have the same columns for the synced tables; a
 mismatch is refused rather than half-applied.
@@ -71,6 +80,18 @@ Options:
                     (slow but assumes nothing about how rows were added)
     --dry-run       Perform the merge and roll it back, reporting exactly
                     what a real run would change (TARGET must be writable)
+    --edit-delta COMMAND
+                    Run a shell command on this machine against the
+                    uncompressed delta before it is merged, ``{}``
+                    standing for the delta's path (repeatable, in
+                    order).  The delta holds the tables ``task_history``,
+                    ``events`` and ``chat_summaries`` with SOURCE's
+                    columns and only the rows about to travel, so a
+                    command can rewrite or drop rows cheaply -- re-point
+                    recorded work directories, hold back a task that is
+                    still running -- without a copy of either database.
+                    A command that exits non-zero stops the sync before
+                    anything is merged.
     --python PATH   Remote python interpreter (default: python3)
     --port PORT     ssh port
     -o OPT          Extra ``ssh -o`` option (repeatable)
@@ -106,7 +127,6 @@ MANIFEST_COLUMN_KEYS = {
 }
 CHAT_KEYS = ("chat_id", "last_launched")
 COPY_BUFFER = 1 << 20
-INSERT_BATCH = 1000
 
 PHASE_MANIFEST = "_manifest"
 PHASE_EXTRACT = "_extract"
@@ -399,14 +419,15 @@ def read_file_gz(inp: BinaryIO, path: str) -> None:
 def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> None:
     """Emit the target's sync manifest as gzipped JSON.
 
-    The manifest holds the task ids the target already has and, per task,
-    the lowest and highest ``events.seq`` together with the number of
-    events the target has.  That is all the source needs to compute a
-    minimal delta: a task row is immutable once created, so an id the
-    target holds never has to travel again; when the event count matches
-    the span, the target owns an unbroken run of events and only rows
-    outside it have to travel, and otherwise the source ships every event
-    of that task so earlier gaps heal.  When the target has a
+    The manifest maps every task id the target holds to the highest
+    ``events.seq`` it has for that task (``null`` when it has none).
+    That is all the source needs under the append-only rule the history
+    follows: a task row is immutable once created, so an id the target
+    holds never has to travel again, and a task's events are only ever
+    appended with increasing ``seq``, so the source's events above that
+    number are exactly the ones the target lacks.  Each highest ``seq``
+    is one seek in the ``(task_id, seq)`` index, so the events table is
+    never scanned however many rows it holds.  When the target has a
     ``chat_summaries`` table, the manifest also lists each chat with its
     ``last_launched``, so only chats the target lacks or holds an older
     row of travel; a target without the table gets no chat rows.
@@ -441,20 +462,13 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
                     ' WHERE "chat_id" IS NOT NULL'
                 )
             }
-        tasks = [
-            str(row[0])
-            for row in conn.execute(
-                f'SELECT "id" FROM main.{quote_name(TASK_TABLE)}'
-                ' WHERE "id" IS NOT NULL'
+        tasks = {
+            str(task_id): high
+            for task_id, high in conn.execute(
+                f'SELECT t."id", (SELECT MAX(e."seq") FROM main.{quote_name(EVENT_TABLE)} e'
+                ' WHERE e."task_id" = t."id")'
+                f' FROM main.{quote_name(TASK_TABLE)} t WHERE t."id" IS NOT NULL'
             )
-        ]
-        events = {
-            str(task_id): [low, high, count]
-            for task_id, low, high, count in conn.execute(
-                'SELECT "task_id", MIN("seq"), MAX("seq"), COUNT(DISTINCT "seq")'
-                f" FROM main.{quote_name(EVENT_TABLE)} GROUP BY \"task_id\""
-            )
-            if task_id is not None and low is not None
         }
     finally:
         conn.close()
@@ -462,7 +476,6 @@ def phase_manifest(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> 
         MANIFEST_COLUMN_KEYS[TASK_TABLE]: sorted(task_cols),
         MANIFEST_COLUMN_KEYS[EVENT_TABLE]: sorted(event_cols),
         "tasks": tasks,
-        "events": events,
     }
     if chats is not None:
         manifest[MANIFEST_COLUMN_KEYS[CHAT_TABLE]] = sorted(chat_cols)
@@ -487,6 +500,14 @@ def has_table(conn: sqlite3.Connection, schema: str, table: str) -> bool:
 def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> None:
     """Build a delta database of rows the target lacks and stream it out.
 
+    The whole extract is one transaction: one read transaction on the
+    source, so a live database is seen at a single instant, and one write
+    transaction on the delta.  The delta is a throw-away file that is
+    rebuilt from scratch on any failure, so it is written without a
+    journal and without fsync -- row by row in autocommit mode, every
+    insert used to wait for the disk, and loading the manifest alone took
+    tens of seconds for a few tens of thousands of tasks.
+
     Args:
         path: Source database path.
         args: Unused; present for a uniform phase signature.
@@ -503,7 +524,8 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
         conn = sqlite3.connect(delta_path, isolation_level=None, timeout=60.0)
         try:
             conn.execute("PRAGMA busy_timeout=60000")
-            conn.execute("PRAGMA journal_mode=OFF")
+            conn.execute("PRAGMA main.journal_mode=OFF")
+            conn.execute("PRAGMA main.synchronous=OFF")
             conn.execute("ATTACH DATABASE ? AS src", (source,))
             _create_delta_tables(conn)
             for table, key in MANIFEST_COLUMN_KEYS.items():
@@ -511,9 +533,12 @@ def phase_extract(path: str, args: list[str], inp: BinaryIO, out: BinaryIO) -> N
                     compare_columns(
                         table_columns(conn, "src", table), list(manifest[key]), table
                     )
-            _extract_tasks(conn, manifest)
-            _extract_events(conn, manifest)
+            conn.execute("BEGIN")
+            _load_target_tasks(conn, manifest.get("tasks") or {})
+            _extract_tasks(conn)
+            _extract_events(conn)
             _extract_chats(conn, manifest)
+            conn.execute("COMMIT")
             conn.execute("DETACH DATABASE src")
         finally:
             conn.close()
@@ -544,86 +569,84 @@ def _create_delta_tables(conn: sqlite3.Connection) -> None:
         conn.execute(row[0])
 
 
-def _extract_tasks(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
+def _load_target_tasks(conn: sqlite3.Connection, tasks: dict[str, Any]) -> None:
+    """Load the manifest's tasks into a temporary table the extract joins against.
+
+    Args:
+        conn: Connection to the delta database, inside its transaction.
+        tasks: Manifest entries ``{task_id: highest seq or None}``; empty
+            for a ``--full`` sync.
+    """
+    conn.execute(
+        'CREATE TEMP TABLE "_sync_have" (task_id TEXT PRIMARY KEY, high_seq INTEGER)'
+    )
+    conn.executemany(
+        'INSERT OR REPLACE INTO temp."_sync_have" VALUES (?, ?)', list(tasks.items())
+    )
+
+
+def _extract_tasks(conn: sqlite3.Connection) -> None:
     """Copy the task rows whose id the target does not have into the delta.
 
     Task ids are unique and a task row is never modified after it is
     created, so an id the target already holds identifies a row that is
-    already there in full and never has to travel.
+    already there in full and never has to travel.  A row with a NULL id
+    cannot be matched across databases and would be duplicated on every
+    run, so such rows are skipped.
 
     Args:
-        conn: Connection to the delta database with the source attached.
-        manifest: Target manifest; empty for a ``--full`` sync.
+        conn: Connection to the delta database with the source attached
+            and the target's tasks loaded by :func:`_load_target_tasks`.
     """
     columns = table_columns(conn, "src", TASK_TABLE)
     require_columns(columns, ("id",), f"{TASK_TABLE} in the source database")
-    have = set(manifest.get("tasks") or [])
-    selection = ", ".join(quote_name(c) for c in columns)
-    insert = (
-        f"INSERT INTO main.{quote_name(TASK_TABLE)} ({selection})"
-        f" VALUES ({', '.join('?' for _ in columns)})"
+    table = quote_name(TASK_TABLE)
+    names = ", ".join(quote_name(c) for c in columns)
+    conn.execute(
+        f"INSERT INTO main.{table} ({names})"
+        f" SELECT {', '.join('s.' + quote_name(c) for c in columns)} FROM src.{table} s"
+        ' LEFT JOIN temp."_sync_have" w ON w.task_id = s."id"'
+        ' WHERE s."id" IS NOT NULL AND w.task_id IS NULL'
     )
-    index = {name: pos for pos, name in enumerate(columns)}
-    batch: list[tuple[Any, ...]] = []
-    cursor = conn.execute(f"SELECT {selection} FROM src.{quote_name(TASK_TABLE)}")
-    for row in cursor:
-        task_id = row[index["id"]]
-        if task_id is None:
-            # A NULL primary key cannot be matched across databases and
-            # would be duplicated on every run, so such rows are skipped.
-            continue
-        if str(task_id) in have:
-            continue
-        batch.append(tuple(row))
-        if len(batch) >= INSERT_BATCH:
-            conn.executemany(insert, batch)
-            batch.clear()
-    if batch:
-        conn.executemany(insert, batch)
 
 
-def _extract_events(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
+def _extract_events(conn: sqlite3.Connection) -> None:
     """Copy the events the target is missing into the delta database.
 
-    An event travels when its task is unknown to the target, when its
-    ``seq`` falls outside the run of sequence numbers the target already
-    holds, or when that run has a gap -- in which case every event of the
-    task is shipped and the merge's de-duplication sorts it out.
+    Events are append-only with increasing ``seq``, so the target lacks
+    exactly the events above the highest ``seq`` it reported for a task,
+    and every event of a task it reported no events for.  Both are found
+    by seeking the source's ``(task_id, seq)`` index once per task; no
+    event the target already has is ever read, nor is the events table
+    scanned.  Events whose ``task_id`` has no ``task_history`` row are
+    never looked at: the column references that table.
 
     Args:
-        conn: Connection to the delta database with the source attached.
-        manifest: Target manifest; empty for a ``--full`` sync.
+        conn: Connection to the delta database with the source attached
+            and the target's tasks loaded by :func:`_load_target_tasks`.
     """
     columns = table_columns(conn, "src", EVENT_TABLE)
     require_columns(columns, ("task_id", "seq"), f"{EVENT_TABLE} in the source database")
     rowid_alias = rowid_alias_column(conn, "src", EVENT_TABLE)
     copied = [c for c in columns if c != rowid_alias]
-    _create_watermark_table(conn, manifest.get("events") or {})
     table = quote_name(EVENT_TABLE)
-    names = ", ".join(quote_name(c) for c in copied)
-    selection = ", ".join(f"s.{quote_name(c)}" for c in copied)
-    missing = (
-        f" FROM src.{table} s"
-        ' LEFT JOIN main."_sync_watermark" w ON w.task_id = s."task_id"'
-        ' WHERE s."task_id" IS NOT NULL AND s."seq" IS NOT NULL'
-        " AND (w.task_id IS NULL OR w.complete = 0"
-        ' OR s."seq" > w.high_seq OR s."seq" < w.low_seq)'
+    insert = (
+        f"INSERT INTO main.{table} ({', '.join(quote_name(c) for c in copied)})"
+        f" SELECT {', '.join('s.' + quote_name(c) for c in copied)}"
     )
-    if rowid_alias:
-        # Picking the rows by their rowid first keeps the scan inside a
-        # ``(task_id, seq)`` index when the source has one, so a routine
-        # sync never reads the payload of an event it does not copy.
-        key = quote_name(rowid_alias)
-        conn.execute('CREATE TABLE main."_sync_todo" (rid INTEGER PRIMARY KEY)')
-        conn.execute(f'INSERT INTO main."_sync_todo" SELECT s.{key}' + missing)
-        conn.execute(
-            f"INSERT INTO main.{table} ({names}) SELECT {selection}"
-            f' FROM main."_sync_todo" t JOIN src.{table} s ON s.{key} = t.rid'
-        )
-        conn.execute('DROP TABLE main."_sync_todo"')
-    else:
-        conn.execute(f"INSERT INTO main.{table} ({names}) SELECT {selection}{missing}")
-    conn.execute('DROP TABLE main."_sync_watermark"')
+    # CROSS JOIN pins the loop order: tasks on the outside, one index seek
+    # into the events on the inside.
+    conn.execute(
+        f"{insert} FROM src.{quote_name(TASK_TABLE)} t"
+        ' LEFT JOIN temp."_sync_have" w ON w.task_id = t."id"'
+        f' CROSS JOIN src.{table} s ON s."task_id" = t."id"'
+        ' WHERE w.high_seq IS NULL AND s."seq" IS NOT NULL'
+    )
+    conn.execute(
+        f'{insert} FROM temp."_sync_have" w'
+        f' CROSS JOIN src.{table} s ON s."task_id" = w.task_id AND s."seq" > w.high_seq'
+        " WHERE w.high_seq IS NOT NULL"
+    )
     _warn_on_duplicate_event_keys(conn)
 
 
@@ -647,9 +670,9 @@ def _extract_chats(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
     columns = table_columns(conn, "src", CHAT_TABLE)
     require_columns(columns, CHAT_KEYS, f"{CHAT_TABLE} in the source database")
     have: dict[str, Any] = manifest.get("chats") or {}
-    conn.execute('CREATE TABLE main."_sync_chats" (chat_id TEXT PRIMARY KEY, launched INTEGER)')
+    conn.execute('CREATE TEMP TABLE "_sync_chats" (chat_id TEXT PRIMARY KEY, launched INTEGER)')
     conn.executemany(
-        'INSERT OR REPLACE INTO main."_sync_chats" VALUES (?, ?)',
+        'INSERT OR REPLACE INTO temp."_sync_chats" VALUES (?, ?)',
         [(chat_id, int(launched or 0)) for chat_id, launched in have.items()],
     )
     table = quote_name(CHAT_TABLE)
@@ -657,33 +680,9 @@ def _extract_chats(conn: sqlite3.Connection, manifest: dict[str, Any]) -> None:
     conn.execute(
         f"INSERT INTO main.{table} ({names})"
         f" SELECT {', '.join('s.' + quote_name(c) for c in columns)} FROM src.{table} s"
-        ' LEFT JOIN main."_sync_chats" w ON w.chat_id = s."chat_id"'
+        ' LEFT JOIN temp."_sync_chats" w ON w.chat_id = s."chat_id"'
         ' WHERE s."chat_id" IS NOT NULL AND (w.chat_id IS NULL'
         ' OR COALESCE(CAST(s."last_launched" AS INTEGER), 0) > w.launched)'
-    )
-    conn.execute('DROP TABLE main."_sync_chats"')
-
-
-def _create_watermark_table(
-    conn: sqlite3.Connection, watermarks: dict[str, Any]
-) -> None:
-    """Load the target's per-task event coverage into the delta database.
-
-    Args:
-        conn: Connection to the delta database.
-        watermarks: Manifest entries of the form
-            ``{task_id: [low_seq, high_seq, count]}``.
-    """
-    conn.execute(
-        'CREATE TABLE main."_sync_watermark" (task_id TEXT PRIMARY KEY,'
-        " low_seq INTEGER, high_seq INTEGER, complete INTEGER NOT NULL)"
-    )
-    rows = [
-        (task_id, low, high, int(count == high - low + 1))
-        for task_id, (low, high, count) in watermarks.items()
-    ]
-    conn.executemany(
-        'INSERT OR REPLACE INTO main."_sync_watermark" VALUES (?, ?, ?, ?)', rows
     )
 
 
@@ -1092,6 +1091,7 @@ def synchronize(
     runner: Runner,
     full: bool = False,
     dry_run: bool = False,
+    delta_edits: list[str] | None = None,
 ) -> dict[str, Any]:
     """Copy task and event rows, and newer chat summaries, from a source database into a target.
 
@@ -1103,6 +1103,9 @@ def synchronize(
         dry_run: Roll the merge back instead of committing it, so the
             target is left untouched but the reported counts are the ones
             a real run would apply.
+        delta_edits: Shell commands run on this machine, in order,
+            against the uncompressed delta before it is merged, ``{}``
+            standing for the delta's path (see :func:`edit_delta`).
 
     Returns:
         Statistics with the compressed delta size, the rows inserted and
@@ -1110,7 +1113,7 @@ def synchronize(
 
     Raises:
         SyncError: If source and target are the same database, or if any
-            phase fails.
+            phase or delta edit fails.
     """
     if (source.host, source.path) == (target.host, target.path):
         raise SyncError("source and target are the same database")
@@ -1126,6 +1129,8 @@ def synchronize(
         else:
             runner.run(target, PHASE_MANIFEST, [], None, manifest_path)
         runner.run(source, PHASE_EXTRACT, [], manifest_path, delta_path)
+        if delta_edits:
+            edit_delta(delta_path, delta_edits)
         commit = "rollback" if dry_run else "commit"
         runner.run(target, PHASE_MERGE, [commit], delta_path, stats_path)
         with open(stats_path, "rb") as handle:
@@ -1140,6 +1145,37 @@ def synchronize(
     stats["seconds"] = round(time.monotonic() - started, 2)
     stats["dry_run"] = dry_run
     return stats
+
+
+def edit_delta(delta_gz: str, commands: list[str]) -> None:
+    """Run shell commands against the delta between the extract and the merge.
+
+    The delta is unpacked to a temporary file, every command is run in
+    order with ``{}`` replaced by that file's (shell-quoted) path, and the
+    result is packed again in place of the original.  The commands
+    inherit this process's standard streams.  A command that exits
+    non-zero stops the sync before anything is merged.
+
+    Args:
+        delta_gz: Path of the gzipped delta database; rewritten.
+        commands: Shell commands to run, each naming the delta as ``{}``.
+
+    Raises:
+        SyncError: If a command exits non-zero.
+    """
+    plain = temp_path(".db")
+    try:
+        with open(delta_gz, "rb") as inp:
+            read_file_gz(inp, plain)
+        for command in commands:
+            shell_command = command.replace("{}", shlex.quote(plain))
+            done = subprocess.run(shell_command, shell=True, check=False)
+            if done.returncode != 0:
+                raise SyncError(f"delta edit exited with {done.returncode}: {command}")
+        with open(delta_gz, "wb") as out:
+            write_file_gz(plain, out)
+    finally:
+        _unlink(plain)
 
 
 def _track(paths: list[str], suffix: str) -> str:
@@ -1219,6 +1255,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--edit-delta",
+        dest="delta_edits",
+        action="append",
+        default=[],
+        metavar="COMMAND",
+        help=(
+            "shell command run here against the uncompressed delta before it is"
+            " merged, {} standing for the delta's path (repeatable, run in order;"
+            " a non-zero exit stops the sync)"
+        ),
+    )
+    parser.add_argument(
         "--python", default="python3", help="remote python interpreter (default: python3)"
     )
     parser.add_argument("--port", help="ssh port")
@@ -1260,6 +1308,7 @@ def main(argv: list[str] | None = None) -> int:
             Runner(options.python, options.port, options.ssh_options),
             full=options.full,
             dry_run=options.dry_run,
+            delta_edits=options.delta_edits,
         )
     except (SyncError, sqlite3.Error) as exc:
         print(f"sync_db: {exc}", file=sys.stderr)
