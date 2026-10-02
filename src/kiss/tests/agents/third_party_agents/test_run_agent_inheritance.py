@@ -388,7 +388,9 @@ class TestFullRunInheritance:
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
-        assert call["work_dir"] == str(env.repo)
+        # ``run`` normalises its work_dir with ``Path.resolve()`` (macOS tmp
+        # dirs are ``/var`` -> ``/private/var`` symlinks).
+        assert call["work_dir"] == str(env.repo.resolve())
         # The run's effective choices, not the (opposite) persisted settings.
         assert parent.use_worktree_enabled is False
         assert call["use_worktree"] is False
