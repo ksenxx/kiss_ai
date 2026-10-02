@@ -101,6 +101,20 @@ _GIT_TASK = (
     "Do not write any new code."
 )
 
+# Tasks that write a file in the repo without any "software development"
+# flavour, and a git request bundled with a file change: both must be
+# development because the files they write could become git-tracked.
+_FILE_WRITING_TASKS = (
+    "Research the three most popular Python web frameworks on the web and "
+    "write a comparison report to ./reports/frameworks.html",
+    "Run the benchmark script and save its output to results.csv",
+    "Delete the old log files under ./logs",
+)
+
+_GIT_PLUS_CHANGE_TASK = (
+    "Update the README with the new install instructions, then commit and push"
+)
+
 _DISABLE_ENV = "KISS_DISABLE_TASK_CLASSIFIER"
 
 
@@ -191,6 +205,32 @@ def test_classify_git_task_is_not_development(
     outcome = classify_task(task=_GIT_TASK, model_name=MODEL)
     assert outcome.classification is not None
     assert outcome.classification.is_development is False
+
+
+@live_api
+@requires_anthropic
+@pytest.mark.parametrize("task", _FILE_WRITING_TASKS)
+def test_any_file_write_in_the_repo_is_development(
+    env: IsolatedKissHome, task: str
+) -> None:
+    """A task that could create or modify any file in the repository is
+    development even when it is not software development: a report, a
+    saved result, a deletion."""
+    outcome = classify_task(task=task, model_name=MODEL)
+    assert outcome.classification is not None
+    assert outcome.classification.is_development is True
+
+
+@live_api
+@requires_anthropic
+def test_git_bundled_with_a_file_change_is_development(
+    env: IsolatedKissHome,
+) -> None:
+    """Only a purely git task is exempt: git operations bundled with a
+    file change are development."""
+    outcome = classify_task(task=_GIT_PLUS_CHANGE_TASK, model_name=MODEL)
+    assert outcome.classification is not None
+    assert outcome.classification.is_development is True
 
 
 @live_api
