@@ -474,8 +474,36 @@ def test_sorcar_agent_banks_the_decisions_spend(env: IsolatedKissHome) -> None:
 
 @pytest.mark.live_api
 @pytest.mark.skipif(not os.getenv("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
-def test_live_jev_classifies_arithmetic_as_simple(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Against OpenRouter itself, a pure-arithmetic question is simple and not development."""
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        # A pure-arithmetic question is simple and not development.
+        (
+            "What is 2 + 2? Answer in text only.",
+            TaskClassification(is_simple=True, is_development=False),
+        ),
+        # Any file write in the repo is development even without a
+        # software-development flavour.
+        (
+            "Run the benchmark script and save its output to results.csv",
+            TaskClassification(is_simple=False, is_development=True),
+        ),
+        # Git bundled with a file change is development; only a purely
+        # git task is exempt.
+        (
+            "Update the README with the new install instructions, then commit and push",
+            TaskClassification(is_simple=False, is_development=True),
+        ),
+        (
+            "Squash-merge branch kiss/wt-42 into main, resolve any merge conflicts, and push",
+            TaskClassification(is_simple=True, is_development=False),
+        ),
+    ],
+)
+def test_live_jev_verdicts(
+    monkeypatch: pytest.MonkeyPatch, task: str, expected: TaskClassification
+) -> None:
+    """Against OpenRouter itself, Jev's kind criteria yield the expected verdicts."""
     saved = os.environ.get(_DISABLE_ENV)
     os.environ[_DISABLE_ENV] = "0"
     monkeypatch.delenv(_BASE_URL_ENV, raising=False)
@@ -483,9 +511,7 @@ def test_live_jev_classifies_arithmetic_as_simple(monkeypatch: pytest.MonkeyPatc
     isolated.write_config(classify_with_decisions=True)
     clear_classification_cache()
     try:
-        outcome = classify_task(
-            task="What is 2 + 2? Answer in text only.", model_name="claude-haiku-4-5"
-        )
+        outcome = classify_task(task=task, model_name="claude-haiku-4-5")
     finally:
         clear_classification_cache()
         if saved is None:
@@ -493,7 +519,7 @@ def test_live_jev_classifies_arithmetic_as_simple(monkeypatch: pytest.MonkeyPatc
         else:
             os.environ[_DISABLE_ENV] = saved
         isolated.cleanup()
-    assert outcome.classification == TaskClassification(is_simple=True, is_development=False)
+    assert outcome.classification == expected
     assert outcome.steps == 0
     assert 0 < outcome.budget_used < 0.001
     assert outcome.tokens_used > 0

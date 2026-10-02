@@ -25,6 +25,7 @@ subprocesses, no mocks.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import subprocess
@@ -235,7 +236,12 @@ class TestFileIndexWorkerSurvives:
     def test_non_utf8_root_is_indexed_and_the_worker_lives_on(self, tmp_path: Path) -> None:
         """A surrogate-escaped root builds, persists, and later roots still build."""
         raw = os.fsencode(str(tmp_path)) + b"/bad-\xff-root"
-        os.mkdir(raw)
+        try:
+            os.mkdir(raw)
+        except OSError as exc:  # APFS (macOS) refuses names that are not valid UTF-8
+            if exc.errno != errno.EILSEQ:
+                raise
+            pytest.skip("filesystem rejects non-UTF-8 file names")
         root = os.fsdecode(raw)
         Path(root, "x.py").write_text("x\n")
         other = tmp_path / "other"

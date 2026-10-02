@@ -398,7 +398,7 @@ class TestContentTabFileLinks:
         )
         page = context.new_page()
         try:
-            page.goto(harness.base_url + "/")
+            goto_retrying_network_change(page, harness.base_url + "/")
             page.wait_for_selector(
                 "#task-input", state="visible", timeout=30000,
             )

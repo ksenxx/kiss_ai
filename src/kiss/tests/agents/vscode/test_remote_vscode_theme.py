@@ -34,6 +34,7 @@ from kiss.server.web_server import (
 from kiss.tests.agents.vscode.test_codex_task_panel_style import (
     _start_live_server,
 )
+from kiss.tests.conftest import goto_retrying_network_change
 
 MEDIA_DIR = Path(vscode_pkg.__file__).parent / "media"
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
@@ -338,7 +339,7 @@ def test_live_remote_page_uses_vscode_theme_colours_and_fonts(tmp_path: Path) ->
                 page = browser.new_page(
                     ignore_https_errors=True, viewport={"width": 1400, "height": 900}
                 )
-                page.goto(f"https://127.0.0.1:{port}/", wait_until="load")
+                goto_retrying_network_change(page, f"https://127.0.0.1:{port}/", wait_until="load")
                 page.wait_for_selector("#output", state="attached")
                 page.evaluate(_INJECT_JS)
                 page.wait_for_function(

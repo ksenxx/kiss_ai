@@ -192,7 +192,11 @@ class TestTunnelRestartPostsToInjectedEndpoint(IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(self.ntfy.posts), 1)
         topic, body, _headers = self.ntfy.posts[0]
-        self.assertEqual(body, "https://isolation-e2e.trycloudflare.com")
+        self.assertEqual(
+            body,
+            "https://isolation-e2e.trycloudflare.com"
+            f" ({platform.node().strip()})",
+        )
         self.assertEqual(topic, _get_machine_topic())
         self.assertNotEqual(topic, _production_default_home_topic())
 

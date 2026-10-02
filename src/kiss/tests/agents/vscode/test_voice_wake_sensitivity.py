@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_voice_wake_sensitivity import (
     HAVE_MAC_TTS,
     _free_port,
@@ -97,7 +98,8 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                     "localStorage.setItem('kissVoiceSensitivity', '50');"
                 )
                 page = context.new_page()
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{self.port}/",
                     wait_until="load",
                     timeout=60_000,
@@ -147,7 +149,8 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                 )
                 fresh = browser.new_context(ignore_https_errors=True)
                 fresh_page = fresh.new_page()
-                fresh_page.goto(
+                goto_retrying_network_change(
+                    fresh_page,
                     f"https://127.0.0.1:{self.port}/",
                     wait_until="load",
                     timeout=60_000,

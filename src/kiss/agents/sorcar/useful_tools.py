@@ -161,6 +161,42 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
     return Path(*parts[:i], *parts[i + 2 :])
 
 
+def remap_vanished_worktree(path: Path) -> Path:
+    """Return *path*, or its parent-repo equivalent when *path* is missing
+    because the ``.kiss-worktrees/kiss_wt-*`` worktree it lived in was
+    torn down.
+
+    A finished worktree task's ``work_dir`` keeps naming the removed
+    worktree (the task-update side channel, ``run_agent`` sub-tasks
+    and :func:`~kiss.agents.sorcar.relentless_agent.resolve_work_dir`
+    all start from it).  Every caller that is about to ``mkdir`` or
+    operate on such a directory must resolve it through this function
+    first: creating the vanished directory resurrects an unregistered
+    husk under ``.kiss-worktrees/`` that no cleanup ever removes and
+    that disables :func:`_stale_worktree_fallback` for every later
+    path under it.
+
+    Nested worktrees (a repo checked out inside another repo's
+    worktree) are peeled one level per pass, innermost first, until
+    the path exists or no vanished worktree encloses it — stopping
+    after one level would hand back a path inside the (also removed)
+    outer worktree and resurrect that one instead.
+
+    Args:
+        path: An absolute path, possibly inside a vanished worktree.
+
+    Returns:
+        *path* when it exists or is not under a vanished worktree;
+        otherwise the same path relative to the parent repo.
+    """
+    while not path.exists():
+        fallback = _stale_worktree_fallback(path)
+        if fallback is None:
+            break
+        path = fallback
+    return path
+
+
 def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     """If *work_dir* lives inside a live ``.kiss-worktrees/kiss_wt-*`` worktree
     and *resolved* points to a file in the parent repo (outside any

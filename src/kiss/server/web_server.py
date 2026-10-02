@@ -1888,6 +1888,18 @@ def _fetch_last_ntfy_message(
     return last
 
 
+def _ntfy_message(url: str) -> str:
+    """Return the ntfy.sh message body for *url*: ``<url> (<machine name>)``.
+
+    The machine name is ``platform.node()``, the same host name the
+    remote page title and the task settings report, so a user who
+    subscribes to several KISS machines can tell the posts apart.
+    The bare URL is returned when the host name is unknown.
+    """
+    node = platform.node().strip()
+    return f"{url} ({node})" if node else url
+
+
 def _post_url_to_message_board(
     url: str, base_url: str = _NTFY_BASE_URL,
 ) -> None:
@@ -1895,10 +1907,11 @@ def _post_url_to_message_board(
 
     Uses the machine-stable topic from :func:`_get_machine_topic` so
     the URL can be retrieved by subscribing to the same topic.  The
-    message is posted with a title indicating it is a KISS Sorcar
-    remote URL update.  Before posting, the most recent cached
-    message on the topic is fetched via :func:`_fetch_last_ntfy_message`;
-    if it already matches ``url`` *and* is younger than
+    message body is :func:`_ntfy_message` (the URL followed by the
+    machine name) and the title indicates it is a KISS Sorcar remote
+    URL update.  Before posting, the most recent cached message on
+    the topic is fetched via :func:`_fetch_last_ntfy_message`; if it
+    already matches the new body *and* is younger than
     :data:`_NTFY_REPOST_MAX_AGE`, the post is skipped so subscribers
     are not woken up by duplicate notifications when a watchdog
     restart or named-tunnel re-registration produces the same public
@@ -1915,8 +1928,9 @@ def _post_url_to_message_board(
         return
     try:
         topic = _get_machine_topic()
+        message = _ntfy_message(url)
         last = _fetch_last_ntfy_message(topic, base_url=base_url)
-        if last is not None and last[0].strip() == url.strip():
+        if last is not None and last[0].strip() == message:
             age = time.time() - last[1]
             if age < _NTFY_REPOST_MAX_AGE:
                 logger.info(
@@ -1929,10 +1943,9 @@ def _post_url_to_message_board(
                 "Reposting %s to ntfy.sh topic %s; last same-URL "
                 "message is stale (posted %.0fs ago)", url, topic, age,
             )
-        data = url.encode("utf-8")
         req = urllib.request.Request(
             f"{base_url}/{topic}",
-            data=data,
+            data=message.encode("utf-8"),
             method="POST",
             headers={
                 "Title": f"{PRODUCT_NAME} Remote URL",
