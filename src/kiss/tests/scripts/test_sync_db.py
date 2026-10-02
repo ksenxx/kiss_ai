@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from kiss.scripts import sync_db
 from kiss.tests.conftest import posix_only
 
 REMOTE_HOST = os.environ.get("KISS_SYNC_TEST_HOST", "ksen@34.42.88.157")
@@ -102,6 +104,11 @@ def add_task(
     events: int = 0,
     result: str = "ok",
     end_ts: int = 0,
+    chat_id: str = "",
+    parent_task_id: str = "",
+    task: str | None = None,
+    timestamp: float = 1000.0,
+    start_ts: int = 0,
 ) -> None:
     """Insert one task row plus a run of events for it.
 
@@ -113,11 +120,30 @@ def add_task(
         events: Number of event rows to add, numbered from ``seq`` 1.
         result: Value for ``task_history.result``.
         end_ts: Value for ``task_history.end_ts``.
+        chat_id: The chat the task belongs to.
+        parent_task_id: Set for a sub-agent task.
+        task: The task text (defaults to ``task <id>``).
+        timestamp: Insertion time, epoch seconds.
+        start_ts: Launch time, epoch milliseconds (0 when unknown).
     """
+    values = {
+        "id": task_id,
+        "timestamp": timestamp,
+        "task": f"task {task_id}" if task is None else task,
+        "steps": steps,
+        "result": result,
+        "end_ts": end_ts,
+        "chat_id": chat_id,
+        "parent_task_id": parent_task_id,
+        "start_ts": start_ts,
+    }
+    # Some tests build a sparse task table: write only the columns it has.
+    present = {row[1] for row in conn.execute("PRAGMA table_info(task_history)")}
+    columns = [name for name in values if name in present]
     conn.execute(
-        "INSERT INTO task_history (id, timestamp, task, steps, result, end_ts)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (task_id, 1000.0, f"task {task_id}", steps, result, end_ts),
+        f"INSERT INTO task_history ({', '.join(columns)})"
+        f" VALUES ({', '.join('?' for _ in columns)})",
+        [values[name] for name in columns],
     )
     append_events(conn, task_id, 1, events)
 
@@ -891,76 +917,78 @@ def chats(path: Path) -> list[tuple]:
     return rows(path, "SELECT chat_id, summary, last_launched FROM chat_summaries ORDER BY chat_id")
 
 
-def test_chat_summaries_travel_when_missing_or_newer(tmp_path: Path) -> None:
-    """A chat the target lacks is added; a newer source row replaces an older one; the rest stays.
+def test_chat_summaries_are_recomputed_from_the_merged_tasks(tmp_path: Path) -> None:
+    """The target's row of every chat that received a task is rebuilt from its merged tasks.
 
-    ``last_launched`` decides: the target's own newer row survives, a NULL
-    chat id never travels, and an unusable ``last_launched`` counts as 0.
-    A repeated sync changes nothing; a dry run reports and writes nothing.
+    Neither side's existing row is copied or compared: the target's stale
+    row and the source's (deliberately wrong) row are both ignored, the
+    rebuilt summary covers the target's own older task as well as the
+    arriving ones, ``last_launched`` is the newest task's launch instant,
+    a chat the target never saw gets a row, chats that received nothing
+    keep theirs, and sub-agent rows and tasks without a chat count for
+    nothing.  A repeated sync recomputes nothing; a dry run reports and
+    writes nothing.
     """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    add_task(src, "a", events=1)
-    add_chats(
-        src,
-        ("c1", "src one", 100),
-        ("c2", "src two", 200),
-        ("c3", "src three", 300),
-        (None, "no chat", 400),
-        ("c5", "src five", "garbage"),
-    )
+    add_task(src, "a2", chat_id="c1", task="Then write the related work section.", timestamp=1200.0)
+    add_task(src, "a3", chat_id="c1", task="run the tests", timestamp=1300.0, start_ts=1300500)
+    add_task(src, "b1", chat_id="c2", task="Please plot the benchmark results as a bar chart")
+    add_task(src, "s1", chat_id="c3", parent_task_id="b1", task="Sub-agent: gather numbers")
+    add_task(src, "n1", chat_id="", task="No chat at all")
+    add_chats(src, ("c1", "wrong on the source", 99999999), ("c2", "also wrong", 99999999))
     src.close()
     dst = make_db(target)
-    add_chats(dst, ("c1", "dst one", 150), ("c2", "dst two", 100), ("c4", "dst four", 50))
+    add_task(dst, "a1", chat_id="c1", task="Write the introduction of the paper", timestamp=1100.0)
+    add_chats(dst, ("c1", "stale", 1), ("c9", "kept", 9))
     dst.close()
 
     preview = sync(str(source), str(target), "--dry-run")
     assert preview.returncode == 0, preview.stderr
-    assert "would add 1 task row(s) and 1 event row(s) and refresh 3 chat summary row(s)" in (
+    assert "would add 5 task row(s) and 0 event row(s) and refresh 2 chat summary row(s)" in (
         preview.stdout
     )
-    assert chats(target) == [("c1", "dst one", 150), ("c2", "dst two", 100), ("c4", "dst four", 50)]
+    assert chats(target) == [("c1", "stale", 1), ("c9", "kept", 9)]
 
     done = sync(str(source), str(target))
     assert done.returncode == 0, done.stderr
-    assert "1 task row(s) added, 1 event row(s) added, 3 chat summary row(s) refreshed" in (
+    assert "5 task row(s) added, 0 event row(s) added, 2 chat summary row(s) refreshed" in (
         done.stdout
     )
     assert chats(target) == [
-        ("c1", "dst one", 150),
-        ("c2", "src two", 200),
-        ("c3", "src three", 300),
-        ("c4", "dst four", 50),
-        ("c5", "src five", "garbage"),
+        ("c1", "Write the introduction of the paper", 1300500),
+        ("c2", "plot the benchmark results as a bar chart", 1000000),
+        ("c9", "kept", 9),
     ]
     assert chats(source) == [
-        (None, "no chat", 400),
-        ("c1", "src one", 100),
-        ("c2", "src two", 200),
-        ("c3", "src three", 300),
-        ("c5", "src five", "garbage"),
+        ("c1", "wrong on the source", 99999999),
+        ("c2", "also wrong", 99999999),
     ]
 
     again = sync(str(source), str(target))
-    assert again.returncode == 0 and "0 chat summary row(s) refreshed" in again.stdout
-    assert chats(target)[1:3] == [("c2", "src two", 200), ("c3", "src three", 300)]
+    assert again.returncode == 0, again.stderr
+    assert "0 task row(s) added, 0 event row(s) added, 0 chat summary row(s) refreshed" in (
+        again.stdout
+    )
 
-    # Stamps are read the way SQLite casts them: 'junk' is 0 (so the source's 200
-    # replaces it), '350garbage' is 350 (so the source's 300 does not).
-    dst = sqlite3.connect(target, isolation_level=None)
-    dst.execute("UPDATE chat_summaries SET last_launched = 'junk' WHERE chat_id = 'c2'")
-    dst.execute("UPDATE chat_summaries SET last_launched = '350garbage' WHERE chat_id = 'c3'")
-    dst.close()
-    again = sync(str(source), str(target))
-    assert again.returncode == 0 and "1 chat summary row(s) refreshed" in again.stdout
-    assert chats(target)[1:3] == [("c2", "src two", 200), ("c3", "src three", "350garbage")]
+    # A full sync names every chat again and rebuilds the same rows.
+    full = sync(str(source), str(target), "--full")
+    assert full.returncode == 0 and "2 chat summary row(s) refreshed" in full.stdout
+    assert chats(target)[:2] == [
+        ("c1", "Write the introduction of the paper", 1300500),
+        ("c2", "plot the benchmark results as a bar chart", 1000000),
+    ]
 
 
-def test_chat_summaries_need_the_table_on_both_sides(tmp_path: Path) -> None:
-    """Databases from before the table existed sync their tasks and skip the chat rows."""
+def test_chat_summaries_need_the_table_on_the_target_only(tmp_path: Path) -> None:
+    """A target from before the table existed syncs its tasks and gets no chat rows.
+
+    Whether the source has the table is irrelevant: the target's rows are
+    rebuilt from the arriving tasks.
+    """
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    add_task(src, "a", events=1)
+    add_task(src, "a", events=1, chat_id="c1")
     add_chats(src, ("c1", "src one", 100))
     src.close()
     make_db(target).close()
@@ -971,26 +999,29 @@ def test_chat_summaries_need_the_table_on_both_sides(tmp_path: Path) -> None:
     assert rows(target, "SELECT name FROM sqlite_master WHERE name = 'chat_summaries'") == []
     assert task_ids(target) == ["a"]
 
-    # The other way round: a source without the table leaves the target's rows alone.
+    # The other way round: the target's rows are rebuilt from the arriving
+    # tasks whether or not the source ever had the table.
     older, newer = tmp_path / "older.db", tmp_path / "newer.db"
     src = make_db(older)
-    add_task(src, "b", events=1)
+    add_task(src, "b", events=1, chat_id="c2", task="Fix the login bug on the settings page")
     src.close()
     dst = make_db(newer)
     add_chats(dst, ("c9", "kept", 9))
     dst.close()
     done = sync(str(older), str(newer))
     assert done.returncode == 0, done.stderr
-    assert "1 task row(s) added" in done.stdout and "0 chat summary row(s)" in done.stdout
-    assert chats(newer) == [("c9", "kept", 9)]
+    assert "1 task row(s) added" in done.stdout and "1 chat summary row(s)" in done.stdout
+    assert chats(newer) == [
+        ("c2", "Fix the login bug on the settings page", 1000000),
+        ("c9", "kept", 9),
+    ]
 
 
-def test_chat_summaries_with_different_columns_are_refused(tmp_path: Path) -> None:
-    """A chat table whose columns differ between the two databases stops the sync."""
+def test_chat_summaries_without_the_expected_columns_are_refused(tmp_path: Path) -> None:
+    """A target chat table the summary code cannot write stops the sync before any row lands."""
     source, target = tmp_path / "src.db", tmp_path / "dst.db"
     src = make_db(source)
-    add_task(src, "a", events=1)
-    add_chats(src, ("c1", "src one", 100))
+    add_task(src, "a", events=1, chat_id="c1")
     src.close()
     dst = make_db(target)
     dst.executescript(
@@ -999,7 +1030,30 @@ def test_chat_summaries_with_different_columns_are_refused(tmp_path: Path) -> No
     dst.close()
     done = sync(str(source), str(target))
     assert done.returncode == 1
-    assert "schemas for 'chat_summaries' differ" in done.stderr
+    assert "chat_summaries in the target database lacks required column(s): summary" in done.stderr
+    assert task_ids(target) == []
+
+
+def test_chat_summaries_need_the_summary_code_next_to_the_script(tmp_path: Path) -> None:
+    """A copy of the script without the checkout's chat-summary module stops rather than guesses."""
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    src = make_db(source)
+    add_task(src, "a", chat_id="c1")
+    src.close()
+    dst = make_db(target)
+    add_chats(dst)
+    dst.close()
+    stray = tmp_path / "scripts" / "sync_db.py"
+    stray.parent.mkdir()
+    shutil.copy(sync_db.__file__, stray)
+    done = subprocess.run(
+        [sys.executable, str(stray), str(source), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert "cannot read" in done.stderr and "chat_summary.py" in done.stderr
     assert task_ids(target) == []
 
 

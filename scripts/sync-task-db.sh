@@ -40,10 +40,12 @@
 #     is left alone, no row is ever deleted or updated, and no table other
 #     than ``task_history``, ``events`` and ``chat_summaries`` is touched.
 #     ``chat_summaries`` is a cache (one row per chat: a few-word summary and
-#     the launch time of the chat's newest task) that the web app rewrites as
-#     tasks finish; there the row computed later -- the larger launch time --
-#     replaces the older one, so both machines end up with the fresher
-#     summary of every chat.
+#     the launch time of the chat's newest task) that is neither append-only
+#     nor kept up to date incrementally -- the web app rewrites a chat's row
+#     from scratch as its tasks finish and a backfill may rebuild the whole
+#     table -- so its rows never travel: once the task rows are merged,
+#     sync_db.py recomputes the receiving machine's row of every chat that
+#     got a task from that machine's own, now complete, history.
 #   * Neither live database is ever rewritten by the relocation step: work
 #     directories are translated in the throw-away delta (or snapshot) that
 #     travels, and a relocation that fails stops its direction rather than

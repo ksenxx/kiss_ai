@@ -15,8 +15,11 @@ Columns produced:
 * ``task_history.sea`` — the file stem of the SEA (agent script) that ran
   the task, from the run's ``agentPath``; backfilled for old rows from the
   parent trajectory's ``run_agent`` tool calls (:func:`sea_name_of_agent`).
-* ``chat_summaries`` — per chat a 6-8 word summary (:func:`summarize_chat`)
-  and the launch instant of the chat's latest task.
+* ``chat_summaries`` — per chat a 6-8 word summary and the launch instant
+  of the chat's latest task; the code lives in
+  :mod:`kiss.agents.sorcar.chat_summary` (stdlib-only, so ``sync_db`` can
+  ship it to a remote machine and rebuild the rows there after a merge)
+  and the backfill below calls it for chats that have no row yet.
 """
 
 from __future__ import annotations
@@ -26,12 +29,11 @@ import re
 import sqlite3
 from pathlib import Path
 
+from kiss.agents.sorcar.chat_summary import POLITENESS_FILLER, upsert_chat_summary
+
 #: Upper bound on the number of tags stored per task: the history panel
 #: shows them inline after the "... ago" launch-age label.
 MAX_TAGS = 6
-
-_SUMMARY_MIN_WORDS = 6
-_SUMMARY_MAX_WORDS = 8
 
 #: Rows written per transaction by :func:`backfill_task_metadata`.
 _BACKFILL_BATCH = 500
@@ -180,7 +182,7 @@ def classify_task_tags(task: str, *, is_subagent: bool = False, failed: bool = F
     Returns:
         The tags, most significant first; never empty.
     """
-    text = _FILLER.sub("", task.strip(), count=1)
+    text = POLITENESS_FILLER.sub("", task.strip(), count=1)
     intent = text[:_INTENT_HEAD]
     head = text[:_ACTIVITY_HEAD]
     tags = ["personal" if _PERSONAL.search(intent) else "work"]
@@ -198,81 +200,6 @@ def classify_task_tags(task: str, *, is_subagent: bool = False, failed: bool = F
     if failed:
         tags.append("failed")
     return tags[:MAX_TAGS]
-
-
-_FILLER = _rx(
-    r"^(?:(?:hi|hello|hey)[,!. ]+)?"
-    r"(?:(?:can|could|would|will) you(?: please)?|please|"
-    r"i(?:'d| would) like(?: you)? to|i (?:want|need)(?: you)? to|help me(?: to)?|"
-    r"let'?s|kindly)\s+"
-)
-_SLASH_COMMAND = re.compile(r"^/([A-Za-z0-9_]+)")
-_SENTENCE_END = re.compile(r"[.!?;:]\s|\n")
-_TRAILING_STOPWORDS = frozenset(
-    "a an the of to and or for with on at by in from as is are be that this "
-    "which into onto than then so if it its".split()
-)
-_STRIP_CHARS = "\"'`*#()[]{}<>,:;"
-_URL = re.compile(r"^<?https?://([^/\s<>|]+)")
-_GREETINGS = frozenset({"hi", "hello", "hey", "thanks", "ok", "okay"})
-_MAX_WORD_CHARS = 40
-
-
-def _summary_word(token: str) -> str:
-    """Normalise one whitespace-delimited token: URLs become their host, long tokens are cut."""
-    url = _URL.match(token)
-    if url:
-        return url.group(1)
-    word = token.strip(_STRIP_CHARS).rstrip(".!?")
-    if len(word) > _MAX_WORD_CHARS:
-        return word[: _MAX_WORD_CHARS - 1] + "…"
-    return word
-
-
-def _summary_sentences(task: str) -> list[list[str]]:
-    """Return *task*'s sentences as lists of significant words, in order.
-
-    Slash-command syntax and a leading politeness filler are stripped;
-    a task that is only a greeting ("hi", "thanks") has no sentences.
-    """
-    text = task.strip()
-    command = _SLASH_COMMAND.match(text)
-    if command:
-        text = command.group(1).replace("_", " ") + "\n" + text[command.end() :]
-    sentences = []
-    for chunk in _SENTENCE_END.split(text):
-        chunk = _FILLER.sub("", chunk.strip(), count=1)
-        words = [w for w in (_summary_word(t) for t in chunk.split()) if w]
-        if words and not all(w.lower() in _GREETINGS for w in words):
-            sentences.append(words)
-    return sentences
-
-
-def summarize_chat(tasks: list[str]) -> str:
-    """Summarise a chat's tasks in 6-8 words.
-
-    The summary is the leading words of the chat's tasks in
-    chronological order: the first sentence of the first task states
-    the chat's intent, and further sentences and later tasks contribute
-    only while the summary is shorter than six words.  Trailing function
-    words (``the``, ``of``, ``in``, ...) are dropped so the summary does
-    not end mid-phrase; a chat whose tasks hold fewer than six words in
-    total ("hi") yields what there is.
-
-    Args:
-        tasks: The chat's listable task texts, oldest first.
-
-    Returns:
-        The summary; empty when *tasks* has no words at all.
-    """
-    words: list[str] = []
-    for sentence in (s for task in tasks for s in _summary_sentences(task)):
-        if len(words) >= _SUMMARY_MIN_WORDS:
-            break
-        words.extend(sentence[: _SUMMARY_MAX_WORDS - len(words)])
-    while len(words) > 1 and words[-1].lower() in _TRAILING_STOPWORDS:
-        words.pop()
-    return " ".join(words)
 
 
 def sea_name_of_agent(agent: str, channels: list[str]) -> str:
@@ -303,19 +230,6 @@ def sea_name_of_agent(agent: str, channels: list[str]) -> str:
         if re.sub(r"[\s\-_]+", "", channel.lower()) == squashed:
             return f"{channel}_sea"
     return ""
-
-
-def launch_ms(row: sqlite3.Row) -> int:
-    """Return a ``task_history`` row's launch instant in epoch milliseconds.
-
-    ``start_ts`` (already ms) when the daemon recorded one, else the
-    row's insertion ``timestamp`` (epoch seconds) — the fallback the
-    history panel applies too.
-    """
-    start = int(row["start_ts"] or 0)
-    if start > 0:
-        return start
-    return int(float(row["timestamp"] or 0.0) * 1000)
 
 
 def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str, str]:
@@ -444,35 +358,3 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
                 upsert_chat_summary(db, chat_id)
     counts["chats"] = len(chats)
     return counts
-
-
-def upsert_chat_summary(db: sqlite3.Connection, chat_id: str) -> None:
-    """Recompute and store the ``chat_summaries`` row of *chat_id*.
-
-    The summary is built from the chat's oldest listable tasks
-    (sub-agent rows excluded, as in the history panel) and
-    ``last_launched`` is the launch instant of its newest listable task.
-    A chat with no listable task gets no row.
-
-    Args:
-        db: Open connection inside the caller's transaction.
-        chat_id: The chat session id.
-    """
-    listable = "chat_id = ? AND (parent_task_id IS NULL OR parent_task_id = '')"
-    first = db.execute(
-        f"SELECT task FROM task_history WHERE {listable} ORDER BY timestamp ASC, rowid ASC LIMIT 5",
-        (chat_id,),
-    ).fetchall()
-    if not first:
-        return
-    last = db.execute(
-        f"SELECT timestamp, start_ts FROM task_history WHERE {listable} "
-        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-        (chat_id,),
-    ).fetchone()
-    db.execute(
-        "INSERT INTO chat_summaries (chat_id, summary, last_launched) VALUES (?, ?, ?) "
-        "ON CONFLICT(chat_id) DO UPDATE SET summary = excluded.summary, "
-        "last_launched = excluded.last_launched",
-        (chat_id, summarize_chat([r[0] or "" for r in first]), launch_ms(last)),
-    )

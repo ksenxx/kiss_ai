@@ -62,6 +62,7 @@ def _make_db(
     work_dir: str = "",
     steps: int = 0,
     events: int = 0,
+    chat_id: str = "",
 ) -> None:
     """Create a task database with the real schema and some tasks in it.
 
@@ -71,6 +72,7 @@ def _make_db(
         work_dir: Directory every task is recorded as having run in.
         steps: Step count of every task.
         events: Number of event rows to add per task.
+        chat_id: Chat every task is recorded as belonging to.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path)
@@ -78,8 +80,8 @@ def _make_db(
     for task_id in task_ids:
         con.execute(
             "INSERT INTO task_history(id, timestamp, task, work_dir, steps,"
-            " has_events) VALUES (?, ?, ?, ?, ?, ?)",
-            (task_id, 1.0, f"task {task_id}", work_dir, steps, int(events > 0)),
+            " has_events, chat_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, 1.0, f"task {task_id}", work_dir, steps, int(events > 0), chat_id),
         )
         for seq in range(events):
             con.execute(
@@ -101,6 +103,20 @@ def _tasks(path: Path) -> dict[str, str]:
                 "SELECT id, work_dir FROM task_history"
             )
         }
+    finally:
+        con.close()
+
+
+def _chat_summaries(path: Path) -> list[tuple[str, str, int]]:
+    """Return every ``(chat_id, summary, last_launched)`` row, ordered by chat id."""
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return [
+            (str(c), str(s), int(n))
+            for c, s, n in con.execute(
+                "SELECT chat_id, summary, last_launched FROM chat_summaries ORDER BY chat_id"
+            )
+        ]
     finally:
         con.close()
 
@@ -663,6 +679,39 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertEqual(len(listed), 8)
         self.assertEqual(listed["server task 3"], _LAPTOP)
         self.assertEqual(listed["laptop task"], _LAPTOP)
+
+    def test_both_machines_summarise_a_shared_chat_from_all_its_tasks(self) -> None:
+        """A chat continued on both machines gets, on both, a summary covering both halves.
+
+        ``chat_summaries`` is a cache neither machine maintained for the
+        other's tasks (each holds a stale row), so the sync rebuilds the
+        row from the merged tasks on each side -- on the server through the
+        ssh bootstrap that ships the summary code along with the script.
+        """
+        _make_db(self.local_db, ["L1", "L2"], chat_id="shared")
+        _make_db(self.remote_db, ["R1"], chat_id="shared")
+        texts = {
+            "L1": ("Write the introduction of the paper", 100.0, 100500),
+            "R1": ("Then add the related work section", 200.0, 0),
+            "L2": ("run the tests", 300.0, 300500),
+        }
+        for db in (self.local_db, self.remote_db):
+            con = sqlite3.connect(db)
+            for task_id, (text, timestamp, start_ts) in texts.items():
+                con.execute(
+                    "UPDATE task_history SET task = ?, timestamp = ?, start_ts = ? WHERE id = ?",
+                    (text, timestamp, start_ts, task_id),
+                )
+            con.execute("INSERT INTO chat_summaries VALUES ('shared', 'stale', 1)")
+            con.commit()
+            con.close()
+
+        result = self._sync(_LAPTOP, _SERVER)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        expected = [("shared", "Write the introduction of the paper", 300500)]
+        self.assertEqual(_chat_summaries(self.local_db), expected)
+        self.assertEqual(_chat_summaries(self.remote_db), expected)
 
 
 class RelocateWorkDirTest(unittest.TestCase):
