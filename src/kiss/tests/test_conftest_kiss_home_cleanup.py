@@ -132,6 +132,20 @@ def test_session_home_is_a_kiss_test_dir() -> None:
     print(f"KISS_HOME={home}")
 
 
+def test_session_home_snoozes_the_update_toast_for_every_release() -> None:
+    """The daemon's own snooze reader sees the session home as "Remind me
+    later" for any release, so no "KISS Sorcar X is available" toast can
+    cover a chat page while PyPI is ahead of the checkout (the 2026-10-02
+    cause of three PDF-toolbar click timeouts in ``test_sidebar_menus``)."""
+    from kiss.server import web_server
+
+    home = Path(os.environ["KISS_HOME"])
+    assert web_server._update_check_cache_path() == home / ".update-check.json"
+    assert web_server._is_update_snoozed("9999.12.31")
+    assert web_server._is_update_snoozed(web_server._read_version() or "0")
+    assert web_server._is_update_snoozed("0.0.1")
+
+
 @pytest.mark.skipif(
     os.environ.get(_PROBE_ENV) != "interrupt", reason="probe for the nested run below"
 )
