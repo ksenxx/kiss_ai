@@ -36,7 +36,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _commit_subject,
     _persisted_task_id,
 )
-from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
+from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.helpers import generate_commit_message_from_diff
@@ -54,7 +54,7 @@ def _resolved_commit_dir(work_dir: str) -> Path:
 
     A *work_dir* under a now-deleted ``.kiss-worktrees/kiss_wt-*``
     checkout is remapped to the parent repository
-    (:func:`_stale_worktree_fallback`); every other path is returned
+    (:func:`remap_vanished_worktree`); every other path is returned
     unchanged.  The one place this remap is written, so the
     dispatcher's busy-check + claim, the worker's staging and the
     sibling-repo pass cannot disagree about the repository.
@@ -65,12 +65,7 @@ def _resolved_commit_dir(work_dir: str) -> Path:
     Returns:
         The post-fallback directory.
     """
-    work_path = Path(work_dir)
-    if not work_path.exists():
-        fallback = _stale_worktree_fallback(work_path)
-        if fallback is not None:
-            return fallback
-    return work_path
+    return remap_vanished_worktree(Path(work_dir))
 
 
 def _effective_commit_repo(work_dir: str) -> Path | None:

@@ -415,3 +415,124 @@ class TestSweepHelpers:
         repo = _make_repo(tmp_path)
 
         assert GitWorktreeOps._config_branch_sections(repo) == set()
+
+
+class TestSweepRemovesHuskDirectories:
+    """Unregistered ``kiss_wt-*`` directories are deleted; live ones kept.
+
+    A husk is a ``.kiss-worktrees/kiss_wt-*`` directory git knows
+    nothing about: a finished task's directory re-created by a stray
+    ``mkdir`` of its stale ``work_dir``, or by a lingering daemon
+    writing state into the removed tree.  ``git worktree prune`` cannot
+    see it, so until the sweep learned about husks they accumulated
+    forever.
+    """
+
+    def test_empty_husk_is_deleted(self, tmp_path: Path) -> None:
+        """The empty directory ``mkdir -p`` of a stale work_dir leaves."""
+        repo = _make_repo(tmp_path)
+        husk = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000001"
+        husk.mkdir(parents=True)
+
+        GitWorktreeOps.sweep_orphaned_state(repo)
+
+        assert not husk.exists(), "the empty husk survived the sweep"
+
+    def test_husk_with_daemon_state_is_deleted(self, tmp_path: Path) -> None:
+        """A husk holding re-created ``tmp/.../muse_auth/vault`` state leaves."""
+        repo = _make_repo(tmp_path)
+        husk = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000002"
+        vault = husk / "tmp" / "khome" / "muse_auth" / "vault"
+        vault.mkdir(parents=True)
+        (vault / "gmail.json").write_text("{}", encoding="utf-8")
+
+        GitWorktreeOps.sweep_orphaned_state(repo)
+
+        assert not husk.exists(), "the husk with daemon state survived"
+
+    def test_registered_worktree_survives(self, tmp_path: Path) -> None:
+        """A directory ``git worktree list`` knows is live, not a husk."""
+        repo = _make_repo(tmp_path)
+        _git("branch", "kiss/wt-1700000000-00000003", cwd=repo)
+        live = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000003"
+        _git("worktree", "add", str(live), "kiss/wt-1700000000-00000003", cwd=repo)
+        (live / "wip.txt").write_text("uncommitted\n", encoding="utf-8")
+
+        GitWorktreeOps.sweep_orphaned_state(repo)
+
+        assert (live / "wip.txt").read_text(encoding="utf-8") == "uncommitted\n"
+
+    def test_detached_worktree_survives(self, tmp_path: Path) -> None:
+        """A detached-HEAD checkout has a ``.git`` link, so it is kept.
+
+        ``registered_worktrees`` skips detached worktrees (no branch to
+        reclaim by); the ``.git`` link is what keeps the sweep off it.
+        """
+        repo = _make_repo(tmp_path)
+        detached = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000004"
+        _git("worktree", "add", "--detach", str(detached), cwd=repo)
+        assert (detached / ".git").is_file()
+
+        GitWorktreeOps.sweep_orphaned_state(repo)
+
+        assert (detached / "README.md").exists(), "the detached worktree was deleted"
+
+    def test_foreign_entries_survive(self, tmp_path: Path) -> None:
+        """Only ``kiss_wt-*`` directories are candidates.
+
+        Files, differently named directories and symlinks under
+        ``.kiss-worktrees/`` are not the agent's husks and stay put
+        (a symlink named like a slug is unlinked by nobody: it may
+        point at the user's data).
+        """
+        repo = _make_repo(tmp_path)
+        root = repo / ".kiss-worktrees"
+        root.mkdir()
+        (root / "notes.txt").write_text("keep\n", encoding="utf-8")
+        (root / "kiss_wt-1700000000-00000005").write_text("a file\n", encoding="utf-8")
+        (root / "other_dir").mkdir()
+        target = tmp_path / "user_data"
+        target.mkdir()
+        (target / "precious.txt").write_text("mine\n", encoding="utf-8")
+        (root / "kiss_wt-1700000000-00000006").symlink_to(target)
+
+        GitWorktreeOps.sweep_orphaned_state(repo)
+
+        assert (root / "notes.txt").exists()
+        assert (root / "kiss_wt-1700000000-00000005").is_file()
+        assert (root / "other_dir").is_dir()
+        assert (root / "kiss_wt-1700000000-00000006").is_symlink()
+        assert (target / "precious.txt").read_text(encoding="utf-8") == "mine\n"
+
+    def test_no_worktree_dir_is_fine(self, tmp_path: Path) -> None:
+        """A repo that never ran a worktree task has no ``.kiss-worktrees/``."""
+        repo = _make_repo(tmp_path)
+        assert not (repo / ".kiss-worktrees").exists()
+
+        assert GitWorktreeOps.sweep_orphaned_state(repo) == 0
+
+    def test_undeletable_remnant_is_reported(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Files the user cannot delete are named in an error log.
+
+        Root-owned Docker output cannot be produced in a test, so the
+        husk holds a directory with no write permission instead: the
+        file inside cannot be unlinked, ``rmtree`` leaves it, and the
+        sweep must say so rather than fail silently.
+        """
+        repo = _make_repo(tmp_path)
+        husk = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000007"
+        locked = husk / "results" / "artifacts"
+        locked.mkdir(parents=True)
+        (locked / "log.txt").write_text("root wrote this\n", encoding="utf-8")
+        locked.chmod(0o555)
+        try:
+            with caplog.at_level(logging.ERROR, logger="kiss.agents.sorcar.git_worktree"):
+                GitWorktreeOps.sweep_orphaned_state(repo)
+            assert (locked / "log.txt").exists(), "test precondition: unlink must fail"
+            messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+            assert any(str(husk) in m and "sudo rm -rf" in m for m in messages), messages
+        finally:
+            locked.chmod(0o755)
+            shutil.rmtree(husk, ignore_errors=True)
