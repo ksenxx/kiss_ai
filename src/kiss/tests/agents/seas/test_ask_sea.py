@@ -12,8 +12,9 @@ dispatch code:
    bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
    ``append_to_system_prompt`` MUST start with the no-internet and
    answer-quickly directives and carry the answering playbook,
-   ``tools`` MUST expose the three trajectory tools, ``tool_profile``
-   MUST be ``review``, and ``is_parallel``, ``use_web_tools`` and
+   ``tools`` MUST expose the single ``task_context`` tool,
+   ``if_append_basic_tools`` MUST be ``False`` (no built-in tool
+   besides ``finish``), and ``is_parallel``, ``use_web_tools`` and
    ``use_memory`` MUST return ``False``.
 2. The command rewriter ``rewrite_prompt_if_command`` MUST recognise
    ``/ask <question>`` and emit a directive that instructs the outer
@@ -50,7 +51,7 @@ _PLACEHOLDER = "<task_id>"
 # The exact prompt suffix both dispatch paths use.
 _EXPECTED_APPEND_TO_PROMPT = (
     "The question above is about the task with id <task_id>. "
-    "Call task_overview with that task id first, then answer the question."
+    "Call task_context with that task id, then answer the question."
 )
 _EXPECTED_APPEND_TO_SYSTEM_PROMPT = ask_sea.append_to_system_prompt()
 _EXPECTED_SUFFIX_START = (
@@ -102,23 +103,26 @@ def test_append_to_system_prompt_returns_fixed_suffix() -> None:
 
     The no-internet directive comes first, then the answer-quickly
     sentence (the user typed ``/ask`` into a live task and is waiting
-    on the reply); the playbook names the three trajectory tools in
-    the order they should be used and the pitfalls seen in earlier
-    runs (raw DB reads, memory tools, editing files).
+    on the reply); the playbook names the two-call recipe
+    (``task_context`` then ``finish``), the answer style (two or
+    three plain sentences, one ``<p>``) and the pitfalls seen in
+    earlier runs (raw DB reads, editing files).
     """
     text = ask_sea.append_to_system_prompt()
     assert text.startswith(_EXPECTED_SUFFIX_START)
-    assert text.index("task_overview") < text.index("task_transcript") < text.index("task_step")
-    assert "sqlite3" in text and "memory tools" in text and "read-only" in text
+    assert "exactly two tools: `task_context` and `finish`" in text
+    assert text.index("task_context(task_id)") < text.index("Call `finish`")
+    assert "Two or three sentences" in text and "<p>…</p>" in text
+    assert "sorcar.db" in text and "read-only" in text
+    assert "task_overview" not in text and "task_transcript" not in text
     assert ask_sea.APPEND_TO_PROMPT == _EXPECTED_APPEND_TO_PROMPT
 
 
-def test_tools_profile_and_memory_getters() -> None:
-    """tools MUST be the three trajectory tools, the profile ``review``, memory off."""
-    assert [t.__name__ for t in ask_sea.tools()] == [
-        "task_overview", "task_transcript", "task_step",
-    ]
-    assert ask_sea.tool_profile() == "review"
+def test_tools_basic_tools_and_memory_getters() -> None:
+    """tools MUST be ``task_context`` alone, the built-in toolset off, memory off."""
+    assert [t.__name__ for t in ask_sea.tools()] == ["task_context"]
+    assert ask_sea.if_append_basic_tools() is False
+    assert not hasattr(ask_sea, "tool_profile")
     assert ask_sea.use_memory() is False
 
 
@@ -512,7 +516,8 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
     assert cmd["useParallel"] is False
     assert cmd["webTools"] is False
     assert cmd["useMemory"] is False
-    assert cmd["toolProfile"] == "review"
+    assert cmd["appendBasicTools"] is False
+    assert "toolProfile" not in cmd
     # ``tools()`` returns callables, so the SEA file doubles as its
     # own tools file.
     assert cmd["toolsFile"] == ask_path

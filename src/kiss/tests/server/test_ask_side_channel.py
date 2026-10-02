@@ -451,7 +451,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     assert kwargs["extension_agent_path"] == str(Path(ask_sea.__file__))
     assert kwargs["append_to_prompt"] == (
         "The question above is about the task with id task-abc. "
-        "Call task_overview with that task id first, then answer the question."
+        "Call task_context with that task id, then answer the question."
     )
     assert kwargs["append_to_system_prompt"] == ask_sea.append_to_system_prompt()
     assert kwargs["append_to_system_prompt"].startswith(
