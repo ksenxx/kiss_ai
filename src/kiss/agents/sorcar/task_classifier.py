@@ -12,14 +12,19 @@ when it can, else with one lightweight NON-AGENTIC
 - ``is_simple``: the task involves neither software development nor
   Internet search.  A simple task runs with the lite system prompt
   (``SYSTEM_LITE.md``) instead of the full ``SYSTEM.md``.
-- ``is_development``: the task may create or modify files in the
-  project — software development, documentation, or producing an
-  artifact such as a report, presentation, notebook or data file.
-  Any such task must run in a worktree, since every file it writes
-  may end up git-tracked.  Tasks that create or edit no file, and
-  tasks that only request git operations (commit, merge, rebase,
-  resolving merge conflicts, ...), are NOT development.  The verdict
-  decides the run's effective
+- ``is_development``: the task could create or modify ANY file in the
+  current git repository (the working directory) — software
+  development, documentation, or producing an artifact such as a
+  report, presentation, notebook or data file.  This is a hard rule
+  with one exception: any task that could write a file in the repo
+  is development, whatever else it involves, UNLESS it is a git-only
+  task (commit, merge, rebase, resolving merge conflicts, ...) that
+  changes nothing beyond what those git operations make.  A task
+  mixing git operations with other work ("fix the bug and commit",
+  "build and commit the package") is development.  Every such
+  task must run in a worktree, since every file it writes may end up
+  git-tracked.  Tasks that create or edit no file are NOT development.
+  The verdict decides the run's effective
   ``is_worktree`` value (worktree isolation on/off) without ever
   touching the persisted ``is_worktree`` setting — but it can only
   DEMOTE a run that asked for a worktree to direct execution, never
@@ -147,18 +152,23 @@ _GIT_OPERATIONS = (
 # designs (see ``run_benchmark.py`` there).
 _DECISIONS_KIND_CRITERIA: dict[str, str] = {
     "development": (
-        "any work that may create or modify files in the project: software "
-        "development (implementing or changing features, fixing bugs or "
-        "reported errors, refactoring, writing tests), updating "
-        "documentation, README files or scripts, and producing a file such "
-        "as a report, document, presentation, notebook, database, data or "
-        "image file, or writing results into a file; includes requests "
-        "phrased as required behaviour of the software ('when X happens, "
-        "the app must do Y')"
+        "any work that could create or modify ANY file in the current git "
+        "repository (the working directory), whatever else it involves: "
+        "software development (implementing or changing features, fixing "
+        "bugs or reported errors, refactoring, writing tests), updating "
+        "documentation, README files, configuration or scripts, producing a "
+        "file such as a report, document, presentation, notebook, database, "
+        "data or image file, writing results or output into a file, running "
+        "a script or command that writes files, and git operations combined "
+        "with any such change ('fix the bug and commit', 'build and commit "
+        "the package'); includes requests phrased as required behaviour of "
+        "the software ('when X happens, the app must do Y')"
     ),
     "git_only": (
-        f"only git version-control operations ({_GIT_OPERATIONS}) with no "
-        "code or file changes"
+        f"ONLY git version-control operations ({_GIT_OPERATIONS}) and "
+        "nothing else: no file changes beyond what those git operations "
+        "themselves make; a task that also builds, fixes, writes or edits "
+        "something is development"
     ),
     "internet": (
         "answering a question, in the reply only, that requires searching "
@@ -281,12 +291,15 @@ _VERDICT_JSON_SCHEMA: dict[str, Any] = {
         "is_development": {
             "type": "boolean",
             "description": (
-                "True if the task may create or modify any file in the "
-                "project: software development, documentation, or "
-                "producing a report, document, presentation, notebook, "
-                "database or data file. False for tasks that create or "
-                "edit no file (questions, explanations, running commands, "
-                "answers given in the reply) and for git-only tasks."
+                "True if the task could create or modify ANY file in the "
+                "current git repository, whatever else it involves: "
+                "software development, documentation, configuration, "
+                "scripts, or producing a report, document, presentation, "
+                "notebook, database or data file. The only exception is a "
+                "git-only task (git operations and nothing else), which is "
+                "false. Also false for tasks that create or edit no file "
+                "(questions, explanations, read-only commands, answers "
+                "given in the reply)."
             ),
         },
     },
@@ -301,18 +314,28 @@ _CLASSIFIER_PROMPT_PREFIX = (
     '{"is_simple": <true|false>, "is_development": <true|false>}\n\n'
     "- is_simple: true if the task involves NEITHER software "
     "development NOR searching the internet. false otherwise.\n"
-    "- is_development: true if the task may create or modify ANY file in "
-    "the project: software development (implementing or changing "
-    "features, fixing bugs, refactoring, writing tests), updating "
-    "documentation or scripts, and producing a file such as a report, "
-    "document, presentation, notebook, database, data or image file. "
-    "false only for tasks that create or edit no file: questions, "
-    "explanations, running commands or tests, reading messages, or "
-    "answers given in the reply. A "
-    "task that only requests git operations (e.g. status, diff, log, "
-    "add, commit, push, pull, fetch, checkout, branch, merge, squash, "
-    "rebase, resolving merge conflicts, tagging, worktree management) "
-    "is NOT software development and MUST get is_development=false.\n\n"
+    "- is_development: HARD RULE: if the task could create or modify ANY "
+    "file in the current git repository (the working directory), it MUST "
+    "get is_development=true, whatever else it involves. This covers "
+    "software development (implementing or changing features, fixing "
+    "bugs, refactoring, writing tests), updating documentation, "
+    "configuration or scripts, producing a file such as a report, "
+    "document, presentation, notebook, database, data or image file, "
+    "saving results or output into a file, and git operations combined "
+    "with any such change (e.g. 'fix the bug and commit', 'build and "
+    "commit the package'). The ONLY exception is a git-only task: one "
+    "that requests git operations (e.g. status, diff, log, add, commit, "
+    "push, pull, fetch, checkout, branch, merge, squash, rebase, "
+    "resolving merge conflicts in the files git marked, tagging, "
+    "worktree management) and nothing else, so no file changes beyond "
+    "what those git operations themselves make; it MUST get "
+    "is_development=false. A task that is not purely git — it also "
+    "builds, fixes, writes or edits something — is development. "
+    "Otherwise false only for tasks that create or edit no file: "
+    "questions, explanations, running or starting commands, servers or "
+    "tests that leave the repository's files unchanged (their output "
+    "only reported back), reading messages, or answers given in the "
+    "reply.\n\n"
     "If the task is ambiguous, or is a follow-up that continues earlier "
     "work you cannot see (e.g. 'continue', 'fix it', 'do the same for "
     "the rest'), be conservative: respond with "
@@ -330,11 +353,13 @@ class TaskClassification:
     Attributes:
         is_simple: The task involves neither software development nor
             Internet search.
-        is_development: The task may create or modify files in the
-            project — code, documentation, or artifacts such as
-            reports, presentations, notebooks or data files — and so
-            must run in a worktree (git-only tasks are not
-            development).
+        is_development: The task could create or modify any file in
+            the current git repository — code, documentation, or
+            artifacts such as reports, presentations, notebooks or
+            data files — and so must run in a worktree.  The one
+            exception is a git-only task, which changes nothing
+            beyond what its git operations make and is not
+            development.
     """
 
     is_simple: bool

@@ -54,6 +54,7 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_remote_panels_match_extension import VSCODE_VARS
 
 MEDIA_DIR = (
@@ -571,7 +572,9 @@ def _load_page(page: Page, url: str) -> None:
         for attempt in range(1, _PAGE_LOAD_ATTEMPTS + 1):
             diag.clear()
             try:
-                page.goto(url, wait_until="domcontentloaded")
+                goto_retrying_network_change(
+                    page, url, wait_until="domcontentloaded"
+                )
             except Error as exc:
                 diag.failed_requests.append(f"{url}: {exc.message}")
                 # ``goto`` raises as soon as the request fails, tens of

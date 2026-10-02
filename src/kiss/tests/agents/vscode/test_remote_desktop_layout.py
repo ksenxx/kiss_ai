@@ -39,6 +39,7 @@ import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
+from kiss.tests.conftest import goto_retrying_network_change
 
 # Widths at or above the 900px desktop breakpoint that the remote
 # webapp uses to dock the history panel.
@@ -141,7 +142,7 @@ def _drag_resizer_to(page: Page, x: float) -> None:
 def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
     """Open the remote page at ``width`` and expand the history filters."""
     page = browser.new_page(viewport={"width": width, "height": 900})
-    page.goto(url)
+    goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.evaluate(_PREPARE_JS)
     page.wait_for_selector(".history-filter-chips .hf-chip", state="visible")

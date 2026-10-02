@@ -307,13 +307,22 @@ def test_virtual_display_restarts_after_stop_and_falls_back_without_xvfb(tool, s
     assert atexit._ncallbacks() == callbacks_before
     # Descriptor exhaustion: the pipe still fits but Popen's own pipe does
     # not; the tool falls back to headless and closes both pipe ends.
+    # Earlier tests leave holes in the descriptor table (closed browser
+    # sockets), and the kernel hands out the lowest free number, so first
+    # plug every hole: the loop ends once a plug lands above the old top.
     highest = max(int(fd) for fd in os.listdir("/proc/self/fd"))
+    plugs: list[int] = []
+    while not plugs or plugs[-1] < highest:
+        plugs.append(os.open(os.devnull, os.O_RDONLY))
+    highest = plugs[-1]
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (highest + 3, hard))
     try:
         assert web_stealth.virtual_display() is None
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        for fd in plugs:
+            os.close(fd)
     assert len(os.listdir("/proc/self/fd")) == fds_before
 
     # No Xvfb binary on PATH -> no display -> the launch falls back to

@@ -45,6 +45,7 @@ from pathlib import Path
 
 from kiss.server.voice_wake import (
     SAMPLE_RATE,
+    TRAILING_SILENCE_KEEP_SECONDS,
     parse_transcription_reply,
     transcribe_pcm,
     trim_trailing_silence,
@@ -272,10 +273,11 @@ class TestParseTranscriptionReply(unittest.TestCase):
 class TestTrimTrailingSilence(unittest.TestCase):
     """Trailing-silence trimming applied before the agent call.
 
-    The endpointed capture carries ~2s of trailing silence, which
-    empirically flips gpt-audio into denying it heard any audio
-    (0/3 padded vs 3/3 trimmed on the same speech), so the PCM is
-    trimmed to the last loud block plus a short tail.
+    The endpointed capture carries ~2s of trailing silence; the PCM
+    is trimmed to the last loud block plus a tail of
+    ``TRAILING_SILENCE_KEEP_SECONDS`` (a full second: shorter tails
+    measurably provoke gpt-audio's "please provide the audio"
+    refusal, see the constant's comment).
     """
 
     def test_empty_pcm(self) -> None:
@@ -295,7 +297,9 @@ class TestTrimTrailingSilence(unittest.TestCase):
         padded = speech + b"\x00\x00" * (2 * SAMPLE_RATE)
         trimmed = trim_trailing_silence(padded)
         self.assertEqual(trimmed[: len(speech)], speech)
-        self.assertLess(len(trimmed), len(speech) + SAMPLE_RATE * 2)
+        kept_tail = 2 * int(TRAILING_SILENCE_KEEP_SECONDS * SAMPLE_RATE)
+        self.assertEqual(len(trimmed), len(speech) + kept_tail)
+        self.assertLess(len(trimmed), len(padded))
 
     def test_leading_silence_is_preserved(self) -> None:
         pcm = b"\x00\x00" * SAMPLE_RATE + _sine_pcm(0.5)

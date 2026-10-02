@@ -32,6 +32,7 @@ import pytest
 from playwright.sync_api import sync_playwright
 
 from kiss.tests.agents.vscode.design_tokens import inline_design_tokens
+from kiss.tests.conftest import goto_retrying_network_change
 
 MEDIA_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
@@ -200,7 +201,8 @@ def test_live_remote_more_menu_settings_item(
                     ignore_https_errors=True,
                     viewport={"width": 1400, "height": 900},
                 )
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{port}/",
                     wait_until="domcontentloaded",
                 )

@@ -50,6 +50,7 @@ from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from kiss.core.brand import PRODUCT_NAME
+from kiss.tests.conftest import goto_retrying_network_change
 
 MEDIA_URL_RE = re.compile(r"/media/[A-Za-z0-9_.-]+\?v=[0-9a-f]+")
 
@@ -372,7 +373,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 viewport={"width": 1200, "height": 800},
             )
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded")
+            goto_retrying_network_change(page, url, wait_until="domcontentloaded")
             # 1. Connected: the app is on screen and the worker has
             #    precached the shell and taken control of this page.
             app_shown = "document.getElementById('app').style.display === ''"
@@ -391,7 +392,7 @@ def test_live_app_survives_outage_and_resyncs_on_reconnect(
                 # navigation, not a reload: step 3 below asserts that
                 # the outage did not reload the page).  A second miss
                 # names the worker's state and fails.
-                page.goto(url, wait_until="domcontentloaded")
+                goto_retrying_network_change(page, url, wait_until="domcontentloaded")
                 _wait_for(page, app_shown)
                 try:
                     _wait_for(page, controlled)

@@ -20,12 +20,15 @@ when the URL is unchanged *and* fresh.
 
 from __future__ import annotations
 
+import platform
 import time
 import unittest
 
 from kiss.server.web_server import (
     _NTFY_REPOST_MAX_AGE,
     _fetch_last_ntfy_message,
+    _get_machine_topic,
+    _ntfy_message,
     _post_url_to_message_board,
 )
 from kiss.tests.server._ntfy_emulator import NtfyServerContext
@@ -54,7 +57,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         self.assertEqual(len(self.ntfy.posts), 1)
         topic, body, _headers = self.ntfy.posts[0]
         self.assertTrue(topic.startswith("kiss-"))
-        self.assertEqual(body, url)
+        self.assertEqual(body, _ntfy_message(url))
 
     def test_fetch_returns_message_and_publish_time(self) -> None:
         """The poll result carries the message's epoch publish time."""
@@ -65,7 +68,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         topic = self.ntfy.posts[0][0]
         latest = _fetch_last_ntfy_message(topic, base_url=self.ntfy.base_url)
         assert latest is not None
-        self.assertEqual(latest[0], url)
+        self.assertEqual(latest[0], _ntfy_message(url))
         # The emulator truncates to whole seconds, hence the -1 margin.
         self.assertGreaterEqual(latest[1], int(before) - 1)
         self.assertLessEqual(latest[1], after)
@@ -80,7 +83,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         topic = self.ntfy.posts[0][0]
         latest = _fetch_last_ntfy_message(topic, base_url=self.ntfy.base_url)
         assert latest is not None
-        self.assertEqual(latest[0], url)
+        self.assertEqual(latest[0], _ntfy_message(url))
 
     def test_stale_same_url_is_reposted(self) -> None:
         """A same-URL message older than the max age is posted again.
@@ -99,7 +102,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         self.ntfy.messages[topic][0] = (body, stale)
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 2)
-        self.assertEqual(self.ntfy.posts[1][1], url)
+        self.assertEqual(self.ntfy.posts[1][1], _ntfy_message(url))
 
     def test_same_url_without_time_field_is_reposted(self) -> None:
         """A cached message lacking a ``time`` field counts as stale.
@@ -112,7 +115,7 @@ class TestNtfyDeduplication(unittest.TestCase):
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 1)
         topic = self.ntfy.posts[0][0]
-        self.ntfy.messages[topic][0] = (url, None)
+        self.ntfy.messages[topic][0] = (_ntfy_message(url), None)
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 2)
 
@@ -123,12 +126,12 @@ class TestNtfyDeduplication(unittest.TestCase):
         _post_url_to_message_board(first, base_url=self.ntfy.base_url)
         _post_url_to_message_board(second, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 2)
-        self.assertEqual(self.ntfy.posts[0][1], first)
-        self.assertEqual(self.ntfy.posts[1][1], second)
+        self.assertEqual(self.ntfy.posts[0][1], _ntfy_message(first))
+        self.assertEqual(self.ntfy.posts[1][1], _ntfy_message(second))
         topic = self.ntfy.posts[0][0]
         latest = _fetch_last_ntfy_message(topic, base_url=self.ntfy.base_url)
         assert latest is not None
-        self.assertEqual(latest[0], second)
+        self.assertEqual(latest[0], _ntfy_message(second))
 
     def test_localhost_url_never_posted(self) -> None:
         """``https://localhost...`` URLs are not meant for ntfy."""
@@ -156,12 +159,39 @@ class TestNtfyDeduplication(unittest.TestCase):
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 1)
         _topic, body, headers = self.ntfy.posts[0]
-        self.assertEqual(body, url)
+        self.assertEqual(body, _ntfy_message(url))
         click = next(
             (v for k, v in headers.items() if k.lower() == "click"),
             None,
         )
         self.assertEqual(click, url)
+
+    def test_body_appends_machine_name(self) -> None:
+        """The body is ``<url> (<machine name>)`` so posts from several
+        KISS machines on one ntfy feed can be told apart.
+
+        The bare-URL fallback for an empty ``platform.node()`` is not
+        covered: the host name comes from the kernel and cannot be
+        emptied for one process without a test double.
+        """
+        url = "https://red-fox-1234.trycloudflare.com"
+        node = platform.node().strip()
+        self.assertTrue(node, "test host must have a host name")
+        _post_url_to_message_board(url, base_url=self.ntfy.base_url)
+        self.assertEqual(self.ntfy.posts[0][1], f"{url} ({node})")
+
+    def test_legacy_bare_url_message_is_reposted_with_machine_name(
+        self,
+    ) -> None:
+        """A fresh cached message holding only the bare URL (posted by
+        an older daemon) does not suppress the post: the new body with
+        the machine name is published once."""
+        url = "https://red-fox-1234.trycloudflare.com"
+        topic = _get_machine_topic()
+        self.ntfy.messages.setdefault(topic, []).append((url, time.time()))
+        _post_url_to_message_board(url, base_url=self.ntfy.base_url)
+        self.assertEqual(len(self.ntfy.posts), 1)
+        self.assertEqual(self.ntfy.posts[0][1], _ntfy_message(url))
 
 
 if __name__ == "__main__":  # pragma: no cover

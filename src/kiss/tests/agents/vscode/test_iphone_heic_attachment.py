@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
+from kiss.tests.conftest import goto_retrying_network_change
+
 # main.js downscales to this many pixels on the long edge.
 MAX_EDGE = 1568
 PHOTO_WIDTH = 2000
@@ -203,7 +205,7 @@ def _open_mobile_page(browser: Browser, port: int) -> Page:
         ignore_https_errors=True,
         viewport={"width": 390, "height": 844},
     )
-    page.goto(f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
+    goto_retrying_network_change(page, f"https://127.0.0.1:{port}/", wait_until="domcontentloaded")
     page.wait_for_selector("#more-btn", state="visible")
     assert page.evaluate("document.body.classList.contains('remote-chat')")
     return page

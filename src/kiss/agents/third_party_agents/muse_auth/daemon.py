@@ -1117,7 +1117,19 @@ class MuseAuthDaemon:
                 send_frame(conn, response)
 
     def run(self) -> None:
-        """Bind the socket and serve until a ``stop`` op arrives."""
+        """Bind the socket and serve until a ``stop`` op arrives or the
+        state directory disappears.
+
+        The daemon outlives the process that spawned it, so when the
+        ``KISS_HOME`` it serves is deleted (a test's or a worktree
+        task's temporary home torn down) nothing stops it.  The
+        periodic :meth:`Vault.sweep_stale_pending` would then recreate
+        ``<KISS_HOME>/muse_auth/vault`` inside the deleted tree every
+        300 s — resurrecting removed ``.kiss-worktrees/kiss_wt-*``
+        directories as husks.  The serve loop therefore exits as soon
+        as the state directory is gone; the next client re-spawns a
+        daemon for a home that exists.
+        """
         state_dir = muse_auth_dir()
         state_dir.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
@@ -1148,6 +1160,7 @@ class MuseAuthDaemon:
             server.bind(str(path))
             os.chmod(path, 0o600)
             server.listen(16)
+            bound_inode = path.stat().st_ino
         finally:
             unlock(lock_file)
             lock_file.close()
@@ -1166,6 +1179,8 @@ class MuseAuthDaemon:
         slots = threading.BoundedSemaphore(64)
         try:
             while not self._stop.is_set():
+                if not state_dir.is_dir():
+                    break
                 if time.monotonic() - last_sweep >= 300.0:
                     with contextlib.suppress(Exception):
                         self.vault.sweep_stale_pending()
@@ -1182,8 +1197,14 @@ class MuseAuthDaemon:
                 ).start()
         finally:
             server.close()
+            # Only this daemon's own socket file is removed.  A daemon
+            # leaving on its own (state directory gone) holds no lock,
+            # so a successor spawned by a client that already saw the
+            # dead listener may have unlinked and re-bound the path;
+            # unlinking blindly would take the successor's socket down.
             with contextlib.suppress(OSError):
-                path.unlink()
+                if path.stat().st_ino == bound_inode:
+                    path.unlink()
 
     def _serve_with_slot(self, conn: socket.socket, slots: threading.BoundedSemaphore) -> None:
         """Serve one connection then release its worker slot.

@@ -517,19 +517,16 @@ def test_session_get_params_and_headers(composio: _FakeComposio) -> None:
     )
     body = _proxy_bodies(composio)[0]
     assert body["connected_account_id"] == "ca_live"
-    assert body["endpoint"] == "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    # The query stays in the endpoint URL (repeated names intact); Composio's
+    # ``parameters`` list would keep only the last ``labelIds``.
+    assert body["endpoint"] == (
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+        "?q=is%3Aunread&empty=&includeSpamTrash=true&labelIds=INBOX&labelIds=UNREAD"
+        "&maxResults=5&x=false"
+    )
     assert body["method"] == "GET"
     assert "body" not in body or body["body"] is None
-    assert body["parameters"] == [
-        {"name": "q", "type": "query", "value": "is:unread"},
-        {"name": "empty", "type": "query", "value": ""},
-        {"name": "includeSpamTrash", "type": "query", "value": "true"},
-        {"name": "labelIds", "type": "query", "value": "INBOX"},
-        {"name": "labelIds", "type": "query", "value": "UNREAD"},
-        {"name": "maxResults", "type": "query", "value": "5"},
-        {"name": "x", "type": "query", "value": "false"},
-        {"name": "X-Goog-Trace", "type": "header", "value": "t"},
-    ]
+    assert body["parameters"] == [{"name": "X-Goog-Trace", "type": "header", "value": "t"}]
     assert response.status_code == 200
     assert response.ok
     assert response.json() == {"messages": [1]}
@@ -601,9 +598,10 @@ def test_http_method_override_becomes_a_get(composio: _FakeComposio) -> None:
     body = _proxy_bodies(composio)[0]
     assert body["method"] == "GET" and body.get("body") is None
     assert body.get("binary_body") is None
-    assert [(p["name"], p["value"]) for p in body["parameters"]] == [
-        ("q", "subject:x"), ("maxResults", "5")
-    ]
+    assert body.get("parameters") is None
+    assert body["endpoint"] == (
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages?q=subject%3Ax&maxResults=5"
+    )
 
 
 def test_session_not_connected(composio: _FakeComposio) -> None:
@@ -676,8 +674,8 @@ def test_composio_http_returns_httplib2_response(composio: _FakeComposio) -> Non
     assert json.loads(content) == {"error": {"code": 404}}
     body = _proxy_bodies(composio)[0]
     assert body["body"] == {"requests": []}
+    assert body["endpoint"] == "https://docs.googleapis.com/v1/documents/d1?fields=title"
     assert body["parameters"] == [
-        {"name": "fields", "type": "query", "value": "title"},
         {"name": "content-type", "type": "header", "value": "application/json"},
     ]
 

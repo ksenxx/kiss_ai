@@ -236,6 +236,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # ``run`` so a mid-session toggle takes effect, and overridable
         # per run via the ``auto_commit`` kwarg.
         self.auto_commit_enabled: bool = _config_auto_commit_enabled()
+        # The worktree decision the current (or last) ``run`` carried
+        # once the ``use_worktree`` kwarg and the classifier's demotion
+        # were applied; ``None`` before the first run.  Read by
+        # ``agent_dispatch.dispatch_result`` so a path-mode ``run_agent``
+        # sub-task inherits this run's effective choice.
+        self.use_worktree_enabled: bool | None = None
         self._task_start_ms: int = 0
         self._pending_review: bool = False
         self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
@@ -285,6 +291,32 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _baseline_commit(self) -> str | None:
         """SHA of the baseline commit (user's dirty state), or ``None``."""
         return self._wt.baseline_commit if self._wt else None
+
+    def _restore_work_dir_after_teardown(self, wt: GitWorktree) -> None:
+        """Point ``self.work_dir`` back at the parent repository once *wt* is gone.
+
+        :meth:`run` redirects ``work_dir`` into the worktree and
+        ``RelentlessAgent._reset`` records that path in
+        ``self.work_dir``.  After the worktree directory has been
+        removed, every later reader of the attribute (the task-update
+        side channel, ``run_agent`` sub-tasks, the printer's image
+        resolver) would otherwise be handed a path that no longer
+        exists — and a ``mkdir`` on it resurrects an unregistered husk
+        under ``.kiss-worktrees/``.  The sub-directory offset the task
+        was launched from is kept, so a run started in ``<wt>/pkg``
+        ends in ``<repo>/pkg``.  A ``work_dir`` outside *wt* (the agent
+        never ran, or its last run lived elsewhere) is left alone.
+
+        Args:
+            wt: The worktree whose directory was just removed.
+        """
+        if not self.work_dir:
+            return
+        try:
+            offset = Path(self.work_dir).resolve().relative_to(wt.wt_dir.resolve())
+        except ValueError:
+            return
+        self.work_dir = str(wt.repo_root.resolve() / offset)
 
 
     def _auto_commit_worktree(self, force_commit: bool = False) -> bool:
@@ -534,6 +566,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # already vanished from disk — and a successful ``git worktree
         # remove`` unregisters the worktree itself.
         GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        self._restore_work_dir_after_teardown(wt)
         return _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED, ""
 
     def _finalize_worktree(self, force_commit: bool = False) -> bool:
@@ -1646,6 +1679,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         )
         if classification is not None:
             use_worktree = use_worktree and classification.is_development
+        self.use_worktree_enabled = use_worktree
 
         wt_work_dir: Path | None = None
         repo: Path | None = None
@@ -1977,6 +2011,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             # registration behind (same contract
             # ``_commit_and_clean_worktree`` relies on).
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+            self._restore_work_dir_after_teardown(wt)
             if wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
                     wt.repo_root,

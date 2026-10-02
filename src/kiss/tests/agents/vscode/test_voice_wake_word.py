@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_voice_wake_word import (
     HAVE_MAC_TTS,
     _free_port,
@@ -87,7 +88,8 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
                     "localStorage.setItem('kissVoiceEnabled', '1');"
                 )
                 page = context.new_page()
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{self.port}/",
                     wait_until="load",
                     timeout=60_000,

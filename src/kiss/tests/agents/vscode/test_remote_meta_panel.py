@@ -52,6 +52,7 @@ import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
+from kiss.tests.conftest import goto_retrying_network_change
 
 # Widths at or above the 900px desktop breakpoint.
 DESKTOP_WIDTHS = (900, 1280, 1920)
@@ -176,7 +177,7 @@ def browser() -> Iterator[Browser]:
 def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
     """Open the remote page at ``width`` in desktop mode."""
     page = browser.new_page(viewport={"width": width, "height": 900})
-    page.goto(url)
+    goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.evaluate(_PREPARE_JS)
     page.wait_for_selector("#meta-panel", state="visible")
@@ -341,7 +342,7 @@ def _open_mobile_page(browser: Browser, url: str) -> Page:
     page = browser.new_page(
         viewport={"width": _MOBILE_WIDTH, "height": 900},
     )
-    page.goto(url)
+    goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-chat", state="attached")
     page.evaluate(_PREPARE_JS)
     page.wait_for_function(

@@ -56,6 +56,7 @@ from playwright.sync_api import sync_playwright
 from kiss.tests.agents.vscode.test_remote_composer_full_width import (
     _build_test_page,
 )
+from kiss.tests.conftest import goto_retrying_network_change
 
 _LEFT_GROUP_IDS = [
     "menu-btn",
@@ -280,7 +281,8 @@ def test_remote_composer_buttons_spread_out(tmp_path: Path) -> None:
                     ignore_https_errors=True,
                     viewport={"width": 420, "height": 900},
                 )
-                page.goto(
+                goto_retrying_network_change(
+                    page,
                     f"https://127.0.0.1:{port}/",
                     wait_until="domcontentloaded",
                 )
