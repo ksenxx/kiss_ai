@@ -236,6 +236,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         # ``run`` so a mid-session toggle takes effect, and overridable
         # per run via the ``auto_commit`` kwarg.
         self.auto_commit_enabled: bool = _config_auto_commit_enabled()
+        # The worktree decision the current (or last) ``run`` carried
+        # once the ``use_worktree`` kwarg and the classifier's demotion
+        # were applied; ``None`` before the first run.  Read by
+        # ``agent_dispatch.dispatch_result`` so a path-mode ``run_agent``
+        # sub-task inherits this run's effective choice.
+        self.use_worktree_enabled: bool | None = None
         self._task_start_ms: int = 0
         self._pending_review: bool = False
         self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
@@ -1673,6 +1679,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         )
         if classification is not None:
             use_worktree = use_worktree and classification.is_development
+        self.use_worktree_enabled = use_worktree
 
         wt_work_dir: Path | None = None
         repo: Path | None = None

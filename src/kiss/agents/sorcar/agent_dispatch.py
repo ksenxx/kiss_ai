@@ -69,6 +69,7 @@ scheduler); standalone runs use the standard endpoint resolution
 need a reachable daemon.
 """
 
+import ast
 import dataclasses
 import difflib
 import importlib
@@ -193,11 +194,14 @@ class RunOptions:
     The parsed form of the ``run_agent`` tool's optional string
     arguments, each mirroring the keyword parameter of the same name
     on :func:`kiss.server.sorcar.run` (see that docstring for the
-    semantics).  ``None`` / empty means "not passed": the dispatch mode
-    default applies (``use_worktree``, ``auto_commit``,
-    ``classify_tasks``) or the daemon's configured default decides
-    (everything else).  An agent script's own getters still win over
-    every value here on the daemon.
+    semantics).  ``None`` / empty means "not passed": in path mode the
+    calling agent's own value applies where it has one
+    (``chat_id``, ``model_config``, ``use_web_tools``, ``use_memory``,
+    ``use_worktree``, ``auto_commit`` — see :func:`inherit_from_parent`),
+    otherwise the dispatch mode default applies (``use_worktree``,
+    ``auto_commit``, ``classify_tasks``) or the daemon's configured
+    default decides (everything else).  An agent script's own getters
+    still win over every value here on the daemon.
     """
 
     chat_id: str = ""
@@ -487,6 +491,210 @@ def _attribute_dispatch_usage(parent_agent: Any, result: Any) -> None:
         logger.warning("dispatched sub-task usage attribution failed", exc_info=True)
 
 
+@dataclass(frozen=True)
+class Inherited:
+    """What a path-mode sub-task takes over from the calling agent.
+
+    The values :func:`inherit_from_parent` resolves for the arguments
+    the ``run_agent`` call left empty — the same inheritance a
+    ``run_parallel`` child gets from its parent
+    (``SorcarAgent._run_tasks_parallel``), so a sub-task dispatched
+    through the daemon behaves like an in-process sub-agent of the
+    caller instead of like a task typed into a fresh chat panel.
+    """
+
+    model_name: str
+    budget: float | None
+    options: RunOptions
+    docker_image: str
+    use_worktree: bool | None
+    auto_commit: bool | None
+
+
+def script_defines(agent_path: str, name: str) -> bool:
+    """Return whether the agent script may bind *name* in its module namespace.
+
+    The daemon's ``apply_agent_overrides`` decides by membership in the
+    EXECUTED module's namespace; this answers the same question
+    statically, without running the script in the caller's process,
+    by scanning every node of the file for a binding of *name*: a
+    ``def`` / ``async def`` / ``class`` of that name, a store to that
+    name (plain, tuple, annotated, ``for``/``with``/walrus targets),
+    or an ``import`` alias — wherever it sits, including under ``if``
+    or ``try``.  The scan over-approximates (a local variable named
+    *name* inside some function counts too); the only cost of a false
+    positive is the sub-task running with default provider routing
+    instead of the caller's endpoint, whereas a miss would send a
+    script-chosen model to the caller's endpoint.  An unreadable or
+    unparsable file defines nothing (the daemon reports it).
+
+    Args:
+        agent_path: Path of the agent script.
+        name: The getter name, e.g. ``"model"``.
+
+    Returns:
+        ``True`` when some statement of the file binds *name*.
+    """
+    try:
+        tree = ast.parse(Path(agent_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            if node.name == name:
+                return True
+        elif isinstance(node, ast.Name):
+            if node.id == name and isinstance(node.ctx, ast.Store):
+                return True
+        elif isinstance(node, ast.Import | ast.ImportFrom):
+            if any((alias.asname or alias.name.split(".")[0]) == name for alias in node.names):
+                return True
+    return False
+
+
+def _parent_model_config(
+    parent_agent: Any, model_name: str, agent_path: str,
+) -> dict[str, Any] | None:
+    """Return the calling agent's model configuration if it fits the sub-task's model.
+
+    A Sorcar agent keeps the ``model_config`` its ``run`` received as
+    the public ``model_config`` attribute; it was supplied for the
+    model the run was LAUNCHED with (``_launch_model_name``), and a
+    later ``set_model`` switch leaves it in place while changing
+    ``model_name``.  An endpoint and its key belong to that launch
+    model, so the configuration is returned only when *model_name* is
+    the launch model (``model_name`` when the agent records no launch
+    model) AND the agent script does not pick the model itself: the
+    daemon applies a script's ``model()`` getter on top of the wire
+    fields without touching ``modelConfig`` (``apply_agent_overrides``),
+    so a script-chosen model would otherwise run against the caller's
+    endpoint.  An empty configuration is reported as ``None``.
+
+    Args:
+        parent_agent: The agent calling ``run_agent``.
+        model_name: The model the sub-task will run unless the script
+            overrides it.
+        agent_path: Path of the agent script the sub-task runs.
+
+    Returns:
+        A copy of the configuration dict, or ``None``.
+    """
+    launch_model = str(
+        getattr(parent_agent, "_launch_model_name", None)
+        or getattr(parent_agent, "model_name", "")
+        or ""
+    )
+    if not model_name or model_name != launch_model or script_defines(agent_path, "model"):
+        return None
+    config = getattr(parent_agent, "model_config", None)
+    return dict(config) if isinstance(config, dict) and config else None
+
+
+def inherit_from_parent(
+    parent_agent: Any,
+    model_name: str,
+    budget: float | None,
+    options: RunOptions,
+    agent_path: str = "",
+) -> Inherited:
+    """Fill the empty ``run_agent`` arguments from the calling agent.
+
+    Mirrors what ``run_parallel`` forwards to its children.  An
+    explicit argument always wins; only an empty one is inherited:
+
+    - ``model_name``: the caller's model.
+    - ``model_config``: the caller's, but ONLY when the sub-task runs
+      the model the caller was launched with and the agent script
+      does not pick its own model — an endpoint and its key belong to
+      that model, so a different model (one the caller switched to
+      with ``set_model``, or one the script's ``model()`` getter
+      selects on the daemon) runs with default provider routing (see
+      :func:`_parent_model_config`).
+    - ``budget``: the caller's remaining budget split as for a
+      one-task fan-out (``_subagent_budget_share(1)``: half of what is
+      left, the other half reserved for the caller to process the
+      result), ``None`` (daemon default) when the caller has no budget
+      context yet.
+    - ``chat_id``: the caller's chat, so the sub-task starts with the
+      conversation's earlier tasks and results as context.
+    - ``use_web_tools`` / ``use_memory``: the caller's per-run
+      settings (``_use_web_tools`` / ``_use_memory_override``).
+    - ``docker_image``: ``container:<id>`` of the caller's live Docker
+      container, so the sub-task acts in the same container instead of
+      on the host.
+    - ``use_worktree`` / ``auto_commit``: the caller's EFFECTIVE
+      choices for its own run (``use_worktree_enabled`` after the
+      classifier's demotion, ``auto_commit_enabled``), ``None`` when
+      the caller does not carry them (a plain ``ChatSorcarAgent`` or a
+      caller that has not run yet), in which case the persisted
+      settings apply as before.  Both are ``False`` when the caller's
+      container is inherited: an attached ``DockerManager`` works in
+      the container's working directory — the caller's mounted tree —
+      so a worktree created on the host for the sub-task would never
+      be the directory its tools act in; the sub-task works in the
+      caller's tree like a ``run_parallel`` child and the caller's own
+      lifecycle commits the result.
+
+    Args:
+        parent_agent: The agent calling ``run_agent``; ``None`` (no
+            caller) inherits nothing.
+        model_name: The call's ``model_name`` argument; empty inherits.
+        budget: The call's parsed ``max_budget``; ``None`` inherits.
+        options: The call's parsed optional arguments.
+        agent_path: Path of the agent script the sub-task runs; its
+            top-level ``model`` binding, if any, blocks the
+            ``model_config`` inheritance.
+
+    Returns:
+        The resolved values.
+
+    Raises:
+        BudgetExceededError: When the budget is inherited and the
+            caller has nothing left to spend (the same signal a
+            ``run_parallel`` fan-out raises).
+    """
+    if parent_agent is None:
+        return Inherited(model_name, budget, options, "", None, None)
+    model_name = model_name or str(getattr(parent_agent, "model_name", "") or "")
+    model_config = options.model_config
+    if model_config is None:
+        model_config = _parent_model_config(parent_agent, model_name, agent_path)
+    if budget is None:
+        share: Callable[[int], float | None] | None = getattr(
+            parent_agent, "_subagent_budget_share", None,
+        )
+        if callable(share):
+            budget = share(1)
+    options = dataclasses.replace(
+        options,
+        chat_id=options.chat_id or str(getattr(parent_agent, "_chat_id", "") or ""),
+        model_config=model_config,
+        use_web_tools=(
+            getattr(parent_agent, "_use_web_tools", None)
+            if options.use_web_tools is None else options.use_web_tools
+        ),
+        use_memory=(
+            getattr(parent_agent, "_use_memory_override", None)
+            if options.use_memory is None else options.use_memory
+        ),
+    )
+    docker_image = ""
+    container = getattr(getattr(parent_agent, "docker_manager", None), "container", None)
+    if container is not None and getattr(container, "id", None):
+        from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX
+
+        docker_image = ATTACH_PREFIX + str(container.id)
+    if docker_image:
+        return Inherited(model_name, budget, options, docker_image, False, False)
+    use_worktree = getattr(parent_agent, "use_worktree_enabled", None)
+    auto_commit = getattr(parent_agent, "auto_commit_enabled", None)
+    return Inherited(
+        model_name, budget, options, docker_image,
+        None if use_worktree is None else bool(use_worktree),
+        None if auto_commit is None else bool(auto_commit),
+    )
+
+
 def _dispatch(
     name: str,
     prompt: str,
@@ -500,6 +708,7 @@ def _dispatch(
     git_lifecycle: bool = True,
     classify: bool = True,
     options: RunOptions = RunOptions(),
+    inherit: bool = False,
 ) -> str:
     """Submit an agent-script task to the kiss-web daemon and wait for its YAML result.
 
@@ -511,6 +720,7 @@ def _dispatch(
         name, prompt, agent_path, work_dir, model_name, budget, timeout,
         parent_agent=parent_agent, scope_work_dir=scope_work_dir,
         git_lifecycle=git_lifecycle, classify=classify, options=options,
+        inherit=inherit,
     )
     if isinstance(result, str):
         return result
@@ -533,6 +743,7 @@ def dispatch_result(
     git_lifecycle: bool = True,
     classify: bool = True,
     options: RunOptions = RunOptions(),
+    inherit: bool = False,
 ) -> TaskResult | str:
     """Submit an agent-script task to the kiss-web daemon and wait.
 
@@ -541,7 +752,8 @@ def dispatch_result(
     *extension_agent_path* and returns the daemon's
     :class:`~kiss.agents.sorcar.daemon_client.TaskResult` (which
     carries the sub-task's persisted ``task_id``) — or a clean error
-    string — never raising.  Callers that need the sub-task's id
+    string.  It raises only for the inherited-budget case described
+    under *inherit*.  Callers that need the sub-task's id
     (rsi7d's clone replays) use this; :func:`_dispatch` formats the
     result for a model.
 
@@ -602,6 +814,23 @@ def dispatch_result(
             set when *git_lifecycle* is on: a channel or cron sub-task
             never gets a worktree or an auto-commit (see
             *git_lifecycle*), so asking for one is an error.
+        inherit: Whether the arguments left empty are filled from
+            *parent_agent* (see :func:`inherit_from_parent`): the
+            caller's model (and, for the same model, its model
+            configuration), a share of its remaining budget, its chat,
+            its web-tools and memory settings, its live Docker
+            container, and its effective worktree / auto-commit
+            choices.  ``True`` for the ``run_agent`` tool's path mode
+            only — a sub-task on the same project is a sub-agent of
+            the caller.  ``False`` (the default) for channel and cron
+            dispatches, which act on an external service from a
+            scratch directory on the host (a channel child must not
+            inherit the caller's chat context or container), and for
+            programmatic callers that pass every value explicitly
+            (rsi7d's clone replays).  When the budget is inherited
+            and the caller has nothing left to spend,
+            ``BudgetExceededError`` propagates — the same signal a
+            ``run_parallel`` fan-out raises.
 
     Returns:
         The sub-task's :class:`TaskResult`, or an error message.
@@ -681,17 +910,34 @@ def dispatch_result(
     # leave an unregistered husk under ``.kiss-worktrees/``.
     work_dir = str(remap_vanished_worktree(Path(work_dir)))
     Path(work_dir).mkdir(parents=True, exist_ok=True)
+    # Path mode: the arguments the caller left empty come from the
+    # calling agent (its model, budget share, chat, web/memory
+    # settings, container, effective worktree/auto-commit), the way a
+    # ``run_parallel`` child inherits them.  Channel/cron dispatches
+    # and explicit programmatic callers skip this.
+    inherited = inherit_from_parent(
+        parent_agent if inherit else None, model_name, budget, options, agent_path,
+    )
+    model_name, budget, options = inherited.model_name, inherited.budget, inherited.options
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /
     # auto-commit request in the pinned-off modes).  In the git
-    # lifecycle (path mode) the defaults are the user's persisted
-    # "Use worktree" / "Auto commit" settings — the same values a
-    # task submitted from the chat panel runs with — not a hard-coded
-    # ``True`` that would ignore a user who turned them off.
+    # lifecycle (path mode) the defaults are the calling agent's
+    # effective choices for its own run when it carries them, else
+    # the user's persisted "Use worktree" / "Auto commit" settings —
+    # the same values a task submitted from the chat panel runs with
+    # — not a hard-coded ``True`` that would ignore a user who turned
+    # them off.
     if git_lifecycle:
         cfg = load_config()  # fills every key from DEFAULTS
-        default_worktree = bool(cfg["is_worktree"])
-        default_auto_commit = bool(cfg["auto_commit_mode"])
+        default_worktree = (
+            bool(cfg["is_worktree"])
+            if inherited.use_worktree is None else inherited.use_worktree
+        )
+        default_auto_commit = (
+            bool(cfg["auto_commit_mode"])
+            if inherited.auto_commit is None else inherited.auto_commit
+        )
     else:
         default_worktree = default_auto_commit = False
     use_worktree = (
@@ -729,6 +975,7 @@ def dispatch_result(
             append_to_system_prompt=options.append_to_system_prompt,
             append_to_prompt=options.append_to_prompt,
             tool_profile=options.tool_profile,
+            docker_image=inherited.docker_image,
             timeout=timeout,
             stop_on_timeout=True,
             endpoint_file=_daemon_endpoint_file(),
@@ -809,10 +1056,11 @@ def _run_agent(
         task: The task for the agent.
         workspace: Workspace/account identifier for multi-account
             channels; ignored in path mode.
-        model_name: LLM model for the sub-task; empty for the daemon
-            default.
+        model_name: LLM model for the sub-task; empty for the calling
+            agent's model in path mode, else the daemon default.
         max_budget: Per-task USD budget override as a number string;
-            empty for the daemon default.
+            empty for half of the calling agent's remaining budget in
+            path mode, else the daemon default.
         timeout: Maximum seconds to wait for the sub-task's result, as
             a number string; empty for the default
             :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS` (300).  On
@@ -863,7 +1111,10 @@ def _run_agent(
     if requested.endswith(".py") or "/" in requested or "\\" in requested:
         # Path mode: any agent-script file.  The task is passed through
         # unchanged — no channel preamble or workspace handling; the
-        # script itself configures the session via its getters.
+        # script itself configures the session via its getters.  The
+        # sub-task works on the calling task's project, so the
+        # arguments left empty are inherited from the calling agent
+        # (``inherit=True``, see ``inherit_from_parent``).
         from kiss.agents.sorcar.daemon_client import resolve_agent_path
 
         candidate = Path(requested).expanduser()
@@ -878,7 +1129,8 @@ def _run_agent(
             task = rewrite_parent_repo_paths(task, parent_work_dir)
         return _dispatch(Path(agent_path).stem, task, agent_path,
                          work_dir, model_name, budget, wait, parent_agent,
-                         scope_work_dir=parent_work_dir, options=options)
+                         scope_work_dir=parent_work_dir, options=options,
+                         inherit=True)
     # Forgiving lookup: "Home Assistant", "HOMEASSISTANT", and
     # "home-assistant" all resolve — spelling variants differ only in
     # case, spaces, hyphens, and underscores.
@@ -1098,7 +1350,16 @@ def make_run_agent_tool(
         session runs in the channels' shared ``~/.kiss/channel_work``.
         The optional arguments from ``model_name`` on mirror the
         keyword options of :func:`kiss.server.sorcar.run`; leave one
-        empty to keep its default.
+        empty to keep its default.  For a path-named agent script the
+        empty arguments are inherited from THIS task, like a
+        ``run_parallel`` sub-agent's: its model (and, for the model
+        this task was launched with, its model configuration), half
+        of its remaining budget, its chat (so the sub-task sees this
+        conversation's earlier tasks and results), its web-tools and
+        memory settings, its Docker container, and its effective
+        worktree / auto-commit choices (both off inside a container:
+        the sub-task then works in this task's tree).  Channel and
+        cron sub-tasks inherit none of these.
         This call blocks until the task finishes or the ``timeout``
         (default 300 seconds) expires, whichever comes first; a
         timed-out call spends up to 20 further seconds confirming the
@@ -1128,11 +1389,14 @@ def make_run_agent_tool(
             workspace: Workspace/account identifier for multi-account
                 channels (default ``"default"``).  Ignored for
                 path-named agent scripts.
-            model_name: LLM model for the sub-task; empty uses the
+            model_name: LLM model for the sub-task; empty uses this
+                task's model for a path-named agent script, else the
                 daemon default.  An agent script's ``model()``
                 still wins.
             max_budget: Per-task USD budget override as a number
-                string; empty uses the daemon default.
+                string; empty gives a path-named agent script half of
+                this task's remaining budget (the other half stays
+                reserved for this task), else the daemon default.
             timeout: Maximum seconds to wait for the task to finish,
                 as a number string; empty uses the default of 300
                 seconds.  Pass a larger value for tasks expected to
@@ -1144,9 +1408,11 @@ def make_run_agent_tool(
                 so check what it already did before retrying with a
                 larger timeout.  Its spend is still charged to the
                 calling task.
-            chat_id: Existing chat session id to continue; empty starts a new chat.
-                Pass the chat id a previous run belonged to and the sub-task sees
-                that chat's earlier tasks and results as context.
+            chat_id: Existing chat session id to continue; empty continues THIS
+                task's chat for a path-named agent script (the sub-task sees this
+                conversation's earlier tasks and results as context) and starts a
+                new chat otherwise.  Pass the chat id a previous run belonged to
+                and the sub-task sees that chat's earlier tasks and results instead.
             system_prompt: Replacement system prompt for the sub-task; empty keeps the default.
                 It replaces the default system prompt of the sub-task and of its own
                 ``run_parallel`` sub-agents; the daemon still appends its per-run
@@ -1157,18 +1423,28 @@ def make_run_agent_tool(
                 script's ``tools()`` still wins.
             model_config: Model configuration override as a JSON object string; empty = default.
                 Custom endpoint / headers, e.g. ``'{"base_url": "http://localhost:8000/v1"}'``.
+                The default for a path-named agent script is this task's model
+                configuration when the sub-task runs the model this task was launched
+                with and the script does not define its own ``model()``; otherwise none.
             use_worktree: "true"/"false": run the sub-task in a git worktree; empty = default.
-                The default is ``true`` for a path-named agent script.  Channel and cron
-                sub-tasks never use a worktree: passing ``"true"`` for them is an error.
+                The default for a path-named agent script is this task's own effective
+                choice (the "Use worktree" setting after the classifier's verdict), or
+                ``false`` when this task runs in a Docker container (the sub-task shares
+                the container and works in this task's tree).  Channel and cron sub-tasks
+                never use a worktree: passing ``"true"`` for them is an error.
             auto_commit: "true"/"false": auto-commit the sub-task's changes; empty = default.
-                The default is ``true`` for a path-named agent script.  Channel and cron
-                sub-tasks never auto-commit: passing ``"true"`` for them is an error.
-            use_web_tools: "true"/"false": give the sub-task the browser tools; empty = default.
+                The default for a path-named agent script is this task's own effective
+                "Auto commit" choice, or ``false`` when this task runs in a Docker
+                container.  Channel and cron sub-tasks never auto-commit: passing
+                ``"true"`` for them is an error.
+            use_web_tools: "true"/"false": give the sub-task the browser tools; empty = default
+                (this task's setting for a path-named agent script).
             classify_tasks: "true"/"false": classify the sub-task before it runs; empty = default.
                 Classification picks the lite vs. full system prompt and may demote a
                 worktree run to direct execution.  The default is the daemon setting,
                 except ``false`` for the cron agent.
-            use_memory: "true"/"false": give the sub-task persistent-memory tools; empty = default.
+            use_memory: "true"/"false": give the sub-task persistent-memory tools; empty = default
+                (this task's setting for a path-named agent script).
             is_parallel: "true"/"false": let the sub-task use run_parallel; empty means true.
             append_basic_tools: "true"/"false": give the sub-task the basic toolset; empty = true.
                 With ``"false"`` the sub-task has ONLY ``finish`` and the tools from
