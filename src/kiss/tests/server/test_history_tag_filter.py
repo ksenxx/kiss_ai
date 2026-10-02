@@ -98,6 +98,16 @@ class TestTagFilterQueries:
         # An empty query with a tag goes through the plain load.
         assert len(th._search_history("", tag="paper")) == 2
 
+    def test_subagent_rows_stay_out_of_the_listing(self) -> None:
+        parent = _finished("Review the parser change with a sub-agent")
+        child_id, _ = th._add_task(
+            "Review the change", extra={"subagent": {"parent_task_id": parent}}
+        )
+        th._save_task_result(result="done", task_id=child_id)
+        th._save_task_extra({"endTs": 1_000}, task_id=child_id)
+        assert th._load_history(tag="subagent") == []
+        assert [str(r["id"]) for r in th._load_history(tag="review")] == [parent]
+
 
 class TestGetHistoryCommand:
     """The ``getHistory`` command threads ``tag`` down to the query."""
@@ -169,13 +179,3 @@ class TestDropdownVocabulary:
         assert select is not None
         options = re.findall(r'<option value="([^"]*)"', select.group(0))
         assert options == ["", *(t for t in ALL_TAGS if t != "subagent")]
-
-    def test_subagent_rows_stay_out_of_the_listing(self) -> None:
-        parent = _finished("Review the parser change with a sub-agent")
-        child_id, _ = th._add_task(
-            "Review the change", extra={"subagent": {"parent_task_id": parent}}
-        )
-        th._save_task_result(result="done", task_id=child_id)
-        th._save_task_extra({"endTs": 1_000}, task_id=child_id)
-        assert th._load_history(tag="subagent") == []
-        assert [str(r["id"]) for r in th._load_history(tag="review")] == [parent]
