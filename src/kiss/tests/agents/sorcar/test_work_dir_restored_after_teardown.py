@@ -18,6 +18,7 @@ every path that preserves the directory.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -152,7 +153,7 @@ class TestWorkDirRestoredWhenWorktreeRemoved:
         """The directory was already deleted out from under the agent."""
         repo, wt_dir, branch = _make_repo_with_worktree(tmp_path)
         agent = _agent_in_worktree(repo, wt_dir, branch)
-        subprocess.run(["rm", "-rf", str(wt_dir)], check=True)
+        shutil.rmtree(wt_dir)
 
         assert agent._finalize_worktree() is True
 
