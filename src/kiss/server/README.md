@@ -180,7 +180,27 @@ except `append_basic_tools`, whose getter is
 | `docker_image()`         | `str`                           | `""` (host)               | `dockerImage`       |
 
 When a getter is absent, the caller's value is used (which is the
-`run()` default when the caller did not pass one).
+`run()` default when the caller did not pass one).  When the caller is
+a running agent's `run_agent` tool naming an agent-script PATH (which
+is how every `/xxx` slash command and the empty `agent` default are
+dispatched), the arguments it leaves empty are first filled from that
+calling agent, as a `run_parallel` child's would be
+(`agent_dispatch.inherit_from_parent`): its model (and its
+`model_config`, but only when the sub-task runs the model the caller
+was launched with and the script binds no `model` name itself: a
+script-chosen model runs with default provider routing), half of its
+remaining budget (the other half stays reserved for the caller), its
+chat id (so the sub-task sees the conversation's earlier tasks and
+results), its web-tools and memory settings, its live Docker
+container (`container:<id>`), and its effective worktree and
+auto-commit choices after the classifier's demotion (both `False`
+when the container is inherited: the sub-task then works in the
+caller's tree).  The script's getters still win over the inherited
+values.  Channel dispatches (`agent="slack"`, ...) and `agent="cron"`
+inherit none of these: they run on the daemon's default model and
+budget unless the call passes its own, never in a worktree and never
+with auto-commit (asking for either is rejected), and the cron
+dispatch also skips the task classifier.
 
 ### `description()` — mandatory, not a run parameter
 
@@ -1012,7 +1032,14 @@ class TaskResult:
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)
   (source: `website/kisssorcar.github.io/docs/sea-commands.md`).
 - The outer run of a `/xxx` command is only a relay that calls
-  `run_agent`; before it starts, for each relay setting that is enabled
+  `run_agent` with the SEA's path, the task text and, when the SEA
+  defines `dispatch_timeout()`, a `timeout` (the `/ask` relay also
+  passes an `append_to_prompt` naming the task to answer about);
+  everything else is left empty, so the SEA run inherits the relay's
+  model, half of its remaining budget, its chat, its web-tools and memory settings and
+  its worktree / auto-commit choices unless a getter of the SEA says
+  otherwise (see the inheritance paragraph under the getter table).
+  Before the relay starts, for each relay setting that is enabled
   (worktree isolation, auto-commit) the daemon imports the resolved SEA
   and checks the matching `use_worktree()` or `auto_commit()` getter.
   An exact `False` demotes that setting on the relay as well (the SEA is

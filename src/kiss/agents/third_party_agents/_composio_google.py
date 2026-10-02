@@ -38,7 +38,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from requests.structures import CaseInsensitiveDict
@@ -351,7 +351,8 @@ class ComposioResponse:
         """Raise :class:`requests.HTTPError` for a 4xx/5xx status."""
         if not self.ok:
             raise requests.HTTPError(
-                f"{self.status_code} Error for url: {self.url}: {self.text[:500]}", response=self  # type: ignore[arg-type]
+                f"{self.status_code} Error for url: {self.url}: {self.text[:500]}",
+                response=self,  # type: ignore[arg-type]
             )
 
 
@@ -400,15 +401,17 @@ def proxy_request(
         query.extend(parse_qsl(_body_text(body), keep_blank_values=True))
         body = None
         headers.pop(lower.pop("content-type", ""), None)
+    # The query travels inside the endpoint URL: the proxy's ``parameters``
+    # list keeps only the last value of a repeated query name, which drops
+    # all but one ``metadataHeaders`` / ``labelIds`` / ``fields`` value.
     parameters: list[dict[str, str]] = [
-        {"name": k, "type": "query", "value": v} for k, v in query
+        {"name": key, "type": "header", "value": value}
+        for key, value in headers.items()
+        if key.lower() not in _DROPPED_HEADERS
     ]
-    for key, value in headers.items():
-        if key.lower() not in _DROPPED_HEADERS:
-            parameters.append({"name": key, "type": "header", "value": value})
     content_type = headers.get(lower.get("content-type", ""), "")
     json_body, binary_body = _split_body(body, content_type)
-    endpoint = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    endpoint = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
     # The SDK's ``tools.proxy`` wrapper has no ``binary_body``; call the
     # generated client directly, without retries (a proxied write is not
     # idempotent).

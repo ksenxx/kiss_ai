@@ -1443,6 +1443,7 @@ class _TaskRunnerMixin:
         conn_id: str,
         start_ms: int,
         client_task_id: str = "",
+        is_subagent: bool = False,
     ) -> None:
         """Wire a freshly allocated task id to its launching UI tab.
 
@@ -1452,7 +1453,14 @@ class _TaskRunnerMixin:
         re-keyed the agent state to *task_id*.  Adds the launching tab
         id and connection id to the printer (which also subscribes the
         tab to the task's event stream) and then subscribes every idle
-        viewer of the chat.
+        viewer of the chat — unless the run is another task's
+        sub-agent (*is_subagent*): a path-mode ``run_agent`` child
+        runs on its PARENT's chat by default, and its stream belongs
+        in the nested sub-agent tab the ``new_tab`` broadcast opens,
+        not in the tabs viewing the parent's chat, which already
+        stream the parent and get the child's result through the
+        parent's tool result.  Subscribing them would ``clear`` their
+        content and interleave the two tasks' events.
 
         Args:
             task_id: The freshly allocated ``task_history`` row id.
@@ -1462,8 +1470,12 @@ class _TaskRunnerMixin:
             start_ms: The task's start timestamp (ms since epoch).
             client_task_id: The client-stamped ``taskId`` of the run
                 command (echoed on viewer ``status`` events).
+            is_subagent: Whether the run was submitted with a
+                ``parentTaskId`` (a ``run_agent`` child).
         """
         self.printer.register_task_ui(task_id, source_tab_id, conn_id)
+        if is_subagent:
+            return
         self._subscribe_chat_viewers(
             task_id,
             chat_id,
@@ -2010,6 +2022,7 @@ class _TaskRunnerMixin:
                 conn_id=state.conn_id,
                 start_ms=start_ms,
                 client_task_id=_client_task_id_of(cmd),
+                is_subagent=bool(parent_task_id),
             )
 
             # A broken tools file raises ToolsFileError here, inside

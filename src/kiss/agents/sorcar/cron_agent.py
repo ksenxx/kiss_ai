@@ -236,6 +236,11 @@ def _jobs_lock(blocking: bool) -> Iterator[Any | None]:
 def load_jobs() -> list[dict[str, Any]]:
     """Load all cron jobs from the JSON store.
 
+    A gateway command job stored with a channel delivery target (by a
+    version without :func:`_gateway_delivery`) is returned with
+    ``deliver`` ``none``, so listing, duplicate detection and delivery
+    all see the normalised job; the next save persists it.
+
     Returns:
         The list of job dicts; an empty list when the store does not
         exist or is unreadable.
@@ -246,7 +251,12 @@ def load_jobs() -> list[dict[str, Any]]:
         return []
     if not isinstance(data, list):
         return []
-    return [job for job in data if isinstance(job, dict) and job.get("id")]
+    jobs = [job for job in data if isinstance(job, dict) and job.get("id")]
+    for job in jobs:
+        job["deliver"] = _gateway_delivery(
+            str(job.get("command", "")), str(job.get("deliver", "local"))
+        )
+    return jobs
 
 
 def save_jobs(jobs: list[dict[str, Any]]) -> None:
@@ -533,7 +543,10 @@ PROMPT_PREAMBLE = (
     "Nobody can answer questions; never ask the user anything. Do not "
     "create, modify, or remove scheduled jobs during this run. Your "
     "final summary is delivered verbatim to the job's delivery targets; "
-    "reply with exactly [SILENT] if there is nothing worth reporting.\n\n"
+    "reply with exactly [SILENT] if there is nothing worth reporting — "
+    "never a bare acknowledgement such as 'OK' or 'tick-OK' — and never "
+    "post a heartbeat or status message to a messaging channel "
+    "yourself.\n\n"
 )
 """Hermes-style preamble prepended to every prompt job's prompt."""
 
@@ -1354,7 +1367,10 @@ def cron_job(
     repeating the same news on every tick.  An always-on gateway for a
     messaging channel is likewise a ``command`` job: build the command
     with the ``gateway_command`` tool first, then schedule it here
-    (typically ``"every 2m"``) — never as a ``prompt`` job.
+    (typically ``"every 2m"``) — never as a ``prompt`` job: ``create``
+    refuses a prompt that describes a gateway tick, and a gateway
+    command is always stored with ``deliver`` ``none`` so its ticks
+    never post status into the chat.
 
     Jobs due at the same time run concurrently, each in its own scratch
     directory that is removed when the run ends; a job whose previous
@@ -1432,6 +1448,22 @@ def cron_job(
             return _dump({"error": f"{action} requires name and schedule"})
         if bool(prompt.strip()) == bool(command.strip()):
             return _dump({"error": f"{action} requires exactly one of prompt or command"})
+        if _describes_gateway(prompt):
+            return _dump({
+                "error": "a messaging gateway is never a prompt job: an LLM "
+                "session on every tick costs money and posts status chatter "
+                "such as 'tick-OK' into the chat.  Call gateway_command(channel, "
+                "chat) and schedule its result as a command job with "
+                "deliver='none'."
+            })
+        note = ""
+        if _gateway_delivery(command, deliver) != deliver:
+            note = (
+                "a gateway tick never posts into a chat: delivery set to none "
+                "(ticks that served messages or failed are logged in "
+                f"{_output_dir()}/<job_id>.md)"
+            )
+            deliver = "none"
         try:
             next_run = compute_next_run(schedule, time.time())
         except ValueError as e:
@@ -1510,7 +1542,10 @@ def cron_job(
                 })
             jobs.append(job)
             save_jobs(jobs)
-        return _dump({"created": _job_view(job)})
+        result: dict[str, Any] = {"created": _job_view(job)}
+        if note:
+            result["note"] = note
+        return _dump(result)
 
     if action == "list":
         return _dump({"jobs": [_job_view(job) for job in load_jobs()]})
@@ -1570,6 +1605,106 @@ def _channel_cli_name(channel: str) -> str:
     return f"kiss-{channel}"
 
 
+_GATEWAY_PROMPT_WORDS = (
+    re.compile(r"\bgateway\b", re.IGNORECASE),
+    re.compile(r"\b(tick|ticks|heartbeat|heartbeats|pairing)\b", re.IGNORECASE),
+    re.compile(r"\b(chat|channel|messages?|dm|dms|room|group)\b", re.IGNORECASE),
+)
+"""Word groups that together identify a prompt as a messaging-gateway tick."""
+
+
+def _describes_gateway(prompt: str) -> bool:
+    """Return whether *prompt* asks an LLM run to act as a messaging gateway.
+
+    A prompt that speaks of a *gateway*, of its *tick* (heartbeat,
+    pairing) and of a *chat* (channel, messages, room, group) is the one
+    failure mode the cron agent is told to avoid: scheduled as a prompt
+    job it starts a paid session on every tick and that session posts
+    status chatter (``tick-OK``, ``gateway heartbeat``) into the chat it
+    is supposed to serve.  All three word groups are required so an
+    ordinary job about an API gateway's health or heartbeat passes.
+
+    Args:
+        prompt: The prompt of a job to create (empty for a command job).
+
+    Returns:
+        ``True`` when the job must be refused in favour of
+        :func:`gateway_command`.
+    """
+    return all(words.search(prompt) for words in _GATEWAY_PROMPT_WORDS)
+
+
+def _is_gateway_command(command: str) -> bool:
+    """Return whether *command* is a channel CLI's gateway tick.
+
+    True when the command's program (its first shell word, bare or with
+    any path prefix — also a ``$(...)`` lookup of the launcher path) is
+    a ``kiss-<channel>`` launcher and a later word is ``--channel`` or
+    ``--channel=...``, i.e. what :func:`gateway_command` builds, with or
+    without extra flags such as ``--allow-users``.  A command that
+    merely mentions a launcher as data (``printf 'kiss-slack
+    --channel=X'``) is not a gateway.
+
+    Args:
+        command: The shell command of a job to create (empty for a
+            prompt job).
+
+    Returns:
+        ``True`` for a gateway tick command.
+    """
+    # A ``"$(...)"`` launcher lookup is one shell word even when the
+    # quotes nested inside it (a path with spaces) would confuse shlex.
+    lookup = re.match(r'\s*"?(\$\(.*?\))"?(\s|$)', command, re.DOTALL)
+    try:
+        if lookup:
+            words = [lookup.group(1), *shlex.split(command[lookup.end():])]
+        else:
+            words = shlex.split(command)
+    except ValueError:
+        return False
+    if not words or not re.search(r"(^|/)kiss-[a-z0-9]+\b", words[0]):
+        return False
+    return any(word == "--channel" or word.startswith("--channel=") for word in words[1:])
+
+
+def _gateway_delivery(command: str, deliver: str) -> str:
+    """Return the delivery spec a job may keep given its command.
+
+    A gateway tick never posts into a chat: when *command* is a gateway
+    tick (:func:`_is_gateway_command`) and *deliver* names a channel
+    target, the result is ``"none"``; otherwise *deliver* is returned
+    unchanged.  Applied when a job is created and when the store is
+    loaded, so gateway jobs stored before this rule existed are
+    normalised the same way.
+
+    Args:
+        command: The job's shell command (empty for a prompt job).
+        deliver: The requested comma-separated delivery targets.
+
+    Returns:
+        The delivery spec to store.
+    """
+    if _is_gateway_command(command) and _has_channel_target(deliver):
+        return "none"
+    return deliver
+
+
+def _has_channel_target(deliver: str) -> bool:
+    """Return whether a ``deliver`` spec names any messaging-channel target.
+
+    Args:
+        deliver: Comma-separated delivery targets as passed to
+            :func:`cron_job`.
+
+    Returns:
+        ``True`` when at least one target is neither ``local`` nor
+        ``none`` (nor empty).
+    """
+    return any(
+        target.strip() not in ("", "local", "none") for target in deliver.split(",")
+    )
+
+
 def gateway_command(
     channel: str, chat: str, pairing: bool = True, workspace: str = "",
 ) -> str:
@@ -1585,7 +1720,9 @@ def gateway_command(
     wrote anything.  The command runs the CLI tick with ``--quiet``
     (replies go to the channel itself), so a tick that finds nothing
     prints nothing and is silent; one that served messages or failed
-    is logged and delivered.
+    is logged locally only — ``cron_job`` stores a gateway job with
+    ``deliver`` ``none`` whatever was requested, so no tick ever posts
+    status chatter into the chat it serves.
 
     Args:
         channel: Channel name, e.g. "telegram", "slack", "Google Chat" (case/spaces ignored).

@@ -34,6 +34,7 @@ import pytest
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
+from kiss.tests.conftest import goto_retrying_network_change
 
 # --sidebar-min-w / --chat-min-w from remote-codex.css: the sliver a
 # drag may collapse either docked panel down to, and the chat width
@@ -124,7 +125,7 @@ def browser() -> Iterator[Browser]:
 def _open_desktop_page(browser: Browser, url: str, width: int) -> Page:
     """Open the remote page at ``width`` in desktop mode."""
     page = browser.new_page(viewport={"width": width, "height": 900})
-    page.goto(url)
+    goto_retrying_network_change(page, url)
     page.wait_for_selector("body.remote-desktop", state="attached")
     page.evaluate(_PREPARE_JS)
     page.wait_for_selector("#meta-panel", state="visible")
@@ -272,7 +273,7 @@ def test_width_persists_across_reloads(
     try:
         _drag_meta_resizer_to(page, 1440 - 450)
         assert page.evaluate(_GEOMETRY_JS)["stored"] == "450"
-        page.goto(page.url)
+        goto_retrying_network_change(page, page.url)
         page.wait_for_selector("body.remote-desktop", state="attached")
         page.evaluate(_PREPARE_JS)
         page.wait_for_selector("#meta-panel", state="visible")

@@ -97,9 +97,8 @@ def _tts_pcm_base64(directory: Path, text: str) -> str:
     capturing the utterance that follows the wake word: the capture
     endpoints on ~2s of trailing silence and INCLUDES those silent
     blocks, so the same trailing silence is appended here (the server
-    now trims trailing silence before the transcription-agent call —
-    long silent padding empirically makes gpt-audio deny hearing any
-    audio — so the padded payload also exercises that trimming).
+    trims trailing silence before the transcription-agent call, so
+    the padded payload also exercises that trimming).
     """
     pcm = _tts_pcm(directory, "speech", text)
     pcm += b"\x00" * (2 * 2 * 16000)
