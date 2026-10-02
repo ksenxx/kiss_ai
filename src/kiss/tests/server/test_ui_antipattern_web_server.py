@@ -70,6 +70,7 @@ from kiss.server.web_server import (
     _build_html,
     _share_page_filename,
 )
+from kiss.tests.conftest import goto_retrying_network_change
 
 PAGE_URL = "https://shim-ui.test/"
 _PASSWORD = "correct-horse-battery-staple"
@@ -198,7 +199,7 @@ def _load_page(browser):
         PAGE_URL + "**",
         lambda route: route.fulfill(body=html, content_type="text/html"),
     )
-    page.goto(PAGE_URL, wait_until="load")
+    goto_retrying_network_change(page, PAGE_URL, wait_until="load")
     return context, page
 
 

@@ -93,7 +93,7 @@
   - `tool_call_hook`: Optional hook installed on every per-session executor :class:`KISSAgent` (see :meth:`kiss.core.kiss_agent.KISSAgent.run`): called before every tool call with the tool's name and arguments; any verdict other than ``"OK"`` suppresses the call and is returned to the model as the tool's result.  Defaults to None (no hook).
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`resolve_work_dir`** — The absolute working directory a run with this ``work_dir`` argument uses. ``None`` or ``""`` means ``artifact_dir/kiss_workdir``.  The directory is not created here; :meth:`RelentlessAgent._reset` does that when the run starts.<br/>`def resolve_work_dir(work_dir: str | None) -> str`
+**`resolve_work_dir`** — The absolute working directory a run with this ``work_dir`` argument uses. ``None`` or ``""`` means ``artifact_dir/kiss_workdir``.  The directory is not created here; :meth:`RelentlessAgent._reset` does that when the run starts. A *work_dir* inside a ``.kiss-worktrees/kiss_wt-*`` worktree that has already been torn down (a finished worktree task's ``work_dir`` handed to a follow-up run) is remapped to the parent repository (:func:`~kiss.agents.sorcar.useful_tools.remap_vanished_worktree`), so ``_reset``'s ``mkdir`` never resurrects the removed worktree directory.<br/>`def resolve_work_dir(work_dir: str | None) -> str`
 
 - `work_dir`: The ``work_dir`` argument of :meth:`RelentlessAgent.run`.
 

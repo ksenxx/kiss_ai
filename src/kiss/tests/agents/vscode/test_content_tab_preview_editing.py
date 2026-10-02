@@ -42,6 +42,7 @@ from kiss.tests.agents.vscode.test_content_tab_file_links import (
     _open_page,
     browser,  # noqa: F401  (module fixture used by param name)
 )
+from kiss.tests.conftest import goto_retrying_network_change
 from kiss.tests.server.test_content_tab_file_links import (
     harness,  # noqa: F401  (module fixture used by param name)
 )
@@ -569,7 +570,7 @@ class TestMarkdownHtmlEditSource:
             ),
         )
         try:
-            page.goto(harness.base_url + "/")
+            goto_retrying_network_change(page, harness.base_url + "/")
             page.wait_for_selector(
                 "#task-input", state="visible", timeout=30000,
             )

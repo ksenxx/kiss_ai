@@ -268,7 +268,9 @@ one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise a
 plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
 header). The daemon starts on demand: agents that find none
 serialize the start behind `$KISS_HOME/muse_auth/spawn.lock`, so concurrent agents
-never race to launch two.
+never race to launch two, and a running daemon exits on its own as soon as its
+`$KISS_HOME/muse_auth` state directory is deleted (a temporary home torn down), so it
+never re-creates a removed directory from its periodic sweep of stale pending files.
 `grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
 `KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
@@ -296,7 +298,7 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 | Discord | `discord` | yes | click-Allow sign-in through the KISS Discord app (`authenticate_discord`, `finish_discord_auth`; user token + one webhook channel), or `authenticate_discord(bot_token=...)` for bot-only features, `discord/config.json` | `list_guilds`, `list_third_party_agents` (channels), `get_channel`, `get_channel_messages`, `post_message`, `edit_message`, `delete_message`, `add_reaction`, `create_thread`, `list_guild_members`, `create_invite` |
 | Email (any IMAP/SMTP mailbox) | `email` | yes | IMAP host + SMTP host + address + app-password, `email/config.json` | `send_email`, `list_unread_emails`, `read_email`, `mark_email_read` |
 | Feishu / Lark | `feishu` | yes | `app_id` + `app_secret`, `feishu/config.json` | `send_text_message`, `reply_message`, `delete_message`, `list_messages`, `list_chats`, `get_chat`, `get_user_info` |
-| Gmail | `gmail` | no | Composio Connect Link (`authenticate_gmail`, `finish_gmail_auth`), connection record in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message`, `create_draft`, `trash_message`, `untrash_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
+| Gmail | `gmail` | no | Composio Connect Link (`authenticate_gmail`, `finish_gmail_auth`), connection record in `gmail/` | `get_profile`, `list_messages`, `get_message`, `send_email`, `reply_to_message` (`draft_only=True` saves the reply as an in-thread draft instead of sending it), `create_draft` (given a `thread_id` it becomes an in-thread reply draft, with the recipient, subject and `In-Reply-To`/`References` headers resolved from the thread's newest message when omitted), `trash_message`, `untrash_message`, `modify_labels`, `list_labels`, `create_label`, `get_attachment`, `get_thread` |
 | Google Chat | `googlechat` | yes | service account (`authenticate_googlechat_service_account`) or Composio with a custom auth config (`finish_googlechat_auth`), `googlechat/` | `list_spaces`, `get_space`, `list_members`, `list_messages`, `get_message`, `post_message`, `update_message`, `delete_message`, `create_space` |
 | Home Assistant | `homeassistant` | no | `base_url` + long-lived token, `homeassistant/config.json` | `ha_get_states`, `ha_call_service`, `ha_list_services`, `ha_get_history`, `ha_render_template`, `ha_fire_event` |
 | iMessage (macOS AppleScript) | `imessage` | no | local Messages app, `imessage/config.json` | `send_imessage`, `send_attachment`, `list_conversations`, `get_messages` |
@@ -650,7 +652,14 @@ agent, whose `gateway_command` tool converts channel + chat into the tick comman
 prints nothing unless it served a message, so an idle tick is silent and only
 activity and failures are logged), which is then scheduled as a command job. A
 gateway is never scheduled as a prompt job: a command tick that finds no messages
-starts no LLM session and costs no tokens.
+starts no LLM session and costs no tokens, whereas a prompt job would start a paid
+session on every tick and post status chatter such as "tick-OK" into the chat. The
+cron agent enforces this: it refuses a prompt job whose text describes a gateway
+tick, and a command job it recognizes as a gateway tick (a `kiss-<channel>` launcher
+with `--channel`) is stored with its messaging-channel delivery targets replaced by
+`none` (a `local` delivery stays), with a note saying why; gateway jobs created before
+this rule existed are normalized the same way when the store is loaded. Ticks that
+served messages or failed are still logged under `~/.kiss/cron/output/<job_id>.md`.
 
 > Find the chat ID of my Telegram group "Sen family" from the bot's recent updates,
 > then schedule a gateway tick of that chat with pairing every 2 minutes.

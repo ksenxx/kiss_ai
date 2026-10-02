@@ -32,6 +32,7 @@ import kiss.viz_trajectory as viz_pkg
 from kiss.tests.agents.vscode.test_codex_task_panel_style import (
     _start_live_server,
 )
+from kiss.tests.conftest import goto_retrying_network_change
 
 VIZ_TEMPLATE = Path(viz_pkg.__file__).parent / "templates" / "index.html"
 
@@ -89,7 +90,9 @@ def test_remote_page_controls_share_typeface_scale_and_scheme(tmp_path: Path) ->
                 page = browser.new_page(
                     ignore_https_errors=True, viewport={"width": 1400, "height": 900}
                 )
-                page.goto(f"https://127.0.0.1:{port}/", wait_until="load")
+                goto_retrying_network_change(
+                    page, f"https://127.0.0.1:{port}/", wait_until="load"
+                )
                 page.wait_for_selector("#output", state="attached")
                 # Light Modern is the default; the toggle switches to dark.
                 page.wait_for_function(

@@ -335,13 +335,19 @@ def install_cli_script(script: Path, source: str) -> None:
     ``shutil.which`` never returns an extensionless file there, so a
     ``<name>.cmd`` shim that runs the script through this interpreter is
     written beside it -- the same shape as the ``claude.cmd`` /
-    ``codex.cmd`` shims npm installs.
+    ``codex.cmd`` shims npm installs.  Git bash (the shell behind the
+    agent's ``Bash`` tool and cron command jobs) finds the extensionless
+    file first and honours its shebang, so on Windows the shebang names
+    this interpreter outright: ``/usr/bin/env python3`` would look for a
+    ``python3`` that a uv-managed Windows box does not have.
 
     Args:
         script: Where to write the program (its directory goes on PATH).
         source: The program text, starting with a shebang line.
     """
-    script.write_text(source, encoding="utf-8")
+    if IS_WINDOWS and source.startswith("#!"):
+        source = f"#!{Path(sys.executable).as_posix()}\n{source.partition(chr(10))[2]}"
+    script.write_text(source, encoding="utf-8", newline="\n")
     script.chmod(0o755)
     if IS_WINDOWS:
         script.with_name(script.name + ".cmd").write_text(

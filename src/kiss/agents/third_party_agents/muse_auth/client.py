@@ -195,16 +195,23 @@ def ensure_daemon() -> None:
             "the muse-auth daemon needs Unix-domain sockets, which this platform lacks; "
             "set KISS_MUSE_AUTH=0 to keep connector credentials in the agent process"
         )
+    # The state directory is (re)created BEFORE any daemon is reused:
+    # a running daemon exits as soon as that directory is gone
+    # (``MuseAuthDaemon.run``), so a caller whose ``KISS_HOME`` was
+    # just deleted and recreated must restore the directory first —
+    # otherwise the still-listening daemon would be accepted here and
+    # then exit under the caller's request.  Once it exists again the
+    # daemon's next check sees it and keeps serving.
+    directory = muse_auth_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        directory.chmod(0o700)
     socket_id = _socket_id()
     if socket_id is not None and socket_id == _verified_socket_id and _daemon_running():
         return
     if _daemon_protocol() == PROTOCOL_VERSION:
         _verified_socket_id = _socket_id()
         return
-    directory = muse_auth_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        directory.chmod(0o700)
     # Serialize the check-stop-spawn-wait sequence across processes so
     # concurrent callers start only one daemon: a waiter re-checks under
     # the lock and finds the winner's daemon.  This is a different lock
