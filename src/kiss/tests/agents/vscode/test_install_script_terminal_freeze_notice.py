@@ -474,3 +474,63 @@ def test_step_5_5_writes_update_marker_into_kiss_home(tmp_path: Path) -> None:
         "the extension watches $KISS_HOME/.extension-updated, so the "
         "reload that applies the update would never be triggered."
     )
+
+
+def test_step_5_5_runs_post_install_hooks_before_the_reload_marker(
+    tmp_path: Path,
+) -> None:
+    """Executables in ``$KISS_HOME/post-install.d/`` run after the extension
+    is installed and before the reload marker, with ``KISS_HOME`` set.
+
+    A white-label layer (SeamlessLabs' s10s) patches the freshly installed
+    extension directory from such a hook, so the window reloads once with
+    the brand already applied.  A hook that fails is reported and the
+    update still completes; a file without the executable bit is skipped.
+    """
+    kiss_home = tmp_path / "custom-kiss-home"
+    hooks = kiss_home / "post-install.d"
+    hooks.mkdir(parents=True)
+    record = tmp_path / "hook-record.txt"
+    (hooks / "10-brand").write_text(
+        textwrap.dedent(
+            f"""\
+            #!/bin/bash
+            marker=no
+            [ -e "$KISS_HOME/.extension-updated" ] && marker=yes
+            stdin=closed
+            read -r -t 1 _line && stdin=open
+            printf 'KISS_HOME=%s marker=%s stdin=%s\\n' "$KISS_HOME" "$marker" "$stdin" \\
+                > {record.as_posix()!r}
+            """
+        ),
+        encoding="utf-8",
+    )
+    (hooks / "10-brand").chmod(0o755)
+    (hooks / "20-broken").write_text("#!/bin/bash\nexit 3\n", encoding="utf-8")
+    (hooks / "20-broken").chmod(0o755)
+    (hooks / "README").write_text("#!/bin/bash\nexit 7\n", encoding="utf-8")
+
+    harness, log = _build_sandbox(tmp_path, kiss_home=kiss_home)
+    proc, master = _spawn_on_pty(harness)
+    try:
+        out = _read_until(master, _LAST_BLOCK_LINE.encode())
+        rc = proc.wait(timeout=30)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        _kill_dummy_daemon(tmp_path)
+
+    text = out.decode("utf-8", errors="replace")
+    assert rc == 0, f"a failing hook must not fail step [5/5]; rc={rc}:\n{text}"
+    _wait_for_line(log, _COMPLETE_LINE)
+    assert record.read_text(encoding="utf-8") == (
+        f"KISS_HOME={kiss_home.as_posix()} marker=no stdin=closed\n"
+    ), "the hook must see $KISS_HOME, run before the reload marker and get no stdin"
+    assert (kiss_home / ".extension-updated").exists()
+    assert text.index(_CODE_STUB_DONE) < text.index("Running post-install hook"), (
+        "hooks must run after the extension is installed"
+    )
+    assert f"post-install hook {hooks.as_posix()}/20-broken exited with status 3" in text
+    assert "README" not in text, "a file without the executable bit is not a hook"

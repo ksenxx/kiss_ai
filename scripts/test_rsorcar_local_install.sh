@@ -59,7 +59,7 @@ FAKE_PW="pw-for-test"
 # (where the marker is written)
 populate_checkout() {
     local dir="$1" install_rc="$2" fix="$3"
-    mkdir -p "$dir/scripts" "$dir/src/kiss/scripts"
+    mkdir -p "$dir/scripts" "$dir/src/kiss/scripts" "$dir/src/kiss/agents/sorcar"
     cp "$REPO_ROOT/rsorcar" "$dir/rsorcar"
     chmod +x "$dir/rsorcar"
     cat > "$dir/install.sh" <<EOF
@@ -95,7 +95,8 @@ EOF
     for helper in scripts/collect-github-auth.sh scripts/install-github-auth.sh \
                   scripts/install-ssh-identity.sh scripts/move-home-to-disk.sh \
                   scripts/wait-for-public-url.sh \
-                  src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
+                  src/kiss/scripts/sync_db.py src/kiss/agents/sorcar/chat_summary.py \
+                  src/kiss/scripts/relocate_work_dir.py \
                   src/kiss/scripts/carry_over_tables.py \
                   src/kiss/scripts/db_fingerprint.py \
                   src/kiss/scripts/running_tasks.py \
