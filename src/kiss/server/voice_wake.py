@@ -497,7 +497,14 @@ def block_rms(data: bytes) -> float:
     return math.sqrt(mean_square) / 32768.0
 
 
-TRAILING_SILENCE_KEEP_SECONDS = 0.3
+#: Silence kept after the last loud block of an utterance.  Measured on
+#: 2026-10-01 with gpt-audio over 52 independent requests per variant of
+#: the same synthesized "open the readme file": a 0.3 s tail drew the
+#: "Please provide the audio" refusal 5 times, a 1.0 s or 2.0 s tail never.
+TRAILING_SILENCE_KEEP_SECONDS = 1.0
+#: Digital silence appended to the utterance on the retry of a refused
+#: transcription (see :func:`transcribe_pcm`).
+RETRY_EXTRA_TAIL_SECONDS = 1.0
 
 
 def trim_trailing_silence(
@@ -506,12 +513,13 @@ def trim_trailing_silence(
     """Drop trailing silence from s16le PCM, keeping a short tail.
 
     The endpointed post-wake capture carries the full trailing-silence
-    window (~2s) that ended it, and that padding empirically flips
-    gpt-audio into denying it heard any audio at all (0/3 padded vs
-    3/3 trimmed on identical speech), so utterances are trimmed to
-    the last loud block plus *keep_seconds* of tail before they are
-    sent to the transcription agent.  Leading and mid-utterance
-    silence are preserved.
+    window (~2s) that ended it; utterances are trimmed to the last loud
+    block plus *keep_seconds* of tail before they are sent to the
+    transcription agent, which bounds the audio tokens billed per
+    utterance.  Very short tails make gpt-audio more likely to deny
+    hearing any audio (see :data:`TRAILING_SILENCE_KEEP_SECONDS`), so
+    the kept tail is a full second.  Leading and mid-utterance silence
+    are preserved.
 
     Args:
         pcm: Raw 16kHz mono s16le PCM.
@@ -817,7 +825,16 @@ def transcribe_pcm(
                 os.environ.get("OPENAI_API_KEY", "")
                 or config_module.DEFAULT_CONFIG.OPENAI_API_KEY
             )
-        for attempt in range(2):
+        # The retry must not resend identical bytes: OpenAI routes
+        # identical requests to the same replica, which at temperature
+        # 0 repeats the identical refusal (measured 2026-10-01: every
+        # refused first attempt was followed by the same refusal, and
+        # identical requests kept refusing 7 rounds in a row while
+        # varied ones refused about 1 in 10).  Appending a second of
+        # silence changes the request and is itself the variant least
+        # prone to the refusal (see TRAILING_SILENCE_KEEP_SECONDS).
+        retry_tail = b"\x00\x00" * int(RETRY_EXTRA_TAIL_SECONDS * SAMPLE_RATE)
+        for attempt, audio in enumerate((pcm, pcm + retry_tail)):
             agent = KISSAgent("voice-transcriber")
             reply = agent.run(
                 model_name=audio_model,
@@ -827,7 +844,7 @@ def transcribe_pcm(
                 verbose=False,
                 model_config=model_config,
                 attachments=[
-                    Attachment(pcm_to_wav_bytes(pcm), "audio/wav")
+                    Attachment(pcm_to_wav_bytes(audio), "audio/wav")
                 ],
             )
             raw_text, language = parse_transcription_reply(reply)
