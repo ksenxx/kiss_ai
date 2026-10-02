@@ -1002,6 +1002,10 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         (root / "scripts").mkdir(parents=True)
         (root / "src" / "kiss" / "scripts").mkdir(parents=True)
         shutil.copy(_SYNC_TASK_DB, root / "scripts" / "sync-task-db.sh")
+        # The chat-summary code sync_db.py recomputes the target's rows with.
+        (root / "src" / "kiss" / "agents" / "sorcar").mkdir(parents=True)
+        shutil.copy(_ROOT / "src" / "kiss" / "agents" / "sorcar" / "chat_summary.py",
+                    root / "src" / "kiss" / "agents" / "sorcar" / "chat_summary.py")
         for name in _HELPERS:
             if name != helper:
                 shutil.copy(_ROOT / "src" / "kiss" / "scripts" / name,

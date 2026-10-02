@@ -2,13 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests of :mod:`kiss.agents.sorcar.task_digest` through the
-``/ask`` SEA's tools (:mod:`kiss.agents.seas.ask.ask_sea`).
+"""End-to-end tests of :mod:`kiss.agents.sorcar.task_digest` and of the
+``/ask`` SEA's ``task_context`` tool built on it
+(:mod:`kiss.agents.seas.ask.ask_sea`).
 
 Tasks are persisted in the test session's real SQLite history
 (``KISS_HOME`` is a temporary directory, see ``conftest.py``) and read
-back through ``task_overview`` / ``task_transcript`` / ``task_step``,
-so every digest branch is exercised on real rows and events.
+back through ``overview`` / ``transcript_page`` / ``entry_detail`` /
+``context``, so every digest branch is exercised on real rows and
+events.
 """
 
 from __future__ import annotations
@@ -123,7 +125,7 @@ def test_overview_of_a_running_task_with_children() -> None:
         result="<p>2 of 10</p>",
     )
 
-    text = ask_sea.task_overview(task_id)
+    text = task_digest.overview(task_id)
     head, _, rest = text.partition("== Sub-agent tasks")
     assert f"Task id: {task_id}" in head
     assert "Task prompt: Run the benchmark" in head
@@ -201,9 +203,9 @@ def test_overview_of_a_finished_task_without_children_or_summaries() -> None:
         extra={"startTs": start, "endTs": start + 3_661_000},
         result="Done: " + "r" * 300,
     )
-    text = ask_sea.task_overview(task_id)
+    text = task_digest.overview(task_id)
     assert "Status: finished (Done: " + "r" * 194 + " …[106 more chars])" in text
-    finished = ask_sea.task_overview(_persist("Finish", [
+    finished = task_digest.overview(_persist("Finish", [
         {"type": "tool_call", "name": "finish",
          "extras": {"success": True, "summary_in_html": "<p>ok</p>"}},
     ]))
@@ -217,13 +219,13 @@ def test_overview_of_a_finished_task_without_children_or_summaries() -> None:
         in text
     )
 
-    bare = ask_sea.task_overview(_persist("Nothing yet", []))
+    bare = task_digest.overview(_persist("Nothing yet", []))
     assert "Transcript entries: 0" in bare
     assert "Last event:" not in bare
     assert "(no transcript entries yet)" in bare
 
     # A legacy row without ``start_ts`` is timed from its insertion timestamp.
-    legacy = ask_sea.task_overview(_persist("Legacy", [], extra={"startTs": 0}))
+    legacy = task_digest.overview(_persist("Legacy", [], extra={"startTs": 0}))
     assert "Started: unknown" not in legacy
     assert "Started: 20" in legacy and "Elapsed: 0 min " in legacy
 
@@ -236,7 +238,7 @@ def test_overview_omits_middle_summaries_and_keeps_last_three_asks() -> None:
     for i in range(5):
         events.append({"type": "ask_answer", "question": f"q{i}", "text": f"a{i}"})
     task_id = _persist("p", events)
-    text = ask_sea.task_overview(task_id)
+    text = task_digest.overview(task_id)
     section = text.partition("== Progress summaries written by the task (15) ==")[2]
     section = section.partition("== Last ")[0]
     lines = [ln for ln in section.strip().splitlines()]
@@ -253,51 +255,51 @@ def test_transcript_pages_filters_and_reports_errors() -> None:
     """``task_transcript`` pages, regex-filters with original indices, and errors cleanly."""
     task_id = _persist("Run the benchmark", _running_task_events())
 
-    page = ask_sea.task_transcript(task_id, 0, 4)
+    page = task_digest.transcript_page(task_id, 0, 4)
     assert "Entries 0..3 of 13:" in page
     assert [e[:4] for e in _entries(page)] == ["[0] ", "[1] ", "[2] ", "[3] "]
     assert page.endswith("... 9 more entries; call again with start=4.")
-    rest = ask_sea.task_transcript(task_id, 4, 400)
+    rest = task_digest.transcript_page(task_id, 4, 400)
     assert "Entries 4..12 of 13:" in rest and rest.endswith("(end of transcript)")
-    beyond = ask_sea.task_transcript(task_id, 99, 5)
+    beyond = task_digest.transcript_page(task_id, 99, 5)
     assert "Entries " not in beyond
     assert beyond.endswith("Transcript entries: 13\n\n(end of transcript)")
 
-    hits = ask_sea.task_transcript(task_id, 0, 1, contains="TRIAL")
+    hits = task_digest.transcript_page(task_id, 0, 1, contains="TRIAL")
     assert "Entries containing 'TRIAL' from index 0: 1 shown, 1 more." in hits
     assert "\n[3] OUTPUT: trial 1 done\ntrial 2 done\n" + "x" * 474 + " …[426 more chars]\n" in hits
     assert hits.endswith("... 1 more entries; call again with start=4.")
-    more = ask_sea.task_transcript(task_id, 4, 10, contains="trial")
+    more = task_digest.transcript_page(task_id, 4, 10, contains="trial")
     assert [e[:4] for e in _entries(more)] == ["[7] "]
     assert more.endswith("(end of transcript)")
     # Terms are literal, any-of, and applied to the full text, not the clipped rendering.
-    deep = ask_sea.task_transcript(task_id, 0, 10, contains="|" + "x" * 900 + "|paper.tex")
+    deep = task_digest.transcript_page(task_id, 0, 10, contains="|" + "x" * 900 + "|paper.tex")
     assert [e[:4] for e in _entries(deep)] == ["[3] ", "[10]"]
-    regex_like = ask_sea.task_transcript(task_id, 0, 10, contains="(a+)+$")
+    regex_like = task_digest.transcript_page(task_id, 0, 10, contains="(a+)+$")
     assert _entries(regex_like) == []
-    none = ask_sea.task_transcript(task_id, 0, 10, contains="no such text anywhere")
+    none = task_digest.transcript_page(task_id, 0, 10, contains="no such text anywhere")
     assert "0 shown, 0 more." in none and none.endswith("(end of transcript)")
 
-    assert ask_sea.task_transcript("") == "Error: no task id given."
-    assert ask_sea.task_transcript("no-such-task") == "Error: no task with id 'no-such-task'."
-    empty = ask_sea.task_transcript(_persist("Nothing yet", []), 0, 5, contains="x")
+    assert task_digest.transcript_page("") == "Error: no task id given."
+    assert task_digest.transcript_page("no-such-task") == "Error: no task with id 'no-such-task'."
+    empty = task_digest.transcript_page(_persist("Nothing yet", []), 0, 5, contains="x")
     assert empty.endswith("(no transcript entries yet)")
 
 
 def test_step_returns_one_entry_in_full_and_clamps() -> None:
     """``task_step`` returns the unclipped entry, clamps ``max_chars``, and rejects bad indices."""
     task_id = _persist("Run the benchmark", _running_task_events())
-    full = ask_sea.task_step(task_id, 3)
+    full = task_digest.entry_detail(task_id, 3)
     assert full == "[3] OUTPUT: trial 1 done\ntrial 2 done\n" + "x" * 900
-    assert ask_sea.task_step(task_id, 3, 20) == (
+    assert task_digest.entry_detail(task_id, 3, 20) == (
         "[3] OUTPUT: trial 1 done\ntrial 2 …[906 more chars]"
     )
-    assert ask_sea.task_step(task_id, 2, 0).startswith("[2] TOOL CALL Bash({ …[")
-    assert ask_sea.task_step(task_id, 3, 10**9) == full
-    assert ask_sea.task_step(task_id, 13) == "Error: entry index 13 out of range (0..12)."
-    assert ask_sea.task_step(task_id, -1) == "Error: entry index -1 out of range (0..12)."
-    assert ask_sea.task_step("no-such-task", 0) == "Error: no task with id 'no-such-task'."
-    assert ask_sea.task_overview("  ") == "Error: no task id given."
+    assert task_digest.entry_detail(task_id, 2, 0).startswith("[2] TOOL CALL Bash({ …[")
+    assert task_digest.entry_detail(task_id, 3, 10**9) == full
+    assert task_digest.entry_detail(task_id, 13) == "Error: entry index 13 out of range (0..12)."
+    assert task_digest.entry_detail(task_id, -1) == "Error: entry index -1 out of range (0..12)."
+    assert task_digest.entry_detail("no-such-task", 0) == "Error: no task with id 'no-such-task'."
+    assert task_digest.overview("  ") == "Error: no task id given."
 
 
 def test_event_time_prefers_ts_and_falls_back_to_the_row_timestamp() -> None:
@@ -309,7 +311,7 @@ def test_event_time_prefers_ts_and_falls_back_to_the_row_timestamp() -> None:
         {"type": "prompt", "text": "p"},
         {"type": "tool_call", "name": "Bash", "ts": stamped},
     ])
-    assert f"Last event: {task_digest._fmt_ts(stamped)} (10 min " in ask_sea.task_overview(task_id)
+    assert f"Last event: {task_digest._fmt_ts(stamped)} (10 min " in task_digest.overview(task_id)
     task = task_digest.load_task(task_id)
     assert task is not None
     last = task["events"][-1]
@@ -321,20 +323,136 @@ def test_event_time_prefers_ts_and_falls_back_to_the_row_timestamp() -> None:
     assert task_digest._event_ms({"ts": "not-an-int", "_timestamp": 5.0}) == 0
     assert task_digest._event_ms({"ts": None, "_timestamp": "bad"}) == 0
     unstamped = _persist("p", [{"type": "tool_call", "name": "Bash"}])
-    assert "Last event: " in ask_sea.task_overview(unstamped)
+    assert "Last event: " in task_digest.overview(unstamped)
     assert task_digest.load_task("missing") is None
 
 
-def test_ask_agent_gets_only_the_review_tools_and_answers_from_the_overview(tmp_path: Path) -> None:
-    """A real ReAct loop configured from the ``/ask`` SEA getters offers the
-    three trajectory tools plus the ``review`` profile (no memory, edit,
-    browser or fan-out tools), receives the playbook as the system-prompt
-    suffix, gets the real overview back as a tool result and finishes with
-    the answer."""
+def _write(path: Path, text: str) -> None:
+    """Write *text* to *path*, creating parent directories."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_context_of_a_running_task_with_children_and_progress_log(tmp_path: Path) -> None:
+    """``task_context`` is the header, the worker sub-agents, the tail of the
+    freshest progress log on disk and the whole transcript, oldest first."""
+    _write(tmp_path / "PROGRESS.md", "# stale root log\nroot line\n")
+    _write(tmp_path / "PROGRESS_LOG.md", "   \n")  # blank: skipped
+    time.sleep(0.01)
+    _write(tmp_path / "tmp" / "PROGRESS.md", "# live log\nstep one\nstep two\n")
+    task_id = _persist(
+        "Run the benchmark", _running_task_events(), extra={"work_dir": str(tmp_path)},
+    )
+    worker = _persist(
+        "Run the tests", [], extra={"subagent": {"parent_task_id": task_id}},
+    )
+    side = _persist(
+        "how many trials are done?", [],
+        extra={"subagent": {"parent_task_id": task_id, "side_channel": True}},
+    )
+    text = ask_sea.task_context(task_id)
+    head, _, rest = text.partition("== Sub-agent tasks (1) ==\n")
+    assert head.startswith("== Task ==\n" + f"Task id: {task_id}\n")
+    assert "Status: running" in head and f"Work dir: {tmp_path}" in head
+    assert "Last event: " in head and "Now: " in head and "UTC (local: " in head
+    assert "SYSTEM TEXT MUST NOT APPEAR" not in text
+    children, _, rest = rest.partition("== Progress log written by the task (newest entries) ==\n")
+    assert children.startswith(f"[{worker}] steps=0, cost=$0.00, started ")
+    assert side not in children
+    log, _, transcript = rest.partition("== Transcript (13 entries, oldest first) ==\n")
+    assert log == "# live log\nstep one\nstep two\n\n"
+    assert "root line" not in text
+    entries = _entries(transcript)
+    assert len(entries) == 13
+    assert entries[0] == "[0] THOUGHT: Plan: run it."
+    assert entries[7] == "[7] ASK ANSWER: Q: how many trials are done?"
+    assert "[11] RESULT (error): Edit failed" in transcript
+    assert transcript.endswith("[12] CUSTOM_NOTE: a note")
+    assert "elided" not in text
+
+
+def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> None:
+    """Over budget, whole transcript entries go oldest first (marked, multi-line
+    entries never split) and the progress log keeps its newest lines within its
+    own limit; an unknown task or no work dir is handled."""
+    _write(tmp_path / "PROGRESS.md", "\n".join(f"log line {i}" for i in range(2000)))
+    events: list[dict[str, Any]] = [{"type": "prompt", "text": "p"}]
+    for i in range(400):
+        events.append({"type": "tool_result", "content": f"result {i}\n" + "y" * 300})
+    task_id = _persist("p", events, extra={"work_dir": str(tmp_path)})
+
+    text = task_digest.context(task_id)
+    assert len(text) <= task_digest.MAX_CONTEXT_CHARS
+    log = text.partition("(newest entries) ==\n")[2].partition("\n\n== Transcript")[0]
+    assert log.startswith("[older progress-log entries elided]\nlog line ")
+    assert log.endswith("log line 1999") and len(log) <= 8_000
+    transcript = text.partition("(400 entries, oldest first) ==\n")[2]
+    marker, _, kept = transcript.partition("\n")
+    elided = int(marker.removeprefix("[... ").removesuffix(" older entries elided ...]"))
+    assert 200 < elided < 300
+    assert kept.startswith(f"[{elided}] RESULT: result {elided}\n" + "y" * 300 + "\n")
+    assert kept.endswith("[399] RESULT: result 399\n" + "y" * 300)
+    # Adding one more entry (and the marker it still needs) would have overflowed.
+    one_more = len(f"[{elided - 1}] RESULT: result {elided - 1}\n" + "y" * 300) + 1
+    assert len(text) + one_more > task_digest.MAX_CONTEXT_CHARS
+
+    # Exact-fit boundaries: the marker line counts against the budget, and
+    # entry 0 needs no marker.
+    head = text.partition("== Transcript (400 entries, oldest first) ==\n")[0]
+    head += "== Transcript (400 entries, oldest first) ==\n"
+    block = len("[399] RESULT: result 399\n" + "y" * 300)
+    two = len(head) + len("[... 398 older entries elided ...]\n") + 2 * block + 1
+    assert task_digest.context(task_id, max_chars=two).startswith(
+        head + "[... 398 older entries elided ...]\n[398] RESULT"
+    )
+    assert len(task_digest.context(task_id, max_chars=two)) == two
+    assert task_digest.context(task_id, max_chars=two - 1).startswith(
+        head + "[... 399 older entries elided ...]\n[399] RESULT"
+    )
+    unlimited = task_digest.context(task_id, max_chars=10**9)
+    assert unlimited.startswith(head + "[0] RESULT: result 0\n") and "elided ...]" not in unlimited
+    assert task_digest.context(task_id, max_chars=len(unlimited)) == unlimited
+    assert task_digest.context(task_id, max_chars=len(unlimited) - 1).startswith(
+        head + "[... 1 older entries elided ...]\n[1] RESULT"
+    )
+
+    # The newest entry is kept whole even when it alone overflows the budget.
+    tight = task_digest.context(task_id, max_chars=10)
+    assert tight.endswith(
+        "[... 399 older entries elided ...]\n[399] RESULT: result 399\n" + "y" * 300
+    )
+    assert ask_sea.task_context("no-such-task") == "Error: no task with id 'no-such-task'."
+    assert ask_sea.task_context("") == "Error: no task id given."
+    bare = task_digest.context(_persist("Nothing yet", [], extra={"work_dir": ""}))
+    assert "Progress log" not in bare
+    assert bare.endswith("oldest first) ==\n(no transcript entries yet)")
+    assert task_digest.progress_log_tail("") == ""
+    assert task_digest.progress_log_tail(str(tmp_path / "missing")) == ""
+    # The log tail, marker included, never exceeds its limit: the cut moves to
+    # the next line start, or into the last line when no line start fits.
+    marker = "[older progress-log entries elided]\n"
+    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 5) == marker + " 1999"
+    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 20) == (
+        marker + "log line 1999"
+    )
+    assert task_digest.progress_log_tail(str(tmp_path), limit=len(marker) + 28) == (
+        marker + "log line 1998\nlog line 1999"
+    )
+    assert task_digest._tail("aaa\nbb", 5, "M") == "M\nbb"
+    assert task_digest._tail("a\nbb\n", 4, "M") == "M\nb\n"
+    assert task_digest._tail("ab", 2, "M") == "ab"
+    assert task_digest._tail("abc", 2, "M") == "M\n"
+
+
+def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path: Path) -> None:
+    """A real ReAct loop configured from the ``/ask`` SEA getters offers
+    exactly ``task_context`` and ``finish`` (no built-in tools at all),
+    receives the playbook as the system-prompt suffix, gets the real
+    context back as a tool result and finishes with the answer."""
     task_id = _persist("Run the benchmark", _running_task_events())
     answer = "<p>2 of 10 trials are done; the last step failed to edit paper.tex.</p>"
     script = [
-        tool_call_body("task_overview", {"task_id": task_id}, prompt_tokens=500),
+        tool_call_body("task_context", {"task_id": task_id}, prompt_tokens=500),
         finish_body(answer, prompt_tokens=700),
     ]
     prompt = "how many trials are done?" + ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id)
@@ -347,7 +465,7 @@ def test_ask_agent_gets_only_the_review_tools_and_answers_from_the_overview(tmp_
             max_steps=4,
             model_config={"base_url": url, "api_key": "local"},
             tools=ask_sea.tools(),
-            tool_profile=ask_sea.tool_profile(),
+            append_basic_tools=ask_sea.if_append_basic_tools(),
             base_system_prompt=ask_sea.system_prompt(),
             system_prompt=ask_sea.append_to_system_prompt(),
             web_tools=ask_sea.use_web_tools(),
@@ -363,10 +481,7 @@ def test_ask_agent_gets_only_the_review_tools_and_answers_from_the_overview(tmp_
     assert len(agentic) == 2, [list(r) for r in requests]
     for request in agentic:
         names = {t["function"]["name"] for t in request["tools"]}
-        assert {"task_overview", "task_transcript", "task_step", "Bash", "finish"} <= names
-        assert not names & {
-            "Edit", "Write", "memory_search", "run_agent", "run_parallel", "go_to_url",
-        }
+        assert names == {"task_context", "finish"}
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
         assert system.startswith(ask_sea.system_prompt())
         assert ask_sea.append_to_system_prompt() in system
@@ -376,5 +491,5 @@ def test_ask_agent_gets_only_the_review_tools_and_answers_from_the_overview(tmp_
     assert len(tool_results) == 1
     digest = str(tool_results[0]["content"])
     assert digest.startswith("== Task ==\n" + f"Task id: {task_id}")
-    assert "== Previous /ask answers (2 of 2) ==" in digest
+    assert "== Transcript (13 entries, oldest first) ==" in digest
     assert "[11] RESULT (error): Edit failed" in digest

@@ -10,24 +10,29 @@ too large to hand to an LLM raw: thousands of streamed ``text_delta``
 output.  This module turns it into numbered *entries* (one per tool
 call, tool result, coalesced thought / assistant text / shell output,
 progress summary, user message, ``/ask`` answer, final result) and
-renders them three ways:
+renders them four ways:
 
 * :func:`transcript_page` — a clipped, optionally filtered page of
   entries (the ``task_transcript`` tool of the task-update and
-  ``/ask`` agents);
+  ``rsi7d`` agents);
 * :func:`overview` — everything needed to orient in one call: the
   header, sub-agent tasks, later user messages, previous ``/ask``
   answers, the task's own progress summaries and its latest entries;
 * :func:`entry_detail` — one entry in full (a complete command
-  output, diff or tool argument).
+  output, diff or tool argument);
+* :func:`context` — the one-shot context of the ``/ask`` agent: the
+  header, the sub-agent tasks, the tail of the task's progress log on
+  disk and as many of the newest transcript entries as fit a fixed
+  character budget.
 
-All three read the live database in-process (queued events are
+All of them read the live database in-process (queued events are
 flushed first), so a running task's newest steps are visible.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -56,6 +61,16 @@ _OVERVIEW_ASK_ANSWERS = 3
 _OVERVIEW_TAIL_ENTRIES = 30
 MAX_PAGE = 400
 MAX_DETAIL_CHARS = 100_000
+# Character budget of :func:`context` (~15-20k tokens): the whole
+# context fits a single cheap model call next to the question.
+MAX_CONTEXT_CHARS = 60_000
+# Only the newest progress-log entries matter for a question about
+# the current state of the task.
+_PROGRESS_LOG_CHARS = 8_000
+# Progress logs a task may keep in its work dir; the most recently
+# modified existing one wins, so the live ``tmp/PROGRESS.md`` a
+# running agent appends to beats a stale copy at the root.
+_PROGRESS_LOG_NAMES = ("PROGRESS_LOG.md", "PROGRESS.md", os.path.join("tmp", "PROGRESS.md"))
 
 # Events that carry no progress information (UI signalling, streaming
 # markers): the digest drops them without a trace.
@@ -488,6 +503,118 @@ def overview(task_id: str) -> str:
         "index) returns one entry in full.",
     ]
     return "\n".join(lines)
+
+
+def _tail(text: str, limit: int, marker: str) -> str:
+    """Return *text* if it fits *limit* chars, else its newest lines under a *marker* line.
+
+    The result never exceeds *limit* (which must leave room for the
+    marker line): the cut moves forward to the next line start, or,
+    when the kept tail has no line start, falls in the middle of the
+    last line.
+    """
+    if len(text) <= limit:
+        return text
+    tail = text[max(0, len(text) - limit + len(marker) + 1):]
+    cut = tail.find("\n")
+    if 0 <= cut < len(tail) - 1:
+        tail = tail[cut + 1:]
+    return marker + "\n" + tail
+
+
+def progress_log_tail(work_dir: str, limit: int = _PROGRESS_LOG_CHARS) -> str:
+    """Return the newest *limit* chars of the task's progress log, or ``""``.
+
+    The transcript only shows what the task has persisted, while a
+    running agent keeps writing its progress log as it works, so the
+    log is read from disk at call time.  Among the candidates in
+    :data:`_PROGRESS_LOG_NAMES` the most recently modified non-blank
+    file wins; unreadable files are skipped.
+
+    Args:
+        work_dir: The task's working directory (``task_history.work_dir``).
+        limit: Character budget of the returned tail.
+    """
+    if not work_dir:
+        return ""
+    best_body, best_mtime = "", -1.0
+    for name in _PROGRESS_LOG_NAMES:
+        path = os.path.join(work_dir, name)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if body.strip() and mtime > best_mtime:
+            best_body, best_mtime = body, mtime
+    return _tail(best_body, limit, "[older progress-log entries elided]")
+
+
+def context(task_id: str, max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    """Return the one-shot context of a task for answering a question about it.
+
+    Sections: header (status, timing, spend, current time), sub-agent
+    tasks, the tail of the task's progress log on disk, and the
+    transcript entries, oldest first.  When the whole text would exceed
+    *max_chars*, whole transcript entries are dropped OLDEST first and
+    the elision is marked, so the newest steps (what questions usually
+    target) always survive; the newest entry is kept even when it alone
+    (with the marker) overflows the budget (its rendering is clipped,
+    so the overflow is bounded by the per-kind clip limits).
+
+    Args:
+        task_id: The ``task_history`` row id (32 hex characters).
+        max_chars: Character budget of the whole context.
+
+    Returns:
+        The context text, or an error line when no task has that id.
+    """
+    loaded = _digest(task_id)
+    if isinstance(loaded, str):
+        return loaded
+    task, entries, spend = loaded
+    events = task["events"]
+    last_ms = _event_ms(events[-1]) if events else 0
+    now = time.time()
+    lines = ["== Task ==", *header_lines(task, spend, len(entries))]
+    if last_ms:
+        ago = _fmt_duration(int(now - last_ms / 1000))
+        lines.append(f"Last event: {_fmt_ts(last_ms)} ({ago} ago)")
+    lines.append(
+        f"Now: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(now))} "
+        f"(local: {time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime(now))})"
+    )
+    workers = [c for c in child_tasks(str(task["id"])) if not c.get("is_side_channel")]
+    lines += ["", f"== Sub-agent tasks ({len(workers)}) =="]
+    lines += [_child_line(c) for c in workers] or ["(none)"]
+    log = progress_log_tail(str(task.get("work_dir") or ""))
+    if log:
+        lines += ["", "== Progress log written by the task (newest entries) ==", log.rstrip()]
+    lines += ["", f"== Transcript ({len(entries)} entries, oldest first) =="]
+    head = "\n".join(lines) + "\n"
+    if not entries:
+        return head + "(no transcript entries yet)"
+    blocks = [f"[{i}] {e.render()}" for i, e in enumerate(entries)]
+    budget = max_chars - len(head)
+    first = len(blocks) - 1
+    used = len(blocks[first])
+    while first > 0:
+        older = first - 1
+        # An elision marker line is still needed unless *older* is entry 0.
+        reserve = len(_elision(older)) + 1 if older else 0
+        if used + 1 + len(blocks[older]) + reserve > budget:
+            break
+        first = older
+        used += 1 + len(blocks[older])
+    if first:
+        blocks[:first] = [_elision(first)]
+    return head + "\n".join(blocks)
+
+
+def _elision(count: int) -> str:
+    """Return the marker line that stands in for *count* elided transcript entries."""
+    return f"[... {count} older entries elided ...]"
 
 
 def entry_detail(task_id: str, index: int, max_chars: int = 20_000) -> str:
