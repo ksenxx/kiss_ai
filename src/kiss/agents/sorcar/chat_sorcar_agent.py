@@ -499,6 +499,14 @@ class ChatSorcarAgent(SorcarAgent):
                 {"type": "followup_suggestion", "text": suggestion}, task_id=task_id,
             )
 
+    def _begin_run_usage_epoch(self) -> None:
+        """Keep the usage epoch :meth:`run` started at row allocation.
+
+        Swapping it again at ``_reset`` would discard spend a side
+        channel banked into it while the task was still setting up
+        (e.g. classifying).
+        """
+
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
@@ -614,6 +622,13 @@ class ChatSorcarAgent(SorcarAgent):
         )
         early_extra["startTs"] = start_ts_ms
 
+        # This run's usage epoch starts BEFORE its row exists: once the
+        # row is visible a ``/update`` or ``/ask`` side channel may
+        # capture the epoch and later bank its spend into it, so the
+        # epoch must not be swapped again by ``_reset`` (see
+        # ``_begin_run_usage_epoch``).  Classifier spend is held apart
+        # until ``SorcarAgent.run`` folds it, so nothing is lost here.
+        self.reset_usage()
         task_id, self._chat_id = _add_task(
             history_prompt, chat_id=self._chat_id, extra=early_extra,
         )
@@ -624,11 +639,11 @@ class ChatSorcarAgent(SorcarAgent):
         result_summary = ""
         result_raw = ""
         # Whether ``super().run`` was reached.  Until then every live
-        # field the final save would read — ``_launch_model_name``,
-        # ``model_name``, ``_is_parallel``, the usage counters — is
-        # either unset (fresh agent) or the PREVIOUS run's (reused
-        # agent), so the final save must fall back to this run's
-        # resolved settings and zero usage.
+        # setting the final save would read — ``_launch_model_name``,
+        # ``model_name``, ``_is_parallel`` — is either unset (fresh
+        # agent) or the PREVIOUS run's (reused agent), so the final save
+        # must fall back to this run's resolved settings.  (The usage
+        # ledger is already this run's: see ``reset_usage`` above.)
         run_started = False
         # Every remaining setup step (state registration, printer
         # wiring, frequent-task recording, ...) must run inside the try
@@ -751,12 +766,14 @@ class ChatSorcarAgent(SorcarAgent):
                     tl.task_id = previous_task_id
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
-                # Once ``super().run`` started, the live agent state is
-                # this run's (``_reset`` resolved the model and zeroed
-                # the counters); before that point it is unset or the
-                # previous run's, so the row keeps this run's resolved
-                # settings and records no usage — a task that never ran
-                # spent nothing.  The per-run resolved work_dir and
+                # Once ``super().run`` started, the live model settings
+                # are this run's (``_reset`` resolved them); before that
+                # point they are unset or the previous run's, so the row
+                # keeps this run's resolved settings.  Usage is always
+                # read from the ledger: its epoch began right before the
+                # row was allocated, so a task stopped during setup
+                # still records any side-channel spend banked into it.
+                # The per-run resolved work_dir and
                 # budget are used either way: ``_reset`` sets the
                 # attributes to exactly these values on success, and
                 # ``self.work_dir`` / ``self.max_budget`` would otherwise
@@ -769,14 +786,13 @@ class ChatSorcarAgent(SorcarAgent):
                         or resolved_model
                     )
                     final_is_parallel = self._is_parallel
-                    # One coherent triple (see usage_snapshot): three
-                    # property reads could tear across a concurrent
-                    # abandoned-subagent reclaim.
-                    final_cost, final_tokens, final_steps = self.usage_snapshot()
                 else:
                     final_model = resolved_model
                     final_is_parallel = run_is_parallel
-                    final_tokens, final_cost, final_steps = 0, 0.0, 0
+                # One coherent triple (see usage_snapshot): three
+                # property reads could tear across a concurrent
+                # abandoned-subagent reclaim.
+                final_cost, final_tokens, final_steps = self.usage_snapshot()
                 extra_payload = self._build_extra_payload(
                     model=final_model,
                     work_dir=resolved_work_dir,

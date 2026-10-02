@@ -683,7 +683,7 @@ class RelentlessAgent(Base):
         # (reclaim_abandoned_subagents) lands wholly in the old epoch
         # (discarded with it) or wholly in the new one — never a mixed
         # state, and never a torn triple.
-        self.reset_usage()
+        self._begin_run_usage_epoch()
         self._current_executor: KISSAgent | None = None
         self.docker_image = docker_image
         self.docker_manager: Any = None
@@ -908,6 +908,16 @@ class RelentlessAgent(Base):
         which could otherwise interleave with a racing attribution.
         """
         self._usage_ledger = _UsageLedger()
+
+    def _begin_run_usage_epoch(self) -> None:
+        """Start the run's usage epoch; called by :meth:`_reset` at run start.
+
+        ``ChatSorcarAgent`` overrides this with a no-op because its
+        ``run`` starts the epoch earlier, when the task row is
+        allocated: from that moment a side channel may capture the
+        epoch, and a second swap here would discard its spend.
+        """
+        self.reset_usage()
 
     def usage_snapshot(self) -> tuple[float, int, int]:
         """Return one coherent ``(budget_used, total_tokens_used, total_steps)``.
