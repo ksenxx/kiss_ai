@@ -775,7 +775,7 @@ def _open_page_mobile(browser, harness):
         ws.on("framesent", _on_sent)
 
     page.on("websocket", _on_ws)
-    page.goto(harness.base_url + "/")
+    goto_retrying_network_change(page, harness.base_url + "/")
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_function(
         "!document.body.classList.contains('remote-desktop')", timeout=15000,

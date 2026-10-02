@@ -28,6 +28,7 @@ import pytest
 from playwright.sync_api import sync_playwright
 
 from kiss.server.web_server import _WS_SHIM_JS
+from kiss.tests.conftest import goto_retrying_network_change
 
 PAGE_URL = "https://shim.test/"
 
@@ -187,7 +188,7 @@ def _load_shim_page(browser, offline_shell: bool = False):
             navs[0] += 1
 
     page.on("framenavigated", _on_nav)
-    page.goto(PAGE_URL, wait_until="load")
+    goto_retrying_network_change(page, PAGE_URL, wait_until="load")
     navs[0] = 0
     return context, page, navs
 
