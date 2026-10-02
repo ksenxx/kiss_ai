@@ -24,12 +24,14 @@ daemon-client boundary of prompt jobs is captured, as in
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.cron_agent import (
@@ -272,3 +274,124 @@ def test_gateway_command_is_schedulable_as_command_job() -> None:
     job = _create(cron_job("create", name="gw", command=command, schedule="every 2m"))
     assert _stored(job["id"])["command"] == command
     assert _stored(job["id"]).get("prompt", "") == ""
+
+
+def test_gateway_described_as_prompt_job_is_refused() -> None:
+    # The failure mode behind the "tick-OK" posts: an LLM session scheduled
+    # to "run a gateway tick" posts a status line into the chat on every
+    # run.  create and ensure both refuse it and point at gateway_command.
+    prompt = (
+        "Run one Slack gateway tick on #sorcar with pairing enabled and "
+        "report whether any user messages are waiting."
+    )
+    for action in ("create", "ensure"):
+        parsed = yaml.safe_load(cron_job(
+            action, name="gw-prompt", prompt=prompt, schedule="every 5m",
+            deliver="slack:C0AKYSNLB7W",
+        ))
+        assert "gateway_command" in parsed["error"], parsed
+        assert "tick-OK" in parsed["error"]
+    assert load_jobs() == []
+    # Ordinary jobs about an API gateway (even its heartbeat) or a poll of a
+    # chat are normal prompt jobs: all three word groups must be present.
+    _create(cron_job(
+        "create", name="api",
+        prompt="Poll the API gateway health endpoint and alert me if it is down.",
+        schedule="every 1h",
+    ))
+    _create(cron_job(
+        "create", name="logs",
+        prompt="Summarize heartbeat failures in the API gateway logs.",
+        schedule="every 1h",
+    ))
+    _create(cron_job(
+        "create", name="chat", prompt="Summarize the new messages in #general.",
+        schedule="every 1h",
+    ))
+    assert {job["name"] for job in load_jobs()} == {"api", "logs", "chat"}
+
+
+_CHATTY_GATEWAY_CLI = """#!/usr/bin/env python3
+print("Processed 1 message(s).")
+"""
+
+
+def test_gateway_command_job_never_delivers_to_a_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A gateway tick that served messages (or failed) prints a line; with a
+    # channel delivery target that line would be posted into the very chat
+    # the gateway serves.  cron_job stores the job with deliver "none"
+    # instead, says so, and the run is logged locally only.
+    from kiss.tests.conftest import install_cli_script
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    install_cli_script(bin_dir / "kiss-fakechat", _CHATTY_GATEWAY_CLI)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+
+    command = "kiss-fakechat --channel=C0AKYSNLB7W --pairing --quiet"
+    parsed = yaml.safe_load(cron_job(
+        "create", name="gw", command=command, schedule="every 1m",
+        deliver="slack:C0AKYSNLB7W,local",
+    ))
+    assert "delivery set to none" in parsed["note"]
+    job = parsed["created"]
+    assert _stored(job["id"])["deliver"] == "none"
+    # The absolute-path, $(...) and quoted-option forms real gateways use
+    # are recognised too; a command that only mentions a launcher as data,
+    # or has none, keeps its delivery targets.
+    assert cron_agent._is_gateway_command(
+        "/opt/kiss/.venv/bin/kiss-slack --workspace w --channel C0AKYSNLB7W --quiet"
+    )
+    assert cron_agent._is_gateway_command(
+        '"$(ls -d "$HOME"/ext/kiss-sorcar-*/.venv/bin/kiss-slack | sort -V | tail -n1)" '
+        "--channel=seamless-loop --pairing --quiet --allow-users=ksen"
+    )
+    assert cron_agent._is_gateway_command(
+        '"$(ls -d "C:/Users/First Last"/ext/kiss-sorcar-*/.venv/Scripts/kiss-slack.exe '
+        '| sort -V | tail -n1)" --channel=C0AKYSNLB7W --quiet'
+    )
+    assert cron_agent._is_gateway_command('kiss-slack "--channel=C0AKYSNLB7W" --quiet')
+    assert not cron_agent._is_gateway_command("kiss-slack --channels C0AKYSNLB7W")
+    assert not cron_agent._is_gateway_command("echo 'unbalanced")
+    other = _create(cron_job(
+        "create", name="poll", command="curl -s https://example.com/channel",
+        schedule="every 1m", deliver="slack:C0AKYSNLB7W",
+    ))
+    assert _stored(other["id"])["deliver"] == "slack:C0AKYSNLB7W"
+    reminder = _create(cron_job(
+        "create", name="reminder",
+        command="printf '%s\\n' 'Run kiss-slack --channel=C0AKYSNLB7W --quiet'",
+        schedule="every 1m", deliver="slack:C0AKYSNLB7W",
+    ))
+    assert _stored(reminder["id"])["deliver"] == "slack:C0AKYSNLB7W"
+    _set_job_fields(reminder["id"], enabled=False)
+
+    # A gateway job stored by a version without this rule (channel delivery
+    # on disk) is normalised on load, so it is listed with deliver none,
+    # recognised as the duplicate of a fresh create, and found by ensure.
+    _set_job_fields(job["id"], deliver="slack:C0AKYSNLB7W")
+    assert _stored(job["id"])["deliver"] == "none"
+    duplicate = yaml.safe_load(cron_job(
+        "create", name="gw-again", command=command, schedule="every 1m",
+        deliver="slack:C0AKYSNLB7W",
+    ))
+    assert duplicate["error"].startswith(f"duplicate: job {job['id']!r}")
+    ensured = yaml.safe_load(cron_job(
+        "ensure", name="gw", command=command, schedule="every 1m", deliver="none",
+    ))
+    assert ensured["exists"]["id"] == job["id"]
+    assert ensured["exists"]["deliver"] == "none"
+
+    _set_job_fields(job["id"], next_run_at=1.0)
+    _set_job_fields(other["id"], enabled=False)
+    assert tick(2.0) == 1
+    stored = _stored(job["id"])
+    assert stored["last_status"] == "ok"
+    assert stored["last_summary"] == "Processed 1 message(s)."
+    # With a slack target the run would have recorded a delivery note
+    # (sent or error); none was attempted.
+    assert stored["last_delivery"] == []
+    log = (tmp_path / "cron" / "output" / f"{job['id']}.md").read_text(encoding="utf-8")
+    assert "Processed 1 message(s)." in log
