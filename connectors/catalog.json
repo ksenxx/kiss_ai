@@ -253,6 +253,21 @@
     ],
     "notes": "Queries go only to Brave. Version pinned; bump deliberately after review."
   },
+  "you-search": {
+    "description": "You.com web search and URL content extraction, keyless free tier (official You.com remote MCP server).",
+    "auth": "none",
+    "default": false,
+    "prereqs": [],
+    "required_env": [],
+    "config": {
+      "type": "http",
+      "url": "https://api.you.com/mcp?profile=free"
+    },
+    "setup": [
+      "The free profile needs no key. For the fuller authenticated toolset (research/finance tools), get a key at https://you.com/platform/api-keys, then swap the URL to https://api.you.com/mcp and add a header \"Authorization: Bearer <key>\" in ~/.kiss/mcp.json."
+    ],
+    "notes": "Remote no-auth connector: You.com sees the search queries you send it and nothing else, same trust shape as deepwiki/context7. Disable it if that matters: `uv run python connectors/enable.py disable you-search`."
+  },
   "notion": {
     "description": "Notion pages and databases (official @notionhq/notion-mcp-server, run locally with an internal integration token).",
     "auth": "env",
