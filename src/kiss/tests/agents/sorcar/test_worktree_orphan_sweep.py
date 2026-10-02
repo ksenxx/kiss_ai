@@ -519,20 +519,26 @@ class TestSweepRemovesHuskDirectories:
         Root-owned Docker output cannot be produced in a test, so the
         husk holds a directory with no write permission instead: the
         file inside cannot be unlinked, ``rmtree`` leaves it, and the
-        sweep must say so rather than fail silently.
+        sweep must say so rather than fail silently.  Windows ignores
+        directory modes but refuses to unlink a read-only file, so the
+        file is made read-only as well.
         """
         repo = _make_repo(tmp_path)
         husk = repo / ".kiss-worktrees" / "kiss_wt-1700000000-00000007"
         locked = husk / "results" / "artifacts"
         locked.mkdir(parents=True)
-        (locked / "log.txt").write_text("root wrote this\n", encoding="utf-8")
+        log = locked / "log.txt"
+        log.write_text("root wrote this\n", encoding="utf-8")
+        log.chmod(0o444)
         locked.chmod(0o555)
         try:
             with caplog.at_level(logging.ERROR, logger="kiss.agents.sorcar.git_worktree"):
                 GitWorktreeOps.sweep_orphaned_state(repo)
-            assert (locked / "log.txt").exists(), "test precondition: unlink must fail"
+            assert log.exists(), "test precondition: unlink must fail"
             messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
             assert any(str(husk) in m and "sudo rm -rf" in m for m in messages), messages
         finally:
             locked.chmod(0o755)
+            if log.exists():
+                log.chmod(0o644)
             shutil.rmtree(husk, ignore_errors=True)
