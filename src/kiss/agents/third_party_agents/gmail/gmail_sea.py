@@ -447,17 +447,24 @@ class GmailChannelBackend(ToolMethodBackend):
         body: str,
         reply_all: bool = False,
         html: bool = False,
+        draft_only: bool = False,
     ) -> str:
-        """Reply to an existing email message.
+        """Reply to an existing email message, sending it or saving it as a draft.
 
         Args:
             message_id: ID of the message to reply to.
             body: Reply body text (plain text or HTML).
             reply_all: If True, reply to all recipients. Default: False.
             html: If True, body is treated as HTML. Default: False.
+            draft_only: If True, the reply is saved as a draft inside the
+                original thread and nothing is sent; the user reviews and
+                sends it from Gmail. Use this for automated or unattended
+                replies. Default: False.
 
         Returns:
-            JSON string with ok status and the reply message ID.
+            JSON string with ok status and the sent reply's ``id`` and
+            ``thread_id``, or with ``draft_id``, ``message_id`` and
+            ``thread_id`` when ``draft_only`` is True.
         """
         assert self._service is not None
         try:
@@ -468,7 +475,7 @@ class GmailChannelBackend(ToolMethodBackend):
                     userId="me",
                     id=message_id,
                     format="metadata",
-                    metadataHeaders=["Subject", "From", "To", "Cc", "Message-ID"],
+                    metadataHeaders=["Subject", "From", "To", "Cc", "Message-ID", "References"],
                 )
                 .execute()
             )
@@ -479,11 +486,14 @@ class GmailChannelBackend(ToolMethodBackend):
                 subject = f"Re: {subject}"
 
             to = headers.get("from", "")
+            orig_id = headers.get("message-id", "")
             message = MIMEMultipart()
             message["to"] = to
             message["subject"] = subject
-            message["In-Reply-To"] = headers.get("message-id", "")
-            message["References"] = headers.get("message-id", "")
+            message["In-Reply-To"] = orig_id
+            message["References"] = " ".join(
+                v for v in (headers.get("references", ""), orig_id) if v
+            )
             if reply_all:  # pragma: no branch
                 orig_to = headers.get("to", "")
                 orig_cc = headers.get("cc", "")
@@ -493,6 +503,8 @@ class GmailChannelBackend(ToolMethodBackend):
             subtype = "html" if html else "plain"
             message.attach(MIMEText(body, subtype))
             raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            if draft_only:
+                return json.dumps(self._save_draft(raw, thread_id))
             result = (
                 self._service.users()
                 .messages()
@@ -583,25 +595,36 @@ class GmailChannelBackend(ToolMethodBackend):
             subtype = "html" if html else "plain"
             message.attach(MIMEText(body, subtype))
             raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-            draft_message: dict[str, Any] = {"raw": raw}
-            if thread_id:
-                draft_message["threadId"] = thread_id
-            draft = (
-                self._service.users()
-                .drafts()
-                .create(userId="me", body={"message": draft_message})
-                .execute()
-            )
-            return json.dumps(
-                {
-                    "ok": True,
-                    "draft_id": draft.get("id", ""),
-                    "message_id": draft.get("message", {}).get("id", ""),
-                    "thread_id": draft.get("message", {}).get("threadId", ""),
-                }
-            )
+            return json.dumps(self._save_draft(raw, thread_id))
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+    def _save_draft(self, raw: str, thread_id: str) -> dict[str, Any]:
+        """Store a raw RFC 822 message as a Gmail draft, inside ``thread_id`` when given.
+
+        Args:
+            raw: URL-safe base64-encoded MIME message.
+            thread_id: Gmail thread the draft belongs to; empty for a new thread.
+
+        Returns:
+            Result dict with ok status, draft ID, message ID and thread ID.
+        """
+        assert self._service is not None
+        draft_message: dict[str, Any] = {"raw": raw}
+        if thread_id:
+            draft_message["threadId"] = thread_id
+        draft = (
+            self._service.users()
+            .drafts()
+            .create(userId="me", body={"message": draft_message})
+            .execute()
+        )
+        return {
+            "ok": True,
+            "draft_id": draft.get("id", ""),
+            "message_id": draft.get("message", {}).get("id", ""),
+            "thread_id": draft.get("message", {}).get("threadId", ""),
+        }
 
     def trash_message(self, message_id: str) -> str:
         """Move a message to the trash.

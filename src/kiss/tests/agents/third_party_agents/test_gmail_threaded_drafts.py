@@ -125,7 +125,11 @@ class _GmailHandler(BaseHTTPRequestHandler):
                 },
             )
         elif tail.startswith("messages/"):
-            self._send(200, _api_message(tail.split("/", 1)[1], wanted))
+            msg_id = tail.split("/", 1)[1]
+            if msg_id not in _MESSAGES:
+                self._send(404, {"error": {"code": 404, "message": "Requested entity not found."}})
+                return
+            self._send(200, _api_message(msg_id, wanted))
         elif tail.startswith("threads/"):
             thread_id = tail.split("/", 1)[1]
             if thread_id not in _THREADS:
@@ -142,13 +146,16 @@ class _GmailHandler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"code": 404, "message": f"no route {tail}"}})
 
     def do_POST(self) -> None:  # noqa: N802
-        """Record ``drafts.create`` and answer with a draft in the requested thread."""
+        """Record ``drafts.create`` / ``messages.send`` and answer in the requested thread."""
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length)) if length else {}
         parts = urlsplit(self.path)
         cast(RecordingServer, self.server).requests.append(
             {"method": "POST", "path": parts.path, "body": body}
         )
+        if parts.path.endswith("/messages/send"):
+            self._send(200, {"id": "sent-1", "threadId": body.get("threadId", "sent-1")})
+            return
         message = body.get("message", {})
         thread_id = message.get("threadId", "dm-1")
         self._send(200, {"id": "d-1", "message": {"id": "dm-1", "threadId": thread_id}})
@@ -183,6 +190,14 @@ def _draft_mime(server: RecordingServer) -> tuple[str | None, Message, Message]:
     mime = message_from_bytes(base64.urlsafe_b64decode(message["raw"]))
     text_part = cast(list[Message], mime.get_payload())[0]
     return message.get("threadId"), mime, text_part
+
+
+def _sent_mime(server: RecordingServer) -> tuple[str | None, Message]:
+    """Return ``(threadId, MIME message)`` of the recorded messages.send call."""
+    posts = [r for r in server.requests if r["method"] == "POST"]
+    assert len(posts) == 1 and posts[0]["path"].endswith("/users/me/messages/send")
+    body = posts[0]["body"]
+    return body.get("threadId"), message_from_bytes(base64.urlsafe_b64decode(body["raw"]))
 
 
 def test_list_messages_returns_all_requested_headers(backend) -> None:
@@ -287,4 +302,56 @@ def test_create_draft_without_recipient_fails(backend) -> None:
     }
     missing = json.loads(gmail.create_draft("", "", "body", thread_id="no-such-thread"))
     assert missing["ok"] is False and "recipient" in missing["error"]
+    assert not any(r["method"] == "POST" for r in server.requests)
+
+
+def test_reply_to_message_draft_only_saves_in_thread_draft_and_sends_nothing(backend) -> None:
+    """draft_only=True: the reply goes to drafts.create in the original thread; no messages.send."""
+    gmail, server = backend
+    result = json.loads(gmail.reply_to_message("m2", "Will do.", draft_only=True))
+    assert result == {"ok": True, "draft_id": "d-1", "message_id": "dm-1", "thread_id": "t2"}
+    assert not any(r["path"].endswith("/messages/send") for r in server.requests)
+    thread_id, mime, text_part = _draft_mime(server)
+    assert thread_id == "t2"
+    assert mime["to"] == "Bob <bob@example.com>"
+    assert mime["subject"] == "Re: Budget"
+    assert mime["In-Reply-To"] == "<bob-2@example.com>"
+    assert mime["References"] == "<me-1@example.com> <bob-2@example.com>"
+    assert "cc" not in mime
+    assert text_part.get_content_type() == "text/plain"
+    assert "Will do." in str(text_part.get_payload())
+
+
+def test_reply_to_message_draft_only_reply_all_html(backend) -> None:
+    """draft_only with reply_all/html: recipients and content type are kept in the draft."""
+    gmail, server = backend
+    result = json.loads(
+        gmail.reply_to_message("m2", "<b>ok</b>", reply_all=True, html=True, draft_only=True)
+    )
+    assert result["ok"] is True and result["draft_id"] == "d-1"
+    thread_id, mime, text_part = _draft_mime(server)
+    assert thread_id == "t2"
+    assert mime["cc"] == "me@example.com, carol@example.com"
+    assert text_part.get_content_type() == "text/html"
+
+
+def test_reply_to_message_default_sends_in_thread(backend) -> None:
+    """Without draft_only the reply is sent through messages.send in the original thread."""
+    gmail, server = backend
+    result = json.loads(gmail.reply_to_message("m1", "Sent reply"))
+    assert result == {"ok": True, "id": "sent-1", "thread_id": "t1"}
+    assert not any(r["path"].endswith("/users/me/drafts") for r in server.requests)
+    thread_id, mime = _sent_mime(server)
+    assert thread_id == "t1"
+    assert mime["to"] == "Alice <alice@example.com>"
+    assert mime["subject"] == "Re: Quals schedule"
+    assert mime["In-Reply-To"] == "<alice-1@example.com>"
+    assert mime["References"] == "<alice-1@example.com>"
+
+
+def test_reply_to_message_draft_only_unknown_message_fails(backend) -> None:
+    """A missing original message yields an error and creates neither a draft nor a send."""
+    gmail, server = backend
+    result = json.loads(gmail.reply_to_message("no-such-message", "body", draft_only=True))
+    assert result["ok"] is False
     assert not any(r["method"] == "POST" for r in server.requests)
