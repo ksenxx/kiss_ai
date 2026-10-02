@@ -18,11 +18,15 @@ or simply finish without any of those counts moving, a digest of the task
 rows themselves.  It is printed as a single line so that a shell can
 compare two of them with ``=``:
 
-    <tasks> <steps> <tokens> <events> <max_seq> <max_timestamp> <digest>
+    <tasks> <steps> <tokens> <events> <newest_rowid> <newest_timestamp> <digest>
 
 The events are covered by their count and their newest row alone: an
 event is written once and never edited, so a change to that table always
-shows up in one of the two.
+shows up in one of the two.  The newest row is the one with the highest
+rowid (``events.id`` is an ``AUTOINCREMENT`` key, so a new row always
+gets a higher one), which SQLite finds without reading the table; a
+maximum over ``seq`` or ``timestamp`` would scan every event, and on a
+database with millions of them that took longer than the sync itself.
 
 Usage:
     python3 db_fingerprint.py DATABASE
@@ -45,9 +49,13 @@ TASK_QUERY = (
     'SELECT count(*), COALESCE(SUM("steps"), 0), COALESCE(SUM("tokens"), 0)'
     " FROM task_history"
 )
+# Three scalar subqueries rather than one aggregate query: SQLite answers a
+# lone count(*) from the index's page counts and a lone MAX(rowid) with one
+# seek, but a SELECT that aggregates both loops over every row.
 EVENT_QUERY = (
-    'SELECT count(*), COALESCE(MAX("seq"), 0), COALESCE(MAX("timestamp"), 0)'
-    " FROM events"
+    "SELECT (SELECT count(*) FROM events),"
+    " COALESCE((SELECT MAX(rowid) FROM events), 0),"
+    ' COALESCE((SELECT "timestamp" FROM events ORDER BY rowid DESC LIMIT 1), 0)'
 )
 # Ordered by the primary key, so that the digest describes what the rows say
 # and not the order sqlite happens to return them in.

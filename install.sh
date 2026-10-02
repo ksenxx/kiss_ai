@@ -1464,6 +1464,23 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
     mkdir -p "$KISS_HOME_DIR"
 
+    # Post-install hooks: every executable in $KISS_HOME_DIR/post-install.d/
+    # runs now, with the new extension directory on disk and before the
+    # reload marker below, so a layer that patches the installed extension
+    # (a white-label brand such as SeamlessLabs' s10s registers its
+    # installer here) is applied before the window reloads.  Hooks run in
+    # name order with KISS_HOME set and no stdin; a failing hook is
+    # reported and the update still completes.
+    for hook in "$KISS_HOME_DIR"/post-install.d/*; do
+        [ -f "$hook" ] && [ -x "$hook" ] || continue
+        echo "   Running post-install hook $hook..."
+        hook_rc=0
+        KISS_HOME="$KISS_HOME_DIR" "$hook" < /dev/null || hook_rc=$?
+        if [ "$hook_rc" != 0 ]; then
+            echo "   WARNING: post-install hook $hook exited with status $hook_rc"
+        fi
+    done
+
     # The marker must land in $KISS_HOME_DIR, not a hard-coded $HOME/.kiss:
     # the extension resolves its state dir through $KISS_HOME (kissHomeDir()
     # in userAssets.ts) and watches $KISS_HOME/.extension-updated to reload

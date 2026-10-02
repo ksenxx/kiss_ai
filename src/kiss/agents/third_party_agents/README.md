@@ -388,22 +388,20 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 described here because it is used from the same chat surfaces. On an idle tab,
 `/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
 plus an instruction naming the task you are asking about and telling the agent to call
-`task_overview` on it first. The script gives the answering session three read-only
-trajectory tools over a pre-digested copy of that task's persisted events
-(`kiss.agents.sorcar.task_digest`): `task_overview(task_id)` (status, model, spend, the
-sub-agents it dispatched, later user messages, progress summaries, and its last 30
-transcript entries in one call), `task_transcript(task_id, start, count, contains)` (a
-page of the digested transcript, optionally filtered), and `task_step(task_id, index,
-max_chars)` (one entry in full). It swaps the system prompt
-for the compact SYSTEM_LITE prompt (the bundled `seas/ask/_ask_system_lite.md`, a copy of the
-ablation prompt with the brand identity as a `{{IDENTITY}}` placeholder) with a
-no-internet, answer-quickly suffix and an answering playbook, runs on the read-only
-`review` tool profile, and returns `False` from `is_parallel()`, `use_web_tools()`, and
-`use_memory()`, so the answering session has no browser tools, no memory tools, and no
-parallel sub-agents. It answers from the trajectory tools, may run one short read-only
-Bash command for live state the transcript cannot show (result files, background jobs,
-`git diff` in the task's work dir), and is told never to read `~/.kiss/sorcar.db` by
-hand. Typed into a tab whose task is still running, the question
+`task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
+and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the
+whole context in one call: the task's status, model, spend and the sub-agents it
+dispatched, the newest 8k characters of the progress log the task keeps in its work dir
+(`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
+transcript entries oldest first, the whole text capped at 60k characters by dropping the
+oldest entries. The script swaps the system prompt for the compact SYSTEM_LITE prompt (the
+bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
+identity as a `{{IDENTITY}}` placeholder) with a no-internet, answer-quickly suffix and a
+playbook asking for two or three plain sentences drawn only from the context, returns
+`False` from `if_append_basic_tools()` so no built-in tool (no shell, no file access) is
+offered, and returns `False` from `is_parallel()`, `use_web_tools()`, and `use_memory()`,
+so there are no browser tools, no memory tools, and no parallel sub-agents either; it
+cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does
 not interrupt the running agent:
 the answering session shows as a nested sub-agent tab under the running task's tab only

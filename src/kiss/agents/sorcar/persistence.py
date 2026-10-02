@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import IO, Any
 
 from kiss.agents.sorcar._concurrency import _race_delay
-from kiss.agents.sorcar.task_metadata import classify_task_tags, upsert_chat_summary
+from kiss.agents.sorcar.chat_summary import upsert_chat_summary
+from kiss.agents.sorcar.task_metadata import classify_task_tags
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 
