@@ -87,7 +87,10 @@ import yaml
 
 from kiss.agents.sorcar.daemon_client import TaskResult
 from kiss.agents.sorcar.sea_commands import sea_script_in
-from kiss.agents.sorcar.useful_tools import rewrite_parent_repo_paths
+from kiss.agents.sorcar.useful_tools import (
+    remap_vanished_worktree,
+    rewrite_parent_repo_paths,
+)
 from kiss.core.config import DEFAULT_CONFIG, kiss_home
 from kiss.core.vscode_config import load_config
 
@@ -673,6 +676,10 @@ def dispatch_result(
             options,
             append_to_prompt=cron_agent.unattended_child_suffix(options.append_to_prompt),
         )
+    # A caller whose worktree was already torn down (a finished worktree
+    # task) hands over the removed directory; creating it here would
+    # leave an unregistered husk under ``.kiss-worktrees/``.
+    work_dir = str(remap_vanished_worktree(Path(work_dir)))
     Path(work_dir).mkdir(parents=True, exist_ok=True)
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /

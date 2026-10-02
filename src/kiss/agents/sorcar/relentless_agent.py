@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import yaml
 
+from kiss.agents.sorcar.useful_tools import remap_vanished_worktree
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.kiss_agent import KISSAgent
@@ -356,11 +357,18 @@ def resolve_work_dir(work_dir: str | None) -> str:
     not created here; :meth:`RelentlessAgent._reset` does that when the run
     starts.
 
+    A *work_dir* inside a ``.kiss-worktrees/kiss_wt-*`` worktree that has
+    already been torn down (a finished worktree task's ``work_dir`` handed
+    to a follow-up run) is remapped to the parent repository
+    (:func:`~kiss.agents.sorcar.useful_tools.remap_vanished_worktree`), so
+    ``_reset``'s ``mkdir`` never resurrects the removed worktree directory.
+
     Args:
         work_dir: The ``work_dir`` argument of :meth:`RelentlessAgent.run`.
     """
     default_work_dir = str(Path(config_module.artifact_dir).resolve() / "kiss_workdir")
-    return str(Path(work_dir or default_work_dir).resolve())
+    resolved = Path(work_dir or default_work_dir).resolve()
+    return str(remap_vanished_worktree(resolved))
 
 #: Consecutive continuation sessions that made no progress — no tool
 #: call other than ``finish``, or a summary identical to the previous
@@ -1501,7 +1509,9 @@ class RelentlessAgent(Base):
         """
         trajectory_path: Path | None = None
         try:
-            tmp_dir = Path(self.work_dir) / "tmp"
+            # The worktree may have been torn down since ``_reset``
+            # (a concurrent discard/merge); never recreate it here.
+            tmp_dir = remap_vanished_worktree(Path(self.work_dir)) / "tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             trajectory_path = tmp_dir / f"trajectory_{session}.json"
             trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
