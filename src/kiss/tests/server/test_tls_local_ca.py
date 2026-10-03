@@ -428,7 +428,7 @@ class TestLiveServer(IsolatedAsyncioTestCase):
         kiss_dir = self.tmp / ".kiss"
         kiss_dir.mkdir()
         self.saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        th._KISS_DIR, th._DB_PATH, th._db_conn = kiss_dir, kiss_dir / "sorcar.db", None
+        th._KISS_DIR, th._DB_PATH, th._db_conn = kiss_dir, kiss_dir / "history.db", None
         self.saved_tls_dir = ws._TLS_DIR
         ws._TLS_DIR = kiss_dir / "tls"
         self.server: RemoteAccessServer | None = None

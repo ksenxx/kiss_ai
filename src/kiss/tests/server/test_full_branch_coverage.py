@@ -82,7 +82,7 @@ class TestReplaySessionWithEvents:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_text = "test-replay-session-task"
             task_id, chat_id = th._add_task(task_text, chat_id="0")

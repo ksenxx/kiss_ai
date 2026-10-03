@@ -6,12 +6,12 @@
 
 The pseudo-SEA ``sorcar`` (:data:`rsi7d_sea.SORCAR`) covers the plain
 top-level runs, the system prompt files ``src/kiss/SYSTEM.md`` /
-``SYSTEM_LITE.md``, the user's ``~/.kiss/SORCAR.md`` and the code under
+``SYSTEM_LITE.md``, the user's ``~/.kiss/AGENTS.md`` and the code under
 ``src/kiss``.  ``request_sorcar_permission`` must grant a target — from a
 permitting sentence of the task text, or by asking the user — before
 ``patch_sorcar`` changes it.  The tests run against a fake KISS checkout
 under ``tmp_path`` (a git repository where the scope needs one) and the
-temporary ``KISS_HOME`` of the test session (so ``SORCAR.md`` and the
+temporary ``KISS_HOME`` of the test session (so ``AGENTS.md`` and the
 task history are test-local).
 """
 
@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import sorcar_md
+from kiss.agents.seas import agents_md
 from kiss.agents.seas.rsi7d import rsi7d_sea as sea
 from kiss.agents.sorcar import cron_agent
 from kiss.agents.sorcar.persistence import _add_task, _flush_chat_events, _save_task_result
@@ -52,7 +52,7 @@ _SYSTEM_MD = (
     "{{IDENTITY}}\n\n## Rules\n- Read before you edit.\n- Batch independent commands.\n"
 )
 _CODE = 'def greet(name: str) -> str:\n    """Greet."""\n    return "hi " + name\n'
-_PERMIT = "You may modify KISS Sorcar itself (SYSTEM.md, SORCAR.md and the code) without asking."
+_PERMIT = "You may modify KISS Sorcar itself (SYSTEM.md, AGENTS.md and the code) without asking."
 
 
 @pytest.fixture
@@ -77,12 +77,12 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture(autouse=True)
 def _fresh_permission_state() -> Any:
-    """Every test starts without grants and without a stored SORCAR.md."""
+    """Every test starts without grants and without a stored AGENTS.md."""
     sea._granted.clear()
-    sorcar_md.sorcar_md_path().unlink(missing_ok=True)
+    agents_md.agents_md_path().unlink(missing_ok=True)
     yield
     sea._granted.clear()
-    sorcar_md.sorcar_md_path().unlink(missing_ok=True)
+    agents_md.agents_md_path().unlink(missing_ok=True)
 
 
 def _persist(prompt: str, **extra: object) -> str:
@@ -150,7 +150,7 @@ def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Pat
     row = rows[sea.SORCAR]
     assert row["editable_path"] == str(checkout / "src" / "kiss" / "SYSTEM.md")
     assert row["prompt_constant"] == "" and row["prompt_chars"] == len(_SYSTEM_MD)
-    assert row["targets"] == ["SYSTEM.md", "SYSTEM_LITE.md", "SORCAR.md", "src/kiss/**/*.py"]
+    assert row["targets"] == ["SYSTEM.md", "SYSTEM_LITE.md", "AGENTS.md", "src/kiss/**/*.py"]
     assert row["permission"].startswith("required") and row["granted"] == []
     with _Registered("Sweep. Additional instructions: " + _PERMIT):
         sea.request_sorcar_permission("SYSTEM.md", "evidence", prompt_quote=_PERMIT)
@@ -161,7 +161,7 @@ def test_indexed_seas_describes_sorcar_with_its_targets_and_grants(checkout: Pat
 def test_indexed_seas_marks_sorcar_not_editable_outside_a_git_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without a git checkout only SORCAR.md is in scope; SYSTEM.md is reported, not editable."""
+    """Without a git checkout only AGENTS.md is in scope; SYSTEM.md is reported, not editable."""
     pkg = tmp_path / "src" / "kiss"
     (pkg / "agents" / "seas").mkdir(parents=True)
     (pkg / "SYSTEM.md").write_text(_SYSTEM_MD, encoding="utf-8")
@@ -169,21 +169,21 @@ def test_indexed_seas_marks_sorcar_not_editable_outside_a_git_checkout(
     row = {r["name"]: r for r in json.loads(sea.indexed_seas())["seas"]}[sea.SORCAR]
     assert row["editable_path"] == "" and row["prompt_chars"] == len(_SYSTEM_MD)
     assert sea.sorcar_text("SYSTEM.md") == (
-        f"Error: {pkg.resolve()} is not inside a git checkout; only SORCAR.md can be changed here"
+        f"Error: {pkg.resolve()} is not inside a git checkout; only AGENTS.md can be changed here"
     )
-    assert sea.sorcar_text("SORCAR.md") == f"({sorcar_md.sorcar_md_path()} does not exist yet)"
+    assert sea.sorcar_text("AGENTS.md") == f"({agents_md.agents_md_path()} does not exist yet)"
 
 
 def test_sorcar_text_resolves_prompt_files_code_and_rejects_the_rest(checkout: Path) -> None:
-    """Targets are the prompt files, SORCAR.md and code under src/kiss; SEA files are refused."""
+    """Targets are the prompt files, AGENTS.md and code under src/kiss; SEA files are refused."""
     pkg = checkout / "src" / "kiss"
     assert sea.sorcar_text() == _SYSTEM_MD
     assert sea.sorcar_text("SYSTEM_LITE.md") == "{{IDENTITY}}\n\nBe brief.\n"
     assert sea.sorcar_text("src/kiss/greet.py") == _CODE
     assert sea.sorcar_text(str(pkg / "greet.py")) == _CODE
-    assert sea.sorcar_text("SORCAR.md") == f"({sorcar_md.sorcar_md_path()} does not exist yet)"
-    sorcar_md.add_instruction("Always answer in French")
-    assert "- Always answer in French" in sea.sorcar_text("SORCAR.md")
+    assert sea.sorcar_text("AGENTS.md") == f"({agents_md.agents_md_path()} does not exist yet)"
+    agents_md.add_instruction("Always answer in French")
+    assert "- Always answer in French" in sea.sorcar_text("AGENTS.md")
     assert sea.sorcar_text("pyproject.toml") == (
         f"Error: 'pyproject.toml' is not a file of {pkg.resolve()}"
     )
@@ -203,7 +203,7 @@ def test_permission_from_the_task_text_needs_a_whole_permitting_sentence(
     task = (
         "Improve every SEA.\n\nAdditional instructions: all. " + _PERMIT
         + " Do not touch the vscode extension. Ask me before changing SYSTEM_LITE.md.\n"
-        "Analyze KISS Sorcar performance. You can also change ~/.kiss/SORCAR.md\n"
+        "Analyze KISS Sorcar performance. You can also change ~/.kiss/AGENTS.md\n"
         "Do not modify KISS Sorcar itself."
     )
     not_whole = (
@@ -216,23 +216,23 @@ def test_permission_from_the_task_text_needs_a_whole_permitting_sentence(
             f"Permission granted for SYSTEM.md by the user's task text: {_PERMIT!r}."
         )
         # Blank runs and the final period do not matter; the words must be the user's.
-        squeezed = " You  may modify KISS Sorcar itself (SYSTEM.md, SORCAR.md and the code) "
+        squeezed = " You  may modify KISS Sorcar itself (SYSTEM.md, AGENTS.md and the code) "
         assert sea.request_sorcar_permission(
-            "SORCAR.md, src/kiss/greet.py", "why", prompt_quote=squeezed + "without asking"
+            "AGENTS.md, src/kiss/greet.py", "why", prompt_quote=squeezed + "without asking"
         ) == (
-            "Permission granted for SORCAR.md, src/kiss/greet.py by the user's task text: "
+            "Permission granted for AGENTS.md, src/kiss/greet.py by the user's task text: "
             f"{_PERMIT.rstrip('.')!r}."
         )
         # A newline ends a sentence like a period does.
         assert sea.request_sorcar_permission(
-            "SORCAR.md", "why", prompt_quote="You can also change ~/.kiss/SORCAR.md"
-        ).startswith("Permission granted for SORCAR.md by")
+            "AGENTS.md", "why", prompt_quote="You can also change ~/.kiss/AGENTS.md"
+        ).startswith("Permission granted for AGENTS.md by")
         for quote, why in (
             ("Modify KISS Sorcar freely.", not_whole),
             ("You may", "the quote is too short to be a permission sentence"),
             # The tail of a prohibition, and the tail of the permitting sentence.
             ("modify KISS Sorcar itself.", not_whole),
-            ("KISS Sorcar itself (SYSTEM.md, SORCAR.md and the code) without asking.", not_whole),
+            ("KISS Sorcar itself (SYSTEM.md, AGENTS.md and the code) without asking.", not_whole),
             ("Do not touch the vscode extension.", forbids),
             ("Ask me before changing SYSTEM_LITE.md.", forbids),
             ("Do not modify KISS Sorcar itself.", forbids),
@@ -242,7 +242,7 @@ def test_permission_from_the_task_text_needs_a_whole_permitting_sentence(
                 "'without asking')",
             ),
             (
-                "You can also change ~/.kiss/SORCAR.md",
+                "You can also change ~/.kiss/AGENTS.md",
                 "the quote does not mention SYSTEM_LITE.md (nor KISS Sorcar as a whole)",
             ),
         ):
@@ -258,7 +258,7 @@ def test_permission_from_the_task_text_needs_a_whole_permitting_sentence(
     assert sorted(sea._granted) == sorted(
         str(p) for p in (
             checkout / "src" / "kiss" / "SYSTEM.md", checkout / "src" / "kiss" / "greet.py",
-            sorcar_md.sorcar_md_path(),
+            agents_md.agents_md_path(),
         )
     )
     # Outside a task nothing can be quoted or asked.
@@ -274,7 +274,7 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
     """The user sees the targets and the reason; only a plain yes grants, and only those targets."""
     questions: list[str] = []
     answers = iter([
-        "Yes, go ahead.", "yes but only SORCAR.md", "Yes, if I approve the diff first.",
+        "Yes, go ahead.", "yes but only AGENTS.md", "Yes, if I approve the diff first.",
         "Yes, never change SYSTEM.md.", "no", "ok",
     ])
 
@@ -292,9 +292,9 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
             "Answer yes to allow exactly these changes; anything else (no, or what you allow "
             "instead) denies them."
         )
-        conditional = sea.request_sorcar_permission("SYSTEM_LITE.md, SORCAR.md", "z")
+        conditional = sea.request_sorcar_permission("SYSTEM_LITE.md, AGENTS.md", "z")
         assert conditional == (
-            "Denied by the user: 'yes but only SORCAR.md'. Do not make these changes; report "
+            "Denied by the user: 'yes but only AGENTS.md'. Do not make these changes; report "
             "them as recommendations, or ask again with only the targets the answer allows."
         )
         for qualified in ("Yes, if I approve the diff first.", "Yes, never change SYSTEM.md."):
@@ -304,8 +304,8 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
         assert sea.request_sorcar_permission("SYSTEM_LITE.md", "z").startswith(
             "Denied by the user: 'no'."
         )
-        assert sea.request_sorcar_permission("SORCAR.md", "z") == (
-            "Permission granted for SORCAR.md by the user's answer 'ok'."
+        assert sea.request_sorcar_permission("AGENTS.md", "z") == (
+            "Permission granted for AGENTS.md by the user's answer 'ok'."
         )
         assert len(questions) == 6
         assert sea.patch_sorcar("SYSTEM_LITE.md", "Be brief.", "Be terse.") == (
@@ -328,7 +328,7 @@ def test_permission_is_asked_from_the_user_and_read_strictly(checkout: Path) -> 
         )
 
 
-def test_patch_sorcar_edits_granted_prompt_code_and_sorcar_md_targets(checkout: Path) -> None:
+def test_patch_sorcar_edits_granted_prompt_code_and_agents_md_targets(checkout: Path) -> None:
     """Granted targets are edited in place (once, compiling, backed up); the rest is refused."""
     pkg = checkout / "src" / "kiss"
     assert sea.patch_sorcar("SYSTEM.md", "Read before you edit.", "Read first.") == (
@@ -339,7 +339,7 @@ def test_patch_sorcar_edits_granted_prompt_code_and_sorcar_md_targets(checkout: 
     )
     with _Registered("Sweep. Additional instructions: " + _PERMIT, work_dir=str(checkout)):
         sea.request_sorcar_permission(
-            "SYSTEM.md\nsrc/kiss/greet.py\nSORCAR.md", "why", prompt_quote=_PERMIT
+            "SYSTEM.md\nsrc/kiss/greet.py\nAGENTS.md", "why", prompt_quote=_PERMIT
         )
         # The system prompt: exactly-once replacement, append, and the two failure modes.
         system_md = pkg / "SYSTEM.md"
@@ -375,26 +375,26 @@ def test_patch_sorcar_edits_granted_prompt_code_and_sorcar_md_targets(checkout: 
         assert run_git(checkout, "status", "--porcelain").stdout.split() == [
             "M", "src/kiss/SYSTEM.md", "M", "src/kiss/greet.py",
         ]
-        # SORCAR.md: bullets through the storage layer, backed up before the first change.
-        assert sea.patch_sorcar("SORCAR.md", "", "") == (
+        # AGENTS.md: bullets through the storage layer, backed up before the first change.
+        assert sea.patch_sorcar("AGENTS.md", "", "") == (
             "Error: give `old` (the bullet to remove), `new` (the bullet to add) or both"
         )
-        backup = checkout / "tmp" / "rsi7d" / "SORCAR.md.before"
-        md = sorcar_md.sorcar_md_path()
-        assert sea.patch_sorcar("SORCAR.md", "", "Always answer in French") == (
+        backup = checkout / "tmp" / "rsi7d" / "AGENTS.md.before"
+        md = agents_md.agents_md_path()
+        assert sea.patch_sorcar("AGENTS.md", "", "Always answer in French") == (
             f"Remembered in {md}: Always answer in French"
         )
-        assert sorcar_md.read_instructions() == ["Always answer in French"]
+        assert agents_md.read_instructions() == ["Always answer in French"]
         assert not backup.exists()  # there was no file to back up
-        assert sea.patch_sorcar("SORCAR.md", "always answer in french", "Answer in French") == (
+        assert sea.patch_sorcar("AGENTS.md", "always answer in french", "Answer in French") == (
             f"Forgot from {md}: Always answer in French Remembered in {md}: Answer in French"
         )
-        assert sorcar_md.read_instructions() == ["Answer in French"]
+        assert agents_md.read_instructions() == ["Answer in French"]
         assert backup.read_text(encoding="utf-8").rstrip().endswith("- Always answer in French")
-        assert sea.patch_sorcar("SORCAR.md", "Answer in French", "") == (
+        assert sea.patch_sorcar("AGENTS.md", "Answer in French", "") == (
             f"Forgot from {md}: Answer in French"
         )
-        assert sorcar_md.read_instructions() == []
+        assert agents_md.read_instructions() == []
         assert backup.read_text(encoding="utf-8").rstrip().endswith("- Always answer in French")
     # Ungranted SYSTEM_LITE.md stays refused even after the other grants.
     assert sea.patch_sorcar("SYSTEM_LITE.md", "", "x").startswith("Error: no permission")
@@ -404,7 +404,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
     checkout: Path,
 ) -> None:
     """A real ReAct loop: the model asks for permission (the user says yes), patches SYSTEM.md,
-    is refused on SORCAR.md (never granted) and finishes."""
+    is refused on AGENTS.md (never granted) and finishes."""
     questions: list[str] = []
 
     def ask(question: str) -> str:
@@ -423,7 +423,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
             prompt_tokens=600,
         ),
         tool_call_body(
-            "patch_sorcar", {"target": "SORCAR.md", "old": "", "new": "Prefer uv."},
+            "patch_sorcar", {"target": "AGENTS.md", "old": "", "new": "Prefer uv."},
             prompt_tokens=700,
         ),
         finish_body("<p>Patched SYSTEM.md.</p>", prompt_tokens=800),
@@ -473,9 +473,9 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
     )
     assert tool_results[1].startswith("Patched ")
     assert tool_results[2].startswith(
-        "Error: no permission to change SORCAR.md; call request_sorcar_permission first"
+        "Error: no permission to change AGENTS.md; call request_sorcar_permission first"
     )
     assert (checkout / "src" / "kiss" / "SYSTEM.md").read_text(encoding="utf-8").endswith(
         "## Lessons from recent runs (rsi7d)\n- X.\n"
     )
-    assert not sorcar_md.sorcar_md_path().exists()
+    assert not agents_md.agents_md_path().exists()

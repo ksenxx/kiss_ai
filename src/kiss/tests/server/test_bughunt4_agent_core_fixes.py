@@ -102,7 +102,7 @@ class _TempDbTestBase:
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         th._invalidate_chat_context_cache("")
         self._saved_states = dict(agent_state.agent_states)

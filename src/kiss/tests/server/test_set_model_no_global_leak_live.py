@@ -87,7 +87,7 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     test_dir = tmp_path / "sorcar_db_dir"
     test_dir.mkdir()
     sorcar_persistence._KISS_DIR = test_dir
-    sorcar_persistence._DB_PATH = test_dir / "sorcar.db"
+    sorcar_persistence._DB_PATH = test_dir / "history.db"
     sorcar_persistence._close_db()
     yield
     sorcar_persistence._close_db()

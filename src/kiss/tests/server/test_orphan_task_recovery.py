@@ -5,7 +5,7 @@
 """Startup-time recovery of orphan ``Agent Failed Abruptly`` rows.
 
 Production failure signature (rows 2143, 2140, 2139, 2136 in the
-shipped ``sorcar.db``):
+shipped ``history.db``):
 
 * ``result == "Agent Failed Abruptly"`` (the sentinel written by
   :func:`_add_task` at task-creation time), AND

@@ -124,7 +124,7 @@ def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
 
     atexit runs handlers newest-first, so the three import-time
     handlers that still write into the home — persistence's event
-    drain (``_drain_events_at_exit`` reopens ``sorcar.db`` and
+    drain (``_drain_events_at_exit`` reopens ``history.db`` and
     recreates the directory for a queued event) and owner-marker
     release, and the subprocess reaper's last-resort sweep (the test
     bucket of a run cut short by ``pytest.exit`` never reached
@@ -138,7 +138,7 @@ def _remove_test_kiss_home(home: str, owner_pid: int) -> None:
     A child forked from the pytest process inherits the atexit table;
     the pid check keeps such a child from deleting its parent's home
     when it exits through ``sys.exit`` instead of ``os._exit``.
-    Errors are ignored: a still-open ``sorcar.db`` on Windows is not
+    Errors are ignored: a still-open ``history.db`` on Windows is not
     worth failing the exit for.
 
     Args:
@@ -179,7 +179,7 @@ Path(_test_kiss_home, ".update-check.json").write_text(
 )
 _th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
-_th._DB_PATH = _th._KISS_DIR / "sorcar.db"
+_th._DB_PATH = _th._KISS_DIR / "history.db"
 
 DEFAULT_MODEL = "claude-opus-4-6"
 

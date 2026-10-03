@@ -4,7 +4,7 @@
 # add your name here
 """Recall evaluation of the memoryfield index on real past Sorcar tasks.
 
-The evaluation turns finished tasks from ``~/.kiss/sorcar.db`` into memory
+The evaluation turns finished tasks from ``~/.kiss/history.db`` into memory
 pages (one page per task: the request plus the final result as text), then
 asks: given a later question, does retrieval surface the page of the task
 that answered it? Each probe query has exactly one gold page, so we report
@@ -58,7 +58,7 @@ from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("~/.kiss/sorcar.db")
+DEFAULT_DB_PATH = Path("~/.kiss/history.db")
 DEFAULT_PROBE_MODEL = "claude-fable-5-1"
 RECALL_KS = (1, 3, 5)
 
@@ -143,7 +143,7 @@ def load_past_tasks(db_path: Path, limit: int, min_result_chars: int = 300) -> l
     """Load the most recent successful top-level tasks from a Sorcar database.
 
     Args:
-        db_path: Path to ``sorcar.db`` (opened read-only).
+        db_path: Path to ``history.db`` (opened read-only).
         limit: Maximum number of tasks.
         min_result_chars: Skip tasks whose result is shorter than this.
 
@@ -210,7 +210,7 @@ def build_memory_from_tasks(memory: MemoryDir, tasks: list[PastTask]) -> list[st
             name,
             task_page_body(task),
             title=task.title,
-            extra={"source": f"sorcar.db task_history {task.task_id}"},
+            extra={"source": f"history.db task_history {task.task_id}"},
         )
     return list(wanted)
 
@@ -578,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code.
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="path to sorcar.db")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="path to history.db")
     parser.add_argument("--memory-dir", type=Path, default=Path("./tmp/memoryfield-eval/memory"))
     parser.add_argument("--out", type=Path, default=Path("./tmp/memoryfield-eval/results.json"))
     parser.add_argument("--limit", type=int, default=300, help="number of past tasks to index")

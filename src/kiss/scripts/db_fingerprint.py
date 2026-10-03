@@ -3,7 +3,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Summarise the synced content of a ``sorcar.db`` in one line.
+"""Summarise the synced content of a ``history.db`` in one line.
 
 A deploy that has to replace a machine's task database wholesale must
 know that the rows it brought back from that machine are still all it
@@ -83,7 +83,7 @@ def fingerprint(database: str) -> str:
     """Return the one-line summary of a database's synced content.
 
     Args:
-        database: Path of the ``sorcar.db`` to summarise.
+        database: Path of the ``history.db`` to summarise.
 
     Returns:
         The seven fields separated by spaces.

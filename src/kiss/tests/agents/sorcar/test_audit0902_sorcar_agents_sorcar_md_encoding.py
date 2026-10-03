@@ -2,9 +2,9 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Audit 2026-09-02 (sorcar-agents): a non-UTF-8 ``~/.kiss/SORCAR.md`` must not kill every task.
+"""Audit 2026-09-02 (sorcar-agents): a non-UTF-8 ``~/.kiss/AGENTS.md`` must not kill every task.
 
-``RelentlessAgent.perform_task`` appends the user's ``~/.kiss/SORCAR.md``
+``RelentlessAgent.perform_task`` appends the user's ``~/.kiss/AGENTS.md``
 to the system prompt with a plain ``read_text()``.  A file saved by a
 Windows editor in cp1252 (a curly quote, an accented name) made that
 call raise ``UnicodeDecodeError`` before the first model request, so
@@ -38,7 +38,7 @@ from kiss.tests.server.parallel_agent_harness import (
 
 @pytest.fixture
 def env() -> Iterator[IsolatedKissHome]:
-    """An isolated KISS_HOME (so the real ~/.kiss/SORCAR.md is never read)."""
+    """An isolated KISS_HOME (so the real ~/.kiss/AGENTS.md is never read)."""
     isolated = IsolatedKissHome("kiss-audit0902-sorcarmd-")
     try:
         yield isolated
@@ -57,10 +57,10 @@ class _Recorder:
         return finish_response("memory loaded")
 
 
-def test_cp1252_sorcar_md_is_loaded_with_replacement(env: IsolatedKissHome) -> None:
+def test_cp1252_agents_md_is_loaded_with_replacement(env: IsolatedKissHome) -> None:
     """Undecodable bytes are replaced; the readable memory still reaches the model."""
     # "Remember: café" in cp1252 — the 0xE9 byte is invalid UTF-8.
-    (env.kiss_home / "SORCAR.md").write_bytes(b"# Memory\nRemember: caf\xe9 rule\n")
+    (env.kiss_home / "AGENTS.md").write_bytes(b"# Memory\nRemember: caf\xe9 rule\n")
     model = _Recorder()
     server = StandInModelServer(model)
     try:

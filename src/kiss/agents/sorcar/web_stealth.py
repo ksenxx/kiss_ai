@@ -4,7 +4,7 @@
 # add your name here
 """Make the KISS browser look like a person's Chrome to bot-protection vendors.
 
-Analysis of ``~/.kiss/sorcar.db`` (Sept 2026) found 95 hosts answering the
+Analysis of ``~/.kiss/history.db`` (Sept 2026) found 95 hosts answering the
 browser tool with a bot-protection page: Cloudflare managed challenges
 (stackoverflow, dl.acm.org, npmjs, readthedocs sites, congress.gov, ...),
 Cloudflare hard blocks (medium.com), Akamai "Access Denied" (carmax,

@@ -39,7 +39,7 @@ class TestHistoryTitleFullText(unittest.TestCase):
         self._tmp = tempfile.mkdtemp()
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
         th._close_db()
-        th._DB_PATH = Path(self._tmp) / "sorcar.db"  # type: ignore[attr-defined]
+        th._DB_PATH = Path(self._tmp) / "history.db"  # type: ignore[attr-defined]
 
         self.server = VSCodeServer()
         self.server.work_dir = self._tmp

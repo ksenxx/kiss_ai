@@ -5,7 +5,7 @@
 """E2E: a running sub-agent's tab is open on EVERY surface, and closed
 on every surface once the sub-agent is over.
 
-The invariant (``~/.kiss/SORCAR.md``)::
+The invariant (``~/.kiss/AGENTS.md``)::
 
     Across all surfaces of KISS Sorcar you must show the same tabs.
     If a task is running, the corresponding tab must be open unless

@@ -8,7 +8,7 @@
 replaced on disk via its ``(st_dev, st_ino)`` identity and reconnects,
 and ``_maybe_reset_caches`` clears the background event writer's
 ``_next_seq_cache`` / ``_marked_has_events`` for exactly that reason
-(the module's own threat model: "a user removing ``~/.kiss/sorcar.db``
+(the module's own threat model: "a user removing ``~/.kiss/history.db``
 while the daemon runs").
 
 The autocomplete chat-context text cache
@@ -48,7 +48,7 @@ class _TempDbTestBase:
         self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._invalidate_chat_context_cache("")
 
     def teardown_method(self) -> None:
@@ -63,7 +63,7 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
     """The stale-cache-after-external-DB-removal bug and its guard rails."""
 
     def _delete_db_files_externally(self) -> None:
-        """Simulate ``rm ~/.kiss/sorcar.db*`` by an external process.
+        """Simulate ``rm ~/.kiss/history.db*`` by an external process.
 
         Deliberately does NOT call ``_close_db()`` or any cache
         invalidator — the daemon has no hook that runs when a user

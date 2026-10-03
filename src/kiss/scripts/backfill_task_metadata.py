@@ -1,4 +1,4 @@
-"""Backfill ``tags``, ``sea`` and ``chat_summaries`` in an existing ``sorcar.db``.
+"""Backfill ``tags``, ``sea`` and ``chat_summaries`` in an existing ``history.db``.
 
 Usage::
 
@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     from kiss.agents.sorcar.task_metadata import backfill_task_metadata
 
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--db", default=str(kiss_home() / "sorcar.db"))
+    parser.add_argument("--db", default=str(kiss_home() / "history.db"))
     parser.add_argument(
         "--refresh",
         action="store_true",

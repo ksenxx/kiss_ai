@@ -14,7 +14,7 @@ Two ways to run it:
   refresh button is pressed.  The result replaces the ``tmp/PROGRESS.md``
   mirror in the task-info panel.
 
-The agent reads the task's persisted transcript (``~/.kiss/sorcar.db``)
+The agent reads the task's persisted transcript (``~/.kiss/history.db``)
 through the :func:`task_transcript` tool defined here (a thin wrapper
 over :func:`kiss.agents.sorcar.task_digest.transcript_page`) and
 answers :data:`PROMPT_TEMPLATE` with a short markdown progress report.
@@ -76,7 +76,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/task_update help``."""
     return (
         "Reports what a running or finished Sorcar task has done so far and its partial "
-        "results by reading its persisted transcript from ~/.kiss/sorcar.db; use it as "
+        "results by reading its persisted transcript from ~/.kiss/history.db; use it as "
         '`/task_update <task_id>` in the chat or `run_agent(agent="task_update", '
         'task="<task_id>")`.'
     )

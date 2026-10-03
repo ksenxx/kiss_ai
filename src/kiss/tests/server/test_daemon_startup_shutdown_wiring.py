@@ -120,7 +120,7 @@ class _DaemonHarness(IsolatedAsyncioTestCase):
 
         self._saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = self.kiss_home
-        th._DB_PATH = self.kiss_home / "sorcar.db"
+        th._DB_PATH = self.kiss_home / "history.db"
         th._db_conn = None
 
         certfile = self.tmpdir / "cert.pem"

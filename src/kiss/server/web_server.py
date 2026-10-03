@@ -9965,7 +9965,7 @@ class RemoteAccessServer:
         self._printer._loop = self._loop
         # No database write may run here: the legacy side-channel stamp
         # and the orphan sweep live on VSCodeServer's background thread
-        # so a locked sorcar.db never delays binding the listeners.
+        # so a locked history.db never delays binding the listeners.
         try:
             # Sign-in pages that connectors hand to the user open in the
             # streamed Browser tab, focused on every surface, while this

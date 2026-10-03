@@ -4,7 +4,7 @@
 # add your name here
 """SQLite persistence for task history, chat events, model and file usage.
 
-All data is stored in a single SQLite database at ``~/.kiss/sorcar.db``
+All data is stored in a single SQLite database at ``~/.kiss/history.db``
 using WAL mode for concurrent access.  Four tables hold task history,
 chat events, model usage counters, and file usage counters.
 
@@ -39,7 +39,7 @@ from typing import IO, Any
 from kiss.agents.sorcar._concurrency import _race_delay
 from kiss.agents.sorcar.chat_summary import upsert_chat_summary
 from kiss.agents.sorcar.task_metadata import classify_task_tags
-from kiss.core.config import kiss_home
+from kiss.core.config import adopt_legacy_file, kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
@@ -444,7 +444,7 @@ def _default_kiss_dir() -> Path:
 
 
 _KISS_DIR = _default_kiss_dir()
-_DB_PATH = _KISS_DIR / "sorcar.db"
+_DB_PATH = _KISS_DIR / "history.db"
 
 
 def _current_db_path() -> str:
@@ -765,8 +765,8 @@ def _sidecars_orphaned(
     SQLite maps exactly ONE ``-shm`` per process per database inode —
     shared by every connection in the process — but opens the ``-wal``
     by *name* for each connection.  When something outside this process
-    unlinks ``sorcar.db-wal``/``sorcar.db-shm`` (the daemon was found
-    holding sixteen descriptors to ``sorcar.db-wal (deleted)``), the
+    unlinks ``history.db-wal``/``history.db-shm`` (the daemon was found
+    holding sixteen descriptors to ``history.db-wal (deleted)``), the
     connections that are already open keep working against a deleted
     inode (so every frame they commit is lost on a hard kill), other
     processes read a database missing those frames, and every NEW
@@ -1681,6 +1681,7 @@ def _get_db() -> sqlite3.Connection:
             pass
 
     _ensure_kiss_dir()
+    _adopt_legacy_db_name(current_path)
     try:
         conn = _open_db_connection(current_path)
     except sqlite3.OperationalError as exc:
@@ -1698,12 +1699,61 @@ def _get_db() -> sqlite3.Connection:
         gen_snapshot = _db_generation
         conn = _open_db_connection(current_path)
 
+    _adopt_legacy_journal_snapshots(conn, current_path)
     tl.conn = conn
     tl.gen = gen_snapshot
     tl.path = current_path
     tl.file_id = _db_file_identity(current_path)
     _db_conn = conn
     return conn
+
+
+_LEGACY_DB_NAME = "sorcar.db"  # the database's name before version 2026.10.2
+
+
+def _adopt_legacy_db_name(current_path: str) -> None:
+    """Rename a ``sorcar.db`` left by a pre-2026.10.2 install to *current_path*.
+
+    The journals named after the database (:func:`_failed_events_path`,
+    :func:`_final_results_path`) are adopted on their own, so that they
+    follow even when the database itself was renamed by the deploy
+    scripts (``rsorcar``, ``scripts/sync-task-db.sh``), which only
+    know about the database and its ``-wal``/``-shm`` sidecars.
+    """
+    db_file = Path(current_path)
+    adopt_legacy_file(db_file, _LEGACY_DB_NAME, ("-wal", "-shm", ""))
+    for journal in (".failed_events.jsonl", ".final_results.jsonl"):
+        adopt_legacy_file(db_file.with_name(db_file.name + journal), _LEGACY_DB_NAME + journal)
+
+
+def _adopt_legacy_journal_snapshots(conn: sqlite3.Connection, current_path: str) -> None:
+    """Rename claimed journal snapshots of the legacy database after *current_path*.
+
+    A ``.consumed-*`` snapshot (:func:`_claim_journal_snapshots`) left
+    by a replay that crashed or was refused is only discovered under
+    the active database's name.  Its basename is also its exactly-once
+    marker in ``replayed_journals``, so the marker is re-keyed in the
+    same step and a snapshot whose rows were committed before the
+    crash is still never inserted twice.
+    """
+    legacy_prefix = _failed_events_path(_LEGACY_DB_NAME) + _JOURNAL_CONSUMED_SUFFIX
+    directory = os.path.dirname(current_path) or "."
+    new_base = os.path.basename(_failed_events_path(current_path))
+    try:
+        names = [name for name in os.listdir(directory) if name.startswith(legacy_prefix)]
+    except OSError:  # pragma: no cover — unreadable journal directory
+        return
+    for name in names:
+        new_name = new_base + name[len(_failed_events_path(_LEGACY_DB_NAME)):]
+        try:
+            os.replace(os.path.join(directory, name), os.path.join(directory, new_name))
+        except OSError:  # pragma: no cover — another process adopted it first
+            continue
+        conn.execute(
+            "UPDATE OR IGNORE replayed_journals SET snapshot = ? WHERE snapshot = ?",
+            (new_name, name),
+        )
+        conn.commit()
 
 
 def _open_db_connection(current_path: str) -> sqlite3.Connection:
@@ -1730,7 +1780,7 @@ def _open_db_connection(current_path: str) -> sqlite3.Connection:
     # against other threads and OTHER PROCESSES concurrently opening
     # or holding the same database, and unlinking a live WAL destroys
     # committed-but-uncheckpointed pages (the root cause of the
-    # 2026-08-15 sorcar.db corruption).  SQLite itself handles a
+    # 2026-08-15 history.db corruption).  SQLite itself handles a
     # leftover sidecar of a deleted-and-recreated database safely: a
     # WAL whose salt/checksums do not match is ignored and reset on
     # the first write, so no cleanup is needed for correctness.
@@ -3774,6 +3824,19 @@ def _delete_replay_marker(marker: str) -> None:
         )
 
 
+def _is_active_db(origin_db_path: str) -> bool:
+    """Whether *origin_db_path* names the active database.
+
+    A row journalled before version 2026.10.2 carries the database's
+    former path (``sorcar.db``); the rename left that name as a symlink
+    to ``history.db``, so the two paths resolve to the same file.
+    """
+    current_path = _current_db_path()
+    return origin_db_path == current_path or (
+        os.path.realpath(origin_db_path) == os.path.realpath(current_path)
+    )
+
+
 def _write_event_batch(
     batch: list[tuple[str, str, float, str]],
     replay_marker: str | None = None,
@@ -3795,8 +3858,7 @@ def _write_event_batch(
     """
     if not batch:
         return
-    current_path = _current_db_path()
-    batch = [row for row in batch if row[3] == current_path]
+    batch = [row for row in batch if _is_active_db(row[3])]
     if not batch:
         return
     db = _get_db()

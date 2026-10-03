@@ -1221,7 +1221,7 @@ def test_prepare_replay_clone_falls_back_to_head_and_reports_unusable_runs(
     assert sea.prepare_replay_clone(no_sea) == (
         f"Error: run {no_sea} is a plain KISS Sorcar run and cannot be replayed from here: "
         f"{(tmp_path / 'src' / 'kiss').resolve()} is not inside a git checkout; only "
-        "SORCAR.md can be changed here"
+        "AGENTS.md can be changed here"
     )
     assert sea.prepare_replay_clone(no_sea, name="slack") == (
         f"Error: 'slack' is not an editable SEA under {', '.join(map(str, sea._editable_dirs()))}"

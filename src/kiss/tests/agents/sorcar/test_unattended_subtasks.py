@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests: sub-tasks of an unattended (cron) run never block on the user.
 
-Production failure (``~/.kiss/sorcar.db``, 2026-09-21 23:33 UTC): the cron
+Production failure (``~/.kiss/history.db``, 2026-09-21 23:33 UTC): the cron
 prompt job ``5937905c`` dispatched the Slack channel agent with
 ``run_agent``; the child hit a permission gate and called
 ``ask_user_question``.  Nobody was there, so the child blocked for the

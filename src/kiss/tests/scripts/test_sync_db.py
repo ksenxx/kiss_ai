@@ -5,7 +5,7 @@
 """End-to-end tests for ``kiss.scripts.sync_db``.
 
 Every test drives the real command-line entry point against real SQLite
-database files that carry the production ``sorcar.db`` schema, then reads
+database files that carry the production ``history.db`` schema, then reads
 the resulting files back with plain SQL.  Nothing is mocked.
 """
 
