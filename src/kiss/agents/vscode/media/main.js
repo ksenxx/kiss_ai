@@ -7269,16 +7269,24 @@
     stop.focus({preventScroll: true});
   }
 
+  // The sequence (workDirCheckSeq) of the daemon check the Explorer's
+  // check mark / "Set as Working Directory" last asked for; the
+  // "Working directory" panel's own checks never carry this number.
+  // Its reply rebuilds the tree and hands the keyboard back to it
+  // (handleWorkDirListing).
+  let explorerWorkDirCheckSeq = 0;
+
   /**
-   * "Set as Working Directory" on a top-level folder: the folder
-   * becomes the workspace exactly as the folder picker's "Select
-   * Folder" makes it (applyPickedWorkDir).  The folder that was the
-   * working directory stays in the Explorer as an added folder, so
-   * switching never makes a tree disappear.
+   * "Set as Working Directory" (the check mark) on a top-level folder:
+   * exactly what "..." > Working directory does when that folder is
+   * opened there (openWorkDir): the daemon lists it first, and only a
+   * real folder, in its canonical spelling, becomes the workspace
+   * (applyPickedWorkDir); a refusal is reported as a notification.
+   * The folder that was the working directory stays in the Explorer as
+   * an added folder, so switching never makes a tree disappear.
    */
   function setExplorerWorkDir(dir) {
     if (!dir || isRootDir(dir)) return;
-    const hadFocus = explorerHasFocus();
     const previous = explorerRoot;
     if (
       previous &&
@@ -7289,10 +7297,10 @@
       explorerExtraRoots.push(previous);
       saveExplorerExtraRoots();
     }
-    applyPickedWorkDir(dir);
-    // The rebuilt tree keeps the keyboard: focus lands on its tab stop
-    // (the new working directory's row).
-    if (hadFocus) focusExplorerStop();
+    const seqBefore = workDirCheckSeq;
+    openWorkDir(dir);
+    if (workDirCheckSeq !== seqBefore)
+      explorerWorkDirCheckSeq = workDirCheckSeq;
   }
 
   /** The top-level folder an Explorer row belongs to. */
@@ -10150,7 +10158,20 @@
     setPanelOpen(panel, document.getElementById('workdir-overlay'), false);
   }
 
+  /**
+   * Report why a working directory was refused.  The panel shows it in
+   * its own error line; a switch asked for from the Explorer's check
+   * mark (the panel is closed) gets an error notification instead, so
+   * the refusal is never silent.
+   *
+   * @param {string} text The reason; '' clears the panel's error line.
+   */
   function setWorkDirError(text) {
+    const panel = document.getElementById('workdir-panel');
+    if (text && !(panel && panel.classList.contains('open'))) {
+      showNotification({message: text, severity: 'error'});
+      return;
+    }
     const el = document.getElementById('workdir-error');
     if (!el) return;
     el.textContent = text;
@@ -10246,7 +10267,9 @@
    * switch still lands on the tab that asked.
    * On the remote webapp the daemon lists *dir* first (listDir with a
    * 'workdir:' token): a real folder is adopted through
-   * applyPickedWorkDir, anything else is reported in the panel.
+   * applyPickedWorkDir, anything else is reported (setWorkDirError: in
+   * the panel, or as a notification when the Explorer's check mark
+   * asked with the panel closed).
    *
    * @param {string} dir The typed, chosen or previously opened path.
    */
@@ -10283,6 +10306,7 @@
   /** The daemon's answer to openWorkDir's listDir check (remote). */
   function handleWorkDirListing(ev) {
     if (String(ev.token) !== 'workdir:' + workDirCheckSeq) return;
+    const fromExplorer = workDirCheckSeq === explorerWorkDirCheckSeq;
     if (ev.error) {
       setWorkDirError(String(ev.error));
       return;
@@ -10298,6 +10322,10 @@
       return;
     }
     applyPickedWorkDir(dir);
+    // The Explorer asked: its rebuilt tree keeps the keyboard, which
+    // the rebuild stranded on the body (the clicked row is gone) --
+    // unless the user has moved it elsewhere while the daemon checked.
+    if (fromExplorer && explorerHasFocus()) focusExplorerStop();
   }
 
   /**

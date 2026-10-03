@@ -2075,12 +2075,19 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         )
         assert (harness.plain_dir / "added.txt").is_file()
         (harness.plain_dir / "added.txt").unlink()
-        # Set as Working Directory (the buttons show on hover): the daemon
-        # and the saved config follow, the old working directory stays
-        # listed as an added folder.
+        # Set as Working Directory (the buttons show on hover) is the
+        # "..." > Working directory flow for that folder: the daemon
+        # lists it first (the 'workdir:' listDir check), then the daemon
+        # pin and the saved config follow, and the old working directory
+        # stays listed as an added folder.
         _click_root_button(page, plain, "set")
         _wait_first_root(page, plain)
         assert _root_paths(page) == [plain, repo]
+        checks = [
+            f for f in _sent(frames, "listDir")
+            if str(f.get("token", "")).startswith("workdir:") and f.get("path") == plain
+        ]
+        assert checks and checks[-1]["workDir"] == plain
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
         assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == plain
         assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain

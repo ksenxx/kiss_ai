@@ -215,6 +215,33 @@ function rootRows(win) {
   return all(win, '#explorer-tree > .explorer-row.is-root');
 }
 
+/**
+ * The daemon's answer to the working-directory check "Set as Working
+ * Directory" makes (the same `listDir` with a 'workdir:' token that
+ * "..." > Working directory sends): the check is asserted to exist and
+ * be scoped to *dir* itself, then answered (with *error* when given).
+ */
+function answerWorkDirCheck(win, posted, dir, error) {
+  const checks = ofType(posted, 'listDir').filter(
+    m => String(m.token).startsWith('workdir:') && m.path === dir,
+  );
+  const req = checks[checks.length - 1];
+  assert.ok(req, 'a workdir: listDir check for ' + dir + ' was sent');
+  assert.strictEqual(req.workDir, dir, 'the check is scoped to the folder');
+  if (error) {
+    send(win, {type: 'dirListing', token: req.token, path: dir, error});
+    return req;
+  }
+  send(win, {
+    type: 'dirListing',
+    token: req.token,
+    path: dir,
+    root: dir,
+    entries: [],
+  });
+  return req;
+}
+
 function rowFor(win, p, root) {
   // Matched in JS rather than a CSS attribute selector: a backslash in
   // the path would be a CSS escape there.
@@ -404,6 +431,16 @@ async function main() {
     addOtherFolder(win, posted, []);
     const before = posted.length;
     click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    // The check mark does what "..." > Working directory does: the
+    // daemon lists the folder first; nothing changes until it answers.
+    assert.ok(
+      !posted
+        .slice(before)
+        .some(m => m.type === 'saveConfig' || m.type === 'setWorkDir'),
+      'no saveConfig / setWorkDir before the daemon confirms the folder',
+    );
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
+    answerWorkDirCheck(win, posted, OTHER);
     const after = posted.slice(before);
     const saved = after.find(m => m.type === 'saveConfig');
     assert.ok(
@@ -2549,6 +2586,7 @@ async function main() {
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
     click(win, menuItem(win, 'Set as Working Directory'));
+    answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     active = win.document.activeElement;
     assert.ok(
@@ -2665,12 +2703,102 @@ async function main() {
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
     click(win, menuItem(win, 'Set as Working Directory'));
+    answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     await sleep(400);
     const active = win.document.activeElement;
     assert.ok(
       active && active.classList.contains('explorer-row'),
       'focus still on a tree row after the retries, got ' +
+        (active ? active.id || active.className : 'none'),
+    );
+    win.close();
+  });
+
+  await test('Set as Working Directory on a folder the daemon refuses: an error notification, the tree unchanged', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    const before = posted.length;
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    answerWorkDirCheck(win, posted, OTHER, 'Not a directory: ' + OTHER);
+    assert.ok(
+      !posted
+        .slice(before)
+        .some(m => m.type === 'saveConfig' || m.type === 'setWorkDir'),
+      'a refused folder never reaches saveConfig / setWorkDir',
+    );
+    assert.deepStrictEqual(
+      rootRows(win).map(r => r.dataset.explorerPath),
+      [WD, OTHER],
+      'the working directory is unchanged',
+    );
+    assert.ok(rootRows(win)[0].classList.contains('is-workdir'));
+    // The panel is closed, so the refusal is a notification, not a
+    // line in the panel's error box.
+    const toast = win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'an error notification is shown');
+    assert.ok(
+      toast.textContent.indexOf('Not a directory: ' + OTHER) >= 0,
+      "the notification carries the daemon's reason",
+    );
+    const panelError = byId(win, 'workdir-error');
+    assert.ok(panelError.hidden, "the closed panel's error line stays hidden");
+    win.close();
+  });
+
+  await test('Set as Working Directory: a late daemon reply leaves the keyboard where the user moved it', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    rootRows(win)[1].focus();
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    // While the daemon checks the folder the user goes back to typing.
+    const input = byId(win, 'task-input');
+    input.focus();
+    assert.strictEqual(win.document.activeElement, input);
+    answerWorkDirCheck(win, posted, OTHER);
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
+    assert.strictEqual(
+      win.document.activeElement,
+      input,
+      'the switch does not pull the keyboard back into the tree',
+    );
+    win.close();
+  });
+
+  await test("The Working directory panel's own Open never focuses the Explorer, even after an abandoned check-mark switch", async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    rootRows(win)[1].focus();
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    const tickCheck = ofType(posted, 'listDir')
+      .filter(m => String(m.token).startsWith('workdir:'))
+      .pop();
+    // Before the daemon answers, the user opens "..." > Working
+    // directory and opens a third folder from there.
+    click(win, byId(win, 'more-btn'));
+    click(win, byId(win, 'workdir-btn'));
+    const box = byId(win, 'workdir-input');
+    box.value = '/data/third';
+    box.dispatchEvent(new win.Event('input', {bubbles: true}));
+    click(win, byId(win, 'workdir-open-btn'));
+    // The check mark's own reply is stale now and changes nothing.
+    send(win, {
+      type: 'dirListing',
+      token: tickCheck.token,
+      path: OTHER,
+      root: OTHER,
+      entries: [],
+    });
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
+    answerWorkDirCheck(win, posted, '/data/third');
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, '/data/third');
+    const active = win.document.activeElement;
+    assert.ok(
+      !(active && active.classList.contains('explorer-row')),
+      "the panel's switch leaves the Explorer alone, focus on " +
         (active ? active.id || active.className : 'none'),
     );
     win.close();
