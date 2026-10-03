@@ -304,8 +304,9 @@ The parameters without getters:
 - **`side_channel`** — marks the run as a side channel of its parent
   (a sub-agent whose result is shown outside its own tab: the `/ask`
   answerer delivers its answer into the PARENT's transcript, the
-  periodic `/task_update` child fills the parent task's task-info
-  panel, and the in-process `/merge` run that resolves a conflicting
+  periodic in-process `/ask` run of `kiss.server.task_update` fills the
+  parent task's task-info panel, and the in-process `/merge` run that
+  resolves a conflicting
   auto-merge works in the parent's repository; so its own tab closes
   when the run ends and is not re-opened when the chat is reloaded);
   only

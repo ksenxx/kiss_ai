@@ -5455,16 +5455,17 @@
 
   // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
-  // TASK UPDATE: what the task-update agent
-  // (src/kiss/agents/seas/task_update/task_update_sea.py) reports the task running
-  // in the visible tab has done so far and its partial results.  The
-  // daemon owns the report (kiss.server.task_update): it runs the agent
-  // when the tab's task has no report yet, again every 10 minutes while
-  // the panel keeps polling, and at once when the subpanel's refresh
-  // button is pressed.  So the client polls getTaskUpdate every
+  // TASK UPDATE: the /ask agent's (src/kiss/agents/seas/ask/ask_sea.py)
+  // short answer to "what has this task done so far, and what are its
+  // partial results?" for the task running in the visible tab.  The
+  // daemon owns the update (kiss.server.task_update): it runs the
+  // agent once the tab's task is a minute old, again every 10 minutes
+  // while the panel keeps polling, and at once when the subpanel's
+  // refresh button is pressed.  So the client polls getTaskUpdate every
   // META_INFO_POLL_MS while the task runs; the reply's sig makes an
-  // unchanged report cost one small message per poll, and a task
-  // without a report yet renders as the subpanel's "updating" state.
+  // unchanged update cost one small message per poll, a task younger
+  // than a minute renders as the subpanel's "first update due" state
+  // and a run in flight as its "updating" state.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
@@ -5478,8 +5479,8 @@
   const metaCloseBtn = document.getElementById('meta-close');
   const META_INFO_POLL_MS = 5000;
   let metaInfoSig = '';
-  // The report behind the info subpanel (null when hidden): the last
-  // taskUpdate reply's {content, running, updatedAt, cost, error}.
+  // The update behind the info subpanel (null when hidden): the last
+  // taskUpdate reply's {content, running, updatedAt, dueAt, cost, error}.
   // This is what a chat editor panel relays to the Task Info view
   // (postMetaUpdate), which renders it exactly like this panel does.
   let metaInfoState = null;
@@ -5521,15 +5522,24 @@
     return div.innerHTML;
   }
 
+  /** Format an epoch-ms timestamp as a short local clock time. */
+  function shortClockTime(ms) {
+    return new Date(Number(ms)).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
   /**
-   * Paint one task-update state into the info subpanel: the report
-   * body, the status line under the header ("Updating…", or the time
-   * and cost of the last run, plus the last run's failure) and the
-   * refresh button's spinning / disabled state.  Shared by the polling
-   * surfaces and the Task Info view (renderMetaState).
+   * Paint one task-update state into the info subpanel: the answer
+   * body, the status line under the header ("Updating…", the time the
+   * first update is due, or the time and cost of the last run, plus
+   * the last run's failure) and the refresh button's spinning /
+   * disabled state.  Shared by the polling surfaces and the Task Info
+   * view (renderMetaState).
    *
-   * @param {object|null} state {content, running, updatedAt, cost,
-   *   error}, or null to empty and hide the subpanel.
+   * @param {object|null} state {content, running, updatedAt, dueAt,
+   *   cost, error}, or null to empty and hide the subpanel.
    */
   function renderTaskUpdate(state) {
     if (!metaInfoContent) return;
@@ -5537,7 +5547,13 @@
       state && typeof state.content === 'string' ? state.content : '';
     const running = !!(state && state.running);
     const error = state && typeof state.error === 'string' ? state.error : '';
-    if (!content.trim() && !running && !error) {
+    // The daemon dates the first run a minute after the task started;
+    // until it has run the subpanel says so instead of staying blank.
+    const firstDueAt =
+      state && !state.updatedAt && Number(state.dueAt) > 0
+        ? Number(state.dueAt)
+        : 0;
+    if (!content.trim() && !running && !error && !firstDueAt) {
       setMetaInfoHTML('');
       if (metaInfoStatus) metaInfoStatus.textContent = '';
       if (metaInfoRefreshBtn) {
@@ -5553,12 +5569,11 @@
       if (running) {
         status = 'Updating\u2026';
       } else if (state.updatedAt) {
-        const d = new Date(Number(state.updatedAt));
-        status =
-          'Updated ' +
-          d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        status = 'Updated ' + shortClockTime(state.updatedAt);
         const cost = Number(state.cost);
         if (cost > 0) status += ' \u00b7 $' + cost.toFixed(2);
+      } else if (firstDueAt) {
+        status = 'First update at ' + shortClockTime(firstDueAt);
       }
       if (error) {
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
@@ -5568,11 +5583,14 @@
     if (content.trim()) {
       setMetaInfoHTML(taskUpdateBodyHTML(content));
     } else {
-      setMetaInfoHTML(
-        '<p class="meta-info-pending">' +
-          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
-          '</p>',
-      );
+      let pending = 'No update yet.';
+      if (running) pending = 'Preparing the first update\u2026';
+      else if (firstDueAt) {
+        pending =
+          'The first update is asked a minute after the task starts; ' +
+          'press refresh to ask now.';
+      }
+      setMetaInfoHTML('<p class="meta-info-pending">' + pending + '</p>');
     }
     if (metaInfoRefreshBtn) {
       metaInfoRefreshBtn.disabled = running;
@@ -5603,7 +5621,7 @@
    * a hidden drawer must not poll the phone's network), or an
    * editor-tab chat panel (only while its task runs, so an idle panel
    * holds no live timer). The two panel-shaped webviews (history, Task
-   * Info) never poll — the Task Info view gets the report relayed from
+   * Info) never poll — the Task Info view gets the update relayed from
    * the active chat panel.
    */
   function metaInfoPollWanted() {
@@ -5737,6 +5755,7 @@
       content: typeof ev.content === 'string' ? ev.content : '',
       running: !!ev.running,
       updatedAt: Number(ev.updatedAt) || 0,
+      dueAt: Number(ev.dueAt) || 0,
       cost: Number(ev.cost) || 0,
       error: typeof ev.error === 'string' ? ev.error : '',
     };
@@ -16037,7 +16056,7 @@
         break;
       case 'refreshTaskUpdate':
         // The host relays the Task Info view's refresh button to the
-        // ACTIVE chat editor panel: run the task-update agent now.
+        // ACTIVE chat editor panel: ask the /ask agent now.
         if (POST_META_UPDATES) requestTaskUpdate(true);
         break;
       case 'activeTask':

@@ -4,15 +4,11 @@
 # add your name here
 """Task-update agent — reports what a running task has done so far.
 
-Two ways to run it:
-
-* ``/task_update <task_id>`` in the chat runs it as a sub-task through
-  ``run_agent`` (see :mod:`kiss.agents.sorcar.sea_commands`).
-* The daemon runs it in-process for the task shown in the visible chat
-  webview (:mod:`kiss.server.task_update`): once when the panel first
-  shows the task, then every 10 minutes, and whenever the panel's
-  refresh button is pressed.  The result replaces the ``tmp/PROGRESS.md``
-  mirror in the task-info panel.
+``/task_update <task_id>`` in the chat runs it as a sub-task through
+``run_agent`` (see :mod:`kiss.agents.sorcar.sea_commands`).  (The
+task-info panel's periodic task update is the ``/ask`` agent's answer,
+see :mod:`kiss.server.task_update`; :data:`PROMPT_TEMPLATE` still
+identifies the rows of the releases in which this agent produced it.)
 
 The agent reads the task's persisted transcript (``~/.kiss/history.db``)
 through the :func:`task_transcript` tool defined here (a thin wrapper

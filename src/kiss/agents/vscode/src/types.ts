@@ -33,17 +33,19 @@ export interface SessionInfo {
 }
 
 /**
- * The task-update report a chat panel shows in its info subpanel and
- * relays to the Task Info view: what the task-update agent reports the
+ * The task update a chat panel shows in its info subpanel and relays
+ * to the Task Info view: the /ask agent's short answer on what the
  * running task has done so far (see kiss.server.task_update).
  */
 export interface TaskUpdateState {
-  /** The agent's report (HTML), '' before the first run completes. */
+  /** The agent's answer (HTML), '' before the first run completes. */
   content: string;
   /** Whether the daemon is running the agent now. */
   running: boolean;
   /** Epoch ms of the last completed run, 0 when none. */
   updatedAt: number;
+  /** Epoch ms before which no unforced run starts (the first one is due a minute after the task started). */
+  dueAt: number;
   /** USD spent by the last run. */
   cost: number;
   /** The last run's failure, '' when it succeeded. */
@@ -454,8 +456,8 @@ export type FromWebviewMessage =
   | {type: 'pickWorkDir'; tabId: string}
   // The task-update poll of the visible tab's RUNNING task (metainfo
   // block in main.js): forwarded whole to the daemon, which answers
-  // with a direct `taskUpdate` reply. `refresh` makes the daemon run
-  // the task-update agent now (the subpanel's refresh button).
+  // with a direct `taskUpdate` reply. `refresh` makes the daemon ask
+  // the /ask agent now (the subpanel's refresh button).
   | {
       type: 'getTaskUpdate';
       tabId?: string;
@@ -1143,6 +1145,7 @@ type ToWebviewMessageBody =
       running?: boolean;
       cost?: number;
       updatedAt?: number;
+      dueAt?: number;
       sig?: string;
       tabId?: string;
       taskId?: string;
@@ -1281,11 +1284,11 @@ export interface AgentCommand {
   text?: string;
   /** editTrick: the promptlet body that replaces `text`. */
   newText?: string;
-  /** getTaskUpdate: fingerprint of the report state the client holds. */
+  /** getTaskUpdate: fingerprint of the update state the client holds. */
   knownSig?: string;
   /** getTaskUpdate: generation token echoed on the `taskUpdate` reply. */
   token?: string;
-  /** getTaskUpdate: run the task-update agent now; getAppsStatus: re-probe. */
+  /** getTaskUpdate: ask the /ask agent now; getAppsStatus: re-probe. */
   refresh?: boolean;
   /** ready: the only registry tab an editor-tab panel shows. */
   singleTabId?: string;

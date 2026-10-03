@@ -5,12 +5,15 @@
 """Periodic task updates for the task-info panel.
 
 While a chat webview shows a running task, its task-info panel asks the
-daemon (``getTaskUpdate``) for a progress report written by the
-:mod:`~kiss.agents.seas.task_update.task_update_sea` agent.  :class:`TaskUpdateRunner`
-keeps one report per task and runs the agent when the report is missing,
-older than :data:`UPDATE_INTERVAL_S`, or explicitly refreshed — never
-more than one run per task at a time, and never for a task nobody is
-looking at (a poll is what triggers a run).
+daemon (``getTaskUpdate``) for a short progress update.  The update is
+the answer of the ``/ask`` agent
+(:mod:`~kiss.agents.seas.ask.ask_sea`) to :data:`UPDATE_QUESTION`, the
+same two-or-three-sentence answer a user gets by typing ``/ask`` into
+the task's chat.  :class:`TaskUpdateRunner` keeps one update per task
+and runs the agent once the task is :data:`FIRST_UPDATE_DELAY_S` old,
+then whenever the update is older than :data:`UPDATE_INTERVAL_S` or is
+explicitly refreshed — never more than one run per task at a time, and
+never for a task nobody is looking at (a poll is what triggers a run).
 
 :func:`run_task_update_sea` runs the agent in-process the way
 :func:`~kiss.server.merge_conflict_resolver.run_merge_sea` runs the merge
@@ -28,31 +31,58 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kiss.agents.seas.task_update import task_update_sea
+from kiss.agents.seas.ask import ask_sea
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
 
-# How long a report stays fresh before a poll triggers the next run.
+# The question the panel asks the ``/ask`` agent about the task.
+UPDATE_QUESTION = "What has this task done so far, and what are its partial results?"
+# A task's first update runs this long after the task started.
+FIRST_UPDATE_DELAY_S = 60.0
+# How long an update stays fresh before a poll triggers the next run.
 UPDATE_INTERVAL_S = 600.0
-# Reports of tasks that stopped being polled are dropped after this long.
+# USD cap of one run.
+UPDATE_BUDGET_USD = 1.0
+# Updates of tasks that stopped being polled are dropped after this long.
 _PRUNE_AFTER_S = 3600.0
 
-# ``(parent_agent, task_id) -> (report_html, cost_usd)``.
+# ``(parent_agent, task_id) -> (answer_html, cost_usd)``.
 TaskUpdateSeaRunner = Callable[[Any, str], tuple[str, float]]
+
+
+def build_prompt(task_id: str) -> str:
+    """Return the ``/ask`` prompt the update run answers for *task_id*.
+
+    What a ``/ask`` typed into the task's chat produces: the question
+    followed by :data:`ask_sea.APPEND_TO_PROMPT` with the task id
+    filled in.
+
+    Args:
+        task_id: The ``task_history`` row id of the task to report on.
+
+    Returns:
+        The prompt text.
+    """
+    return (
+        UPDATE_QUESTION + "\n\n"
+        + ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id)
+    )
 
 
 @dataclasses.dataclass
 class TaskUpdate:
-    """The task-info panel's report for one task.
+    """The task-info panel's update for one task.
 
     Attributes:
-        text: The agent's report (HTML), ``""`` before the first run
-            completes.  A failed run keeps the previous report.
+        text: The agent's answer (HTML), ``""`` before the first run
+            completes.  A failed run keeps the previous answer.
         error: The failure of the last run, ``""`` when it succeeded.
         finished_at: ``time.time()`` when the last run ended (0 = never).
         cost: USD spent by the last run.
         running: Whether a run is in flight.
+        started_at: ``time.time()`` when the task started (the first
+            poll's time when the task's agent does not tell).
         polled_at: ``time.time()`` of the last poll (for pruning).
     """
 
@@ -61,7 +91,20 @@ class TaskUpdate:
     finished_at: float = 0.0
     cost: float = 0.0
     running: bool = False
+    started_at: float = 0.0
     polled_at: float = 0.0
+
+    @property
+    def due_at(self) -> float:
+        """Return the ``time.time()`` before which no unforced run starts.
+
+        The task's start plus :data:`FIRST_UPDATE_DELAY_S` until the
+        first run has ended, then the last run's end plus
+        :data:`UPDATE_INTERVAL_S`.
+        """
+        if self.finished_at:
+            return self.finished_at + UPDATE_INTERVAL_S
+        return self.started_at + FIRST_UPDATE_DELAY_S
 
     @property
     def sig(self) -> str:
@@ -69,14 +112,20 @@ class TaskUpdate:
         return f"{self.finished_at:.3f}:{int(self.running)}"
 
     def payload(self) -> dict[str, Any]:
-        """Return the wire fields of a ``taskUpdate`` reply."""
+        """Return the wire fields of a ``taskUpdate`` reply.
+
+        ``exists`` is true from the first poll on: before the first run
+        the panel shows when that run is due (``dueAt``), so a task that
+        is seconds old does not look like a task without an update.
+        """
         return {
-            "exists": bool(self.text or self.error or self.running),
+            "exists": True,
             "content": self.text,
             "error": self.error,
             "running": self.running,
             "cost": self.cost,
             "updatedAt": int(self.finished_at * 1000),
+            "dueAt": int(self.due_at * 1000),
             "sig": self.sig,
         }
 
@@ -85,6 +134,7 @@ def mark_legacy_updates_as_side_channels() -> int:
     """Stamp task-update children persisted before the side-channel flag.
 
     Rows written by earlier releases of :func:`run_task_update_sea`
+    (which ran the ``/task_update`` agent with its prompt template)
     carry ``is_side_channel = 0``, so every reload of a chat re-opened
     each finished update as a dead sub-agent tab.  The daemon calls this
     once at startup; it is idempotent.
@@ -92,6 +142,7 @@ def mark_legacy_updates_as_side_channels() -> int:
     Returns:
         The number of rows newly stamped.
     """
+    from kiss.agents.seas.task_update import task_update_sea
     from kiss.agents.sorcar.persistence import _mark_legacy_side_channel_rows
 
     return _mark_legacy_side_channel_rows(task_update_sea.PROMPT_TEMPLATE)
@@ -215,7 +266,7 @@ def charge_side_channel_usage(
 
 
 def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
-    """Run the task-update agent in-process for *task_id*.
+    """Ask the ``/ask`` agent :data:`UPDATE_QUESTION` about *task_id*, in-process.
 
     The child is a :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
     stamped like a ``run_parallel`` child (``_tab_id`` /
@@ -223,10 +274,14 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     frontend opens it as a nested tab of the task's tab and its history
     row nests under the task's row in the same chat.  The stamp marks it
     a side channel: its tab is open only while it runs — a reload never
-    re-opens the finished tab, because its report lives in the task-info
-    panel, not in the tab.  It uses the parent's
-    model unless the agent script defines ``model()``, the script's system
-    prompt, tools and budget cap, and runs in the parent's work dir.
+    re-opens the finished tab, because its answer lives in the task-info
+    panel, not in the tab.  It is configured exactly like a ``/ask``
+    typed into the task's chat (:mod:`~kiss.agents.seas.ask.ask_sea`'s
+    getters: its base system prompt and playbook suffix, the
+    ``task_context`` tool and ``finish`` only, no memory, browser or
+    sub-agents), capped at :data:`UPDATE_BUDGET_USD`, with the parent's
+    model unless the script defines ``model()``, in the parent's work
+    dir.
 
     Its spend is charged to the task whatever way the run ends.  While
     the task still runs it is banked on *parent_agent*'s live counters,
@@ -245,7 +300,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
         task_id: That task's persisted ``task_history`` row id.
 
     Returns:
-        ``(report, cost)``: the child's ``finish`` summary and the USD
+        ``(answer, cost)``: the child's ``finish`` summary and the USD
         it spent.
 
     Raises:
@@ -268,13 +323,13 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
-    model_getter = getattr(task_update_sea, "model", None)
+    model_getter = getattr(ask_sea, "model", None)
     model_name = str(
         model_getter() if callable(model_getter) else parent_agent.model_name
     )
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
-    # A side channel like the ``/ask`` answerer: its report lands in the
+    # A side channel like the ``/ask`` answerer: its answer lands in the
     # task-info panel, so the finished child has no tab worth reopening.
     # The daemon replays a finished side channel as ``subagentDone``
     # instead of ``openSubagentTab`` (see ``server._is_side_channel_row``);
@@ -292,21 +347,22 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     result = ""
     try:
         result = agent.run(
-            prompt_template=task_update_sea.build_prompt(task_id),
+            prompt_template=build_prompt(task_id),
             model_name=model_name,
             work_dir=str(getattr(parent_agent, "work_dir", "") or "."),
             printer=printer,
-            tools=task_update_sea.tools(),
-            tool_profile=task_update_sea.tool_profile(),
-            is_parallel=task_update_sea.is_parallel(),
-            max_budget=task_update_sea.max_budget(),
+            tools=ask_sea.tools(),
+            append_basic_tools=ask_sea.if_append_basic_tools(),
+            is_parallel=ask_sea.is_parallel(),
+            max_budget=UPDATE_BUDGET_USD,
             model_config=(
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
-            base_system_prompt=task_update_sea.system_prompt(),
-            web_tools=task_update_sea.use_web_tools(),
-            use_memory=task_update_sea.use_memory(),
+            base_system_prompt=ask_sea.system_prompt(),
+            system_prompt=ask_sea.append_to_system_prompt(),
+            web_tools=ask_sea.use_web_tools(),
+            use_memory=ask_sea.use_memory(),
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)
@@ -320,12 +376,37 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     return _extract_result_summary(result), budget
 
 
+def _task_started_at(task_id: str, now: float) -> float:
+    """Return when the task *task_id* started (``time.time()``), or *now* if unknown.
+
+    Read from the task's own ``task_history`` row (``start_ts``, or the
+    row's insertion ``timestamp`` for legacy rows), which every run —
+    each ``<task>`` block of a sequential submission, each
+    ``run_parallel`` child — allocates with its own start; the agent's
+    ``_task_start_ms`` would date a later block of a sequential
+    submission by the first one.  Blocks on the history database's
+    lock, so call it off the event loop.
+    """
+    from kiss.agents.sorcar import persistence
+
+    with persistence._rw_lock.read_lock():
+        row = persistence._get_db().execute(
+            "SELECT start_ts, timestamp FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+    if row is None:
+        return now
+    start_ms = persistence._safe_int(row["start_ts"], 0)
+    if start_ms > 0:
+        return start_ms / 1000.0
+    return float(row["timestamp"]) or now
+
+
 class TaskUpdateRunner:
     """Keeps one :class:`TaskUpdate` per task and schedules the agent runs.
 
     Args:
         run_sea: Runs the agent for ``(parent_agent, task_id)`` and
-            returns ``(report, cost)``; :func:`run_task_update_sea` by
+            returns ``(answer, cost)``; :func:`run_task_update_sea` by
             default.
     """
 
@@ -335,30 +416,30 @@ class TaskUpdateRunner:
         self._lock = threading.Lock()
 
     def poll(self, task_id: str, parent_agent: Any, force: bool = False) -> TaskUpdate:
-        """Return the report for *task_id*, starting a run when one is due.
+        """Return the update for *task_id*, starting a run when one is due.
 
-        A run is due when no report exists yet, when the last one ended
+        A run is due once the task is :data:`FIRST_UPDATE_DELAY_S` old
+        and no run has ended yet, when the last one ended
         :data:`UPDATE_INTERVAL_S` or more ago, or when *force* is set
         (the panel's refresh button); a run already in flight is never
         doubled.
 
+        The first poll for a task reads the task's start from its
+        history row, so call this off the event loop
+        (``asyncio.to_thread``).
+
         Args:
             task_id: The running task's persisted id.
             parent_agent: The running task's agent (the run's parent).
-            force: Start a run now even if the report is fresh.
+            force: Start a run now even if the update is fresh.
 
         Returns:
-            A snapshot of the task's report state.
+            A snapshot of the task's update state.
         """
         now = time.time()
+        upd = self._update_for(task_id, now)
         with self._lock:
-            self._prune(now)
-            upd = self._updates.setdefault(task_id, TaskUpdate())
-            upd.polled_at = now
-            due = force or upd.finished_at == 0.0 or (
-                now - upd.finished_at >= UPDATE_INTERVAL_S
-            )
-            if due and not upd.running:
+            if (force or now >= upd.due_at) and not upd.running:
                 upd.running = True
                 threading.Thread(
                     target=self._run,
@@ -368,8 +449,31 @@ class TaskUpdateRunner:
                 ).start()
             return dataclasses.replace(upd)
 
+    def _update_for(self, task_id: str, now: float) -> TaskUpdate:
+        """Return the update of *task_id* polled at *now*, created on its first poll.
+
+        Pruning runs first, then the polled update is touched so no
+        concurrent poll prunes it; only a task without an update reads
+        its start from the history row (outside the lock).
+        """
+        with self._lock:
+            self._prune(now)
+            upd = self._updates.get(task_id)
+            if upd is not None:
+                upd.polled_at = now
+                return upd
+        started_at = _task_started_at(task_id, now)
+        with self._lock:
+            # A concurrent first poll may have created it meanwhile.
+            upd = self._updates.get(task_id)
+            if upd is None:
+                upd = TaskUpdate(started_at=started_at)
+                self._updates[task_id] = upd
+            upd.polled_at = now
+            return upd
+
     def _prune(self, now: float) -> None:
-        """Drop idle reports nobody polled for :data:`_PRUNE_AFTER_S`."""
+        """Drop idle updates nobody polled for :data:`_PRUNE_AFTER_S`."""
         stale = [
             tid for tid, upd in self._updates.items()
             if not upd.running and now - upd.polled_at >= _PRUNE_AFTER_S
@@ -378,7 +482,7 @@ class TaskUpdateRunner:
             del self._updates[tid]
 
     def _run(self, task_id: str, parent_agent: Any) -> None:
-        """Thread body: run the agent and record its report."""
+        """Thread body: run the agent and record its answer."""
         text, cost, error = "", 0.0, ""
         try:
             text, cost = self._run_sea(parent_agent, task_id)
@@ -386,7 +490,7 @@ class TaskUpdateRunner:
             error = f"{type(exc).__name__}: {exc}"
             log.warning("task update for %s failed", task_id, exc_info=True)
         finally:
-            # Also on a BaseException: a report pinned on ``running``
+            # Also on a BaseException: an update pinned on ``running``
             # would never be restarted by ``poll`` nor pruned.
             with self._lock:
                 upd = self._updates.setdefault(task_id, TaskUpdate())

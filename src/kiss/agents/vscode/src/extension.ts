@@ -181,8 +181,8 @@ export function activate(context: vscode.ExtensionContext): void {
   panelManager.setMetaSink((values, taskUpdate) => {
     metaView?.postMetaState(values, taskUpdate);
   });
-  // The view's refresh button runs the task-update agent for the
-  // ACTIVE chat editor panel's task.
+  // The view's refresh button asks the /ask agent about the ACTIVE
+  // chat editor panel's task now.
   metaView.onMetaRefresh = () => panelManager?.refreshActiveTaskUpdate();
 
   // Bring the Task Info view on screen in the secondary sidebar
