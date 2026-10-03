@@ -308,11 +308,14 @@
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
         </div>
         <ul id="meta-list" class="meta-section-body">
+          <!-- The machine the agent runs on comes first, in bold: it is
+               the one value a user with several daemons reads before
+               anything else. -->
+          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
-          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
           <!-- The task's own settings (a task_settings event), which
