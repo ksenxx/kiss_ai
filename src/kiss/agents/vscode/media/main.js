@@ -1131,12 +1131,6 @@
       t0: null,
       endTs: 0,
       workDir: '',
-      // A folder chosen in the "Working directory" panel for this tab's
-      // NEXT task (VS Code surface).  Kept apart from `workDir`, which
-      // task replays and the registry rewrite and the tab bar scopes
-      // by: the pick must survive both and must not hide the tab.
-      // Consumed by the submit that uses it.
-      pinnedWorkDir: '',
       streamState: null,
       streamLlmPanel: null,
       streamLlmPanelState: null,
@@ -1331,11 +1325,16 @@
     return /^[A-Za-z]:$/.test(s);
   }
 
+  /**
+   * The directory a tab browses and its next task runs in: the global
+   * working directory (configWorkDir, the daemon's one value every task
+   * on every surface uses), or, until the daemon has reported one, the
+   * folder the tab's last task ran in.
+   */
   function workDirForTab(tabId) {
-    const tab = getTab(tabId);
-    if (tab && tab.pinnedWorkDir) return tab.pinnedWorkDir;
-    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
     if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
+    const tab = getTab(tabId);
+    if (tab && tab.workDir && !isRootDir(tab.workDir)) return tab.workDir;
     return '';
   }
 
@@ -6805,25 +6804,13 @@
   let scmDirty = false;
 
   /**
-   * The workspace the side views browse: the active tab's work dir.  A
-   * content tab (a file opened from the Explorer, say) has none of its
-   * own and browses the workspace of the chat it was opened from, so
-   * opening a file never flips the tree to another folder.  That is
-   * the owner chat's BROWSE work dir (workDirForTab), not its visibility
-   * scope: a standalone API task may run in a scratch dir while being
-   * shown under the calling workspace, and the Explorer follows the
-   * folder the task really works in.
+   * The workspace the side views browse: the global working directory
+   * (workDirForTab).  Before the daemon has reported one, a content tab
+   * (a file opened from the Explorer, say) browses the folder of the
+   * chat it was opened from, so opening a file never flips the tree.
    */
-  // The folder the user picked with the Explorer's folder picker
-  // (applyPickedWorkDir); '' until they pick one.
-  let pickedWorkDir = '';
-
   function sidebarWorkDir() {
-    // A folder picked with the Explorer's folder picker wins for as
-    // long as it is the workspace (a later change to a different work
-    // dir -- the "Working directory" panel, or the VS Code window's
-    // folder -- ends the override).
-    if (pickedWorkDir && pickedWorkDir === configWorkDir) return pickedWorkDir;
+    if (configWorkDir && !isRootDir(configWorkDir)) return configWorkDir;
     let tab = getTab(activeTabId);
     for (let i = 0; tab && tab.isContentTab && i < tabs.length; i++) {
       const owner = getTab(tab.ownerTabId);
@@ -10132,29 +10119,38 @@
   }
 
   /**
-   * Make *dir* the workspace: the daemon's connection pin (setWorkDir)
-   * and the saved config both follow, and the client re-scopes to the
-   * new workspace right away.
+   * Make *dir* the global working directory (remote webapp: the panel's
+   * Open button and the Explorer's check mark).  The daemon adopts,
+   * persists and broadcasts it (setWorkDir); this client re-scopes
+   * right away rather than waiting for its own broadcast.
    */
   function applyPickedWorkDir(dir) {
-    closeFolderPicker();
-    api.saveConfig({config: {work_dir: dir}});
     api.setWorkDir({workDir: dir});
+    adoptWorkDir(dir);
+    closeWorkDirPanel();
+  }
+
+  /**
+   * Re-scope this client to the global working directory *dir*: the
+   * Explorer, SCM view, history filter and the panel's "Current:" line
+   * follow it, and every tab's next task runs in it (a running task
+   * keeps the folder it started in).  Used for this client's own pick
+   * (applyPickedWorkDir, workDirPicked) and for the daemon's
+   * workDirChanged broadcast of a pick made on another surface.
+   */
+  function adoptWorkDir(dir) {
+    closeFolderPicker();
     if (dir !== configWorkDir) {
       configWorkDir = dir;
       applyWorkspaceScope();
     }
-    // The picked folder is the working directory from now on: the
-    // views browse it even when the active chat had pinned another
-    // folder (sidebarWorkDir), and an idle chat adopts it for its next
-    // task; a running task keeps the folder it started in.
-    pickedWorkDir = dir;
-    const tab = getTab(activeTabId);
-    if (tab && !tab.isContentTab && !tab.isRunning) tab.workDir = dir;
     explorerRoot = '';
     scmWorkDir = '';
     refreshSidebarDataViews(true);
-    closeWorkDirPanel();
+    renderCurrentWorkDir();
+    // The task-info panel's Workdir item falls back to the global
+    // directory while the visible task has no settings of its own.
+    updateMetaTaskDetails(metaShownSettings);
   }
 
   // ---- The "Working directory" panel ("..." menu) ----------------------
@@ -10166,13 +10162,11 @@
   // 'workdir:<seq>') and the directory it is checking.
   let workDirCheckSeq = 0;
   let workDirCheckPath = '';
-  // The tab whose openWorkDir / pickWorkDir request the open panel is
-  // waiting on (VS Code); '' when the panel asked nothing or was closed.
-  // The host's reply names its tab, and only a reply to this request
-  // may close the panel or report into it: the reply to a request made
-  // from a panel the user has since closed still pins its own tab but
-  // leaves a panel reopened for another tab alone.
-  let workDirRequestTabId = '';
+  // Whether the open panel is waiting on an openWorkDir / pickWorkDir
+  // reply from the VS Code host; false once the panel is closed, so a
+  // late reply to a request made from a panel the user has since
+  // closed neither closes nor reports into a reopened one.
+  let workDirRequestPending = false;
 
   function openWorkDirPanel() {
     const panel = document.getElementById('workdir-panel');
@@ -10201,7 +10195,7 @@
     // A check still in flight belongs to the closed panel.
     workDirCheckSeq++;
     workDirCheckPath = '';
-    workDirRequestTabId = '';
+    workDirRequestPending = false;
     const panel = document.getElementById('workdir-panel');
     if (!panel || !panel.classList.contains('open')) return;
     // Focus must not be stranded inside the sheet that just went inert;
@@ -10370,19 +10364,17 @@
   }
 
   /**
-   * Make *dir* the working directory.
+   * Make *dir* the global working directory every task runs in.
    *
-   * In a VS Code webview only the active chat tab changes: the host
-   * checks that *dir* is a folder (openWorkDir -> workDirPicked, or
-   * workDirError) and applyTabWorkDir pins it as the directory the
-   * tab's next task runs in; the window's own folder is left alone.
-   * The request names the tab so a reply that arrives after a tab
-   * switch still lands on the tab that asked.
-   * On the remote webapp the daemon lists *dir* first (listDir with a
+   * In a VS Code webview the host checks that *dir* is a folder and
+   * sends it to the daemon (openWorkDir -> workDirPicked, or
+   * workDirError); the window's own folder is left alone.  On the
+   * remote webapp the daemon lists *dir* first (listDir with a
    * 'workdir:' token): a real folder is adopted through
    * applyPickedWorkDir, anything else is reported (setWorkDirError: in
    * the panel, or as a notification when the Explorer's check mark
-   * asked with the panel closed).
+   * asked with the panel closed).  Either way the daemon persists the
+   * directory and broadcasts workDirChanged to every other surface.
    *
    * @param {string} dir The typed, chosen or previously opened path.
    */
@@ -10397,13 +10389,8 @@
     }
     setWorkDirError('');
     if (!document.body.classList.contains('remote-chat')) {
-      const error = tabWorkDirError(activeTabId);
-      if (error) {
-        setWorkDirError(error);
-        return;
-      }
-      workDirRequestTabId = activeTabId;
-      postToHost({type: 'openWorkDir', path: dir, tabId: activeTabId});
+      workDirRequestPending = true;
+      postToHost({type: 'openWorkDir', path: dir});
       return;
     }
     workDirCheckSeq++;
@@ -10442,58 +10429,20 @@
   }
 
   /**
-   * Why tab *tabId* cannot take a working directory of its own right
-   * now ('' when it can): only an idle chat tab has a "next task".
-   *
-   * @param {string} tabId The tab asked to change.
-   */
-  function tabWorkDirError(tabId) {
-    const tab = getTab(tabId);
-    if (!tab || tab.isContentTab) {
-      return 'Switch to a chat tab to change its working directory.';
-    }
-    if (tab.isRunning) {
-      return (
-        'The running task keeps its working directory; ' +
-        'open a new chat or wait for it to finish.'
-      );
-    }
-    return '';
-  }
-
-  /**
-   * The VS Code host verified *dir* is a folder (workDirPicked): the
-   * next task of the tab that asked runs there.  Nothing else moves --
-   * the window keeps its folder, `configWorkDir` stays the workspace,
-   * `tab.workDir` (what the tab bar scopes by) is untouched
-   * -- so only the tab's pin and the views browsing it change.
-   *
-   * The panel is only closed (or told why the pin was refused) when it
-   * is still waiting on this very request: the user may have closed it
-   * and reopened it for another tab while the host's folder dialog was
-   * up, and that tab's panel, with whatever was typed into it, stays.
+   * The VS Code host verified *dir* is a folder and sent it to the
+   * daemon (workDirPicked): it is the global working directory now, so
+   * this webview re-scopes to it.  The panel is only closed when it is
+   * still waiting on this request: the user may have closed it and
+   * reopened it while the host's folder dialog was up, and that panel,
+   * with whatever was typed into it, stays.
    *
    * @param {string} dir The folder in the host's canonical spelling.
-   * @param {string} tabId The tab that asked (the active one when the
-   *   request was made; it may no longer be active).
    */
-  function applyTabWorkDir(dir, tabId) {
+  function applyHostPickedWorkDir(dir) {
     dir = String(dir || '').trim();
     if (!dir || isRootDir(dir)) return;
-    if (!getTab(tabId)) return;
-    const ownsPanel = tabId === workDirRequestTabId;
-    const error = tabWorkDirError(tabId);
-    if (error) {
-      if (ownsPanel) setWorkDirError(error);
-      return;
-    }
-    getTab(tabId).pinnedWorkDir = dir;
-    if (tabId === activeTabId) {
-      explorerRoot = '';
-      scmWorkDir = '';
-      refreshSidebarDataViews(true);
-    }
-    if (ownsPanel) closeWorkDirPanel();
+    adoptWorkDir(dir);
+    if (workDirRequestPending) closeWorkDirPanel();
   }
 
   /** Wire the "Working directory" menu item and its panel. */
@@ -10534,18 +10483,13 @@
         // The in-page folder browser lists folders through the daemon's
         // listDir, which only the remote webapp's connection relays; a
         // VS Code window uses the editor's own folder dialog (the pick
-        // comes back as workDirPicked, for the active tab alone).
+        // comes back as workDirPicked).
         if (document.body.classList.contains('remote-chat')) {
           openFolderPicker('workdir');
           return;
         }
-        const error = tabWorkDirError(activeTabId);
-        if (error) {
-          setWorkDirError(error);
-          return;
-        }
-        workDirRequestTabId = activeTabId;
-        postToHost({type: 'pickWorkDir', tabId: activeTabId});
+        workDirRequestPending = true;
+        postToHost({type: 'pickWorkDir'});
       });
     }
     if (list) {
@@ -15986,18 +15930,22 @@
         break;
       case 'workDirError':
         // The VS Code host found no folder at the path asked for by
-        // openWorkDir / pickWorkDir.  It is reported into the panel
-        // only while the panel still waits on that tab's request (a
-        // panel reopened for another tab is not told); a reply from an
-        // older host build names no tab and is shown as before.
-        if (ev.tabId && String(ev.tabId) !== workDirRequestTabId) break;
-        setWorkDirError(String(ev.text || ''));
+        // openWorkDir / pickWorkDir.  Reported into the panel only
+        // while it still waits on that request.
+        if (workDirRequestPending) setWorkDirError(String(ev.text || ''));
         break;
       case 'workDirPicked':
-        // The VS Code host verified the folder: it becomes the working
-        // directory of the chat that asked (the window's folder is
-        // untouched).
-        applyTabWorkDir(ev.path, String(ev.tabId || activeTabId));
+        // The VS Code host verified the folder and made it the global
+        // working directory (the window's folder is untouched).
+        applyHostPickedWorkDir(ev.path);
+        break;
+      case 'workDirChanged':
+        // The daemon's global working directory changed (a pick on this
+        // or any other surface, or a settings save): every client
+        // re-scopes so all surfaces show the same directory.
+        if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
+          adoptWorkDir(ev.workDir);
+        }
         break;
       case 'myModelsData':
         myModels = Array.isArray(ev.models) ? ev.models : [];
@@ -16723,17 +16671,6 @@
         // A snapshot without a well-formed tab list is junk, not an
         // empty registry: ignore it rather than close every tab.
         if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
-        break;
-
-      case 'workspaceWorkDir':
-        // The extension host reports the window's workspace folder
-        // change directly (its daemon `setWorkDir` produces no
-        // `configData` reply), so the history filter and the Explorer
-        // views re-scope immediately.
-        if (typeof ev.workDir === 'string' && ev.workDir !== configWorkDir) {
-          configWorkDir = ev.workDir;
-          applyWorkspaceScope();
-        }
         break;
 
       case 'triggerStop': {
@@ -20768,13 +20705,10 @@
     if (webToolsToggleBtn && webToolsStateKnown) {
       msg.webTools = !!webToolsToggleBtn.checked;
     }
-    const runDir = curTab ? curTab.pinnedWorkDir || curTab.workDir : '';
-    if (runDir) msg.workDir = runDir;
+    // No workDir: the daemon runs every task in its one global working
+    // directory (the "Working directory" panel's pick on any surface).
     // The run's system prompt names the file open in the editor.
     Object.assign(msg, editorContext(false));
-    // The pick was for this task; from here on the run's own work dir
-    // (broadcast with its first event) is what the tab carries.
-    if (curTab) curTab.pinnedWorkDir = '';
     api.send(msg);
     t0 = Date.now();
     endTs = 0;
@@ -24085,34 +24019,17 @@
       if (!node || settingsEditedFields.has(node.id)) return;
       node.checked = checked;
     };
-    // The working directory is not a settings field: in VS Code it is
-    // the workspace folder open in the window, on the remote web app it
-    // is chosen in the "Working directory" panel.  The config reply
-    // still decides which history rows and shared tabs this client
-    // shows.
+    // The working directory is not a settings field: it is the daemon's
+    // one global value (every task on every surface runs in it), chosen
+    // in the "Working directory" panel or the remote Explorer.  The
+    // config reply decides which history rows this client shows and
+    // what the Explorer browses.
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
-    if (document.body.classList.contains('remote-chat')) {
-      // A browser tab that already pinned its own working directory
-      // (the WS shim writes sessionStorage `sorcar-work-dir` when the
-      // page posts setWorkDir) keeps it, so a second tab pointed
-      // elsewhere does not drag this one along; a fresh, unpinned tab
-      // adopts the stored value as its own.
-      let pinned = '';
-      try {
-        // eslint-disable-next-line no-undef -- sessionStorage is a browser global
-        pinned = sessionStorage.getItem('sorcar-work-dir') || '';
-      } catch (_e) {}
-      if (pinned) {
-        configWorkDir = pinned;
-      } else if (cfg.work_dir) {
-        api.setWorkDir({workDir: cfg.work_dir});
-      }
+    if (prevConfigWorkDir !== configWorkDir) {
+      applyWorkspaceScope();
+      renderCurrentWorkDir();
     }
-    // Compared AFTER the pinned override above so the web app's
-    // session pin — not the daemon-reported work_dir it supersedes —
-    // decides which history rows and shared tabs this client shows.
-    if (prevConfigWorkDir !== configWorkDir) applyWorkspaceScope();
     // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
     // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
     // reply from it, so an effective value is always in `configData`.

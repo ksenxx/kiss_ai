@@ -444,16 +444,16 @@ export type FromWebviewMessage =
   | {type: 'closePanel'; retire?: boolean}
   // The settings UI's editor-tabs toggle (both modes).
   | {type: 'setEditorTabsMode'; enabled: boolean}
-  // The "Working directory" panel ("..." menu): make `path` the working
-  // directory of chat tab `tabId`'s next task (the active tab when the
-  // panel asked).  The host only checks the folder exists (it never
-  // opens it as the window's workspace) and answers `workDirPicked`
-  // with its real path and the same `tabId`, or `workDirError` when it
-  // is not a directory.
-  | {type: 'openWorkDir'; path: string; tabId: string}
+  // The "Working directory" panel ("..." menu): make `path` the global
+  // working directory every task (on every surface) runs in.  The host
+  // checks the folder exists (it never opens it as the window's
+  // workspace), forwards `setWorkDir` to the daemon and answers
+  // `workDirPicked` with its real path, or `workDirError` when it is
+  // not a directory.
+  | {type: 'openWorkDir'; path: string}
   // The panel's folder button: the editor's own folder dialog, then
   // the same check.
-  | {type: 'pickWorkDir'; tabId: string}
+  | {type: 'pickWorkDir'}
   // The task-update poll of the visible tab's RUNNING task (metainfo
   // block in main.js): forwarded whole to the daemon, which answers
   // with a direct `taskUpdate` reply. `refresh` makes the daemon ask
@@ -1063,17 +1063,18 @@ type ToWebviewMessageBody =
       snoozed?: boolean;
       pendingIdle?: boolean;
     }
-  // The window's workspace folder changed; the webview re-scopes its
-  // workspace-filtered surfaces (tab bar, history) to this directory.
-  | {type: 'workspaceWorkDir'; workDir: string}
+  // Broadcast by the daemon to every client when the global working
+  // directory changes (a pick in any surface's "Working directory"
+  // panel, the remote Explorer's check mark, or a settings save); the
+  // webview re-scopes its Explorer, history and panel to `workDir`.
+  | {type: 'workDirChanged'; workDir: string}
   // The "Working directory" panel's openWorkDir / pickWorkDir named
-  // something that is not a folder; shown inside the panel of the chat
-  // tab `tabId` that asked (absent only in replies from older hosts).
-  | {type: 'workDirError'; text: string; tabId?: string}
+  // something that is not a folder; shown inside the panel.
+  | {type: 'workDirError'; text: string}
   // The folder asked for by openWorkDir / pickWorkDir exists: `path`
-  // (symlinks and `..` resolved) becomes the working directory of chat
-  // tab `tabId`'s next task; the window's folder is untouched.
-  | {type: 'workDirPicked'; path: string; tabId: string}
+  // (symlinks and `..` resolved) is now the global working directory;
+  // the window's folder is untouched.
+  | {type: 'workDirPicked'; path: string}
   | {
       // Canonical shared-tab snapshot broadcast by the daemon after
       // every tab-registry mutation; clients reconcile against it.
@@ -1236,6 +1237,9 @@ export interface AgentCommand {
   prompt?: string;
   model?: string;
   workDir?: string;
+  // setWorkDir only: adopt `workDir` solely while no global working
+  // directory is persisted yet (the VS Code window's connect-time seed).
+  ifUnset?: boolean;
   activeFile?: string;
   attachments?: Attachment[];
   query?: string;

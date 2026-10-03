@@ -4857,17 +4857,6 @@ _WS_SHIM_JS = r"""
   window.acquireVsCodeApi = function() {
     return {
       postMessage: function(msg) {
-        if (msg && msg.type === 'setWorkDir') {
-          // Pin this webapp instance's work_dir.  sessionStorage is
-          // scoped per browser tab, so each tab (= one webapp
-          // instance) keeps its own value across reloads, and the
-          // auth_ok handler below replays it on every reconnect —
-          // mirroring how each VS Code window re-announces its
-          // workspace folder on every daemon (re)connect.
-          try {
-            sessionStorage.setItem('sorcar-work-dir', msg.workDir || '');
-          } catch(e) {}
-        }
         var data = JSON.stringify(msg);
         if (_ws && _ws.readyState === WebSocket.OPEN && _authenticated) {
           _ws.send(data);
@@ -5048,18 +5037,6 @@ _WS_SHIM_JS = r"""
         _stopOverlayTick();
         _setOverlayAction(null, null);
         _hideAuthModal();
-        // Re-establish this instance's pinned work_dir BEFORE flushing
-        // any queued commands: the server stamps each connection's
-        // work_dir onto later commands, so the pin must arrive first.
-        // Every reconnect creates a fresh server-side connection state
-        // with an empty work_dir; without this replay a reload or a
-        // dropped WebSocket would silently fall back to the
-        // daemon-global work_dir (possibly another instance's folder).
-        var _wd = '';
-        try { _wd = sessionStorage.getItem('sorcar-work-dir') || ''; } catch(e) {}
-        if (_wd) {
-          _ws.send(JSON.stringify({type: 'setWorkDir', workDir: _wd}));
-        }
         // Everything the page posted while the connection was down
         // (a settings save, a model change, a closed tab, ...) goes
         // out now, on the new connection, in the order it was posted.
@@ -5917,9 +5894,7 @@ class RemoteAccessServer:
         is_local = auth == "local"
 
         self._printer.add_client(websocket, local=is_local)
-        conn_state: dict[str, Any] = {
-            "work_dir": "", "conn_id": uuid.uuid4().hex,
-        }
+        conn_state: dict[str, Any] = {"conn_id": uuid.uuid4().hex}
         self._printer.bind_conn(conn_state["conn_id"], websocket)
         try:
             async for message in websocket:
@@ -5983,21 +5958,20 @@ class RemoteAccessServer:
         transport state into a :class:`kiss.server.sorcar.ApiContext`
         and calls :meth:`kiss.server.sorcar.ServerApi.dispatch`, which
         validates the command against the API catalog, applies the
-        per-connection stamping (``connId``, per-window ``workDir``,
-        tab registration — see the invariant documentation on
-        :class:`ServerApi`), and invokes the API method the command's
-        catalog entry names, with this server as the backend.
+        per-connection stamping (``connId``, tab registration — see
+        the invariant documentation on :class:`ServerApi`), and
+        invokes the API method the command's catalog entry names, with
+        this server as the backend.
 
         Args:
             cmd: The parsed JSON command dictionary.
             endpoint: The client's :class:`ServerConnection`, used
                 for direct replies.
             conn_state: Per-connection mutable state holding the
-                connection's own ``work_dir`` and unique ``conn_id``.
-                Each VS Code window owns exactly one connection, and
-                the API layer's stamping of these fields is what
-                guarantees the per-window work_dir and autocomplete
-                isolation invariants.
+                connection's unique ``conn_id``.  Each VS Code window
+                owns exactly one connection, and the API layer's
+                stamping of ``connId`` is what guarantees the
+                per-window autocomplete isolation invariant.
             is_local: Whether the connection authenticated with the
                 local token (see :meth:`_authenticate_ws`).
         """
@@ -6918,11 +6892,10 @@ class RemoteAccessServer:
     def _cmd_work_dir(self, cmd: dict[str, Any]) -> str:
         """Return the command's ``workDir``, else the daemon work dir.
 
-        The per-connection ``workDir`` stamped by
-        :meth:`kiss.server.sorcar.ServerApi.dispatch` wins; a missing,
-        empty or non-string value falls back to the backend's current
-        work dir and then this server's own.  Shared by the file
-        handlers so relative paths resolve identically everywhere.
+        An explicit ``workDir`` wins; a missing, empty or non-string
+        value falls back to the backend's global working directory and
+        then this server's own.  Shared by the file handlers so
+        relative paths resolve identically everywhere.
         """
         return (
             self._cmd_str(cmd, "workDir")
@@ -7516,12 +7489,8 @@ class RemoteAccessServer:
         # The reply's workDir is a correlation key: main.js stamps each
         # candidate with the workDir it sent (data-path-wd) and only
         # applies a reply whose workDir matches.  Echo what the CLIENT
-        # sent — ServerApi.dispatch keeps it in ``clientWorkDir`` when it
-        # stamps the connection's pin into ``workDir`` — or a tab that
-        # sent "" would never see its links promoted.
-        raw_work_dir = self._cmd_str(
-            cmd, "clientWorkDir" if "clientWorkDir" in cmd else "workDir",
-        )
+        # sent, or a tab that sent "" would never see its links promoted.
+        raw_work_dir = self._cmd_str(cmd, "workDir")
         work_dir = self._cmd_work_dir(cmd)
         tab_id = self._cmd_str(cmd, "tabId")
 

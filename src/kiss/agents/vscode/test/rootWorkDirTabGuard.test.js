@@ -12,7 +12,13 @@
 // webview `work_dir: '/'` — via configData or a task_events replay —
 // which used to root drag-and-drop resolution and every daemon-bound
 // command at the whole disk.  `workDirForTab()` and the two replay
-// adoption sites now ignore roots (isRootDir in media/main.js).
+// adoption sites ignore roots (isRootDir in media/main.js).
+//
+// workDirForTab() resolves the GLOBAL working directory (configData
+// work_dir) first and a tab's own folder (learned from a replay) only
+// while there is no usable global one, so the replay guard is observed
+// with an empty global value, and each case also checks that a real
+// global value wins over whatever the replay recorded.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -79,67 +85,115 @@ function lastMsg(posted, type) {
   return null;
 }
 
-// A root config work dir (a pre-guard daemon whose fallback had
-// degenerated to '/') must not be stamped on tab-scoped commands.
+// The work dir the active tab stamps on a drop's resolveDroppedPaths.
+function droppedWorkDir(win, posted, uriList) {
+  const before = posted.length;
+  drop(win, uriList);
+  const cmd = lastMsg(posted.slice(before), 'resolveDroppedPaths');
+  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  return cmd.workDir;
+}
+
+function setConfigWorkDir(win, workDir) {
+  send(win, {type: 'configData', config: {work_dir: workDir}});
+}
+
+function replay(win, workDir, tabFields) {
+  send(win, {
+    type: 'task_events',
+    ...(tabFields || {}),
+    task: 'replayed task',
+    events: [],
+    extra: JSON.stringify({work_dir: workDir}),
+  });
+}
+
+function activateTab(win, tabId) {
+  const el = win.document.querySelector(`.chat-tab[data-tab-id="${tabId}"]`);
+  assert.ok(el, `the ${tabId} tab must be rendered`);
+  el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+}
+
+const BG_TABS = [
+  {tabId: 'tab-a', chatId: 'chat-a', title: 'a', workDir: ''},
+  {tabId: 'tab-bg', chatId: 'chat-bg', title: 'bg', workDir: ''},
+];
+const BG_FIELDS = {tabId: 'tab-bg', chat_id: 'chat-bg'};
+
+// A root global work dir (a pre-guard daemon whose fallback had
+// degenerated to '/') must not be stamped on tab-scoped commands ...
 function testRootConfigWorkDirNotStamped() {
   const {win, posted} = makeWebview();
-  send(win, {type: 'configData', config: {work_dir: '/'}});
-  drop(win, 'file:///x/y/src/a.ts\n');
-  const cmd = lastMsg(posted, 'resolveDroppedPaths');
-  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  setConfigWorkDir(win, '/');
   assert.strictEqual(
-    cmd.workDir,
+    droppedWorkDir(win, posted, 'file:///x/y/src/a.ts\n'),
     '',
-    'a root config work dir must be treated as no work dir',
+    'a root global work dir must be treated as no work dir',
   );
   win.close();
   console.log('ok - root config work dir is not stamped on commands');
 }
 
+// ... and, being treated as none, it leaves the tab's own folder as the
+// fallback instead of hiding it.
+function testRootConfigWorkDirFallsThroughToTabFolder() {
+  const {win, posted} = makeWebview();
+  setConfigWorkDir(win, '/');
+  replay(win, '/proj/repo');
+  assert.strictEqual(
+    droppedWorkDir(win, posted, 'file:///proj/repo/src/a.ts\n'),
+    '/proj/repo',
+    'a root global work dir must fall through to the tab folder',
+  );
+  win.close();
+  console.log('ok - root config work dir falls through to the tab folder');
+}
+
 // A replayed task that truthfully recorded work_dir '/' (run before
-// the daemon guard existed) must not re-poison the live tab.
+// the daemon guard existed) must not poison the live tab: the folder
+// the tab already learned survives (workDirForTab() would hide a stored
+// root on its own, so a surviving real folder is what proves the replay
+// never stored it), and a real global one is untouched by the replay.
 function testReplayRootWorkDirNotAdopted() {
   const {win, posted} = makeWebview();
-  send(win, {type: 'configData', config: {work_dir: '/x/y'}});
-  send(win, {
-    type: 'task_events',
-    task: 'old poisoned task',
-    events: [],
-    extra: JSON.stringify({work_dir: '/'}),
-  });
-  drop(win, 'file:///x/y/src/a.ts\n');
-  const cmd = lastMsg(posted, 'resolveDroppedPaths');
-  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  setConfigWorkDir(win, '');
+  replay(win, '/proj/repo');
+  replay(win, '/');
   assert.strictEqual(
-    cmd.workDir,
+    droppedWorkDir(win, posted, 'file:///proj/repo/src/a.ts\n'),
+    '/proj/repo',
+    'a replayed root work_dir must not displace the tab folder',
+  );
+  setConfigWorkDir(win, '/x/y');
+  assert.strictEqual(
+    droppedWorkDir(win, posted, 'file:///x/y/src/a.ts\n'),
     '/x/y',
-    'a replayed root work_dir must not displace the real fallback',
+    'the global work dir is stamped once the daemon reports one',
   );
   win.close();
   console.log('ok - replayed root work_dir is not adopted by the tab');
 }
 
-// Control: a real replayed work_dir must still repin the tab (the
-// normal heal path for tabs that predate per-tab pinning).
-function testReplayRealWorkDirStillAdopted() {
+// Control: a real replayed work_dir is still learned as the tab's own
+// folder (the fallback while no global directory exists), and the
+// global directory wins over it as soon as the daemon reports one.
+function testReplayRealWorkDirIsTheFallbackOnly() {
   const {win, posted} = makeWebview();
-  send(win, {type: 'configData', config: {work_dir: '/x/y'}});
-  send(win, {
-    type: 'task_events',
-    task: 'healthy task',
-    events: [],
-    extra: JSON.stringify({work_dir: '/proj/repo'}),
-  });
-  drop(win, 'file:///proj/repo/src/a.ts\n');
-  const cmd = lastMsg(posted, 'resolveDroppedPaths');
-  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  setConfigWorkDir(win, '');
+  replay(win, '/proj/repo');
   assert.strictEqual(
-    cmd.workDir,
+    droppedWorkDir(win, posted, 'file:///proj/repo/src/a.ts\n'),
     '/proj/repo',
-    'a real replayed work_dir must still repin the tab',
+    'a real replayed work_dir is the fallback while no global one exists',
+  );
+  setConfigWorkDir(win, '/x/y');
+  assert.strictEqual(
+    droppedWorkDir(win, posted, 'file:///x/y/src/a.ts\n'),
+    '/x/y',
+    'the global work dir wins over the replayed tab folder',
   );
   win.close();
-  console.log('ok - real replayed work_dir still repins the tab');
+  console.log('ok - real replayed work_dir is only the fallback');
 }
 
 // The same replay poisoning through the BACKGROUND-tab branch of
@@ -147,79 +201,53 @@ function testReplayRealWorkDirStillAdopted() {
 // one): the root must not stick to the hidden tab either.
 function testBgReplayRootWorkDirNotAdopted() {
   const {win, posted} = makeWebview();
-  send(win, {type: 'configData', config: {work_dir: '/x/y'}});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 'tab-a', chatId: 'chat-a', title: 'a', workDir: ''},
-      {tabId: 'tab-bg', chatId: 'chat-bg', title: 'bg', workDir: ''},
-    ],
-  });
-  send(win, {
-    type: 'task_events',
-    tabId: 'tab-bg',
-    chat_id: 'chat-bg',
-    task: 'old poisoned bg task',
-    events: [],
-    extra: JSON.stringify({work_dir: '/'}),
-  });
-  const bgEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="tab-bg"]',
-  );
-  assert.ok(bgEl, 'the background tab must be rendered');
-  bgEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  drop(win, 'file:///x/y/src/a.ts\n');
-  const cmd = lastMsg(posted, 'resolveDroppedPaths');
-  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  setConfigWorkDir(win, '');
+  send(win, {type: 'tabs_state', tabs: BG_TABS});
+  replay(win, '/proj/bg', BG_FIELDS);
+  replay(win, '/', BG_FIELDS);
+  activateTab(win, 'tab-bg');
   assert.strictEqual(
-    cmd.workDir,
+    droppedWorkDir(win, posted, 'file:///proj/bg/src/a.ts\n'),
+    '/proj/bg',
+    'a bg-replayed root work_dir must not displace the hidden tab folder',
+  );
+  setConfigWorkDir(win, '/x/y');
+  assert.strictEqual(
+    droppedWorkDir(win, posted, 'file:///x/y/src/a.ts\n'),
     '/x/y',
-    'a bg-replayed root work_dir must not displace the real fallback',
+    'the global work dir is stamped once the daemon reports one',
   );
   win.close();
   console.log('ok - bg-replayed root work_dir is not adopted by the tab');
 }
 
-// Control for the background branch: a real replayed work_dir still
-// repins the hidden tab.
-function testBgReplayRealWorkDirStillAdopted() {
+// Control for the background branch: a real replayed work_dir is still
+// learned as the hidden tab's folder, and the global directory wins.
+function testBgReplayRealWorkDirIsTheFallbackOnly() {
   const {win, posted} = makeWebview();
-  send(win, {type: 'configData', config: {work_dir: '/x/y'}});
-  send(win, {
-    type: 'tabs_state',
-    tabs: [
-      {tabId: 'tab-a', chatId: 'chat-a', title: 'a', workDir: ''},
-      {tabId: 'tab-bg', chatId: 'chat-bg', title: 'bg', workDir: ''},
-    ],
-  });
-  send(win, {
-    type: 'task_events',
-    tabId: 'tab-bg',
-    chat_id: 'chat-bg',
-    task: 'healthy bg task',
-    events: [],
-    extra: JSON.stringify({work_dir: '/proj/bg'}),
-  });
-  const bgEl = win.document.querySelector(
-    '.chat-tab[data-tab-id="tab-bg"]',
-  );
-  assert.ok(bgEl, 'the background tab must be rendered');
-  bgEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  drop(win, 'file:///proj/bg/src/a.ts\n');
-  const cmd = lastMsg(posted, 'resolveDroppedPaths');
-  assert.ok(cmd, 'drop must send resolveDroppedPaths');
+  setConfigWorkDir(win, '');
+  send(win, {type: 'tabs_state', tabs: BG_TABS});
+  replay(win, '/proj/bg', BG_FIELDS);
+  activateTab(win, 'tab-bg');
   assert.strictEqual(
-    cmd.workDir,
+    droppedWorkDir(win, posted, 'file:///proj/bg/src/a.ts\n'),
     '/proj/bg',
-    'a real bg-replayed work_dir must still repin the tab',
+    'a real bg-replayed work_dir is the fallback while no global one exists',
+  );
+  setConfigWorkDir(win, '/x/y');
+  assert.strictEqual(
+    droppedWorkDir(win, posted, 'file:///x/y/src/a.ts\n'),
+    '/x/y',
+    'the global work dir wins over the bg-replayed tab folder',
   );
   win.close();
-  console.log('ok - real bg-replayed work_dir still repins the tab');
+  console.log('ok - real bg-replayed work_dir is only the fallback');
 }
 
 testRootConfigWorkDirNotStamped();
+testRootConfigWorkDirFallsThroughToTabFolder();
 testReplayRootWorkDirNotAdopted();
-testReplayRealWorkDirStillAdopted();
+testReplayRealWorkDirIsTheFallbackOnly();
 testBgReplayRootWorkDirNotAdopted();
-testBgReplayRealWorkDirStillAdopted();
+testBgReplayRealWorkDirIsTheFallbackOnly();
 console.log('all rootWorkDirTabGuard tests passed');

@@ -266,14 +266,14 @@ export class AgentClient extends EventEmitter {
    * Set the command written first on every (re)connect, ahead of any
    * queued frame; `null` clears it.
    *
-   * The daemon pins a connection's workspace folder from `setWorkDir`
-   * and stamps that pin on every later command that carries no
-   * `workDir`, so the pin must reach a fresh connection before the
-   * commands queued while it was down (a prompt submitted, a file link
-   * clicked) — otherwise they would resolve against the daemon-global
-   * folder, another window's.  The preamble is written on this
-   * connection and on every reconnect; a change takes effect from the
-   * next connect (send the new command yourself for the current one).
+   * The sidebar leads with `setWorkDir {.., ifUnset: true}`: on a fresh
+   * install it seeds the daemon's global working directory with the
+   * window's folder before the commands queued while the daemon was
+   * down (a prompt submitted, a file link clicked) resolve against it;
+   * once a directory is persisted the daemon ignores the seed.  The
+   * preamble is written on this connection and on every reconnect; a
+   * change takes effect from the next connect (send the new command
+   * yourself for the current one).
    *
    * @param cmd The command to lead every connection with.
    */

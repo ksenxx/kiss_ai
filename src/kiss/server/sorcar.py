@@ -24,8 +24,7 @@ and remote webapp) and ``src/SorcarApi.ts`` (VS Code extension host)
 — whose methods map 1:1 onto the catalog's command names; the remote
 webapp's bootstrap shim (``_WS_SHIM_JS`` in
 :mod:`kiss.server.web_server`) additionally sends the ``auth``
-handshake and the reconnect ``setWorkDir`` re-pin, both catalog
-commands.
+handshake, itself a catalog command.
 
 **The client API** — :func:`run` lets any process launch a task on an
 already-running daemon and block until it finishes::
@@ -301,7 +300,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("browserInput", required=("tab_id", "event")),
     ApiCommand("browserViewport", required=("tab_id",)),
     ApiCommand("setWorkDir", required=("workDir",)),
-    ApiCommand("recordWorkDir", required=("path",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
@@ -403,17 +401,6 @@ def validate_command(cmd: Any) -> str | None:
     return None
 
 
-def _usable_work_dir(cmd: dict[str, Any]) -> bool:
-    """Return whether *cmd* carries an explicit, non-empty string ``workDir``.
-
-    Anything else — missing, ``""``, or a non-string such as ``123`` —
-    counts as absent, so :meth:`ServerApi.dispatch` stamps the
-    connection's pinned work dir over it.
-    """
-    work_dir = cmd.get("workDir")
-    return isinstance(work_dir, str) and bool(work_dir)
-
-
 def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     """Translate a webview wire command into a backend command.
 
@@ -474,8 +461,7 @@ class ApiContext:
             ``websockets`` ``ServerConnection``.  Used for direct
             replies.
         conn_state: Per-connection mutable state holding at least the
-            connection's ``work_dir`` (announced via ``setWorkDir``)
-            and unique ``conn_id``.
+            connection's unique ``conn_id``.
         is_local: ``True`` when the connection authenticated with the
             daemon's local token from a loopback address (a VS Code
             window or a local Python client), ``False`` for a remote
@@ -696,20 +682,14 @@ class ServerApi:
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
            autocomplete state.
-        6. Maintains the per-window work_dir invariant: a
-           ``setWorkDir`` updates the connection's ``work_dir``; every
-           other command lacking a usable ``workDir`` (missing, empty
-           or not a string) is stamped with it, so two VS Code windows
-           sharing the daemon can never observe each other's folder
-           through the daemon-global fallback.  A ``workDir`` naming a
-           filesystem root (``/``, ``C:\\`` — see
-           :func:`kiss.core.utils.is_root_dir`) is blanked first and
-           treated exactly like an absent one, so a client whose cwd
-           degenerated to the root can never pin, persist or execute
-           against the whole disk.  When the pin is stamped, the value
-           the client sent is kept as ``clientWorkDir`` so a reply that
-           echoes ``workDir`` as a correlation key (``pathsExist``)
-           echoes what the client will recognise.
+        6. Blanks a ``workDir`` naming a filesystem root (``/``,
+           ``C:\\`` — see :func:`kiss.core.utils.is_root_dir`) so it is
+           treated exactly like an absent one: a client whose cwd
+           degenerated to the root can never make the daemon's single
+           global working directory the whole disk, nor run a task
+           there.  A command without a ``workDir`` resolves to that
+           global directory (``config.json`` ``work_dir``, set from any
+           surface's "Working directory" panel via ``setWorkDir``).
         7. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -748,25 +728,11 @@ class ServerApi:
             # Dock-launched VS Code window with no folder open) or from
             # a tab whose persisted registry entry was poisoned by one.
             # Blank it HERE — the one chokepoint every transport
-            # shares — so a root can neither pin the connection, nor
-            # poison the daemon-wide fallback via ``setWorkDir``, nor
-            # root a task or the @-mention file scan at the whole
-            # disk.  The command then falls back to the connection pin
-            # (stamped below) or the daemon's configured folder.
+            # shares — so a root can neither become the global working
+            # directory via ``setWorkDir`` nor root a task or the
+            # @-mention file scan at the whole disk.  The command then
+            # falls back to the daemon's configured folder.
             cmd["workDir"] = ""
-        if name == "setWorkDir":
-            new_wd = cmd.get("workDir", "")
-            if isinstance(new_wd, str) and new_wd:
-                ctx.conn_state["work_dir"] = new_wd
-        elif ctx.conn_state["work_dir"] and not _usable_work_dir(cmd):
-            # A truthy non-string ``workDir`` (``123``, ``["x"]``) is
-            # as absent as a missing one: left in place it would be
-            # blanked by the handler and fall back to the daemon-global
-            # folder — another window's — instead of this window's pin.
-            # The client's own value survives as ``clientWorkDir`` for
-            # replies that echo it as a correlation key (``pathsExist``).
-            cmd["clientWorkDir"] = raw_wd if isinstance(raw_wd, str) else ""
-            cmd["workDir"] = ctx.conn_state["work_dir"]
         await getattr(self, handler)(cmd, ctx)
 
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
