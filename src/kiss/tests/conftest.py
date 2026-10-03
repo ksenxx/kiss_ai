@@ -163,6 +163,20 @@ os.environ["KISS_HOME"] = _test_kiss_home
 # session opts out the way a user does; the tips tests that need the
 # auto-open point KISS_HOME at a home of their own.
 Path(_test_kiss_home, "TIPS_DISABLED").write_text("test session opt-out\n")
+# The daemon polls PyPI at startup and raises a sticky "update available"
+# toast over the top-right of every chat page as soon as a release newer
+# than this checkout is published, so Playwright clicks there failed
+# deterministically whenever the live index was ahead (2026-09-23,
+# 2026-10-02).  The session snoozes it the way "Remind me later" does:
+# ``web_server._is_update_snoozed`` treats an unparseable
+# ``snoozedLatest`` as covering every release until ``snoozeUntilMs``.
+# The passive settings-button badge still appears, so tests that wait
+# for ``#cfg-update-btn.has-update`` keep their marker.  The snooze
+# tests point KISS_HOME at a home of their own.
+Path(_test_kiss_home, ".update-check.json").write_text(
+    f'{{"snoozeUntilMs": {int(time.time() + 10 * 365 * 24 * 3600) * 1000},'
+    ' "snoozedLatest": ""}\n'
+)
 _th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
 _th._DB_PATH = _th._KISS_DIR / "sorcar.db"
