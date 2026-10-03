@@ -37,6 +37,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     list_commands as list_sea_commands,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 
 def _kiss_home_is_default() -> bool:
-    """Return True when this process operates on the default ``~/.kiss``.
+    """Return True when this process operates on the brand's default home.
 
     ``KISS_HOME`` redirects all KISS state (config.json, history.db) to a
     private directory — the test suite (``src/kiss/tests/conftest.py``)
@@ -69,7 +70,7 @@ def _kiss_home_is_default() -> bool:
     if not custom:
         return True
     try:
-        return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
+        return Path(custom).resolve() == (Path.home() / HOME_DIR).resolve()
     except OSError:
         return False
 

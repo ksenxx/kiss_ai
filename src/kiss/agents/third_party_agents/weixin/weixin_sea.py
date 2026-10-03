@@ -36,7 +36,6 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -55,7 +54,9 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ _DEFAULT_CALLBACK_PORT = "18085"
 _DEFAULT_API_BASE = "https://api.weixin.qq.com"
 _MAX_BODY_BYTES = 1024 * 1024
 
-_WEIXIN_DIR = Path.home() / ".kiss" / "third_party_agents" / "weixin"
+_WEIXIN_DIR = kiss_home() / "third_party_agents" / "weixin"
 _config = ChannelConfig(_WEIXIN_DIR, ("appid", "appsecret"))
 
 
@@ -71,7 +72,8 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/weixin help``."""
     return (
         "Sends customer-service messages from a WeChat Official Account (appid and appsecret "
-        "in ~/.kiss/third_party_agents/weixin/config.json) and receives inbound messages on an "
+        f"in ~/{HOME_DIR}/third_party_agents/weixin/config.json) and receives "
+        "inbound messages on an "
         "embedded callback server; use it with `run_agent(agent=\"weixin\", task=...)` or the "
         "`kiss-weixin -t \"<task>\"` CLI (`kiss-weixin --channel <openid>` polls for new "
         "messages and answers them)."

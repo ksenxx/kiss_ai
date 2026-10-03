@@ -1797,6 +1797,10 @@ def _get_machine_topic() -> str:
         stored = ""
     if stored:
         return stored
+    # Only the literal stock ``~/.kiss`` keeps the historical unsalted topic
+    # (phones subscribed before this code existed); any other home — a
+    # custom KISS_HOME or a white-label brand's directory — is salted with
+    # its path, so two installs on one machine never share a topic.
     default_home = Path.home() / ".kiss"
     if kiss_home_path.expanduser().resolve() == default_home.resolve():
         identity = f"{platform.node()}:{uuid.getnode()}"
@@ -6366,6 +6370,14 @@ class RemoteAccessServer:
         # fails with WinError 2 (reported through the OSError path below
         # when no bash is installed at all).
         bash = find_bash() or "bash"
+        # Pin KISS_HOME to the home THIS daemon resolved (the brand's
+        # default unless the environment overrides it), as the extension's
+        # ``runUpdate()`` does: install.sh runs the post-install hooks of,
+        # copies MODEL_INFO.json into and writes the reload marker under
+        # $KISS_HOME, and defaults to the stock ``~/.kiss`` otherwise —
+        # which a white-label brand's daemon never reads.
+        env = dict(os.environ)
+        env["KISS_HOME"] = str(_kiss_home_dir())
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
@@ -6385,12 +6397,10 @@ class RemoteAccessServer:
                 # ``--non-interactive``.
                 argv = [bash, str(bootstrap)]
                 cwd = str(script.parent)
-                env = dict(os.environ)
                 env["KISS_NONINTERACTIVE"] = "1"
             else:
                 argv = [bash, str(script), "--non-interactive"]
                 cwd = str(script.parent)
-                env = None
         else:
             argv = [
                 bash, "-c",
@@ -6398,7 +6408,6 @@ class RemoteAccessServer:
                 'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
             ]
             cwd = str(Path.home())
-            env = dict(os.environ)
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"
         try:

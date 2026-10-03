@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -45,8 +44,9 @@ from kiss.agents.third_party_agents._device_auth import (
     consent_required,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
-_TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
+_TWITCH_DIR = kiss_home() / "third_party_agents" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
 _DEFAULT_OAUTH_BASE = "https://id.twitch.tv"
 # Scopes the chat, moderation and clip tools need; public data needs none.

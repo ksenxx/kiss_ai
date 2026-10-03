@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,9 +31,11 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     config_file_lock,
     write_private_file,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
-_TELEGRAM_DIR = Path.home() / ".kiss" / "third_party_agents" / "telegram"
+_TELEGRAM_DIR = kiss_home() / "third_party_agents" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 _DEFAULT_API_BASE = "https://api.telegram.org"
@@ -44,7 +45,8 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/telegram help``."""
     return (
         "Channel agent for Telegram that uses a @BotFather bot token (stored under "
-        "~/.kiss/third_party_agents/telegram) to send, edit, forward, pin and delete messages, "
+        f"~/{HOME_DIR}/third_party_agents/telegram) to send, edit, "
+        "forward, pin and delete messages, "
         "photos, documents and polls, read updates and inspect or moderate chat members "
         "through the Bot API; use `run_agent(agent=\"telegram\", task=...)` or the "
         "`kiss-telegram` CLI."

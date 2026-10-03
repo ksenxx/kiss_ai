@@ -28,6 +28,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.processes import SIGKILL, kill_process_group, popen_process_group
@@ -771,13 +772,16 @@ def save_api_key(key_name: str, key_value: str) -> None:
 
 RC_HOOK_BEGIN = "# >>> sorcar-cloud API keys >>>"
 RC_HOOK_END = "# <<< sorcar-cloud API keys <<<"
-_RC_HOOK_LINE = '[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"'
+_RC_HOOK_LINE = (
+    f'[ -f "$HOME/{HOME_DIR}/{API_KEYS_ENV_FILE}" ] && . "$HOME/{HOME_DIR}/{API_KEYS_ENV_FILE}"'
+)
 """The RC block that sources the canonical key store.
 
-Markers and hook line are byte-identical to what
-``scripts/install-api-keys.sh`` writes on ``./rsorcar`` deploy targets,
-so a machine that already has the deploy-installed block is recognized
-and never gets a second one.
+Markers and hook line (for the stock ``~/.kiss``) are byte-identical to
+what ``scripts/install-api-keys.sh`` writes on ``./rsorcar`` deploy
+targets, so a machine that already has the deploy-installed block is
+recognized and never gets a second one.  A white-label brand sources its
+own home's key store.
 """
 
 
@@ -823,14 +827,21 @@ def _update_rc_for_key(
     if (
         install_hook
         and shell != "fish"
-        and api_keys_env_path() == Path.home() / ".kiss" / API_KEYS_ENV_FILE
-        and not any(line.rstrip("\n") == RC_HOOK_BEGIN for line in kept)
+        and api_keys_env_path() == Path.home() / HOME_DIR / API_KEYS_ENV_FILE
+        and not any(line.rstrip("\n") == _RC_HOOK_LINE for line in kept)
     ):
-        if kept and not kept[-1].endswith("\n"):
-            kept[-1] += "\n"
-        kept.append(RC_HOOK_BEGIN + "\n")
-        kept.append(_RC_HOOK_LINE + "\n")
-        kept.append(RC_HOOK_END + "\n")
+        # A block from another brand's install (stock KISS sourcing
+        # ~/.kiss/api_keys.env, say) shares the markers: this brand's
+        # source line joins that block instead of opening a second one.
+        ends = [i for i, line in enumerate(kept) if line.rstrip("\n") == RC_HOOK_END]
+        if ends:
+            kept.insert(ends[0], _RC_HOOK_LINE + "\n")
+        else:
+            if kept and not kept[-1].endswith("\n"):
+                kept[-1] += "\n"
+            kept.append(RC_HOOK_BEGIN + "\n")
+            kept.append(_RC_HOOK_LINE + "\n")
+            kept.append(RC_HOOK_END + "\n")
         changed = True
     if changed:
         _atomic_write_text_secure(rc, "".join(kept))

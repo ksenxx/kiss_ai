@@ -66,6 +66,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ _DEFAULT_BIND_HOST = "127.0.0.1"
 _MAX_BODY_BYTES = 5 * 1024 * 1024
 _MAX_CHAT_MAP_ENTRIES = 5000
 
-_OPENAI_COMPAT_DIR = Path.home() / ".kiss" / "third_party_agents" / "openai_compat"
+_OPENAI_COMPAT_DIR = kiss_home() / "third_party_agents" / "openai_compat"
 _config = ChannelConfig(_OPENAI_COMPAT_DIR, ("api_key", "port"))
 
 _chat_map_lock = threading.Lock()

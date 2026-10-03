@@ -28,7 +28,6 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -46,6 +45,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ _DEFAULT_WEBHOOK_PORT = 18084
 _MAX_TIMESTAMP_SKEW_MS = 60 * 60 * 1000
 _MAX_CALLBACK_BODY_BYTES = 1024 * 1024
 
-_DINGTALK_DIR = Path.home() / ".kiss" / "third_party_agents" / "dingtalk"
+_DINGTALK_DIR = kiss_home() / "third_party_agents" / "dingtalk"
 _config = ChannelConfig(_DINGTALK_DIR, ("webhook_url",))
 
 

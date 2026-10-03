@@ -64,6 +64,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 from kiss.server.agent_state import current_agent
@@ -214,7 +215,7 @@ EVIDENCE_CUT = (
 """Line appended in place of the part of an over-long evidence file the prompt drops."""
 
 NO_EVIDENCE = (
-    "_No observed evidence yet: `~/.kiss/AUTOROUTER.md` is missing or empty. Route on the "
+    f"_No observed evidence yet: `~/{HOME_DIR}/AUTOROUTER.md` is missing or empty. Route on the "
     "tier order alone until `/rsi7d all` has measured this installation's task history._"
 )
 """What the prompt says in place of the evidence when the file is missing or empty."""
@@ -341,7 +342,7 @@ def description() -> str:
     return (
         "Splits a task into units, runs each on the cheapest model tier (small, medium, "
         "frontier) that passes its acceptance check, escalating on failure and logging every "
-        "decision to ~/.kiss/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
+        f"decision to ~/{HOME_DIR}/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
         '`/autorouter <task>` in the chat, or run_agent(agent="autorouter", task="...").'
     )
 

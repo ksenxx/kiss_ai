@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.agents.seas.agents_md import add_instruction, list_instructions
+from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
     "You store a standing instruction for the user. The user's message is the "
@@ -43,7 +44,7 @@ SYSTEM_PROMPT = (
 def description() -> str:
     """Return the one-sentence help text shown by ``/remember help``."""
     return (
-        "Stores the prompt as a standing instruction in ~/.kiss/AGENTS.md so every "
+        f"Stores the prompt as a standing instruction in ~/{HOME_DIR}/AGENTS.md so every "
         "future Sorcar task follows it; use `/remember <instruction>` in the chat or "
         'run_agent(agent="remember", task="<instruction>"), and `/forget` to remove it.'
     )

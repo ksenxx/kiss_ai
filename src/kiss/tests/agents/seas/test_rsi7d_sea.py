@@ -41,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.utils import rmtree_force
 from kiss.server import agent_state
 from kiss.tests.agents.sorcar.local_model_server import (
@@ -165,7 +166,10 @@ def _dispatch(agent: str, task: str) -> dict[str, Any]:
 
 def test_sea_getters_and_prompt_follow_the_contract() -> None:
     """The SEA replaces the system prompt, exposes its tools, and runs without a browser."""
-    assert sea.system_prompt() == sea.SYSTEM_PROMPT
+    # The prompt names the brand's state directory (``~/{{HOME_DIR}}/...``), rendered on read.
+    assert sea.system_prompt() == render_brand(sea.SYSTEM_PROMPT)
+    assert "{{HOME_DIR}}" in sea.SYSTEM_PROMPT and "{{" not in sea.system_prompt()
+    assert f"~/{HOME_DIR}/MODEL_INFO.json" in sea.system_prompt()
     assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
     assert sea.max_budget() == 2000.0
     assert sea.use_memory() is True
@@ -954,7 +958,7 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     # setting (off in the test KISS_HOME), not the SEA's tool list.
     assert {"Bash", "run_agent", "finish"} <= names
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
-    assert str(system["content"]).startswith(sea.SYSTEM_PROMPT)
+    assert str(system["content"]).startswith(sea.system_prompt())
     listing, refused, patched = _tool_results(agentic)
     scoped = json.loads(listing)
     assert scoped["scope"] == {"seas_dir": "", "names": ["demo", "fdemo"]}

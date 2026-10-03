@@ -127,7 +127,7 @@ from kiss.agents.sorcar.git_worktree import (
     USER_PROMPT_HEADING,
     strip_worktree_suffix,
 )
-from kiss.core.brand import render_brand
+from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.utils import rmtree_force
 from kiss.server.agent_state import current_agent
@@ -226,7 +226,7 @@ step 6 (`write_autorouter_evidence` refuses).
 The top-level tasks that ran on no SEA ran on KISS Sorcar's own system prompt; `sea_runs()`
 and `sea_findings("sorcar")` list them under the name `sorcar`. You may improve KISS Sorcar
 itself as well: its system prompt (`src/kiss/SYSTEM.md`, and `SYSTEM_LITE.md` for simple
-tasks), the user's standing instructions in `~/.kiss/AGENTS.md`, and its code under
+tasks), the user's standing instructions in `~/{{HOME_DIR}}/AGENTS.md`, and its code under
 `src/kiss/`. Read them with `sorcar_text(target)` (code with Read/grep) and change them
 only through `patch_sorcar(target, old, new)`; never with Edit/Write.
 - Permission first, always. Before the first `patch_sorcar` of a batch call
@@ -283,7 +283,7 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
 - A change that makes a SEA slower or costlier is acceptable only when it demonstrably
   improves the quality of the result; never trade quality for cost.
 - Model names: use the names exactly as they appear in `model_scorecard` and
-  `~/.kiss/MODEL_INFO.json`. Never invent a model name.
+  `~/{{HOME_DIR}}/MODEL_INFO.json`. Never invent a model name.
 - Work in `./tmp/rsi7d/` for notes; the final report goes to
   `./reports/rsi7d-<YYYY-MM-DD>.md` and is `git add`ed.
 
@@ -344,7 +344,7 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
    replay-verified" in the report.
 6. Autorouter evidence. From `model_scorecard()` and the per-SEA models, write a compact
    evidence block for the router with `write_autorouter_evidence(text)`, which rewrites
-   `~/.kiss/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt; its
+   `~/{{HOME_DIR}}/AUTOROUTER.md` (the autorouter SEA splices that file into every prompt; its
    `autorouter_sea.py` is not edited for this). The tool refuses more than 2,500 characters
    including its stamp line, so: one line naming the window (`window_start`) and the task
    count; a Markdown table of the models with at least 10 tasks (model, tasks, roles,
@@ -432,12 +432,12 @@ _ERROR_KIND_WORDS = ("ERROR", "FAIL", "EXCEPTION", "TRACEBACK")
 def description() -> str:
     """Return the one-sentence help text shown by ``/rsi7d help``."""
     return (
-        "Mines the last 7 days of the indexed SEAs' runs in ~/.kiss/history.db for agentic "
+        f"Mines the last 7 days of the indexed SEAs' runs in ~/{HOME_DIR}/history.db for agentic "
         "mistakes, cost sinks and quality problems, applies and evaluates improvements to each "
         "SEA's SYSTEM_PROMPT (its own included; file-modifying tasks are replayed in a clone "
         "at the task's commit), refreshes the autorouter SEA's model evidence and, with the "
         "user's permission (asked for, unless the task text grants it), improves KISS Sorcar "
-        "itself: src/kiss/SYSTEM.md, ~/.kiss/AGENTS.md and its code. The task text starts "
+        f"itself: src/kiss/SYSTEM.md, ~/{HOME_DIR}/AGENTS.md and its code. The task text starts "
         "with the scope: `/rsi7d all` (every SEA), `/rsi7d review_paper write_paper` (those "
         "SEAs), `/rsi7d --seas-dir <folder> [<name> ...]` (the SEAs of that folder, which "
         "become the editable ones); instructions may follow. Or "
@@ -943,8 +943,8 @@ def _execute_sea(path: Path) -> dict[str, Any]:
 
 
 def system_prompt() -> str:
-    """Replace the default Sorcar system prompt with the rsi7d procedure."""
-    return SYSTEM_PROMPT
+    """Replace the default Sorcar system prompt with the rsi7d procedure (brand rendered)."""
+    return render_brand(SYSTEM_PROMPT)
 
 
 def max_budget() -> float:

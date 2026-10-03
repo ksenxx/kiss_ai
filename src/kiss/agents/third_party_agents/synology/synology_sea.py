@@ -21,7 +21,6 @@ import queue
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -39,12 +38,13 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18083
 
-_SYNOLOGY_DIR = Path.home() / ".kiss" / "third_party_agents" / "synology"
+_SYNOLOGY_DIR = kiss_home() / "third_party_agents" / "synology"
 _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 

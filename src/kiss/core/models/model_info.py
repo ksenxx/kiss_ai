@@ -77,13 +77,13 @@ class ModelInfo:
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
 
-USER_MY_MODELS_PATH = Path.home() / ".kiss" / "MY_MODELS.json"
+USER_MY_MODELS_PATH = config_module.kiss_home() / "MY_MODELS.json"
 
 
 def user_model_info_path() -> Path:
     """Return the user-local catalog path ``$KISS_HOME/MODEL_INFO.json``.
 
-    ``KISS_HOME`` defaults to ``~/.kiss``.  The installer (both
+    ``KISS_HOME`` defaults to the brand's home (``~/.kiss``).  The installer (both
     ``install.sh`` and the VS Code extension's ``DependencyInstaller``)
     seeds this file from the bundled catalog on every install/update, and
     the settings panel's "Update Models" button refreshes it in place via

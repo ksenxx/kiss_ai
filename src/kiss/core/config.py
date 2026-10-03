@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
@@ -110,13 +111,16 @@ def get_jobs_root(base_dir: str | Path | None = None) -> Path:
 
 
 def kiss_home() -> Path:
-    """Return the KISS home directory ($KISS_HOME or ~/.kiss).
+    """Return the KISS home directory ($KISS_HOME or the brand's default).
 
-    Resolved lazily on every call so that ``KISS_HOME`` set after
-    module import (as the test suite's conftest does) is honored.
+    The default is ``~/<home_dir>`` with ``home_dir`` from ``brand.json``
+    (``~/.kiss`` for stock KISS Sorcar; a white-label brand names its own
+    directory so it never shares state with a stock install).  Resolved
+    lazily on every call so that ``KISS_HOME`` set after module import
+    (as the test suite's conftest does) is honored.
     """
     env = os.environ.get("KISS_HOME")
-    return Path(env) if env else Path.home() / ".kiss"
+    return Path(env) if env else Path.home() / HOME_DIR
 
 
 def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = ("",)) -> None:

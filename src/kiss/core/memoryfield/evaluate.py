@@ -47,6 +47,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 
+from kiss.core.config import kiss_home
 from kiss.core.memoryfield.index import (
     DEFAULT_EMBEDDING_MODEL,
     HASHED_EMBEDDING_MODEL_CODE,
@@ -58,7 +59,7 @@ from kiss.core.memoryfield.pages import MAX_PAGE_BYTES, MemoryDir, slugify
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("~/.kiss/history.db")
+DEFAULT_DB_PATH = kiss_home() / "history.db"
 DEFAULT_PROBE_MODEL = "claude-fable-5-1"
 RECALL_KS = (1, 3, 5)
 

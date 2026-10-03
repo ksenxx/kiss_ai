@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from kiss.core.brand import HOME_DIR
+
 PROMPT_TEMPLATE = (
     "What have the task with {task_id} done so far and what are the partial results?"
 )
@@ -76,7 +78,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/task_update help``."""
     return (
         "Reports what a running or finished Sorcar task has done so far and its partial "
-        "results by reading its persisted transcript from ~/.kiss/history.db; use it as "
+        f"results by reading its persisted transcript from ~/{HOME_DIR}/history.db; use it as "
         '`/task_update <task_id>` in the chat or `run_agent(agent="task_update", '
         'task="<task_id>")`.'
     )

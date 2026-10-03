@@ -44,6 +44,7 @@ from kiss.core.brand import PRODUCT_NAME
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
+    _kiss_home_dir,
 )
 from kiss.tests.local_ws import LocalReader, LocalWriter, open_local_connection
 
@@ -183,9 +184,14 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         fake = Path(self.tmpdir) / "fake-bootstrap.sh"
         fake.write_text(
             "#!/bin/bash\n"
-            f"echo \"nonint=$KISS_NONINTERACTIVE\" > '{marker}'\n"
+            f"echo \"nonint=$KISS_NONINTERACTIVE home=$KISS_HOME\" > '{marker}'\n"
             "echo bootstrap-done\n",
         )
+        # The daemon pins KISS_HOME to the home it resolved (the brand's
+        # default unless overridden), as the extension's runUpdate does,
+        # so the installer's hooks and reload marker land where this
+        # daemon and its extension look.
+        expected = f"nonint=1 home={_kiss_home_dir()}"
         saved_url = os.environ.get("KISS_UPDATE_BOOTSTRAP_URL")
         os.environ["KISS_UPDATE_BOOTSTRAP_URL"] = f"file://{fake}"
         if saved_url is None:
@@ -211,14 +217,11 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             # shell redirect creates the file empty before echo writes
             # to it, so an existence check can win the race and read ''.
             for _ in range(100):
-                if (
-                    marker.is_file()
-                    and marker.read_text().strip() == "nonint=1"
-                ):
+                if marker.is_file() and marker.read_text().strip() == expected:
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "curl bootstrap did not run")
-            self.assertEqual(marker.read_text().strip(), "nonint=1")
+            self.assertEqual(marker.read_text().strip(), expected)
             log = self.server._update_log_path
             for _ in range(100):
                 if log.is_file() and "bootstrap-done" in log.read_text():
@@ -243,8 +246,9 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         marker = self.install_root / "marker.txt"
         script = self.install_root / "install.sh"
         script.write_text(
-            "#!/bin/bash\necho updated > marker.txt\necho done\n",
+            "#!/bin/bash\necho \"updated $KISS_HOME\" > marker.txt\necho done\n",
         )
+        expected = f"updated {_kiss_home_dir()}"
         reader, writer = await self._connect()
         try:
             await self._send(writer, {"type": "runUpdate"})
@@ -258,14 +262,11 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             # shell redirect creates the file empty before echo writes
             # to it, so an existence check can win the race and read ''.
             for _ in range(100):
-                if (
-                    marker.is_file()
-                    and marker.read_text().strip() == "updated"
-                ):
+                if marker.is_file() and marker.read_text().strip() == expected:
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "install.sh did not run")
-            self.assertEqual(marker.read_text().strip(), "updated")
+            self.assertEqual(marker.read_text().strip(), expected)
             log = self.server._update_log_path
             for _ in range(100):
                 if log.is_file() and "done" in log.read_text():

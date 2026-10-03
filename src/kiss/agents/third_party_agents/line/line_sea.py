@@ -23,7 +23,6 @@ import queue
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents._backend_utils import (
@@ -39,12 +38,13 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18081
 
-_LINE_DIR = Path.home() / ".kiss" / "third_party_agents" / "line"
+_LINE_DIR = kiss_home() / "third_party_agents" / "line"
 _LINE_API_BASE = "https://api.line.me"
 _config = ChannelConfig(_LINE_DIR, ("channel_access_token",))
 

@@ -19,7 +19,6 @@ import json
 import logging
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -31,10 +30,11 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_MATTERMOST_DIR = Path.home() / ".kiss" / "third_party_agents" / "mattermost"
+_MATTERMOST_DIR = kiss_home() / "third_party_agents" / "mattermost"
 _config = ChannelConfig(
     _MATTERMOST_DIR,
     (

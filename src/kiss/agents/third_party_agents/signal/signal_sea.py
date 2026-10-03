@@ -44,11 +44,12 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 from kiss.agents.third_party_agents._device_auth import ConsentSession
 from kiss.core.brand import PRODUCT_NAME
 from kiss.core.browser_handoff import BROWSER_TAB, DEFAULT_BROWSER, open_for_user
+from kiss.core.config import kiss_home
 from kiss.core.processes import kill_process_group, popen_process_group
 
 logger = logging.getLogger(__name__)
 
-_SIGNAL_DIR = Path.home() / ".kiss" / "third_party_agents" / "signal"
+_SIGNAL_DIR = kiss_home() / "third_party_agents" / "signal"
 _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 _LINK_DEVICE_NAME = PRODUCT_NAME
 # ``signal-cli link`` prints the provisioning URI first; once the phone

@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from kiss.agents.seas.agents_md import list_instructions, remove_instruction
+from kiss.core.brand import HOME_DIR
 
 SYSTEM_PROMPT = (
     "You remove a standing instruction the user stored earlier with /remember. The "
@@ -48,7 +49,7 @@ SYSTEM_PROMPT = (
 def description() -> str:
     """Return the one-sentence help text shown by ``/forget help``."""
     return (
-        "Removes a standing instruction that /remember stored in ~/.kiss/AGENTS.md so "
+        f"Removes a standing instruction that /remember stored in ~/{HOME_DIR}/AGENTS.md so "
         "later tasks stop following it; use it as `/forget <instruction text>` in the "
         'chat or `run_agent(agent="forget", task="<instruction text>")`.'
     )

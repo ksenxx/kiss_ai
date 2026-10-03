@@ -38,7 +38,6 @@ import json
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -52,6 +51,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     save_json_config,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def _bad_segment(value: str, name: str) -> str | None:
     return None
 
 
-_HOMEASSISTANT_DIR = Path.home() / ".kiss" / "third_party_agents" / "homeassistant"
+_HOMEASSISTANT_DIR = kiss_home() / "third_party_agents" / "homeassistant"
 _config = ChannelConfig(_HOMEASSISTANT_DIR, ("base_url", "token"))
 
 

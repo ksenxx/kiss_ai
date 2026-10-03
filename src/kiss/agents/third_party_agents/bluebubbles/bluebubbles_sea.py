@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -29,8 +28,9 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
-_BB_DIR = Path.home() / ".kiss" / "third_party_agents" / "bluebubbles"
+_BB_DIR = kiss_home() / "third_party_agents" / "bluebubbles"
 
 _PLATFORM_ERROR = json.dumps(
     {

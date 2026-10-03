@@ -953,6 +953,9 @@ def _run_command_job(
         ``("error", output)`` on non-zero exit or timeout.
     """
     timeout = COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    # The command sees the state directory this daemon uses (the brand's
+    # default unless KISS_HOME already overrides it), so a script it runs
+    # with another interpreter reads and writes the same files.
     proc = popen_process_group(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -960,6 +963,7 @@ def _run_command_job(
         encoding="utf-8",
         errors="replace",
         cwd=None if work_dir is None else str(work_dir),
+        env={**os.environ, "KISS_HOME": str(kiss_home())},
         **_popen_kwargs(str(job["command"])),
     )
     try:
