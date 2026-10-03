@@ -63,10 +63,10 @@ Git clone (`git clone --depth 1`, no ref) and the separately installed `gh` /
 | Connector | Service | Credential (env var, read from your shell) |
 |---|---|---|
 | `google` | Gmail, Calendar, Drive, Docs, Sheets, ... | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` (your own GCP OAuth client) |
-| `slack` | Search/read Slack; posting off by default | `SLACK_MCP_XOXP_TOKEN` (or browser `xoxc`/`xoxd` tokens) |
+| `slack` | Search/read Slack; posting off by default | `SLACK_MCP_XOXP_TOKEN` (or browser `xoxc`/`xoxd` tokens; `enable.py` only checks the `xoxp` one, so pass `--force` then) |
 | `twilio-sms` | Send SMS via your Twilio account | `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY`, `TWILIO_API_SECRET` |
 | `whatsapp` | Personal WhatsApp (QR-paired, all data local) | none — pair by QR code |
-| `brave-search` | Web/news/image search | `BRAVE_API_KEY` |
+| `brave-search` | Web/news/image/video search | `BRAVE_API_KEY` |
 | `notion` | Notion pages and databases | `NOTION_TOKEN` (internal integration) |
 | `postgres` | Your PostgreSQL databases (restricted mode) | `DATABASE_URI` |
 | `firecrawl` | Crawling/scraping via Firecrawl cloud | `FIRECRAWL_API_KEY` |

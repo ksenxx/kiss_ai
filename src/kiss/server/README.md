@@ -973,8 +973,8 @@ class TaskResult:
   environment.  A tool that runs on the task's worker thread can call
   `kiss.server.agent_state.current_agent()` to get the running agent
   (its `work_dir`, model and usage counters); it returns `None` on any
-  other thread.  The bundled `seas/autorouter/autorouter_sea.py` and
-  `seas/skillopt/skillopt_sea.py` use it.
+  other thread.  The bundled `seas/autorouter/autorouter_sea.py`,
+  `seas/rsi7d/rsi7d_sea.py` and `seas/skillopt/skillopt_sea.py` use it.
 - Put the SEA in a folder named after the command, `xxx/xxx_sea.py`,
   and list that folder's parent in `~/.kiss/SEAS.md` (one folder per
   line; blank lines and `#` comments are ignored) to expose it as the

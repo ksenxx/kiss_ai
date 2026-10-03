@@ -90,13 +90,15 @@ llms.txt directories listed on <https://llmstxt.org/#directories>:
   (<https://tally.so/r/wAydjB>), Category "AI"; pending curation-team
   approval, notification goes to ksen@berkeley.edu.
 
-## Earlier update — § 02 "All you need is a short prompt"
+## Earlier update — "All you need is a short prompt" deck
 
-A new section `§ 02 — All you need is a short prompt` was inserted between
-the existing `§ 01 — Compare` and `§ 02 — What is in the Name` sections.
-All subsequent section numbers (§ 02 → § 03, …, § 09 → § 10) were shifted
-by one, and a `Prompts` link was added to the top nav. No other content
-was changed.
+A new section `All you need is a short prompt` was inserted between the
+existing `§ 01 — Compare` and `What is in the Name` sections, the later
+section numbers were shifted by one, and a `Prompts` link was added to the
+top nav. The homepage has since gained a `§ 02 — Terminal-Bench 2.0`
+section, so the deck now sits at `§ 03` (`<section id="prompts">`) between
+`§ 02 — Terminal-Bench 2.0` and `§ 04 — Papers`, and the page runs to
+`§ 14 — Citation`.
 
 The section's intro paragraph links `src/kiss/SAMPLE_TASKS.md` and
 `src/kiss/INJECTIONS.md` and points to `~/.kiss/MY_INJECTION.md` for personal
@@ -116,9 +118,10 @@ per entry from:
   GPT-5.6 Sol review", and "Self-improving model routing" come from tricks
   since removed or rewritten (the file's Kimi K3 trick now reviews with
   `gpt-6-astra`), and the authentication and GPT-6 Astra panels carry
-  older wording than the file. The file's `git pull`/merge/push trick and
-  its `claude-fable-5-1` + `gpt-6-astra` pair-programming variant have no
-  panel.
+  older wording than the file (the panel pairs `claude-fable-5` with
+  `gpt-6-astra` at 50% of the budget; the file's trick pairs
+  `claude-fable-5-1` with `gpt-6-astra` at 75%). The file's
+  `git pull`/merge/push trick has no panel.
 
 Each panel has:
 
@@ -139,10 +142,15 @@ remain in the markup but are hidden (`display: none`).
 - Under `kisssorcar.github.io/`: `docs/`, `llms.txt`, `.well-known/llms.txt`,
   `llms-full.txt`, `index.html.md`, `robots.txt`, `sitemap.xml`, and
   `.nojekyll` (the LLM-indexing files described above), plus
-  `privacy.html`.
-- `kisssorcar.github.io/assets/` — images and paper PDFs linked from the
-  homepage and `llms.txt`; `kisssorcar.github.io/blog/` — the six blog
-  posts listed in `llms.txt` and `sitemap.xml`.
+  `privacy.html` and a `.gitignore` (ignores `__pycache__/`).
+- `kisssorcar.github.io/assets/` — images, the three `tb2-*.svg` figures,
+  and paper PDFs linked from the homepage and `llms.txt`;
+  `kisssorcar.github.io/blog/` — the six blog posts listed in `llms.txt`
+  and `sitemap.xml`.
+
+There is no build step or sync script: every file under
+`kisssorcar.github.io/` is hand-maintained and copied to the website repo
+as is.
 
 ## How to push
 
@@ -151,13 +159,14 @@ remain in the markup but are hidden (`display: none`).
 git clone https://github.com/kisssorcar/kisssorcar.github.io.git
 cd kisssorcar.github.io
 
-# Copy in the updated index.html from this artifact directory
-cp /path/to/this/repo/website/kisssorcar.github.io/index.html ./index.html
+# Copy in the whole mirror from this artifact directory (dotfiles included)
+rsync -a --exclude .git /path/to/this/repo/website/kisssorcar.github.io/ ./
 
 # Review and commit
+git status
 git diff
-git add index.html
-git commit -m "Add § 02 'All you need is a short prompt' deck"
+git add -A
+git commit -m "Sync site from kiss_ai website/ mirror"
 git push origin main
 ```
 

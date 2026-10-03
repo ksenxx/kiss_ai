@@ -117,7 +117,7 @@ of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
   `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
-  below) migrate out of those files into the `$KISS_HOME/muse_auth/vault` credential
+  below) migrate out of those files into the `~/.kiss/muse_auth/vault` credential
   vault on first use; non-secret settings and inbound-verification secrets (LINE's
   `channel_secret`) stay in the service directory. The Google Workspace agents keep no
   Google token at all: Composio holds it (see *Composio sign-in* below). Because auth tools are always available,
@@ -267,20 +267,21 @@ renews itself when the grant includes a refresh token (Teams rejects a grant wit
 one; GitHub OAuth apps issue one only with expiring tokens enabled), otherwise as a
 plain bearer token (a Discord bot token is stored as the `Authorization: Bot …`
 header). The daemon starts on demand: agents that find none
-serialize the start behind `$KISS_HOME/muse_auth/spawn.lock`, so concurrent agents
+serialize the start behind `~/.kiss/muse_auth/spawn.lock`, so concurrent agents
 never race to launch two, and a running daemon exits on its own as soon as its
-`$KISS_HOME/muse_auth` state directory is deleted (a temporary home torn down), so it
+`~/.kiss/muse_auth` state directory is deleted (a temporary home torn down), so it
 never re-creates a removed directory from its periodic sweep of stale pending files.
 `grant SERVICE write` defaults to a single-use grant (`--scope once`); use `--scope ttl --ttl 3600`,
 `--scope session`, or `--scope perpetual` for a standing one. Opt out with
-`KISS_MUSE_AUTH=0` in `$KISS_HOME/api_keys.env` (default `~/.kiss/api_keys.env`).
+`KISS_MUSE_AUTH=0` in `~/.kiss/api_keys.env`.
 
 ## Agent catalog
 
 The **Name in prompts** column is the canonical channel name; say it (or any spacing /
 casing variant) in your prompt to target the channel. Config paths are relative to
-`~/.kiss/third_party_agents/` (override the root with `$KISS_HOME`; exception: Slack's
-workspace token store is hard-coded under `~/.kiss`). Token locations name the legacy
+`~/.kiss/third_party_agents/` (override the root with `$KISS_HOME`; Slack's
+per-workspace token store, `slack/<workspace>/token.json`, follows the same root,
+resolved on every call). Token locations name the legacy
 (non-Muse) files: on Linux with Muse enabled, the secret moves into the vault on first
 use and the legacy file is removed. "Gateway" marks the modules with `_make_backend()`
 — they can carry inbound prompts and receive scheduled deliveries. Tool names are the
@@ -329,7 +330,8 @@ helpers noted below, such as `finish_<service>_auth` and the browser-setup tools
 Platform notes: BlueBubbles and iMessage are macOS-only (BlueBubbles needs a Mac running
 the BlueBubbles server; iMessage drives the local Messages app via `osascript`). The
 email agent drops automated mail (no-reply senders, `Auto-Submitted`, `Precedence:
-bulk/junk/list`) from the gateway loop so it only answers real people. The webhook
+bulk/junk/list`, `List-Id` mailing-list mail) from the gateway loop so it only answers
+real people. The webhook
 agent verifies GitHub (`X-Hub-Signature-256`) or generic timestamped HMAC signatures,
 caps bodies at 1 MB, suppresses duplicate deliveries, rate-limits to 60 events per
 route per minute, and can either queue events as agent tasks or push them straight
@@ -685,7 +687,7 @@ resume the same daemon chat. Gateway state — per-thread chat continuity, an
 at-least-once delivery ledger with `(recovered reply)` redelivery, and a circuit
 breaker that pauses the channel after repeated tick crashes (only errors that escape a
 tick count) — persists next to the adapter's config (or under
-`$KISS_HOME/third_party_agents/channel_state/`), and overlapping ticks exit
+`~/.kiss/third_party_agents/channel_state/`), and overlapping ticks exit
 immediately thanks to a non-blocking per-channel lock.
 
 Two caveats. Adapters that receive messages through an **embedded callback server**

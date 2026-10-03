@@ -149,7 +149,7 @@ export GEMINI_API_KEY=...
 
 You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app. The **Custom Models** section of the Settings panel registers your own models (a local vLLM/Ollama endpoint, or a provider model not in the bundled catalog); entries are stored in `~/.kiss/MY_MODELS.json` and appear in the model picker alongside the bundled catalog.
 
-The picker also lists two bundled router agents under the `Router` group: **`autorouter`** splits a task into units and dispatches each to the cheapest model tier that passes its acceptance check, and **`bestrouter`** runs every task on `claude-fable-5-1` and has `gpt-6-astra` review the result read-only. They are Sorcar Extension Agents (see below), not models.
+The picker also lists two bundled router agents under the `Router` group: **`autorouter`** splits a task into units that have a mechanical acceptance check and dispatches those to the cheapest model tier (small, medium, frontier) that passes the check, escalating on failure, while planning, final acceptance and uncheckable work stay on the frontier model, and **`bestrouter`** runs every task on `claude-fable-5-1` and has `gpt-6-astra` review the result read-only. They are Sorcar Extension Agents (see below), not models.
 
 ### VS Code Extension Installation
 
@@ -166,7 +166,7 @@ Open the KISS Sorcar sidebar in VS Code (or the remote web app in a browser) and
 - `@` file/folder mentions with ranked completion from a persistent index of your working directory and home directory.
 - Per-task **git worktree isolation** with auto-commit and merge on success (a bundled merge agent resolves conflicts), or an interactive merge/discard prompt; toggle both in the Settings panel.
 - A pre-run **task classifier** that decides whether a task could create or modify any file in the repository (code, docs, reports, data; anything that could become git-tracked) and so needs a worktree. The rule is strict: a task that writes files is development work whatever else it involves, and the only exception is a git-only task (commit, merge, rebase, conflict resolution and nothing else). Tasks that write no files and git-only tasks skip the worktree, and simple tasks get a lite system prompt; optionally backed by the `~typesafe/jev-latest` decisions model through OpenRouter.
-- A model picker, per-task budget caps, chat history with tags and per-chat summaries, an agent dashboard, a **Working directory** panel, and inline rendering of tool-generated images.
+- A model picker, per-task budget caps, chat history with tags and per-chat summaries, a **Task Info** view (tokens, cost, steps, time, budget, model, and the ids of the task and its parent), a **Working directory** panel, and inline rendering of tool-generated images.
 - **Image and PDF attachments** via the picker, paste, or drag-and-drop.
 - **Persistent agent memory** (on by default): Markdown pages under `~/.kiss/memories` with a vector index, plus a per-repository memory for tasks run inside a git checkout. Toggle it in Settings or with `KISS_USE_MEMORY=0`.
 - Wake-word voice chat ("Hey Sorcar, …") via the mic button, including steering a running agent by voice.
@@ -216,7 +216,7 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
 ### Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports it on every run and calls its top-level functions named after `run()`'s parameters (`prompt()`, `model()`, `max_budget()`, `tools()`, `system_prompt()`, ...) to compute the run's parameters; parameters without a getter keep whatever the caller passed. Every SEA also defines `description()`, one sentence that `/<name> help` prints. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before every model call and every tool call (a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports it on every run and calls its top-level functions named after `run()`'s parameters (`prompt()`, `model()`, `max_budget()`, `tools()`, `system_prompt()`, ...; `if_append_basic_tools()` stands in for `append_basic_tools`) to compute the run's parameters; parameters without a getter keep whatever the caller passed. Every SEA also defines `description()`, one sentence that `/<name> help` prints. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
 
 ```python
 # weather/weather_sea.py — a minimal SEA
