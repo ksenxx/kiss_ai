@@ -229,7 +229,8 @@ for helper in scripts/install-ssh-identity.sh scripts/install-remote-prereqs.sh 
               scripts/sync-memory.sh src/kiss/scripts/merge_memory_pages.py \
               src/kiss/scripts/sync_kiss_notes.py \
               scripts/collect-github-auth.sh scripts/install-github-auth.sh \
-              src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
+              src/kiss/scripts/sync_db.py src/kiss/agents/sorcar/chat_summary.py \
+              src/kiss/scripts/relocate_work_dir.py \
               src/kiss/scripts/carry_over_tables.py \
               src/kiss/scripts/db_fingerprint.py \
               src/kiss/scripts/running_tasks.py \

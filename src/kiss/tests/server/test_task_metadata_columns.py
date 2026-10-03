@@ -20,12 +20,12 @@ import time
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_summary import summarize_chat
 from kiss.agents.sorcar.task_metadata import (
     backfill_task_metadata,
     classify_task_tags,
     infer_subagent_seas,
     sea_name_of_agent,
-    summarize_chat,
 )
 
 from .test_history_chat_first_task import _history_sessions, _make_server
