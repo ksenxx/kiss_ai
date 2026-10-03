@@ -10835,6 +10835,21 @@
   // taskinfo-coverage:end
 
   // chevron-coverage:start
+  /**
+   * Fold the event panels of a finished task whose transcript was
+   * replayed (a reload, a tab switch, a neighbouring task spliced in).
+   *
+   * Every plain panel stays on screen, collapsed to its header and
+   * preview, so any event of a past task can be opened by a click.
+   * Left as they are: the panels of a running task, the result, a
+   * panel showing an image, a `/ask` answer, a panel the user opened
+   * (`user-pinned`), a panel that finished on screen (`_liveFinished`)
+   * and the panels a `summary` tool call adopted (`.summary-sub`, shown
+   * when the summary panel is opened).
+   *
+   * @param {string} taskName Only panels of this task are folded; a
+   *     falsy name folds every task on screen.
+   */
   function applyChevronState(taskName) {
     if (!O) return;
     const panels = O.querySelectorAll('.collapsible');
@@ -10852,39 +10867,24 @@
         p.classList.contains('rc') ||
         panelShowsImage(p) ||
         answerPanelStaysOpen(p)
-      ) {
-        p.classList.remove('chv-hidden');
+      )
         continue;
-      }
       // livedone-coverage:start
       // The panel was on screen when its task finished: the finish must
-      // not explicitly collapse or hide any event panel, so the panel
-      // keeps the exact state the live stream left it in — untouched —
-      // until a replay rebuilds the transcript (markPanelsLiveFinished).
+      // not explicitly collapse any event panel, so the panel keeps the
+      // exact state the live stream left it in — untouched — until a
+      // replay rebuilds the transcript (markPanelsLiveFinished).
       if (p._liveFinished) continue;
       // livedone-coverage:end
-      if (p.classList.contains('tc-summary')) {
-        p.classList.remove('chv-hidden');
-        if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
-        if (p.classList.contains('collapsed')) collapseNestedRunParallel(p);
-        syncCollapseAria(p);
-        continue;
-      }
-      if (p.closest('.summary-sub')) {
-        p.classList.remove('chv-hidden');
-        continue;
-      }
-      p.classList.add('chv-hidden');
-      if (p.classList.contains('tc-run-parallel')) {
-        p.classList.add('collapsed');
-        p.classList.remove('user-pinned');
-        collapsePreview(p);
-        syncRunParallelPanel(p);
-      } else {
-        // A hidden panel takes any fan-out panel it swallowed off
-        // screen with it, so those sub-agent tabs must close too.
-        collapseNestedRunParallel(p);
-      }
+      if (p.closest('.summary-sub')) continue;
+      if (p.classList.contains('user-pinned')) continue;
+      // Already folded: its preview was built when it collapsed and
+      // its nested fan-outs were folded with it.
+      if (p.classList.contains('collapsed')) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
+      collapseNestedRunParallel(p);
     }
   }
   // chevron-coverage:end
@@ -13176,16 +13176,13 @@
     if (!wrap.childElementCount) return;
     container.appendChild(wrap);
     // imagepanel-coverage:start
-    // The panel now shows a picture: if an automatic pass folded or
-    // hid it before the result arrived (an older panel of a streaming
-    // transcript), bring it back on screen -- see panelShowsImage.
+    // The panel now shows a picture: if an automatic pass folded it
+    // before the result arrived (an older panel of a streaming
+    // transcript), open it again -- see panelShowsImage.
     const panel = container.closest ? container.closest('.collapsible') : null;
-    if (panel) {
-      panel.classList.remove('chv-hidden');
-      if (panel.classList.contains('collapsed')) {
-        panel.classList.remove('collapsed');
-        collapsePreview(panel);
-      }
+    if (panel && panel.classList.contains('collapsed')) {
+      panel.classList.remove('collapsed');
+      collapsePreview(panel);
     }
     // imagepanel-coverage:end
   }
@@ -14597,7 +14594,6 @@
     for (let i = 0; i < children.length; i++) {
       const el = children[i];
       if (el.id === 'welcome' || el.id === 'adjacent-loader') continue;
-      if (el.classList.contains('chv-hidden')) continue;
       if (el.classList.contains('adjacent-task')) {
         if (mainFirst) {
           regions.push({
@@ -17240,7 +17236,7 @@
     // streamtail-coverage:start
     // A deferred chunk tail must run while the task still counts as
     // running (exactly when its synchronous ancestor ran): swept after
-    // the flip below, applyChevronState() would hide the finished
+    // the flip below, applyChevronState() would fold the finished
     // task's panels and collapseOlderPanels() would drop its debt.
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end

@@ -595,7 +595,7 @@ function testSpawnWhileCollapsedDefersTabs() {
   console.log('  ok - spawns while collapsed open their tab immediately');
 }
 
-function testTaskEndCollapsePassClosesSubTabs() {
+function testTaskEndPassKeepsUserOpenedFanOut() {
   const {win, panel, parentId, taskIds, subTabIds} = bootParallelRun(2);
 
   // The children finish and the user reopens their history tabs.
@@ -613,18 +613,14 @@ function testTaskEndCollapsePassClosesSubTabs() {
   send(win, {type: 'status', running: false, tabId: parentId});
   send(win, {type: 'usage_info', tabId: parentId});
   assert.ok(
-    panel.classList.contains('chv-hidden'),
-    'the task-end collapse pass must hide the run_parallel panel',
-  );
-  assert.ok(
-    panel.classList.contains('collapsed'),
-    'a hidden run_parallel panel must also be marked collapsed',
+    !panel.classList.contains('collapsed'),
+    'the task-end pass must leave a run_parallel panel the user opened ' +
+      'open',
   );
   assert.strictEqual(
     subagentTabEls(win).length,
-    0,
-    'the task-end collapse of the finished run_parallel panel must ' +
-      'close its finished sub-agent tabs',
+    2,
+    'a fan-out panel the user keeps open keeps its sub-agent tabs',
   );
   assert.strictEqual(
     win.document.getElementById('task-panel-collapse-btn'),
@@ -632,7 +628,7 @@ function testTaskEndCollapsePassClosesSubTabs() {
     'the removed Collapse/Uncollapse Chats button must not exist',
   );
   win.close();
-  console.log('  ok - task-end collapse pass closes sub tabs');
+  console.log('  ok - task-end pass keeps a user-opened fan-out and its tabs');
 }
 
 function testRunParallelFinishAutoCollapseClosesSubTabs() {
@@ -861,7 +857,7 @@ async function main() {
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
     testSpawnWhileCollapsedDefersTabs,
-    testTaskEndCollapsePassClosesSubTabs,
+    testTaskEndPassKeepsUserOpenedFanOut,
     testRunParallelFinishAutoCollapseClosesSubTabs,
     testRunningFanOutStaysExemptFromAutoCollapse,
     testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,

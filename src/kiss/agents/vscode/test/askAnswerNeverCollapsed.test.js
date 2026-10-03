@@ -3,14 +3,14 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// The `/ask` answer panel (an `ask_answer` event) is never folded or
-// hidden by any automatic pass of the chat webview, on any surface:
+// The `/ask` answer panel (an `ask_answer` event) is never folded by
+// any automatic pass of the chat webview, on any surface:
 //
 //   * collapseOlderPanels  -- the streaming sweep of a running task;
 //   * collapseAllExceptResult -- a task_events replay (reload, reattach,
 //     background tab, neighbouring task) and the share export;
-//   * applyChevronState -- the finished-task digest that takes every
-//     plain panel off screen (chv-hidden);
+//   * applyChevronState -- the finished-task digest that folds every
+//     plain panel;
 //   * the `summary` tool call, which adopts the panels before it into a
 //     collapsed .summary-sub.
 //
@@ -109,10 +109,6 @@ function assertOpenAndOnScreen(panel, where) {
     'BUG: the answer panel was auto-collapsed ' + where,
   );
   assert.ok(
-    !panel.classList.contains('chv-hidden'),
-    'BUG: the answer panel was hidden ' + where,
-  );
-  assert.ok(
     !panel.closest('.summary-sub'),
     'BUG: the answer panel was swallowed by a summary ' + where,
   );
@@ -132,10 +128,6 @@ function testReplayOfFinishedTaskKeepsAnswerOpen() {
   assert.ok(
     Array.from(tools).every(p => p.classList.contains('collapsed')),
     'plain replayed tool panels are folded',
-  );
-  assert.ok(
-    Array.from(tools).every(p => p.classList.contains('chv-hidden')),
-    'plain replayed tool panels of a finished task are taken off screen',
   );
   assertOpenAndOnScreen(answerPanelIn(out), 'on a finished-task replay');
   win.close();
@@ -240,10 +232,6 @@ function testReplayedSummaryLeavesAnswerVisible() {
   const out = win.document.getElementById('output');
   const summary = out.querySelector('.tc-summary');
   assert.ok(summary.classList.contains('collapsed'), 'the summary folds');
-  assert.ok(
-    !summary.classList.contains('chv-hidden'),
-    'the summary stays on screen',
-  );
   // The adoption walks back over the answer to the `/ask` prompt echo,
   // which (like any prompt) bounds it: one tool panel is adopted.
   assert.strictEqual(

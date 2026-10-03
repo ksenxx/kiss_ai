@@ -4919,9 +4919,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .tr.collapsed .tr-content { display: none; }
 
-.chv-hidden { display: none !important; }
-
-
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -76,6 +76,7 @@ function headerNamed(win, name) {
 function testBashHeaderMatchesTheOtherToolHeaders() {
   const {win} = makeWebview();
   injectMainCss(win);
+  send(win, {type: 'status', running: true});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls -la', description: 'list files'});
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/x.txt'});
   const bash = headerNamed(win, 'Bash');
