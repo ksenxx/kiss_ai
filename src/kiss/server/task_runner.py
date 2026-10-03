@@ -54,7 +54,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     sea_getter_is_false as _sea_getter_is_false,
 )
-from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, _notify_subagent_done
+from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, resolve_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
@@ -1990,11 +1990,7 @@ class _TaskRunnerMixin:
             # with the diagnostic instead of leaving a half-set-up run.
             _raw_profile = cmd.get("toolProfile")
             _tool_profile = _raw_profile if isinstance(_raw_profile, str) else ""
-            if _tool_profile and _tool_profile not in TOOL_PROFILES:
-                raise ValueError(
-                    f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
-                    f"got {_tool_profile!r}."
-                )
+            resolve_tool_profile(_tool_profile)
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
             _raw_docker = cmd.get("dockerImage")

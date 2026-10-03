@@ -35,7 +35,7 @@ Every count and feature in this document was checked against the source tree at 
 - **One agent, many surfaces**: the same `SorcarAgent` runs in the VS Code extension, the remote web app served by the `kiss-web` daemon, the `sorcar` CLI, the Python client API, 44 messaging and service channels, and cron jobs. Clients connected to the daemon share its tab registry (`~/.kiss/tabs.json`) for chat tabs, and sub-agent and browser tabs are synchronised by events, so an open task, sub-agent or browser tab appears in every client; only the standalone `sorcar` CLI runs its agent in the terminal instead. **NEW**
 - **706 model entries** in `src/kiss/core/models/MODEL_INFO.json` (687 generation, 525 with function calling, 7 embedding): 165 direct API models, 412 through OpenRouter, 16 `cc/` (Claude Code) and 10 `codex/` run-to-completion adapters, the rest through Together and other hosts. Two router entries, `autorouter` and `bestrouter`, appear in the model picker and are implemented as SEAs. **NEW**
 - **17 bundled Sorcar Extension Agents** (slash commands) in `src/kiss/agents/seas/`, 13 of them new since 2026-09-22, plus 44 channel SEAs in `src/kiss/agents/third_party_agents/`; both packages use a folder-per-SEA layout with a mandatory `description()`.
-- **33 built-in tool functions** in a full-profile run (shell/file 6, browser 9, memory 7, MCP sign-in 2, dispatch 3, interaction 6 including `finish` and, when Jev is enabled, `decide`), before skill, MCP-server and caller-supplied tools; five tool profiles (`full`, `review`, `shell`, `assistant`, `bash`).
+- **33 built-in tool functions** in a full-profile run (shell/file 6, browser 9, memory 7, MCP sign-in 2, dispatch 3, interaction 6 including `finish` and, when Jev is enabled, `decide`), before skill, MCP-server and caller-supplied tools; fourteen composable tool profiles (`full`, `review`, `assistant`, `bash` and the ten tool groups `shell`, `edit`, `browser`, `memory`, `agents`, `mcp`, `skills`, `user`, `decide`, `control`, joinable with `+`). **NEW**
 - **50 console scripts** in `pyproject.toml` (`sorcar`, `kiss-web`, `kiss-cron`, `check`, `generate-api-docs`, `swedefend-eval` and 44 `kiss-<channel>` CLIs, including the new `kiss-overleaf`).
 - **Prompt assets**: `SYSTEM.md` 3,971 words, `SYSTEM_LITE.md` 753 words, 23 tips, 6 bundled promptlets, 12 sample tasks.
 - **Codebase**: 160,637 lines of non-test Python under `src/kiss` (server 37,727; `agents/sorcar` 32,532), 1,360 `test_*.py` files with 10,682 test functions (382,938 lines across the 1,405 Python files under `src/kiss/tests`), 11,326 lines of TypeScript plus the 23,860-line shared `main.js` in the VS Code extension (43,649 lines with the other media scripts and vendored JavaScript) and 369 JS test files.
@@ -191,24 +191,33 @@ Prompt assets shipped in `src/kiss/`:
 | Group | Tools | Notes |
 | --- | --- | --- |
 | Files and shell | `Bash`, `bash_job`, `run_commands_parallel`, `Read`, `Edit`, `Write` | `Bash(background=true)` detaches with `nohup` and returns a job id; `bash_job` tails, waits or kills; `run_commands_parallel` runs shell commands in threads with per-command exit codes; a whole-file `Read` of a file over 2,000 lines returns an outline, and an unchanged range already shown returns a one-line stub (`force=True` re-reads); `Edit` rejects a file not read in the session and `Write` rejects overwriting an unread existing file (new files and scratch files under `tmp/` are exempt). In Docker the file tools execute inside the container without this guard and `bash_job` is absent. |
-| Browser | `go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `show_browser`, `close_browser` | Patchright/Chromium; `show_browser` streams the page into the KISS Browser tab on every surface **NEW**; sub-agents get an ephemeral profile; only in the `full` and `review` profiles with "Use web tools" on |
+| Browser | `go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `show_browser`, `close_browser` | Patchright/Chromium; `show_browser` streams the page into the KISS Browser tab on every surface **NEW**; sub-agents get an ephemeral profile; only in profiles that include the `browser` group (`full`, `review`, `browser` and composites) with "Use web tools" on |
 | Memory | `memory_search`, `memory_pull`, `memory_read`, `memory_write`, `memory_list`, `memory_delete`, `memory_refresh` | Section 13; `memory=` narrows to the general or a domain memory **NEW** |
 | Dispatch | `run_agent`, `run_parallel`, `number_of_cores` | Section 10; `run_parallel` and `number_of_cores` only in parallel mode |
 | MCP | tools of configured MCP servers, `connect_mcp_server`, `finish_mcp_server_connect` **NEW** | OAuth sign-in for remote MCP servers (Notion, Linear, Asana, Zoom or any URL); tokens in `~/.kiss/mcp_auth/<server>.json` |
 | Skills | `skill` | Present when the work dir or `~/.kiss/skills`, `.kiss/skills`, `.agents/skills` or Claude skill directories hold a `SKILL.md` |
 | Interaction | `ask_user_question`, `talk(language, text, emotion)`, `set_model`, `decide`, `summary`, `finish` | `decide` only when the Jev decisions model is enabled (section 11); `finish` carries `summary_in_html`, `is_continue`, `suggested_next_task` |
 
-Tool profiles (`TOOL_PROFILES`, `sorcar_agent.py:71-92`):
+Tool profiles (`TOOL_PROFILES` and `TOOL_GROUPS` in `sorcar_agent.py`):
 
 | Profile | Tools kept | Used by |
 | --- | --- | --- |
 | `full` | everything above | default |
-| `review` | `Bash`, `bash_job`, `Read`, `run_commands_parallel`, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary`, `talk`, the browser tools | reviewer children of `run_parallel`, `/ask` |
-| `shell` | `Bash`, `bash_job`, `Read`, `run_commands_parallel` | `/skillopt` |
-| `assistant` **NEW** | shell profile + `ask_user_question`, `talk`, `decide`, `summary`, `set_model` | conversational runs without file edits |
+| `review` | `shell` + `browser` groups, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary`, `talk` | reviewer children of `run_parallel`, `/ask` |
+| `assistant` | `shell` + `user` + `decide` + `control` groups | conversational runs without file edits |
 | `bash` | `Bash` | `/sh`, `/remember`, `/forget`, `/task_update` |
+| `shell` | `Bash`, `bash_job`, `Read`, `run_commands_parallel` | `/skillopt` |
+| `edit` **NEW** | `Edit`, `Write` | |
+| `browser` **NEW** | the nine browser tools | |
+| `memory` **NEW** | the seven `memory_*` tools | |
+| `agents` **NEW** | `run_agent`, `run_parallel`, `number_of_cores` | |
+| `mcp` **NEW** | the configured MCP servers' tools, `connect_mcp_server`, `finish_mcp_server_connect` | |
+| `skills` **NEW** | `skill` | |
+| `user` **NEW** | `ask_user_question`, `talk` | |
+| `decide` **NEW** | `decide` | |
+| `control` **NEW** | `summary`, `set_model` | |
 
-Every restricted profile also receives `ask_user_question`, `talk`, `set_model`, `summary` (and `decide` when available) before filtering, and `finish` is always added. A restricted run gets `RESTRICTED_PROFILE_NOTE` in its system prompt listing the tools it has.
+Profiles compose **NEW**: a profile name may join any number of keys with `+` (`tool_profile="shell+edit+memory"`), and `resolve_tool_profile` keeps the union of their tools; `full` in a composite means everything. The name is accepted everywhere a profile is named: `sorcar.run(tool_profile=...)`, `run_parallel(..., tool_profile=...)`, `run_agent(..., tool_profile=...)` and a SEA's `tool_profile()` getter. Per-run switches still intersect with the profile (`Use web tools` off removes the browser, Docker removes `bash_job`, serial mode removes the fan-out, missing skills or servers remove `skill` and the MCP tools), `finish` is always added, and a restricted run gets `RESTRICTED_PROFILE_NOTE` in its system prompt listing the tools it has.
 
 ## 8. Models, routing and cost accounting
 

@@ -417,11 +417,17 @@ The parameters without getters:
   sub-agents (`run_parallel`).
 - **`tool_profile()`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
-  (read, run, browse and talk; no editing or dispatch), `"shell"` (`Bash`,
-  `bash_job`, `Read`, `run_commands_parallel`), `"assistant"` (the
-  `shell` set plus `ask_user_question`, `talk`, `decide`, `summary`,
-  `set_model`) or `"bash"` (`Bash` only — the bundled `/sh` agent's
-  choice); `finish` is always added.
+  (read, run, browse and talk; no editing or dispatch), `"assistant"`
+  (the `shell` group plus `ask_user_question`, `talk`, `decide`,
+  `summary`, `set_model`), `"bash"` (`Bash` only — the bundled `/sh`
+  agent's choice), or a tool group: `"shell"` (`Bash`, `bash_job`,
+  `Read`, `run_commands_parallel`), `"edit"` (`Edit`, `Write`),
+  `"browser"`, `"memory"`, `"agents"` (`run_agent`, `run_parallel`,
+  `number_of_cores`), `"mcp"` (the configured servers' tools and the
+  sign-in pair), `"skills"`, `"user"` (`ask_user_question`, `talk`),
+  `"decide"`, `"control"` (`summary`, `set_model`).  Join several with
+  `+` to keep the union of their tools (`"shell+edit+memory"`);
+  `finish` is always added.
   `""` keeps the daemon's usual choice.  An unknown name fails the
   task when it starts.  Ignored for a SEA with a `tools()` getter,
   which builds no built-in toolset at all.

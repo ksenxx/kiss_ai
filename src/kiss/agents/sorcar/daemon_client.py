@@ -666,12 +666,17 @@ def run(
             records and what follow-up tasks of the same chat see as
             context.  Empty (default) appends nothing.
         tool_profile: Name of the tool profile the task's built-in
-            toolset is cut down to — one of ``"full"``, ``"review"``,
-            ``"shell"``, ``"assistant"``, ``"bash"`` (the keys of
-            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`;
-            ``bash`` is the single-command runner of the bundled
-            ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the
-            default) keeps the daemon's usual choice (the full toolset).
+            toolset is cut down to — a key of
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`
+            (the composites ``"full"``, ``"review"``, ``"assistant"``,
+            ``"bash"`` or the groups ``"shell"``, ``"edit"``,
+            ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``,
+            ``"skills"``, ``"user"``, ``"decide"``, ``"control"``), or
+            several keys joined with ``+`` for the union of their
+            tools (``"shell+edit+memory"``); ``bash`` is the
+            single-command runner of the bundled ``/sh`` agent:
+            ``Bash`` and ``finish`` only.  Empty (the default) keeps
+            the daemon's usual choice (the full toolset).
             An unknown name stops the task with a diagnostic error.
             Ignored when the agent script's ``tools()`` supplies the
             whole tool set, which builds no built-in toolset at all.

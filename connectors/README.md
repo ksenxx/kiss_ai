@@ -10,7 +10,8 @@ Sorcar discovers servers from `~/.kiss/mcp.json` (all projects),
 `<project>/.mcp.json` (Claude-Code compatible), and `<project>/.kiss/mcp.json`,
 in that order of increasing precedence (on a name clash the later file wins).
 The files are re-read at the start of each task, and the servers' tools are
-added only to runs with the full tool profile. Each server's tools appear to the agent as
+added only to runs whose tool profile includes the `mcp` group (`full`, `mcp` or a
+composite such as `shell+mcp`). Each server's tools appear to the agent as
 `<server>_<tool>` and are filtered by the `mcp_permissions` wildcard rules in
 `~/.kiss/config.json`.
 

@@ -243,6 +243,27 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         }, call
         assert "# Restricted tool profile: shell" in call["system_prompt"]
 
+    def test_composite_profile_unions_the_groups(self) -> None:
+        """``tool_profile="shell+edit+control"`` offers the union of the groups."""
+        calls: list[dict[str, Any]] = []
+        self._install_recording_stub(calls)
+        result = sorcar.run(
+            "task with a composite profile",
+            work_dir=self.repo,
+            tool_profile="shell+edit+control",
+            use_worktree=False,
+            endpoint_file=self.endpoint_file,
+            timeout=60,
+        )
+        assert result.success is True, result
+        call = self._single_call(calls)
+        assert set(call["tool_names"]) == {
+            "finish", "Bash", "bash_job", "Read", "run_commands_parallel",
+            "Edit", "Write", "summary", "set_model",
+        }, call
+        assert "# Restricted tool profile: shell+edit+control" in call["system_prompt"]
+        assert "Edit, Read, Write" in call["system_prompt"]
+
     def test_no_profile_keeps_the_full_toolset(self) -> None:
         """Without ``tool_profile`` the executor gets the full built-in set."""
         calls: list[dict[str, Any]] = []

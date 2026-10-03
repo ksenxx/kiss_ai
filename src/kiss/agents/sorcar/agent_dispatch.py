@@ -277,8 +277,9 @@ def _parse_run_options(
         append_to_prompt: Text appended to the task prompt.
         tool_profile: Name of the tool profile the sub-task's built-in
             toolset is cut down to (a key of
-            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`);
-            empty for the daemon's usual choice.
+            :data:`kiss.agents.sorcar.sorcar_agent.TOOL_PROFILES`, or
+            several joined with ``+``); empty for the daemon's usual
+            choice.
 
     Returns:
         The parsed options.
@@ -287,14 +288,10 @@ def _parse_run_options(
         ValueError: On a malformed boolean, a *model_config* that is
             not a JSON object, or an unknown *tool_profile* name.
     """
-    from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
+    from kiss.agents.sorcar.sorcar_agent import resolve_tool_profile
 
     profile = tool_profile.strip()
-    if profile and profile not in TOOL_PROFILES:
-        raise ValueError(
-            f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
-            f"got {tool_profile!r}."
-        )
+    resolve_tool_profile(profile)
     config: dict[str, Any] | None = None
     if model_config.strip():
         try:
@@ -1459,12 +1456,16 @@ def make_run_agent_tool(
                 Appended to each ``<task>`` when the task holds several.
             tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
                 ``"full"`` (everything), ``"review"`` (read, run, browse and talk; no
-                editing or dispatch), ``"shell"`` (Bash, bash_job, Read,
-                run_commands_parallel),
-                ``"assistant"`` (the shell set plus ask_user_question, talk, decide,
-                summary, set_model) or ``"bash"`` (Bash only); empty = the daemon's
-                usual choice.  ``finish``
-                is always available.  An agent script's ``tool_profile()`` still wins.
+                editing or dispatch), ``"assistant"`` (shell plus ask_user_question,
+                talk, decide, summary, set_model), ``"bash"`` (Bash only), or any of
+                the groups ``"shell"`` (Bash, bash_job, Read, run_commands_parallel),
+                ``"edit"`` (Edit, Write), ``"browser"``, ``"memory"``, ``"agents"``
+                (run_agent, run_parallel, number_of_cores), ``"mcp"``, ``"skills"``,
+                ``"user"`` (ask_user_question, talk), ``"decide"``, ``"control"``
+                (summary, set_model).  Join several with ``+`` to keep the union of
+                their tools, e.g. ``"shell+edit+browser"``; empty = the daemon's
+                usual choice.  ``finish`` is always available.  An agent script's
+                ``tool_profile()`` still wins.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),

@@ -123,9 +123,11 @@ stored value (``sorcar_agent._memory_settings``);
 ``is_parallel()`` (wire field ``useParallel``) returns a bool.
 ``tool_profile()`` (wire field ``toolProfile``) returns the name of the
 tool profile the run's built-in toolset is cut down to — a key of
-``sorcar_agent.TOOL_PROFILES`` (``"full"``, ``"review"``, ``"shell"``,
-``"assistant"``, ``"bash"``) or ``""`` for the daemon's usual choice; the task runner
-rejects an unknown name when the task starts.
+``sorcar_agent.TOOL_PROFILES`` (``"full"``, ``"review"``, ``"assistant"``,
+``"bash"`` or a tool group such as ``"shell"``, ``"edit"``, ``"browser"``,
+``"memory"``), several keys joined with ``+`` (``"shell+edit"``), or ``""``
+for the daemon's usual choice; the task runner rejects an unknown name
+when the task starts.
 ``docker_image()`` (wire field ``dockerImage``) returns the Docker
 image the run's shell and file tools execute in, or
 ``container:<name-or-id>`` to attach to a running container, or ``""``

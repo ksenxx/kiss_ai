@@ -74,27 +74,69 @@ BROWSER_TOOL_NAMES: frozenset[str] = frozenset({
 })
 """Names of the tools :meth:`WebUseTool.get_tools` returns."""
 
+MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
+    "memory_search", "memory_pull", "memory_read", "memory_write", "memory_list",
+    "memory_delete", "memory_refresh",
+})
+"""Names of the tools :meth:`MemoryTools.tools` returns."""
+
+MCP_AUTH_TOOL_NAMES: frozenset[str] = frozenset({
+    "connect_mcp_server", "finish_mcp_server_connect",
+})
+"""Names of the MCP sign-in tools; a profile naming them also gets the
+tools of every configured MCP server."""
+
+TOOL_GROUPS: dict[str, frozenset[str]] = {
+    # Run commands and read files (and their output).
+    "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    # Change files.
+    "edit": frozenset({"Edit", "Write"}),
+    # Drive the Chromium browser.
+    "browser": BROWSER_TOOL_NAMES,
+    # Persistent memory pages.
+    "memory": MEMORY_TOOL_NAMES,
+    # Sub-agents: channel/cron/agent-script dispatch and the parallel fan-out.
+    "agents": frozenset({"run_agent", "run_parallel", "number_of_cores"}),
+    # MCP servers: their tools plus the OAuth sign-in pair.
+    "mcp": MCP_AUTH_TOOL_NAMES,
+    # Project and user skills.
+    "skills": frozenset({"skill"}),
+    # Talk with the user.
+    "user": frozenset({"ask_user_question", "talk"}),
+    # Typed classification through the decisions model.
+    "decide": frozenset({"decide"}),
+    # Steer the run itself.
+    "control": frozenset({"summary", "set_model"}),
+}
+"""One tool profile per group of built-in tools.
+
+Groups are the building blocks of composite profiles: a profile name
+may join any number of :data:`TOOL_PROFILES` keys with ``+``
+(``"shell+edit+browser"``), and :func:`resolve_tool_profile` returns the
+union of their tool sets.  The ``mcp`` and ``skills`` groups gate tools
+that exist only when servers or skills are configured.
+"""
+
 TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     # ``None``: every tool the agent can build (today's default).
     "full": None,
     # Reduced reviewer set: it can inspect the tree, run commands (Bash
     # is unrestricted, so this is not a sandbox), browse the web to
-    # check facts and documentation, and speak to the user, but has no
-    # file editing, agent dispatch or fan-out tools.
+    # check facts and documentation, recall memory and speak to the
+    # user, but has no file editing, memory writing, agent dispatch or
+    # fan-out tools.
     "review": frozenset({
-        "Bash", "bash_job", "Read", "run_commands_parallel", "memory_search",
+        *TOOL_GROUPS["shell"], *TOOL_GROUPS["browser"], "memory_search",
         "memory_pull", "memory_read", "memory_list", "decide", "summary", "talk",
-        *BROWSER_TOOL_NAMES,
     }),
-    # Shell runner: just enough to run commands and read their output.
-    "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
+    **TOOL_GROUPS,
     # Shell runner that also talks with the user: ``shell`` plus asking
     # and speaking, decide, summary and switching its own model (no file
     # editing, browser, memory, agent dispatch or fan-out).
-    "assistant": frozenset({
-        "Bash", "bash_job", "Read", "run_commands_parallel", "ask_user_question",
-        "talk", "decide", "summary", "set_model",
-    }),
+    "assistant": (
+        TOOL_GROUPS["shell"] | TOOL_GROUPS["user"] | TOOL_GROUPS["decide"]
+        | TOOL_GROUPS["control"]
+    ),
     # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
     "bash": frozenset({"Bash"}),
 }
@@ -108,7 +150,47 @@ through ``run_parallel(..., tool_profile=...)``, and a top-level run
 through ``run(tool_profile=...)`` (the ``tool_profile`` parameter of
 :func:`kiss.server.sorcar.run` / the ``run_agent`` tool, or an agent
 script's ``tool_profile()`` getter).
+
+A profile name is either one key or several keys joined with ``+``
+(``"shell+edit+memory"``); see :func:`resolve_tool_profile`.
 """
+
+PROFILE_SEPARATOR = "+"
+"""Joins the parts of a composite tool profile name."""
+
+
+def resolve_tool_profile(name: str) -> frozenset[str] | None:
+    """Return the tool names a (possibly composite) profile *name* allows.
+
+    *name* is one :data:`TOOL_PROFILES` key or several joined with
+    ``+``; the result is the union of their tool sets.  ``None`` means
+    every tool the agent can build: the ``full`` profile, alone or as a
+    part of a composite, and the empty name (no profile chosen).
+
+    Args:
+        name: The profile name, e.g. ``"review"`` or ``"shell+edit+browser"``.
+            Whitespace around a part is ignored.
+
+    Returns:
+        The allowed tool names, or ``None`` for everything.
+
+    Raises:
+        ValueError: If a part is not a :data:`TOOL_PROFILES` key.
+    """
+    parts = [part.strip() for part in name.split(PROFILE_SEPARATOR)] if name.strip() else []
+    unknown = [part for part in parts if part not in TOOL_PROFILES]
+    if unknown:
+        raise ValueError(
+            f"tool_profile must be one of {', '.join(TOOL_PROFILES)} "
+            f"(several joined with '+'), got {name!r}."
+        )
+    allowed: frozenset[str] = frozenset()
+    for part in parts:
+        tools = TOOL_PROFILES[part]
+        if tools is None:
+            return None
+        allowed |= tools
+    return None if not parts else allowed
 
 
 RESTRICTED_PROFILE_NOTE = """
@@ -1711,7 +1793,8 @@ class SorcarAgent(RelentlessAgent):
                 routing (this agent's ``model_config`` is not forwarded,
                 since its endpoint and key belong to this agent's model).
             tool_profile: Explicit tool profile for the children (a key
-                of :data:`TOOL_PROFILES`); ``""`` lets each child pick.
+                of :data:`TOOL_PROFILES`, or several joined with ``+``);
+                ``""`` lets each child pick.
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
@@ -1830,11 +1913,16 @@ class SorcarAgent(RelentlessAgent):
                 ``task_description``.
 
         Returns:
-            One of the keys of :data:`TOOL_PROFILES`.
+            A :data:`TOOL_PROFILES` key or a ``+``-joined composite of
+            keys (see :func:`resolve_tool_profile`).
         """
-        explicit = str(getattr(self, "_tool_profile_name", "") or "")
-        if explicit in TOOL_PROFILES:
-            return explicit
+        explicit = str(getattr(self, "_tool_profile_name", "") or "").strip()
+        if explicit:
+            try:
+                resolve_tool_profile(explicit)
+                return explicit
+            except ValueError:
+                pass  # An unknown name falls through to the default rule.
         task = task or str(getattr(self, "task_description", "") or "")
         if (
             DEFAULT_CONFIG.tool_profiles
@@ -1851,13 +1939,13 @@ class SorcarAgent(RelentlessAgent):
         not from run() before super().run()).
 
         The list is cut down to the agent's tool profile
-        (:meth:`_tool_profile`): a ``review`` or ``shell`` sub-agent
-        never builds the MCP, channel-dispatch or fan-out tools (and
-        the browser only where the profile names it), so its every
-        step carries only the schemas it can use.
+        (:meth:`_tool_profile`, resolved by :func:`resolve_tool_profile`
+        so composites such as ``shell+edit+browser`` work): the browser,
+        skill, MCP, channel-dispatch and fan-out tools are built only
+        where the profile names them, so a ``review`` or ``shell``
+        sub-agent's every step carries only the schemas it can use.
         """
-        profile = self._tool_profile()
-        allowed = TOOL_PROFILES[profile]
+        allowed = resolve_tool_profile(self._tool_profile())
 
         def _stream(text: str) -> None:
             if self.printer:
@@ -2088,8 +2176,13 @@ class SorcarAgent(RelentlessAgent):
                     ``"shell"`` just Bash, bash_job, Read and
                     run_commands_parallel; ``"assistant"`` the shell set
                     plus ask_user_question, talk, decide, summary and
-                    set_model.  Empty (default): review tasks get
-                    ``"review"``, others the full toolset.
+                    set_model.  Tool groups ``"edit"`` (Edit, Write),
+                    ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``,
+                    ``"skills"``, ``"user"``, ``"decide"`` and
+                    ``"control"`` (summary, set_model) can be joined
+                    with ``+`` for the union of their tools, e.g.
+                    ``"shell+edit+memory"``.  Empty (default): review
+                    tasks get ``"review"``, others the full toolset.
 
             Returns:
                 A YAML-formatted string containing a list of result
@@ -2115,11 +2208,10 @@ class SorcarAgent(RelentlessAgent):
                 )
             if workers is not None and workers < 1:
                 return f"Error: max_workers must be at least 1, got {workers}."
-            if tool_profile and tool_profile not in TOOL_PROFILES:
-                return (
-                    f"Error: tool_profile must be one of "
-                    f"{', '.join(TOOL_PROFILES)}, got {tool_profile!r}."
-                )
+            try:
+                resolve_tool_profile(tool_profile)
+            except ValueError as exc:
+                return f"Error: {exc}"
             results = self._run_tasks_parallel(
                 task_list, max_workers=workers, model_name=model_name or None,
                 tool_profile=tool_profile,
@@ -2282,34 +2374,33 @@ class SorcarAgent(RelentlessAgent):
 
         if self._memory_tools is not None:
             tools.extend(self._memory_tools.tools())
-        if allowed is not None:
-            # Restricted profile: no skills, MCP servers, channel
-            # dispatch or fan-out; user interaction and model switching
-            # only where the profile names them (``review``, ``assistant``).
-            tools.extend([ask_user_question, talk, set_model, summary])
-            if decisions_tool_available():
-                tools.append(make_decide_tool(self))
-            return [tool for tool in tools if tool.__name__ in allowed]
-        skill_tool = make_skill_tool(self.work_dir or ".")
-        if skill_tool is not None:
-            tools.append(skill_tool)
-        try:
-            from kiss.agents.sorcar.mcp_oauth import make_mcp_auth_tools
-            from kiss.agents.sorcar.mcp_servers import make_mcp_tools
+        if allowed is None or "skill" in allowed:
+            skill_tool = make_skill_tool(self.work_dir or ".")
+            if skill_tool is not None:
+                tools.append(skill_tool)
+        # The MCP servers' tools carry server-specific names, so they
+        # are kept as a block, unfiltered, wherever the profile names
+        # the sign-in pair (the ``mcp`` group).
+        mcp_tools: list = []
+        if allowed is None or allowed & MCP_AUTH_TOOL_NAMES:
+            try:
+                from kiss.agents.sorcar.mcp_oauth import make_mcp_auth_tools
+                from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 
-            tools.extend(make_mcp_tools(self.work_dir or "."))
-            tools.extend(make_mcp_auth_tools(self.work_dir or "."))
-        except Exception:
-            logger.warning("MCP tool setup failed", exc_info=True)
-        from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
+                mcp_tools.extend(make_mcp_tools(self.work_dir or "."))
+                tools.extend(make_mcp_auth_tools(self.work_dir or "."))
+            except Exception:
+                logger.warning("MCP tool setup failed", exc_info=True)
+        if allowed is None or "run_agent" in allowed:
+            from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
 
-        # Scheduled automations (cron) are not a built-in tool: the
-        # agent dispatches them via run_agent(agent="cron", ...), which runs
-        # kiss.agents.sorcar.cron_agent as an agent script.  Passing
-        # self makes each dispatched sub-task's cost/tokens/steps fold
-        # into THIS task's accounting, so the end-of-task cost shown
-        # to the user includes run_agent sub-tasks (like run_parallel).
-        tools.append(make_run_agent_tool(self.work_dir or "", self))
+            # Scheduled automations (cron) are not a built-in tool: the
+            # agent dispatches them via run_agent(agent="cron", ...), which
+            # runs kiss.agents.sorcar.cron_agent as an agent script.  Passing
+            # self makes each dispatched sub-task's cost/tokens/steps fold
+            # into THIS task's accounting, so the end-of-task cost shown
+            # to the user includes run_agent sub-tasks (like run_parallel).
+            tools.append(make_run_agent_tool(self.work_dir or "", self))
         tools.append(ask_user_question)
         tools.append(talk)
         tools.append(set_model)
@@ -2330,10 +2421,12 @@ class SorcarAgent(RelentlessAgent):
         # requested by the SYSTEM.md instructions and this tool's
         # docstring only — there is no mechanical enforcement.
         tools.append(summary)
-        if self._is_parallel:
+        if self._is_parallel and (allowed is None or "run_parallel" in allowed):
             tools.append(run_parallel)
             tools.append(number_of_cores)
-        return tools
+        if allowed is not None:
+            tools = [tool for tool in tools if tool.__name__ in allowed]
+        return tools + mcp_tools
 
     def _show_model_in_picker(self, model_name: str) -> None:
         """Display *model_name* in the picker of every tab watching this task.
@@ -2787,25 +2880,26 @@ class SorcarAgent(RelentlessAgent):
                 governs the whole task tree.
             tool_profile: Name of the tool profile this run's built-in
                 toolset is cut down to — a key of :data:`TOOL_PROFILES`
-                (``"full"``, ``"review"``, ``"shell"``, ``"assistant"``,
-                ``"bash"``) —
-                or ``""`` (the default) to let :meth:`_tool_profile`
-                decide (``full`` for a top-level task, ``review`` for a
-                reviewer sub-agent).  Applies to this agent only:
-                ``run_parallel`` children pick their own profile.
+                (the composites ``"full"``, ``"review"``, ``"assistant"``,
+                ``"bash"`` or the groups ``"shell"``, ``"edit"``,
+                ``"browser"``, ``"memory"``, ``"agents"``, ``"mcp"``,
+                ``"skills"``, ``"user"``, ``"decide"``, ``"control"``),
+                several keys joined with ``+`` (``"shell+edit+browser"``
+                keeps the union of their tools; see
+                :func:`resolve_tool_profile`), or ``""`` (the default)
+                to let :meth:`_tool_profile` decide (``full`` for a
+                top-level task, ``review`` for a reviewer sub-agent).
+                Applies to this agent only: ``run_parallel`` children
+                pick their own profile.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
 
         Raises:
-            ValueError: If *tool_profile* is neither ``""`` nor a key of
-                :data:`TOOL_PROFILES`.
+            ValueError: If *tool_profile* is neither ``""`` nor a
+                ``+``-joined list of :data:`TOOL_PROFILES` keys.
         """
-        if tool_profile and tool_profile not in TOOL_PROFILES:
-            raise ValueError(
-                f"tool_profile must be one of {', '.join(TOOL_PROFILES)}, "
-                f"got {tool_profile!r}."
-            )
+        resolve_tool_profile(tool_profile)
         self._tool_profile_name = tool_profile
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
@@ -2851,31 +2945,6 @@ class SorcarAgent(RelentlessAgent):
                 (self._base_system_prompt or default_base_prompt)
                 + (system_prompt if system_prompt else "")
             )
-            profile = self._tool_profile(prompt_template)
-            # No note without a built-in toolset to cut down: a run with
-            # ``append_basic_tools=False`` has only ``finish`` and the
-            # caller's tools, whatever profile it names.
-            if profile != "full" and self._append_basic_tools:
-                allowed = TOOL_PROFILES[profile]
-                assert allowed is not None
-                # The docker toolset has no job registry (see the docker
-                # ``Bash`` shim in :meth:`_get_tools`), so the note must
-                # not promise ``bash_job`` there; nor the browser tools
-                # when the settings panel's "Use web tools" is off.
-                offered = set(allowed) - ({"bash_job"} if docker_image else set())
-                if not web_tools:
-                    offered -= BROWSER_TOOL_NAMES
-                system_instructions += RESTRICTED_PROFILE_NOTE.format(
-                    profile=profile, tools=", ".join(sorted(offered)),
-                )
-                if not web_tools and allowed & BROWSER_TOOL_NAMES:
-                    system_instructions += WEB_TOOLS_OFF_NOTE
-            elif self._append_basic_tools and not web_tools:
-                # The settings panel's "Use web tools" is off: the
-                # browser tools are not built (:meth:`_get_tools`), so
-                # the static Web Research rules above must not send the
-                # model after go_to_url() or a curl substitute.
-                system_instructions += WEB_TOOLS_OFF_NOTE
             memory_root = _memory_root_for_run(
                 self._append_basic_tools,
                 docker_image,
@@ -2889,6 +2958,47 @@ class SorcarAgent(RelentlessAgent):
                 self._memory_tools = MemoryTools(
                     memory_root, domains=_repo_memory_domains(resolve_work_dir(work_dir))
                 )
+            profile = self._tool_profile(prompt_template)
+            # No note without a built-in toolset to cut down: a run with
+            # ``append_basic_tools=False`` has only ``finish`` and the
+            # caller's tools, whatever profile it names.
+            allowed = resolve_tool_profile(profile)
+            if allowed is not None and self._append_basic_tools:
+                # The note lists what :meth:`_get_tools` will build,
+                # never a tool this run cannot have: the docker toolset
+                # has no job registry (see the docker ``Bash`` shim),
+                # the browser needs the settings panel's "Use web
+                # tools", the fan-out needs parallel mode, memory needs
+                # a memory root, ``decide`` the decisions model and
+                # ``skill`` a configured user or project skill.
+                offered = set(allowed)
+                if docker_image:
+                    offered.discard("bash_job")
+                if not web_tools:
+                    offered -= BROWSER_TOOL_NAMES
+                if not is_parallel:
+                    offered -= {"run_parallel", "number_of_cores"}
+                if memory_root is None:
+                    offered -= MEMORY_TOOL_NAMES
+                if not decisions_tool_available():
+                    offered.discard("decide")
+                if "skill" in offered and make_skill_tool(resolve_work_dir(work_dir)) is None:
+                    offered.discard("skill")
+                listed = sorted(offered)
+                if allowed & MCP_AUTH_TOOL_NAMES:
+                    listed.append("the tools of every configured MCP server")
+                system_instructions += RESTRICTED_PROFILE_NOTE.format(
+                    profile=profile, tools=", ".join(listed),
+                )
+                if not web_tools and allowed & BROWSER_TOOL_NAMES:
+                    system_instructions += WEB_TOOLS_OFF_NOTE
+            elif self._append_basic_tools and not web_tools:
+                # The settings panel's "Use web tools" is off: the
+                # browser tools are not built (:meth:`_get_tools`), so
+                # the static Web Research rules above must not send the
+                # model after go_to_url() or a curl substitute.
+                system_instructions += WEB_TOOLS_OFF_NOTE
+            if self._memory_tools is not None:
                 system_instructions += "\n\n" + self._memory_tools.protocol()
             prompt = prompt_template
             if attachments:
@@ -3177,7 +3287,8 @@ def run_tasks_parallel(
             sub-agent fall back to the environment/config default,
             exactly like the parent did.
         tool_profile: Explicit tool profile for every child (a key of
-            :data:`TOOL_PROFILES`).  ``""`` (default) lets each child
+            :data:`TOOL_PROFILES`, or several joined with ``+``; see
+            :func:`resolve_tool_profile`).  ``""`` (default) lets each child
             pick its own: ``review`` for reviewer-marked children when
             ``DEFAULT_CONFIG.tool_profiles`` is on, ``full`` otherwise.
         docker_image: ``docker_image`` for every child (normally the
