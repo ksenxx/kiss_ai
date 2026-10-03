@@ -332,7 +332,7 @@ tasks.
 
 - Nothing dispatched: no `decide`, `observed_call_costs` or `estimate_cost`; they follow
   `pick_model`. Actual cost = the last `Budget:` figure plus each child's `run_agent`
-  result; never query `~/.kiss/sorcar.db`.
+  result; never query `~/.kiss/history.db`.
 - `estimated_usd` prices one call; a sub-agent re-reads its context every step: budget
   about 50x. An audit you would re-check yourself is frontier work; delegate only raw
   fact gathering (file lists, grep hits, test output).
