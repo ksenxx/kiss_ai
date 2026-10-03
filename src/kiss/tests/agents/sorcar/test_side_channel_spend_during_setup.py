@@ -12,7 +12,7 @@ agent's epoch inside that window (``run_task_update_sea`` and the
 ``/ask`` dispatcher both capture it when they start) banked its spend
 into a ledger the reset then discarded, so the task's persisted cost,
 and every ancestor's, silently omitted the side channel's spend
-(observed in ``~/.kiss/sorcar.db``: a $0.0373 task update lost from its
+(observed in ``~/.kiss/history.db``: a $0.0373 task update lost from its
 parent).  The run's epoch now starts at row allocation.
 
 Drives a real :class:`ChatSorcarAgent` against a real local

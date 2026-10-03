@@ -113,7 +113,7 @@ def test_append_to_system_prompt_returns_fixed_suffix() -> None:
     assert "exactly two tools: `task_context` and `finish`" in text
     assert text.index("task_context(task_id)") < text.index("Call `finish`")
     assert "Two or three sentences" in text and "<p>…</p>" in text
-    assert "sorcar.db" in text and "read-only" in text
+    assert "history.db" in text and "read-only" in text
     assert "task_overview" not in text and "task_transcript" not in text
     assert ask_sea.APPEND_TO_PROMPT == _EXPECTED_APPEND_TO_PROMPT
 

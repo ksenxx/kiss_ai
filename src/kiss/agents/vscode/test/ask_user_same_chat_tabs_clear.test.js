@@ -114,9 +114,13 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   });
   assert.strictEqual(
     api.getActiveTabId(),
-    secondTab,
-    'a background ask must not steal the active tab',
+    firstTab,
+    'a question switches the client to its tab',
   );
+  // Back on the sibling tab: it shares the backend chat but has no
+  // question of its own.
+  clickTab(win, secondTab);
+  assert.strictEqual(api.getActiveTabId(), secondTab);
   assert.strictEqual(
     visibleAskText(win),
     '',

@@ -4,7 +4,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 #
-# Sync the task database (~/.kiss/sorcar.db) between this machine and a remote
+# Sync the task database (~/.kiss/history.db) between this machine and a remote
 # host in *both* directions, so the History panel on either machine lists every
 # task either machine ever ran.
 #
@@ -20,7 +20,7 @@
 #   1. remote -> here.  src/kiss/scripts/sync_db.py asks the remote what this
 #      machine lacks, builds a small delta of just those rows on the remote,
 #      brings it here, re-points the work directories recorded in it at
-#      *this* checkout, and merges it into ~/.kiss/sorcar.db in place.  Only
+#      *this* checkout, and merges it into ~/.kiss/history.db in place.  Only
 #      the delta crosses the network, neither database is copied or scanned
 #      (the history is append-only, and sync_db.py seeks straight to the rows
 #      above what the other side holds), and nothing here is deleted or
@@ -62,7 +62,7 @@
 #     Anything that happened there in between, down to a single event, is
 #     something this machine has never seen, and stops the replacement.
 #     A probe that did not run authorises nothing.  Whatever file
-#     it replaces is kept as ~/.kiss/sorcar.db.replaced-<time>, complete: the
+#     it replaces is kept as ~/.kiss/history.db.replaced-<time>, complete: the
 #     pages that were still only in its -wal are folded into it first, and if
 #     they cannot be, that -wal is kept alongside instead.  An older backup is
 #     never written over, and the tables no sync moves — that machine's own
@@ -79,7 +79,7 @@
 # The full upload of that fallback has four traps in it, and all four are
 # handled here:
 #
-#   * The live database is a trio — sorcar.db plus its -wal (pages committed
+#   * The live database is a trio — history.db plus its -wal (pages committed
 #     but not yet folded into the main file) and -shm (an ephemeral,
 #     machine-local index that must never be copied at all).  While an agent
 #     runs, all three keep changing, so copying them one after another over a
@@ -143,13 +143,26 @@ FINGERPRINT="$PROJECT_ROOT/src/kiss/scripts/db_fingerprint.py"
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 
 KISS_DIR="${KISS_HOME:-$HOME/.kiss}"
-DB="$KISS_DIR/sorcar.db"
+DB="$KISS_DIR/history.db"
+# The database was sorcar.db before version 2026.10.2.  The web app renames
+# it the first time it opens the database; a machine that has not started the
+# new version yet still holds it under the old name, here and on the remote.
+# The old name stays as a symlink to the new one, so a web app still running
+# the old version keeps writing to the same file (SQLite resolves the link).
+if [[ ! -e "$DB" && -e "$KISS_DIR/sorcar.db" ]]; then
+    for part in -wal -shm ""; do
+        if [[ -e "$KISS_DIR/sorcar.db$part" ]]; then
+            mv "$KISS_DIR/sorcar.db$part" "$DB$part" || die "Could not rename $KISS_DIR/sorcar.db$part."
+        fi
+    done
+    ln -s history.db "$KISS_DIR/sorcar.db"
+fi
 # Where the remote leaves the snapshot pass 1 reads.  Expanded by the remote
 # shell, so it is written with a literal $HOME everywhere below.
-REMOTE_SNAPSHOT='$HOME/.kiss/sorcar.db.outgoing'
+REMOTE_SNAPSHOT='$HOME/.kiss/history.db.outgoing'
 
 TMP_DIR="$(mktemp -d)"
-SNAPSHOT="$TMP_DIR/sorcar.db"
+SNAPSHOT="$TMP_DIR/history.db"
 # The helper sync_db.py runs on each delta before merging it, and the files it
 # needs (see "What is done to the rows before they travel" below).
 PREPARE_DELTA="$TMP_DIR/prepare-delta.sh"
@@ -161,7 +174,7 @@ export RELOCATE OMIT_LIVE_TASKS
 # happens: an ssh connection can drop after the remote has already acted.
 REMOTE_SNAPSHOT_MADE=0
 REMOTE_WEB_APP_STOPPED=0
-# Set while an upload may have left ~/.kiss/sorcar.db.incoming on the remote
+# Set while an upload may have left ~/.kiss/history.db.incoming on the remote
 # without the swap having taken it: a transfer cut short -- by the connection,
 # or by the disk filling up -- must not leave a file the size of the database
 # behind, taking the room the next attempt needs.
@@ -198,8 +211,8 @@ cleanup() {
             || warn "Could not remove $TARGET:$REMOTE_SNAPSHOT — delete it by hand."
     fi
     if (( REMOTE_INCOMING_MADE )); then
-        ssh "$TARGET" 'rm -f "$HOME/.kiss/sorcar.db.incoming"' >/dev/null 2>&1 \
-            || warn "Could not remove $TARGET:~/.kiss/sorcar.db.incoming — delete it by hand."
+        ssh "$TARGET" 'rm -f "$HOME/.kiss/history.db.incoming"' >/dev/null 2>&1 \
+            || warn "Could not remove $TARGET:~/.kiss/history.db.incoming — delete it by hand."
     fi
     if (( REMOTE_WEB_APP_STOPPED )); then
         ssh "$TARGET" 'systemctl --user start kiss-web.service >/dev/null 2>&1 || true' \
@@ -227,7 +240,13 @@ REMOTE_DB_STATE="$(ssh "$TARGET" 'python3 -' <<'PY' 2>/dev/null || echo unknown
 import os
 import sqlite3
 
-path = os.path.expanduser("~/.kiss/sorcar.db")
+path = os.path.expanduser("~/.kiss/history.db")
+legacy = os.path.expanduser("~/.kiss/sorcar.db")
+if not os.path.exists(path) and os.path.exists(legacy):
+    for part in ("-wal", "-shm", ""):
+        if os.path.exists(legacy + part):
+            os.replace(legacy + part, path + part)
+    os.symlink("history.db", legacy)
 if not os.path.isfile(path):
     print("missing")
     raise SystemExit
@@ -412,9 +431,9 @@ pull_from_remote() {
     # before the rows travel: whatever is written there from this instant on
     # may or may not have come here, so it counts as a change -- the safe
     # side to err on.
-    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint '$HOME/.kiss/sorcar.db')"
+    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint '$HOME/.kiss/history.db')"
     step "Merging $TARGET's tasks into $DB ..."
-    if python3 "$SYNC_DB" "$TARGET:~/.kiss/sorcar.db" "$DB" \
+    if python3 "$SYNC_DB" "$TARGET:~/.kiss/history.db" "$DB" \
             --edit-delta "$(prepare_delta_command "$REMOTE_DIR" "$LOCAL_DIR")"; then
         info "This machine's task database now holds $TARGET's tasks too."
         PULL_COMPLETE=1
@@ -497,8 +516,8 @@ push_to_remote() {
     if [[ ! -f "$SYNC_DB" ]]; then
         warn "$SYNC_DB is missing — uploading the database in full instead."
     elif [[ "$REMOTE_DB_STATE" == "ok" ]]; then
-        step "Merging this machine's tasks into $TARGET:~/.kiss/sorcar.db ..."
-        if python3 "$SYNC_DB" "$DB" "$TARGET:~/.kiss/sorcar.db" \
+        step "Merging this machine's tasks into $TARGET:~/.kiss/history.db ..."
+        if python3 "$SYNC_DB" "$DB" "$TARGET:~/.kiss/history.db" \
                 --edit-delta "$(prepare_delta_command "$LOCAL_DIR" "$REMOTE_DIR" "$LIVE_TASK_IDS")"; then
             info "Task database synced on $TARGET."
             return 0
@@ -563,7 +582,7 @@ remote_unchanged_since_pull() {
                    "brought here, so its database was left as it is."
         return 1
     fi
-    now="$(remote_fingerprint '$HOME/.kiss/sorcar.db')"
+    now="$(remote_fingerprint '$HOME/.kiss/history.db')"
     if [[ -z "$now" ]]; then
         incomplete "Cannot re-read what $TARGET holds, so it is not certain that" \
                    "the tasks brought back are still all of it: its database was" \
@@ -585,7 +604,7 @@ may_replace_remote_db() {
         missing) return 0 ;;
         unreadable|incompatible)
             warn "The database on $TARGET is $REMOTE_DB_STATE — replacing it," \
-                 "and keeping it as ~/.kiss/sorcar.db.replaced-<time>."
+                 "and keeping it as ~/.kiss/history.db.replaced-<time>."
             return 0
             ;;
     esac
@@ -596,7 +615,7 @@ may_replace_remote_db() {
         # never seen, and the replacement would throw it away.
         remote_unchanged_since_pull || return 1
         warn "Replacing the database on $TARGET wholesale; its own tasks are" \
-             "already here, and it is kept as ~/.kiss/sorcar.db.replaced-<time>."
+             "already here, and it is kept as ~/.kiss/history.db.replaced-<time>."
         return 0
     fi
     incomplete "Refusing to replace the task database on $TARGET: its tasks" \
@@ -631,7 +650,7 @@ upload_whole_db() {
                        "its database was left as it is."
             return 0
         fi
-        running="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/sorcar.db\" \
+        running="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/history.db\" \
             $(shquote "$LIVE_TASK_WINDOW")" < "$RUNNING_TASKS" 2>/dev/null \
             | head -1 | tr -d '[:space:]' || true)"
         if [[ "$running" != "0" ]]; then
@@ -653,7 +672,7 @@ upload_whole_db() {
     local snapshot_bytes free_bytes
     snapshot_bytes="$(wc -c < "$SNAPSHOT" | tr -d ' ')"
     free_bytes="$(ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && stale=0
-                                  [ -f "$HOME/.kiss/sorcar.db.incoming" ] && stale=$(wc -c < "$HOME/.kiss/sorcar.db.incoming")
+                                  [ -f "$HOME/.kiss/history.db.incoming" ] && stale=$(wc -c < "$HOME/.kiss/history.db.incoming")
                                   df -Pk "$HOME/.kiss" | awk -v stale="$stale" "NR == 2 { print \$4 * 1024 + stale }"' \
         2>/dev/null | tr -d '[:space:]' || true)"
     if [[ ! "$free_bytes" =~ ^[0-9]+$ ]]; then
@@ -674,7 +693,7 @@ upload_whole_db() {
                    home_re=$(printf %s "$HOME" | sed "s/[][\\.^\$*+?(){}|\/]/\\\\&/g")
                    pkill -f "$home_re/.*kiss-web" >/dev/null 2>&1 || true
                    sleep 1
-                   rm -f "$HOME"/.kiss/sorcar.db.incoming' \
+                   rm -f "$HOME"/.kiss/history.db.incoming' \
         || die "Could not prepare $TARGET for the upload."
 
     # Nothing there can write any more, so this answer cannot go stale between
@@ -690,14 +709,14 @@ upload_whole_db() {
     step "Uploading $tasks tasks to $TARGET ..."
     REMOTE_INCOMING_MADE=1
     gzip -1 -c "$SNAPSHOT" \
-        | ssh "$TARGET" 'gzip -dc > "$HOME/.kiss/sorcar.db.incoming"' \
+        | ssh "$TARGET" 'gzip -dc > "$HOME/.kiss/history.db.incoming"' \
         || die "Uploading the task database to $TARGET failed."
 
     if ! ssh "$TARGET" "EXPECTED='$tasks' bash -s" > "$TMP_DIR/swap.out" <<'SWAP'
 set -e
 cd "$HOME/.kiss"
 got=$(python3 -c 'import sqlite3
-con = sqlite3.connect("file:sorcar.db.incoming?mode=ro&immutable=1", uri=True)
+con = sqlite3.connect("file:history.db.incoming?mode=ro&immutable=1", uri=True)
 if con.execute("PRAGMA quick_check").fetchone()[0] != "ok":
     raise SystemExit("the uploaded database is corrupt")
 print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])')
@@ -729,13 +748,13 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])')
 # still complete if the last step below cannot be taken.  Either way the old
 # -wal is gone before the new database takes its place: a -wal left beside a
 # database it does not belong to is how a database gets corrupted.
-if [ -f sorcar.db ]; then
-    backup="sorcar.db.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+if [ -f history.db ]; then
+    backup="history.db.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
     while [ -e "$backup" ]; do backup="$backup+"; done
     folded=1
-    if [ -f sorcar.db-wal ]; then
+    if [ -f history.db-wal ]; then
         python3 -c 'import sqlite3, sys
-con = sqlite3.connect("sorcar.db", timeout=30)
+con = sqlite3.connect("history.db", timeout=30)
 try:
     busy, frames, _ = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
 finally:
@@ -744,24 +763,24 @@ finally:
 # anything else -- a busy reader, frames still in the log -- means it did not.
 sys.exit(0 if busy == 0 and frames <= 0 else 1)' 2>/dev/null || folded=0
     fi
-    ln sorcar.db "$backup" 2>/dev/null || cp -p sorcar.db "$backup" \
+    ln history.db "$backup" 2>/dev/null || cp -p history.db "$backup" \
         || { echo "ERROR: cannot keep a copy of the database being replaced" >&2; exit 1; }
     if [ "$folded" = 0 ]; then
-        cp -p sorcar.db-wal "$backup-wal" \
+        cp -p history.db-wal "$backup-wal" \
             || { echo "ERROR: cannot keep the -wal of the database being replaced" >&2; exit 1; }
     fi
     echo "SORCAR_DB_BACKUP=$backup"
 fi
 # The -shm is an index into the -wal, and the local endpoint file describes a
 # daemon that is gone; neither says anything about the database arriving.
-rm -f sorcar.db-wal sorcar.db-shm sorcar-local.json
+rm -f history.db-wal history.db-shm sorcar-local.json
 # The one step that takes the old database away.  If it cannot be taken, the old
 # database is still here under its own name -- and gets its -wal back, so that
 # what is here is the database that was here, whole.
-if ! mv -f sorcar.db.incoming sorcar.db; then
+if ! mv -f history.db.incoming history.db; then
     # No backup means there was no database here to put back.
     if [ -n "${backup:-}" ] && [ -f "$backup-wal" ]; then
-        cp -p "$backup-wal" sorcar.db-wal || true
+        cp -p "$backup-wal" history.db-wal || true
     fi
     echo "ERROR: cannot put the new database in place; the previous one is still here" >&2
     exit 1
@@ -784,7 +803,7 @@ SWAP
 # ---------------------------------------------------------------------------
 # What the replacement does not bring with it
 #
-# A sync moves the two tables that hold a machine's history.  A sorcar.db has
+# A sync moves the two tables that hold a machine's history.  A history.db has
 # three more that no sync moves -- how often each model was chosen, each file
 # opened, each task text run -- and a wholesale replacement would take those
 # down with the file, in the one step that is supposed to lose nothing.  They
@@ -798,12 +817,12 @@ SWAP
 carry_over_counters() {
     local backup="$1"
     # The name comes back from the remote, and goes into a remote command line.
-    [[ "$backup" =~ ^sorcar\.db\.replaced-[0-9A-Za-z]+\+*$ ]] \
+    [[ "$backup" =~ ^history\.db\.replaced-[0-9A-Za-z]+\+*$ ]] \
         || { warn "'$backup' is not a name this script gave a backup — leaving it alone."
              return 0; }
     [[ -f "$CARRY_OVER" ]] || { warn "$CARRY_OVER is missing — the usage counters" \
         "of the replaced database were left in ~/.kiss/$backup."; return 0; }
-    if ! ssh "$TARGET" "python3 - \"\$HOME/.kiss/$backup\" \"\$HOME/.kiss/sorcar.db\"" \
+    if ! ssh "$TARGET" "python3 - \"\$HOME/.kiss/$backup\" \"\$HOME/.kiss/history.db\"" \
             < "$CARRY_OVER"; then
         warn "Could not carry the usage counters of the replaced database over;" \
              "they are in ~/.kiss/$backup on $TARGET."
@@ -820,7 +839,7 @@ cat > "$TMP_DIR/remote-snapshot.py" <<'PY'
 import os
 import sqlite3
 
-database = os.path.expanduser("~/.kiss/sorcar.db")
+database = os.path.expanduser("~/.kiss/history.db")
 snapshot = database + ".outgoing"
 if os.path.exists(snapshot):
     os.unlink(snapshot)

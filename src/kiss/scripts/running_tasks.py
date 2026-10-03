@@ -3,7 +3,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Report the tasks of a ``sorcar.db`` that are still running.
+"""Report the tasks of a ``history.db`` that are still running.
 
 A deploy rebuilds the Python environment under the web app and restarts
 it, and replacing the task database wholesale stops it outright.  Either
@@ -23,7 +23,7 @@ Usage:
 The number of running tasks is printed on the first line, followed by
 one ``<task_id> <seconds_since_last_event>`` line each.
 
-A machine with no database, or whose ``sorcar.db`` is not an SQLite file
+A machine with no database, or whose ``history.db`` is not an SQLite file
 at all, has no running task and prints ``0`` -- a first deploy has
 nothing to lose.  A database that exists but cannot be *read* is a
 different answer: it prints ``unknown`` and exits 1, because it might be
@@ -75,7 +75,7 @@ def running_tasks(
     """List the tasks of a database that look like they are running.
 
     Args:
-        database: Path of the ``sorcar.db`` to inspect.
+        database: Path of the ``history.db`` to inspect.
         window: How recent a task's newest event has to be, in seconds,
             for the task to count as running.
         now: Present time as an epoch timestamp; defaults to

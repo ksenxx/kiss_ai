@@ -6,7 +6,7 @@
 model returns empty assistant turns.
 
 Bug reproduction (claude-fable-5 production failures, tasks 3706/3707/3708/3710
-in ~/.kiss/sorcar.db):
+in ~/.kiss/history.db):
 
 The model returns an assistant message with empty ``content`` and no tool
 calls (e.g. after a streaming/reasoning-block parsing hiccup in the provider

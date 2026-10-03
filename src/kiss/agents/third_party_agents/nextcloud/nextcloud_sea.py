@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -41,10 +40,11 @@ from kiss.agents.third_party_agents._device_auth import (
     connect_prompt,
     consent_required,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_NEXTCLOUD_DIR = Path.home() / ".kiss" / "third_party_agents" / "nextcloud"
+_NEXTCLOUD_DIR = kiss_home() / "third_party_agents" / "nextcloud"
 _config = ChannelConfig(
     _NEXTCLOUD_DIR,
     (

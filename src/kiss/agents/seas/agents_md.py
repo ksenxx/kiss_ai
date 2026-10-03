@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The user's standing instructions in ``~/.kiss/SORCAR.md``.
+"""The user's standing instructions in ``~/.kiss/AGENTS.md``.
 
 ``RelentlessAgent.perform_task`` appends the whole of
-``$KISS_HOME/SORCAR.md`` (``~/.kiss/SORCAR.md`` by default) to the
+``$KISS_HOME/AGENTS.md`` (``~/.kiss/AGENTS.md`` by default) to the
 system prompt of every Sorcar task, so a line written there is an
 instruction the agent follows in every later task.  This module is the
 storage layer shared by the ``/remember`` and ``/forget`` agents
@@ -14,7 +14,7 @@ each instruction is one Markdown bullet line (``- <instruction>``), the
 file is created with a short heading on first use, and any other text
 the user wrote in the file by hand is left byte for byte as it was
 (undecodable bytes and whatever line endings each line has included).
-Every update runs under an inter-process lock (``SORCAR.md.lock``
+Every update runs under an inter-process lock (``AGENTS.md.lock``
 beside the file), so two tasks remembering at once cannot lose each
 other's line, and the new content is moved into place atomically, so a
 task reading the file for its system prompt never sees it half-written.
@@ -25,7 +25,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from kiss.core.config import kiss_home
+from kiss.core.config import agents_md_path
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.utils import read_bytes_waiting_for_writer, replace_waiting_for_readers
 
@@ -34,11 +34,6 @@ HEADER = ["# User instructions", ""]
 
 _BULLET = re.compile(r"^\s*[-*+]\s+(.*\S)\s*$")
 _LEADING_MARKERS = re.compile(r"^(?:[-*+](?:\s+|$))+")
-
-
-def sorcar_md_path() -> Path:
-    """Return the path of the user's instruction file, ``$KISS_HOME/SORCAR.md``."""
-    return kiss_home() / "SORCAR.md"
 
 
 def normalize(instruction: str) -> str:
@@ -93,9 +88,9 @@ def _write_lines(path: Path, lines: list[str]) -> None:
     """Replace the file's content with *lines* (terminators included) atomically.
 
     The text is written to a sibling temporary file and moved over the
-    real one, so a task reading ``SORCAR.md`` for its system prompt at
+    real one, so a task reading ``AGENTS.md`` for its system prompt at
     the same moment sees either the old or the new content, never a
-    truncated file.  Callers hold the ``SORCAR.md.lock`` lock, so the
+    truncated file.  Callers hold the ``AGENTS.md.lock`` lock, so the
     temporary file's fixed name is never contended.  On Windows the move
     waits out a reader that has the file open at that instant, which
     would otherwise fail the whole ``/remember`` with a sharing violation.
@@ -119,7 +114,7 @@ def _instructions(lines: list[str]) -> list[str]:
 
 def read_instructions() -> list[str]:
     """Return the instructions stored in the file: every bullet line's text, in order."""
-    return _instructions(_read_lines(sorcar_md_path()))
+    return _instructions(_read_lines(agents_md_path()))
 
 
 def _format_list(instructions: list[str], path: Path) -> str:
@@ -130,13 +125,13 @@ def _format_list(instructions: list[str], path: Path) -> str:
 
 
 def list_instructions() -> str:
-    """List the standing instructions currently stored in ~/.kiss/SORCAR.md.
+    """List the standing instructions currently stored in ~/.kiss/AGENTS.md.
 
     Returns:
         One numbered line per instruction, exactly as stored, or a
         sentence saying the file holds no instructions.
     """
-    return _format_list(read_instructions(), sorcar_md_path())
+    return _format_list(read_instructions(), agents_md_path())
 
 
 def add_instruction(instruction: str) -> str:
@@ -151,7 +146,7 @@ def add_instruction(instruction: str) -> str:
     text = normalize(instruction)
     if not text:
         return "Error: the instruction is empty; nothing was remembered."
-    path = sorcar_md_path()
+    path = agents_md_path()
     with exclusive_file_lock(path.with_name(path.name + ".lock")):
         lines = _read_lines(path)
         if any(_key(existing) == text.casefold() for existing in _instructions(lines)):
@@ -181,7 +176,7 @@ def remove_instruction(instruction: str) -> str:
     text = normalize(instruction)
     if not text:
         return "Error: the instruction is empty; nothing was forgotten."
-    path = sorcar_md_path()
+    path = agents_md_path()
     with exclusive_file_lock(path.with_name(path.name + ".lock")):
         lines = _read_lines(path)
         kept = []

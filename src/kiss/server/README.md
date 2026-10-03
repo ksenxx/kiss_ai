@@ -304,8 +304,9 @@ The parameters without getters:
 - **`side_channel`** — marks the run as a side channel of its parent
   (a sub-agent whose result is shown outside its own tab: the `/ask`
   answerer delivers its answer into the PARENT's transcript, the
-  periodic `/task_update` child fills the parent task's task-info
-  panel, and the in-process `/merge` run that resolves a conflicting
+  periodic in-process `/ask` run of `kiss.server.task_update` fills the
+  parent task's task-info panel, and the in-process `/merge` run that
+  resolves a conflicting
   auto-merge works in the parent's repository; so its own tab closes
   when the run ends and is not re-opened when the chat is reloaded);
   only
@@ -333,8 +334,8 @@ The parameters without getters:
   after the prompt (`RelentlessAgent.perform_task`): the work
   directory (omitted when the tools run in an attached container that
   does not mount it), the process id, the task settings, and the
-  user's standing instructions from `~/.kiss/SORCAR.md`
-  (`$KISS_HOME/SORCAR.md`, the file the bundled `/remember` and
+  user's standing instructions from `~/.kiss/AGENTS.md`
+  (`$KISS_HOME/AGENTS.md`, the file the bundled `/remember` and
   `/forget` SEAs maintain) when that file exists.  A
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
@@ -988,21 +989,25 @@ class TaskResult:
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
   folder can shadow them.  The 17 bundled SEA folders register
   these commands: `/ask` (answers a question about the current task
-  from a digest of its persisted events; typed into a running task's
+  in two or three sentences from one `task_context` call over its
+  status, spend, progress log and digested persisted events; its only
+  tools are `task_context` and `finish`, so it never touches the task's
+  files or shell; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
   `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
-  command), `/autorouter` (runs a task on the cheapest model tier
+  command, and the task-info panel's Task update is the same agent
+  run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
   that will finish it), `/bestrouter` (runs a task on
   `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
   container; the module defines no top-level run-parameter getters, its
   `ContainerHarness` getters are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`
-  (removes a standing instruction from `~/.kiss/SORCAR.md`),
+  (removes a standing instruction from `~/.kiss/AGENTS.md`),
   `/git_extract_knowledge` (builds and refreshes a repository's
   knowledge memory and can schedule its daily refresh), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
-  `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
+  `~/.kiss/AGENTS.md`), `/review_paper` (reviews a research paper for
   a venue, scoring seven dimensions from 1 to 10), `/revise_and_review_paper` (writes a paper with
   `/write_paper`, has `/review_paper` review it fresh, and repeats until
   strong accept or no further improvement; task text carries `Writing:`
@@ -1025,7 +1030,7 @@ class TaskResult:
   (`coding/coding_test_context.py`,
   `git_extract_knowledge/git_knowledge_index.py`,
   `git_extract_knowledge/git_knowledge_store.py`, the shared
-  `sorcar_md.py`) are helpers, not commands: only
+  `agents_md.py`) are helpers, not commands: only
   `<name>/<name>_sea.py` folders are registered.  Syntax,
   precedence and the dispatch flow are
   documented in

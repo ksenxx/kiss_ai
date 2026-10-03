@@ -325,7 +325,7 @@ TASK_PROMPT = """
 
 #: Everything up to the cache-break marker is identical for every task of a
 #: Sorcar daemon (the base system prompt precedes it); the work dir, PID,
-#: Task Settings and SORCAR.md that follow vary per task.  The Anthropic
+#: Task Settings and AGENTS.md that follow vary per task.  The Anthropic
 #: adapter caches the prefix as one block (see ``SYSTEM_CACHE_BREAK``).
 IMPORTANT_INSTRUCTIONS = """
 # MOST IMPORTANT INSTRUCTIONS
@@ -1205,15 +1205,15 @@ class RelentlessAgent(Base):
             current_pid=current_pid,
         )
         important_instructions += self._task_settings_section()
-        sorcar_md = config_module.kiss_home() / "SORCAR.md"
-        if sorcar_md.is_file():
+        agents_md = config_module.agents_md_path()
+        if agents_md.is_file():
             # User-authored: a cp1252 byte from a Windows editor must
             # not abort every task before its first model call (the
             # same tolerance ``skills.parse_frontmatter`` gives SKILL.md).
             # A ``/remember`` replacing the file at this instant must not
             # abort the task either (Windows denies the open mid-rename).
             important_instructions += "\n" + read_text_waiting_for_writer(
-                sorcar_md, errors="replace",
+                agents_md, errors="replace",
             )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):

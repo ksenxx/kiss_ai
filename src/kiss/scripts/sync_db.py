@@ -3,7 +3,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""One-way synchronization of ``sorcar.db``-shaped SQLite databases.
+"""One-way synchronization of ``history.db``-shaped SQLite databases.
 
 Copies rows of the task table (``task_history``) and the ``events``
 table from SOURCE into TARGET, then recomputes TARGET's per-chat
@@ -15,9 +15,9 @@ Both SOURCE and TARGET are unix-style paths to a SQLite database file,
 optionally prefixed with ``user@host:`` when the database lives on a
 machine reachable over ssh::
 
-    uv run python -m kiss.scripts.sync_db ~/.kiss/sorcar.db /tmp/backup.db
-    uv run python -m kiss.scripts.sync_db ksen@1.2.3.4:~/.kiss/sorcar.db \\
-        ~/.kiss/sorcar.db
+    uv run python -m kiss.scripts.sync_db ~/.kiss/history.db /tmp/backup.db
+    uv run python -m kiss.scripts.sync_db ksen@1.2.3.4:~/.kiss/history.db \\
+        ~/.kiss/history.db
 
 How it works (three phases, each run on the machine that owns the
 database, so a database file is never copied across machines):
@@ -32,7 +32,7 @@ database, so a database file is never copied across machines):
    new rows in a single transaction.
 
 Only the delta crosses the network, which keeps a repeated sync of a
-multi-gigabyte ``sorcar.db`` down to seconds.  Rows are matched by their
+multi-gigabyte ``history.db`` down to seconds.  Rows are matched by their
 stable natural keys -- ``task_history.id`` for tasks and
 ``(task_id, seq)`` for events -- and ``events.id`` (an ``AUTOINCREMENT``
 rowid that means different things in different databases) is never
@@ -1136,6 +1136,28 @@ def synchronize(
     return stats
 
 
+def local_shell_quote(arg: str) -> str:
+    """Quote *arg* for the shell ``subprocess.run(..., shell=True)`` uses on this machine.
+
+    That is ``/bin/sh`` everywhere but Windows, where it is ``cmd.exe``:
+    it knows nothing of POSIX single quotes, and ``&``, ``|``, ``<``,
+    ``>`` and ``^`` are literal only inside double quotes.  A file name
+    cannot contain a double quote on Windows, so a word that does (not a
+    path) gets the C runtime's quoting instead.
+
+    Args:
+        arg: The word to quote.
+
+    Returns:
+        *arg* quoted as one shell word.
+    """
+    if os.name != "nt":
+        return shlex.quote(arg)
+    if '"' in arg:
+        return subprocess.list2cmdline([arg])
+    return f'"{arg}"'
+
+
 def edit_delta(delta_gz: str, commands: list[str]) -> None:
     """Run shell commands against the delta between the extract and the merge.
 
@@ -1157,7 +1179,7 @@ def edit_delta(delta_gz: str, commands: list[str]) -> None:
         with open(delta_gz, "rb") as inp:
             read_file_gz(inp, plain)
         for command in commands:
-            shell_command = command.replace("{}", shlex.quote(plain))
+            shell_command = command.replace("{}", local_shell_quote(plain))
             done = subprocess.run(shell_command, shell=True, check=False)
             if done.returncode != 0:
                 raise SyncError(f"delta edit exited with {done.returncode}: {command}")
@@ -1222,7 +1244,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sync_db",
         description=(
-            "One-way sync of the task_history and events tables of sorcar.db-shaped "
+            "One-way sync of the task_history and events tables of history.db-shaped "
             "SQLite databases, recomputing the target's chat_summaries rows of the "
             "chats that received tasks. SOURCE and TARGET are "
             "unix paths, optionally prefixed with user@host: for a "

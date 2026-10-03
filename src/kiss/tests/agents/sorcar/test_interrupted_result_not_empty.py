@@ -4,7 +4,7 @@
 # add your name here
 """Regression tests for the task-3624 empty-result data loss.
 
-Incident (forensics from ``~/.kiss/sorcar.db``): when the kiss-web
+Incident (forensics from ``~/.kiss/history.db``): when the kiss-web
 daemon was SIGTERMed on 2026-06-11 00:37:45 with 7 parallel sub-agents
 in flight, the shutdown's cooperative stop event made each sub-agent's
 printer raise ``KeyboardInterrupt``.  One sub-agent (task_history row
@@ -42,7 +42,7 @@ def _redirect_db(tmpdir: Path) -> tuple:
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return old
 

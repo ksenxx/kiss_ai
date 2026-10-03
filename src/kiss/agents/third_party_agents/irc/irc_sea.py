@@ -21,7 +21,6 @@ import socket
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -30,8 +29,10 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
+from kiss.core.config import kiss_home
 
-_IRC_DIR = Path.home() / ".kiss" / "third_party_agents" / "irc"
+_IRC_DIR = kiss_home() / "third_party_agents" / "irc"
 _config = ChannelConfig(
     _IRC_DIR,
     (
@@ -45,7 +46,8 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/irc help``."""
     return (
         "Joins IRC channels and sends and reads messages on the IRC server configured in "
-        "~/.kiss/third_party_agents/irc/config.json (server, nick, optional TLS); use it with "
+        f"~/{HOME_DIR}/third_party_agents/irc/config.json (server, nick, optional "
+        "TLS); use it with "
         "`run_agent(agent=\"irc\", task=...)` or the `kiss-irc -t \"<task>\"` CLI "
         "(`kiss-irc --channel <#channel>` polls a channel and answers new messages)."
     )

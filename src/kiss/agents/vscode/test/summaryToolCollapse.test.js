@@ -452,6 +452,9 @@ function testToolResultLandsInsideCollapsedSummaryPanel() {
 
 function testNonSummaryToolCallUnaffected() {
   const {win} = makeWebview();
+  // The daemon announces a running task before streaming its events;
+  // a finished task's panels fold as they land (applyChevronState).
+  send(win, {type: 'status', running: true});
   sendToolPanels(win, 7);
   send(win, {
     type: 'tool_call',
@@ -540,6 +543,10 @@ function replayCompletedSummaryTask(win) {
     name: 'summary',
     content: 'Summary recorded.',
   });
+  // One plain panel after the summary: adopted by nothing, it is what
+  // the finished-task digest folds.
+  events.push({type: 'tool_call', name: 'Read', path: '/tmp/after'});
+  events.push({type: 'tool_result', name: 'Read', content: 'after'});
   events.push({type: 'result', text: 'done', summary: 'done', success: true});
   send(win, {
     type: 'task_events',
@@ -555,10 +562,6 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
   replayCompletedSummaryTask(win);
   const p = summaryPanels(win)[0];
   assert.ok(p, 'summary panel replays');
-  assert.ok(
-    !p.classList.contains('chv-hidden'),
-    'the summary panel must be exempt from task-level chv-hidden',
-  );
   assert.ok(
     p.classList.contains('collapsed'),
     'the replayed summary panel stays in its collapsed digest state',
@@ -585,12 +588,15 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
         el.classList.contains('tc') &&
         !el.classList.contains('tc-summary'),
     );
+  assert.ok(plainTc.length > 0, 'the replay leaves plain panels on screen');
   assert.ok(
-    plainTc.every(el => el.classList.contains('chv-hidden')),
-    'non-summary panels keep the pre-existing chv-hidden behavior',
+    plainTc.every(
+      el => el.classList.contains('collapsed') && isDisplayed(win, el),
+    ),
+    'non-summary panels of a replayed task are folded, never hidden',
   );
   win.close();
-  console.log('  ok - replayed summary stays visible (no chv-hidden)');
+  console.log('  ok - replayed summary and plain panels stay visible');
 }
 
 function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
@@ -607,10 +613,6 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
   assert.strictEqual(nested.length, 7);
   for (const el of nested) {
     assert.ok(
-      !el.classList.contains('chv-hidden'),
-      'adopted panels must not be chv-hidden inside the summary',
-    );
-    assert.ok(
       isDisplayed(win, el),
       'every adopted panel must be visible once the summary is expanded',
     );
@@ -622,6 +624,7 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
 function testAdoptedPanelKeepsOwnCollapsePreview() {
   const {win} = makeWebview();
   injectCss(win);
+  send(win, {type: 'status', running: true});
   sendToolPanels(win, 6);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
@@ -629,7 +632,15 @@ function testAdoptedPanelKeepsOwnCollapsePreview() {
   hdr.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),
   );
-  const nestedPanel = p.querySelector(':scope > .summary-sub > .tc');
+  // The newest adopted tool panel: the streaming sweep folded the
+  // older ones, this one is still open when the user folds it below.
+  const nestedPanel = p.querySelector(
+    ':scope > .summary-sub > .tc:last-of-type',
+  );
+  assert.ok(
+    !nestedPanel.classList.contains('collapsed'),
+    'precondition: the adopted panel is open',
+  );
   const nestedHdr = nestedPanel.querySelector(':scope > .tc-h');
   nestedHdr.dispatchEvent(
     new win.MouseEvent('click', {bubbles: true, cancelable: true}),

@@ -85,6 +85,16 @@ function cs(win, id) {
   return win.getComputedStyle(win.document.getElementById(id));
 }
 
+/** Whether *el* and every ancestor up to #output is displayed. */
+function isDisplayed(win, el) {
+  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
+      return false;
+    if (n.id === 'output') break;
+  }
+  return true;
+}
+
 function showTaskPanel(win, posted, task) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
@@ -299,9 +309,13 @@ function testChevronPassWorksWithoutButton() {
   const adopted = summaryPanel.querySelector('.summary-sub .collapsible');
   assert.ok(adopted, 'the summary must adopt the earlier panels');
 
+  const readPanel = Array.from(O.querySelectorAll('.tc')).find(p =>
+    (p.textContent || '').includes('/tmp/a'),
+  );
+  assert.ok(readPanel, 'the Read tool panel must exist');
   assert.ok(
-    !rpPanel.classList.contains('chv-hidden'),
-    'running-task panels must not be tucked away',
+    !rpPanel.classList.contains('collapsed'),
+    'precondition: the fan-out panel is open while the task runs',
   );
 
   send(win, {
@@ -316,30 +330,25 @@ function testChevronPassWorksWithoutButton() {
   const rc = O.querySelector('.rc');
   assert.ok(rc, 'the result panel must render');
   assert.ok(
-    !rc.classList.contains('chv-hidden'),
-    'the result panel must stay visible',
+    !rc.classList.contains('collapsed'),
+    'the result panel must stay open',
   );
   assert.ok(
-    !summaryPanel.classList.contains('chv-hidden') &&
-      summaryPanel.classList.contains('collapsed'),
-    'the summary digest must stay visible in its collapsed state',
+    summaryPanel.classList.contains('collapsed'),
+    'the summary digest must fold',
   );
   assert.ok(
-    !adopted.classList.contains('chv-hidden'),
-    'panels adopted inside the summary must not be chv-hidden',
-  );
-  const readPanel = Array.from(O.querySelectorAll('.tc')).find(p =>
-    (p.textContent || '').includes('/tmp/a'),
-  );
-  assert.ok(readPanel, 'the Read tool panel must exist');
-  assert.ok(
-    readPanel.classList.contains('chv-hidden'),
-    'plain finished panels must be tucked away',
+    !adopted.classList.contains('collapsed'),
+    'panels adopted inside the summary are left as they are',
   );
   assert.ok(
-    rpPanel.classList.contains('chv-hidden') &&
-      rpPanel.classList.contains('collapsed'),
-    'the finished run_parallel panel must be hidden AND collapsed',
+    readPanel.classList.contains('collapsed') &&
+      isDisplayed(win, readPanel),
+    'a plain finished panel must fold but stay on screen',
+  );
+  assert.ok(
+    rpPanel.classList.contains('collapsed') && isDisplayed(win, rpPanel),
+    'the finished run_parallel panel must fold but stay on screen',
   );
   assert.strictEqual(
     d.querySelectorAll('.tab.subagent-tab, .tab[data-subagent="1"]').length +
@@ -347,7 +356,23 @@ function testChevronPassWorksWithoutButton() {
         (t.textContent || '').includes('sub 1'),
       ).length,
     0,
-    'hiding the run_parallel panel must close its sub-agent tabs',
+    'folding the run_parallel panel must close its sub-agent tabs',
+  );
+
+  // The user opens a folded panel: a later chevron pass (any trailing
+  // event) leaves the panel the user pinned open.
+  readPanel.querySelector('.collapse-header').dispatchEvent(
+    new win.MouseEvent('click', {bubbles: true, cancelable: true}),
+  );
+  assert.ok(
+    !readPanel.classList.contains('collapsed') &&
+      readPanel.classList.contains('user-pinned'),
+    'the header click opens and pins the panel',
+  );
+  send(win, {type: 'usage_info', tabId: parentId});
+  assert.ok(
+    !readPanel.classList.contains('collapsed'),
+    'the chevron pass must not re-fold a panel the user opened',
   );
 
   send(win, {
@@ -366,15 +391,15 @@ function testChevronPassWorksWithoutButton() {
   const adjPanel = adjacent.querySelector('.collapsible:not(.rc)');
   assert.ok(adjPanel, 'the adjacent task must replay its tool panel');
   assert.ok(
-    adjPanel.classList.contains('chv-hidden'),
-    "the adjacent task's finished panels must be tucked away too",
+    adjPanel.classList.contains('collapsed') && isDisplayed(win, adjPanel),
+    "the adjacent task's finished panels fold but stay on screen too",
   );
   win.close();
 }
 
 // A task that finishes ON SCREEN (a real task_done, not a replay)
 // stamps its panels, and the chevron pass leaves them exactly as the
-// stream left them: not hidden, not collapsed.
+// stream left them: not collapsed.
 function testLiveFinishedPanelsSkipChevronPass() {
   const {win, posted} = makeWebview();
   const d = win.document;
@@ -396,10 +421,6 @@ function testLiveFinishedPanelsSkipChevronPass() {
   send(win, {type: 'usage_info', tabId: parentId});
 
   panels.forEach((p, i) => {
-    assert.ok(
-      !p.classList.contains('chv-hidden'),
-      'a live finish must not tuck panel #' + i + ' away',
-    );
     assert.strictEqual(
       p.classList.contains('collapsed'),
       before[i],

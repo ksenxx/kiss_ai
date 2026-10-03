@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -37,6 +36,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ def _condense_search_result(result: dict[str, Any]) -> dict[str, Any]:
     return {"object": obj, "id": result.get("id", ""), "title": title, "url": result.get("url", "")}
 
 
-_NOTION_DIR = Path.home() / ".kiss" / "third_party_agents" / "notion"
+_NOTION_DIR = kiss_home() / "third_party_agents" / "notion"
 _config = ChannelConfig(_NOTION_DIR, ("token",))
 
 

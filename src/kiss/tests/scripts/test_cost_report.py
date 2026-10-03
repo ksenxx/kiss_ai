@@ -68,13 +68,14 @@ def _seed(db: Path, now: float) -> None:
     root_events = [
         {"type": "prompt", "text": "task"},
         _usage(1, 20_000, 0.10),
-        {"type": "tool_call", "name": "Read", "path": "./SORCAR.md"},
+        {"type": "tool_call", "name": "Read", "path": "./AGENTS.md"},
+        {"type": "tool_call", "name": "Read", "path": "./SORCAR.md"},  # its pre-2026.10.2 name
         _usage(2, 60_000, 0.30, cache_read=0),
         {"type": "tool_call", "name": "Read", "path": "/repo/a.py"},
         _usage(3, 150_000, 0.70, cache_read=1000),
         {"type": "tool_call", "name": "Read", "path": "/repo/a.py"},
         _usage(4, 250_000, 1.20, cache_read=2000),
-        {"type": "tool_call", "name": "Read", "file_path": "/home/u/.kiss/SORCAR.md"},
+        {"type": "tool_call", "name": "Read", "file_path": "/home/u/.kiss/AGENTS.md"},
         _usage(5, 420_000, 2.00),
         {"type": "prompt", "text": "task <h3>Previous Session 1</h3>"},
         _usage(6, 30_000, 2.10),
@@ -104,7 +105,7 @@ def _seed(db: Path, now: float) -> None:
 
 @pytest.fixture
 def seeded_db(tmp_path: Path) -> Path:
-    db = tmp_path / "sorcar.db"
+    db = tmp_path / "history.db"
     _seed(db, time.time())
     return db
 
@@ -119,9 +120,9 @@ def test_kpis_from_seeded_db(seeded_db: Path) -> None:
     # wrap) + orphan ($1, its parent is outside the window); the cycle rows
     # each have an in-window parent and are not counted twice.
     assert kpis["cost_usd"] == pytest.approx(11.0)
-    assert kpis["sorcar_md_reads"] == 1  # the ~/.kiss one is not counted
-    assert kpis["reads"] == 4 and kpis["repeat_reads"] == 1
-    assert kpis["repeat_read_ratio"] == 0.25
+    assert kpis["agents_md_reads"] == 2  # the ~/.kiss one is not counted
+    assert kpis["reads"] == 5 and kpis["repeat_reads"] == 1
+    assert kpis["repeat_read_ratio"] == 0.2
     # Root steps 1-6 and 8 are its own; step 7 (after run_parallel) and the
     # repeated step-6 monitor event are not; the two children add 2 each.
     assert kpis["steps_by_context_bucket"] == {

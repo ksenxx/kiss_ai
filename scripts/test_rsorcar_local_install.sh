@@ -29,7 +29,7 @@
 # Step 1c runs for real as well: the stub runs scripts/check-remote-disk-space.sh
 # fed on ``NEED_BYTES=... bash -s`` against this machine's disk, and the test
 # checks that it runs after the task probe and before the ~/.ssh copy and the
-# sync, that it removes a stale ~/.kiss/sorcar.db.incoming on the remote, and
+# sync, that it removes a stale ~/.kiss/history.db.incoming on the remote, and
 # that a remote without room stops the deploy there (SORCAR_DISK_HEADROOM_GB
 # set to more than any disk holds), while SORCAR_SKIP_DISK_CHECK=1 skips it.
 # Step 4 runs for real as far as the stubs allow: the ssh stub runs the key
@@ -126,7 +126,7 @@ make_env() {
     # The remote's own authorized_keys: the file that lets the deploy in.
     echo 'remote authorized_keys' > "$fix/rhome/.ssh/authorized_keys"
     # What an upload that ran out of disk left behind on the remote.
-    head -c 3072 /dev/zero > "$fix/rhome/.kiss/sorcar.db.incoming"
+    head -c 3072 /dev/zero > "$fix/rhome/.kiss/history.db.incoming"
     # The scp stub copies nothing, so the remote half of the copy is put where
     # rsorcar's scp would have put it.
     cp "$REPO_ROOT/scripts/install-ssh-identity.sh" "$fix/rhome/.kiss/"
@@ -143,6 +143,7 @@ case "\$cmd" in
     'echo ok') echo ok ;;
     *'printf %s "\$HOME"'*) printf '%s' "$fix/rhome" ;;
     'python3 - '*) cat >/dev/null; echo 0 ;;                  # running-task probe
+    *sorcar.db*) HOME="$fix/rhome" bash -c "\$cmd" ;;         # legacy database-name probe and rename
     REMOTE_DIR=*) cat >/dev/null; echo "SORCAR_PUBLIC_URL=$FAKE_URL" ;;
     *remote-url.json*) echo "$FAKE_URL" ;;
     *remote_password*) echo "$FAKE_PW" ;;
@@ -178,6 +179,26 @@ run_rsorcar() {
     SORCAR_NO_BROWSER=1 SORCAR_SKIP_GITHUB_AUTH=1 \
         bash "$rsorcar" user@fakehost 2>&1
 }
+
+# --- Test 0: a remote still holding ~/.kiss/sorcar.db gets it renamed ---------
+make_env "$WORK/legacy"
+populate_checkout "$WORK/legacy/checkout" 0 "$WORK/legacy"
+echo 'rows' > "$WORK/legacy/rhome/.kiss/sorcar.db"
+echo 'pages' > "$WORK/legacy/rhome/.kiss/sorcar.db-wal"
+OUT=$(run_rsorcar "$WORK/legacy" "$WORK/legacy/checkout/rsorcar") || fail "rsorcar failed:
+$OUT"
+echo "$OUT" | grep -q "Checking whether a task is running" || fail "the running-task probe did not run:
+$OUT"
+echo "$OUT" | grep -q "Renaming user@fakehost's ~/.kiss/sorcar.db to history.db" \
+    || fail "the legacy database name on the remote was not renamed (or not reported):
+$OUT"
+[[ "$(cat "$WORK/legacy/rhome/.kiss/history.db")" == rows && "$(cat "$WORK/legacy/rhome/.kiss/history.db-wal")" == pages ]] \
+    || fail "~/.kiss/sorcar.db and its WAL did not become history.db: $(ls -A "$WORK/legacy/rhome/.kiss")"
+[[ -L "$WORK/legacy/rhome/.kiss/sorcar.db" && "$(readlink "$WORK/legacy/rhome/.kiss/sorcar.db")" == history.db ]] \
+    || fail "the old name is not a symlink to history.db: $(ls -lA "$WORK/legacy/rhome/.kiss")"
+[[ ! -e "$WORK/legacy/rhome/.kiss/sorcar.db-wal" ]] \
+    || fail "the legacy WAL is still on the remote: $(ls -A "$WORK/legacy/rhome/.kiss")"
+pass "a remote's ~/.kiss/sorcar.db (its pre-2026.10.2 name) is renamed to history.db after the running-task check"
 
 # --- Test 1: the deploy ends by running install.sh locally -------------------
 make_env "$WORK/ok"
@@ -239,10 +260,10 @@ $OUT"
 DISK_LINE=$(echo "$OUT" | grep -n "Checking that user@fakehost has room for the deploy" | cut -d: -f1 | head -1)
 [[ -n "$DISK_LINE" && "$TASK_LINE" -lt "$DISK_LINE" && "$DISK_LINE" -lt "$SSH_LINE" && "$DISK_LINE" -lt "$SYNC_LINE" ]] \
     || fail "the room check does not run after the task probe and before the ssh copy and the sync (lines $TASK_LINE / $DISK_LINE / $SSH_LINE / $SYNC_LINE)"
-echo "$OUT" | grep -q "Removed ~/.kiss/sorcar.db.incoming (3.0 KiB)" \
-    || fail "the stale sorcar.db.incoming on the remote was not removed (or not reported):
+echo "$OUT" | grep -q "Removed ~/.kiss/history.db.incoming (3.0 KiB)" \
+    || fail "the stale history.db.incoming on the remote was not removed (or not reported):
 $OUT"
-[[ ! -e "$WORK/ok/rhome/.kiss/sorcar.db.incoming" ]] || fail "the stale sorcar.db.incoming is still on the remote"
+[[ ! -e "$WORK/ok/rhome/.kiss/history.db.incoming" ]] || fail "the stale history.db.incoming is still on the remote"
 pass "the room check runs on the remote before anything of size travels, and removes a stale upload"
 
 grep -qx 'user@fakehost' "$WORK/ok/sync-memory-args.txt" 2>/dev/null \

@@ -4,17 +4,13 @@
 # add your name here
 """Task-update agent — reports what a running task has done so far.
 
-Two ways to run it:
+``/task_update <task_id>`` in the chat runs it as a sub-task through
+``run_agent`` (see :mod:`kiss.agents.sorcar.sea_commands`).  (The
+task-info panel's periodic task update is the ``/ask`` agent's answer,
+see :mod:`kiss.server.task_update`; :data:`PROMPT_TEMPLATE` still
+identifies the rows of the releases in which this agent produced it.)
 
-* ``/task_update <task_id>`` in the chat runs it as a sub-task through
-  ``run_agent`` (see :mod:`kiss.agents.sorcar.sea_commands`).
-* The daemon runs it in-process for the task shown in the visible chat
-  webview (:mod:`kiss.server.task_update`): once when the panel first
-  shows the task, then every 10 minutes, and whenever the panel's
-  refresh button is pressed.  The result replaces the ``tmp/PROGRESS.md``
-  mirror in the task-info panel.
-
-The agent reads the task's persisted transcript (``~/.kiss/sorcar.db``)
+The agent reads the task's persisted transcript (``~/.kiss/history.db``)
 through the :func:`task_transcript` tool defined here (a thin wrapper
 over :func:`kiss.agents.sorcar.task_digest.transcript_page`) and
 answers :data:`PROMPT_TEMPLATE` with a short markdown progress report.
@@ -23,6 +19,8 @@ answers :data:`PROMPT_TEMPLATE` with a short markdown progress report.
 from __future__ import annotations
 
 from typing import Any
+
+from kiss.core.brand import HOME_DIR
 
 PROMPT_TEMPLATE = (
     "What have the task with {task_id} done so far and what are the partial results?"
@@ -76,7 +74,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/task_update help``."""
     return (
         "Reports what a running or finished Sorcar task has done so far and its partial "
-        "results by reading its persisted transcript from ~/.kiss/sorcar.db; use it as "
+        f"results by reading its persisted transcript from ~/{HOME_DIR}/history.db; use it as "
         '`/task_update <task_id>` in the chat or `run_agent(agent="task_update", '
         'task="<task_id>")`.'
     )

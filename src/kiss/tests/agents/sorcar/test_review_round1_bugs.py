@@ -25,7 +25,7 @@ def temp_db(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[Path]:
     """Point persistence at a temp DB and reset per-thread connection cache."""
-    db_path = tmp_path / "sorcar.db"
+    db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
     yield db_path

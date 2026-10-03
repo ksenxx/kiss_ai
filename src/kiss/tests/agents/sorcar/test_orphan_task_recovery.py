@@ -12,7 +12,7 @@ depend on ``kiss.server``) remain in the original module, which imports
 the row helpers below back from here.
 
 Production failure signature (rows 2143, 2140, 2139, 2136 in the
-shipped ``sorcar.db``):
+shipped ``history.db``):
 
 * ``result == "Agent Failed Abruptly"`` (the sentinel written by
   :func:`_add_task` at task-creation time), AND

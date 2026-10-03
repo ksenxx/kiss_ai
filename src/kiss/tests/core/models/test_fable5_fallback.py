@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the ``claude-fable-5`` non-retryable + fallback fix.
 
-Bug reproduction (production failures in ``~/.kiss/sorcar.db``, all-time,
+Bug reproduction (production failures in ``~/.kiss/history.db``, all-time,
 model = ``claude-fable-5``):
 
 * 5+ tasks failed with Anthropic 404 whose body reads ``"Claude Fable 5

@@ -602,6 +602,37 @@ async function main() {
     }
   });
 
+  await test('Spend: the tooltip sits above the cell, below it near the top, and never over it when it can help', () => {
+    const {win} = makeWebview(REMOTE);
+    send(win, spendReport());
+    const graph = el(win, 'meta-spend-graph');
+    const tip = graph.querySelector('.spend-tip');
+    const cell = cellOf(win, dayKey(0));
+    // jsdom has no layout: the graph is 200 x 180, the tooltip 120 x 90.
+    graph.getBoundingClientRect = () => ({left: 0, top: 0, right: 200, bottom: 180, width: 200, height: 180});
+    Object.defineProperty(tip, 'offsetWidth', {configurable: true, value: 120});
+    Object.defineProperty(tip, 'offsetHeight', {configurable: true, value: 90});
+    const cellAt = top => {
+      cell.getBoundingClientRect = () => ({left: 100, top, right: 111, bottom: top + 11, width: 11, height: 11});
+      hover(win, cell);
+      return tip.style.top;
+    };
+    // Room above: 6px over the cell, centered on it.
+    assert.strictEqual(cellAt(120), 120 - 90 - 6 + 'px');
+    assert.strictEqual(tip.style.left, 100 + 11 / 2 - 60 + 'px');
+    // A cell in the top rows: below it instead.
+    assert.strictEqual(cellAt(10), 10 + 11 + 6 + 'px');
+    // Neither side has room inside the graph: above (clamped to the
+    // graph's top) ends 2px short of the cell, below (clamped to the
+    // bottom) would cover it, so above wins.
+    assert.strictEqual(cellAt(92), '0px');
+    // ...and below wins when it is the side that leaves the cell visible.
+    assert.strictEqual(cellAt(78), 180 - 90 + 'px');
+    // Both sides cover the cell: the one covering less of it wins.
+    assert.strictEqual(cellAt(88), '0px', 'above covers 2px, below covers 9px');
+    assert.strictEqual(cellAt(82), 180 - 90 + 'px', 'above covers 8px, below covers 3px');
+  });
+
   await test('Spend: the heatmap reaches back to the oldest day, shaded by cost, with model bars', () => {
     const {win} = makeWebview(REMOTE);
     const report = spendReport();

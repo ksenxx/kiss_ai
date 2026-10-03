@@ -1213,20 +1213,21 @@ class ServerApi:
         await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
     async def get_task_update(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Report the task-update agent's progress report to a task-info panel.
+        """Report the ``/ask`` agent's task update to a task-info panel.
 
         The remote webapp's task-info panel (docked on desktop, a
         drawer on mobile) and the VS Code extension's chat editor
-        panels (editor-tabs mode, whose reports fill the secondary
+        panels (editor-tabs mode, whose updates fill the secondary
         sidebar's Task Info view) poll this command while the visible
-        tab's task runs: the info subpanel shows what the
-        :mod:`~kiss.agents.seas.task_update.task_update_sea` agent reports about that
-        task.  The first poll for a task runs the agent (as a sub-agent
-        of the task, in the task's chat; its cost counts towards the
-        task), later polls re-run it every 10 minutes, and a poll with
-        ``refresh: true`` (the panel's refresh button) re-runs it at
-        once.  The direct ``taskUpdate`` reply goes back to the asking
-        endpoint, local or remote.
+        tab's task runs: the info subpanel shows the
+        :mod:`~kiss.agents.seas.ask.ask_sea` agent's short answer to
+        what that task has done so far and its partial results.  The
+        first poll once the task is a minute old runs the agent (as a
+        sub-agent of the task, in the task's chat; its cost counts
+        towards the task), later polls re-run it every 10 minutes, and
+        a poll with ``refresh: true`` (the panel's refresh button)
+        re-runs it at once.  The direct ``taskUpdate`` reply goes back
+        to the asking endpoint, local or remote.
 
         Args:
             cmd: The ``getTaskUpdate`` command (``tabId``, optional
