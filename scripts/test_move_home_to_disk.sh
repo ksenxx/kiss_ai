@@ -48,9 +48,9 @@ mkdir -p /home/alice/.ssh /home/alice/.kiss/deep
 echo key > /home/alice/.ssh/authorized_keys; chmod 700 /home/alice/.ssh
 # 711, so that another user's process can sit in a directory under it (case 4).
 mkdir -p /home/alice/shared && chmod 755 /home/alice/shared && chmod 711 /home/alice
-head -c 3000000 /dev/urandom > /home/alice/.kiss/sorcar.db
-ln -s .kiss/sorcar.db /home/alice/link
-ln /home/alice/.kiss/sorcar.db /home/alice/hard
+head -c 3000000 /dev/urandom > /home/alice/.kiss/history.db
+ln -s .kiss/history.db /home/alice/link
+ln /home/alice/.kiss/history.db /home/alice/hard
 echo deep > /home/alice/.kiss/deep/file
 python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("/home/alice/.kiss/sorcar.sock")' 2>/dev/null \
     || perl -e 'use Socket; socket(S, PF_UNIX, SOCK_STREAM, 0); bind(S, sockaddr_un("/home/alice/.kiss/sorcar.sock"))' 2>/dev/null \
@@ -161,9 +161,9 @@ AFTER="$(cd /home/alice && find . ! -type s | sort | xargs -I{} stat -c '%n %U %
 $BEFORE
 ---
 $AFTER"
-[ "$(readlink /home/alice/link)" = .kiss/sorcar.db ] || fail "the symlink changed"
+[ "$(readlink /home/alice/link)" = .kiss/history.db ] || fail "the symlink changed"
 [ "$(stat -c %h /home/alice/hard)" = 2 ] || fail "the hard link was not kept"
-cmp -s /home/alice/hard /home/alice/.kiss/sorcar.db || fail "file content differs"
+cmp -s /home/alice/hard /home/alice/.kiss/history.db || fail "file content differs"
 grep -qxF "/data/home/alice /home/alice none bind,nofail,x-systemd.requires-mounts-for=/data 0 0" /etc/fstab \
     || fail "fstab line missing: $(cat /etc/fstab)"
 ls /home | grep -q moved && fail "the renamed original was not removed"

@@ -936,6 +936,10 @@ class AnthropicModel(Model):
                 try:
                     for event in stream:
                         watchdog.beat()
+                        # The SDK accumulates message_start / message_delta
+                        # usage here; kept for take_partial_usage_response
+                        # if the stream fails before message_stop.
+                        self._rejected_response = stream.current_message_snapshot
                         if self.token_callback is None:
                             continue
                         if event.type == "content_block_start":
@@ -975,6 +979,7 @@ class AnthropicModel(Model):
                         raise stop_error()
                     if watchdog.stalled:
                         raise self._stall_error()
+                    self._rejected_response = None
                     return stream.get_final_message()
                 finally:
                     # Idempotent second stop for the exception paths.
@@ -1047,7 +1052,7 @@ class AnthropicModel(Model):
         """Raise :class:`ModelRefusalError` when the model refused the request.
 
         Adaptive-thinking Claude models (fable-5 in production, task
-        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/sorcar.db``) can return
+        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/history.db``) can return
         ``stop_reason="refusal"`` with an EMPTY ``content`` list when their
         safety layer declines an otherwise benign prompt (observed on
         security-research text that opus-4-8 answers normally).  Without

@@ -41,12 +41,13 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18082
 
-_ZALO_DIR = Path.home() / ".kiss" / "third_party_agents" / "zalo"
+_ZALO_DIR = kiss_home() / "third_party_agents" / "zalo"
 _API_BASE = "https://openapi.zalo.me/v2.0/oa"
 _config = ChannelConfig(_ZALO_DIR, ("access_token",))
 

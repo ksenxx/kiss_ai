@@ -103,7 +103,7 @@ class _Base(unittest.TestCase):
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "sorcar.db"
+        _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
 
         # A hooks dir whose pre-commit always fails, so a test can make

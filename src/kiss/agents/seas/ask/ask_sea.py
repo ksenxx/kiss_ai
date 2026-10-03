@@ -70,7 +70,7 @@ at any point. You must answer quickly because the user is waiting.**
 ## How to answer (read-only side channel of a running task)
 You have exactly two tools: `task_context` and `finish`. There is no shell, \
 no file access, no memory and no browser; do not look for them and never try \
-to read ~/.kiss/sorcar.db yourself.
+to read ~/.kiss/history.db yourself.
 1. Call `task_context(task_id)` once with the task id named in the prompt. It \
 returns everything you can know: status, elapsed time, spend, the sub-agent \
 tasks, the tail of the task's own progress log, and the newest transcript \
@@ -183,7 +183,7 @@ def use_web_tools() -> bool:
     """Never enable browser tools for the answering session.
 
     The answer is derived solely from the task's own events in
-    ``~/.kiss/sorcar.db``; internet access would let the answering
+    ``~/.kiss/history.db``; internet access would let the answering
     agent drift off the local trajectory the user is asking about.
     """
     return False

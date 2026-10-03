@@ -12,7 +12,7 @@ event — sent to connected clients but never recorded or persisted.
 The Result panel therefore shows up live but VANISHES from the task's
 persisted event stream: reloading the webview, loading the task from
 history, or scrolling to it as an adjacent task shows no Result panel
-at all (observed in ``~/.kiss/sorcar.db``: a user-stopped task's
+at all (observed in ``~/.kiss/history.db``: a user-stopped task's
 stream ends ``tool_call -> task_stopped -> followup_suggestion`` with
 no ``result`` row).
 
@@ -68,7 +68,7 @@ def _redirect(tmpdir: str):
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return old
 

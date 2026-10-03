@@ -4,7 +4,7 @@
 # add your name here
 """Compact digests of a persisted Sorcar task's transcript.
 
-The persisted event stream of a task (``~/.kiss/sorcar.db``) is far
+The persisted event stream of a task (``~/.kiss/history.db``) is far
 too large to hand to an LLM raw: thousands of streamed ``text_delta``
 / ``thinking_delta`` chunks, multi-kilobyte tool arguments and shell
 output.  This module turns it into numbered *entries* (one per tool

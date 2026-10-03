@@ -397,23 +397,40 @@ def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> N
     assert len(text) + one_more > task_digest.MAX_CONTEXT_CHARS
 
     # Exact-fit boundaries: the marker line counts against the budget, and
-    # entry 0 needs no marker.
-    head = text.partition("== Transcript (400 entries, oldest first) ==\n")[0]
-    head += "== Transcript (400 entries, oldest first) ==\n"
+    # entry 0 needs no marker.  The header carries the clock (Elapsed, Last
+    # event, Now), so its length is re-measured from each result instead of
+    # being fixed once.
+    transcript_header = "== Transcript (400 entries, oldest first) ==\n"
+    head_len = len(text.partition(transcript_header)[0]) + len(transcript_header)
+
+    def transcript_within(tail_chars: int) -> str:
+        """Transcript of ``context()`` given a budget of the header plus *tail_chars*.
+
+        Retried when the clock moved the header's length between the budget
+        computation and the call (e.g. ``Elapsed: 0 min 9 s`` -> ``0 min 10 s``).
+        """
+        nonlocal head_len
+        for _ in range(10):
+            result = task_digest.context(task_id, max_chars=head_len + tail_chars)
+            got_head, _, tail = result.partition(transcript_header)
+            if len(got_head) + len(transcript_header) == head_len:
+                return tail
+            head_len = len(got_head) + len(transcript_header)
+        raise AssertionError("the header length never settled")
+
     block = len("[399] RESULT: result 399\n" + "y" * 300)
-    two = len(head) + len("[... 398 older entries elided ...]\n") + 2 * block + 1
-    assert task_digest.context(task_id, max_chars=two).startswith(
-        head + "[... 398 older entries elided ...]\n[398] RESULT"
+    two = len("[... 398 older entries elided ...]\n") + 2 * block + 1
+    tail = transcript_within(two)
+    assert tail.startswith("[... 398 older entries elided ...]\n[398] RESULT")
+    assert len(tail) == two
+    assert transcript_within(two - 1).startswith(
+        "[... 399 older entries elided ...]\n[399] RESULT"
     )
-    assert len(task_digest.context(task_id, max_chars=two)) == two
-    assert task_digest.context(task_id, max_chars=two - 1).startswith(
-        head + "[... 399 older entries elided ...]\n[399] RESULT"
-    )
-    unlimited = task_digest.context(task_id, max_chars=10**9)
-    assert unlimited.startswith(head + "[0] RESULT: result 0\n") and "elided ...]" not in unlimited
-    assert task_digest.context(task_id, max_chars=len(unlimited)) == unlimited
-    assert task_digest.context(task_id, max_chars=len(unlimited) - 1).startswith(
-        head + "[... 1 older entries elided ...]\n[1] RESULT"
+    unlimited = task_digest.context(task_id, max_chars=10**9).partition(transcript_header)[2]
+    assert unlimited.startswith("[0] RESULT: result 0\n") and "elided ...]" not in unlimited
+    assert transcript_within(len(unlimited)) == unlimited
+    assert transcript_within(len(unlimited) - 1).startswith(
+        "[... 1 older entries elided ...]\n[1] RESULT"
     )
 
     # The newest entry is kept whole even when it alone overflows the budget.

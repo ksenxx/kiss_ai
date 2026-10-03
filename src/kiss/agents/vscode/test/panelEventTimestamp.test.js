@@ -586,6 +586,7 @@ async function run() {
     const output = win.document.getElementById('output');
     const now = Date.now();
     send(win, {type: 'clear', chat_id: 'chat-prev', tabId: TAB});
+    send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
     send(win, {
       type: 'tool_call',
       name: 'Edit',
@@ -594,6 +595,7 @@ async function run() {
       ts: now,
     });
     const tc = output.querySelector('.ev.tc');
+    assert.ok(!tc.classList.contains('collapsed'), 'the live panel is open');
     const label = tc.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;

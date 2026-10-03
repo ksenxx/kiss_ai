@@ -1797,6 +1797,10 @@ def _get_machine_topic() -> str:
         stored = ""
     if stored:
         return stored
+    # Only the literal stock ``~/.kiss`` keeps the historical unsalted topic
+    # (phones subscribed before this code existed); any other home — a
+    # custom KISS_HOME or a white-label brand's directory — is salted with
+    # its path, so two installs on one machine never share a topic.
     default_home = Path.home() / ".kiss"
     if kiss_home_path.expanduser().resolve() == default_home.resolve():
         identity = f"{platform.node()}:{uuid.getnode()}"
@@ -6366,6 +6370,14 @@ class RemoteAccessServer:
         # fails with WinError 2 (reported through the OSError path below
         # when no bash is installed at all).
         bash = find_bash() or "bash"
+        # Pin KISS_HOME to the home THIS daemon resolved (the brand's
+        # default unless the environment overrides it), as the extension's
+        # ``runUpdate()`` does: install.sh runs the post-install hooks of,
+        # copies MODEL_INFO.json into and writes the reload marker under
+        # $KISS_HOME, and defaults to the stock ``~/.kiss`` otherwise —
+        # which a white-label brand's daemon never reads.
+        env = dict(os.environ)
+        env["KISS_HOME"] = str(_kiss_home_dir())
         if script is not None:
             bootstrap = script.parent / "scripts" / "install.sh"
             # os.path.isfile, not Path.is_file: an unreadable ``scripts``
@@ -6385,12 +6397,10 @@ class RemoteAccessServer:
                 # ``--non-interactive``.
                 argv = [bash, str(bootstrap)]
                 cwd = str(script.parent)
-                env = dict(os.environ)
                 env["KISS_NONINTERACTIVE"] = "1"
             else:
                 argv = [bash, str(script), "--non-interactive"]
                 cwd = str(script.parent)
-                env = None
         else:
             argv = [
                 bash, "-c",
@@ -6398,7 +6408,6 @@ class RemoteAccessServer:
                 'curl -fsSL "$KISS_BOOTSTRAP_URL" | bash',
             ]
             cwd = str(Path.home())
-            env = dict(os.environ)
             env["KISS_BOOTSTRAP_URL"] = _bootstrap_install_url()
             env["KISS_NONINTERACTIVE"] = "1"
         try:
@@ -8029,19 +8038,21 @@ class RemoteAccessServer:
     async def _handle_get_task_update(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
-        """Send a client the task-update report for the task its tab shows.
+        """Send a client the task update for the task its tab shows.
 
         Handles the ``getTaskUpdate`` command polled by ``media/main.js``
         for the info subpanel of the task-info panel: the subpanel shows
-        the report the :mod:`~kiss.agents.seas.task_update.task_update_sea` agent
-        wrote about the task RUNNING in the tab (:meth:`_tab_task_agent`),
-        never a file the task left on disk.  :class:`TaskUpdateRunner`
-        owns the reports: this poll makes it run the agent when the tab's
-        task has no report yet, when the report is
+        the :mod:`~kiss.agents.seas.ask.ask_sea` agent's short answer
+        to what the task RUNNING in the tab (:meth:`_tab_task_agent`)
+        has done so far, never a file the task left on disk.
+        :class:`TaskUpdateRunner` owns the updates: this poll makes it
+        run the agent once the tab's task is
+        :data:`~kiss.server.task_update.FIRST_UPDATE_DELAY_S` old and
+        has no update yet, when the update is
         :data:`~kiss.server.task_update.UPDATE_INTERVAL_S` old, or when
         the poll carries ``refresh: true`` (the panel's refresh button);
         the reply reflects the state right after that decision, so a
-        refresh answers ``running: true`` at once and the report itself
+        refresh answers ``running: true`` at once and the answer itself
         arrives with a later poll.
 
         The reply is sent directly to the requesting *endpoint* — never
@@ -8050,12 +8061,13 @@ class RemoteAccessServer:
             {"type": "taskUpdate", "exists": <bool>, "sig": <str>,
              "content": <html>, "error": <str>, "running": <bool>,
              "cost": <usd>, "updatedAt": <epoch ms>,
+             "dueAt": <epoch ms>,                # next unforced run
              "unchanged": true,                  # sig == cmd knownSig
              "tabId": <echo of cmd tabId>, "taskId": <task id>,
              "token": <echo of cmd token>}
 
         ``token`` is an opaque client request tag the webview matches
-        replies by.  ``sig`` fingerprints the report state; a poll whose
+        replies by.  ``sig`` fingerprints the update state; a poll whose
         ``knownSig`` matches it is answered with ``unchanged: true`` and
         no ``content``.  A tab attached to no running task, or to a task
         whose history row is not allocated yet, replies ``exists: false``
@@ -8096,7 +8108,9 @@ class RemoteAccessServer:
             and task_id
             and state.task_id == task_id
         ):
-            update = self._task_updates.poll(task_id, agent, force=force)
+            update = await asyncio.to_thread(
+                self._task_updates.poll, task_id, agent, force,
+            )
             reply["taskId"] = task_id
             reply.update(update.payload())
             if known_sig and known_sig == update.sig:
@@ -9965,7 +9979,7 @@ class RemoteAccessServer:
         self._printer._loop = self._loop
         # No database write may run here: the legacy side-channel stamp
         # and the orphan sweep live on VSCodeServer's background thread
-        # so a locked sorcar.db never delays binding the listeners.
+        # so a locked history.db never delays binding the listeners.
         try:
             # Sign-in pages that connectors hand to the user open in the
             # streamed Browser tab, focused on every surface, while this

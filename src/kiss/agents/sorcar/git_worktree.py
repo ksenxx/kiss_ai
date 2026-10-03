@@ -1656,7 +1656,7 @@ class GitWorktreeOps:
         git-ignored ``node_modules`` of the main checkout is missing and
         JS tests, ``npm run compile`` and the extension lint fail until
         the agent runs ``npm install`` (minutes, hundreds of MB) or links
-        the directory by hand — a 24-hour audit of ``sorcar.db`` found
+        the directory by hand — a 24-hour audit of ``history.db`` found
         seven worktree tasks reinstalling and several rerunning a
         340-file suite after "compiled extension missing" failures.
 

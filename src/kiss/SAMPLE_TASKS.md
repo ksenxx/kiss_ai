@@ -44,14 +44,14 @@ Sorcar for Optimization: Can you run the command \<<command>> and optimize it wi
 
 ## Task
 
-Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-fable-5? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into a 50% dev set and a 50% val set.
+Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at \<<url_or_db_file_of_data>> using claude-fable-5? You can find the trajectory events of an agent execution in ~/.kiss/history.db after the agent has finished its execution. Split the dataset into a 50% dev set and a 50% val set.
 
 RUN_GEPA: Sample 100 data points from the val set and call it the sval set. Maintain a Pareto frontier in the folder ./pareto, with a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a JSON file, say score.json, containing the list of data points (ids) from the sval set that were correctly predicted by the prompt. When you add a node to the Pareto frontier, make sure that the list of correctly predicted data points is not a subset of or equal to an existing list of data points in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of data points is a subset of or equal to the list of data points in the added node. Then run the following algorithm.
 
 1. Pick a node from the Pareto frontier with probability 0.5
    a. sample a minibatch of 5 data points from the dev set
    b. run the agent with the prompt from the node on the minibatch
-   c. If the agent incorrectly predicts for some data points, analyze and reflect on the trajectory events of the agent on those data points available at ~/.kiss/sorcar.db and propose a new prompt that will fix the mistakes made by the agent on data points incorrectly predicted
+   c. If the agent incorrectly predicts for some data points, analyze and reflect on the trajectory events of the agent on those data points available at ~/.kiss/history.db and propose a new prompt that will fix the mistakes made by the agent on data points incorrectly predicted
    d. If the agent predicts correctly on the minibatch, then evaluate it on the sval set and create the list of data points on which the agent with the new prompt predicts correctly.
    e. Add the new prompt and the list of data points to the Pareto frontier
 

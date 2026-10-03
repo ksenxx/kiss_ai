@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -28,8 +27,9 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
-_PHONE_DIR = Path.home() / ".kiss" / "third_party_agents" / "phone"
+_PHONE_DIR = kiss_home() / "third_party_agents" / "phone"
 _config = ChannelConfig(_PHONE_DIR, ("device_ip",))
 
 

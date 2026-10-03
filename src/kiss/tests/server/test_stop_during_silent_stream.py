@@ -5,7 +5,7 @@
 """End-to-end tests: Stop must land while a model stream is silent.
 
 Bug reproduction (post-mortem ``reports/stop_button_delay_2026-08-05.html``,
-task ``709ebce3`` in ``~/.kiss/sorcar.db``, 5 Aug 2026):
+task ``709ebce3`` in ``~/.kiss/history.db``, 5 Aug 2026):
 
 * A sub-agent issued an Anthropic request at 04:58:34 that returned
   response headers and then delivered NOTHING for 178 seconds.

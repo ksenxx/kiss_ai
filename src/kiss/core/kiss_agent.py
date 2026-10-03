@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import time
@@ -515,6 +516,13 @@ class KISSAgent(Base):
                     f"Agent {self.name} exceeded the model's context window: {e}"
                 ) from e
             raise
+        except BaseException:
+            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
+            # so far to this run, not to the adapter's next call.  An
+            # unpriced model's KISSError must not replace the Stop.
+            with contextlib.suppress(KISSError):
+                self._bill_partial_usage()
+            raise
         self._update_tokens_and_budget_from_response(response)
         self._print_llm_call(call_started)
         usage_info_str = self._get_usage_info_string()
@@ -802,6 +810,13 @@ class KISSAgent(Base):
             self.last_call_usage = None
             self._bill_partial_usage()
             self._print_llm_call(call_started)
+            raise
+        except BaseException:
+            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
+            # so far to this run, not to the adapter's next call.  An
+            # unpriced model's KISSError must not replace the Stop.
+            with contextlib.suppress(KISSError):
+                self._bill_partial_usage()
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call.

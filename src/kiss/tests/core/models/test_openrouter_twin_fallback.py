@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the automatic OpenRouter-twin fallback.
 
-Production failure (``~/.kiss/sorcar.db``, task ``bcdb7b63``, 2026-09-22):
+Production failure (``~/.kiss/history.db``, task ``bcdb7b63``, 2026-09-22):
 a 3 h 13 min / $24 task on ``claude-fable-5-1`` died with ``KISSError:
 Non-retryable error from model: ... credit balance is too low`` because
 that catalog entry declares no ``fallback`` (only 2 of 664 entries did).

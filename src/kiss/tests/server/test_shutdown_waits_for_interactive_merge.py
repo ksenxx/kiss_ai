@@ -130,7 +130,7 @@ class TestShutdownWaitsForInteractiveMerge(IsolatedAsyncioTestCase):
             persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR,
         )
         persistence._KISS_DIR = self.home
-        persistence._DB_PATH = self.home / "sorcar.db"
+        persistence._DB_PATH = self.home / "history.db"
         persistence._db_conn = None
         self._saved_cfg = (
             getattr(vscode_config, "CONFIG_DIR", None),

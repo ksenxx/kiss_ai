@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -40,6 +39,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     save_json_config,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ def _bad_segment(value: str, name: str) -> str | None:
     return None
 
 
-_FIRECRAWL_DIR = Path.home() / ".kiss" / "third_party_agents" / "firecrawl"
+_FIRECRAWL_DIR = kiss_home() / "third_party_agents" / "firecrawl"
 _config = ChannelConfig(_FIRECRAWL_DIR, ("api_key",))
 
 

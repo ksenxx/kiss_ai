@@ -280,7 +280,7 @@ def _redirect_persistence(tmpdir: str) -> tuple:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     ps._KISS_DIR = kiss_dir
-    ps._DB_PATH = kiss_dir / "sorcar.db"
+    ps._DB_PATH = kiss_dir / "history.db"
     ps._db_conn = None
     return saved
 
@@ -323,7 +323,7 @@ class _TwoTabFixture(unittest.TestCase):
 
     * a fake OpenAI HTTP server,
     * a redirected persistence DB (so the test does not write to the
-      user's real ``~/.kiss/sorcar.db``),
+      user's real ``~/.kiss/history.db``),
     * a redirected vscode_config (so the fake endpoint and disabled
       auto-commit only apply to this test process),
     * two git-initialised work directories,

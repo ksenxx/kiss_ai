@@ -83,7 +83,7 @@ class _RecordingPrinter(JsonPrinter):
 
 
 class _DbRedirectBase:
-    """Per-test ``sorcar.db`` redirection + registry cleanup."""
+    """Per-test ``history.db`` redirection + registry cleanup."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -91,7 +91,7 @@ class _DbRedirectBase:
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self.saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         _clear_registry()
 

@@ -37,6 +37,7 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     list_commands as list_sea_commands,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.utils import is_root_dir
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -58,9 +59,9 @@ logger = logging.getLogger(__name__)
 
 
 def _kiss_home_is_default() -> bool:
-    """Return True when this process operates on the default ``~/.kiss``.
+    """Return True when this process operates on the brand's default home.
 
-    ``KISS_HOME`` redirects all KISS state (config.json, sorcar.db) to a
+    ``KISS_HOME`` redirects all KISS state (config.json, history.db) to a
     private directory — the test suite (``src/kiss/tests/conftest.py``)
     and sandboxed runs rely on it for isolation.  Read at call time (not
     import time) so callers see the current environment.
@@ -69,7 +70,7 @@ def _kiss_home_is_default() -> bool:
     if not custom:
         return True
     try:
-        return Path(custom).resolve() == (Path.home() / ".kiss").resolve()
+        return Path(custom).resolve() == (Path.home() / HOME_DIR).resolve()
     except OSError:
         return False
 
@@ -1109,7 +1110,7 @@ class _CommandsMixin:
         is set and the state holds a live ``user_answer_queue``) it never
         reaches the pre-step hook, so a steering message would sit
         undrained and the agent would hang until the task is stopped
-        (sorcar.db task ``e8a8407967d645c28c87750eda7a6cc0``: the user
+        (history.db task ``e8a8407967d645c28c87750eda7a6cc0``: the user
         typed the reply into the chat box instead of the answer box).  A
         plain message typed then IS the answer and is delivered through
         :meth:`_deliver_user_answer`, exactly like a ``userAnswer``

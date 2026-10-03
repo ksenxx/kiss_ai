@@ -27,7 +27,7 @@ class TestResumeSessionWithTaskId:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_id, chat_id = th._add_task("specific task", chat_id="0")
             th._append_chat_event(

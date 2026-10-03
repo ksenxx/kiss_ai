@@ -4,12 +4,12 @@
 // add your name here
 
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
+import {kissHomeDir} from './kissHome';
 
-export function kissHomeDir(): string {
-  return process.env.KISS_HOME || path.join(os.homedir(), '.kiss');
-}
+// `$KISS_HOME`, else the brand's `~/<home_dir>` (`~/.kiss` for stock KISS);
+// see kissHome.js, shared with the plain-CJS UpdateChecker.js.
+export {kissHomeDir};
 
 /**
  * The kiss-web daemon's local-endpoint file.

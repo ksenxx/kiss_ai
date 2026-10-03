@@ -247,7 +247,7 @@ def infer_subagent_seas(db: sqlite3.Connection, parent_task_id: str) -> dict[str
     reached by ``run_parallel`` have no such call and are not returned.
 
     Args:
-        db: Open connection to ``sorcar.db``.
+        db: Open connection to ``history.db``.
         parent_task_id: The parent row id.
 
     Returns:
@@ -311,7 +311,7 @@ def backfill_task_metadata(db: sqlite3.Connection) -> dict[str, int]:
     sharing the database is never locked out for long.
 
     Args:
-        db: Open connection to ``sorcar.db`` with the current schema.
+        db: Open connection to ``history.db`` with the current schema.
 
     Returns:
         Counts: ``{"tags": n, "sea": n, "chats": n}``.

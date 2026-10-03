@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for the ``steer_inputs`` table in sorcar.db.
+"""Tests for the ``steer_inputs`` table in history.db.
 
 Text typed into a RUNNING task's composer (steer mode) never gets a
 ``task_history`` row, so it is remembered in ``steer_inputs`` and
@@ -29,7 +29,7 @@ def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return saved  # type: ignore[return-value]
 

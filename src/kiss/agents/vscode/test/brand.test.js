@@ -78,6 +78,7 @@ assert.deepStrictEqual(BRAND, {
   productName: CHECKOUT_BRAND.product_name,
   shortName: CHECKOUT_BRAND.short_name,
   tagline: CHECKOUT_BRAND.tagline,
+  homeDir: CHECKOUT_BRAND.home_dir || '.kiss',
 });
 assert.strictEqual(PRODUCT_NAME, BRAND.productName);
 assert.strictEqual(SHORT_NAME, BRAND.shortName);
@@ -85,15 +86,24 @@ assert.strictEqual(SHORT_NAME, BRAND.shortName);
 // A custom file overrides only the keys it names; junk values fall back.
 withTempDir(dir => {
   const file = path.join(dir, 'brand.json');
-  fs.writeFileSync(file, JSON.stringify({product_name: 'Seamless Loop', short_name: '', tagline: 7}));
+  fs.writeFileSync(
+    file,
+    JSON.stringify({product_name: 'Seamless Loop', short_name: '', tagline: 7, home_dir: '.s10s'}),
+  );
   assert.deepStrictEqual(loadBrand(file), {
     productName: 'Seamless Loop',
     shortName: 'KISS',
     tagline: STOCK_BRAND.tagline,
+    homeDir: '.s10s',
   });
   // Broken or missing files fall back to the STOCK names (not to whatever
   // brand this checkout carries).
-  const stock = {productName: 'KISS Sorcar', shortName: 'KISS', tagline: STOCK_BRAND.tagline};
+  const stock = {
+    productName: 'KISS Sorcar',
+    shortName: 'KISS',
+    tagline: STOCK_BRAND.tagline,
+    homeDir: '.kiss',
+  };
   fs.writeFileSync(file, '{oops');
   assert.deepStrictEqual(loadBrand(file), stock, 'malformed JSON falls back to stock');
   fs.writeFileSync(file, '[1,2]');
@@ -102,7 +112,7 @@ withTempDir(dir => {
 });
 
 // renderBrand fills the three text placeholders and leaves other tokens alone.
-const s10sBrand = {productName: 'Seamless Loop', shortName: 's10s', tagline: 'Hi there'};
+const s10sBrand = {productName: 'Seamless Loop', shortName: 's10s', tagline: 'Hi there', homeDir: '.s10s'};
 assert.strictEqual(
   renderBrand('{{PRODUCT_NAME}}/{{SHORT_NAME}}: {{TAGLINE}} {{MODEL_NAME}}', s10sBrand),
   'Seamless Loop/s10s: Hi there {{MODEL_NAME}}',

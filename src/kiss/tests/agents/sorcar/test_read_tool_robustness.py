@@ -5,7 +5,7 @@
 """Integration tests for the ``Read`` tool's robustness fallbacks.
 
 These tests were added in response to a recurring class of model
-failures observed in ~/.kiss/sorcar.db where the ``Read`` tool returned
+failures observed in ~/.kiss/history.db where the ``Read`` tool returned
 bare or cryptic error messages (empty body, ``Errno 21``, ``FileNotFoundError``,
 stale ``.kiss-worktrees/kiss_wt-*`` paths) and the model interpreted the
 response as a failure.
@@ -79,15 +79,15 @@ def test_empty_directory_listing(temp_dir: Path) -> None:
 
 
 def test_file_not_found_suggests_close_match(temp_dir: Path) -> None:
-    """A typo like ``SORCR.md`` should suggest the real ``SORCAR.md``."""
-    (temp_dir / "SORCAR.md").write_text("# sorcar\n")
+    """A typo like ``AGNTS.md`` should suggest the real ``AGENTS.md``."""
+    (temp_dir / "AGENTS.md").write_text("# sorcar\n")
     (temp_dir / "INJECTIONS.md").write_text("# injections\n")
 
-    out = UsefulTools().Read(str(temp_dir / "SORCR.md"))
+    out = UsefulTools().Read(str(temp_dir / "AGNTS.md"))
 
     assert "File not found" in out
     assert "Did you mean" in out
-    assert "SORCAR.md" in out
+    assert "AGENTS.md" in out
 
 
 def test_file_not_found_no_suggestion_when_nothing_close(temp_dir: Path) -> None:
@@ -102,12 +102,12 @@ def test_file_not_found_no_suggestion_when_nothing_close(temp_dir: Path) -> None
 
 def test_file_not_found_walks_up_to_existing_parent(temp_dir: Path) -> None:
     """Suggestions still surface when the immediate parent doesn't exist."""
-    (temp_dir / "SORCAR.md").write_text("# sorcar\n")
+    (temp_dir / "AGENTS.md").write_text("# sorcar\n")
 
-    out = UsefulTools().Read(str(temp_dir / "no_such_dir" / "SORCR.md"))
+    out = UsefulTools().Read(str(temp_dir / "no_such_dir" / "AGNTS.md"))
 
     assert "File not found" in out
-    assert "SORCAR.md" in out
+    assert "AGENTS.md" in out
 
 
 def test_stale_worktree_falls_back_to_repo(temp_dir: Path) -> None:

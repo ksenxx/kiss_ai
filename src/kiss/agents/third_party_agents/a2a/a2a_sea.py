@@ -38,7 +38,6 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -56,6 +55,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ _MAX_BODY_BYTES = 1024 * 1024
 _TURN_LIMIT = 20
 _TURN_WINDOW_SECONDS = 3600.0
 
-_A2A_DIR = Path.home() / ".kiss" / "third_party_agents" / "a2a"
+_A2A_DIR = kiss_home() / "third_party_agents" / "a2a"
 _config = ChannelConfig(_A2A_DIR, ("bind_host", "port"))
 
 

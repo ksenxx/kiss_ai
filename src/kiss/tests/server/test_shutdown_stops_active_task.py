@@ -4,7 +4,7 @@
 # add your name here
 """Reproduction + fix: shutdown must not silently kill an in-flight task.
 
-Production failure (task 2968 in the bundled ``sorcar.db``): a task was
+Production failure (task 2968 in the bundled ``history.db``): a task was
 running in its worker thread (step 9 of 100) when ``kiss-web`` received
 a routine restart ``SIGTERM``.  The signal handler raised
 ``KeyboardInterrupt`` in the *main* thread, ``asyncio.run`` unwound, and

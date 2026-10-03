@@ -41,6 +41,7 @@ from kiss.agents.sorcar.cron_agent import (
     start_scheduler_thread,
     tick,
 )
+from kiss.core.config import kiss_home
 
 
 @pytest.fixture(autouse=True)
@@ -879,6 +880,16 @@ def test_command_job_honours_work_dir_and_timeout(tmp_path: Path) -> None:
     _set_job_fields(job["id"], next_run_at=1.0)
     assert tick(2.0) == 1
     assert Path(load_jobs()[0]["last_summary"]).resolve() == project.resolve()
+    # The command sees the daemon's state directory, so a script it runs
+    # with another interpreter reads the same files as the daemon does.
+    home_job = _create(cron_job(
+        "create", name="home", schedule="every 1m",
+        command=f'"{python}" -c "import os; print(os.environ[\'KISS_HOME\'])"',
+    ))
+    _set_job_fields(home_job["id"], next_run_at=1.0)
+    assert tick(2.0) == 1
+    stored_home = {j["id"]: j for j in load_jobs()}[home_job["id"]]
+    assert Path(stored_home["last_summary"]).resolve() == kiss_home().resolve()
     slow = _create(cron_job(
         "create", name="slow", command="sleep 30", schedule="every 1m",
         timeout="0.5",

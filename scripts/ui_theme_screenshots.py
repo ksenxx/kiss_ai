@@ -205,10 +205,6 @@ TRANSCRIPT_JS = r"""
   E({type: 'warning', message: 'Context usage is above 60%.'});
   E({type: 'result', success: true, summary: 'All radii now use the ' +
      'four-step scale.', total_tokens: 48213, cost: '$0.42', step_count: 12});
-  // A finished, non-replayed task hides its panels behind the chevron;
-  // show them as the live stream left them.
-  document.querySelectorAll('#output .chv-hidden')
-    .forEach(el => el.classList.remove('chv-hidden'));
   document.getElementById('output').scrollTop = 0;
   return document.getElementById('output').children.length;
 }

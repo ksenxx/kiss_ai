@@ -4,14 +4,14 @@
 // add your name here
 
 // When a task finishes, the chat webview must not explicitly collapse
-// (or hide) any event panel: the transcript keeps the exact state the
-// live stream left it in.  The terminal events (task_done, task_error,
+// any event panel: the transcript keeps the exact state the live
+// stream left it in.  The terminal events (task_done, task_error,
 // task_stopped, task_interrupted) stamp every panel that is on screen,
 // and the not-running branch of applyChevronState leaves stamped
 // panels alone.  A transcript REBUILT from stored events (a reload or
-// reattach replay) carries no stamps and keeps the old finished-task
-// digest: everything but the result collapsed, non-summary panels
-// hidden.  These tests drive the real webview end to end through
+// reattach replay) carries no stamps and keeps the finished-task
+// digest: everything but the result collapsed, but every panel stays
+// on screen.  These tests drive the real webview end to end through
 // window messages, exactly as the daemon does.
 
 'use strict';
@@ -75,10 +75,24 @@ function outputPanels(win) {
 }
 
 function panelState(p) {
-  return {
-    collapsed: p.classList.contains('collapsed'),
-    hidden: p.classList.contains('chv-hidden'),
-  };
+  return {collapsed: p.classList.contains('collapsed')};
+}
+
+function injectCss(win) {
+  const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
+  const styleEl = win.document.createElement('style');
+  styleEl.textContent = css;
+  win.document.head.appendChild(styleEl);
+}
+
+/** Whether *el* and every ancestor up to #output is displayed. */
+function isDisplayed(win, el) {
+  for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+    if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
+      return false;
+    if (n.id === 'output') break;
+  }
+  return true;
 }
 
 /**
@@ -119,8 +133,8 @@ function finishTask(win, tabId) {
 
 // A task finishing on the visible tab leaves every panel exactly as
 // the stream left it: the pass a trailing event (usage_info) triggers
-// with the running flag off must neither collapse nor hide anything,
-// and the panel the stream left open stays open.
+// with the running flag off must not collapse anything, and the panel
+// the stream left open stays open.
 function testVisibleFinishLeavesPanelsAsIs() {
   const {win, posted} = makeWebview();
   const tabId = readyTabId(posted);
@@ -140,11 +154,7 @@ function testVisibleFinishLeavesPanelsAsIs() {
   assert.deepStrictEqual(
     after,
     before,
-    'the finish must not change any panel: no explicit collapse, no hide',
-  );
-  assert.ok(
-    after.every(s => !s.hidden),
-    'no event panel may be hidden once its task finished on screen',
+    'the finish must not change any panel: no explicit collapse',
   );
   win.close();
   console.log('  ok - a visible finish leaves every panel as the stream left it');
@@ -161,7 +171,7 @@ function testUntaggedFinishStampsVisibleTab() {
   send(win, {type: 'status', running: false, tabId});
   send(win, {type: 'usage_info', tabId, total_tokens: 9, cost: '$0.01'});
   assert.ok(
-    outputPanels(win).every(p => !p.classList.contains('chv-hidden')),
+    outputPanels(win).every(p => p._liveFinished),
     'an untagged task_done must stamp (and so keep) the visible panels',
   );
   win.close();
@@ -189,10 +199,6 @@ function testUserExpandedPanelSurvivesFinish() {
     !bash.classList.contains('collapsed'),
     'the finish must not re-collapse a panel the user expanded',
   );
-  assert.ok(
-    !bash.classList.contains('chv-hidden'),
-    'the finish must not hide a panel the user expanded',
-  );
   win.close();
   console.log('  ok - a user-expanded panel survives the finish');
 }
@@ -217,13 +223,9 @@ function testBackgroundErrorFinishKeepsPanels() {
   send(win, {type: 'status', running: false, tabId: bgId});
 
   // The error pulled the user onto the finished tab (focusFinishedTab);
-  // repaint once more and check nothing collapsed or hid.
+  // repaint once more and check nothing collapsed.
   const panels = outputPanels(win);
   assert.ok(panels.length >= 3, 'the background transcript is on screen');
-  assert.ok(
-    panels.every(p => !p.classList.contains('chv-hidden')),
-    'a task_error finish must not hide the panels it streamed',
-  );
   assert.ok(
     !panels[panels.length - 1].classList.contains('collapsed'),
     'the panel the stream left open stays open after task_error',
@@ -260,10 +262,6 @@ function testTabSwitchAfterFinishKeepsPanels() {
   const panels = outputPanels(win);
   assert.ok(panels.length >= 3, 'the finished transcript is back on screen');
   assert.ok(
-    panels.every(p => !p.classList.contains('chv-hidden')),
-    'switching back must not hide the live-finished panels',
-  );
-  assert.ok(
     !panels[panels.length - 1].classList.contains('collapsed'),
     'switching back must not collapse the panel the stream left open',
   );
@@ -273,9 +271,11 @@ function testTabSwitchAfterFinishKeepsPanels() {
 
 // REGRESSION: a transcript rebuilt from stored events (reload /
 // reattach replay) has no live-finish stamps and keeps the digest —
-// panels collapsed by the replay pass and non-summary panels hidden.
+// panels collapsed by the replay pass, yet every one of them stays on
+// screen, one click away.
 function testReplayKeepsFinishedDigest() {
   const {win, posted} = makeWebview();
+  injectCss(win);
   const tabId = readyTabId(posted);
   send(win, {
     type: 'task_events',
@@ -297,8 +297,8 @@ function testReplayKeepsFinishedDigest() {
     'a replayed finished task keeps the collapsed digest',
   );
   assert.ok(
-    bash.classList.contains('chv-hidden'),
-    'a replayed finished task keeps non-summary panels hidden',
+    isDisplayed(win, bash),
+    'a replayed finished task must not hide its event panels',
   );
   win.close();
   console.log('  ok - a replayed finished task keeps the digest');
@@ -307,7 +307,7 @@ function testReplayKeepsFinishedDigest() {
 // REGRESSION: a neighbouring task's replayed digest, spliced into the
 // transcript while the live task runs, takes no live-finish stamp —
 // even when its label equals the live task's name (a rerun) — so the
-// finish leaves its panels hidden.
+// finish leaves its panels folded.
 function testAdjacentReplayKeepsDigestThroughSameNameFinish() {
   const {win, posted} = makeWebview();
   const tabId = readyTabId(posted);
@@ -332,8 +332,8 @@ function testAdjacentReplayKeepsDigestThroughSameNameFinish() {
   assert.ok(adjacent, 'the earlier task must be spliced in');
   const adjPanel = adjacent.querySelector('.collapsible:not(.rc)');
   assert.ok(
-    adjPanel.classList.contains('chv-hidden'),
-    'precondition: the adjacent digest panel is hidden',
+    adjPanel.classList.contains('collapsed'),
+    'precondition: the adjacent digest panel is folded',
   );
 
   finishTask(win, tabId);
@@ -344,12 +344,12 @@ function testAdjacentReplayKeepsDigestThroughSameNameFinish() {
     'the finish must not stamp a neighbouring task\'s panels',
   );
   assert.ok(
-    adjPanel.classList.contains('chv-hidden'),
-    'the finish must not un-hide the adjacent digest',
+    adjPanel.classList.contains('collapsed'),
+    'the finish must not unfold the adjacent digest',
   );
   const livePanel = win.document.querySelector('#output > .tc-bash');
   assert.ok(
-    livePanel && !livePanel.classList.contains('chv-hidden'),
+    livePanel && !livePanel.classList.contains('collapsed'),
     'the live task\'s own panels still keep their streamed state',
   );
   win.close();
@@ -367,10 +367,11 @@ function testStatusOnlyEndStillDigests() {
   send(win, {type: 'status', running: false, tabId});
   send(win, {type: 'usage_info', tabId, total_tokens: 5, cost: '$0.01'});
 
-  const bash = win.document.querySelector('#output .tc-bash');
+  const panels = outputPanels(win).filter(p => !p.classList.contains('rc'));
+  assert.ok(panels.length >= 3, 'the streamed event panels are on screen');
   assert.ok(
-    bash.classList.contains('chv-hidden'),
-    'a status-only end keeps the old digest pass',
+    panels.every(p => p.classList.contains('collapsed')),
+    'a status-only end keeps the digest pass: every event panel folds',
   );
   win.close();
   console.log('  ok - a status-only end still digests');
@@ -405,7 +406,7 @@ function testUnstampableTerminalEventsAreNoOps() {
   finishTask(win, tabId);
   send(win, {type: 'usage_info', tabId, total_tokens: 9, cost: '$0.01'});
   assert.ok(
-    outputPanels(win).every(p => !p.classList.contains('chv-hidden')),
+    outputPanels(win).every(p => p._liveFinished),
     'the visible tab still stamps and keeps its own panels',
   );
   win.close();

@@ -74,7 +74,7 @@ TASKS = [
 
 
 def make_db(path: Path, extra_rows: list[tuple[Any, ...]] | None = None) -> Path:
-    """Create a minimal ``sorcar.db`` with the real ``task_history`` columns."""
+    """Create a minimal ``history.db`` with the real ``task_history`` columns."""
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             "CREATE TABLE task_history (id TEXT PRIMARY KEY, timestamp REAL NOT NULL,"
@@ -103,7 +103,7 @@ def test_html_to_text() -> None:
 def test_load_past_tasks_filters_failed_and_child_rows(tmp_path: Path) -> None:
     long_result = "<p>" + "x" * 400 + "</p>"
     db = make_db(
-        tmp_path / "sorcar.db",
+        tmp_path / "history.db",
         extra_rows=[
             ("child" + "0" * 27, time.time() + 10, "child task", long_result, "parent-id"),
             ("fail1" + "0" * 27, time.time() + 11, "t", "Task failed: boom" + long_result, ""),
@@ -157,13 +157,13 @@ def test_task_page_body_and_truncation() -> None:
 
 
 def test_build_memory_keyword_index_and_fusion(tmp_path: Path) -> None:
-    db = make_db(tmp_path / "sorcar.db")
+    db = make_db(tmp_path / "history.db")
     tasks = load_past_tasks(db, limit=10, min_result_chars=10)
     memory = MemoryDir(tmp_path / "memory")
     names = build_memory_from_tasks(memory, tasks)
     assert sorted(names) == memory.page_names()
     page = memory.read(names[0])
-    assert page.frontmatter["source"].startswith("sorcar.db task_history bf690e27")
+    assert page.frontmatter["source"].startswith("history.db task_history bf690e27")
     assert page.title == tasks[0].title
     # Reconciliation: existing pages are kept byte-for-byte, extras are pruned, missing ones added.
     memory.write("stray", "not part of the corpus")
@@ -227,7 +227,7 @@ def test_probe_helpers_and_metrics() -> None:
 
 
 def test_run_evaluation_offline(tmp_path: Path) -> None:
-    db = make_db(tmp_path / "sorcar.db")
+    db = make_db(tmp_path / "history.db")
     tasks = load_past_tasks(db, limit=10, min_result_chars=10)
     memory = MemoryDir(tmp_path / "memory")
     build_memory_from_tasks(memory, tasks)
@@ -258,7 +258,7 @@ def test_run_evaluation_offline(tmp_path: Path) -> None:
 
 
 def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    db = make_db(tmp_path / "sorcar.db")
+    db = make_db(tmp_path / "history.db")
     out = tmp_path / "eval" / "results.json"
     args = [
         "--db",
@@ -305,7 +305,7 @@ def test_main_cli_offline(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
 def test_main_cli_with_real_embedding_model(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    db = make_db(tmp_path / "sorcar.db")
+    db = make_db(tmp_path / "history.db")
     out = tmp_path / "eval" / "results.json"
     assert (
         main(
@@ -338,7 +338,7 @@ def test_main_cli_with_real_embedding_model(
 @live_api
 @requires_anthropic
 def test_llm_probes_and_probe_cache(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    db = make_db(tmp_path / "sorcar.db")
+    db = make_db(tmp_path / "history.db")
     tasks = load_past_tasks(db, limit=10, min_result_chars=10)
     memory = MemoryDir(tmp_path / "memory")
     build_memory_from_tasks(memory, tasks)

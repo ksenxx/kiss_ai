@@ -5,10 +5,10 @@
 """End-to-end tests: a finished task-update child never re-opens its tab.
 
 The task-info panel polls ``getTaskUpdate`` while a tab shows a running
-task; the daemon answers by running the task-update agent
+task; the daemon answers by asking the ``/ask`` agent about that task
 (:func:`kiss.server.task_update.run_task_update_sea`) as an in-process
-sub-agent of that task.  Like the ``/ask`` answerer it is a side
-channel: its report goes to the task-info panel, so its nested tab is
+sub-agent of it.  Like the chat's ``/ask`` answerer it is a side
+channel: its answer goes to the task-info panel, so its nested tab is
 open only while it runs.  Before the ``side_channel`` stamp, every
 reload of the webview (a ``resumeSession`` of the parent) re-announced
 each finished update as ``openSubagentTab{isDone: true}`` — one dead
@@ -24,15 +24,15 @@ import threading
 import time
 from typing import Any
 
-from kiss.agents.seas.task_update import task_update_sea
 from kiss.agents.sorcar import persistence as _persistence
+from kiss.server import task_update
 from kiss.server.server import _is_side_channel_row
 from kiss.tests.server.test_run_agent_subagent_tab import DaemonLocalHarness
 
 PARENT_TAB_ID = "webtab-updated-1"
 PARENT_MARKER = "long running parent task tu7"
-# ``task_update_sea.PROMPT_TEMPLATE`` minus its ``{task_id}`` tail.
-CHILD_MARKER = task_update_sea.PROMPT_TEMPLATE.split("{", 1)[0]
+# The question the panel's in-process ``/ask`` run opens with.
+CHILD_MARKER = task_update.UPDATE_QUESTION
 
 
 def _result_text() -> str:

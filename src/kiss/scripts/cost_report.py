@@ -2,11 +2,11 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Token-cost KPIs of the tasks recorded in a ``sorcar.db``.
+"""Token-cost KPIs of the tasks recorded in a ``history.db``.
 
 The 7-day efficiency audit of 2026-09-19 found that most avoidable spend
 came from a handful of measurable patterns: a mandatory first-step
-``Read("./SORCAR.md")``, files re-read within the same task, steps run
+``Read("./AGENTS.md")``, files re-read within the same task, steps run
 at very large contexts, sub-agents that start with a ~12k-token first
 step, reviewer sub-trees that exceed half of a task's spend, LLM
 sub-agents used as shell wrappers, and context hand-offs at 90 % of the
@@ -75,7 +75,7 @@ class TaskRow:
     timestamp: float
     in_window: bool = True
     """False for an ancestor loaded only to reconstruct a tree."""
-    sorcar_md_reads: int = 0
+    agents_md_reads: int = 0
     reads: int = 0
     repeat_reads: int = 0
     first_context: int | None = None
@@ -102,9 +102,11 @@ def _bucket(context_tokens: int) -> str:
     return CONTEXT_BUCKETS[-1][0]  # pragma: no cover — sentinel bucket is unbounded
 
 
-def _is_sorcar_md_read(event: dict[str, Any]) -> bool:
+def _is_agents_md_read(event: dict[str, Any]) -> bool:
+    """Whether *event* read the repository's ``AGENTS.md`` (``SORCAR.md`` before 2026.10.2)."""
     path = str(event.get("path") or event.get("file_path") or "")
-    return path.replace("\\", "/").rstrip("/").endswith("SORCAR.md") and "/.kiss/" not in path
+    name = path.replace("\\", "/").rstrip("/")
+    return name.endswith(("AGENTS.md", "SORCAR.md")) and "/.kiss/" not in path
 
 
 def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
@@ -143,8 +145,8 @@ def _scan_events(conn: sqlite3.Connection, rows: dict[str, TaskRow]) -> None:
         if kind == "tool_call" and event.get("name") == "Read":
             row.reads += 1
             path = str(event.get("path") or event.get("file_path") or "")
-            if _is_sorcar_md_read(event):
-                row.sorcar_md_reads += 1
+            if _is_agents_md_read(event):
+                row.agents_md_reads += 1
             key = (path, event.get("start_line"), event.get("max_lines"))
             if key in seen_reads[task_id]:
                 row.repeat_reads += 1
@@ -196,7 +198,7 @@ def load_tasks(db_path: str, since: float) -> dict[str, TaskRow]:
     """Load every task that started after *since* with its event figures.
 
     Args:
-        db_path: Path of the ``sorcar.db`` to read.
+        db_path: Path of the ``history.db`` to read.
         since: Epoch seconds; tasks with an older ``timestamp`` are skipped.
 
     Returns:
@@ -327,7 +329,7 @@ def compute_kpis(rows: dict[str, TaskRow]) -> dict[str, Any]:
         "cost_usd": round(total_cost, 4),
         "tokens": sum(r.tokens for r in counted),
         "steps": sum(r.steps for r in counted),
-        "sorcar_md_reads": sum(r.sorcar_md_reads for r in rows.values()),
+        "agents_md_reads": sum(r.agents_md_reads for r in rows.values()),
         "reads": reads,
         "repeat_reads": repeat_reads,
         "repeat_read_ratio": round(repeat_reads / reads, 4) if reads else 0.0,
@@ -372,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code (0 on success).
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--db", default=str(kiss_home() / "sorcar.db"))
+    parser.add_argument("--db", default=str(kiss_home() / "history.db"))
     parser.add_argument("--hours", type=float, default=24.0)
     parser.add_argument("--json", action="store_true", help="print JSON instead of text")
     args = parser.parse_args(argv)

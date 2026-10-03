@@ -49,7 +49,7 @@ def _history_event_from_real_backend(
     tmp = tempfile.mkdtemp(prefix="kiss-history-running-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
     th._close_db()
-    th._DB_PATH = Path(tmp) / "sorcar.db"  # type: ignore[attr-defined]
+    th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
 
     stop = threading.Event()
     worker: threading.Thread | None = None
@@ -115,7 +115,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
     tmp = tempfile.mkdtemp(prefix="kiss-history-running-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
     th._close_db()
-    th._DB_PATH = Path(tmp) / "sorcar.db"  # type: ignore[attr-defined]
+    th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
     stop = threading.Event()
     worker: threading.Thread | None = None
     fake_tab_id = "__alive_thread_test__"

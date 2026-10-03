@@ -5,7 +5,7 @@
 """End-to-end tests for the History sidebar's date-range auto-fill.
 
 The redesigned History filter bar pre-fills its From/To date inputs
-with the FIRST and LAST task dates stored in ``~/.kiss/sorcar.db``.
+with the FIRST and LAST task dates stored in ``~/.kiss/history.db``.
 The backend side of that feature is:
 
 1. ``persistence._history_date_range()`` — returns the ``(min, max)``

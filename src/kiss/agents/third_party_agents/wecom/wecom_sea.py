@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -33,10 +32,11 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_WECOM_DIR = Path.home() / ".kiss" / "third_party_agents" / "wecom"
+_WECOM_DIR = kiss_home() / "third_party_agents" / "wecom"
 _config = ChannelConfig(_WECOM_DIR, ("webhook_url",))
 
 

@@ -4,7 +4,7 @@
 # add your name here
 """Regression tests for the 2026-06-11 00:37:45 self-inflicted daemon kill.
 
-Incident (forensics from ``~/.kiss/kiss-web-stderr.log`` + ``sorcar.db``):
+Incident (forensics from ``~/.kiss/kiss-web-stderr.log`` + ``history.db``):
 a bug-hunt sub-agent (task_history row 3624) ran a freshly written
 pre-fix test that exercised ``_cmd_save_config`` with a junk
 ``remote_password`` against an in-process ``VSCodeServer``.  The handler

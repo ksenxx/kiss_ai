@@ -47,6 +47,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
 )
 from kiss.agents.third_party_agents._overleaf_realtime import fetch_file_tree, flatten_tree
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 _TIMEOUT = 60
 _MAX_OUTPUT = 8000
@@ -76,7 +77,7 @@ _STATE_ACTIONS = {
     "restore": ("POST", "/Project/{}/restore"),
 }
 
-_OVERLEAF_DIR = Path.home() / ".kiss" / "third_party_agents" / "overleaf"
+_OVERLEAF_DIR = kiss_home() / "third_party_agents" / "overleaf"
 _config = ChannelConfig(_OVERLEAF_DIR, ("session_cookie",))
 
 

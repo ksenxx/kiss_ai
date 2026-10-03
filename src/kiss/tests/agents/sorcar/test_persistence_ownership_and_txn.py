@@ -54,7 +54,7 @@ def _redirect(tmpdir: Path) -> tuple:
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     th._owner_state = None
     return saved
@@ -76,7 +76,7 @@ def _live_task_worker(kiss_dir: str, out_queue) -> None:
     import kiss.agents.sorcar.persistence as child_th
 
     child_th._KISS_DIR = Path(kiss_dir)
-    child_th._DB_PATH = child_th._KISS_DIR / "sorcar.db"
+    child_th._DB_PATH = child_th._KISS_DIR / "history.db"
     child_th._db_conn = None
     child_th._owner_state = None
     task_id, _chat = child_th._add_task("live task in another process")
@@ -94,7 +94,7 @@ def _clean_exit_owner_worker(kiss_dir: str, out_queue) -> None:
     import kiss.agents.sorcar.persistence as child_th
 
     child_th._KISS_DIR = Path(kiss_dir)
-    child_th._DB_PATH = child_th._KISS_DIR / "sorcar.db"
+    child_th._DB_PATH = child_th._KISS_DIR / "history.db"
     child_th._db_conn = None
     child_th._owner_state = None
     out_queue.put(child_th._process_owner_token())
@@ -105,7 +105,7 @@ def _frequent_task_worker(kiss_dir: str, task: str, barrier) -> None:
     import kiss.agents.sorcar.persistence as child_th
 
     child_th._KISS_DIR = Path(kiss_dir)
-    child_th._DB_PATH = child_th._KISS_DIR / "sorcar.db"
+    child_th._DB_PATH = child_th._KISS_DIR / "history.db"
     child_th._db_conn = None
     child_th._owner_state = None
     barrier.wait()
@@ -457,7 +457,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
     def test_migration_keeps_unrecorded_toggles_enabled(self) -> None:
         """A legacy row that never recorded the toggles is not inverted."""
         th._close_db()
-        db_path = self.kiss_dir / "sorcar.db"
+        db_path = self.kiss_dir / "history.db"
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.executescript("""
             CREATE TABLE task_history (
@@ -489,7 +489,7 @@ class SchemaDefaultsTest(_PersistenceTestCase):
     def test_migration_preserves_explicitly_disabled_toggles(self) -> None:
         """An explicit ``false`` is still migrated as disabled."""
         th._close_db()
-        db_path = self.kiss_dir / "sorcar.db"
+        db_path = self.kiss_dir / "history.db"
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         conn.executescript("""
             CREATE TABLE task_history (
@@ -778,7 +778,7 @@ class ModuleInternalsTest(_PersistenceTestCase):
     def test_owner_column_is_added_to_an_older_database(self) -> None:
         """A database created before owner tracking is upgraded in place."""
         th._close_db()
-        conn = sqlite3.connect(str(self.kiss_dir / "sorcar.db"))
+        conn = sqlite3.connect(str(self.kiss_dir / "history.db"))
         conn.execute(
             "CREATE TABLE task_history ("
             "id TEXT PRIMARY KEY, timestamp REAL NOT NULL, task TEXT NOT NULL,"

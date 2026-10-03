@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.scripts.backfill_subtask_costs`` on a real ``sorcar.db``."""
+"""End-to-end tests for ``kiss.scripts.backfill_subtask_costs`` on a real ``history.db``."""
 
 from __future__ import annotations
 

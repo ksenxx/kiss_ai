@@ -35,7 +35,7 @@ class TestResumeSessionWithTaskId:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_a_id, chat_id = th._add_task("task alpha", chat_id="0")
             events_a: list[dict[str, object]] = [
@@ -96,7 +96,7 @@ class TestResumeSessionWithTaskId:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_id, chat_id = th._add_task("the task", chat_id="0")
             th._append_chat_event(
@@ -139,7 +139,7 @@ class TestResumeSessionWithTaskId:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_a_id, chat_id = th._add_task("old task", chat_id="0")
             th._append_chat_event(
@@ -180,7 +180,7 @@ class TestResumeSessionWithTaskId:
         try:
             th._db_conn = None
             th._KISS_DIR = tmp_path
-            th._DB_PATH = tmp_path / "sorcar.db"
+            th._DB_PATH = tmp_path / "history.db"
 
             task_id, chat_id = th._add_task("only task", chat_id="0")
             th._append_chat_event(

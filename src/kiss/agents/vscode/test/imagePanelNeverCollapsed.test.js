@@ -11,8 +11,8 @@
 //     new ones arrive; an image panel must stay open.
 //   * collapseAllExceptResult -- a replayed transcript folds everything
 //     but the result; an image panel must stay open.
-//   * applyChevronState -- a finished task's plain tool panels are taken
-//     off screen (chv-hidden); an image panel must stay on screen.
+//   * applyChevronState -- a finished task's plain tool panels are
+//     folded; an image panel must stay open.
 //
 // Only the user's own click on the chevron folds such a panel.
 
@@ -159,7 +159,7 @@ function testLiveStreamKeepsImagePanelOpen() {
     'BUG: the panel showing an image was auto-collapsed while streaming',
   );
 
-  // The task finishes: plain panels go off screen, the image stays.
+  // The task finishes: the image panel stays open.
   send(win, {
     type: 'result',
     text: 'done',
@@ -168,10 +168,6 @@ function testLiveStreamKeepsImagePanelOpen() {
     tabId: TAB,
   });
   send(win, {type: 'status', running: false, tabId: TAB});
-  assert.ok(
-    !panels[1].classList.contains('chv-hidden'),
-    'BUG: the panel showing an image was hidden when the task finished',
-  );
   assert.ok(
     !panels[1].classList.contains('collapsed'),
     'the image panel stays open after the task finishes',
@@ -185,7 +181,7 @@ function testLiveStreamKeepsImagePanelOpen() {
     panels[1].classList.contains('collapsed'),
     'the user can still fold an image panel by hand',
   );
-  console.log('ok: a streaming image panel is never auto-collapsed or hidden');
+  console.log('ok: a streaming image panel is never auto-collapsed');
 }
 
 function testReplayKeepsImagePanelOpenAndVisible() {
@@ -221,16 +217,8 @@ function testReplayKeepsImagePanelOpenAndVisible() {
     'plain replayed tool panels are folded',
   );
   assert.ok(
-    plain.every(p => p.classList.contains('chv-hidden')),
-    'plain replayed tool panels of a finished task are taken off screen',
-  );
-  assert.ok(
     !imagePanel.classList.contains('collapsed'),
     'BUG: the replayed panel showing an image was auto-collapsed',
-  );
-  assert.ok(
-    !imagePanel.classList.contains('chv-hidden'),
-    'BUG: the replayed panel showing an image was hidden',
   );
   console.log('ok: a replayed image panel stays open and on screen');
 }

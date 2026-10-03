@@ -16,17 +16,21 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import {DEFAULT_HOME_DIR_NAME, brandHomeDirName} from './kissHome';
 
 export interface Brand {
   productName: string;
   shortName: string;
   tagline: string;
+  /** State directory name under $HOME (`.kiss` for stock KISS); see kissHome.js. */
+  homeDir: string;
 }
 
 const DEFAULT_BRAND: Brand = {
   productName: 'KISS Sorcar',
   shortName: 'KISS',
   tagline: 'Your AI assistant. Ask me anything!',
+  homeDir: DEFAULT_HOME_DIR_NAME,
 };
 
 /** `media/brand.json`, resolved from `out/brand.js` in both dev and VSIX layouts. */
@@ -51,6 +55,7 @@ export function loadBrand(file: string = BRAND_FILE): Brand {
     productName: pickString(obj, 'product_name', DEFAULT_BRAND.productName),
     shortName: pickString(obj, 'short_name', DEFAULT_BRAND.shortName),
     tagline: pickString(obj, 'tagline', DEFAULT_BRAND.tagline),
+    homeDir: brandHomeDirName(file),
   };
 }
 
@@ -67,20 +72,23 @@ export const BRAND: Brand = loadBrand();
 export const PRODUCT_NAME = BRAND.productName;
 export const SHORT_NAME = BRAND.shortName;
 
+const PLACEHOLDERS: Record<string, keyof Brand> = {
+  PRODUCT_NAME: 'productName',
+  SHORT_NAME: 'shortName',
+  TAGLINE: 'tagline',
+  HOME_DIR: 'homeDir',
+};
+
 /**
- * Fill the `{{PRODUCT_NAME}}`, `{{SHORT_NAME}}` and `{{TAGLINE}}` placeholders
- * in `text` (the twin of `kiss.core.brand.render_brand`, used on TIPS.md).
- * Other `{{...}}` tokens are left untouched.
+ * Fill the `{{PRODUCT_NAME}}`, `{{SHORT_NAME}}`, `{{TAGLINE}}` and
+ * `{{HOME_DIR}}` placeholders in `text` (the twin of
+ * `kiss.core.brand.render_brand`, used on TIPS.md).  Other `{{...}}`
+ * tokens are left untouched.
  */
 export function renderBrand(text: string, brand: Brand = BRAND): string {
   return text.replace(
-    /\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE)\}\}/g,
-    (_m, key: string) =>
-      key === 'PRODUCT_NAME'
-        ? brand.productName
-        : key === 'SHORT_NAME'
-          ? brand.shortName
-          : brand.tagline,
+    /\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|HOME_DIR)\}\}/g,
+    (_m, key: string) => brand[PLACEHOLDERS[key]],
   );
 }
 

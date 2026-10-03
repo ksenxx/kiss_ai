@@ -38,7 +38,6 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -63,6 +62,7 @@ from kiss.agents.third_party_agents._oauth_apps import (
     missing_client_id_error,
     oauth_client_id,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ _MAX_OUTPUT = 8000
 _BODY_TRUNCATE = 1000
 _MERGE_METHODS = ("merge", "squash", "rebase")
 
-_GITHUB_DIR = Path.home() / ".kiss" / "third_party_agents" / "github"
+_GITHUB_DIR = kiss_home() / "third_party_agents" / "github"
 _config = ChannelConfig(_GITHUB_DIR, ("token",))
 _DEFAULT_OAUTH_BASE = "https://github.com"
 # Scopes requested by the device flow: repository read/write, org and

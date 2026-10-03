@@ -336,7 +336,7 @@ class IsolatedKissHome:
             persistence._KISS_DIR,
         )
         persistence._KISS_DIR = self.kiss_home
-        persistence._DB_PATH = self.kiss_home / "sorcar.db"
+        persistence._DB_PATH = self.kiss_home / "history.db"
         persistence._db_conn = None
 
     def write_config(self, **values: Any) -> None:

@@ -4,9 +4,9 @@
 # add your name here
 """End-to-end tests of the bundled ``/remember`` and ``/forget`` agents
 (:mod:`kiss.agents.seas.remember.remember_sea`, :mod:`kiss.agents.seas.forget.forget_sea`)
-and their storage layer (:mod:`kiss.agents.seas.sorcar_md`).
+and their storage layer (:mod:`kiss.agents.seas.agents_md`).
 
-The tools write the real ``$KISS_HOME/SORCAR.md`` of the test session
+The tools write the real ``$KISS_HOME/AGENTS.md`` of the test session
 (``KISS_HOME`` is a temporary directory, see ``conftest.py``).  The
 agent-level tests run a real :class:`ChatSorcarAgent` ReAct loop against
 the scripted local chat-completions server configured from each SEA's
@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.agents.seas import sorcar_md
+from kiss.agents.seas import agents_md
 from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.remember import remember_sea
 from kiss.agents.sorcar import sea_commands
@@ -45,9 +45,9 @@ _FORGET_PATH = Path(forget_sea.__file__).resolve()
 
 
 @pytest.fixture(autouse=True)
-def _fresh_sorcar_md() -> Iterator[Path]:
-    """Start and end every test without a ``SORCAR.md`` in the test KISS_HOME."""
-    path = sorcar_md.sorcar_md_path()
+def _fresh_agents_md() -> Iterator[Path]:
+    """Start and end every test without a ``AGENTS.md`` in the test KISS_HOME."""
+    path = agents_md.agents_md_path()
     path.unlink(missing_ok=True)
     yield path
     path.unlink(missing_ok=True)
@@ -85,12 +85,12 @@ def test_sea_getters_follow_the_contract() -> None:
     assert remember_sea.system_prompt() == remember_sea.SYSTEM_PROMPT
     assert "`remember_instruction`" in remember_sea.SYSTEM_PROMPT
     assert remember_sea.tools() == [
-        remember_sea.remember_instruction, sorcar_md.list_instructions,
+        remember_sea.remember_instruction, agents_md.list_instructions,
     ]
     assert forget_sea.system_prompt() == forget_sea.SYSTEM_PROMPT
     assert "`forget_instruction`" in forget_sea.SYSTEM_PROMPT
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
-    assert forget_sea.tools() == [forget_sea.forget_instruction, sorcar_md.list_instructions]
+    assert forget_sea.tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
     for sea in (remember_sea, forget_sea):
         assert sea.tool_profile() == "bash"
         assert sea.max_budget() == 1.0
@@ -117,11 +117,11 @@ def test_slash_commands_resolve_to_the_bundled_seas() -> None:
     assert prompt.endswith("TASK TEXT FOR run_agent:\nAlways reply tersely")
 
 
-def test_remember_creates_the_file_and_appends_bullets(_fresh_sorcar_md: Path) -> None:
+def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -> None:
     """The first instruction creates the file with a heading; later ones append."""
-    path = _fresh_sorcar_md
-    assert sorcar_md.list_instructions() == f"No instructions are stored in {path}."
-    assert sorcar_md.read_instructions() == []
+    path = _fresh_agents_md
+    assert agents_md.list_instructions() == f"No instructions are stored in {path}."
+    assert agents_md.read_instructions() == []
 
     reply = remember_sea.remember_instruction("Always reply in British English")
     assert reply == f"Remembered in {path}: Always reply in British English"
@@ -135,14 +135,14 @@ def test_remember_creates_the_file_and_appends_bullets(_fresh_sorcar_md: Path) -
         "# User instructions\n\n- Always reply in British English\n"
         "- Run tests before finishing\n"
     )
-    assert sorcar_md.list_instructions() == (
+    assert agents_md.list_instructions() == (
         "1. Always reply in British English\n2. Run tests before finishing"
     )
 
 
-def test_remember_rejects_empty_and_duplicate_instructions(_fresh_sorcar_md: Path) -> None:
+def test_remember_rejects_empty_and_duplicate_instructions(_fresh_agents_md: Path) -> None:
     """An empty instruction writes nothing; a repeat (any case/spacing) writes nothing."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     assert remember_sea.remember_instruction("  \n ") == (
         "Error: the instruction is empty; nothing was remembered."
     )
@@ -159,9 +159,9 @@ def test_remember_rejects_empty_and_duplicate_instructions(_fresh_sorcar_md: Pat
     assert path.read_text() == "-   Use   uv\n"
 
 
-def test_bullet_markers_never_become_instructions(_fresh_sorcar_md: Path) -> None:
+def test_bullet_markers_never_become_instructions(_fresh_agents_md: Path) -> None:
     """Marker-only text is empty; nested markers are stripped on both store and remove."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     for marker_only in ("- ", "*\n ", "+\t", "- - ", "-"):
         assert remember_sea.remember_instruction(marker_only).startswith("Error: "), marker_only
     assert not path.exists()
@@ -170,7 +170,7 @@ def test_bullet_markers_never_become_instructions(_fresh_sorcar_md: Path) -> Non
     )
     # A nested bullet the user wrote by hand is matched by its text alone.
     path.write_text(path.read_text() + "- - Hand written\n")
-    assert sorcar_md.read_instructions() == ["Nested rule", "- Hand written"]
+    assert agents_md.read_instructions() == ["Nested rule", "- Hand written"]
     assert forget_sea.forget_instruction("- - Nested rule") == (
         f"Forgot from {path}: Nested rule"
     )
@@ -180,21 +180,21 @@ def test_bullet_markers_never_become_instructions(_fresh_sorcar_md: Path) -> Non
     assert path.read_text() == "# User instructions\n\n"
 
 
-def test_edits_keep_foreign_bytes_and_crlf_endings(_fresh_sorcar_md: Path) -> None:
+def test_edits_keep_foreign_bytes_and_crlf_endings(_fresh_agents_md: Path) -> None:
     """A cp1252 byte and CRLF endings in a hand-written file survive add and remove."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     original = b"# Mine\r\n\r\nProse with a cp1252 \x92 quote.\r\n- Old rule\r\n"
     path.write_bytes(original)
     assert remember_sea.remember_instruction("New rule").startswith("Remembered in ")
     assert path.read_bytes() == original + b"- New rule\r\n"
-    assert sorcar_md.read_instructions() == ["Old rule", "New rule"]
+    assert agents_md.read_instructions() == ["Old rule", "New rule"]
     assert forget_sea.forget_instruction("old rule") == f"Forgot from {path}: Old rule"
     assert path.read_bytes() == (
         b"# Mine\r\n\r\nProse with a cp1252 \x92 quote.\r\n- New rule\r\n"
     )
 
 
-def test_edits_keep_every_other_line_byte_for_byte(_fresh_sorcar_md: Path) -> None:
+def test_edits_keep_every_other_line_byte_for_byte(_fresh_agents_md: Path) -> None:
     """Mixed endings, lone CRs and an unterminated last line are left as they are.
 
     Only the edited line changes: an added bullet gets the terminator of
@@ -202,7 +202,7 @@ def test_edits_keep_every_other_line_byte_for_byte(_fresh_sorcar_md: Path) -> No
     so the bullet starts a line of its own), and a removed bullet takes
     exactly its own terminator with it.
     """
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     mixed = b"# Mine\r\nProse \x92\n- Old rule\r\nTail without newline"
     path.write_bytes(mixed)
     remember_sea.remember_instruction("New rule")
@@ -214,7 +214,7 @@ def test_edits_keep_every_other_line_byte_for_byte(_fresh_sorcar_md: Path) -> No
     path.write_bytes(lone_cr)
     remember_sea.remember_instruction("New rule")
     assert path.read_bytes() == lone_cr + b"- New rule\r"
-    assert sorcar_md.read_instructions() == ["Old rule", "New rule"]
+    assert agents_md.read_instructions() == ["Old rule", "New rule"]
 
     path.write_bytes(b"- Old rule\nUnrelated prose without trailing newline")
     forget_sea.forget_instruction("Old rule")
@@ -223,8 +223,8 @@ def test_edits_keep_every_other_line_byte_for_byte(_fresh_sorcar_md: Path) -> No
     assert path.read_bytes() == b"Unrelated prose without trailing newline\n- Rule\n"
 
 
-def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path) -> None:
-    """A task reading SORCAR.md while it is rewritten gets the old or the new text.
+def test_readers_never_see_a_partial_file_during_updates(_fresh_agents_md: Path) -> None:
+    """A task reading AGENTS.md while it is rewritten gets the old or the new text.
 
     The reader repeats the exact ``perform_task`` read while a writer
     adds and removes a transient rule 200 times; every snapshot must
@@ -234,7 +234,7 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path)
     wait out the reader's open handle and the reader's open must wait
     out the in-flight rename.
     """
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     standing = "- Always preserve this standing instruction"
     remember_sea.remember_instruction(standing)
     start = Barrier(2)
@@ -244,8 +244,8 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path)
         start.wait()
         try:
             for i in range(200):
-                sorcar_md.add_instruction(f"Transient {i}")
-                sorcar_md.remove_instruction(f"Transient {i}")
+                agents_md.add_instruction(f"Transient {i}")
+                agents_md.remove_instruction(f"Transient {i}")
         finally:
             done.set()  # a writer failure must not leave the reader spinning
 
@@ -266,36 +266,36 @@ def test_readers_never_see_a_partial_file_during_updates(_fresh_sorcar_md: Path)
     assert path.read_text() == f"# User instructions\n\n{standing}\n"
 
 
-def test_concurrent_remembers_all_land(_fresh_sorcar_md: Path) -> None:
+def test_concurrent_remembers_all_land(_fresh_agents_md: Path) -> None:
     """Sixteen simultaneous adds each keep their line: the update is serialized."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     start = Barrier(16)
 
     def add(i: int) -> str:
         start.wait()
-        return sorcar_md.add_instruction(f"Concurrent rule {i}")
+        return agents_md.add_instruction(f"Concurrent rule {i}")
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         replies = list(pool.map(add, range(16)))
     assert all(r.startswith("Remembered in ") for r in replies), replies
-    assert sorted(sorcar_md.read_instructions()) == sorted(
+    assert sorted(agents_md.read_instructions()) == sorted(
         f"Concurrent rule {i}" for i in range(16)
     )
     assert path.read_text().startswith("# User instructions\n\n- Concurrent rule ")
 
 
-def test_remember_appends_to_a_hand_written_file(_fresh_sorcar_md: Path) -> None:
-    """A user-authored SORCAR.md keeps its text; bullets are appended after it."""
-    path = _fresh_sorcar_md
+def test_remember_appends_to_a_hand_written_file(_fresh_agents_md: Path) -> None:
+    """A user-authored AGENTS.md keeps its text; bullets are appended after it."""
+    path = _fresh_agents_md
     path.write_text("# Mine\n\nSome prose.\n* Existing bullet")  # no trailing newline
     remember_sea.remember_instruction("New rule")
     assert path.read_text() == "# Mine\n\nSome prose.\n* Existing bullet\n- New rule\n"
-    assert sorcar_md.read_instructions() == ["Existing bullet", "New rule"]
+    assert agents_md.read_instructions() == ["Existing bullet", "New rule"]
 
 
-def test_forget_removes_the_matching_bullet_only(_fresh_sorcar_md: Path) -> None:
+def test_forget_removes_the_matching_bullet_only(_fresh_agents_md: Path) -> None:
     """Matching ignores case, marker and spacing; prose and other bullets stay."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     path.write_text(
         "# Mine\n\nSome prose.\n- Keep this\n- Remove   this one\n\n"
         "## Notes\n+ remove THIS one\nTrailing prose.\n"
@@ -303,12 +303,12 @@ def test_forget_removes_the_matching_bullet_only(_fresh_sorcar_md: Path) -> None
     reply = forget_sea.forget_instruction("*  remove this ONE")
     assert reply == f"Forgot from {path}: Remove   this one"
     assert path.read_text() == "# Mine\n\nSome prose.\n- Keep this\n\n## Notes\nTrailing prose.\n"
-    assert sorcar_md.read_instructions() == ["Keep this"]
+    assert agents_md.read_instructions() == ["Keep this"]
 
 
-def test_forget_reports_misses_with_the_stored_list(_fresh_sorcar_md: Path) -> None:
+def test_forget_reports_misses_with_the_stored_list(_fresh_agents_md: Path) -> None:
     """No match or an empty text changes nothing and lists what is stored."""
-    path = _fresh_sorcar_md
+    path = _fresh_agents_md
     assert forget_sea.forget_instruction("anything") == (
         f"Error: no instruction in {path} matches: anything\n"
         f"Stored instructions:\nNo instructions are stored in {path}."
@@ -327,7 +327,7 @@ def test_forget_reports_misses_with_the_stored_list(_fresh_sorcar_md: Path) -> N
     assert path.read_text() == before
 
 
-def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_sorcar_md: Path) -> None:
+def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_agents_md: Path) -> None:
     """With the SEA's configuration the model sees Bash, finish and the two tools.
 
     The scripted model calls ``remember_instruction`` with the prompt and
@@ -342,7 +342,7 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_sorcar
     parsed, agentic = _run(remember_sea, instruction, script, tmp_path)
     assert parsed["success"] is True
     assert parsed["summary"] == "<p>Remembered.</p>"
-    assert _fresh_sorcar_md.read_text() == f"# User instructions\n\n- {instruction}\n"
+    assert _fresh_agents_md.read_text() == f"# User instructions\n\n- {instruction}\n"
 
     assert len(agentic) == 2, [list(r) for r in agentic]
     for request in agentic:
@@ -355,12 +355,12 @@ def test_remember_agent_stores_the_prompt_verbatim(tmp_path: Path, _fresh_sorcar
     assert len(tool_results) == 1
     # The agent appends a usage line to every tool result; the reply comes first.
     assert str(tool_results[0]["content"]).startswith(
-        f"Remembered in {_fresh_sorcar_md}: {instruction}\n"
+        f"Remembered in {_fresh_agents_md}: {instruction}\n"
     )
 
 
 def test_forget_agent_removes_the_instruction_the_next_task_was_following(
-    tmp_path: Path, _fresh_sorcar_md: Path,
+    tmp_path: Path, _fresh_agents_md: Path,
 ) -> None:
     """A stored instruction is in the run's system prompt until ``/forget`` removes it.
 
@@ -382,7 +382,7 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
     parsed, agentic = _run(forget_sea, "forget the British English one", script, tmp_path)
     assert parsed["success"] is True
     assert parsed["summary"] == "<p>Forgot it.</p>"
-    assert _fresh_sorcar_md.read_text() == "# User instructions\n\n- Prefer uv over pip\n"
+    assert _fresh_agents_md.read_text() == "# User instructions\n\n- Prefer uv over pip\n"
 
     assert len(agentic) == 3, [list(r) for r in agentic]
     for request in agentic:
@@ -390,14 +390,14 @@ def test_forget_agent_removes_the_instruction_the_next_task_was_following(
         assert names == {"Bash", "finish", "forget_instruction", "list_instructions"}, names
         system = _system_message(request)
         assert system.startswith(forget_sea.SYSTEM_PROMPT)
-        # perform_task appended SORCAR.md: the run itself followed both rules.
+        # perform_task appended AGENTS.md: the run itself followed both rules.
         assert "- Always reply in British English\n- Prefer uv over pip" in system
     tool_results = [m for m in agentic[2]["messages"] if m["role"] == "tool"]
     assert len(tool_results) == 2
     assert str(tool_results[0]["content"]).startswith(
-        f"Error: no instruction in {_fresh_sorcar_md} matches: the British English one\n"
+        f"Error: no instruction in {_fresh_agents_md} matches: the British English one\n"
         "Stored instructions:\n1. Always reply in British English\n2. Prefer uv over pip\n"
     )
     assert str(tool_results[1]["content"]).startswith(
-        f"Forgot from {_fresh_sorcar_md}: Always reply in British English\n"
+        f"Forgot from {_fresh_agents_md}: Always reply in British English\n"
     )

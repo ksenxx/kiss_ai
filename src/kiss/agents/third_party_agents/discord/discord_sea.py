@@ -50,7 +50,6 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -75,8 +74,9 @@ from kiss.agents.third_party_agents._oauth_apps import (
     missing_client_id_error,
     oauth_client_id,
 )
+from kiss.core.config import kiss_home
 
-_DISCORD_DIR = Path.home() / ".kiss" / "third_party_agents" / "discord"
+_DISCORD_DIR = kiss_home() / "third_party_agents" / "discord"
 _API_BASE = "https://discord.com/api/v10"
 _OAUTH_SCOPES = "identify guilds webhook.incoming"
 _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))

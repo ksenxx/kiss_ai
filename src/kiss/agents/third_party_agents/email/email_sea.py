@@ -32,7 +32,6 @@ import threading
 from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.utils import formatdate, make_msgid, parseaddr, parsedate_to_datetime
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -41,10 +40,11 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_EMAIL_DIR = Path.home() / ".kiss" / "third_party_agents" / "email"
+_EMAIL_DIR = kiss_home() / "third_party_agents" / "email"
 _config = ChannelConfig(_EMAIL_DIR, ("imap_host", "smtp_host", "email_address", "password"))
 
 _AUTOMATED_FROM_MARKERS = ("noreply", "no-reply", "donotreply", "mailer-daemon")
