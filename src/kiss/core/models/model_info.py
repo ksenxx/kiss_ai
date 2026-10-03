@@ -49,6 +49,7 @@ class ModelInfo:
         adaptive_thinking: bool | None = None,
         audio_input_price_per_million: float | None = None,
         audio_output_price_per_million: float | None = None,
+        image_output_price_per_million: float | None = None,
         alias_of: str | None = None,
         use_responses_api: bool | None = None,
         is_decisions_supported: bool = False,
@@ -67,6 +68,7 @@ class ModelInfo:
         self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
         self.audio_input_price_per_1M = audio_input_price_per_million
         self.audio_output_price_per_1M = audio_output_price_per_million
+        self.image_output_price_per_1M = image_output_price_per_million
         self.thinking = thinking
         self.fallback = fallback
         self.extended_thinking = extended_thinking
@@ -619,6 +621,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         adaptive_thinking=entry.get("adaptive_thinking"),
         audio_input_price_per_million=entry.get("audio_input_price_per_1M"),
         audio_output_price_per_million=entry.get("audio_output_price_per_1M"),
+        image_output_price_per_million=entry.get("image_output_price_per_1M"),
         alias_of=entry.get("alias_of"),
         use_responses_api=entry.get("use_responses_api"),
         is_decisions_supported=entry.get("dec", False),
@@ -684,6 +687,7 @@ _ALIAS_MIRRORED_FIELDS = (
     "cache_write_1h_price_per_1M",
     "audio_input_price_per_1M",
     "audio_output_price_per_1M",
+    "image_output_price_per_1M",
 )
 
 
@@ -1813,6 +1817,7 @@ def calculate_cost(
     num_audio_input_tokens: int = 0,
     num_audio_output_tokens: int = 0,
     num_audio_cache_read_tokens: int = 0,
+    num_image_output_tokens: int = 0,
 ) -> float:
     """Calculates the cost in USD for the given token counts.
 
@@ -1839,6 +1844,10 @@ def calculate_cost(
             (``audio_input * cache_read / input``), which is Google's
             published cached-audio price on every Gemini model with an
             audio premium.
+        num_image_output_tokens: Number of IMAGE output tokens (Gemini's
+            ``candidates_tokens_details`` IMAGE share), billed at the
+            model's image output rate when registered, otherwise at the
+            text output rate.
 
     Returns:
         float: Cost in USD.
@@ -1856,6 +1865,7 @@ def calculate_cost(
         + num_audio_input_tokens
         + num_audio_output_tokens
         + num_audio_cache_read_tokens
+        + num_image_output_tokens
     )
     if info is None:
         if total_tokens > 0:
@@ -1882,7 +1892,12 @@ def calculate_cost(
     input_price = info.input_price_per_1M
     output_price = info.output_price_per_1M
     uplift = _long_context_uplift(model_name)
-    prompt_tokens = total_tokens - num_output_tokens - num_audio_output_tokens
+    prompt_tokens = (
+        total_tokens
+        - num_output_tokens
+        - num_audio_output_tokens
+        - num_image_output_tokens
+    )
     if uplift is not None and prompt_tokens > uplift[0]:
         _, input_mult, output_mult = uplift
         input_price *= input_mult
@@ -1900,6 +1915,11 @@ def calculate_cost(
         if info.audio_output_price_per_1M is not None
         else output_price
     )
+    image_out_price = (
+        info.image_output_price_per_1M
+        if info.image_output_price_per_1M is not None
+        else output_price
+    )
     audio_cr_price = (
         audio_in_price * cr_price / input_price if input_price > 0 else cr_price
     )
@@ -1915,6 +1935,7 @@ def calculate_cost(
         + num_audio_input_tokens * audio_in_price
         + num_audio_output_tokens * audio_out_price
         + num_audio_cache_read_tokens * audio_cr_price
+        + num_image_output_tokens * image_out_price
     ) / 1_000_000
 
 

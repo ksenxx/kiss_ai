@@ -762,6 +762,7 @@
     "context_length": 32768,
     "input_price_per_1M": 0.3,
     "output_price_per_1M": 2.5,
+    "image_output_price_per_1M": 30.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -796,6 +797,7 @@
     "context_length": 131072,
     "input_price_per_1M": 2.0,
     "output_price_per_1M": 12.0,
+    "image_output_price_per_1M": 120.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -804,6 +806,7 @@
     "context_length": 65536,
     "input_price_per_1M": 0.5,
     "output_price_per_1M": 3.0,
+    "image_output_price_per_1M": 60.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -821,6 +824,7 @@
     "context_length": 65536,
     "input_price_per_1M": 0.25,
     "output_price_per_1M": 1.5,
+    "image_output_price_per_1M": 30.0,
     "fc": true,
     "emb": false,
     "gen": true,

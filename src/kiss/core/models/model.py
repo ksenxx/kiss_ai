@@ -1149,6 +1149,7 @@ class Model(ABC):
         | tuple[int, int, int, int, int]
         | tuple[int, int, int, int, int, int, int]
         | tuple[int, int, int, int, int, int, int, int]
+        | tuple[int, int, int, int, int, int, int, int, int]
     ):
         """Extracts token counts from an API response.
 
@@ -1161,9 +1162,12 @@ class Model(ABC):
             Anthropic one-hour cache-write token count, a 7-tuple whose
             last two elements are the audio input/output token subsets
             of an OpenAI audio-chat response (billed at the model's
-            separate audio rates), or an 8-tuple whose last element is
-            the audio subset of the cache reads (Gemini).  Audio tokens
-            are never also counted in the text counts.
+            separate audio rates), an 8-tuple whose last element is
+            the audio subset of the cache reads (Gemini), or a 9-tuple
+            whose last element is the IMAGE subset of the output
+            (Gemini image models, billed at the model's image output
+            rate).  Audio and image tokens are never also counted in
+            the text counts.
         """
         pass  # pragma: no cover
 

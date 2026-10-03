@@ -1266,7 +1266,7 @@ class KISSAgent(Base):
         """
         try:
             usage = self.model.extract_input_output_token_counts_from_response(response)
-            # Adapters return 4 to 8 counts; the missing trailing ones are 0.
+            # Adapters return 4 to 9 counts; the missing trailing ones are 0.
             (
                 input_tokens,
                 output_tokens,
@@ -1276,7 +1276,8 @@ class KISSAgent(Base):
                 audio_input,
                 audio_output,
                 audio_cache_read,
-            ) = (*usage, 0, 0, 0, 0)[:8]
+                image_output,
+            ) = (*usage, 0, 0, 0, 0, 0)[:9]
             cache_read = text_cache_read + audio_cache_read
             call_tokens = (
                 input_tokens
@@ -1286,6 +1287,7 @@ class KISSAgent(Base):
                 + cache_write_1h
                 + audio_input
                 + audio_output
+                + image_output
             )
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
@@ -1308,10 +1310,11 @@ class KISSAgent(Base):
                     num_audio_input_tokens=audio_input,
                     num_audio_output_tokens=audio_output,
                     num_audio_cache_read_tokens=audio_cache_read,
+                    num_image_output_tokens=image_output,
                 )
             self.last_call_usage = {
                 "input_tokens": input_tokens + audio_input,
-                "output_tokens": output_tokens + audio_output,
+                "output_tokens": output_tokens + audio_output + image_output,
                 "cache_read": cache_read,
                 "cache_write": cache_write + cache_write_1h,
                 "cost": cost,

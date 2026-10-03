@@ -67,7 +67,7 @@ def test_audio_prompt_is_split_and_billed_at_the_audio_rate() -> None:
     usage = _model("gemini-2.5-flash").extract_input_output_token_counts_from_response(
         _response(prompt=100_200, output=500, audio=100_000),
     )
-    assert usage == (200, 500, 0, 0, 0, 100_000, 0, 0)
+    assert usage == (200, 500, 0, 0, 0, 100_000, 0, 0, 0)
     cost = _cost("gemini-2.5-flash", usage)
     expected = (200 * 0.30 + 100_000 * 1.00 + 500 * 2.50) / 1_000_000
     assert cost == pytest.approx(expected)
@@ -85,7 +85,7 @@ def test_cached_audio_is_billed_at_the_cached_audio_rate() -> None:
         ),
     )
     # text input = 10000 - 5000 cached - 2000 uncached audio
-    assert usage == (3_000, 10, 1_000, 0, 0, 2_000, 0, 4_000)
+    assert usage == (3_000, 10, 1_000, 0, 0, 2_000, 0, 4_000, 0)
     expected = (
         3_000 * 0.50 + 10 * 3.00 + 1_000 * 0.05 + 2_000 * 1.00 + 4_000 * 0.10
     ) / 1_000_000
@@ -100,7 +100,7 @@ def test_fully_cached_audio_prompt() -> None:
             cached_audio=100_000,
         ),
     )
-    assert usage == (0, 0, 0, 0, 0, 0, 0, 100_000)
+    assert usage == (0, 0, 0, 0, 0, 0, 0, 100_000, 0)
     assert _cost("gemini-2.5-flash", usage) == pytest.approx(0.01)
 
 
