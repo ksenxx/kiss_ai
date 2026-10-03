@@ -3586,6 +3586,34 @@ body.sidebar-chat-mode #meta-info-content {
   border-color: var(--accent);
 }
 
+/* "Recently opened": the Working directory panel's recent folders,
+   offered above the subfolder list so one click adds one of them. */
+.folder-picker-recent {
+  flex: 0 1 auto;
+  min-height: 60px; /* the header and two rows, on the shortest screens */
+  max-height: 30vh;
+  overflow: auto;
+  margin: 0 var(--space-3) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.folder-picker-recent[hidden] { display: none; }
+
+/* With the recent section shown, the subfolder list yields some of its
+   room so both stay usable on a short screen. */
+.folder-picker-recent:not([hidden]) + .folder-picker-list { min-height: 80px; }
+
+.folder-picker-recent-hdr {
+  padding: var(--space-1) var(--space-2-5) 0;
+  font-size: var(--fs-xs);
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+}
+
+.folder-picker-recent .workdir-item {
+  padding: var(--space-1) var(--space-2-5);
+}
+
 .folder-picker-list {
   flex: 1 1 auto;
   min-height: 120px;

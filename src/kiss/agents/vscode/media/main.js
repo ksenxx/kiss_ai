@@ -7088,6 +7088,16 @@
   }
 
   /**
+   * Record the set of top-level folders the tree shows.  The folder
+   * picker's "Recently opened" section offers only folders not shown,
+   * so it follows every change of the set.
+   */
+  function setExplorerRootsKey(roots) {
+    explorerRootsKey = JSON.stringify(roots);
+    renderPickerRecentFolders();
+  }
+
+  /**
    * Rebuild the tree: one top-level row per folder in *roots*.  The
    * working directory (*wd*) starts expanded; a folder named in
    * *expandRoot* (one just added) opens too.
@@ -7095,7 +7105,7 @@
   function buildExplorerRoot(wd, roots, expandRoot) {
     explorerRoot = wd;
     roots = roots || explorerRoots(wd);
-    explorerRootsKey = JSON.stringify(roots);
+    setExplorerRootsKey(roots);
     explorerGeneration++;
     explorerDirs.clear();
     explorerTree.textContent = '';
@@ -7210,7 +7220,7 @@
       return;
     }
     appendExplorerRootRow(dir, false, true);
-    explorerRootsKey = JSON.stringify(explorerRoots(wd));
+    setExplorerRootsKey(explorerRoots(wd));
     rovingFocus(explorerTree, '.explorer-row', null);
   }
 
@@ -7238,7 +7248,7 @@
     dropExplorerSubtree(dir, dir);
     node.kids.remove();
     node.row.remove();
-    explorerRootsKey = JSON.stringify(roots);
+    setExplorerRootsKey(roots);
     rovingFocus(explorerTree, '.explorer-row', null);
     if (hadFocus) focusExplorerStop();
   }
@@ -9815,7 +9825,9 @@
   // navigate (listDir with a `picker:` token), "Select Folder" makes the
   // folder the workspace — the same pin the "Working directory" panel
   // sets — so the Explorer, the Source Control view and new tasks
-  // follow it.
+  // follow it.  In "Add Folder to Explorer" mode the dialog also offers
+  // the panel's recently opened folders (renderPickerRecentFolders),
+  // each added with one click.
   let folderPickerEl = null;
   let folderPickerDir = '';
   let folderPickerSeq = 0;
@@ -9841,6 +9853,8 @@
       '<button type="button" class="folder-picker-close" aria-label="Close">&times;</button></div>' +
       '<div class="folder-picker-path"><button type="button" class="folder-picker-up" title="Parent folder" aria-label="Parent folder">\u2191</button>' +
       '<input type="text" class="folder-picker-input" aria-label="Folder path" spellcheck="false"></div>' +
+      '<div class="folder-picker-recent" hidden><div class="folder-picker-recent-hdr">Recently opened</div>' +
+      '<div class="folder-picker-recent-list" role="list" aria-label="Recently opened folders"></div></div>' +
       '<div class="folder-picker-list" role="listbox" aria-label="Folders"></div>' +
       '<div class="folder-picker-note"></div>' +
       '<div class="folder-picker-actions"><button type="button" class="folder-picker-cancel">Cancel</button>' +
@@ -9890,6 +9904,21 @@
         const item = e.target.closest('.folder-picker-item');
         if (item) folderPickerNavigate(item.dataset.path);
       });
+    // A recently opened folder is picked with one click (or Enter /
+    // Space); selectPickedFolder still has the daemon list it first,
+    // so a folder that has since vanished is reported, not added.
+    const recent = overlay.querySelector('.folder-picker-recent-list');
+    recent.addEventListener('click', e => {
+      const item = e.target.closest('.workdir-item');
+      if (item) selectPickedFolder(item.dataset.path);
+    });
+    recent.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const item = e.target.closest('.workdir-item');
+      if (!item) return;
+      e.preventDefault();
+      selectPickedFolder(item.dataset.path);
+    });
     overlay.addEventListener('mousedown', e => {
       if (e.target === overlay) closeFolderPicker();
     });
@@ -9994,6 +10023,10 @@
     el.hidden = false;
     folderPickerListed = '';
     folderPickerNavigate(sidebarWorkDir() || explorerRoot || '/');
+    renderPickerRecentFolders();
+    // Another window may have opened a folder since the last reply;
+    // the refreshed configData repaints the list (setRecentWorkDirs).
+    if (folderPickerMode === 'add') api.getConfig();
     const input = el.querySelector('.folder-picker-input');
     window.setTimeout(() => {
       // The dialog may already be gone (a pick made at once).
@@ -10223,37 +10256,90 @@
       .sort((a, b) => b.ts - a.ts);
     const panel = document.getElementById('workdir-panel');
     if (panel && panel.classList.contains('open')) renderRecentWorkDirs();
+    renderPickerRecentFolders();
+  }
+
+  /**
+   * One row of a recently opened folder: its path and when it was last
+   * opened.  Shared by the panel's list and the folder picker's
+   * "Recently opened" section.
+   *
+   * @param {{path: string, ts: number}} entry A recentWorkDirs row.
+   * @param {number} now Date.now(), so every row of a list agrees.
+   * @param {string} verb What a click does with the row ('Open', 'Add').
+   */
+  function recentWorkDirItem(entry, now, verb) {
+    const item = document.createElement('div');
+    item.className = 'workdir-item';
+    item.setAttribute('role', 'listitem');
+    item.tabIndex = 0;
+    item.dataset.path = entry.path;
+    item.title = verb + ' ' + entry.path;
+    const pathEl = document.createElement('span');
+    pathEl.className = 'workdir-item-path';
+    pathEl.textContent = entry.path;
+    const ago = document.createElement('span');
+    ago.className = 'workdir-item-ago';
+    ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
+    item.appendChild(pathEl);
+    item.appendChild(ago);
+    return item;
+  }
+
+  /**
+   * Replace the rows of *list* with one per entry of *rows*.  A repaint
+   * (a fresh configData, a change of the Explorer's folders) keeps the
+   * keyboard where it was: the row of the focused folder, if still
+   * listed, is focused again.
+   */
+  function renderRecentRows(list, rows, verb) {
+    const focused = list.contains(document.activeElement)
+      ? document.activeElement.dataset.path
+      : '';
+    list.textContent = '';
+    const now = Date.now();
+    rows.forEach(entry => {
+      const item = recentWorkDirItem(entry, now, verb);
+      list.appendChild(item);
+      if (entry.path === focused) item.focus();
+    });
   }
 
   function renderRecentWorkDirs() {
     const list = document.getElementById('workdir-list');
     if (!list) return;
-    list.textContent = '';
+    renderRecentRows(list, recentWorkDirs, 'Open');
     if (!recentWorkDirs.length) {
       const empty = document.createElement('div');
       empty.id = 'workdir-empty';
       empty.textContent = 'No working directory opened yet.';
       list.appendChild(empty);
-      return;
     }
-    const now = Date.now();
-    recentWorkDirs.forEach(entry => {
-      const item = document.createElement('div');
-      item.className = 'workdir-item';
-      item.setAttribute('role', 'listitem');
-      item.tabIndex = 0;
-      item.dataset.path = entry.path;
-      item.title = 'Open ' + entry.path;
-      const pathEl = document.createElement('span');
-      pathEl.className = 'workdir-item-path';
-      pathEl.textContent = entry.path;
-      const ago = document.createElement('span');
-      ago.className = 'workdir-item-ago';
-      ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
-      item.appendChild(pathEl);
-      item.appendChild(ago);
-      list.appendChild(item);
-    });
+  }
+
+  /**
+   * The folder picker's "Recently opened" section: in "Add Folder to
+   * Explorer" mode it lists the panel's recent working directories
+   * that the Explorer does not show yet, each added with one click;
+   * the section is hidden in "Open Folder" mode (the panel underneath
+   * already lists them) and when nothing is left to offer.
+   */
+  function renderPickerRecentFolders() {
+    if (!folderPickerEl || folderPickerEl.hidden) return;
+    const section = folderPickerEl.querySelector('.folder-picker-recent');
+    const shown = explorerRoots(sidebarWorkDir());
+    const rows =
+      folderPickerMode === 'add'
+        ? recentWorkDirs.filter(
+            entry => !shown.some(p => samePath(p, entry.path)),
+          )
+        : [];
+    section.hidden = !rows.length;
+    renderRecentRows(
+      section.querySelector('.folder-picker-recent-list'),
+      rows,
+      'Add',
+    );
   }
 
   /**
