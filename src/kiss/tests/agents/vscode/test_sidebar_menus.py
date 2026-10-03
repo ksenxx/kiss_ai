@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -1584,6 +1585,102 @@ def test_pdf_click_opens_a_viewer_tab(browser, harness, worktree):
         page.locator(".chat-tab.active .chat-tab-close").click()
         _wait_tab_count(page, tabs_before + 1)
         assert page.locator(".pdf-viewer").count() == 0
+    finally:
+        context.close()
+
+
+_PDFJS_BUILD_GLOB = "https://cdn.jsdelivr.net/npm/pdfjs-dist@*/legacy/build/*"
+
+
+def _route_pdfjs(context, decide) -> list[str]:
+    """Intercept the pdf.js module and worker downloads; ``decide(route,
+    n)`` handles the n-th (1-based) request for a file.  Returns the
+    requested file names, one entry per request (a retried module import
+    carries a query string, which is dropped here)."""
+    requests: list[str] = []
+
+    def handler(route):
+        name = route.request.url.rsplit("/", 1)[1].split("?")[0]
+        requests.append(name)
+        decide(route, requests.count(name))
+
+    context.route(_PDFJS_BUILD_GLOB, handler)
+    return requests
+
+
+def _open_report_pdf(page) -> None:
+    _open_explorer(page)
+    tabs_before = page.locator(".chat-tab").count()
+    _explorer_row(page, "report.pdf").click()
+    _wait_tab_count(page, tabs_before + 1)
+    page.locator(_PDF_VIEWER).wait_for(timeout=15000)
+
+
+def _pdf_note(page) -> str:
+    """The viewer's error note (the Download link shares its class)."""
+    note = page.locator(_PDF_VIEWER + " div.content-binary-note")
+    note.wait_for(timeout=15000)
+    return str(note.inner_text())
+
+
+def test_pdf_viewer_retries_a_dropped_cdn_fetch(browser, harness, worktree):
+    """A connection that drops under the first download of pdf.js (the
+    module or its worker: a network change, not an HTTP error) is retried
+    once, so the page is drawn instead of the tab saying "Cannot display"."""
+    context, page, frames = _open_page(browser, harness)
+    requests = _route_pdfjs(
+        context,
+        lambda route, n: route.abort("connectionfailed") if n == 1 else route.continue_(),
+    )
+    try:
+        _open_report_pdf(page)
+        _wait_pdf_rendered(page)
+        assert page.locator(_PDF_VIEWER + " div.content-binary-note").count() == 0
+        assert Counter(requests) == {"pdf.min.mjs": 2, "pdf.worker.min.mjs": 2}
+    finally:
+        context.close()
+
+
+def test_pdf_viewer_gives_up_after_one_retry(browser, harness, worktree):
+    """With the connection dropping every time, the viewer tries twice
+    and then reports the failure; the next viewer starts afresh (and
+    draws the page once the CDN is back)."""
+    context, page, frames = _open_page(browser, harness)
+    requests = _route_pdfjs(context, lambda route, n: route.abort("connectionfailed"))
+    try:
+        _open_report_pdf(page)
+        # Whichever of the module import and the worker fetch fails first
+        # names the error (the import's message goes on to name the URL).
+        assert _pdf_note(page).startswith("Cannot display report.pdf: TypeError: Failed to fetch")
+        assert Counter(requests) == {"pdf.min.mjs": 2, "pdf.worker.min.mjs": 2}
+        context.unroute(_PDFJS_BUILD_GLOB)
+        _explorer_row(page, "report.pdf").click()
+        # The reopened tab replaces the failed viewer (and its note).
+        page.locator(_PDF_VIEWER + " div.content-binary-note").wait_for(
+            state="detached", timeout=15000
+        )
+        _wait_pdf_rendered(page)
+        assert page.locator(_PDF_VIEWER + " div.content-binary-note").count() == 0
+    finally:
+        context.close()
+
+
+def test_pdf_viewer_does_not_retry_an_http_error(browser, harness, worktree):
+    """An HTTP error for the worker script is final: one request, and
+    the note names the status."""
+    context, page, frames = _open_page(browser, harness)
+
+    def decide(route, n):
+        if route.request.url.endswith("/pdf.worker.min.mjs"):
+            route.fulfill(status=503, body="")
+        else:
+            route.continue_()
+
+    requests = _route_pdfjs(context, decide)
+    try:
+        _open_report_pdf(page)
+        assert _pdf_note(page) == "Cannot display report.pdf: Error: pdf.js worker HTTP 503"
+        assert requests.count("pdf.worker.min.mjs") == 1
     finally:
         context.close()
 
