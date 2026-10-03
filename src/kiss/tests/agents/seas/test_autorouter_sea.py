@@ -76,7 +76,7 @@ def test_sea_getters_follow_the_contract() -> None:
     assert len(prompt) <= 5_000 + autorouter_sea.EVIDENCE_MAX_CHARS + len(
         autorouter_sea.EVIDENCE_CUT
     )
-    assert {tool.__name__ for tool in autorouter_sea.tools()} == _TOOL_NAMES
+    assert {tool.__name__ for tool in autorouter_sea.add_to_tools()} == _TOOL_NAMES
     # run_parallel workers inherit the parent's custom system prompt, which
     # would make every routed unit a router; dispatch goes through run_agent.
     assert autorouter_sea.is_parallel() is False
@@ -119,6 +119,7 @@ def test_agent_file_loader_stages_the_sea_as_its_own_tools_file() -> None:
         "appendToSystemPrompt",
         "model",
         "toolsFile",
+        "appendBasicTools",
         "useParallel",
         "classifyTasks",
         "webTools",
@@ -128,6 +129,8 @@ def test_agent_file_loader_stages_the_sea_as_its_own_tools_file() -> None:
     assert "systemPrompt" not in cmd
     assert cmd["model"] == autorouter_sea.orchestrator_model()
     assert cmd["toolsFile"] == str(_SEA_PATH)
+    # ``add_to_tools()``: the router's tools come on top of the basic toolset.
+    assert cmd["appendBasicTools"] is True
     assert cmd["useParallel"] is False
     assert cmd["classifyTasks"] is False and cmd["webTools"] is False and cmd["useMemory"] is False
     assert cmd["toolProfile"] == "full"
@@ -349,7 +352,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 max_budget=1.0,
                 model_config={"base_url": url, "api_key": "local"},
                 system_prompt=autorouter_sea.add_to_system_prompt(),
-                tools=autorouter_sea.tools(),
+                tools=autorouter_sea.add_to_tools(),
                 web_tools=autorouter_sea.use_web_tools(),
                 use_memory=autorouter_sea.use_memory(),
                 is_parallel=autorouter_sea.is_parallel(),

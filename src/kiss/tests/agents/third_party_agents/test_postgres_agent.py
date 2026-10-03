@@ -145,7 +145,7 @@ def test_read_only_defaults_to_true_when_key_missing() -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns a non-empty tool list."""
-    tools = pg_mod.tools()
+    tools = pg_mod.add_to_tools()
     assert len(tools) >= 3
     assert all(callable(t) for t in tools)
 

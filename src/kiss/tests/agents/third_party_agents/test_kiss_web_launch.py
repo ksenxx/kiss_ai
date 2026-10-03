@@ -432,7 +432,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "        return []\n"
             "\n"
             "\n"
-            "def tools() -> list:\n"
+            "def add_to_tools() -> list:\n"
             '    """Return the note-channel tools."""\n'
             "    return NoteAgent()._get_tools()\n",
             encoding="utf-8",
@@ -442,7 +442,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
             assert "add_note" in tools, (
                 "the authenticated backend's tool must come from the "
-                "module's tools()"
+                "module's add_to_tools()"
             )
             return str(tools["add_note"](note="from daemon"))
 

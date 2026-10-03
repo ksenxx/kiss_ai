@@ -36,7 +36,7 @@ not re-derive them with ad-hoc greps:
   summarizes the log: errors, undefined references and citations,
   overfull boxes over 10 pt, and the page count.
 
-Module-level getters (``append_to_system_prompt()``, ``tools()``,
+Module-level getters (``append_to_system_prompt()``, ``add_to_tools()``,
 ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
 """
 
@@ -776,7 +776,7 @@ def append_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the gate checker and the LaTeX builder to the model."""
     return [check_paper, build_paper]
 

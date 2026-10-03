@@ -30,7 +30,7 @@ from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
     _config,
 )
 from kiss.agents.third_party_agents.ntfy.ntfy_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 from kiss.core.config import kiss_home
 
@@ -184,7 +184,7 @@ def test_authenticate_rejects_empty_topic() -> None:
 
 
 def test_tools_module_function() -> None:
-    """The module-level tools() returns a non-empty tool list."""
+    """The module-level add_to_tools() returns a non-empty tool list."""
     tools = module_tools()
     assert tools
     assert "check_ntfy_auth" in {t.__name__ for t in tools}

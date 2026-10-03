@@ -72,7 +72,7 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Return the agent's tools: :func:`remember_instruction` and ``list_instructions``."""
     return [remember_instruction, list_instructions]
 

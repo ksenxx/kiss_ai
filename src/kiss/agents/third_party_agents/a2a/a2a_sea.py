@@ -641,7 +641,7 @@ def main() -> None:
     channel_main(A2AAgent, "kiss-a2a", channel_name="A2A", make_backend=_make_backend)
 
 
-def tools() -> list:
+def add_to_tools() -> list:
     """Return the A2A channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

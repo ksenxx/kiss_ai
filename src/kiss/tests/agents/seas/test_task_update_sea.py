@@ -71,7 +71,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     )
     assert sea.system_prompt() == sea.SYSTEM_PROMPT
     assert "task_transcript" in sea.SYSTEM_PROMPT
-    assert sea.tools() == [sea.task_transcript]
+    assert sea.add_to_tools() == [sea.task_transcript]
     assert sea.tool_profile() == "bash"
     assert sea.max_budget() == 1.0
     for getter in (
@@ -260,7 +260,7 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
             max_steps=4,
             max_budget=sea.max_budget(),
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             tool_profile=sea.tool_profile(),
             base_system_prompt=sea.system_prompt(),
             web_tools=sea.use_web_tools(),

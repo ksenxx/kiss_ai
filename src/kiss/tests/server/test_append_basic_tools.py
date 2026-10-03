@@ -415,22 +415,28 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert result.success is True
         assert self._executor_tool_names(calls) == ["finish"]
 
-    def test_agent_script_getter_overrides_to_false(self) -> None:
-        """A script ``if_append_basic_tools()`` overrides the client value.
+    def test_agent_script_tools_is_the_whole_tool_set(self) -> None:
+        """A script ``tools()`` strips the run down to finish + its own tools.
 
-        The client sends the default (``True``); the agent script's
-        getter returns ``False`` — the daemon-side override must win,
-        stripping the run down to finish + client tools.
+        The client sends the default (``append_basic_tools=True``) and a
+        tools file; the script's ``tools()`` wins on both counts: the
+        executor sees exactly ``finish`` and the script's tool — no
+        basic tool and no client tool.
         """
         agent_path = self._write_py(
-            "strip_tools_agent.py",
+            "own_tools_agent.py",
             '''
-            """Agent script disabling the basic toolset."""
+            """Agent script whose tools() is the whole tool set."""
 
 
-            def if_append_basic_tools() -> bool:
-                """Run with only finish and the client tools."""
-                return False
+            def script_tool() -> str:
+                """Return a marker."""
+                return "script"
+
+
+            def tools() -> list:
+                """Run with only finish and script_tool."""
+                return [script_tool]
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -445,19 +451,59 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is True
-        assert self._executor_tool_names(calls) == ["finish", "client_tool"]
+        assert self._executor_tool_names(calls) == ["finish", "script_tool"]
 
-    def test_agent_script_getter_wrong_type_fails_task(self) -> None:
-        """A non-bool ``if_append_basic_tools()`` stops the task loudly."""
+    def test_agent_script_add_to_tools_extends_the_basic_toolset(self) -> None:
+        """A script ``add_to_tools()`` adds its tools to the basic toolset.
+
+        The client sends ``append_basic_tools=False``; the script's
+        ``add_to_tools()`` switches the basic toolset back on and the
+        executor sees Bash/Read/... plus ``finish`` and the script's tool.
+        """
         agent_path = self._write_py(
-            "bad_append_agent.py",
+            "add_tools_agent.py",
             '''
-            """Agent script with a wrong-typed getter."""
+            """Agent script adding a tool to the basic toolset."""
 
 
-            def if_append_basic_tools() -> str:
-                """Return the wrong type."""
-                return "yes"
+            def script_tool() -> str:
+                """Return a marker."""
+                return "script"
+
+
+            def add_to_tools() -> list:
+                """Add script_tool to the basic toolset."""
+                return [script_tool]
+            ''',
+        )
+        calls: list[dict[str, Any]] = []
+        self._install_executor_stub(calls)
+        result = sorcar.run(
+            "script adds to basic tools",
+            work_dir=self.repo,
+            append_basic_tools=False,
+            extension_agent_path=agent_path,
+            use_worktree=False,
+            endpoint_file=self.endpoint_file,
+            timeout=60,
+        )
+        assert result.success is True
+        names = self._executor_tool_names(calls)
+        for expected in ("Bash", "Read", "Edit", "Write", "finish", "script_tool"):
+            assert expected in names, f"{expected} missing from {names}"
+
+    def test_agent_script_tools_path_fails_task(self) -> None:
+        """A ``tools()`` returning a tools-file path stops the task loudly."""
+        client_tools = self._write_client_tools()
+        agent_path = self._write_py(
+            "path_tools_agent.py",
+            f'''
+            """Agent script with a path-returning tools()."""
+
+
+            def tools() -> str:
+                """Return a path (no longer accepted)."""
+                return {client_tools!r}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -471,8 +517,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "if_append_basic_tools" in result.text
-        assert "bool" in result.text
+        assert "tools" in result.text
+        assert "list of tool callables" in result.text
         assert calls == [], "no executor session may start for a broken script"
 
     def test_restricted_failure_skips_summarizer(self) -> None:

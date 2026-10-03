@@ -216,7 +216,7 @@ follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
 ### Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports it on every run and calls its top-level functions named after `run()`'s parameters (`prompt()`, `model()`, `max_budget()`, `tools()`, `system_prompt()`, ...; `if_append_basic_tools()` stands in for `append_basic_tools`) to compute the run's parameters; parameters without a getter keep whatever the caller passed. Every SEA also defines `description()`, one sentence that `/<name> help` prints. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports it on every run and calls its top-level functions named after `run()`'s parameters (`prompt()`, `model()`, `max_budget()`, `system_prompt()`, ...) to compute the run's parameters; parameters without a getter keep whatever the caller passed. Tools come from one of two getters, each returning a list of callables: `tools()` makes them, plus `finish`, the agent's entire tool set (no built-in toolset), while `add_to_tools()` adds them to the built-in toolset. Every SEA also defines `description()`, one sentence that `/<name> help` prints. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
 
 ```python
 # weather/weather_sea.py — a minimal SEA
@@ -231,9 +231,6 @@ def prompt() -> str:
 
 def max_budget() -> float:
     return 0.50
-
-def if_append_basic_tools() -> bool:
-    return False  # restrict the agent to finish + our tools
 
 def system_prompt() -> str:
     return ("You are a weather assistant. Use the get_weather tool "
@@ -250,7 +247,7 @@ def get_weather(city: str) -> str:
     return resp.text.strip()
 
 def tools() -> list:
-    """Return the tools the agent may call."""
+    """The agent's whole tool set: get_weather + finish (use add_to_tools() to keep the built-in tools)."""
     return [get_weather]
 ```
 

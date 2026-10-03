@@ -26,35 +26,58 @@ from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # The contract the cron dispatch relies on: passing the cron
     # module as ``extension_agent_path`` makes it its own tools file (its
-    # ``tools()`` returns the cron_job tool) and moves the session
-    # to ~/.kiss/cron/work with no git lifecycle.
+    # ``add_to_tools()`` returns the cron_job tool on top of the basic
+    # toolset) and moves the session to ~/.kiss/cron/work with no git
+    # lifecycle.
     cmd = {"agentPath": cron_agent.__file__, "toolsFile": ""}
     overridden = apply_agent_overrides(cmd)
-    assert overridden == {"toolsFile", "workDir", "useWorktree", "autoCommit"}
+    assert overridden == {
+        "toolsFile", "appendBasicTools", "workDir", "useWorktree", "autoCommit",
+    }
     assert cmd["toolsFile"] == cron_agent.__file__
+    assert cmd["appendBasicTools"] is True
     assert cmd["workDir"] == cron_agent.work_dir()
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
 
-def test_agent_script_tools_list_normalizes_to_own_path(
+
+_HELLO_TOOL = '''
+def _hello() -> str:
+    """Say hello.
+
+    Returns:
+        A greeting.
+    """
+    return "hello"
+'''
+
+
+def test_agent_script_tools_is_own_path_without_basic_tools(
     tmp_path: Path,
 ) -> None:
+    # ``tools()`` -> the script is its own tools file and the run gets
+    # ONLY these tools (+ finish): ``appendBasicTools`` is forced off
+    # whatever the client sent.
     script = tmp_path / "self_tools_agent.py"
-    script.write_text(textwrap.dedent("""
-        def _hello() -> str:
-            \"\"\"Say hello.
-
-            Returns:
-                A greeting.
-            \"\"\"
-            return "hello"
-
-        def tools() -> list:
-            return [_hello]
-    """))
-    cmd = {"agentPath": str(script), "toolsFile": ""}
-    assert apply_agent_overrides(cmd) == {"toolsFile"}
+    script.write_text(_HELLO_TOOL + "\ndef tools() -> list:\n    return [_hello]\n")
+    cmd = {"agentPath": str(script), "toolsFile": "", "appendBasicTools": True}
+    assert apply_agent_overrides(cmd) == {"toolsFile", "appendBasicTools"}
     assert cmd["toolsFile"] == str(script)
+    assert cmd["appendBasicTools"] is False
+
+
+def test_agent_script_add_to_tools_is_own_path_with_basic_tools(
+    tmp_path: Path,
+) -> None:
+    # ``add_to_tools()`` -> same tools file, but ADDED to the basic
+    # toolset: ``appendBasicTools`` is forced on.  A tuple is accepted.
+    script = tmp_path / "add_tools_agent.py"
+    script.write_text(_HELLO_TOOL + "\ndef add_to_tools() -> tuple:\n    return (_hello,)\n")
+    cmd = {"agentPath": str(script), "toolsFile": "/client/tools.py", "appendBasicTools": False}
+    assert apply_agent_overrides(cmd) == {"toolsFile", "appendBasicTools"}
+    assert cmd["toolsFile"] == str(script)
+    assert cmd["appendBasicTools"] is True
+
 
 def test_agent_script_tools_wrong_type_still_rejected(
     tmp_path: Path,
@@ -66,15 +89,62 @@ def test_agent_script_tools_wrong_type_still_rejected(
         apply_agent_overrides(cmd)
 
 
+@pytest.mark.parametrize("getter", ["tools", "add_to_tools"])
+def test_agent_script_tool_getters_reject_paths_and_non_callables(
+    tmp_path: Path, getter: str,
+) -> None:
+    # A tools-file path (str or Path) is no longer a valid return value,
+    # nor is a list holding a non-callable.
+    for body in (
+        "    return '/some/tools.py'\n",
+        "    from pathlib import Path\n    return Path('/some/tools.py')\n",
+        "    return [1]\n",
+    ):
+        script = tmp_path / f"bad_{getter}_agent.py"
+        script.write_text(f"def {getter}():\n{body}")
+        cmd = {"agentPath": str(script), "toolsFile": "kept", "appendBasicTools": True}
+        with pytest.raises(AgentFileError, match="list of tool callables"):
+            apply_agent_overrides(cmd)
+        assert cmd["toolsFile"] == "kept", "a broken getter must not override"
+        assert cmd["appendBasicTools"] is True
+
+
+def test_agent_script_defining_both_tool_getters_is_rejected(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "both_tools_agent.py"
+    script.write_text(
+        _HELLO_TOOL
+        + "\ndef tools() -> list:\n    return [_hello]\n"
+        + "\ndef add_to_tools() -> list:\n    return [_hello]\n"
+    )
+    cmd = {"agentPath": str(script), "toolsFile": "kept"}
+    with pytest.raises(AgentFileError, match="both tools"):
+        apply_agent_overrides(cmd)
+    assert cmd["toolsFile"] == "kept"
+
+
+def test_removed_getters_are_plain_functions(tmp_path: Path) -> None:
+    # ``scope_work_dir()`` and ``if_append_basic_tools()`` are no longer
+    # agent-script getters: a script defining them overrides nothing
+    # (and their return types are not checked).
+    script = tmp_path / "legacy_getters_agent.py"
+    script.write_text(
+        "def scope_work_dir():\n    return 7\n\n"
+        "def if_append_basic_tools():\n    return False\n"
+    )
+    cmd = {"agentPath": str(script), "tabScopeWorkDir": "kept", "appendBasicTools": True}
+    assert apply_agent_overrides(cmd) == set()
+    assert cmd["tabScopeWorkDir"] == "kept"
+    assert cmd["appendBasicTools"] is True
+
+
 def test_new_getters_override_their_wire_fields(tmp_path: Path) -> None:
-    # ``scope_work_dir()``, ``use_web_tools()``, ``classify_tasks``, and
-    # ``is_parallel()`` are agent-script getters: each overrides its
-    # wire field on the run command.
+    # ``use_web_tools()``, ``classify_tasks``, and ``is_parallel()`` are
+    # agent-script getters: each overrides its wire field on the run
+    # command.
     script = tmp_path / "new_getters_agent.py"
     script.write_text(textwrap.dedent("""
-        def scope_work_dir() -> str:
-            return "/tmp/caller-workspace"
-
         def use_web_tools():
             return False
 
@@ -86,16 +156,12 @@ def test_new_getters_override_their_wire_fields(tmp_path: Path) -> None:
     """))
     cmd = {
         "agentPath": str(script),
-        "tabScopeWorkDir": "",
         "webTools": None,
         "classifyTasks": None,
         "useParallel": True,
     }
     overridden = apply_agent_overrides(cmd)
-    assert overridden == {
-        "tabScopeWorkDir", "webTools", "classifyTasks", "useParallel",
-    }
-    assert cmd["tabScopeWorkDir"] == "/tmp/caller-workspace"
+    assert overridden == {"webTools", "classifyTasks", "useParallel"}
     assert cmd["webTools"] is False
     assert cmd["classifyTasks"] is True
     assert cmd["useParallel"] is False
@@ -124,15 +190,6 @@ def test_is_parallel_getter_rejects_none(tmp_path: Path) -> None:
     with pytest.raises(AgentFileError, match="is_parallel"):
         apply_agent_overrides(cmd)
     assert cmd["useParallel"] is True, "a broken getter must not override"
-
-
-def test_scope_work_dir_getter_rejects_non_string(tmp_path: Path) -> None:
-    script = tmp_path / "bad_scope_agent.py"
-    script.write_text("def scope_work_dir():\n    return 7\n")
-    cmd = {"agentPath": str(script), "tabScopeWorkDir": "kept"}
-    with pytest.raises(AgentFileError, match="scope_work_dir"):
-        apply_agent_overrides(cmd)
-    assert cmd["tabScopeWorkDir"] == "kept"
 
 
 def test_use_web_tools_getter_rejects_non_bool(tmp_path: Path) -> None:

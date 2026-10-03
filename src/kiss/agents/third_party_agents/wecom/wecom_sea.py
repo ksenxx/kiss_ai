@@ -233,7 +233,7 @@ def main() -> None:
     channel_main(WeComAgent, "kiss-wecom", channel_name="WeCom")
 
 
-def tools() -> list:
+def add_to_tools() -> list:
     """Return the WeCom channel tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

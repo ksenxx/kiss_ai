@@ -16,13 +16,13 @@ like a task started from the chat UI.
 
 The agent's channel tools are supplied through the API's ``tools=``
 *file path* contract directly: each agent module defines a top-level
-``tools()`` that builds a fresh agent from the credentials
+``add_to_tools()`` that builds a fresh agent from the credentials
 persisted under ``~/.kiss`` and returns its authentication and backend
 tools, so the agent's OWN module file (``agent.tools_file``) is passed
 as the ``tools=`` argument and the daemon imports it and calls its
-``tools()``.  No bridge, registry, wrapper, or generated file is
+``add_to_tools()``.  No bridge, registry, wrapper, or generated file is
 involved.  The active workspace travels to the daemon-side
-``tools()`` through the ``KISS_CHANNEL_WORKSPACE`` environment
+``add_to_tools()`` through the ``KISS_CHANNEL_WORKSPACE`` environment
 variable.
 """
 
@@ -283,7 +283,7 @@ def run_agent_via_kiss_web(
 
     Supplies the agent's channel tools through the API's ``tools=``
     file-path contract (by default ``agent.tools_file`` — the agent's
-    own module, whose top-level ``tools()`` the daemon calls to
+    own module, whose top-level ``add_to_tools()`` the daemon calls to
     build a fresh agent from the credentials persisted under
     ``~/.kiss``), appends the agent's ``channel_system_prompt``
     guidance to the prompt (kept out of the system prompt so the
@@ -294,7 +294,7 @@ def run_agent_via_kiss_web(
 
     While the task runs, the ``KISS_CHANNEL_WORKSPACE`` environment
     variable holds ``agent.workspace`` so the daemon-side
-    ``tools()`` authenticates under the same workspace (concurrent
+    ``add_to_tools()`` authenticates under the same workspace (concurrent
     launches from one process should therefore use the same
     workspace).
 
@@ -318,7 +318,7 @@ def run_agent_via_kiss_web(
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
         tools: Path of a Python file whose top-level ``get_tools()``
-            (or agent-script ``tools()``)
+            (or agent-script ``add_to_tools()``)
             supplies the task's extra tools (the API's tools-file
             contract).  ``None`` uses ``agent.tools_file`` — the
             agent's own module.
@@ -369,7 +369,7 @@ def run_agent_via_kiss_web(
     chat_id = agent.chat_id if isinstance(agent, KissWebChatAgent) else ""
     # The agent's channel tools (auth tools + authenticated backend
     # methods) are built inside the daemon: it imports the tools file
-    # and calls its tools(); the daemon-built agent supplies the
+    # and calls its add_to_tools(); the daemon-built agent supplies the
     # standard tools itself.
     tools_path = str(tools) if tools else agent.tools_file
     endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()

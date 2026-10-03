@@ -1460,8 +1460,8 @@ class SorcarRunApiTest(unittest.TestCase):
         tab's ``workDir`` to the overridden value.  The tab's
         ``scopeWorkDir`` must survive that re-pin — it is what keeps a
         ``run_agent``-dispatched cron tab visible in the CALLING
-        workspace — because a script without a ``scope_work_dir()``
-        getter must not disturb the client-sent scope.
+        workspace — because a script must not disturb the client-sent
+        scope.
         """
         captured: dict[str, Any] = {}
         override_dir = str(Path(self.tmpdir) / "script_work")
@@ -1513,20 +1513,19 @@ class SorcarRunApiTest(unittest.TestCase):
             "the workDir re-pin must not clobber the visibility scope"
         )
 
-    def test_scope_work_dir_getter_repins_the_scope(self) -> None:
-        """A ``scope_work_dir()`` override re-pins the tab's scope.
+    def test_scope_work_dir_is_not_an_agent_script_getter(self) -> None:
+        """A script-level ``scope_work_dir()`` is a plain function: the client scope stays.
 
-        The dispatch handler pins the registry scope from the
-        client-sent ``tabScopeWorkDir`` before the worker thread runs;
-        the script's ``scope_work_dir()`` override must then win, so
-        clients scope the tab to the SCRIPT's workspace.
+        The calling workspace recorded on the tab is the caller's
+        identity, not the script's, so the dispatch handler's pin from
+        the client-sent ``tabScopeWorkDir`` must survive a script that
+        happens to define ``scope_work_dir()``.
         """
         captured: dict[str, Any] = {}
-        script_scope = str(Path(self.tmpdir) / "script_workspace")
         agent_script = Path(self.tmpdir) / "scope_agent.py"
         agent_script.write_text(
             "def scope_work_dir() -> str:\n"
-            f"    return {script_scope!r}\n"
+            f"    return {str(Path(self.tmpdir) / 'script_workspace')!r}\n"
         )
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
@@ -1561,60 +1560,8 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.success is True
         api_tabs = captured.get("tabs") or []
         assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
-        assert api_tabs[0]["scopeWorkDir"] == script_scope, (
-            "scope_work_dir() must re-pin the registry scope"
-        )
-
-    def test_empty_scope_work_dir_getter_scopes_to_work_dir(self) -> None:
-        """An EMPTY ``scope_work_dir()`` override falls back to the work dir.
-
-        ``TabRegistry.update_tab`` keeps the current scope for an empty
-        value, so the re-pin must translate the empty override into the
-        run's effective work directory — otherwise a caller-supplied
-        scope would silently survive the script's reset.
-        """
-        captured: dict[str, Any] = {}
-        agent_script = Path(self.tmpdir) / "clear_scope_agent.py"
-        agent_script.write_text(
-            "def scope_work_dir() -> str:\n"
-            "    return ''\n"
-        )
-
-        def stub_run(self_agent: Any, **kwargs: Any) -> str:
-            self_agent.total_tokens_used = 1
-            self_agent.budget_used = 0.0
-            self_agent.total_steps = 1
-            captured["tabs"] = [
-                dict(entry)
-                for entry in self.server._vscode_server.tab_registry.snapshot()
-                if entry["tabId"].startswith("api-")
-            ]
-            raw = "success: true\nis_continue: false\nsummary: ok\n"
-            printer = kwargs.get("printer") or getattr(
-                self_agent, "printer", None,
-            )
-            if printer is not None:
-                printer.print(raw, type="result", step_count=1)
-            return raw
-
-        self._parent_class.run = stub_run
-        exec_dir = str(Path(self.tmpdir) / "clear_scope_work")
-        result = sorcar.run(
-            "say hi",
-            work_dir=exec_dir,
-            scope_work_dir=str(Path(self.tmpdir) / "caller_scope"),
-            extension_agent_path=str(agent_script),
-            use_worktree=False,
-            auto_commit=False,
-            endpoint_file=self.endpoint_file,
-            timeout=60,
-        )
-        assert result.success is True
-        api_tabs = captured.get("tabs") or []
-        assert len(api_tabs) == 1, f"expected one api tab, got {api_tabs!r}"
-        assert api_tabs[0]["scopeWorkDir"] == exec_dir, (
-            "an empty scope override must re-scope the tab to the "
-            "run's work directory"
+        assert api_tabs[0]["scopeWorkDir"] == client_scope, (
+            "the client-sent scope must survive a script-level scope_work_dir()"
         )
 
     def test_no_daemon_raises_connection_error(self) -> None:

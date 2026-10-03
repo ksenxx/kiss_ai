@@ -304,7 +304,7 @@ def test_clear_auth_removes_connection_and_relocks_tools(composio) -> None:
 
 def test_tools_module_function() -> None:
     """Module-level tools() returns the auth tool set when locked."""
-    tools = gdrive_mod.tools()
+    tools = gdrive_mod.add_to_tools()
     assert [t.__name__ for t in tools] == _AUTH_TOOL_NAMES
     assert all(callable(t) for t in tools)
 

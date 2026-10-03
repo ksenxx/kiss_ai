@@ -57,9 +57,6 @@ def max_budget() -> float:
 def use_worktree() -> bool:
     return False  # no repo changes expected
 
-def if_append_basic_tools() -> bool:
-    return False  # only finish + our tools
-
 def system_prompt() -> str:
     return (
         "You are a weather assistant. Use the get_weather tool "
@@ -79,7 +76,7 @@ def get_weather(city: str) -> str:
     return resp.text.strip()
 
 def tools() -> list:
-    """Return the tools the agent may call."""
+    """The agent's whole tool set: get_weather + finish (no built-in tools)."""
     return [get_weather]
 ```
 
@@ -143,8 +140,8 @@ on the daemon.
 3. **Tools loading** — After overrides, the daemon reads the
    `toolsFile` field and calls `load_tools_file()` to import it and
    invoke its `get_tools()` (or, for an SEA doubling as its own tools
-   file, its `tools()`).  The returned callables become the
-   agent's tools.
+   file, its `tools()` / `add_to_tools()`).  The returned callables
+   become the agent's tools.
 
 
 ## Overridable parameters
@@ -152,9 +149,12 @@ on the daemon.
 Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
 `endpoint_file`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`,
 `side_channel`, and `extension_agent_path` itself has a corresponding
-getter the SEA may define.  The getter is named `X()` for parameter `X`,
-except `append_basic_tools`, whose getter is
-`if_append_basic_tools()`.  The table below lists them all.
+getter the SEA may define.  The getter is named `X()` for parameter `X`.
+`tools` and `append_basic_tools` are the exception: they have no
+getters of their own and are set together by one of the two tool
+getters, `tools()` or `add_to_tools()` (see below).  `scope_work_dir`
+has no getter either: the calling workspace is the caller's identity.
+The table below lists them all.
 
 | Getter function              | Return type                     | `run()` default           | Wire field          |
 |------------------------------|---------------------------------|---------------------------|---------------------|
@@ -163,15 +163,14 @@ except `append_basic_tools`, whose getter is
 | `model()`                | `str`                           | `""` (daemon default)     | `model`             |
 | `chat_id()`              | `str`                           | `""` (new chat)           | `chatId`            |
 | `system_prompt()`        | `str`                           | `""` (daemon-selected)    | `systemPrompt`      |
-| `tools()`                | `str`, `Path`, `list`, or `None`| `None` (no extra tools)   | `toolsFile`         |
+| `tools()`                | `list` of callables             | (none)                    | `toolsFile` + `appendBasicTools=False` |
+| `add_to_tools()`         | `list` of callables             | (none)                    | `toolsFile` + `appendBasicTools=True`  |
 | `use_worktree()`         | `bool`                          | `True`                    | `useWorktree`       |
 | `auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
 | `max_budget()`           | finite `int`/`float` (not `bool`) or `None` | `None` (daemon default) | `maxBudget`  |
 | `model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
-| `if_append_basic_tools()` | `bool`                         | `True`                    | `appendBasicTools`  |
 | `append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
 | `append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
-| `scope_work_dir()`       | `str`                           | `""` (= work dir)         | `tabScopeWorkDir`   |
 | `use_web_tools()`        | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
 | `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
 | `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
@@ -340,11 +339,15 @@ The parameters without getters:
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
   `setdefault`s it).
-- **`tools()`** — **overrides** (does not append to) the caller's
-  `tools` argument.  Returning `None` clears any caller-supplied tools.
-- **`if_append_basic_tools()`** — overrides the
-  `append_basic_tools` parameter; `False` strips the run down to
-  `finish` plus the supplied tools.
+- **`tools()`** — returns a list of tool callables that, with
+  `finish`, are the run's **entire** tool set: the built-in toolset is
+  not built (`append_basic_tools` becomes `False`).  The SEA file is
+  its own tools file (the caller's `tools` argument is replaced).
+- **`add_to_tools()`** — returns a list of tool callables **added** to
+  the built-in toolset (`append_basic_tools` becomes `True`); the
+  caller's `tools` argument is replaced likewise.  A SEA defines at
+  most one of `tools()` / `add_to_tools()`; neither may return a
+  tools-file path.
 - **`append_to_system_prompt()`** — extra text **appended** to
   the run's system prompt (the daemon-selected base prompt or the
   `system_prompt()` replacement) when the agent is executed.
@@ -358,12 +361,6 @@ The parameters without getters:
   than turned into an "open this file" request, as it is for a path
   typed into a chat box.  The appended text becomes part of the
   recorded prompt in chat history.
-- **`scope_work_dir()`** — the calling workspace recorded on the run's
-  tab in the daemon's shared tab registry, when different from the
-  execution `work_dir`.  Informational only: every client shows every
-  registry tab whatever folder it runs in.  An empty string from the
-  getter replaces any client-sent scope with the run's effective work
-  directory (an absent getter leaves the client-sent value alone).
 - **`use_web_tools()`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
   "Use web tools" checkbox, persisted as `use_web_browser`).  Under
@@ -427,8 +424,8 @@ The parameters without getters:
   `set_model`) or `"bash"` (`Bash` only — the bundled `/sh` agent's
   choice); `finish` is always added.
   `""` keeps the daemon's usual choice.  An unknown name fails the
-  task when it starts.  Ignored when `if_append_basic_tools()` is
-  `False`, which builds no built-in toolset at all.
+  task when it starts.  Ignored for a SEA with a `tools()` getter,
+  which builds no built-in toolset at all.
 - **`docker_image()`** — the Docker image the run's shell and file
   tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
   execute in: an image name starts a fresh container that is removed
@@ -491,49 +488,22 @@ def tool_call_hook():
 ```
 
 
-## Tools: two contracts
+## Tools: two getters
 
-An SEA supplies tools to the LLM agent through one of two
-approaches.
+An SEA supplies tools to the LLM agent through one of two getters,
+each returning a **list of callables** (a tools-file path is not
+accepted, and a SEA defines at most one of the two):
 
-### 1. Separate tools file (path return)
+- `tools()` — the returned tools plus `finish` are the agent's
+  **entire** tool set; the built-in toolset is not built.  Pair it
+  with a `system_prompt()` written for those tools.
+- `add_to_tools()` — the returned tools are **added** to the built-in
+  toolset (`Bash`, `Read`, `Edit`, `Write`, browser tools, ...).
 
-`tools()` returns the **path** (string or `pathlib.Path`) of
-another Python file.  The daemon imports that file and calls its
-`get_tools()` (or `tools()`) to obtain the callable list.  Use an
-absolute path; the
-daemon does not resolve paths against the client's working directory.
-
-```python
-# my_agent.py
-import pathlib
-
-def tools():
-    return pathlib.Path("/absolute/path/to/my_tools.py")
-```
-
-```python
-# my_tools.py
-def multiply(a: int, b: int) -> int:
-    """Multiply two numbers.
-
-    Args:
-        a: First factor.
-        b: Second factor.
-    """
-    return a * b
-
-def get_tools():
-    return [multiply]
-```
-
-### 2. Self-contained agent (list return)
-
-`tools()` returns a **list of callables** directly.  The daemon
-normalizes this to the agent script's own path and later re-imports
-the same file as the tools file, calling `tools()` again.  This
-makes the SEA its own tools file — a single file provides
-both parameter overrides and tools.
+Either way the daemon normalizes the getter to the agent script's own
+path and later re-imports the same file as the tools file, calling the
+same getter again.  The SEA is its own tools file — a single file
+provides both parameter overrides and tools.
 
 Because the file is imported twice per run (once for parameter
 overrides, once for tools loading), module-level side effects execute
@@ -554,8 +524,8 @@ def double(n: int) -> int:
     """
     return n * 2
 
-def tools() -> list:
-    return [double]
+def add_to_tools() -> list:
+    return [double]  # built-in toolset + double
 ```
 
 ### Tool function requirements
@@ -601,9 +571,11 @@ sub-agent dispatched with `run_parallel(..., tool_profile="review")`)
 filters that built-in set, including the memory tools; extension tools
 are still appended.
 
-When `append_basic_tools=False`, the agent's **only** tools are
-`finish` and the tools from `tools()`.  This is useful for
-building focused, restricted agents.
+When `append_basic_tools=False` — which is what a SEA's `tools()`
+getter selects — the agent's **only** tools are `finish` and the
+supplied tools.  This is useful for building focused, restricted
+agents.  A SEA that wants the built-in toolset plus its own tools
+returns them from `add_to_tools()` instead.
 
 When restricting tools, the full default system prompt (`SYSTEM.md`)
 assumes the full toolset (its workflow rules name `Read`, `Edit`,
@@ -611,8 +583,8 @@ assumes the full toolset (its workflow rules name `Read`, `Edit`,
 matches the tools you provide:
 
 ```python
-def if_append_basic_tools() -> bool:
-    return False
+def tools() -> list:
+    return [get_weather]  # the whole tool set: get_weather + finish
 
 def system_prompt() -> str:
     return (
@@ -855,7 +827,7 @@ def complete_task(task_id: int) -> str:
 
 
 def tools() -> list:
-    """Return the tools the agent may call."""
+    """The agent's whole tool set (plus finish); no built-in tools."""
     return [add_task, list_tasks, complete_task]
 ```
 

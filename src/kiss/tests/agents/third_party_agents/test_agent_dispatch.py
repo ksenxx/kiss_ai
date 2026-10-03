@@ -327,7 +327,6 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "classify_tasks",
         "use_memory",
         "is_parallel",
-        "append_basic_tools",
     ):
         out = run_agent("say hi", "ntfy", **{name: "maybe"})
         assert out == f"Error: {name} must be 'true' or 'false', got 'maybe'."
@@ -343,6 +342,13 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     not_py.write_text("")
     out = run_agent("say hi", "ntfy", tools=str(not_py))
     assert out == f"Error: tools file '{not_py}' is not a Python (.py) file"
+    # ``add_to_tools`` is a tools-file path too, and exclusive with ``tools``.
+    out = run_agent("say hi", "ntfy", add_to_tools=str(missing))
+    assert out == f"Error: tools file '{missing}' does not exist"
+    ok = tmp_path / "ok_tools.py"
+    ok.write_text("def get_tools():\n    return []\n")
+    out = run_agent("say hi", "ntfy", tools=str(ok), add_to_tools=str(ok))
+    assert out == "Error: pass either tools or add_to_tools, not both."
 
 
 def test_channel_and_cron_refuse_worktree_and_auto_commit(
@@ -378,9 +384,11 @@ def test_run_options_are_forwarded_to_daemon(
     """The optional arguments reach ``daemon_client.run`` as its keyword options.
 
     Empty arguments forward the option's default (``None`` for the
-    tri-state daemon-decides options, ``True`` for ``is_parallel`` /
+    tri-state daemon-decides options, ``True`` for ``is_parallel`` and
     ``append_basic_tools``); explicit values are parsed and forwarded
-    verbatim.  A relative ``tools`` path resolves against the CALLING
+    verbatim.  A ``tools`` file switches the basic toolset off
+    (``append_basic_tools=False``); an ``add_to_tools`` file keeps it.
+    A relative path of either resolves against the CALLING
     task's work directory (the tool runs in the daemon process, whose
     working directory is unrelated).  The real dispatch path is
     exercised up to the daemon-client boundary; only that boundary
@@ -423,7 +431,6 @@ def test_run_options_are_forwarded_to_daemon(
         classify_tasks="false",
         use_memory="true",
         is_parallel="false",
-        append_basic_tools="false",
         append_to_system_prompt="Answer in French.",
         append_to_prompt="Cite sources.",
     )
@@ -438,9 +445,17 @@ def test_run_options_are_forwarded_to_daemon(
     assert sent["classify_tasks"] is False
     assert sent["use_memory"] is True
     assert sent["is_parallel"] is False
+    # ``tools`` means ONLY these tools (+ finish).
     assert sent["append_basic_tools"] is False
     assert sent["append_to_system_prompt"] == "Answer in French."
     assert sent["append_to_prompt"] == "Cite sources."
+
+    # ``add_to_tools`` sends the same tools file but keeps the basic
+    # toolset.
+    captured_dispatch.clear()
+    tool("say hi", str(script), add_to_tools="extra_tools.py")
+    assert captured_dispatch[0]["tools"] == str(tools_file)
+    assert captured_dispatch[0]["append_basic_tools"] is True
 
     # An absolute tools path is kept as given (resolved); path mode
     # honours an explicit worktree request too.
@@ -783,19 +798,22 @@ def test_every_channel_module_is_dispatchable() -> None:
             str,
         ), channel
         assert module.__file__ and Path(module.__file__).is_file(), channel
-        assert callable(getattr(module, "tools", None)), channel
+        assert callable(getattr(module, "add_to_tools", None)), channel
+        assert not hasattr(module, "tools"), channel
 
 
 def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
     # module as ``extension_agent_path`` makes the daemon use the module as its
-    # own tools file (its ``tools()`` returns the tool list).
+    # own tools file (its ``add_to_tools()`` returns the tool list, on
+    # top of the basic toolset).
     import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
 
-    cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": ""}
+    cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": "", "appendBasicTools": False}
     overridden = apply_agent_overrides(cmd)
-    assert overridden == {"toolsFile"}
+    assert overridden == {"toolsFile", "appendBasicTools"}
     assert cmd["toolsFile"] == ntfy_sea.__file__
+    assert cmd["appendBasicTools"] is True
 
 
 def test_get_tools_and_sorcar_wiring() -> None:

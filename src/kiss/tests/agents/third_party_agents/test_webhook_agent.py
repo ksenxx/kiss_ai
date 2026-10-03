@@ -128,7 +128,7 @@ def test_auth_trio_roundtrip_and_persistence() -> None:
 
 def test_module_get_tools_nonempty() -> None:
     """The module-level tools() tools-file contract returns tools."""
-    tools = webhook_agent_mod.tools()
+    tools = webhook_agent_mod.add_to_tools()
     assert tools
     assert _AUTH_TRIO <= {t.__name__ for t in tools}
 

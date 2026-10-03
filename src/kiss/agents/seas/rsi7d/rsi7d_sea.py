@@ -2191,7 +2191,7 @@ def replay_in_clone(
     return json.dumps(prepared, indent=1)
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
     return [
         indexed_seas,

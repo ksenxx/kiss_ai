@@ -101,8 +101,8 @@ def system_prompt() -> str:
 _NOPROMPT_SEA = '''"""Demo SEA without a prompt getter."""
 
 
-def tools() -> list:
-    """No tools."""
+def add_to_tools() -> list:
+    """No extra tools."""
     return []
 '''
 
@@ -174,7 +174,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea.max_budget() == 2000.0
     assert sea.use_memory() is True
     assert sea.use_web_tools() is False
-    names = [t.__name__ for t in sea.tools()]
+    names = [t.__name__ for t in sea.add_to_tools()]
     assert names == [
         "indexed_seas",
         "sea_runs",
@@ -907,7 +907,7 @@ def _run_registered(
             max_steps=8,
             max_budget=sea.max_budget(),
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             base_system_prompt=sea.system_prompt(),
             web_tools=sea.use_web_tools(),
             use_memory=False,
@@ -953,7 +953,7 @@ def test_agent_run_offers_the_tools_and_patches_a_sea_through_them(
     assert parsed["success"] is True and parsed["summary"] == "<p>Patched demo.</p>", parsed
     assert len(agentic) == 4
     names = {t["function"]["name"] for t in agentic[0]["tools"]}
-    assert {t.__name__ for t in sea.tools()} <= names
+    assert {t.__name__ for t in sea.add_to_tools()} <= names
     # ``decide`` is not asserted: the Jev tool follows the "Use Jev"
     # setting and the OpenRouter key, not the SEA's tool list.
     assert {"Bash", "run_agent", "finish"} <= names

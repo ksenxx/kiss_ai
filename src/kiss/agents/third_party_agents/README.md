@@ -111,8 +111,8 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
 - Every module defines `description()`, the one-sentence summary `/xxx help` prints,
-  and a `tools()` function. The daemon calls
-  `tools()` to build the channel's tool list: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
+  and an `add_to_tools()` function. The daemon calls
+  `add_to_tools()` to build the channel's tool list, added to the standard toolset: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
@@ -399,9 +399,10 @@ transcript entries oldest first, the whole text capped at 60k characters by drop
 oldest entries. The script swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
 identity as a `{{IDENTITY}}` placeholder) with a no-internet, answer-quickly suffix and a
-playbook asking for two or three plain sentences drawn only from the context, returns
-`False` from `if_append_basic_tools()` so no built-in tool (no shell, no file access) is
-offered, and returns `False` from `is_parallel()`, `use_web_tools()`, and `use_memory()`,
+playbook asking for two or three plain sentences drawn only from the context, supplies
+its single `task_context` tool through `tools()` (not `add_to_tools()`) so no built-in
+tool (no shell, no file access) is offered, and returns `False` from `is_parallel()`,
+`use_web_tools()`, and `use_memory()`,
 so there are no browser tools, no memory tools, and no parallel sub-agents either; it
 cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does

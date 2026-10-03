@@ -37,11 +37,11 @@ and applies its ``X()`` parameter overrides.  The tool's optional
 arguments (``model_name``, ``max_budget``, ``timeout``, ``chat_id``,
 ``system_prompt``, ``tools``, ``model_config``, ``use_worktree``,
 ``auto_commit``, ``use_web_tools``, ``classify_tasks``,
-``use_memory``, ``is_parallel``, ``append_basic_tools``,
+``use_memory``, ``is_parallel``, ``add_to_tools``,
 ``append_to_system_prompt``, ``append_to_prompt``, ``tool_profile``)
 are the string form of that function's keyword options, parsed into a
 :class:`RunOptions` and forwarded as-is.  For a channel, the
-module's ``tools()`` returns the channel's tool callables, so the
+module's ``add_to_tools()`` returns the channel's tool callables, so the
 script serves as its own tools file — the daemon-built agent gets the
 channel's authenticated API tools (credentials persisted under
 ``~/.kiss``) on top of the standard tools (bash, files, browser) — and
@@ -254,7 +254,7 @@ def _parse_run_options(
     classify_tasks: str,
     use_memory: str,
     is_parallel: str,
-    append_basic_tools: str,
+    add_to_tools: str,
     append_to_system_prompt: str,
     append_to_prompt: str,
     tool_profile: str = "",
@@ -263,14 +263,19 @@ def _parse_run_options(
 
     Args:
         parent_work_dir: The calling task's work directory; a relative
-            *tools* path is resolved against it (the tool runs in the
-            daemon process, whose working directory is unrelated).
-            Empty resolves against the process working directory.
+            *tools* / *add_to_tools* path is resolved against it (the
+            tool runs in the daemon process, whose working directory is
+            unrelated).  Empty resolves against the process working
+            directory.
         chat_id: Existing chat session id to continue; empty starts a
             new chat.
         system_prompt: Replacement system prompt; empty keeps the
             default.
-        tools: Path of a tools file (``get_tools()``); empty for none.
+        tools: Path of a tools file (``get_tools()``) whose tools, plus
+            ``finish``, are the sub-task's ENTIRE tool set (no basic
+            toolset); empty for none.
+        add_to_tools: Path of a tools file whose tools are ADDED to the
+            basic toolset; empty for none.  Exclusive with *tools*.
         model_config: JSON object with the model configuration
             override; empty for the daemon default.
         use_worktree: ``"true"``/``"false"``; empty for the mode default.
@@ -282,8 +287,6 @@ def _parse_run_options(
         use_memory: ``"true"``/``"false"``; empty for the daemon
             default.
         is_parallel: ``"true"``/``"false"``; empty means ``true``.
-        append_basic_tools: ``"true"``/``"false"``; empty means
-            ``true``.
         append_to_system_prompt: Text appended to the system prompt.
         append_to_prompt: Text appended to the task prompt.
         tool_profile: Name of the tool profile the sub-task's built-in
@@ -296,8 +299,9 @@ def _parse_run_options(
 
     Raises:
         ValueError: On a malformed boolean, a *model_config* that is
-            not a JSON object, a *tools* path that is not an existing
-            ``.py`` file, or an unknown *tool_profile* name.
+            not a JSON object, a *tools* / *add_to_tools* path that is
+            not an existing ``.py`` file, both *tools* and
+            *add_to_tools* given, or an unknown *tool_profile* name.
     """
     from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
 
@@ -309,12 +313,15 @@ def _parse_run_options(
         )
     from kiss.agents.sorcar.daemon_client import resolve_tools_file
 
+    if tools.strip() and add_to_tools.strip():
+        raise ValueError("pass either tools or add_to_tools, not both.")
     tools_path = ""
-    if tools.strip():
-        candidate = Path(tools.strip()).expanduser()
-        if not candidate.is_absolute() and parent_work_dir:
-            candidate = Path(parent_work_dir) / candidate
-        tools_path = resolve_tools_file(str(candidate))
+    for raw in (tools, add_to_tools):
+        if raw.strip():
+            candidate = Path(raw.strip()).expanduser()
+            if not candidate.is_absolute() and parent_work_dir:
+                candidate = Path(parent_work_dir) / candidate
+            tools_path = resolve_tools_file(str(candidate))
     config: dict[str, Any] | None = None
     if model_config.strip():
         try:
@@ -328,7 +335,6 @@ def _parse_run_options(
                 f"model_config must be a JSON object, got {model_config!r}."
             )
     parallel = _parse_bool("is_parallel", is_parallel)
-    basic_tools = _parse_bool("append_basic_tools", append_basic_tools)
     return RunOptions(
         chat_id=chat_id.strip(),
         system_prompt=system_prompt,
@@ -340,7 +346,9 @@ def _parse_run_options(
         classify_tasks=_parse_bool("classify_tasks", classify_tasks),
         use_memory=_parse_bool("use_memory", use_memory),
         is_parallel=True if parallel is None else parallel,
-        append_basic_tools=True if basic_tools is None else basic_tools,
+        # A ``tools`` file replaces the basic toolset; an
+        # ``add_to_tools`` file (or no file) keeps it.
+        append_basic_tools=not tools.strip(),
         append_to_system_prompt=append_to_system_prompt,
         append_to_prompt=append_to_prompt,
         tool_profile=profile,
@@ -1029,7 +1037,7 @@ def _run_agent(
     classify_tasks: str = "",
     use_memory: str = "",
     is_parallel: str = "",
-    append_basic_tools: str = "",
+    add_to_tools: str = "",
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     tool_profile: str = "",
@@ -1102,7 +1110,7 @@ def _run_agent(
         options = _parse_run_options(
             parent_work_dir, chat_id, system_prompt, tools, model_config,
             use_worktree, auto_commit, use_web_tools, classify_tasks,
-            use_memory, is_parallel, append_basic_tools,
+            use_memory, is_parallel, add_to_tools,
             append_to_system_prompt, append_to_prompt, tool_profile,
         )
     except ValueError as e:
@@ -1138,7 +1146,7 @@ def _run_agent(
     if squashed == "cron":
         # The scheduled-automations agent: an agent script in the
         # sorcar package (not a third-party channel), dispatched the
-        # same way — its tools() supplies the cron_job and
+        # same way — its add_to_tools() supplies the cron_job and
         # gateway_command tools and its work_dir()/use_worktree()/auto_commit()
         # getters keep the session in ~/.kiss/cron/work, out of the
         # calling project's git lifecycle.  ``classify=False``
@@ -1304,7 +1312,7 @@ def make_run_agent_tool(
         classify_tasks: str = "",
         use_memory: str = "",
         is_parallel: str = "",
-        append_basic_tools: str = "",
+        add_to_tools: str = "",
         append_to_system_prompt: str = "",
         append_to_prompt: str = "",
         tool_profile: str = "",
@@ -1341,7 +1349,7 @@ def make_run_agent_tool(
         agent file's path is passed as the ``extension_agent_path`` of
         :func:`kiss.server.sorcar.run`, so the session is configured
         by the file's ``X()`` getters (a channel module's
-        ``tools()`` supplies that channel's authenticated tools,
+        ``add_to_tools()`` supplies that channel's authenticated tools,
         credentials persisted under ``~/.kiss``) on top of the
         standard tools.  A path-named agent's session runs in THIS
         task's work directory (so it operates on the same project,
@@ -1417,10 +1425,15 @@ def make_run_agent_tool(
                 It replaces the default system prompt of the sub-task and of its own
                 ``run_parallel`` sub-agents; the daemon still appends its per-run
                 operational instructions.  An agent script's ``system_prompt()`` still wins.
-            tools: Path of a Python tools file adding extra tools to the sub-task; empty = none.
-                The file's ``get_tools()`` returns the tool functions.  A relative path is
-                resolved against this task's work directory and must exist.  An agent
-                script's ``tools()`` still wins.
+            tools: Path of a Python tools file holding the sub-task's ONLY tools; empty = none.
+                The file's ``get_tools()`` returns the tool functions; the sub-task gets
+                exactly those plus ``finish`` and NO basic toolset, so pass a
+                ``system_prompt`` written for them.  A relative path is resolved against
+                this task's work directory and must exist.  An agent script's ``tools()``
+                / ``add_to_tools()`` still wins.
+            add_to_tools: Path of a Python tools file adding tools to the sub-task; empty = none.
+                Like ``tools`` but the file's tools are ADDED to the basic toolset.
+                Exclusive with ``tools``.
             model_config: Model configuration override as a JSON object string; empty = default.
                 Custom endpoint / headers, e.g. ``'{"base_url": "http://localhost:8000/v1"}'``.
                 The default for a path-named agent script is this task's model
@@ -1446,9 +1459,6 @@ def make_run_agent_tool(
             use_memory: "true"/"false": give the sub-task persistent-memory tools; empty = default
                 (this task's setting for a path-named agent script).
             is_parallel: "true"/"false": let the sub-task use run_parallel; empty means true.
-            append_basic_tools: "true"/"false": give the sub-task the basic toolset; empty = true.
-                With ``"false"`` the sub-task has ONLY ``finish`` and the tools from
-                ``tools`` / the agent script, so pass a ``system_prompt`` written for them.
             append_to_system_prompt: Extra text appended to the sub-task's system prompt.
                 Appended after the default (or the ``system_prompt`` replacement) and
                 inherited by the sub-task's ``run_parallel`` sub-agents.
@@ -1472,7 +1482,7 @@ def make_run_agent_tool(
             work_dir, agent, task, workspace, model_name, max_budget,
             timeout, parent_agent, chat_id, system_prompt, tools,
             model_config, use_worktree, auto_commit, use_web_tools,
-            classify_tasks, use_memory, is_parallel, append_basic_tools,
+            classify_tasks, use_memory, is_parallel, add_to_tools,
             append_to_system_prompt, append_to_prompt, tool_profile,
         )
 

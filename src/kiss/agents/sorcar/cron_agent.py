@@ -1803,7 +1803,7 @@ agents' dispatch preamble.
 """
 
 
-def tools() -> list:
+def add_to_tools() -> list:
     """Return the cron tools (``kiss.server.sorcar.run`` tools-file contract).
 
     Called by the kiss-web daemon when this module's path is passed as

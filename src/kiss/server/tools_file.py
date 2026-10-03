@@ -12,8 +12,8 @@ and resolves the path
 sends it on the ``run`` command's ``toolsFile`` field; the daemon
 imports the file and
 calls its required top-level ``get_tools()`` function — or, when the
-module defines none, its ``tools()`` function (the agent-script
-spelling, so an SEA can double as its own tools file) — which returns
+module defines none, its ``tools()`` or ``add_to_tools()`` function
+(the agent-script getters, so an SEA doubles as its own tools file) — which returns
 the callables the agent may invoke (:func:`load_tools_file`).  The
 tools therefore execute in the daemon process, exactly like native
 agent tools.  A broken tools file (malformed field, missing file,
@@ -64,8 +64,8 @@ class ToolsFileError(Exception):
     Raised by :func:`load_tools_file` when the ``toolsFile`` wire field
     is malformed, names a missing or non-``.py`` path, names a file
     that raises at import time, or names a module whose ``get_tools()``
-    (or fallback ``tools()``) is missing, raises, or returns anything
-    but callables.  The task
+    (or fallback ``tools()`` / ``add_to_tools()``) is missing, raises,
+    or returns anything but callables.  The task
     runner's generic task-error handling turns the raise into a failed
     task result whose text carries this exception's diagnostic message,
     so a broken tools file stops the task loudly instead of silently
@@ -155,7 +155,8 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     Daemon-side counterpart of :func:`resolve_tools_file`: imports the
     Python file named by a ``run`` command's ``toolsFile`` field and
     calls the module's top-level ``get_tools()`` function — or its
-    ``tools()`` function when no ``get_tools`` is defined — which must
+    ``tools()`` / ``add_to_tools()`` function when no ``get_tools`` is
+    defined — which must
     return the callables the agent may invoke.  The file's author —
     not the daemon — decides which of the module's functions become
     tools, so no scanning or suitability filtering happens here.
@@ -170,9 +171,9 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     callables raises :exc:`ToolsFileError` with a diagnostic message
     instead of silently running the task without the requested tools.
 
-    An agent script (SEA) whose ``tools()`` returns the tool callables
-    doubles as its own tools file: when the module defines no
-    ``get_tools()``, its ``tools()`` is called instead.
+    An agent script (SEA) doubles as its own tools file: when the
+    module defines no ``get_tools()``, its ``tools()`` getter is called
+    instead, or its ``add_to_tools()`` getter when it defines neither.
 
     Args:
         raw_path: The ``toolsFile`` field of a ``run`` command —
@@ -181,14 +182,15 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
 
     Returns:
         The tool callables returned by the module's ``get_tools()``
-        (or fallback ``tools()``).
+        (or fallback ``tools()`` / ``add_to_tools()``).
 
     Raises:
         ToolsFileError: When *raw_path* is not a string, is not the
             path of an existing ``.py`` file, names a module that
             raises at import time, or names a module whose
-            ``get_tools()`` (or fallback ``tools()``) is missing,
-            raises, or returns anything but a list/tuple of callables.
+            ``get_tools()`` (or fallback ``tools()`` / ``add_to_tools()``)
+            is missing, raises, or returns anything but a list/tuple of
+            callables.
     """
     # ``None``/empty mean "no extra tools"; isinstance is checked FIRST
     # (before the == comparison) because comparing an untrusted
@@ -198,17 +200,21 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     if isinstance(raw_path, str) and raw_path == "":
         return []
     namespace = execute_python_file(raw_path, ToolsFileError, "tools file")
-    # ``get_tools()`` is the tools-file contract; ``tools()`` is the
-    # agent-script (SEA) spelling, accepted so an SEA whose ``tools()``
-    # returns the tool callables can double as its own tools file.  A
-    # module defining both uses ``get_tools()``.
-    getter_name = "get_tools" if "get_tools" in namespace else "tools"
+    # ``get_tools()`` is the tools-file contract; ``tools()`` and
+    # ``add_to_tools()`` are the agent-script (SEA) getters, accepted
+    # so an SEA doubles as its own tools file.  The first one defined
+    # wins, in that order.
+    getter_name = "add_to_tools"
+    for candidate in ("get_tools", "tools"):
+        if candidate in namespace:
+            getter_name = candidate
+            break
     get_tools = namespace.get(getter_name)
     if not callable(get_tools):
         raise ToolsFileError(
             f"tools file {raw_path!r} must define a top-level "
-            f"get_tools() (or tools()) function returning the tool "
-            f"callables"
+            f"get_tools() (or tools() / add_to_tools()) function "
+            f"returning the tool callables"
         )
     try:
         returned = get_tools()

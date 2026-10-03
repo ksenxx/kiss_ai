@@ -869,9 +869,7 @@ class _TaskRunnerMixin:
             # the OVERRIDDEN set: without a ``chat_id()`` getter the
             # state's chat id (possibly carried over from the tab's
             # previous run) must stay untouched.
-            if overridden_fields & {
-                "chatId", "prompt", "workDir", "tabScopeWorkDir",
-            }:
+            if overridden_fields & {"chatId", "prompt", "workDir"}:
                 override_chat_id: str | None = None
                 if "chatId" in overridden_fields:
                     # An empty override means "fresh chat" — mint the id
@@ -901,23 +899,6 @@ class _TaskRunnerMixin:
                         # as the EFFECTIVE directory the run uses.
                         (cmd["workDir"] or self.work_dir)
                         if "workDir" in overridden_fields
-                        else None
-                    ),
-                    scope_work_dir=(
-                        # A ``scope_work_dir()`` override re-pins the tab's
-                        # workspace-visibility scope, which the dispatch
-                        # handler pinned from the client-sent
-                        # ``tabScopeWorkDir`` before this thread started.
-                        # ``update_tab`` keeps the current scope for an
-                        # empty value, so an EMPTY override (meaning "scope
-                        # to the run's work dir", like an empty client-sent
-                        # scope) must be pinned as the effective work
-                        # directory — mirroring the ``workDir`` re-pin.
-                        (
-                            str(cmd["tabScopeWorkDir"] or "")
-                            or str(cmd.get("workDir") or self.work_dir)
-                        )
-                        if "tabScopeWorkDir" in overridden_fields
                         else None
                     ),
                 )

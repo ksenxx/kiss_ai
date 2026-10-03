@@ -483,8 +483,6 @@ def run(
             whatever folder it runs in.  Empty (the default) records
             nothing.  Irrelevant for a sub-agent run (non-empty
             *parent_task_id*), which gets no registry tab at all.
-            An agent script's ``scope_work_dir()`` getter overrides
-            this value on the daemon.
         parent_task_id: The persisted ``task_history`` row id of the
             CALLING task, when this run is dispatched on behalf of one
             (the ``run_agent`` tool).  Non-empty marks the run as a
@@ -563,10 +561,10 @@ def run(
             uses its return value for ``X``, replacing the value passed
             to this call.  A parameter whose ``X()`` the script
             does not define keeps the value passed here, which is the
-            parameter's default when the caller did not pass one.  One
-            getter is named differently from its parameter:
-            ``if_append_basic_tools()`` overrides
-            *append_basic_tools*.
+            parameter's default when the caller did not pass one.
+            *tools* and *append_basic_tools* have no getters of their
+            own: the script's tool set comes from the two tool
+            getters described below.
 
             Script format: a plain Python file defining any subset of
             these zero-argument top-level functions, each returning a
@@ -577,20 +575,34 @@ def run(
                 def model() -> str: ...
                 def chat_id() -> str: ...
                 def system_prompt() -> str: ...
-                def tools() -> str | Path | list | None: ...  # tools-file path or tool list
                 def use_worktree() -> bool: ...
                 def auto_commit() -> bool: ...
                 def max_budget() -> float | None: ...   # finite
                 def model_config() -> dict | None: ...
-                def if_append_basic_tools() -> bool: ...
                 def append_to_system_prompt() -> str: ...
                 def append_to_prompt() -> str: ...
-                def scope_work_dir() -> str: ...
                 def use_web_tools() -> bool | None: ...
                 def classify_tasks() -> bool | None: ...
                 def use_memory() -> bool | None: ...
                 def is_parallel() -> bool: ...
                 def tool_profile() -> str: ...
+
+            The script's tools come from at most ONE of these two
+            getters, each returning a list of tool callables (never a
+            tools-file path)::
+
+                def tools() -> list: ...         # ONLY these + finish
+                def add_to_tools() -> list: ...  # basic toolset + these
+
+            ``tools()`` makes the returned tools plus ``finish`` the
+            run's entire tool set (the built-in basic toolset is not
+            built, as if *append_basic_tools* were ``False``);
+            ``add_to_tools()`` adds the returned tools to the built-in
+            basic toolset (as if *append_basic_tools* were ``True``).
+            Either way the script is its own tools file: the daemon
+            re-imports it and calls the same getter for the list, as
+            it calls a tools file's ``get_tools()``.  Defining both
+            getters stops the task like any other broken getter.
 
             The script may also define two hook getters with no
             corresponding parameter on this function (a callable
@@ -635,28 +647,19 @@ def run(
 
             The ``X()`` functions are never serialized by the
             client — they run **in the daemon process**, exactly like a
-            tools file's ``get_tools()``.  ``tools()`` here returns
-            the *path* of a tools file (pass an absolute path — the
-            daemon does not resolve it against this process's working
-            directory), which the daemon then imports and whose
-            ``get_tools()`` (or ``tools()``) it calls as if the path
-            had been passed as *tools*; a ``tools()`` that instead
-            returns a *list* of tool callables (the tools-file
-            contract, as in the channel agent modules) makes the
-            script its own tools file.  ``scope_work_dir()`` overrides
-            the calling workspace recorded on the run's tab (an empty
-            override records none, like an empty client-sent
-            *scope_work_dir*);
+            tools file's ``get_tools()``.
             ``use_web_tools()``, ``classify_tasks()``, and
             ``use_memory()`` return a bool for a per-run override
             or ``None`` for the daemon's configured default; and
             ``is_parallel()`` returns a bool.  ``timeout``,
-            *stop_on_timeout*, *endpoint_file*, *parent_task_id*, and
-            *parent_tab_id* have no getters by design: the first three
+            *stop_on_timeout*, *endpoint_file*, *scope_work_dir*,
+            *parent_task_id*, and *parent_tab_id* have no getters by
+            design: the first three
             are client-transport parameters — the script only runs on
             the daemon that *endpoint_file* selects, *timeout* bounds this
             client's local wait, and *stop_on_timeout* picks this
-            client's timeout behavior — and *parent_task_id* /
+            client's timeout behavior — and *scope_work_dir* /
+            *parent_task_id* /
             *parent_tab_id* are the CALLING task's identity, which the
             script must not be able to forge.  The
             *extension_agent_path* itself is resolved against this process's
