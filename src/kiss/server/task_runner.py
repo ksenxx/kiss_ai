@@ -320,6 +320,32 @@ def _client_task_id_of(cmd: dict[str, Any]) -> str:
     return raw if isinstance(raw, str) else ""
 
 
+def _parent_extra_tools(parent_task_id: str) -> list[Callable[..., Any]]:
+    """Return the extra tools of the running task *parent_task_id*.
+
+    A ``run_agent`` sub-task dispatched in path mode inherits the
+    calling task's system prompt; these are the tools that prompt
+    refers to — the ``add_to_tools()`` tools of the parent's agent
+    script and those the parent inherited itself, which the parent
+    agent keeps as ``_extra_tools`` for the duration of its run.  The
+    parent is found in this daemon's state registry by its persisted
+    task id.  ``SorcarAgent.perform_task`` adds them after the
+    sub-task's own toolset, skipping names it already has.
+
+    Args:
+        parent_task_id: The calling task's id (wire field
+            ``parentTaskId``); empty or unknown yields nothing.
+
+    Returns:
+        A new list of the parent's extra tool callables (possibly empty).
+    """
+    parent_state = agent_state.get(parent_task_id)
+    parent_tools = getattr(getattr(parent_state, "agent", None), "_extra_tools", None)
+    if not isinstance(parent_tools, list):
+        return []
+    return [tool for tool in parent_tools if callable(tool)]
+
+
 def coerce_budget_override(raw: object) -> float | None:
     """Coerce a wire ``maxBudget`` override to a valid spend cap.
 
@@ -2020,6 +2046,15 @@ class _TaskRunnerMixin:
             _append_basic_tools = (
                 _raw_append if isinstance(_raw_append, bool) else True
             )
+            # A path-mode ``run_agent`` sub-task (wire field
+            # ``inheritTools``) also gets the extra tools of the
+            # calling task — the ``add_to_tools()`` tools of ITS agent
+            # script, plus those it inherited itself — so the tools
+            # the inherited system prompt refers to exist.  Not when
+            # this run's script's ``tools()`` fixed the whole set.
+            _inherited_tools: list[Callable[..., Any]] = []
+            if _append_basic_tools and cmd.get("inheritTools") is True:
+                _inherited_tools = _parent_extra_tools(parent_task_id)
 
             # A ``while`` over a growable list, not a ``for``: a
             # steering message of ``<task>`` blocks sent while a
@@ -2093,6 +2128,7 @@ class _TaskRunnerMixin:
                         ),
                         tools=client_tools,
                         append_basic_tools=_append_basic_tools,
+                        inherited_tools=_inherited_tools,
                         base_system_prompt=system_prompt_override,
                         _open_bare_path=_open_bare_path,
                         # ``SorcarAgent.run``'s ``system_prompt`` is an

@@ -1443,6 +1443,12 @@ class SorcarAgent(RelentlessAgent):
         self._live_browser: Any = None
         self._is_parallel: bool = True
         self._append_basic_tools: bool = True
+        # The caller's extra tools of the current run (``run(tools=...)``:
+        # an agent script's ``add_to_tools()`` list, plus whatever this
+        # agent itself inherited as a sub-task).  Kept on self so a
+        # ``run_agent`` sub-task dispatched DURING the run can take
+        # them over (``task_runner`` reads them off the parent agent).
+        self._extra_tools: list[Callable[..., Any]] = []
         # Background jobs started by ``Bash(background=True)``, kept on
         # the agent (not the per-run UsefulTools) so a follow-up prompt
         # in the same chat can still wait on, tail or kill them.
@@ -2384,10 +2390,21 @@ class SorcarAgent(RelentlessAgent):
         # the caller's *tools*: the built-in toolset is never built, so
         # no web profile, MCP server, or run_agent/run_parallel wiring
         # is set up either.
-        if self._append_basic_tools:
-            all_tools = self._get_tools() + tools
-        else:
-            all_tools = list(tools)
+        built_in = self._get_tools() if self._append_basic_tools else []
+        # Tools inherited from the dispatching task come last, and only
+        # under names this run does not have yet (the caller may lack a
+        # built-in this run has, e.g. ``number_of_cores`` without
+        # ``is_parallel``).  Everything after the built-ins is this
+        # run's effective extra toolset — what ITS ``run_agent``
+        # sub-tasks inherit in turn.
+        extra = list(tools)
+        names = {tool.__name__ for tool in built_in + extra}
+        for tool in self._inherited_tools:
+            if tool.__name__ not in names:
+                extra.append(tool)
+                names.add(tool.__name__)
+        self._extra_tools = extra
+        all_tools = built_in + extra
         # Always install the steering hooks: they are self-guarding
         # no-ops when no follow-up channel exists (a printer without
         # the duck-typed ``drain_pending_user_messages`` bridge), and
@@ -2671,6 +2688,7 @@ class SorcarAgent(RelentlessAgent):
         ask_user_question_callback: Callable[[str], str] | None = None,
         base_system_prompt: str = "",
         append_basic_tools: bool = True,
+        inherited_tools: list[Callable[..., Any]] | None = None,
         llm_call_hook: (
             Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None
         ) = None,
@@ -2730,6 +2748,14 @@ class SorcarAgent(RelentlessAgent):
                 ``RelentlessAgent.perform_task``) and the caller's
                 *tools* — *web_tools* and *is_parallel* then have no
                 effect, since the tools they toggle are never built.
+            inherited_tools: Extra tools taken over from the task that
+                dispatched this run (a ``run_agent`` sub-task gets the
+                caller's ``add_to_tools()`` tools, see
+                ``task_runner``).  Added after the built-in toolset and
+                *tools*; one whose name this run already has (a
+                built-in the caller lacked, or one of *tools*) is
+                skipped rather than registered twice.  ``None``
+                (default) adds nothing.
             llm_call_hook: Optional hook forwarded to the underlying
                 :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
                 sub-session this agent runs (see that docstring): called
@@ -2787,6 +2813,7 @@ class SorcarAgent(RelentlessAgent):
         self._use_memory_override = use_memory
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
+        self._inherited_tools = list(inherited_tools or [])
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.

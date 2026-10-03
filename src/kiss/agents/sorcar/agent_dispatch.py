@@ -605,6 +605,15 @@ def inherit_from_parent(
       ``system_prompt()`` / ``append_to_system_prompt()`` getters still
       replace them on the daemon, and its ``add_to_system_prompt()``
       text is added after the inherited suffix.
+    - the caller's extra tools (its agent script's ``add_to_tools()``
+      list, plus those the caller inherited itself): not resolved
+      here — a callable cannot travel the wire — but requested from
+      the daemon with the ``inherit_tools`` flag :func:`dispatch_result`
+      sends, so the sub-task has the tools the inherited system prompt
+      refers to.  The daemon adds them to the sub-task's built-in
+      toolset after the sub-task's own script's ``add_to_tools()``
+      tools; a script whose ``tools()`` supplies the whole set keeps
+      exactly that set.
     - ``use_web_tools`` / ``use_memory``: the caller's per-run
       settings (``_use_web_tools`` / ``_use_memory_override``).
     - ``docker_image``: ``container:<id>`` of the caller's live Docker
@@ -969,6 +978,10 @@ def dispatch_result(
             append_to_prompt=options.append_to_prompt,
             tool_profile=options.tool_profile,
             docker_image=inherited.docker_image,
+            # The caller's extra tools (its script's ``add_to_tools()``)
+            # cannot travel the wire: the daemon takes them off the
+            # running caller, which ``parent_task_id`` names.
+            inherit_tools=inherit,
             timeout=timeout,
             stop_on_timeout=True,
             endpoint_file=_daemon_endpoint_file(),
@@ -1343,11 +1356,14 @@ def make_run_agent_tool(
         ``run_parallel`` sub-agent's: its model (and, for the model
         this task was launched with, its model configuration), half
         of its remaining budget, its chat (so the sub-task sees this
-        conversation's earlier tasks and results), its web-tools and
-        memory settings, its Docker container, and its effective
-        worktree / auto-commit choices (both off inside a container:
-        the sub-task then works in this task's tree).  Channel and
-        cron sub-tasks inherit none of these.
+        conversation's earlier tasks and results), its system prompt
+        additions together with the extra tools this task's own agent
+        script added (so the sub-task can call the tools the inherited
+        instructions refer to), its web-tools and memory settings, its
+        Docker container, and its effective worktree / auto-commit
+        choices (both off inside a container: the sub-task then works
+        in this task's tree).  Channel and cron sub-tasks inherit none
+        of these.
         This call blocks until the task finishes or the ``timeout``
         (default 300 seconds) expires, whichever comes first; a
         timed-out call spends up to 20 further seconds confirming the

@@ -144,6 +144,9 @@ class TestDispatchResultInheritance:
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
+        # The caller's ``add_to_tools()`` tools are resolved on the
+        # daemon (callables cannot travel the wire): the flag asks for them.
+        assert call["inherit_tools"] is True
         # The parent's EFFECTIVE choices beat the persisted settings.
         assert call["use_worktree"] is False
         assert call["auto_commit"] is False
@@ -342,6 +345,7 @@ class TestDispatchResultInheritance:
         assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
+        assert call["inherit_tools"] is False
         assert call["use_worktree"] is True
         assert call["auto_commit"] is True
 
@@ -373,6 +377,7 @@ class TestDispatchResultInheritance:
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["docker_image"] == ""
+        assert call["inherit_tools"] is False
         assert call["use_worktree"] is False
         assert call["auto_commit"] is False
 

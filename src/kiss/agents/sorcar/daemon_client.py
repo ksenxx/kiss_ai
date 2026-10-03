@@ -399,6 +399,7 @@ def run(
     append_to_prompt: str = "",
     tool_profile: str = "",
     docker_image: str = "",
+    inherit_tools: bool = False,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     endpoint_file: str | Path | None = None,
@@ -684,6 +685,20 @@ def run(
             container.  ``bash_job`` and persistent memory are
             unavailable in a Docker run.  Empty (default) runs the
             tools on the host.
+        inherit_tools: Whether the task also gets the extra tools of
+            the task *parent_task_id* names — the tool callables that
+            parent's agent script added through ``add_to_tools()``
+            (and those the parent inherited itself), resolved on the
+            daemon from the running parent (a callable cannot travel
+            the wire).  They are added to the task's built-in toolset
+            after the task's own script's ``add_to_tools()`` tools,
+            skipping names the task already has; a script whose
+            ``tools()`` supplies the whole tool set keeps exactly that
+            set.  ``run_agent`` sets this for the
+            sub-tasks it dispatches in path mode, so a sub-task that
+            inherits the caller's system prompt also has the tools
+            that prompt refers to.  ``False`` (default) adds nothing;
+            ignored without *parent_task_id*.
         timeout: Maximum seconds to wait for the task to finish;
             ``None`` waits indefinitely.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
@@ -819,6 +834,7 @@ def run(
             "appendToPrompt": append_to_prompt,
             "toolProfile": tool_profile,
             "dockerImage": docker_image,
+            "inheritTools": inherit_tools,
         }
         try:
             local_endpoint.send(ws, json.dumps(cmd))

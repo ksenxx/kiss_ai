@@ -794,8 +794,11 @@ def is_parallel() -> bool:
 
     ``run_parallel`` forwards the parent's system-prompt additions to every
     worker, which would turn each routed unit into another router without
-    the routing tools.  ``run_agent`` starts a fresh default session, so it
-    is the dispatch primitive (one unit per call).
+    the routing tools.  ``run_agent`` is the dispatch primitive (one unit
+    per call): its sub-task inherits the caller's prompt additions together
+    with the caller's ``add_to_tools()`` tools, so a routed unit that reads
+    this protocol also has ``pick_model`` and the ledger tools, and runs in
+    its own tab with its own model and budget.
     """
     return False
 
