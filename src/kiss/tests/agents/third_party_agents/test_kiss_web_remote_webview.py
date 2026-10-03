@@ -96,7 +96,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         vscode_config.CONFIG_PATH = kiss_dir / "config.json"
         self.addCleanup(self._restore_vscode_config)
 
-        self.addCleanup(agent_state.agent_states.clear)
+        self.addCleanup(self._join_tasks_and_clear_agents)
         self.loop = asyncio.new_event_loop()
         self.loop_thread = threading.Thread(
             target=self.loop.run_forever, daemon=True,
@@ -158,9 +158,20 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self.loop_thread.join(timeout=5)
         self.loop.close()
 
+    def _join_tasks_and_clear_agents(self) -> None:
+        # The daemon answers the launcher before its task thread has
+        # finished its bookkeeping on the test's history.db; join those
+        # threads before the DB is closed and the tmpdir removed.
+        for state in agent_state.snapshot():
+            if state.task_thread is not None:
+                state.task_thread.join(timeout=30)
+        agent_state.agent_states.clear()
+
     def _restore_persistence(self) -> None:
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        # ``_close_db()`` stops the event writer and invalidates every
+        # thread's cached connection; a raw ``close()`` under another
+        # thread's running ``db.execute`` crashes the process (SIGSEGV).
+        _persistence._close_db()
         (
             _persistence._DB_PATH,
             _persistence._db_conn,

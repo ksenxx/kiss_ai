@@ -154,6 +154,14 @@ class _ApiLaunchBase(unittest.TestCase):
 
     def _restore_run_and_discard_agents(self) -> None:
         self._parent_class.run = self._original_run
+        # The daemon answers the launcher before its task thread has
+        # finished its bookkeeping (``_record_frequent_task`` and the
+        # event writer still use the test's history.db); join those
+        # threads before the states are dropped and, later, the DB is
+        # closed and the tmpdir removed.
+        for state in agent_state.snapshot():
+            if state.task_thread is not None:
+                state.task_thread.join(timeout=30)
         for state in agent_state.snapshot():
             if state.agent is not None and state.agent._wt_pending:
                 try:
@@ -189,8 +197,12 @@ class _ApiLaunchBase(unittest.TestCase):
         self.loop.close()
 
     def _restore_persistence(self) -> None:
-        if _persistence._db_conn is not None:
-            _persistence._db_conn.close()
+        # ``_close_db()`` stops the event writer and invalidates every
+        # thread's cached connection before the path is switched back
+        # and the tmpdir removed; a raw ``close()`` (or an unlinked
+        # ``-shm``) under another thread's running ``db.execute``
+        # crashes the whole pytest process (SIGSEGV).
+        _persistence._close_db()
         (
             _persistence._DB_PATH,
             _persistence._db_conn,

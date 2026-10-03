@@ -58,7 +58,13 @@ function printHelp() {
  * afterwards, also when packaging fails or the process is interrupted.
  */
 async function packWithHashedIcons(options) {
-  const restoreManifest = applyHashedIcons(options.cwd);
+  // The signal handlers go in before the manifest is rewritten: a
+  // signal that arrives after applyHashedIcons() has written the
+  // hashed package.json but before a handler exists would kill the
+  // process with the default disposition and leave the manifest
+  // rewritten.  Handlers run from the event loop, so they cannot
+  // interleave with the synchronous rewrite below.
+  let restoreManifest = () => {};
   function restoreAndExit() {
     restoreManifest();
     process.exit(1);
@@ -66,6 +72,7 @@ async function packWithHashedIcons(options) {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
     process.on(signal, restoreAndExit);
   try {
+    restoreManifest = applyHashedIcons(options.cwd);
     return await vscePackage.pack(options);
   } finally {
     restoreManifest();
