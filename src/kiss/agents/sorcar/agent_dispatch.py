@@ -1455,8 +1455,9 @@ def make_run_agent_tool(
             append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
                 Appended to each ``<task>`` when the task holds several.
             tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
-                ``"full"`` (everything), ``"review"`` (read and run, no editing, browser
-                or dispatch), ``"shell"`` (Bash, bash_job, Read, run_commands_parallel),
+                ``"full"`` (everything), ``"review"`` (read, run, browse and talk; no
+                editing or dispatch), ``"shell"`` (Bash, bash_job, Read,
+                run_commands_parallel),
                 ``"assistant"`` (the shell set plus ask_user_question, talk, decide,
                 summary, set_model) or ``"bash"`` (Bash only); empty = the daemon's
                 usual choice.  ``finish``

@@ -421,7 +421,7 @@ The parameters without getters:
   sub-agents (`run_parallel`).
 - **`tool_profile()`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
-  (read and run, no editing, browser or dispatch), `"shell"` (`Bash`,
+  (read, run, browse and talk; no editing or dispatch), `"shell"` (`Bash`,
   `bash_job`, `Read`, `run_commands_parallel`), `"assistant"` (the
   `shell` set plus `ask_user_question`, `talk`, `decide`, `summary`,
   `set_model`) or `"bash"` (`Bash` only — the bundled `/sh` agent's

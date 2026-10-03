@@ -191,7 +191,7 @@ Prompt assets shipped in `src/kiss/`:
 | Group | Tools | Notes |
 | --- | --- | --- |
 | Files and shell | `Bash`, `bash_job`, `run_commands_parallel`, `Read`, `Edit`, `Write` | `Bash(background=true)` detaches with `nohup` and returns a job id; `bash_job` tails, waits or kills; `run_commands_parallel` runs shell commands in threads with per-command exit codes; a whole-file `Read` of a file over 2,000 lines returns an outline, and an unchanged range already shown returns a one-line stub (`force=True` re-reads); `Edit` rejects a file not read in the session and `Write` rejects overwriting an unread existing file (new files and scratch files under `tmp/` are exempt). In Docker the file tools execute inside the container without this guard and `bash_job` is absent. |
-| Browser | `go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `show_browser`, `close_browser` | Patchright/Chromium; `show_browser` streams the page into the KISS Browser tab on every surface **NEW**; sub-agents get an ephemeral profile; only in the `full` profile with "Use web tools" on |
+| Browser | `go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `show_browser`, `close_browser` | Patchright/Chromium; `show_browser` streams the page into the KISS Browser tab on every surface **NEW**; sub-agents get an ephemeral profile; only in the `full` and `review` profiles with "Use web tools" on |
 | Memory | `memory_search`, `memory_pull`, `memory_read`, `memory_write`, `memory_list`, `memory_delete`, `memory_refresh` | Section 13; `memory=` narrows to the general or a domain memory **NEW** |
 | Dispatch | `run_agent`, `run_parallel`, `number_of_cores` | Section 10; `run_parallel` and `number_of_cores` only in parallel mode |
 | MCP | tools of configured MCP servers, `connect_mcp_server`, `finish_mcp_server_connect` **NEW** | OAuth sign-in for remote MCP servers (Notion, Linear, Asana, Zoom or any URL); tokens in `~/.kiss/mcp_auth/<server>.json` |
@@ -203,7 +203,7 @@ Tool profiles (`TOOL_PROFILES`, `sorcar_agent.py:71-92`):
 | Profile | Tools kept | Used by |
 | --- | --- | --- |
 | `full` | everything above | default |
-| `review` | `Bash`, `bash_job`, `Read`, `run_commands_parallel`, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary` | reviewer children of `run_parallel`, `/ask` |
+| `review` | `Bash`, `bash_job`, `Read`, `run_commands_parallel`, `memory_search`, `memory_pull`, `memory_read`, `memory_list`, `decide`, `summary`, `talk`, the browser tools | reviewer children of `run_parallel`, `/ask` |
 | `shell` | `Bash`, `bash_job`, `Read`, `run_commands_parallel` | `/skillopt` |
 | `assistant` **NEW** | shell profile + `ask_user_question`, `talk`, `decide`, `summary`, `set_model` | conversational runs without file edits |
 | `bash` | `Bash` | `/sh`, `/remember`, `/forget`, `/task_update` |
