@@ -69,7 +69,6 @@ from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
-from kiss.server.tools_file import load_tools_file
 
 logger = logging.getLogger(__name__)
 
@@ -201,13 +200,12 @@ def _state_owns_thread(
 def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
     """True when *exc* wraps the run-cancelling ``KeyboardInterrupt``.
 
-    The untrusted-code loaders (:func:`apply_agent_overrides`,
-    :func:`load_tools_file`) execute caller-supplied Python on the
-    task thread and convert EVERY raise — ``BaseException`` included —
-    into their diagnostic error type.  The asynchronous
-    ``KeyboardInterrupt`` the Stop watchdog (or the shutdown path)
-    injects while such a getter runs therefore surfaced as an
-    ``AgentFileError``/``ToolsFileError``: the run was reported
+    The untrusted-code loader (:func:`apply_agent_overrides`) executes
+    caller-supplied Python on the task thread and converts EVERY raise
+    — ``BaseException`` included — into its diagnostic error type.  The
+    asynchronous ``KeyboardInterrupt`` the Stop watchdog (or the
+    shutdown path) injects while such a getter runs therefore surfaced
+    as an ``AgentFileError``: the run was reported
     ``"Task failed: ... KeyboardInterrupt"`` instead of stopped, and
     with :meth:`_TaskRunnerMixin._cancel_outcome` never called the
     stop stayed unacknowledged, so the watchdog's retry could land a
@@ -221,7 +219,7 @@ def _stop_interrupt_wrapped(exc: BaseException, state: AgentState) -> bool:
     * a ``KeyboardInterrupt`` sits in *exc*'s cause/context chain.
 
     A user script that raises ``KeyboardInterrupt`` on its own, with
-    no stop pending, stays a task error (the loaders' documented
+    no stop pending, stays a task error (the loader's documented
     contract); a script failure that merely coincides with a pending
     stop is reported as the stop the user asked for.
 
@@ -588,7 +586,7 @@ def _zero_usage_counters(agent: Any) -> None:
     first (and every run on an agent reused from the tab's previous
     task) as ``max(0, own - previous)``.  Zeroing here as well covers
     the runs that never reach ``_reset`` (a worktree setup or
-    tools-file failure on a reused agent), whose failure banner would
+    agent-script failure on a reused agent), whose failure banner would
     otherwise carry the previous run's numbers.
 
     A ``RelentlessAgent``-derived agent is reset through its
@@ -826,8 +824,7 @@ class _TaskRunnerMixin:
                 # the worker thread was never started, and this call
                 # runs on the dispatch thread purely to route the run
                 # through the normal cancellation handlers below — no
-                # user setup (agent-script getters, tools files) may
-                # execute.
+                # user setup (agent-script getters) may execute.
                 client_task_id = _client_task_id_of(cmd)
                 raise KeyboardInterrupt("run cancelled before start")
             # Agent-script overrides (wire field ``agentPath``) rewrite the
@@ -835,7 +832,7 @@ class _TaskRunnerMixin:
             # any field is read, including the ``chatId`` that
             # ``_resolve_run_state`` below consumes.  The script is
             # untrusted user code, so it executes here on the task's worker
-            # thread (like a tools file), never on the dispatch loop.  A
+            # thread, never on the dispatch loop.  A
             # broken script must still fail the task with the
             # status-running → result → status-end guarantees of the try
             # below, so the raise is deferred until after the start status.
@@ -848,6 +845,14 @@ class _TaskRunnerMixin:
                 # ``agentPath``.
                 picked_sea = self._resolve_sea_model(cmd)
                 overridden_fields = apply_agent_overrides(cmd)
+                # ``tools`` / ``appendBasicTools`` are daemon-side
+                # fields the loader stages together from the script's
+                # ``tools()`` / ``add_to_tools()``; they never travel
+                # the wire, so whatever a client sent in them is
+                # dropped here rather than read as tool input.
+                if "tools" not in overridden_fields:
+                    cmd.pop("tools", None)
+                    cmd.pop("appendBasicTools", None)
                 # Once per run whose model is a picker SEA, with the
                 # effective work dir (a ``work_dir()`` override included):
                 # the hook's side effects (autorouter's weekly cron job)
@@ -1879,7 +1884,7 @@ class _TaskRunnerMixin:
         suggested_next_task = ""
         task_end_event: dict[str, Any] | None = None
         sub_start_ms = start_ms
-        # A failure before the first ``agent.run`` (tools file, config)
+        # A failure before the first ``agent.run`` (agent script, config)
         # must not report the previous run's usage of a reused agent.
         _zero_usage_counters(agent)
         agent_returned: str = ""
@@ -1951,13 +1956,6 @@ class _TaskRunnerMixin:
             # ``webTools`` no config fallback is read here.
             _raw_memory = cmd.get("useMemory")
             _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
-            # Absent or malformed means the default (True): only a
-            # client that explicitly sent ``false`` strips the agent
-            # down to ``finish`` plus its own tools.
-            _raw_append = cmd.get("appendBasicTools")
-            _append_basic_tools = (
-                _raw_append if isinstance(_raw_append, bool) else True
-            )
             # Tool profile (``run(tool_profile=...)`` / an agent
             # script's ``tool_profile()``): absent or malformed means
             # the agent's usual choice.  An unknown name is rejected
@@ -2006,12 +2004,22 @@ class _TaskRunnerMixin:
                 is_subagent=bool(parent_task_id),
             )
 
-            # A broken tools file raises ToolsFileError here, inside
-            # this try: the generic task-error handling below turns it
-            # into a failed task result carrying the loader's
-            # diagnostic message — the task must stop rather than run
-            # without the tools the client asked for.
-            client_tools = load_tools_file(cmd.get("toolsFile"))
+            # The agent script's ``tools()`` / ``add_to_tools()`` list,
+            # staged onto the command dict's ``tools`` field by
+            # ``apply_agent_overrides`` (which already type-checked it)
+            # together with the ``appendBasicTools`` flag the getter
+            # implies (``tools()`` -> False, ``add_to_tools()`` -> True).
+            # ``_run_task`` dropped any client-sent value of either
+            # field, so absent means "no extra tools, the built-in
+            # toolset as usual".
+            _raw_tools = cmd.get("tools")
+            client_tools: list[Callable[..., Any]] = (
+                list(_raw_tools) if isinstance(_raw_tools, list) else []
+            )
+            _raw_append = cmd.get("appendBasicTools")
+            _append_basic_tools = (
+                _raw_append if isinstance(_raw_append, bool) else True
+            )
 
             # A ``while`` over a growable list, not a ``for``: a
             # steering message of ``<task>`` blocks sent while a
@@ -2264,8 +2272,8 @@ class _TaskRunnerMixin:
         except BaseException as _outer_exc:
             if result_summary == "Agent Failed Abruptly":
                 # ``_stop_interrupt_wrapped``: a stop injected while
-                # the tools-file loader ran caller code surfaces here
-                # as a ``ToolsFileError`` wrapping the interrupt — a
+                # the agent-script loader ran caller code surfaces here
+                # as an ``AgentFileError`` wrapping the interrupt — a
                 # cancellation, not a task error.
                 if isinstance(
                     _outer_exc, KeyboardInterrupt,
@@ -2329,7 +2337,7 @@ class _TaskRunnerMixin:
                 # / ``_release_worktree_without_merging`` above) are
                 # normally broadcast by ``agent.run``.  A failure
                 # BEFORE the first ``agent.run`` (tool profile, config,
-                # tools file) would otherwise swallow them and the user
+                # agent script) would otherwise swallow them and the user
                 # would never learn where that worktree's work went.
                 # The flush is a take-and-clear, so it never
                 # re-delivers what ``run`` already broadcast; it sits

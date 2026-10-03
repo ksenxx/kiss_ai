@@ -231,14 +231,14 @@ class TestSingleFailureResultBroadcast(unittest.TestCase):
             assert key in result, f"failure result lost field {key!r}"
 
     def test_outer_failure_emits_one_result(self) -> None:
-        """Outer catch-all path (broken tools file, pre-loop failure)."""
-        broken_tools = Path(self.tmpdir) / "broken_tools.py"
-        broken_tools.write_text(
-            "raise RuntimeError('broken tools import')\n",
+        """Outer catch-all path (broken agent script, pre-loop failure)."""
+        broken_script = Path(self.tmpdir) / "broken_agent.py"
+        broken_script.write_text(
+            "raise RuntimeError('broken agent script import')\n",
             encoding="utf-8",
         )
         results = self._run_and_collect_results(
-            "r3-outer-tab", {"toolsFile": str(broken_tools)},
+            "r3-outer-tab", {"agentPath": str(broken_script)},
         )
         assert len(results) == 1, (
             f"expected exactly one terminal result event, got {results}"

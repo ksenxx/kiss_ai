@@ -517,8 +517,9 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
     assert cmd["useParallel"] is False
     assert cmd["webTools"] is False
     assert cmd["useMemory"] is False
-    # ``tools()`` returns callables, so the SEA file doubles as its
-    # own tools file, and switches the basic toolset off.
+    # ``tools()`` returns callables, staged on the daemon-side ``tools``
+    # field, and switches the basic toolset off.
     assert cmd["appendBasicTools"] is False
     assert "toolProfile" not in cmd
-    assert cmd["toolsFile"] == ask_path
+    assert all(callable(tool) for tool in cmd["tools"])
+    assert "toolsFile" not in cmd

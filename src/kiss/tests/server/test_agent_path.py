@@ -265,7 +265,7 @@ class AgentPathApiTest(unittest.TestCase):
 
 
             def tools():
-                # The script is its own tools file; ``tools()`` also
+                # ``tools()`` makes these the whole tool set and
                 # switches the basic toolset off.
                 return [scripted_tool]
 
@@ -303,22 +303,6 @@ class AgentPathApiTest(unittest.TestCase):
                 return False
             ''',
         )
-        client_tools = self._write_py(
-            "client_tools.py",
-            '''
-            """Tools the client passes (the script's must win)."""
-
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
-            ''',
-        )
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         result = sorcar.run(
@@ -326,7 +310,6 @@ class AgentPathApiTest(unittest.TestCase):
             work_dir=self.repo,
             model=available[0],
             system_prompt="client system prompt",
-            tools=client_tools,
             extension_agent_path=agent_path,
             use_worktree=True,
             auto_commit=True,
@@ -363,8 +346,8 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_use_memory_attr"] is False
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
         assert seen["tools"][0](x=21) == 42
-        # ``tools()`` means ONLY these tools (+ finish): the client's
-        # default ``append_basic_tools=True`` is overridden.
+        # ``tools()`` means ONLY these tools (+ finish): the basic
+        # toolset is switched off.
         assert seen["_append_basic_tools_attr"] is False
 
     def test_missing_getters_keep_passed_and_default_values(self) -> None:
@@ -409,30 +392,12 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_is_parallel_attr"] is True
         assert seen["tools"] == []
 
-    def test_add_to_tools_replaces_client_tools_and_keeps_basic_tools(self) -> None:
-        """An ``add_to_tools()`` script replaces the client's tools and keeps the basic toolset.
+    def test_add_to_tools_keeps_basic_tools(self) -> None:
+        """An ``add_to_tools()`` script adds its tools and keeps the basic toolset.
 
-        The client passes a tools file AND ``append_basic_tools=False``;
-        the script's ``add_to_tools()`` wins on both counts: the agent
-        sees the script's tools only, with the basic toolset switched
-        back on.
+        The agent sees the script's tools, with the basic toolset kept
+        on.
         """
-        client_tools = self._write_py(
-            "dropped_tools.py",
-            '''
-            """Tools the client passes (replaced by the script's)."""
-
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
-            ''',
-        )
         agent_path = self._write_py(
             "add_tools_agent.py",
             '''
@@ -453,8 +418,6 @@ class AgentPathApiTest(unittest.TestCase):
         result = sorcar.run(
             "run with added tools",
             work_dir=self.repo,
-            tools=client_tools,
-            append_basic_tools=False,
             extension_agent_path=agent_path,
             endpoint_file=self.endpoint_file,
             timeout=60,

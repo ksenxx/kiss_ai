@@ -19,7 +19,7 @@ arriving on another connection) found the thread with
   exactly this window (S3-05 / C-R4) — so no force-stop watchdog was
   ever started;
 * only the cooperative stop event was set, which nothing in the run's
-  untrusted setup code (agent-script getters, tools files) ever
+  untrusted setup code (agent-script getters) ever
   checks, so the run kept executing that code indefinitely and the
   client's stop confirmation wait starved.
 

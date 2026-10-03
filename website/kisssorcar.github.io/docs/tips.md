@@ -88,7 +88,7 @@ print(result.text, result.success, result.cost)
 sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`.
+Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `add_to_tools()` returns the extra tool functions.
 
 ## Run KISS Sorcar in a Docker Container
 

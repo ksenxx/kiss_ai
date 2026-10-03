@@ -271,81 +271,14 @@ def _to_task_result(
     )
 
 
-def _resolve_py_file(
-    value: str | Path, type_error: str, what: str, allow_path: bool = True,
-) -> str:
-    """Resolve and validate a client-supplied Python-file path.
-
-    Shared tail of :func:`resolve_tools_file` and
-    :func:`resolve_agent_path`: the path is resolved against the
-    CLIENT's working directory (the daemon may run with a different
-    one) and validated eagerly so a bad value fails fast, before any
-    daemon connection is made.
-
-    Args:
-        value: The path to resolve; a wrong-typed value raises.
-        type_error: Error message for a wrong-typed *value*;
-            ``{type}`` and ``{value}`` placeholders are filled in.
-        what: Noun used in the suffix/existence error messages, e.g.
-            ``"tools file"`` or ``"agent script"``.
-        allow_path: Whether a ``pathlib.Path`` *value* is accepted in
-            addition to ``str``.
-
-    Returns:
-        The absolute path as a string.
-
-    Raises:
-        ValueError: When *value* has a wrong type, is not a ``.py``
-            file, or does not exist.
-    """
-    if not isinstance(value, (str, Path) if allow_path else str):
-        raise ValueError(
-            type_error.format(type=type(value).__name__, value=repr(value))
-        )
-    path = Path(value).expanduser().resolve()
-    # Quote the path literally rather than via repr(): repr doubles every
-    # backslash of a Windows path, which misleads the reader.
-    if path.suffix != ".py":
-        raise ValueError(f"{what} '{path}' is not a Python (.py) file")
-    if not path.is_file():
-        raise ValueError(f"{what} '{path}' does not exist")
-    return str(path)
-
-
-def resolve_tools_file(tools: str | Path | None) -> str:
-    """Validate a client-supplied tools path and resolve it absolutely.
-
-    Client-side counterpart of the daemon's
-    ``kiss.server.tools_file.load_tools_file`` (see
-    :func:`_resolve_py_file` for the resolution rules).
-
-    Args:
-        tools: Path to a Python file whose ``get_tools()`` function
-            supplies the agent tools, or ``None`` for no extra tools.
-
-    Returns:
-        The absolute path as a string, or ``""`` when *tools* is
-        ``None``.
-
-    Raises:
-        ValueError: When *tools* is neither ``None`` nor a path, is not
-            a ``.py`` file, or does not exist.
-    """
-    if tools is None:
-        return ""
-    return _resolve_py_file(
-        tools,
-        "tools must be a path to a Python file, got {type}: {value}",
-        "tools file",
-    )
-
-
 def resolve_agent_path(agent_path: str | None) -> str:
     """Validate a client-supplied agent-script path and resolve it.
 
     Client-side counterpart of the daemon's
-    ``kiss.server.agent_file.apply_agent_overrides`` (see
-    :func:`_resolve_py_file` for the resolution rules).
+    ``kiss.server.agent_file.apply_agent_overrides``: the path is
+    resolved against the CLIENT's working directory (the daemon may run
+    with a different one) and validated eagerly so a bad value fails
+    fast, before any daemon connection is made.
 
     Args:
         agent_path: Path string of a Python file whose top-level
@@ -362,12 +295,19 @@ def resolve_agent_path(agent_path: str | None) -> str:
     """
     if agent_path is None or agent_path == "":
         return ""
-    return _resolve_py_file(
-        agent_path,
-        "agent_path must be a string path to a Python file, got {type}: {value}",
-        "agent script",
-        allow_path=False,
-    )
+    if not isinstance(agent_path, str):
+        raise ValueError(
+            "agent_path must be a string path to a Python file, got "
+            f"{type(agent_path).__name__}: {agent_path!r}"
+        )
+    path = Path(agent_path).expanduser().resolve()
+    # Quote the path literally rather than via repr(): repr doubles every
+    # backslash of a Windows path, which misleads the reader.
+    if path.suffix != ".py":
+        raise ValueError(f"agent script '{path}' is not a Python (.py) file")
+    if not path.is_file():
+        raise ValueError(f"agent script '{path}' does not exist")
+    return str(path)
 
 
 def _frame_limit_error() -> ConnectionError:
@@ -446,7 +386,6 @@ def run(
     model: str = "",
     chat_id: str = "",
     system_prompt: str = "",
-    tools: str | Path | None = None,
     extension_agent_path: str = "",
     use_worktree: bool = True,
     auto_commit: bool = True,
@@ -456,7 +395,6 @@ def run(
     classify_tasks: bool | None = None,
     use_memory: bool | None = None,
     is_parallel: bool = True,
-    append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     tool_profile: str = "",
@@ -533,23 +471,6 @@ def run(
             id, ``~/.kiss/AGENTS.md``) so the agent's tool contract
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
-        tools: Optional path to a Python file supplying extra tools
-            for the agent.  The file must define a top-level
-            ``get_tools()`` function returning the functions in the
-            file the agent may call; the daemon imports the file,
-            calls ``get_tools()``, and registers the returned
-            callables as agent tools.  Each function's name, docstring
-            (Google-style ``Args:`` section for parameter
-            descriptions), and annotated keyword-bindable parameters
-            define the tool schema the agent sees, exactly like a
-            native tool.  The functions are never serialized by the
-            client — they run **in the daemon process**.  The path is
-            resolved against this process's working directory.  A
-            broken tools file (deleted before the daemon reads it,
-            raising at import time, or missing/misbehaving
-            ``get_tools()``) stops the task: the daemon fails the run
-            and the returned :class:`TaskResult` carries the
-            diagnostic error in its ``text`` with ``success=False``.
         extension_agent_path: Optional path — a string — to a Python
             *agent script*, also called a Sorcar Extension Agent (SEA),
             that computes this run's parameters **on the daemon**.
@@ -562,9 +483,9 @@ def run(
             to this call.  A parameter whose ``X()`` the script
             does not define keeps the value passed here, which is the
             parameter's default when the caller did not pass one.
-            *tools* and *append_basic_tools* have no getters of their
-            own: the script's tool set comes from the two tool
-            getters described below.
+            Extra agent tools have no parameter of their own (a
+            callable cannot travel the wire): the script's tool set
+            comes from the two tool getters described below.
 
             Script format: a plain Python file defining any subset of
             these zero-argument top-level functions, each returning a
@@ -589,20 +510,28 @@ def run(
 
             The script's tools come from at most ONE of these two
             getters, each returning a list of tool callables (never a
-            tools-file path)::
+            file path)::
 
                 def tools() -> list: ...         # ONLY these + finish
                 def add_to_tools() -> list: ...  # basic toolset + these
 
             ``tools()`` makes the returned tools plus ``finish`` the
-            run's entire tool set (the built-in basic toolset is not
-            built, as if *append_basic_tools* were ``False``);
-            ``add_to_tools()`` adds the returned tools to the built-in
-            basic toolset (as if *append_basic_tools* were ``True``).
-            Either way the script is its own tools file: the daemon
-            re-imports it and calls the same getter for the list, as
-            it calls a tools file's ``get_tools()``.  Defining both
-            getters stops the task like any other broken getter.
+            run's entire tool set (the built-in basic toolset —
+            ``Bash``, ``Read``, ``Edit``, ``Write``, browser tools,
+            ``run_agent``, ``ask_user_question``, ``talk``,
+            ``set_model``, ``decide``, ``summary``, ``run_parallel``,
+            ... — is not built, so *use_web_tools*, *is_parallel* and
+            *tool_profile* have no tools left to act on, and the
+            default ``SYSTEM.md`` prompt, whose workflow rules name
+            ``Read``, ``Edit``, ``Bash`` and the browser tools, should
+            usually be replaced by a *system_prompt* written for the
+            tools the run actually has); ``add_to_tools()`` adds the
+            returned tools to the built-in basic toolset.  Each tool's
+            name, docstring (Google-style ``Args:`` section for
+            parameter descriptions), and annotated keyword-bindable
+            parameters define the tool schema the agent sees, exactly
+            like a native tool.  Defining both getters stops the task
+            like any other broken getter.
 
             The script may also define two hook getters with no
             corresponding parameter on this function (a callable
@@ -646,8 +575,7 @@ def run(
             added to the system prompt.
 
             The ``X()`` functions are never serialized by the
-            client — they run **in the daemon process**, exactly like a
-            tools file's ``get_tools()``.
+            client — they run **in the daemon process**.
             ``use_web_tools()``, ``classify_tasks()``, and
             ``use_memory()`` return a bool for a per-run override
             or ``None`` for the daemon's configured default; and
@@ -663,7 +591,7 @@ def run(
             *parent_tab_id* are the CALLING task's identity, which the
             script must not be able to forge.  The
             *extension_agent_path* itself is resolved against this process's
-            working directory and validated eagerly, like *tools*.  A
+            working directory and validated eagerly.  A
             broken agent script (deleted before the daemon reads it,
             raising at import time, a non-callable getter ``X``, a
             raising ``X()``, or a wrong-typed return value) stops the
@@ -714,26 +642,13 @@ def run(
             memory" checkbox, persisted as ``use_memory``, or the
             daemon process's ``KISS_USE_MEMORY`` environment
             variable).  A boolean override never bypasses the memory
-            safety gates: a run without the basic toolset
-            (*append_basic_tools* false), a Docker run, a
+            safety gates: a run without the basic toolset (an agent
+            script's ``tools()``), a Docker run, a
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
         is_parallel: Whether the agent may spawn parallel sub-agents.
             Defaults to True.
-        append_basic_tools: Whether the agent gets the built-in basic
-            toolset (``Bash``, ``Read``, ``Edit``, ``Write``, browser
-            tools, ``run_agent``, ``ask_user_question``, ``talk``,
-            ``set_model``, ``decide``, ``summary``, ``run_parallel``, ...).
-            Defaults to True.  When False the agent's ONLY tools are
-            ``finish`` and the caller-supplied tools — the ones
-            returned by the *tools* file's ``get_tools()`` — so the
-            *use_web_tools* and *is_parallel* toggles have no tools left
-            to act on.  The default system prompt (``SYSTEM.md``)
-            assumes the basic toolset (its workflow rules name ``Read``,
-            ``Edit``, ``Bash`` and the browser tools), so a restricted
-            run should usually pass a *system_prompt* written for the
-            tools it actually has.
         append_to_system_prompt: Extra text appended to the run's
             system prompt when the agent is executed — after the
             default ``SYSTEM.md`` prompt (or the *system_prompt*
@@ -757,8 +672,8 @@ def run(
             ``/sh`` agent: ``Bash`` and ``finish`` only).  Empty (the
             default) keeps the daemon's usual choice (the full toolset).
             An unknown name stops the task with a diagnostic error.
-            Ignored when *append_basic_tools* is False, which builds
-            no built-in toolset at all.
+            Ignored when the agent script's ``tools()`` supplies the
+            whole tool set, which builds no built-in toolset at all.
         docker_image: Run the task's file and shell tools (``Bash``,
             ``run_commands_parallel``, ``Read``, ``Edit``, ``Write``)
             inside a Docker container instead of on the daemon's host.
@@ -811,11 +726,10 @@ def run(
         history.
 
     Raises:
-        ValueError: When *prompt* is empty or blank, when *tools*
-            is not the path of an existing Python (``.py``) file (see
-            :func:`resolve_tools_file`), or when *extension_agent_path* is
-            neither empty nor the path string of an existing Python
-            (``.py``) file (see :func:`resolve_agent_path`).
+        ValueError: When *prompt* is empty or blank, or when
+            *extension_agent_path* is neither empty nor the path string
+            of an existing Python (``.py``) file (see
+            :func:`resolve_agent_path`).
         ConnectionError: When no daemon is reachable at the endpoint,
             the daemon drops the connection before the task finishes,
             or a *stop_on_timeout* stop cannot be sent on the broken
@@ -857,7 +771,6 @@ def run(
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
-    tools_file = resolve_tools_file(tools)
     agent_file = resolve_agent_path(extension_agent_path)
     path = _resolve_endpoint_file(endpoint_file)
     tab_id = f"api-{uuid.uuid4().hex}"
@@ -893,7 +806,6 @@ def run(
             "sideChannel": side_channel,
             "model": model,
             "systemPrompt": system_prompt,
-            "toolsFile": tools_file,
             "agentPath": agent_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
@@ -903,7 +815,6 @@ def run(
             "classifyTasks": classify_tasks,
             "useMemory": use_memory,
             "useParallel": is_parallel,
-            "appendBasicTools": append_basic_tools,
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
             "toolProfile": tool_profile,

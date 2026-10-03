@@ -212,7 +212,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface (`model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config`, `use_web_tools`, `use_memory`, `tool_profile`, `docker_image`, `timeout`, and more) plus options that customize the agent itself: `tools` (path of a Python file whose `get_tools()` returns extra tool functions, imported and run in the daemon process), `system_prompt`, `append_to_system_prompt`, `append_to_prompt`, `append_basic_tools=False` (restrict the agent to `finish` plus your tools), and `extension_agent_path` (run a Sorcar Extension Agent). Every option is documented in [src/kiss/server/README.md](src/kiss/server/README.md).
+`run()` accepts keyword options mirroring the chat interface (`model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config`, `use_web_tools`, `use_memory`, `tool_profile`, `docker_image`, `timeout`, and more) plus options that customize the agent itself: `system_prompt`, `append_to_system_prompt`, `append_to_prompt`, and `extension_agent_path` (run a Sorcar Extension Agent — a Python file whose `add_to_tools()` / `tools()` supply extra tool functions, imported and run in the daemon process). Every option is documented in [src/kiss/server/README.md](src/kiss/server/README.md).
 
 ### Sorcar Extension Agents (SEAs)
 

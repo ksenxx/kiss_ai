@@ -14,16 +14,16 @@ lifecycle — live event broadcasts to every connected webview,
 follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
-The agent's channel tools are supplied through the API's ``tools=``
-*file path* contract directly: each agent module defines a top-level
-``add_to_tools()`` that builds a fresh agent from the credentials
-persisted under ``~/.kiss`` and returns its authentication and backend
-tools, so the agent's OWN module file (``agent.tools_file``) is passed
-as the ``tools=`` argument and the daemon imports it and calls its
-``add_to_tools()``.  No bridge, registry, wrapper, or generated file is
-involved.  The active workspace travels to the daemon-side
-``add_to_tools()`` through the ``KISS_CHANNEL_WORKSPACE`` environment
-variable.
+The agent's channel tools are supplied through the API's
+``extension_agent_path`` agent-script contract directly: each agent
+module is a SEA defining a top-level ``add_to_tools()`` that builds a
+fresh agent from the credentials persisted under ``~/.kiss`` and
+returns its authentication and backend tools, so the agent's OWN
+module file (``agent.sea_path``) is passed as ``extension_agent_path``
+and the daemon imports it and calls its ``add_to_tools()``.  No
+bridge, registry, wrapper, or generated file is involved.  The active
+workspace travels to the daemon-side ``add_to_tools()`` through the
+``KISS_CHANNEL_WORKSPACE`` environment variable.
 """
 
 from __future__ import annotations
@@ -235,12 +235,25 @@ class KissWebChatAgent(BaseChannelAgent):
     anything itself — the inherited ``run()`` submits the task through
     :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`,
     which records the YAML result in ``last_run_result`` plus the
-    cost / token / step totals.
+    cost / token / step totals.  This module defines no
+    ``add_to_tools()``, so the carrier adds no channel tools of its own;
+    the channel runner passes the channel module's path as *sea_path*
+    so the launch still gets that channel's tools.
     """
 
-    def __init__(self, name: str = "") -> None:
+    def __init__(self, name: str = "", sea_path: str = "") -> None:
         super().__init__(name)
         self._chat_id: str = ""
+        self._sea_path = sea_path
+
+    @property
+    def sea_path(self) -> str:
+        """Path of the agent script whose ``add_to_tools()`` supplies the launch's tools.
+
+        The *sea_path* given at construction (a channel module, for the
+        channel runner's launches), or ``""`` for no extra tools.
+        """
+        return self._sea_path
 
     @property
     def chat_id(self) -> str:
@@ -268,12 +281,10 @@ def run_agent_via_kiss_web(
     model_name: str = "",
     work_dir: str = "",
     max_budget: float | None = None,
-    tools: str | Path | None = None,
     use_worktree: bool = True,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
     is_parallel: bool = True,
-    append_basic_tools: bool = True,
     append_to_system_prompt: str = "",
     append_to_prompt: str = "",
     timeout: float | None = None,
@@ -281,11 +292,11 @@ def run_agent_via_kiss_web(
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
-    Supplies the agent's channel tools through the API's ``tools=``
-    file-path contract (by default ``agent.tools_file`` — the agent's
-    own module, whose top-level ``add_to_tools()`` the daemon calls to
-    build a fresh agent from the credentials persisted under
-    ``~/.kiss``), appends the agent's ``channel_system_prompt``
+    Supplies the agent's channel tools through the API's
+    ``extension_agent_path`` agent-script contract (``agent.sea_path``
+    — the agent's own module, whose top-level ``add_to_tools()`` the
+    daemon calls to build a fresh agent from the credentials persisted
+    under ``~/.kiss``), appends the agent's ``channel_system_prompt``
     guidance to the prompt (kept out of the system prompt so the
     daemon's default system prompt stays intact), and
     submits the task to the in-process kiss-web daemon over its
@@ -308,7 +319,7 @@ def run_agent_via_kiss_web(
 
     Args:
         agent: The third-party agent instance supplying the channel
-            tools file (``agent.tools_file``), the workspace,
+            agent script (``agent.sea_path``), the workspace,
             ``channel_system_prompt`` guidance, and the chat id to
             continue (``agent.chat_id`` on :class:`KissWebChatAgent`
             carriers).
@@ -317,22 +328,12 @@ def run_agent_via_kiss_web(
         work_dir: Working directory for the run.
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
-        tools: Path of a Python file whose top-level ``get_tools()``
-            (or agent-script ``add_to_tools()``)
-            supplies the task's extra tools (the API's tools-file
-            contract).  ``None`` uses ``agent.tools_file`` — the
-            agent's own module.
         use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
             endpoint / headers).
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
-        append_basic_tools: Whether the daemon-built agent gets the
-            built-in basic toolset on top of the channel tools.  When
-            ``False`` the agent's only tools are ``finish`` and the
-            tools file's tools (see
-            :func:`kiss.server.sorcar.run`).
         append_to_system_prompt: Extra text appended to the run's
             system prompt when the daemon executes the agent (see
             :func:`kiss.server.sorcar.run`).
@@ -352,8 +353,8 @@ def run_agent_via_kiss_web(
         the task did not finish within *timeout*.
 
     Raises:
-        ValueError: When *tools* (or ``agent.tools_file``) is not the
-            path of an existing Python file.
+        ValueError: When ``agent.sea_path`` is not the path of an
+            existing Python file.
         ConnectionError: When the daemon cannot be reached.
     """
     from kiss.server import sorcar
@@ -368,10 +369,9 @@ def run_agent_via_kiss_web(
         return result_yaml
     chat_id = agent.chat_id if isinstance(agent, KissWebChatAgent) else ""
     # The agent's channel tools (auth tools + authenticated backend
-    # methods) are built inside the daemon: it imports the tools file
-    # and calls its add_to_tools(); the daemon-built agent supplies the
-    # standard tools itself.
-    tools_path = str(tools) if tools else agent.tools_file
+    # methods) are built inside the daemon: it imports the agent's
+    # module as the run's agent script and calls its add_to_tools();
+    # the daemon-built agent supplies the standard tools itself.
     endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
     _enter_workspace(agent.workspace)
     try:
@@ -381,13 +381,12 @@ def run_agent_via_kiss_web(
                 work_dir=work_dir,
                 model=model_name,
                 chat_id=chat_id,
-                tools=tools_path or None,
+                extension_agent_path=agent.sea_path,
                 use_worktree=use_worktree,
                 max_budget=max_budget,
                 model_config=model_config,
                 use_web_tools=web_tools,
                 is_parallel=is_parallel,
-                append_basic_tools=append_basic_tools,
                 append_to_system_prompt=append_to_system_prompt,
                 append_to_prompt=append_to_prompt,
                 timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,

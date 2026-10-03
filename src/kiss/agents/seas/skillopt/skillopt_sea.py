@@ -289,7 +289,7 @@ def _format_fields(text: str) -> set[str]:
 
 def _execute_sea(path: Path) -> dict[str, Any]:
     """Execute the SEA file at *path* and return its namespace."""
-    from kiss.server.tools_file import execute_python_file
+    from kiss.server.agent_file import execute_python_file
 
     return execute_python_file(str(path), ValueError, "SEA")
 
@@ -366,7 +366,7 @@ class SeaTarget(Target):
         # ``tools()`` is the whole tool set (no basic tools);
         # ``add_to_tools()`` extends the basic toolset.  Same contract
         # as the daemon's agent-file loader: at most one of the two,
-        # each a list of callables (never a tools-file path).
+        # each a list of callables (never a file path).
         if "tools" in ns and "add_to_tools" in ns:
             raise ValueError(
                 f"{self.path.name}: defines both tools() and add_to_tools()"

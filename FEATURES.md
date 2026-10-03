@@ -126,7 +126,7 @@ On the TPC-H engine the human supplied a researched plan (5,979 characters: remo
  │ Models (706 entries)   │ │ State in ~/.kiss     │ │ Extension points              │
  │ Anthropic/OpenAI/Gemini│ │ history.db · memories/│ │ SEAs (seas/, SEAS.md folders) │
  │ OpenRouter/Together/   │ │ cron/jobs.json ·     │ │ skills (SKILL.md) · MCP       │
- │ Z.ai/Moonshot · cc/    │ │ tabs.json · AGENTS.md│ │ servers · tools= files ·      │
+ │ Z.ai/Moonshot · cc/    │ │ tabs.json · AGENTS.md│ │ servers · SEA add_to_tools() ·│
  │ codex/ CLIs · autorouter│ │ AUTOROUTER.md · TLS  │ │ INJECTIONS.md · MY_INJECTION  │
  └────────────────────────┘ └──────────────────────┘ └───────────────────────────────┘
 ```
@@ -140,7 +140,7 @@ Figure 1. The data path from clients to models. Every client speaks the same com
 | VS Code extension `ksenxx.kiss-sorcar` | Activity-bar History view; chat as editor tabs (default, `kissSorcar.editorTabsMode`) or in the secondary sidebar; Task Info in the secondary sidebar | 13 commands, 4 keybindings (`Ctrl/Cmd+T` new conversation, `Ctrl/Cmd+D` focus chat, `Ctrl/Cmd+E` run selection, `Ctrl/Cmd+L` insert selection), 4 VS Code settings (`defaultModel`, `kissProjectPath`, `editorTabsMode`, `checkForUpdates`); SCM sparkle generates commit messages |
 | Remote web app | `https://<host>:8787` served by `kiss-web`, password from Settings; Cloudflare tunnel URL on remote deploys; installable PWA with an offline shell (`sw.js`) | Same `chat.html`/`main.js` as the extension; light theme by default **NEW**; reconnects in place with backoff and a 45 s half-open detector **NEW** |
 | `sorcar` CLI | `sorcar -t "task"` or `-f file`, with `-m model`, `-b budget`, `--work-dir` | Runs `SorcarAgent` in the terminal process, outside the daemon; the 44 `kiss-<channel>` CLIs run through the daemon instead |
-| Python client API | `from kiss.server import sorcar; sorcar.run(task, ...)` returning `TaskResult(text, success, cost, tokens, steps, chat_id, task_id)` | 27 keyword options including `tools=` (path of a file whose `get_tools()` returns callables), `extension_agent_path`, `tool_profile`, `docker_image`, `timeout=3600`, `stop_on_timeout` |
+| Python client API | `from kiss.server import sorcar; sorcar.run(task, ...)` returning `TaskResult(text, success, cost, tokens, steps, chat_id, task_id)` | 25 keyword options including `extension_agent_path` (a SEA whose `add_to_tools()` / `tools()` return the extra tool callables), `tool_profile`, `docker_image`, `timeout=3600`, `stop_on_timeout` |
 | Slash commands | `/<name> <text>` at position 0 of a prompt | Registered from three sources (section 9); `/<name> help` prints the SEA's `description()` |
 | Channels | `kiss-<channel>` CLIs, `run_agent(agent="slack", ...)`, always-on gateways scheduled by cron | 44 agents (section 18) |
 | Voice | In-page wake word "Hey Sorcar" **NEW wording**, host-side Vosk listener, `talk()` playback on every open tab | Section 17 |
@@ -250,7 +250,7 @@ Files these SEAs keep under `~/.kiss`: `AGENTS.md`, `SEAS.md`, `AUTOROUTER.md`, 
 
 ## 10. Sub-agents and parallelism
 
-- `run_agent(task, agent="", workspace, model_name, max_budget, timeout, chat_id, system_prompt, tools, model_config, use_worktree, auto_commit, use_web_tools, classify_tasks, use_memory, is_parallel, append_basic_tools, append_to_system_prompt, append_to_prompt, tool_profile)`: `agent` is empty (plain sub-agent), a channel name, `"cron"`, or a `.py` path. Default wait 300 s; on timeout the child is stopped and its spend still charged **NEW**. Path-named agents honour the persisted worktree and auto-commit settings **NEW**. Task text naming the parent repository path is rewritten to the active worktree (`dispatch_path_rewrite`).
+- `run_agent(task, agent="", workspace, model_name, max_budget, timeout, chat_id, system_prompt, model_config, use_worktree, auto_commit, use_web_tools, classify_tasks, use_memory, is_parallel, append_to_system_prompt, append_to_prompt, tool_profile)`: `agent` is empty (plain sub-agent), a channel name, `"cron"`, or a `.py` path. Default wait 300 s; on timeout the child is stopped and its spend still charged **NEW**. Path-named agents honour the persisted worktree and auto-commit settings **NEW**. Task text naming the parent repository path is rewritten to the active worktree (`dispatch_path_rewrite`).
 - `run_parallel(tasks, max_workers, model_name, tool_profile)`: independent LLM sub-agents, each in its own tab on every surface; fan-out may recurse (the prompt asks for at most two levels, the code sets no limit); children classified as reviewers get the `review` profile when tool profiles are on and the task needs no implementation, unless `tool_profile=` says otherwise.
 - `run_commands_parallel(commands, max_workers, timeout_seconds, max_output_chars)`: shell commands in threads, no LLM.
 - Sub-agent tabs: opened on all clients while the child runs, closed everywhere by `subagentDone` when it finishes or by `closeSubagentTab` when any client closes them; the user's close is remembered so a replay does not reopen it. **NEW**

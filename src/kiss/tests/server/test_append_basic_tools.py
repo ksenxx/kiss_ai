@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``kiss.server.sorcar.run``'s ``append_basic_tools``.
+"""End-to-end tests for the tool set a ``kiss.server.sorcar.run`` agent gets.
 
 Spin up a real :class:`kiss.server.web_server.RemoteAccessServer` on a
 loopback local endpoint and drive ``kiss.server.sorcar.run``
@@ -15,10 +15,13 @@ agent-script overrides → ``WorktreeSorcarAgent.run`` →
 ``RelentlessAgent.perform_task``'s ``finish`` prepend — executes for
 real without any model API calls.
 
-Contract under test: ``append_basic_tools`` defaults to ``True`` (the
-agent gets the built-in basic toolset on top of the caller's tools);
-when ``False`` the agent's ONLY tools are ``finish`` and the tools the
-client's tools file's ``get_tools()`` returned.
+Contract under test: without an agent script, or with one defining
+``add_to_tools()``, the agent gets the built-in basic toolset (plus the
+script's tools); with a script defining ``tools()`` the agent's ONLY
+tools are ``finish`` and the tools that getter returned.  Extra tools
+reach the agent through the agent script alone: the ``run`` command
+has no tools or append-basic-tools wire field, and a client sending
+either anyway is ignored.
 """
 
 from __future__ import annotations
@@ -271,12 +274,18 @@ class DaemonRunApiHarness(unittest.TestCase):
         assert len(executor_calls) == 1, calls
         return list(executor_calls[0]["tool_names"])
 
-    def _write_client_tools(self) -> str:
-        """Write a tools file exporting one ``client_tool`` and return its path."""
+    def _write_tools_agent(self, getter: str, returns: str = "[client_tool]") -> str:
+        """Write an agent script whose *getter* returns *returns* and return its path.
+
+        Args:
+            getter: ``"tools"`` or ``"add_to_tools"``.
+            returns: Python expression for the getter's return value;
+                the script defines one ``client_tool`` to refer to.
+        """
         return self._write_py(
-            "client_tools.py",
-            '''
-            """Client-supplied tools."""
+            f"{getter}_agent.py",
+            f'''
+            """Agent script supplying tools through {getter}()."""
 
 
             def client_tool(x: int) -> int:
@@ -288,9 +297,9 @@ class DaemonRunApiHarness(unittest.TestCase):
                 return 2 * x
 
 
-            def get_tools():
+            def {getter}():
                 """Return the tools the agent may call."""
-                return [client_tool]
+                return {returns}
             ''',
         )
 
@@ -345,23 +354,22 @@ class DaemonRunApiHarness(unittest.TestCase):
 
 
 class AppendBasicToolsApiTest(DaemonRunApiHarness):
-    """Drive ``sorcar.run(append_basic_tools=...)`` against a real daemon."""
+    """Drive ``sorcar.run`` with ``tools()`` / ``add_to_tools()`` scripts against a real daemon."""
 
-    def test_default_appends_basic_tools(self) -> None:
-        """Without the parameter, the built-in basic toolset is added.
+    def test_add_to_tools_appends_basic_tools(self) -> None:
+        """An ``add_to_tools()`` script keeps the built-in basic toolset.
 
         The executor must see the basic tools (Bash/Read/Edit/Write,
         summary, run_agent, ask_user_question, talk, set_model,
-        run_parallel, number_of_cores), the caller's client tool, AND
-        ``finish`` — the historical default behavior, now behind
-        ``append_basic_tools=True``.
+        run_parallel, number_of_cores), the script's tool, AND
+        ``finish``.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
             "task with basic tools",
             work_dir=self.repo,
-            tools=self._write_client_tools(),
+            extension_agent_path=self._write_tools_agent("add_to_tools"),
             use_worktree=False,
             use_web_tools=False,
             endpoint_file=self.endpoint_file,
@@ -378,21 +386,20 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert "finish" in names
         assert "client_tool" in names
 
-    def test_false_only_finish_and_client_tools(self) -> None:
-        """``append_basic_tools=False`` leaves only finish + client tools.
+    def test_tools_getter_only_finish_and_script_tools(self) -> None:
+        """A ``tools()`` script leaves only finish + its tools.
 
         The executor's tool list must be EXACTLY ``finish`` (prepended
         by ``RelentlessAgent.perform_task``) followed by the tools the
-        client's tools file's ``get_tools()`` returned — no Bash, no
-        summary, no run_agent, nothing else.
+        script's ``tools()`` returned — no Bash, no summary, no
+        run_agent, nothing else.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
-            "task with only client tools",
+            "task with only script tools",
             work_dir=self.repo,
-            tools=self._write_client_tools(),
-            append_basic_tools=False,
+            extension_agent_path=self._write_tools_agent("tools"),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -400,14 +407,14 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert result.success is True
         assert self._executor_tool_names(calls) == ["finish", "client_tool"]
 
-    def test_false_without_client_tools_only_finish(self) -> None:
-        """``append_basic_tools=False`` with no tools file: finish only."""
+    def test_empty_tools_getter_only_finish(self) -> None:
+        """A ``tools()`` returning an empty list: finish only."""
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
             "task with no tools at all",
             work_dir=self.repo,
-            append_basic_tools=False,
+            extension_agent_path=self._write_tools_agent("tools", "[]"),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -418,10 +425,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_agent_script_tools_is_the_whole_tool_set(self) -> None:
         """A script ``tools()`` strips the run down to finish + its own tools.
 
-        The client sends the default (``append_basic_tools=True``) and a
-        tools file; the script's ``tools()`` wins on both counts: the
-        executor sees exactly ``finish`` and the script's tool — no
-        basic tool and no client tool.
+        The executor sees exactly ``finish`` and the script's tool — no
+        basic tool, whatever the script also defines at top level.
         """
         agent_path = self._write_py(
             "own_tools_agent.py",
@@ -434,6 +439,11 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
                 return "script"
 
 
+            def helper() -> str:
+                """Defined at top level but not returned by tools()."""
+                return "helper"
+
+
             def tools() -> list:
                 """Run with only finish and script_tool."""
                 return [script_tool]
@@ -444,7 +454,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script strips basic tools",
             work_dir=self.repo,
-            tools=self._write_client_tools(),
             extension_agent_path=agent_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
@@ -456,9 +465,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_agent_script_add_to_tools_extends_the_basic_toolset(self) -> None:
         """A script ``add_to_tools()`` adds its tools to the basic toolset.
 
-        The client sends ``append_basic_tools=False``; the script's
-        ``add_to_tools()`` switches the basic toolset back on and the
-        executor sees Bash/Read/... plus ``finish`` and the script's tool.
+        The executor sees Bash/Read/... plus ``finish`` and the
+        script's tool.
         """
         agent_path = self._write_py(
             "add_tools_agent.py",
@@ -481,7 +489,6 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "script adds to basic tools",
             work_dir=self.repo,
-            append_basic_tools=False,
             extension_agent_path=agent_path,
             use_worktree=False,
             endpoint_file=self.endpoint_file,
@@ -493,8 +500,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
             assert expected in names, f"{expected} missing from {names}"
 
     def test_agent_script_tools_path_fails_task(self) -> None:
-        """A ``tools()`` returning a tools-file path stops the task loudly."""
-        client_tools = self._write_client_tools()
+        """A ``tools()`` returning a file path stops the task loudly."""
+        other_script = self._write_tools_agent("add_to_tools")
         agent_path = self._write_py(
             "path_tools_agent.py",
             f'''
@@ -502,8 +509,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
 
 
             def tools() -> str:
-                """Return a path (no longer accepted)."""
-                return {client_tools!r}
+                """Return a path (not accepted)."""
+                return {other_script!r}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -526,7 +533,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
 
         ``RelentlessAgent.perform_task`` normally summarizes a failed
         sub-session's trajectory with a helper ``KISSAgent`` equipped
-        with Read and Bash — tools an ``append_basic_tools=False`` run
+        with Read and Bash — tools a ``tools()``-restricted run
         promised NO LLM session would get.  The restricted run must
         skip that summarizer and continue with the plain failure text.
         """
@@ -535,7 +542,7 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         result = sorcar.run(
             "restricted task whose first session fails",
             work_dir=self.repo,
-            append_basic_tools=False,
+            extension_agent_path=self._write_tools_agent("tools", "[]"),
             use_worktree=False,
             endpoint_file=self.endpoint_file,
             timeout=60,
@@ -554,10 +561,10 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_default_failure_uses_summarizer(self) -> None:
         """The default (basic-tools) failure path keeps its summarizer.
 
-        Counterpart of the restricted test above: with
-        ``append_basic_tools`` left True, the failed first sub-session
-        is followed by the Read/Bash-equipped trajectory summarizer
-        before the second sub-session continues.
+        Counterpart of the restricted test above: with no agent script
+        restricting the toolset, the failed first sub-session is
+        followed by the Read/Bash-equipped trajectory summarizer before
+        the second sub-session continues.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls, fail_first_executor=True)
@@ -579,9 +586,8 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
     def test_absent_wire_field_defaults_true(self) -> None:
         """A raw command without ``appendBasicTools`` keeps the basics.
 
-        Every pre-existing client (the webview ``submit`` path, old
-        Python clients) omits the field — their agents must keep the
-        full toolset.
+        Every client (the webview ``submit`` path, the Python client)
+        omits the field — their agents must keep the full toolset.
         """
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
@@ -591,21 +597,29 @@ class AppendBasicToolsApiTest(DaemonRunApiHarness):
         assert "summary" in names
         assert "finish" in names
 
-    def test_malformed_wire_field_defaults_true(self) -> None:
-        """A non-boolean ``appendBasicTools`` is ignored, not applied.
+    def test_client_sent_wire_fields_are_ignored(self) -> None:
+        """``appendBasicTools`` / ``tools`` sent by a client are ignored.
 
-        The daemon treats the ``run`` command as untrusted input: a
-        string ``"false"`` (or any non-bool) falls back to the default
-        ``True`` instead of stripping tools or crashing the task
-        thread.
+        Both are daemon-side fields staged by the agent-script loader,
+        never wire input: a raw command carrying ``appendBasicTools``
+        (a bool ``False`` or a string ``"false"``) or a ``tools`` JSON
+        value keeps the full toolset instead of stripping tools or
+        crashing the task thread.
         """
-        calls: list[dict[str, Any]] = []
-        self._install_executor_stub(calls)
-        self._raw_daemon_run({"appendBasicTools": "false"})
-        names = self._executor_tool_names(calls)
-        assert "Bash" in names
-        assert "summary" in names
-        assert "finish" in names
+        for extra in (
+            {"appendBasicTools": "false"},
+            {"appendBasicTools": False},
+            {"appendBasicTools": False, "tools": ["/some/tools.py"]},
+            {"tools": "/some/tools.py", "toolsFile": "/some/tools.py"},
+        ):
+            calls: list[dict[str, Any]] = []
+            self._install_executor_stub(calls)
+            self._raw_daemon_run(extra)
+            names = self._executor_tool_names(calls)
+            assert "Bash" in names, extra
+            assert "summary" in names, extra
+            assert "finish" in names, extra
+            assert names.count("finish") == 1, extra
 
 
 if __name__ == "__main__":

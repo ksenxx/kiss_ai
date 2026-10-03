@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,17 +26,18 @@ from kiss.server.agent_file import AgentFileError, apply_agent_overrides
 
 def test_cron_agent_module_is_a_valid_agent_script() -> None:
     # The contract the cron dispatch relies on: passing the cron
-    # module as ``extension_agent_path`` makes it its own tools file (its
-    # ``add_to_tools()`` returns the cron_job tool on top of the basic
-    # toolset) and moves the session to ~/.kiss/cron/work with no git
-    # lifecycle.
-    cmd = {"agentPath": cron_agent.__file__, "toolsFile": ""}
+    # module as ``extension_agent_path`` stages its ``add_to_tools()``
+    # (the cron_job and gateway_command tools on top of the basic
+    # toolset) and moves the
+    # session to ~/.kiss/cron/work with no git lifecycle.
+    cmd: dict[str, Any] = {"agentPath": cron_agent.__file__}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "toolsFile", "appendBasicTools", "workDir", "useWorktree", "autoCommit",
+        "tools", "appendBasicTools", "workDir", "useWorktree", "autoCommit",
     }
-    assert cmd["toolsFile"] == cron_agent.__file__
+    assert [t.__name__ for t in cmd["tools"]] == ["cron_job", "gateway_command"]
     assert cmd["appendBasicTools"] is True
+    assert "toolsFile" not in cmd
     assert cmd["workDir"] == cron_agent.work_dir()
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
@@ -52,30 +54,50 @@ def _hello() -> str:
 '''
 
 
-def test_agent_script_tools_is_own_path_without_basic_tools(
+def test_agent_script_tools_stages_callables_without_basic_tools(
     tmp_path: Path,
 ) -> None:
-    # ``tools()`` -> the script is its own tools file and the run gets
-    # ONLY these tools (+ finish): ``appendBasicTools`` is forced off
-    # whatever the client sent.
+    # ``tools()`` -> the returned callables are staged on the daemon-side
+    # ``tools`` field and the run gets ONLY these tools (+ finish):
+    # ``appendBasicTools`` is False.  Nothing names the script's path.
     script = tmp_path / "self_tools_agent.py"
     script.write_text(_HELLO_TOOL + "\ndef tools() -> list:\n    return [_hello]\n")
-    cmd = {"agentPath": str(script), "toolsFile": "", "appendBasicTools": True}
-    assert apply_agent_overrides(cmd) == {"toolsFile", "appendBasicTools"}
-    assert cmd["toolsFile"] == str(script)
+    cmd: dict[str, Any] = {"agentPath": str(script)}
+    assert apply_agent_overrides(cmd) == {"tools", "appendBasicTools"}
+    assert [t.__name__ for t in cmd["tools"]] == ["_hello"]
+    assert cmd["tools"][0]() == "hello"
     assert cmd["appendBasicTools"] is False
+    assert "toolsFile" not in cmd
 
 
-def test_agent_script_add_to_tools_is_own_path_with_basic_tools(
+def test_agent_script_add_to_tools_stages_callables_with_basic_tools(
     tmp_path: Path,
 ) -> None:
-    # ``add_to_tools()`` -> same tools file, but ADDED to the basic
-    # toolset: ``appendBasicTools`` is forced on.  A tuple is accepted.
+    # ``add_to_tools()`` -> same staging, but ADDED to the basic
+    # toolset: ``appendBasicTools`` is True.  A tuple is accepted and
+    # staged as a list.
     script = tmp_path / "add_tools_agent.py"
     script.write_text(_HELLO_TOOL + "\ndef add_to_tools() -> tuple:\n    return (_hello,)\n")
-    cmd = {"agentPath": str(script), "toolsFile": "/client/tools.py", "appendBasicTools": False}
-    assert apply_agent_overrides(cmd) == {"toolsFile", "appendBasicTools"}
-    assert cmd["toolsFile"] == str(script)
+    cmd: dict[str, Any] = {"agentPath": str(script)}
+    assert apply_agent_overrides(cmd) == {"tools", "appendBasicTools"}
+    assert isinstance(cmd["tools"], list)
+    assert [t.__name__ for t in cmd["tools"]] == ["_hello"]
+    assert cmd["appendBasicTools"] is True
+    assert "toolsFile" not in cmd
+
+
+def test_client_sent_tools_field_is_replaced_by_the_getter(
+    tmp_path: Path,
+) -> None:
+    # ``tools`` is a daemon-side field: whatever JSON a client puts
+    # there is overwritten by the script's getter.
+    script = tmp_path / "add_tools_agent.py"
+    script.write_text(_HELLO_TOOL + "\ndef add_to_tools() -> list:\n    return [_hello]\n")
+    cmd: dict[str, Any] = {
+        "agentPath": str(script), "tools": "/client/tools.py", "appendBasicTools": False,
+    }
+    apply_agent_overrides(cmd)
+    assert [t.__name__ for t in cmd["tools"]] == ["_hello"]
     assert cmd["appendBasicTools"] is True
 
 
@@ -84,7 +106,7 @@ def test_agent_script_tools_wrong_type_still_rejected(
 ) -> None:
     script = tmp_path / "bad_tools_agent.py"
     script.write_text("def tools():\n    return 42\n")
-    cmd = {"agentPath": str(script), "toolsFile": ""}
+    cmd = {"agentPath": str(script)}
     with pytest.raises(AgentFileError, match="tools"):
         apply_agent_overrides(cmd)
 
@@ -93,8 +115,8 @@ def test_agent_script_tools_wrong_type_still_rejected(
 def test_agent_script_tool_getters_reject_paths_and_non_callables(
     tmp_path: Path, getter: str,
 ) -> None:
-    # A tools-file path (str or Path) is no longer a valid return value,
-    # nor is a list holding a non-callable.
+    # A file path (str or Path) is not a valid return value, nor is a
+    # list holding a non-callable.
     for body in (
         "    return '/some/tools.py'\n",
         "    from pathlib import Path\n    return Path('/some/tools.py')\n",
@@ -102,10 +124,10 @@ def test_agent_script_tool_getters_reject_paths_and_non_callables(
     ):
         script = tmp_path / f"bad_{getter}_agent.py"
         script.write_text(f"def {getter}():\n{body}")
-        cmd = {"agentPath": str(script), "toolsFile": "kept", "appendBasicTools": True}
+        cmd = {"agentPath": str(script), "appendBasicTools": True}
         with pytest.raises(AgentFileError, match="list of tool callables"):
             apply_agent_overrides(cmd)
-        assert cmd["toolsFile"] == "kept", "a broken getter must not override"
+        assert "tools" not in cmd, "a broken getter must not override"
         assert cmd["appendBasicTools"] is True
 
 
@@ -118,10 +140,10 @@ def test_agent_script_defining_both_tool_getters_is_rejected(
         + "\ndef tools() -> list:\n    return [_hello]\n"
         + "\ndef add_to_tools() -> list:\n    return [_hello]\n"
     )
-    cmd = {"agentPath": str(script), "toolsFile": "kept"}
+    cmd = {"agentPath": str(script)}
     with pytest.raises(AgentFileError, match="both tools"):
         apply_agent_overrides(cmd)
-    assert cmd["toolsFile"] == "kept"
+    assert "tools" not in cmd
 
 
 def test_removed_getters_are_plain_functions(tmp_path: Path) -> None:

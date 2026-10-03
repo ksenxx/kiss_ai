@@ -902,7 +902,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     cmd: dict[str, Any] = {"agentPath": str(_SKILLOPT_SEA)}
     assert "autoCommit" in apply_agent_overrides(cmd)
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
-    assert cmd["toolProfile"] == "shell" and cmd["toolsFile"] == str(_SKILLOPT_SEA)
+    assert cmd["toolProfile"] == "shell" and all(callable(tool) for tool in cmd["tools"])
     assert cmd["systemPrompt"] == skillopt_sea.SYSTEM_PROMPT
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.

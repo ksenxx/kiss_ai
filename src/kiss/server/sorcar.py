@@ -38,16 +38,22 @@ already-running daemon and block until it finishes::
     # Continue the same chat (the agent sees the prior task as context):
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
-Caller-supplied tools become agent tools: pass the path of a Python
-file via ``tools="/path/to/my_tools.py"`` and the daemon imports the
-file and calls its top-level ``get_tools()`` function, which returns
-the functions in the file the agent may call (plain synchronous
-functions with keyword-bindable, type-annotated parameters and
-Google-style docstrings).  The client never serializes Python
-functions — the daemon loads the file itself, so the tools execute
-**in the daemon process** like native agent tools::
+``extension_agent_path="/path/to/my_agent.py"`` names an *agent
+script* — a Sorcar Extension Agent (SEA) — whose top-level ``X()``
+functions compute the run's parameters on the daemon — e.g. a
+``model()`` overrides *model*, a
+``prompt()`` overrides *prompt* — while parameters without a getter
+keep the values passed to :func:`run` (see the :func:`run` docstring
+for the script format).  The script is also the only way to give the
+agent extra tools: its ``add_to_tools()`` returns functions (plain
+synchronous functions with keyword-bindable, type-annotated
+parameters and Google-style docstrings) that are added to the
+built-in toolset, and ``tools()`` returns functions that, with
+``finish``, become the whole toolset.  The client never serializes
+Python functions — the daemon loads the script itself, so the tools
+execute **in the daemon process** like native agent tools::
 
-    # my_tools.py
+    # my_agent.py
     def get_temperature(city: str) -> str:
         \"\"\"Return the current temperature of a city.
 
@@ -56,25 +62,20 @@ functions — the daemon loads the file itself, so the tools execute
         \"\"\"
         return lookup_sensor(city)
 
-    def get_tools():
-        \"\"\"Return the tools the agent may call.\"\"\"
+    def add_to_tools():
+        \"\"\"Return the tools added to the built-in toolset.\"\"\"
         return [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
-                        tools="my_tools.py")
+                        extension_agent_path="my_agent.py")
 
-Similarly, ``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose top-level ``X()``
-functions compute the run's parameters on the daemon — e.g. a
-``model()`` overrides *model*, a
-``prompt()`` overrides *prompt* — while parameters without a getter
-keep the values passed to :func:`run` (see the :func:`run` docstring
-for the script format).  The script may additionally define
-``llm_call_hook()`` / ``tool_call_hook()``, returning functions
-``llm_call_hook`` and ``tool_call_hook`` that the daemon passes to the
-underlying :class:`kiss.core.kiss_agent.KISSAgent` (see
-:meth:`~kiss.core.kiss_agent.KISSAgent.run`); these two have no
-:func:`run` parameter, since a callable cannot travel the wire.
+The script may additionally define ``llm_call_hook()`` /
+``tool_call_hook()``, returning functions ``llm_call_hook`` and
+``tool_call_hook`` that the daemon passes to the underlying
+:class:`kiss.core.kiss_agent.KISSAgent` (see
+:meth:`~kiss.core.kiss_agent.KISSAgent.run`); like the tool getters,
+these have no :func:`run` parameter, since a callable cannot travel
+the wire.
 
 The function speaks the daemon's JSON protocol over its local WSS
 endpoint, found through ``$KISS_HOME/sorcar-local.json`` (or the file

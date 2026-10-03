@@ -652,7 +652,7 @@ def system_prompt() -> str:
 
 
 def add_to_tools() -> list[Any]:
-    """Return the knowledge tools (this file doubles as its own tools file)."""
+    """Return the knowledge tools added to the built-in toolset."""
     return [
         index_repo, knowledge_status, knowledge_search, knowledge_read,
         list_knowledge_pages, read_knowledge_page, search_knowledge_pages,

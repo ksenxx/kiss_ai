@@ -43,7 +43,6 @@ from kiss.agents.sorcar.agent_dispatch import (
     _agent_class,
     _daemon_endpoint_file,
     available_channels,
-    get_tools,
     make_run_agent_tool,
 )
 from kiss.server.agent_file import apply_agent_overrides
@@ -335,20 +334,15 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     )
     out = run_agent("say hi", "ntfy", model_config="{not json")
     assert out.startswith("Error: model_config must be a JSON object, got '{not json': ")
-    missing = tmp_path / "no_such_tools.py"
-    out = run_agent("say hi", "ntfy", tools=str(missing))
-    assert out == f"Error: tools file '{missing}' does not exist"
-    not_py = tmp_path / "tools.txt"
-    not_py.write_text("")
-    out = run_agent("say hi", "ntfy", tools=str(not_py))
-    assert out == f"Error: tools file '{not_py}' is not a Python (.py) file"
-    # ``add_to_tools`` is a tools-file path too, and exclusive with ``tools``.
-    out = run_agent("say hi", "ntfy", add_to_tools=str(missing))
-    assert out == f"Error: tools file '{missing}' does not exist"
-    ok = tmp_path / "ok_tools.py"
-    ok.write_text("def get_tools():\n    return []\n")
-    out = run_agent("say hi", "ntfy", tools=str(ok), add_to_tools=str(ok))
-    assert out == "Error: pass either tools or add_to_tools, not both."
+    # Extra tools come only from the agent script's ``tools()`` /
+    # ``add_to_tools()``: the tool has no tools-path arguments.
+    import inspect
+
+    params = inspect.signature(run_agent).parameters
+    assert "tools" not in params
+    assert "add_to_tools" not in params
+    with pytest.raises(TypeError):
+        run_agent("say hi", "ntfy", tools=str(tmp_path / "x.py"))
 
 
 def test_channel_and_cron_refuse_worktree_and_auto_commit(
@@ -379,26 +373,22 @@ def test_channel_and_cron_refuse_worktree_and_auto_commit(
 
 
 def test_run_options_are_forwarded_to_daemon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_dispatch: list[dict[str, Any]]
+    tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
     """The optional arguments reach ``daemon_client.run`` as its keyword options.
 
     Empty arguments forward the option's default (``None`` for the
-    tri-state daemon-decides options, ``True`` for ``is_parallel`` and
-    ``append_basic_tools``); explicit values are parsed and forwarded
-    verbatim.  A ``tools`` file switches the basic toolset off
-    (``append_basic_tools=False``); an ``add_to_tools`` file keeps it.
-    A relative path of either resolves against the CALLING
-    task's work directory (the tool runs in the daemon process, whose
-    working directory is unrelated).  The real dispatch path is
+    tri-state daemon-decides options, ``True`` for ``is_parallel``);
+    explicit values are parsed and forwarded verbatim.  No tools path
+    travels: the daemon client's ``run`` has no tools parameter, so
+    the sub-task's extra tools can only come from the agent script's
+    own ``tools()`` / ``add_to_tools()``.  The real dispatch path is
     exercised up to the daemon-client boundary; only that boundary
     call is captured_dispatch.
     """
 
     caller = tmp_path / "caller_project"
     script = _write_helper_script(caller)
-    tools_file = caller / "extra_tools.py"
-    tools_file.write_text("def get_tools():\n    return []\n")
     tool = make_run_agent_tool(str(caller))
 
     # Nothing passed: the daemon's defaults decide.
@@ -406,12 +396,13 @@ def test_run_options_are_forwarded_to_daemon(
     defaults = captured_dispatch[0]
     assert defaults["chat_id"] == ""
     assert defaults["system_prompt"] == ""
-    assert defaults["tools"] is None
+    assert "tools" not in defaults
+    assert "toolsFile" not in defaults
+    assert "append_basic_tools" not in defaults
     assert defaults["model_config"] is None
     assert defaults["use_web_tools"] is None
     assert defaults["use_memory"] is None
     assert defaults["is_parallel"] is True
-    assert defaults["append_basic_tools"] is True
     assert defaults["append_to_system_prompt"] == ""
     assert defaults["append_to_prompt"] == ""
 
@@ -423,7 +414,6 @@ def test_run_options_are_forwarded_to_daemon(
         str(script),
         chat_id=" chat-123 ",
         system_prompt="You are a terse helper.",
-        tools="extra_tools.py",
         model_config='{"base_url": "http://localhost:8000/v1"}',
         use_worktree="false",
         auto_commit="False",
@@ -437,7 +427,6 @@ def test_run_options_are_forwarded_to_daemon(
     sent = captured_dispatch[0]
     assert sent["chat_id"] == "chat-123"
     assert sent["system_prompt"] == "You are a terse helper."
-    assert sent["tools"] == str(tools_file)
     assert sent["model_config"] == {"base_url": "http://localhost:8000/v1"}
     assert sent["use_worktree"] is False
     assert sent["auto_commit"] is False
@@ -445,31 +434,13 @@ def test_run_options_are_forwarded_to_daemon(
     assert sent["classify_tasks"] is False
     assert sent["use_memory"] is True
     assert sent["is_parallel"] is False
-    # ``tools`` means ONLY these tools (+ finish).
-    assert sent["append_basic_tools"] is False
     assert sent["append_to_system_prompt"] == "Answer in French."
     assert sent["append_to_prompt"] == "Cite sources."
 
-    # ``add_to_tools`` sends the same tools file but keeps the basic
-    # toolset.
+    # Path mode honours an explicit worktree request too.
     captured_dispatch.clear()
-    tool("say hi", str(script), add_to_tools="extra_tools.py")
-    assert captured_dispatch[0]["tools"] == str(tools_file)
-    assert captured_dispatch[0]["append_basic_tools"] is True
-
-    # An absolute tools path is kept as given (resolved); path mode
-    # honours an explicit worktree request too.
-    captured_dispatch.clear()
-    tool("say hi", str(script), tools=str(tools_file), use_worktree="true")
-    assert captured_dispatch[0]["tools"] == str(tools_file)
+    tool("say hi", str(script), use_worktree="true")
     assert captured_dispatch[0]["use_worktree"] is True
-
-    # The standalone tool (no calling work dir) resolves a relative
-    # tools path against the process working directory.
-    monkeypatch.chdir(caller)
-    captured_dispatch.clear()
-    run_agent("say hi", str(script), tools="extra_tools.py")
-    assert captured_dispatch[0]["tools"] == str(tools_file)
 
     # An explicit classify_tasks overrides the mode default in every
     # mode: cron's pinned-off classification and the channel/path
@@ -531,7 +502,7 @@ def test_dispatch_forwards_parent_identity(
     assert captured_dispatch[0]["parent_task_id"] == ""
     assert captured_dispatch[0]["parent_tab_id"] == ""
 
-    # Standalone tools-file use: no calling agent at all.
+    # Standalone use: no calling agent at all.
     captured_dispatch.clear()
     make_run_agent_tool(str(caller))("say hi", str(script))
     assert captured_dispatch[0]["parent_task_id"] == ""
@@ -804,23 +775,22 @@ def test_every_channel_module_is_dispatchable() -> None:
 
 def test_channel_module_is_a_valid_agent_script() -> None:
     # The exact contract the dispatch relies on: passing a channel
-    # module as ``extension_agent_path`` makes the daemon use the module as its
-    # own tools file (its ``add_to_tools()`` returns the tool list, on
-    # top of the basic toolset).
+    # module as ``extension_agent_path`` makes the daemon stage the
+    # module's ``add_to_tools()`` callables on top of the basic toolset.
     import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
 
-    cmd = {"agentPath": ntfy_sea.__file__, "toolsFile": "", "appendBasicTools": False}
+    cmd = {"agentPath": ntfy_sea.__file__}
     overridden = apply_agent_overrides(cmd)
-    assert overridden == {"toolsFile", "appendBasicTools"}
-    assert cmd["toolsFile"] == ntfy_sea.__file__
+    assert overridden == {"tools", "appendBasicTools"}
+    assert cmd["tools"] and all(callable(t) for t in cmd["tools"])
     assert cmd["appendBasicTools"] is True
+    assert "toolsFile" not in cmd
 
 
-def test_get_tools_and_sorcar_wiring() -> None:
-    tools = get_tools()
-    assert len(tools) == 1
-    assert tools[0].__name__ == "run_agent"
-    assert "slack" in (tools[0].__doc__ or "")
+def test_run_agent_tool_and_sorcar_wiring() -> None:
+    tool = make_run_agent_tool("")
+    assert tool.__name__ == "run_agent"
+    assert "slack" in (tool.__doc__ or "")
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope (soft plugin).
     source_text = Path(agent_dispatch.__file__).read_text(encoding="utf-8")

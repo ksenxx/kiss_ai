@@ -455,7 +455,7 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
     compiled and executed directly — no ``__pycache__`` bytecode is read
     or written — so an edit that keeps the file's size and whole-second
     mtime (the bytecode cache's staleness key) is still seen, exactly as
-    the daemon's agent-file loader (``kiss.server.tools_file``) behaves.
+    the daemon's agent-file loader (``kiss.server.agent_file``) behaves.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.

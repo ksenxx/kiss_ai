@@ -1595,10 +1595,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
 
 def add_to_tools() -> list:
-    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` tools-file contract).
+    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
+    the API's ``extension_agent_path``: builds a fresh agent from the
     bridge state persisted under ``~/.kiss`` and returns its
     authentication and backend tools.
     """
