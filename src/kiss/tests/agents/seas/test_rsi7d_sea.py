@@ -188,6 +188,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "patch_sea_prompt",
         "write_autorouter_evidence",
         "replay_in_clone",
+        "replay_in_place",
         "sorcar_text",
         "request_sorcar_permission",
         "patch_sorcar",

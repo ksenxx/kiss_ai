@@ -187,7 +187,12 @@ was launched with and the script binds no `model` name itself: a
 script-chosen model runs with default provider routing), half of its
 remaining budget (the other half stays reserved for the caller), its
 chat id (so the sub-task sees the conversation's earlier tasks and
-results), its web-tools and memory settings, its live Docker
+results), its own replacement system prompt and appended system-prompt
+text (the `system_prompt` / `append_to_system_prompt` its run was
+given, so a run's extra system instructions constrain its whole task
+tree as they do through `run_parallel`; the classifier's lite-vs-full
+choice is not among them, the sub-task is classified on its own), its
+web-tools and memory settings, its live Docker
 container (`container:<id>`), and its effective worktree and
 auto-commit choices after the classifier's demotion (both `False`
 when the container is inherited: the sub-task then works in the

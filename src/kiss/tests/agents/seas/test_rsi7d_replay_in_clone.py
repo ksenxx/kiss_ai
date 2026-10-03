@@ -2,17 +2,18 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E: rsi7d's ``replay_in_clone`` replays a past task through the real daemon in a clone.
+"""E2E: rsi7d's ``replay_in_clone`` / ``replay_in_place`` replay a past task through the daemon.
 
 A real :class:`~kiss.server.web_server.RemoteAccessServer` on a temp
 local WSS endpoint runs the replay; the model is a local HTTP stand-in
 speaking the OpenAI wire format, reached through the daemon's
 ``custom_endpoint`` setting, so the child agent makes a genuine tool
 call: it writes a file into its work dir, which must be the clone at
-the task's base commit and never the task's repository.
+the task's base commit (``replay_in_clone``) or this task's directory
+(``replay_in_place``) and never the task's repository.
 
 Not covered: the "daemon's installed kiss package predates
-``agent_dispatch.dispatch_result``" branch of ``replay_in_clone``.  It
+``agent_dispatch.dispatch_result``" branch (``_legacy_daemon_error``).  It
 is reachable only when the daemon runs an older installed package than
 the checkout whose SEA file it loads (the VS Code extension's bundled
 copy before a release), which a test in this checkout cannot arrange
@@ -188,3 +189,44 @@ class ReplayInCloneTest(DaemonLocalHarness):
         system = str(next(m for m in agentic[0]["messages"] if m["role"] == "system")["content"])
         assert system.startswith("You are KISS Sorcar") and marker in system, system[:300]
         assert "{{IDENTITY}}" not in system
+
+    def test_replay_in_place_runs_this_checkouts_sea_here_on_the_seas_own_prompt(self) -> None:
+        """No clone: the verbatim task runs in this directory on the SEA's prompt, fresh chat."""
+        repo = Path(self.repo)
+        task = "Say hello and finish"
+        now_ms = int(time.time() * 1000)
+        task_id, _chat = _add_task(
+            task,
+            extra={
+                "model": "model-a", "work_dir": str(repo), "sea": "demo_sea",
+                "startTs": now_ms - 60_000, "endTs": now_ms, "cost": 0.5, "steps": 3,
+            },
+        )
+        assert sea.replay_in_place("no-such-task", max_budget=1.0).startswith(
+            "Error: unknown task id"
+        )
+        assert sea.replay_in_place(task_id, max_budget=1.0, name="nosuchsea").startswith("Error")
+
+        out = json.loads(
+            sea.replay_in_place(task_id, max_budget=1.0, timeout=120, model=STANDIN_MODEL)
+        )
+
+        demo_file = self.checkout / "src" / "kiss" / "agents" / "seas" / "demo" / "demo_sea.py"
+        assert out["sea"] == "demo" and out["sea_file"] == str(demo_file)
+        assert out["work_dir"] == str(self.checkout) and out["task"] == task
+        assert out["model"] == STANDIN_MODEL and "clone" not in out
+        assert (self.checkout / "replayed.txt").read_text(encoding="utf-8") == "replayed\n"
+        assert not (repo / "replayed.txt").exists()
+        result = out["result"]
+        assert result["success"] is True and "replayed in the clone" in result["summary"]
+        assert out["replay_task_id"], out
+        row = sea._task_row(out["replay_task_id"])
+        assert row is not None, out
+        assert row["task"] == task and row["work_dir"] == str(self.checkout)
+        assert row["model"] == STANDIN_MODEL and not row["is_worktree"]
+        agentic = [r for r in self.requests if r.get("tools")]
+        assert len(agentic) == 2, [list(r) for r in self.requests]
+        system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
+        assert str(system["content"]).startswith("You are the demo agent.")
+        user = str(next(m for m in agentic[0]["messages"] if m["role"] == "user")["content"])
+        assert task in user

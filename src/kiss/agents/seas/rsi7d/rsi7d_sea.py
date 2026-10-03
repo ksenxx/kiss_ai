@@ -329,8 +329,10 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
      result. Delete `tmp/rsi7d/replays` before you finish. Never replay such a task with
      `run_agent` in this checkout.
    - A task that changes nothing on disk is replayed with
-     `run_agent(agent="src/kiss/agents/seas/<name>/<name>_sea.py", task=<the verbatim past
-     task>, max_budget=<cap>)`.
+     `replay_in_place(task_id, max_budget=<cap>)`: this checkout's patched SEA file runs the
+     verbatim past task in this directory, on the SEA's own prompt in a fresh chat. Never
+     replay with `run_agent`: a `run_agent` sub-task inherits rsi7d's system prompt, chat
+     and budget share, so it does not measure the SEA as a user runs it.
    Then compare `run_findings(<new task id>)` with the original run (status, cost, steps,
    signal counts). Keep the change when the replay is not worse on status and signals and
    not clearly worse on cost/steps; otherwise revert with `git checkout --
@@ -368,9 +370,8 @@ only through `patch_sorcar(target, old, new)`; never with Edit/Write.
 - Call `sea_runs()` exactly once per sweep: it returns about 220k chars. Write the per-SEA
   numbers into `tmp/rsi7d/baseline.md` in the next step and never call it again, with or
   without `name`/`days`. A replay's task id comes from the `replay_task_id` field of the JSON
-  `replay_in_clone` returns; `run_agent` returns only success and summary, so after a
-  `run_agent` replay take the newest id in `sea_findings(name, runs=1)["runs_scanned"]`.
-  `run_findings(id)` then gives the replay's status and cost.
+  `replay_in_clone` and `replay_in_place` return; `run_findings(id)` then gives the
+  replay's status and cost.
 - In a worktree, never put a main-checkout path (`/home/ksen/kiss/...`) in a Bash command,
   heredoc bodies included: the guard rejects the whole call. Read the main branch's copy
   with `git show main:<path>` and quote such paths only in `Write`d notes.
@@ -637,8 +638,13 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
 
     A run is recognised through its parent's ``run_agent`` tool call
     (``agent`` argument = SEA path or channel name, ``task`` argument =
-    the child's verbatim prompt) or, failing that, through *signatures*
-    (``{sea name: prompt prefix}``, see :func:`_runs_by_signature`).
+    the child's verbatim prompt), failing that through *signatures*
+    (``{sea name: prompt prefix}``, see :func:`_runs_by_signature`),
+    and failing that through the ``sea`` the row records (the agent
+    script's file stem, set by the daemon for every run with an agent
+    path: ``replay_in_clone`` / ``replay_in_place`` replays and other
+    ``dispatch_result`` runs of a SEA whose prompt is too short for a
+    signature).
 
     Returns ``{"days", "window_start", "tasks_in_window", "seas": {name:
     {"agents": [distinct agent arguments], "stats": {...}, "runs": [...]}},
@@ -687,10 +693,16 @@ def _mine_sea_runs(days: float = 7, signatures: dict[str, str] | None = None) ->
         for tid in ids:
             claimed.add(tid)
             matched[name].append(("(system prompt signature)", by_id[tid]))
-    # What is left without a parent and without a recorded SEA ran on
-    # KISS Sorcar's own system prompt: the pseudo-SEA ``sorcar``.
     for tid, row in by_id.items():
-        if tid not in claimed and not row.get("parent_task_id") and not row.get("sea"):
+        if tid in claimed:
+            continue
+        recorded = sea_name_of(row.get("sea"))
+        if recorded:
+            claimed.add(tid)
+            matched[recorded].append(("(recorded sea)", row))
+        elif not row.get("parent_task_id"):
+            # Neither a parent nor a recorded SEA: the run was on KISS
+            # Sorcar's own system prompt, the pseudo-SEA ``sorcar``.
             claimed.add(tid)
             matched[SORCAR].append((SORCAR_AGENT_LABEL, row))
     flags = _final_success(sorted(claimed))
@@ -2051,6 +2063,143 @@ def _sorcar_system_prompt() -> str:
     return render_brand((_kiss_pkg_dir() / SORCAR_PROMPT_FILES[0]).read_text(encoding="utf-8"))
 
 
+def _replay_sea_file(task_id: str, sea: str) -> Path | str:
+    """Return this checkout's file a replay of *sea* runs, or an ``Error: ...`` string.
+
+    The SEA's editable ``<sea>_sea.py``; for a plain KISS Sorcar run
+    (:data:`SORCAR`) this checkout's (possibly patched) ``SYSTEM.md``,
+    which the replay uses as its base system prompt.
+    """
+    if sea == SORCAR:
+        if not _sorcar_in_scope(_scope()):
+            return _not_editable(sea)
+        system_md = _sorcar_target(SORCAR_PROMPT_FILES[0])
+        if isinstance(system_md, str):
+            return (
+                f"Error: run {task_id} is a plain KISS Sorcar run and cannot be replayed from "
+                f"here: {system_md.removeprefix('Error: ')}"
+            )
+        return system_md
+    editable = _editable_path(sea)
+    if editable is None:
+        return _not_editable(sea)
+    return editable
+
+
+def _legacy_daemon_error(
+    tool: str, task_id: str, max_budget: float, timeout: float, name: str, model: str
+) -> str:
+    """Return the ``Error: ...`` a replay tool answers when this daemon cannot dispatch, else "".
+
+    The daemon imports its own installed kiss package (the VS Code
+    extension's bundled copy), which can be older than this checkout and
+    lack ``agent_dispatch.dispatch_result``; the message names the
+    *tool* call (with its original arguments) to run under this
+    checkout's package instead.
+    """
+    if hasattr(agent_dispatch, "dispatch_result"):
+        return ""
+    return (
+        "Error: the daemon's installed kiss package predates "
+        "agent_dispatch.dispatch_result (commit 12ee8703c), so this tool cannot "
+        "dispatch the replay from inside the daemon. Reinstall the extension from "
+        "this checkout, or run the replay under this checkout's package with "
+        f"`uv run python -c \"from kiss.agents.seas.rsi7d import rsi7d_sea; "
+        f"print(rsi7d_sea.{tool}({task_id!r}, {max_budget!r}, {timeout!r}, "
+        f"{name!r}, {model!r}))\"` "
+        "in the background; that replay has no parent task, so quote its cost "
+        "from run_findings(<replay_task_id>)."
+    )
+
+
+def _dispatch_replay(
+    sea: str, sea_file: str, task: str, work_dir: str,
+    model: str, max_budget: float, timeout: float,
+) -> dict[str, Any]:
+    """Run a replay of *task* as *sea* through the daemon and return its outcome.
+
+    A plain KISS Sorcar replay (*sea* = :data:`SORCAR`) runs with no
+    agent script and *sea_file* (this checkout's ``SYSTEM.md``) as its
+    base system prompt; any other replay runs the agent script
+    *sea_file*.  The replay is dispatched with ``inherit=False``: a
+    faithful replay runs on the SEA's own prompt, in its own chat, with
+    *model*, rather than on rsi7d's replacement system prompt, chat
+    and budget share a ``run_agent`` call would hand it.  Returns the
+    ``result`` (the dict ``success``, ``summary``, ``cost``, ``steps``,
+    or the dispatch's error string) and the ``replay_task_id`` (empty
+    when the dispatch failed).
+    """
+    plain = sea == SORCAR
+    result = agent_dispatch.dispatch_result(
+        sea,
+        task,
+        "" if plain else sea_file,
+        work_dir,
+        model,
+        max_budget,
+        timeout,
+        parent_agent=current_agent(),
+        scope_work_dir=str(_work_root()),
+        options=agent_dispatch.RunOptions(
+            use_worktree=False,
+            auto_commit=False,
+            system_prompt=_sorcar_system_prompt() if plain else "",
+        ),
+    )
+    if isinstance(result, str):
+        return {"replay_task_id": "", "result": result}
+    return {
+        "replay_task_id": result.task_id,
+        "result": {
+            "success": result.success, "summary": result.text, "cost": result.cost,
+            "steps": result.steps,
+        },
+    }
+
+
+def replay_in_place(
+    task_id: str, max_budget: float, timeout: float = 3600.0, name: str = "", model: str = ""
+) -> str:
+    """Replay past run *task_id* in this task's work directory, with no clone.
+
+    Use it for tasks that change nothing on disk: the replay runs the SEA
+    file of this checkout (with its patched prompt) on the verbatim past
+    task, in this task's directory, without a worktree and without
+    auto-commit, with the original run's model unless *model* is given,
+    capped by *max_budget* (USD) and *timeout* (seconds); *name*
+    overrides the SEA recorded on the run.  Unlike a ``run_agent`` call,
+    which would hand the SEA rsi7d's own replacement system prompt, chat
+    and budget share, the replay runs on the SEA's own prompt in a fresh
+    chat, so it measures the SEA as a user runs it.  A run of KISS Sorcar
+    itself (``sorcar``) is replayed as a plain task on this checkout's
+    ``SYSTEM.md``, patched or not.  Returns JSON with ``replay_task_id``
+    (pass it to ``run_findings``), ``sea``, ``sea_file``, ``work_dir``,
+    ``model``, ``task`` and the replay's ``result``.
+    """
+    error = _legacy_daemon_error("replay_in_place", task_id, max_budget, timeout, name, model)
+    if error:
+        return error
+    row = _task_row(task_id)
+    if row is None:
+        return f"Error: unknown task id {task_id!r}"
+    sea = name or sea_name_of(row.get("sea") or "") or SORCAR
+    sea_file = _replay_sea_file(task_id, sea)
+    if isinstance(sea_file, str):
+        return sea_file
+    prepared: dict[str, Any] = {
+        "sea": sea,
+        "sea_file": str(sea_file),
+        "work_dir": str(_work_root()),
+        "model": model or str(row.get("model") or ""),
+        "task": str(row.get("task") or ""),
+    }
+    prepared.update(_dispatch_replay(
+        sea, prepared["sea_file"], prepared["task"], prepared["work_dir"],
+        prepared["model"], max_budget, timeout,
+    ))
+    return json.dumps(prepared, indent=1)
+
+
 def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     """Clone the repository of past run *task_id* at the commit it started from.
 
@@ -2067,23 +2216,9 @@ def prepare_replay_clone(task_id: str, name: str = "") -> dict[str, Any] | str:
     if row is None:
         return f"Error: unknown task id {task_id!r}"
     sea = name or sea_name_of(row.get("sea") or "") or SORCAR
-    if sea == SORCAR:
-        # A plain KISS Sorcar run: the replay is a plain task whose base
-        # system prompt is this checkout's (possibly patched) SYSTEM.md.
-        if not _sorcar_in_scope(_scope()):
-            return _not_editable(sea)
-        system_md = _sorcar_target(SORCAR_PROMPT_FILES[0])
-        if isinstance(system_md, str):
-            return (
-                f"Error: run {task_id} is a plain KISS Sorcar run and cannot be replayed from "
-                f"here: {system_md.removeprefix('Error: ')}"
-            )
-        sea_file = system_md
-    else:
-        editable = _editable_path(sea)
-        if editable is None:
-            return _not_editable(sea)
-        sea_file = editable
+    sea_file = _replay_sea_file(task_id, sea)
+    if isinstance(sea_file, str):
+        return sea_file
     work_dir = str(row.get("work_dir") or "")
     located = _task_tree(work_dir)
     if located is None:
@@ -2145,49 +2280,16 @@ def replay_in_clone(
     what the replay changed with ``git -C <clone> status --short`` and
     delete the clone when done.
     """
-    if not hasattr(agent_dispatch, "dispatch_result"):
-        # The daemon imports its own installed kiss package (the VS Code
-        # extension's bundled copy), which can be older than this checkout.
-        return (
-            "Error: the daemon's installed kiss package predates "
-            "agent_dispatch.dispatch_result (commit 12ee8703c), so this tool cannot "
-            "dispatch the replay from inside the daemon. Reinstall the extension from "
-            "this checkout, or run the replay under this checkout's package with "
-            f"`uv run python -c \"from kiss.agents.seas.rsi7d import rsi7d_sea; "
-            f"print(rsi7d_sea.replay_in_clone({task_id!r}, {max_budget!r}, {timeout!r}, "
-            f"{name!r}, {model!r}))\"` "
-            "in the background; that replay has no parent task, so quote its cost "
-            "from run_findings(<replay_task_id>)."
-        )
+    error = _legacy_daemon_error("replay_in_clone", task_id, max_budget, timeout, name, model)
+    if error:
+        return error
     prepared = prepare_replay_clone(task_id, name)
     if isinstance(prepared, str):
         return prepared
-    plain = prepared["sea"] == SORCAR
-    result = agent_dispatch.dispatch_result(
-        prepared["sea"],
-        prepared["task"],
-        "" if plain else prepared["sea_file"],
-        prepared["work_dir"],
-        model or prepared["model"],
-        max_budget,
-        timeout,
-        parent_agent=current_agent(),
-        scope_work_dir=str(_work_root()),
-        options=agent_dispatch.RunOptions(
-            use_worktree=False,
-            auto_commit=False,
-            system_prompt=_sorcar_system_prompt() if plain else "",
-        ),
-    )
-    if isinstance(result, str):
-        prepared["replay_task_id"] = ""
-        prepared["result"] = result
-    else:
-        prepared["replay_task_id"] = result.task_id
-        prepared["result"] = {
-            "success": result.success, "summary": result.text, "cost": result.cost,
-            "steps": result.steps,
-        }
+    prepared.update(_dispatch_replay(
+        prepared["sea"], prepared["sea_file"], prepared["task"], prepared["work_dir"],
+        model or prepared["model"], max_budget, timeout,
+    ))
     return json.dumps(prepared, indent=1)
 
 
@@ -2206,6 +2308,7 @@ def add_to_tools() -> list[Any]:
         patch_sea_prompt,
         write_autorouter_evidence,
         replay_in_clone,
+        replay_in_place,
         sorcar_text,
         request_sorcar_permission,
         patch_sorcar,

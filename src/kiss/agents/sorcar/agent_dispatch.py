@@ -196,7 +196,8 @@ class RunOptions:
     on :func:`kiss.server.sorcar.run` (see that docstring for the
     semantics).  ``None`` / empty means "not passed": in path mode the
     calling agent's own value applies where it has one
-    (``chat_id``, ``model_config``, ``use_web_tools``, ``use_memory``,
+    (``chat_id``, ``system_prompt``, ``append_to_system_prompt``,
+    ``model_config``, ``use_web_tools``, ``use_memory``,
     ``use_worktree``, ``auto_commit`` — see :func:`inherit_from_parent`),
     otherwise the dispatch mode default applies (``use_worktree``,
     ``auto_commit``, ``classify_tasks``) or the daemon's configured
@@ -593,6 +594,17 @@ def inherit_from_parent(
       context yet.
     - ``chat_id``: the caller's chat, so the sub-task starts with the
       conversation's earlier tasks and results as context.
+    - ``system_prompt`` / ``append_to_system_prompt``: the caller's
+      own replacement base prompt (``_base_system_prompt``, blank
+      unless its run was given one — the classifier's SYSTEM vs
+      SYSTEM_LITE choice is never stored there, so the sub-task is
+      still classified on its own) and append-only suffix
+      (``_system_prompt_suffix``), so a run's extra system
+      instructions constrain its whole task tree through ``run_agent``
+      exactly as through ``run_parallel``.  An agent script's
+      ``system_prompt()`` / ``append_to_system_prompt()`` getters still
+      replace them on the daemon, and its ``add_to_system_prompt()``
+      text is added after the inherited suffix.
     - ``use_web_tools`` / ``use_memory``: the caller's per-run
       settings (``_use_web_tools`` / ``_use_memory_override``).
     - ``docker_image``: ``container:<id>`` of the caller's live Docker
@@ -644,6 +656,14 @@ def inherit_from_parent(
     options = dataclasses.replace(
         options,
         chat_id=options.chat_id or str(getattr(parent_agent, "_chat_id", "") or ""),
+        system_prompt=(
+            options.system_prompt
+            or str(getattr(parent_agent, "_base_system_prompt", "") or "")
+        ),
+        append_to_system_prompt=(
+            options.append_to_system_prompt
+            or str(getattr(parent_agent, "_system_prompt_suffix", "") or "")
+        ),
         model_config=model_config,
         use_web_tools=(
             getattr(parent_agent, "_use_web_tools", None)
@@ -1384,7 +1404,9 @@ def make_run_agent_tool(
             system_prompt: Replacement system prompt for the sub-task; empty keeps the default.
                 It replaces the default system prompt of the sub-task and of its own
                 ``run_parallel`` sub-agents; the daemon still appends its per-run
-                operational instructions.  An agent script's ``system_prompt()`` still wins.
+                operational instructions.  The default for a path-named agent script
+                is this task's own replacement system prompt, if its run was given
+                one.  An agent script's ``system_prompt()`` still wins.
             model_config: Model configuration override as a JSON object string; empty = default.
                 Custom endpoint / headers, e.g. ``'{"base_url": "http://localhost:8000/v1"}'``.
                 The default for a path-named agent script is this task's model
@@ -1412,7 +1434,11 @@ def make_run_agent_tool(
             is_parallel: "true"/"false": let the sub-task use run_parallel; empty means true.
             append_to_system_prompt: Extra text appended to the sub-task's system prompt.
                 Appended after the default (or the ``system_prompt`` replacement) and
-                inherited by the sub-task's ``run_parallel`` sub-agents.
+                inherited by the sub-task's ``run_parallel`` sub-agents.  The default
+                for a path-named agent script is the text appended to this task's own
+                system prompt, so a run's extra system instructions reach its whole
+                task tree.  An agent script's ``append_to_system_prompt()`` still wins
+                and its ``add_to_system_prompt()`` text is added after it.
             append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
                 Appended to each ``<task>`` when the task holds several.
             tool_profile: Tool profile the sub-task's built-in toolset is cut down to:

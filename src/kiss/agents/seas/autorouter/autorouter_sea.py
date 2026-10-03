@@ -103,7 +103,8 @@ RSI7D_TASK = (
     "tools. Mine the last 7 days of autorouter runs and of the models it dispatched to, rewrite "
     "the observed model evidence with write_autorouter_evidence, and patch the autorouter "
     "prompt only where its own runs show a repeatable failure. Spend at most $20 in total and "
-    "at most $8 on replays; replay only tasks that changed nothing on disk, with run_agent. "
+    "at most $8 on replays; replay only tasks that changed nothing on disk, with "
+    "replay_in_place. "
     "Delete tmp/rsi7d/replays before finishing. Write the report to "
     "./reports/rsi7d-autorouter-<date>.md and, when the work dir is a git checkout, git add it."
 )

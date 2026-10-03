@@ -9,6 +9,7 @@ task's project, so the arguments the call leaves empty are filled from the
 calling agent the way a ``run_parallel`` child's are
 (:func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`): model,
 same-model model configuration, half of the remaining budget, chat id,
+the run's replacement system prompt and appended system-prompt text,
 web-tools and memory settings, the live Docker container, and the
 effective worktree / auto-commit choices.  Channel and cron sub-tasks and
 explicit programmatic callers (``inherit=False``) inherit nothing.
@@ -36,11 +37,13 @@ from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import BudgetExceededError
+from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.server.parallel_agent_harness import (
     STANDIN_MODEL,
     IsolatedKissHome,
     StandInModelServer,
     finish_response,
+    request_text,
     tool_call_response,
 )
 
@@ -49,6 +52,8 @@ DUMMY_SEA = str(
 )
 PARENT_MODEL = "gpt-4o-mini"
 PARENT_CONFIG = {"base_url": "http://127.0.0.1:1/v1", "api_key": "kiss-test-key"}
+PARENT_BASE_PROMPT = "You are the parent run's replacement system prompt."
+PARENT_SUFFIX = "Parent rule: answer in French."
 
 
 @pytest.fixture()
@@ -92,6 +97,8 @@ def _parent_after_a_run(repo: Path, auto_commit: bool, use_worktree: bool) -> Wo
     parent.max_budget = 4.0
     parent.budget_used = 1.0
     parent._chat_id = "chat-parent"
+    parent._base_system_prompt = PARENT_BASE_PROMPT
+    parent._system_prompt_suffix = PARENT_SUFFIX
     parent._use_web_tools = False
     parent._use_memory_override = True
     parent.auto_commit_enabled = auto_commit
@@ -132,12 +139,45 @@ class TestDispatchResultInheritance:
         # (4.0 - 1.0 used) / 2: half of the remaining budget.
         assert call["max_budget"] == pytest.approx(1.5)
         assert call["chat_id"] == "chat-parent"
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
         # The parent's EFFECTIVE choices beat the persisted settings.
         assert call["use_worktree"] is False
         assert call["auto_commit"] is False
+
+    def test_script_prompt_getters_win_over_the_inherited_prompts(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """The daemon applies the script's getters to the wire fields the parent filled.
+
+        ``system_prompt()`` replaces the inherited base prompt;
+        ``add_to_system_prompt()`` is added after the inherited suffix.
+        """
+        script = env.repo / "prompts_sea.py"
+        script.write_text(
+            "def system_prompt() -> str:\n    return 'script base'\n\n"
+            "def add_to_system_prompt() -> str:\n    return 'script addition'\n"
+        )
+        parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
+        result = dispatch_result(
+            "prompts", "say hi", str(script), str(env.repo), "", None, 30.0,
+            parent_agent=parent, inherit=True,
+        )
+        assert isinstance(result, daemon_client.TaskResult), result
+        (call,) = captured
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
+        cmd = {
+            "agentPath": call["extension_agent_path"],
+            "systemPrompt": call["system_prompt"],
+            "appendToSystemPrompt": call["append_to_system_prompt"],
+        }
+        assert apply_agent_overrides(cmd) == {"systemPrompt", "appendToSystemPrompt"}
+        assert cmd["systemPrompt"] == "script base"
+        assert cmd["appendToSystemPrompt"] == f"{PARENT_SUFFIX}\n\nscript addition"
 
     def test_parent_worktree_and_auto_commit_on_are_inherited_over_config_off(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -156,6 +196,7 @@ class TestDispatchResultInheritance:
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         options = RunOptions(
             chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
+            system_prompt="explicit base", append_to_system_prompt="explicit suffix",
             use_worktree=False, auto_commit=False, use_web_tools=True, use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
@@ -164,6 +205,8 @@ class TestDispatchResultInheritance:
         assert call["model_config"] == {"base_url": "http://x/v1"}
         assert call["max_budget"] == 0.5
         assert call["chat_id"] == "chat-explicit"
+        assert call["system_prompt"] == "explicit base"
+        assert call["append_to_system_prompt"] == "explicit suffix"
         assert call["use_web_tools"] is True
         assert call["use_memory"] is False
         assert call["use_worktree"] is False
@@ -274,6 +317,8 @@ class TestDispatchResultInheritance:
         assert call["model_config"] is None
         assert call["max_budget"] is None  # daemon default
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is True  # the agent's initial per-run value
         assert call["use_memory"] is None
         # No ``use_worktree_enabled`` / ``auto_commit_enabled`` on a
@@ -293,6 +338,8 @@ class TestDispatchResultInheritance:
         assert call["model_config"] is None
         assert call["max_budget"] is None
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["use_worktree"] is True
@@ -321,6 +368,8 @@ class TestDispatchResultInheritance:
         assert call["model_config"] is None
         assert call["max_budget"] is None
         assert call["chat_id"] == ""
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["docker_image"] == ""
@@ -352,13 +401,19 @@ def _run_parent(
 
 
 class _DelegatingModel:
-    """Scripted model: first ``run_agent(dummy_sea.py)``, then ``finish``."""
+    """Scripted model: first ``run_agent(dummy_sea.py)``, then ``finish``.
+
+    Keeps the text of every request so a test can check what system
+    prompt the parent itself ran with.
+    """
 
     def __init__(self) -> None:
         self.turns = 0
+        self.requests: list[str] = []
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         self.turns += 1
+        self.requests.append(request_text(request))
         if self.turns == 1:
             return tool_call_response(
                 "run_agent", {"task": "say hi", "agent": DUMMY_SEA, "timeout": "30"},
@@ -385,6 +440,10 @@ class TestFullRunInheritance:
         assert call["model_config"]["api_key"] == server.model_config["api_key"]
         assert 0.0 < call["max_budget"] <= 2.0  # half of what was left of 4.0
         assert call["chat_id"] == parent._chat_id != ""
+        # A run given no system prompt of its own forwards none: the
+        # default SYSTEM.md the parent ran with is not an override.
+        assert call["system_prompt"] == ""
+        assert call["append_to_system_prompt"] == ""
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
@@ -397,6 +456,33 @@ class TestFullRunInheritance:
         assert call["auto_commit"] is False
         # The sub-task's spend folded into the parent's accounting.
         assert parent.budget_used >= 0.25
+
+    def test_run_system_prompts_reach_the_sub_task(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """A run's ``base_system_prompt`` and ``system_prompt`` suffix go to the sub-task.
+
+        The same two values ``run_parallel`` forwards: the parent's own
+        request carried both, and the ``run_agent`` dispatch sends them
+        as the sub-task's ``system_prompt`` / ``append_to_system_prompt``.
+        """
+        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        model = _DelegatingModel()
+        server = StandInModelServer(model)
+        try:
+            parent = _run_parent(
+                env, server, use_worktree=False,
+                base_system_prompt=PARENT_BASE_PROMPT, system_prompt=PARENT_SUFFIX,
+            )
+        finally:
+            server.stop()
+        assert PARENT_BASE_PROMPT in model.requests[0]
+        assert PARENT_SUFFIX in model.requests[0]
+        assert parent._base_system_prompt == PARENT_BASE_PROMPT
+        assert parent._system_prompt_suffix == PARENT_SUFFIX
+        (call,) = captured
+        assert call["system_prompt"] == PARENT_BASE_PROMPT
+        assert call["append_to_system_prompt"] == PARENT_SUFFIX
 
     def test_worktree_run_passes_its_worktree_and_its_directory(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
