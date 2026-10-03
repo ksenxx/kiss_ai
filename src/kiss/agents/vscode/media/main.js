@@ -44,6 +44,10 @@
     !EDITOR_TAB_MODE && !document.body.classList.contains('remote-chat');
   if (SIDEBAR_CHAT_MODE) document.body.classList.add('sidebar-chat-mode');
 
+  // Both VS Code chat surfaces have an extension host behind
+  // postToHost; the remote webapp's postMessage goes to the daemon.
+  const VSCODE_CHAT_HOST = EDITOR_TAB_MODE || SIDEBAR_CHAT_MODE;
+
   // Chat panels of editor-tabs mode report their task-info values to
   // the host (metaUpdate), which relays the ACTIVE panel's into the
   // Task Info view. The two panel-shaped surfaces (history, task info)
@@ -550,10 +554,10 @@
     toast.className = 'kiss-notification kiss-notification-' + severity;
     toast.dataset.notificationSticky = sticky ? 'true' : 'false';
     toast.setAttribute('role', severity === 'error' ? 'alert' : 'status');
-    toast.setAttribute(
-      'aria-label',
-      notificationTitle(severity) + ': ' + (ev.message || ''),
-    );
+    // A caller may name the toast after its purpose ("Waiting for your
+    // answer") instead of its severity.
+    const titleText = ev.title || notificationTitle(severity);
+    toast.setAttribute('aria-label', titleText + ': ' + (ev.message || ''));
 
     const body = document.createElement('div');
     body.className = 'kiss-notification-body';
@@ -565,7 +569,7 @@
     content.className = 'kiss-notification-content';
     const title = document.createElement('div');
     title.className = 'kiss-notification-title';
-    title.textContent = notificationTitle(severity);
+    title.textContent = titleText;
     const message = document.createElement('div');
     message.className = 'kiss-notification-message';
     message.textContent = ev.message || '';
@@ -656,8 +660,7 @@
     if (liveRegion) {
       liveRegion.textContent = '';
       setTimeout(() => {
-        liveRegion.textContent =
-          notificationTitle(severity) + ': ' + (ev.message || '');
+        liveRegion.textContent = titleText + ': ' + (ev.message || '');
       }, 0);
     }
     scheduleNotificationDismiss(id, severity, sticky);
@@ -2135,7 +2138,11 @@
     const closed = tabs[origIdx];
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
-      if (i >= 0) tabs.splice(i, 1);
+      if (i >= 0) {
+        if (typeof tabs[i].askPendingQuestion === 'string')
+          dismissAskWaitingNotice(id);
+        tabs.splice(i, 1);
+      }
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -4517,10 +4524,12 @@
       if (draft) inputDrafts[t.id] = draft;
       // Likewise the answer typed into (or sent from, but never
       // confirmed) the composer, with its question: it comes back when
-      // the daemon asks that same question again after the reload.
-      const answer = asked ? typed : t.unackedAnswer;
+      // the daemon asks that same question again after the reload. A
+      // pending question is kept even before anything is typed, so the
+      // replay after the reload is recognised as already seen.
+      const answer = (asked ? typed : t.unackedAnswer) || '';
       const question = asked ? t.askPendingQuestion : t.unackedQuestion;
-      if (answer && typeof question === 'string') {
+      if ((answer || asked) && typeof question === 'string') {
         askDrafts[t.id] = {question, answer};
       }
     });
@@ -4802,6 +4811,8 @@
     removedIds.forEach(id => {
       const doomed = byId.get(id);
       if (doomed && doomed.isContentTab) disposeTabContentView(doomed);
+      if (doomed && typeof doomed.askPendingQuestion === 'string')
+        dismissAskWaitingNotice(id);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -4944,13 +4955,11 @@
       savedAskDrafts = {};
       Object.keys(asks).forEach(id => {
         const d = asks[id];
-        if (
-          d &&
-          typeof d.question === 'string' &&
-          typeof d.answer === 'string' &&
-          d.answer
-        ) {
-          savedAskDrafts[id] = {question: d.question, answer: d.answer};
+        if (d && typeof d.question === 'string') {
+          savedAskDrafts[id] = {
+            question: d.question,
+            answer: typeof d.answer === 'string' ? d.answer : '',
+          };
         }
       });
     }
@@ -15979,16 +15988,21 @@
         if (askTab.askPendingQuestion === askQuestion) break;
         enterAnswerMode(askTab, askQuestion);
         const draft = savedAskDrafts && savedAskDrafts[askTab.id];
+        // The question this client was already answering when it
+        // reloaded comes back in place; only a NEW question pulls the
+        // user over to its tab.
+        const knownQuestion = !!draft && draft.question === askQuestion;
         if (draft) {
           // The same question is still open: the answer goes back into
           // the (now empty) composer. A different one means the old
           // answer was taken.
-          if (draft.question === askQuestion)
-            setComposerTextOf(askTab, draft.answer);
+          if (knownQuestion) setComposerTextOf(askTab, draft.answer);
           delete savedAskDrafts[askTab.id];
         }
         syncAskComposer();
         renderTabBar();
+        showAskWaitingNotice(askTab);
+        if (!knownQuestion) focusAskingTab(askTab);
         break;
       }
       case 'askUserDone': {
@@ -17297,6 +17311,47 @@
       // ended, so tabs sharing its backend chat keep their own questions.
       if (tab.askPendingQuestion !== null) clearAskForTab(tab);
     }
+  }
+
+  // A new question brings its tab forward on every surface: the internal
+  // strip switches to it and, in VS Code, the host reveals the sidebar
+  // view or editor panel (raising a native notice when the webview was
+  // hidden). Unlike focusFinishedTab this ignores
+  // userInteractedSinceSubmit: the agent is blocked until the user
+  // answers, so the question is where they need to be.
+  function focusAskingTab(tab) {
+    if (tab.id !== activeTabId) switchToTab(tab.id);
+    if (VSCODE_CHAT_HOST) {
+      postToHost({
+        type: 'askWaiting',
+        tabId: tab.id,
+        question: tab.askPendingQuestion || '',
+      });
+    }
+  }
+
+  function askWaitingNoticeId(tabId) {
+    return 'ask:' + tabId;
+  }
+
+  // Sticky toast saying the agent is blocked on the user, with a button
+  // back to the question. The user clears it with its X; it also goes
+  // when the question is answered, its task ends or its tab closes
+  // (dismissAskWaitingNotice).
+  function showAskWaitingNotice(tab) {
+    showNotification({
+      id: askWaitingNoticeId(tab.id),
+      severity: 'info',
+      sticky: true,
+      title: 'Waiting for your answer',
+      message: tab.askPendingQuestion || '',
+      actions: [{label: 'Show question', onClick: () => switchToTab(tab.id)}],
+    });
+  }
+
+  function dismissAskWaitingNotice(tabId) {
+    removeNotification(askWaitingNoticeId(tabId), undefined, false);
+    if (VSCODE_CHAT_HOST) postToHost({type: 'askWaitingDone', tabId: tabId});
   }
 
   function focusFinishedTab(tabId) {
@@ -20707,6 +20762,8 @@
   // the parked prompt comes back. An answer still being typed is kept
   // too, above it, so nothing the user wrote is lost.
   function retireAskForTab(tab) {
+    if (typeof tab.askPendingQuestion === 'string')
+      dismissAskWaitingNotice(tab.id);
     tab.askPendingQuestion = null;
     const panel = lastQuestionPanel(tab);
     if (panel) setQuestionPanelPending(panel, false);

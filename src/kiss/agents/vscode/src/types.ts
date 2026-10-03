@@ -410,6 +410,14 @@ export type FromWebviewMessage =
   // Editor-tabs mode: a task in this panel just finished — bring the
   // hosting editor tab forward (sidebar mode's finished-task switch).
   | {type: 'revealPanel'}
+  // Both VS Code chat surfaces: an ask_user_question just reached the
+  // tab `tabId` of this webview. The host brings the surface forward
+  // and, when the webview was hidden, raises a native notification
+  // that stays until the user clears it or `askWaitingDone` arrives.
+  | {type: 'askWaiting'; tabId: string; question: string}
+  // The question of tab `tabId` was answered, its task ended or its tab
+  // closed: drop the native notification.
+  | {type: 'askWaitingDone'; tabId: string}
   // Editor-tabs mode: open another chat as a new editor tab — a fresh
   // conversation when chatId is absent, a history resume otherwise.
   | {

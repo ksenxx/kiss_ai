@@ -755,8 +755,9 @@ export class SorcarPanelManager {
         // the user's keyboard focus, and never while the user is in a
         // file: revealing would replace the document they are reading
         // in its group. The tab's ✅ / ❌ title decoration already tells
-        // them the task ended.
-        if (vscode.window.activeTextEditor) break;
+        // them the task ended. A waiting question (`force`) is the
+        // exception: the agent is blocked until they answer it.
+        if (vscode.window.activeTextEditor && !event.force) break;
         cp.panel.reveal(undefined, true);
         break;
       case 'metaUpdate':
