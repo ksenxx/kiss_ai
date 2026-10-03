@@ -3157,14 +3157,14 @@
   },
   "openrouter/deepseek/deepseek-v4-pro-0813": {
     "context_length": 500000,
-    "input_price_per_1M": 0.66,
-    "output_price_per_1M": 1.98,
+    "input_price_per_1M": 0.22,
+    "output_price_per_1M": 4.2,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.022
+    "cache_read_price_per_1M": 0.14
   },
   "openrouter/deepseek/deepseek-v4.1-flash": {
     "context_length": 500000,
@@ -4010,9 +4010,9 @@
   },
   "openrouter/moonshotai/kimi-k3": {
     "context_length": 500000,
-    "input_price_per_1M": 2.7,
-    "output_price_per_1M": 13.5,
-    "cache_read_price_per_1M": 0.27,
+    "input_price_per_1M": 0.99,
+    "output_price_per_1M": 13.0,
+    "cache_read_price_per_1M": 0.8,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4022,9 +4022,9 @@
   },
   "openrouter/moonshotai/kimi-k3-high": {
     "context_length": 500000,
-    "input_price_per_1M": 2.7,
-    "output_price_per_1M": 13.5,
-    "cache_read_price_per_1M": 0.27,
+    "input_price_per_1M": 0.99,
+    "output_price_per_1M": 13.0,
+    "cache_read_price_per_1M": 0.8,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4035,9 +4035,9 @@
   },
   "openrouter/moonshotai/kimi-k3-low": {
     "context_length": 500000,
-    "input_price_per_1M": 2.7,
-    "output_price_per_1M": 13.5,
-    "cache_read_price_per_1M": 0.27,
+    "input_price_per_1M": 0.99,
+    "output_price_per_1M": 13.0,
+    "cache_read_price_per_1M": 0.8,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4048,9 +4048,9 @@
   },
   "openrouter/moonshotai/kimi-k3-max": {
     "context_length": 500000,
-    "input_price_per_1M": 2.7,
-    "output_price_per_1M": 13.5,
-    "cache_read_price_per_1M": 0.27,
+    "input_price_per_1M": 0.99,
+    "output_price_per_1M": 13.0,
+    "cache_read_price_per_1M": 0.8,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -6633,14 +6633,14 @@
   },
   "openrouter/~deepseek/deepseek-pro-latest": {
     "context_length": 500000,
-    "input_price_per_1M": 0.17,
+    "input_price_per_1M": 0.22,
     "output_price_per_1M": 4.2,
     "fc": true,
     "emb": false,
     "gen": true,
     "comment": "NEW",
     "use_responses_api": true,
-    "cache_read_price_per_1M": 0.12
+    "cache_read_price_per_1M": 0.14
   },
   "openrouter/~deepseek/deepseek-v4-flash-latest": {
     "context_length": 500000,
