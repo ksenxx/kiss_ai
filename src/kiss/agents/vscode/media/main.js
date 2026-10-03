@@ -24137,10 +24137,9 @@
     // ``webTools`` override.
     webToolsStateKnown = true;
     setChecked(classifyTasksToggleBtn, cfg.classify_tasks !== false);
-    // Off unless explicitly enabled: the default is the LLM classifier.
     setChecked(
       classifyWithDecisionsToggleBtn,
-      cfg.classify_with_decisions === true,
+      cfg.classify_with_decisions !== false,
     );
     setChecked(memoryToggleBtn, cfg.use_memory !== false);
     // Recorded even while an edit is active (the boxes themselves are
