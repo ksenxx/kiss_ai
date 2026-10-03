@@ -125,11 +125,15 @@ class RunAgentChildAskAllSurfacesTest(DaemonLocalHarness):
             ) from error
 
     def _assert_question_shown(self, name: str, child_tab: str) -> None:
-        if self.bridge.call("ask", name=name)["activeTabId"] != child_tab:
-            def attention() -> bool:
-                return child_tab in self.bridge.call("ask", name=name)["attention"]
+        # A new question brings the child's tab forward; a question the
+        # surface already knows (replayed after a reload) leaves the tab in
+        # the background and flags it "Waiting for your answer" instead.
+        def shown() -> bool:
+            ask = self.bridge.call("ask", name=name)
+            return ask["activeTabId"] == child_tab or child_tab in ask["attention"]
 
-            self._wait_for(attention, what=f"child attention on {name}")
+        self._wait_for(shown, what=f"child question on {name}")
+        if self.bridge.call("ask", name=name)["activeTabId"] != child_tab:
             assert self.bridge.call("activateTab", name=name, tabId=child_tab)["found"]
 
         def answering() -> dict[str, Any] | None:

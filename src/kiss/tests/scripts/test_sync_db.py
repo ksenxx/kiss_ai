@@ -168,11 +168,12 @@ def append_events(
     )
 
 
-def sync(*args: str) -> subprocess.CompletedProcess[str]:
+def sync(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run the sync_db command line.
 
     Args:
         *args: Command-line arguments after the module name.
+        env: Environment of the process; the current one when ``None``.
 
     Returns:
         The completed process, with text stdout and stderr.
@@ -182,6 +183,7 @@ def sync(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
 
 
@@ -1080,7 +1082,8 @@ def edit_command(tmp_path: Path, sql: str) -> str:
     """
     script = tmp_path / "edit.py"
     script.write_text(EDIT_SCRIPT)
-    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {{}} {shlex.quote(sql)}"
+    quote = sync_db.local_shell_quote
+    return f"{quote(sys.executable)} {quote(str(script))} {{}} {quote(sql)}"
 
 
 def test_edit_delta_rewrites_and_drops_rows_before_the_merge(tmp_path: Path) -> None:
@@ -1094,14 +1097,10 @@ def test_edit_delta_rewrites_and_drops_rows_before_the_merge(tmp_path: Path) -> 
     dst = make_db(target)
     add_task(dst, "a", events=1, result="kept")
     dst.close()
-    edit = edit_command(tmp_path, "")
-    drop_live = edit.replace("''", shlex.quote("DELETE FROM task_history WHERE id = 'live'"))
-    drop_live_events = edit.replace(
-        "''", shlex.quote("DELETE FROM events WHERE task_id = 'live'")
-    )
-    relocate = edit.replace(
-        "''",
-        shlex.quote("UPDATE task_history SET result = replace(result, '/laptop/', '/server/')"),
+    drop_live = edit_command(tmp_path, "DELETE FROM task_history WHERE id = 'live'")
+    drop_live_events = edit_command(tmp_path, "DELETE FROM events WHERE task_id = 'live'")
+    relocate = edit_command(
+        tmp_path, "UPDATE task_history SET result = replace(result, '/laptop/', '/server/')"
     )
 
     done = sync(
@@ -1154,18 +1153,27 @@ def test_edit_delta_sees_the_source_columns_and_a_quoted_path(tmp_path: Path) ->
     probe = tmp_path / "probe.py"
     probe.write_text(
         "import sqlite3,sys\n"
+        "print(sys.argv[1])\n"
         "c=sqlite3.connect(sys.argv[1])\n"
         "print(sorted(r[0] for r in c.execute("
         "\"SELECT name FROM sqlite_master WHERE type='table'\")))\n"
     )
+    # The delta is a temporary file: put the temp dir where its name needs
+    # quoting in every shell (a space, and `&`, a command separator for
+    # cmd.exe even in a word without spaces).
+    temp = tmp_path / "a&b c"
+    temp.mkdir()
+    env = {**os.environ, "TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)}
 
     done = sync(
         str(source),
         str(target),
         "--edit-delta",
-        f"{shlex.quote(sys.executable)} {shlex.quote(str(probe))} {{}}",
+        f"{sync_db.local_shell_quote(sys.executable)} {sync_db.local_shell_quote(str(probe))} {{}}",
+        env=env,
     )
 
     assert done.returncode == 0, done.stderr
+    assert done.stdout.count(str(temp)) == 1, done.stdout
     assert "['events', 'sqlite_sequence', 'task_history']" in done.stdout
     assert event_keys(target) == [("a", 1)]

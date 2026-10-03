@@ -1136,6 +1136,28 @@ def synchronize(
     return stats
 
 
+def local_shell_quote(arg: str) -> str:
+    """Quote *arg* for the shell ``subprocess.run(..., shell=True)`` uses on this machine.
+
+    That is ``/bin/sh`` everywhere but Windows, where it is ``cmd.exe``:
+    it knows nothing of POSIX single quotes, and ``&``, ``|``, ``<``,
+    ``>`` and ``^`` are literal only inside double quotes.  A file name
+    cannot contain a double quote on Windows, so a word that does (not a
+    path) gets the C runtime's quoting instead.
+
+    Args:
+        arg: The word to quote.
+
+    Returns:
+        *arg* quoted as one shell word.
+    """
+    if os.name != "nt":
+        return shlex.quote(arg)
+    if '"' in arg:
+        return subprocess.list2cmdline([arg])
+    return f'"{arg}"'
+
+
 def edit_delta(delta_gz: str, commands: list[str]) -> None:
     """Run shell commands against the delta between the extract and the merge.
 
@@ -1157,7 +1179,7 @@ def edit_delta(delta_gz: str, commands: list[str]) -> None:
         with open(delta_gz, "rb") as inp:
             read_file_gz(inp, plain)
         for command in commands:
-            shell_command = command.replace("{}", shlex.quote(plain))
+            shell_command = command.replace("{}", local_shell_quote(plain))
             done = subprocess.run(shell_command, shell=True, check=False)
             if done.returncode != 0:
                 raise SyncError(f"delta edit exited with {done.returncode}: {command}")

@@ -22,6 +22,10 @@ from pathlib import Path
 
 import pytest
 
+from kiss.tests.conftest import posix_only
+
+pytestmark = posix_only("runs the brand_home_dir_name function of install.sh under bash")
+
 _REPO = Path(__file__).resolve().parents[3]
 _INSTALL = _REPO / "install.sh"
 _FUNCTION = re.compile(r"^brand_home_dir_name\(\) \{\n.*?^\}\n", re.M | re.S)

@@ -6752,16 +6752,24 @@
     tip.style.top = '0px';
     const width = tip.offsetWidth;
     const height = tip.offsetHeight;
-    // Centered over the target, above it (below it when the graph's
-    // top is too close), kept inside the graph's edges.
+    // Centered over the target and kept inside the graph's edges: above
+    // the target, or below it when the graph's top is too close.  When
+    // neither side has room inside the graph (a narrow panel wraps the
+    // tooltip into many lines), the side that covers less of the target
+    // wins, so the hovered cell stays visible whenever it can.
     const rect = target.getBoundingClientRect();
     const graphRect = spendGraph.getBoundingClientRect();
     const x = rect.left - graphRect.left + rect.width / 2 - width / 2;
     tip.style.left =
       Math.max(2, Math.min(x, graphRect.width - width - 2)) + 'px';
-    const above = rect.top - graphRect.top - height - 6;
-    const y = above >= 0 ? above : rect.bottom - graphRect.top + 6;
-    tip.style.top = Math.max(0, Math.min(y, graphRect.height - height)) + 'px';
+    const top = rect.top - graphRect.top;
+    const bottom = rect.bottom - graphRect.top;
+    const clamp = y => Math.max(0, Math.min(y, graphRect.height - height));
+    const covered = y =>
+      Math.max(0, Math.min(y + height, bottom) - Math.max(y, top));
+    const above = clamp(top - height - 6);
+    const below = clamp(bottom + 6);
+    tip.style.top = (covered(above) <= covered(below) ? above : below) + 'px';
   }
 
   /** Hide the graph's tooltip (the pointer left the graph or a cell). */

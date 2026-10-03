@@ -27,6 +27,19 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.core import config
 from kiss.core.file_lock import exclusive_file_lock
+from kiss.tests.conftest import posix_only
+
+
+def assert_old_name_left_behind(old: Path, new_name: str) -> None:
+    """The old name is a link to the new one, except on Windows, where nothing is left.
+
+    SQLite on Windows names the WAL after the path it was given, so a link
+    would have an old-version process write a second WAL over the database.
+    """
+    if os.name == "nt":
+        assert not old.is_symlink() and not old.exists()
+    else:
+        assert os.readlink(old) == new_name
 
 
 @pytest.fixture
@@ -56,11 +69,12 @@ def test_sorcar_db_is_renamed_to_history_db_with_its_sidecars(kiss_dir: Path) ->
     rows = th._get_db().execute("SELECT task FROM task_history").fetchall()
     assert [row["task"] for row in rows] == ["written under the old name"]
     assert (kiss_dir / "history.db").is_file()
-    assert os.readlink(kiss_dir / "sorcar.db") == "history.db"
+    assert_old_name_left_behind(kiss_dir / "sorcar.db", "history.db")
     assert not (kiss_dir / "sorcar.db-wal").exists()
     assert not (kiss_dir / "sorcar.db-shm").exists()
 
 
+@posix_only("the rename leaves a link behind only where SQLite resolves it (not Windows)")
 def test_a_process_of_the_old_version_keeps_writing_to_the_same_file(kiss_dir: Path) -> None:
     """Opened through the old name after the rename, SQLite shares the new file's WAL."""
     th._DB_PATH = kiss_dir / "history.db"
@@ -104,6 +118,30 @@ def test_events_journalled_against_the_old_path_are_replayed(kiss_dir: Path) -> 
     }
 
 
+def test_rows_journalled_against_an_unrelated_sorcar_db_are_dropped(kiss_dir: Path) -> None:
+    """A sorcar.db still beside history.db is another database, not its former name."""
+    th._DB_PATH = kiss_dir / "history.db"
+    task_id, _chat = th._add_task("new version")
+    th._close_db()
+    other = sqlite3.connect(kiss_dir / "sorcar.db")  # e.g. created by an old version run later
+    other.execute("CREATE TABLE t (x)")
+    other.commit()
+    other.close()
+    (kiss_dir / "sorcar.db.failed_events.jsonl").write_text(json.dumps({
+        "task_id": task_id, "event_json": json.dumps({"type": "result", "text": "stray"}),
+        "timestamp": 1.0, "origin_db_path": str(kiss_dir / "sorcar.db"),
+    }) + "\n")
+
+    th._get_db()  # adopts the journal; the database itself stays, history.db exists
+    th._replay_failed_events()
+    assert (kiss_dir / "sorcar.db").is_file() and not (kiss_dir / "sorcar.db").is_symlink()
+    assert not (kiss_dir / "history.db.failed_events.jsonl").exists()
+    events = th._get_db().execute(
+        "SELECT event_json FROM events WHERE task_id = ?", (task_id,),
+    ).fetchall()
+    assert events == []
+
+
 def test_claimed_journal_snapshots_follow_the_database_and_keep_their_markers(
     kiss_dir: Path,
 ) -> None:
@@ -127,6 +165,10 @@ def test_claimed_journal_snapshots_follow_the_database_and_keep_their_markers(
     th._get_db()
     assert not list(kiss_dir.glob("sorcar.db.failed_events.jsonl.consumed-*"))
     assert len(list(kiss_dir.glob("history.db.failed_events.jsonl.consumed-*"))) == 2
+    # The rows name the old path on their own merits, not through the link
+    # the rename leaves behind (there is none on Windows, and a user may
+    # have deleted it).
+    (kiss_dir / "sorcar.db").unlink(missing_ok=True)
     th._replay_failed_events()
     events = th._get_db().execute(
         "SELECT event_json FROM events WHERE task_id = ?", (task_id,),
@@ -143,7 +185,7 @@ def test_sidecars_move_before_the_main_file_and_keep_their_bytes(tmp_path: Path)
     assert (tmp_path / "new.db").read_bytes() == b"main"
     assert (tmp_path / "new.db-wal").read_bytes() == b"wal pages"
     assert not (tmp_path / "new.db-shm").exists()
-    assert os.readlink(tmp_path / "old.db") == "new.db"
+    assert_old_name_left_behind(tmp_path / "old.db", "new.db")
     assert not (tmp_path / "old.db-wal").exists()
 
 
@@ -195,5 +237,5 @@ def test_sorcar_md_becomes_agents_md(kiss_dir: Path) -> None:
     path = config.agents_md_path()
     assert path == kiss_dir / "AGENTS.md"
     assert path.read_text() == "# User instructions\n\n- Always be brief\n"
-    assert os.readlink(kiss_dir / "SORCAR.md") == "AGENTS.md"
+    assert_old_name_left_behind(kiss_dir / "SORCAR.md", "AGENTS.md")
     assert config.agents_md_path() == path
