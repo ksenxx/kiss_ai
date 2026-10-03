@@ -136,9 +136,12 @@ def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = 
     one, so a process of the previous version that is still running
     (the web app before its restart, say) keeps writing to the same
     file -- SQLite resolves the link, so both versions share one WAL --
-    instead of recreating an empty file under the old name.  Concurrent
-    adopters serialise on a lock file next to *path*, and the one that
-    arrives second finds nothing left to do.
+    instead of recreating an empty file under the old name.  Not on
+    Windows: SQLite there names the WAL after the path it was given, so
+    a link would have the two versions write two WALs over one database
+    file; the old version is restarted anyway, so nothing is left behind.
+    Concurrent adopters serialise on a lock file next to *path*, and the
+    one that arrives second finds nothing left to do.
 
     Args:
         path: The file's current location.
@@ -157,10 +160,8 @@ def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = 
             source = legacy.with_name(legacy.name + suffix)
             if source.exists():
                 os.replace(source, path.with_name(path.name + suffix))
-        try:
+        if os.name != "nt":
             os.symlink(path.name, legacy)
-        except OSError:
-            pass  # Windows without the symlink privilege: the old version is restarted anyway.
 
 
 def agents_md_path() -> Path:

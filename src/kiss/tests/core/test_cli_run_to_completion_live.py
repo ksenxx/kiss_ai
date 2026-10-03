@@ -55,6 +55,13 @@ def _run_live_task(model_name: str, tmp_path: Path) -> tuple[dict, Path]:
     on its own; the system prompt requires a marker in the final answer,
     proving the appended system prompt was delivered.
 
+    The marker is an instruction the model may still disobey: measured on
+    2026-10-03, ``codex exec`` (gpt-5.5, xhigh) given this exact prompt
+    directly left the marker out of its confirmation in about one run in
+    five.  A run that wrote the file but dropped the marker therefore gets
+    one more attempt in a fresh directory; the file write has never been
+    missed, so a second miss is reported as the plumbing failure it would be.
+
     Args:
         model_name: The ``cc/*`` or ``codex/*`` model to run.
         tmp_path: Directory the task writes its probe file into.
@@ -62,7 +69,16 @@ def _run_live_task(model_name: str, tmp_path: Path) -> tuple[dict, Path]:
     Returns:
         Tuple of the parsed finish-YAML payload and the probe file path.
     """
-    probe = tmp_path / "live_probe.txt"
+    payload, probe = _run_live_task_once(model_name, tmp_path / "attempt0")
+    if MARKER not in str(payload.get("summary", "")) and probe.exists():
+        payload, probe = _run_live_task_once(model_name, tmp_path / "attempt1")
+    return payload, probe
+
+
+def _run_live_task_once(model_name: str, work_dir: Path) -> tuple[dict, Path]:
+    """One attempt of :func:`_run_live_task` in the fresh directory *work_dir*."""
+    work_dir.mkdir()
+    probe = work_dir / "live_probe.txt"
     task = (
         f"Create a file at {probe} containing exactly the text "
         "live-ok (no trailing newline). Then reply with a one-sentence "
@@ -70,7 +86,7 @@ def _run_live_task(model_name: str, tmp_path: Path) -> tuple[dict, Path]:
     )
     agent = KISSAgent(f"live run-to-completion {model_name}")
     cwd = os.getcwd()
-    os.chdir(tmp_path)
+    os.chdir(work_dir)
     try:
         result = agent.run(
             model_name=model_name,

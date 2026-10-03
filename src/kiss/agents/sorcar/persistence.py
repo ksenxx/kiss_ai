@@ -3828,13 +3828,21 @@ def _is_active_db(origin_db_path: str) -> bool:
     """Whether *origin_db_path* names the active database.
 
     A row journalled before version 2026.10.2 carries the database's
-    former path (``sorcar.db``); the rename left that name as a symlink
-    to ``history.db``, so the two paths resolve to the same file.
+    former path (``sorcar.db``): the active database's own name before
+    the rename (:func:`_adopt_legacy_db_name`).  The symlink the rename
+    leaves behind resolves it to ``history.db``; where there is none
+    (Windows, or a user deleted it) the old name is accepted as long as
+    no file exists under it -- an actual ``sorcar.db`` beside the active
+    database is an unrelated database, not its former name.
     """
     current_path = _current_db_path()
-    return origin_db_path == current_path or (
-        os.path.realpath(origin_db_path) == os.path.realpath(current_path)
-    )
+    if origin_db_path == current_path:
+        return True
+    origin = os.path.realpath(origin_db_path)
+    if origin == os.path.realpath(current_path):
+        return True
+    legacy_path = os.path.join(os.path.dirname(current_path), _LEGACY_DB_NAME)
+    return origin == os.path.realpath(legacy_path) and not os.path.exists(legacy_path)
 
 
 def _write_event_batch(
