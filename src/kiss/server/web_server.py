@@ -1256,18 +1256,32 @@ def _terminate_declined_cloudflared(pid: int) -> None:
     be recycled inside the wait window too), escalates to SIGKILL if
     still alive, then unlinks the pidfile.
     """
+    _terminate_cloudflared_pid(pid)
+    _unlink_cloudflared_pidfile()
+
+
+def _terminate_cloudflared_pid(pid: int) -> None:
+    """Terminate the cloudflared process *pid* without touching the pidfile.
+
+    Verifies the process identity (:func:`_looks_like_cloudflared`)
+    before EVERY signal because *pid* may come from a stale pidfile or
+    a process listing and could have been recycled for an unrelated
+    process.  Sends SIGTERM, waits up to ~2s, re-verifies, escalates to
+    SIGKILL if still alive.  Used both for pidfile-recorded processes
+    (via :func:`_terminate_declined_cloudflared`) and for stray tunnels
+    found by :func:`_find_cloudflared_forwarding_to`, where unlinking
+    the pidfile would wrongly discard the daemon's OWN tunnel record.
+    """
     if not _looks_like_cloudflared(pid):
         logger.info(
-            "pidfile pid %d is not a cloudflared process (stale pidfile, "
-            "pid recycled); not signalling it",
+            "pid %d is not a cloudflared process (pid recycled); "
+            "not signalling it",
             pid,
         )
-        _unlink_cloudflared_pidfile()
         return
     try:
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
-        _unlink_cloudflared_pidfile()
         return
     for _ in range(20):
         if not _is_pid_alive(pid):
@@ -1280,10 +1294,118 @@ def _terminate_declined_cloudflared(pid: int) -> None:
             os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    _unlink_cloudflared_pidfile()
 
 
-def _terminate_orphan_cloudflared() -> None:
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _find_cloudflared_forwarding_to(local_port: int) -> list[tuple[int, int]]:
+    """Find every cloudflared of this user that forwards to *local_port*.
+
+    The pidfile is the daemon's only link to its tunnel, and that link
+    breaks in practice: the file is lost, or the daemon's home directory
+    changes (a brand switch between ``~/.kiss`` and ``~/.s10s`` keeps a
+    separate pidfile per home).  The tunnel itself keeps running — it was
+    detached on purpose so its public URL survives restarts — and keeps
+    relaying internet visitors to ``--url https://localhost:<port>``.
+    This scan rediscovers such tunnels from the process table so the
+    caller can adopt one (preserving its URL) or terminate the rest
+    (no unmanaged public URL may reach this server).
+
+    Only processes that look like a tunnel THIS daemon could have spawned
+    (:meth:`RemoteAccessServer._spawn_cloudflared`) count: owned by the
+    current user, executable basename ``cloudflared``, quick-tunnel
+    argv (``tunnel ...`` without the named-tunnel ``run`` subcommand),
+    ``--metrics 127.0.0.1:<port>`` (the probes connect to 127.0.0.1, so
+    a tunnel exposing metrics elsewhere could never be monitored) and a
+    ``--url`` whose host is loopback and whose port is *local_port*.  A
+    user's own named tunnel or a tunnel to another machine's port is
+    never matched, so it is neither adopted nor killed.
+
+    Returns:
+        ``(pid, metrics_port)`` pairs, in process-table order; empty on
+        Windows (no ``ps``) or when ``ps`` fails.
+    """
+    if sys.platform == "win32":  # pragma: no cover — Windows only
+        return []
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-eo", "pid=,uid=,args="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+    except Exception:
+        return []
+    uid = str(os.getuid())
+    found: list[tuple[int, int]] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 4 or parts[1] != uid:
+            continue
+        if Path(parts[2]).name.lower() != "cloudflared":
+            continue
+        args = parts[3:]
+        if args[0] != "tunnel" or "run" in args:
+            continue
+        try:
+            metrics_port = _quick_tunnel_argv_ports(args, local_port)
+        except ValueError:
+            # Unparsable ``--metrics``/``--url`` value (not an int, bad
+            # IPv6 literal, ...): not a tunnel this daemon spawned.
+            continue
+        if metrics_port is not None:
+            found.append((int(parts[0]), metrics_port))
+    return found
+
+
+def _quick_tunnel_argv_ports(args: list[str], local_port: int) -> int | None:
+    """Return the ``--metrics`` port of a quick-tunnel argv aimed at *local_port*.
+
+    *args* are the arguments after the ``cloudflared`` executable.
+    Returns ``None`` when the metrics endpoint is not on 127.0.0.1 or
+    the ``--url`` host is not loopback or its port is not *local_port*.
+    Raises ``ValueError`` for values that do not parse at all.
+    """
+    metrics_port: int | None = None
+    url_port: int | None = None
+    for i, arg in enumerate(args[:-1]):
+        if arg == "--metrics":
+            host, _, port = args[i + 1].rpartition(":")
+            if host == "127.0.0.1":
+                metrics_port = int(port)
+        elif arg == "--url":
+            target = urlsplit(args[i + 1])
+            if target.hostname in _LOOPBACK_HOSTS:
+                url_port = target.port
+    if metrics_port is None or url_port != local_port:
+        return None
+    return metrics_port
+
+
+def _terminate_stray_cloudflared(local_port: int, keep_pid: int | None) -> None:
+    """Terminate every cloudflared forwarding to *local_port* except *keep_pid*.
+
+    Called once the daemon's own tunnel is settled (adopted or freshly
+    spawned, *keep_pid*) or when no tunnel may exist at all
+    (``keep_pid=None``, empty password).  Any other cloudflared aimed at
+    this port is a leftover of an earlier daemon that lost its pidfile
+    or ran from another home directory: nobody monitors it, yet its
+    public URL still reaches this server.
+    """
+    for pid, metrics_port in _find_cloudflared_forwarding_to(local_port):
+        if pid == keep_pid:
+            continue
+        logger.warning(
+            "Terminating stray cloudflared pid=%d metrics_port=%d: it "
+            "forwards to local port %d but is not this server's tunnel",
+            pid, metrics_port, local_port,
+        )
+        _terminate_cloudflared_pid(pid)
+
+
+def _terminate_orphan_cloudflared(local_port: int | None = None) -> None:
     """Kill a previous kiss-web's surviving cloudflared, if any.
 
     Called at startup when the ``remote_password`` is EMPTY: a tunnel
@@ -1296,22 +1418,28 @@ def _terminate_orphan_cloudflared() -> None:
     The signalling (identity check before EVERY signal, SIGTERM,
     bounded wait, re-verified SIGKILL escalation, pidfile unlink) is
     delegated to :func:`_terminate_declined_cloudflared`, which exists
-    for exactly this "recorded pid we must not adopt" situation.
+    for exactly this "recorded pid we must not adopt" situation.  When
+    *local_port* is given, cloudflared processes forwarding to it that
+    the pidfile does not know about (lost pidfile, other home directory)
+    are terminated as well — they expose this server just the same.
     """
     data = _load_cloudflared_pidfile()
-    if data is None:
-        return
-    pid = int(data["pid"])
-    if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
-        logger.warning(
-            "remote_password is empty; terminating the cloudflared "
-            "tunnel (pid=%d) left by a previous kiss-web so its "
-            "public URL stops reaching this server.", pid,
-        )
-    _terminate_declined_cloudflared(pid)
+    if data is not None:
+        pid = int(data["pid"])
+        if _is_pid_alive(pid) and _looks_like_cloudflared(pid):
+            logger.warning(
+                "remote_password is empty; terminating the cloudflared "
+                "tunnel (pid=%d) left by a previous kiss-web so its "
+                "public URL stops reaching this server.", pid,
+            )
+        _terminate_declined_cloudflared(pid)
+    if local_port is not None:
+        _terminate_stray_cloudflared(local_port, None)
 
 
-def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
+def _try_adopt_existing_cloudflared(
+    local_port: int | None = None,
+) -> tuple[int, int, str] | None:
     """Look for a healthy cloudflared started by a previous kiss-web.
 
     Reads ``~/.kiss/cloudflared.pid``, verifies the pid is alive and
@@ -1319,6 +1447,15 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     and re-discovers the public URL via the ``/quicktunnel`` endpoint
     (falling back to the URL recorded in the pidfile when the metrics
     endpoint doesn't expose one — e.g. named tunnels).
+
+    When the pidfile yields nothing (missing, malformed, dead pid, or a
+    live process that had to be declined) and *local_port* is given,
+    the process table is scanned for a cloudflared that forwards to
+    that port anyway (:func:`_find_cloudflared_forwarding_to`) — the
+    tunnel of a daemon that lost its pidfile or ran from another home
+    directory — and the first healthy one is adopted the same way.
+    Without this the public URL rotated on every such restart while the
+    old tunnel lived on unmanaged.
 
     A live cloudflared whose reachable metrics endpoint reports zero
     ready connections (mid-reconnect after a network switch or wake
@@ -1344,18 +1481,55 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         ``(pid, metrics_port, url)`` if adoption succeeded, else
         ``None`` (caller spawns a fresh cloudflared).
     """
+    recorded_pid: int | None = None
     data = _load_cloudflared_pidfile()
-    if data is None:
+    if data is not None:
+        pid = int(data["pid"])
+        metrics_port = data.get("metrics_port")
+        if isinstance(metrics_port, int):
+            recorded_pid = pid
+            if _is_pid_alive(pid):
+                adopted = _adopt_cloudflared_candidate(
+                    pid, metrics_port, data.get("url"),
+                )
+                if adopted is not None:
+                    return adopted
+            else:
+                logger.info(
+                    "cloudflared pidfile points to dead pid %d; ignoring",
+                    pid,
+                )
+    if local_port is None:
         return None
-    pid = int(data["pid"])
-    metrics_port = data.get("metrics_port")
-    if not isinstance(metrics_port, int):
-        return None
-    if not _is_pid_alive(pid):
+    for pid, metrics_port in _find_cloudflared_forwarding_to(local_port):
+        if pid == recorded_pid:
+            continue
         logger.info(
-            "cloudflared pidfile points to dead pid %d; ignoring", pid,
+            "Found cloudflared pid=%d metrics_port=%d forwarding to local "
+            "port %d that the pidfile does not record; trying to adopt it",
+            pid, metrics_port, local_port,
         )
-        return None
+        adopted = _adopt_cloudflared_candidate(pid, metrics_port, None)
+        if adopted is not None:
+            return adopted
+    return None
+
+
+def _adopt_cloudflared_candidate(
+    pid: int, metrics_port: int, saved_url: object,
+) -> tuple[int, int, str] | None:
+    """Probe one live cloudflared and adopt it or terminate it.
+
+    Shared by the pidfile path and the process-table fallback of
+    :func:`_try_adopt_existing_cloudflared`; see there for the
+    adoption rules.  *saved_url* is the URL recorded in the pidfile
+    (``None`` for a process found in the process table), used when the
+    metrics endpoint exposes no ``/quicktunnel`` hostname.
+
+    Returns:
+        ``(pid, metrics_port, url)`` on adoption; ``None`` after the
+        process was declined and terminated.
+    """
     ready = _probe_tunnel_ready(metrics_port)
     if ready is not True:
         # Re-probe before declining: ``None`` (endpoint unreachable —
@@ -1370,10 +1544,8 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
             if ready is True:
                 break
     url = _query_quicktunnel_hostname(metrics_port)
-    if url is None:
-        saved = data.get("url")
-        if isinstance(saved, str) and saved.startswith("https://"):
-            url = saved
+    if url is None and isinstance(saved_url, str) and saved_url.startswith("https://"):
+        url = saved_url
     if ready is not True:
         if ready is False and url is not None and _looks_like_cloudflared(pid):
             # The metrics endpoint is REACHABLE but reports zero ready
@@ -10198,17 +10370,19 @@ class RemoteAccessServer:
             )
             if not initial_cfg.get("remote_password", ""):
                 await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared,
+                    None, _terminate_orphan_cloudflared, self.port,
                 )
             password = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, _wait_for_remote_password, 30.0,
             )
+            own_tunnel_pid: int | None = None
             if password:
                 adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _try_adopt_existing_cloudflared,
+                    None, _try_adopt_existing_cloudflared, self.port,
                 )
                 if adopted is not None:
                     adopted_pid, adopted_port, adopted_url = adopted
+                    own_tunnel_pid = adopted_pid
                     self._tunnel_adopted_pid = adopted_pid
                     self._tunnel_metrics_port = adopted_port
                     self._tunnel_started_at = time.monotonic()
@@ -10218,7 +10392,7 @@ class RemoteAccessServer:
                     )
             if not password:
                 await self._loop.run_in_executor(  # type: ignore[union-attr]
-                    None, _terminate_orphan_cloudflared,
+                    None, _terminate_orphan_cloudflared, self.port,
                 )
                 logger.warning(
                     "remote_password is not set in ~/.kiss/config.json; "
@@ -10236,6 +10410,25 @@ class RemoteAccessServer:
             elif tunnel_url is None:
                 tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                     None, self._start_tunnel,
+                )
+                spawned = self._tunnel_proc
+                if spawned is not None:
+                    own_tunnel_pid = spawned.pid
+            if own_tunnel_pid is not None:
+                # Our tunnel is settled (adopted or spawned); any OTHER
+                # cloudflared still forwarding to this port is a
+                # leftover from a daemon that lost its pidfile or ran
+                # from another home directory — unmonitored, yet its
+                # public URL reaches this server.  Only when our own
+                # pid is positively known: a SIGTERM landing during
+                # startup runs ``_detach_tunnel`` on another thread,
+                # which clears ``_tunnel_proc``/``_tunnel_adopted_pid``
+                # while leaving the tunnel alive for the next daemon —
+                # a cleanup with ``keep_pid=None`` would kill exactly
+                # that tunnel.
+                await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _terminate_stray_cloudflared, self.port,
+                    own_tunnel_pid,
                 )
 
         self._last_ips = await asyncio.to_thread(_get_local_ips)
