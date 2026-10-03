@@ -308,11 +308,14 @@
           <button type="button" class="meta-section-toggle" aria-expanded="true" aria-controls="meta-list"><svg class="meta-section-chevron" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Task Info</span></button>
         </div>
         <ul id="meta-list" class="meta-section-body">
+          <!-- The machine the agent runs on comes first, in bold: it is
+               the one value a user with several daemons reads before
+               anything else. -->
+          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Tokens:</span><span id="meta-tokens" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Cost:</span><span id="meta-cost" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Steps:</span><span id="meta-steps" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Time:</span><span id="meta-time" class="meta-value">Ready</span></li>
-          <li class="meta-item"><span class="meta-label">Machine:</span><span id="meta-machine" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Workdir:</span><span id="meta-workdir" class="meta-value">&mdash;</span></li>
           <li class="meta-item"><span class="meta-label">Max budget:</span><span id="meta-max-budget" class="meta-value">&mdash;</span></li>
           <!-- The task's own settings (a task_settings event), which
@@ -482,13 +485,13 @@
             Classify tasks before running
           </label>
           <!-- classify_with_decisions: the one switch for OpenRouter's
-               ~typesafe/jev-latest decisions model.  Checked: the
-               pre-run classifier asks Jev first (falling back to the
-               run's own LLM) and the agent gets the ``decide`` tool.
-               Unchecked (the default): the LLM classifier runs and no
-               task ever calls Jev. -->
+               ~typesafe/jev-latest decisions model.  Checked (the
+               default): the pre-run classifier asks Jev first (falling
+               back to the run's own LLM) and the agent gets the
+               ``decide`` tool.  Unchecked: the LLM classifier runs and
+               no task ever calls Jev. -->
           <label class="config-label config-checkbox" title="Let tasks use the ~typesafe/jev-latest decisions model (needs an OpenRouter API key): the pre-run classifier asks Jev first and the agent gets the decide tool. Unchecked: the classifier runs on the run's own model (skipped for cc/* and codex/* models) and no task calls Jev">
-            <input type="checkbox" id="cfg-classify-with-decisions">
+            <input type="checkbox" id="cfg-classify-with-decisions" checked>
             Use Jev (decisions model)
           </label>
           <label class="config-label config-checkbox">

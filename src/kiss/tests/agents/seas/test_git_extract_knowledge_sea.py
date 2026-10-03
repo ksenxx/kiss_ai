@@ -140,7 +140,7 @@ def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
     assert sea.classify_tasks() is False
     assert sea.use_web_tools() is False
     assert sea.use_memory() is False
-    names = [tool.__name__ for tool in sea.tools()]
+    names = [tool.__name__ for tool in sea.add_to_tools()]
     assert names == [
         "index_repo", "knowledge_status", "knowledge_search", "knowledge_read",
         "list_knowledge_pages", "read_knowledge_page", "search_knowledge_pages",
@@ -152,11 +152,12 @@ def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
     assert "ABSOLUTE path" in prompt
     for page in ("overview", "domain-glossary", "architecture", "history", "faq"):
         assert f"`{page}`" in prompt
-    # The real loader accepts the file: ``tools()`` returning callables makes
-    # the SEA its own tools file.
+    # The real loader accepts the file and stages the ``tools()``
+    # callables on the daemon-side ``tools`` field.
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "workDir": str(tmp_path)}
     apply_agent_overrides(cmd)
-    assert cmd["toolsFile"] == str(_SEA_PATH)
+    assert all(callable(tool) for tool in cmd["tools"])
+    assert "toolsFile" not in cmd
     assert cmd["toolProfile"] == "full"
     assert cmd["useWorktree"] is False
     assert cmd["systemPrompt"] == prompt
@@ -1037,7 +1038,7 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
             max_steps=6,
             max_budget=5.0,
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             tool_profile=sea.tool_profile(),
             base_system_prompt=sea.system_prompt(),
             web_tools=sea.use_web_tools(),

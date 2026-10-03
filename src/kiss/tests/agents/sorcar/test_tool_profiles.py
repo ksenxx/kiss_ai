@@ -27,7 +27,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar import sorcar_agent as sa
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.fanout_guard import is_implementation_task
-from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES, SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import BROWSER_TOOL_NAMES, TOOL_PROFILES, SorcarAgent
 from kiss.core.config import DEFAULT_CONFIG, Config
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
@@ -130,12 +130,23 @@ class TestToolProfiles:
                 "number_of_cores"} <= names
 
     def test_review_profile_is_read_only(self, tmp_path: Path) -> None:
-        agent = _bare_agent(tmp_path, _tool_profile_name="review")
+        """``review`` reads, runs, browses and talks; it never edits or dispatches."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="review", _use_web_tools=True)
         names = _names(agent._get_tools())
         assert names <= set(TOOL_PROFILES["review"])  # type: ignore[arg-type]
-        assert {"Bash", "Read", "run_commands_parallel", "summary"} <= names
-        assert not names & {"Edit", "Write", "run_agent", "run_parallel", "talk",
+        assert {"Bash", "Read", "run_commands_parallel", "summary", "talk"} <= names
+        assert BROWSER_TOOL_NAMES <= names
+        assert agent.web_use_tool is not None
+        assert not names & {"Edit", "Write", "run_agent", "run_parallel",
                             "set_model", "ask_user_question"}
+
+    def test_review_profile_honours_web_tools_off(self, tmp_path: Path) -> None:
+        """With "Use web tools" off the review profile builds no browser."""
+        agent = _bare_agent(tmp_path, _tool_profile_name="review", _use_web_tools=False)
+        names = _names(agent._get_tools())
+        assert not names & BROWSER_TOOL_NAMES
+        assert agent.web_use_tool is None
+        assert "talk" in names
 
     def test_shell_profile(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _tool_profile_name="shell")

@@ -12,7 +12,7 @@ Typing this in the chat box of the VS Code extension or the web app:
 
 is the same as asking Sorcar, in plain language, to run the `slack/slack_sea.py` agent on the task "tell #eng that the deploy is done", except that the routing is fixed: the session must call its `run_agent` tool first, with the SEA's absolute path and your text, and cannot pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA.
 
-Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose top-level getters (`prompt()`, `model()`, `tools()`, `system_prompt()`, ...) configure the run. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
+Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose top-level getters (`prompt()`, `model()`, `add_to_tools()`, `system_prompt()`, ...) configure the run. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
 
 ## Where commands come from
 
@@ -122,7 +122,7 @@ Details worth knowing:
        )
    ```
 
-   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. For a SEA that carries its own tools, return a list of callables from `tools()`; the bundled channel agents are written this way and are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
+   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. For a SEA that carries its own tools, return a list of callables from `add_to_tools()` (added to the built-in toolset) or from `tools()` (those tools and `finish` only); the bundled channel agents are written the first way and are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
 
 2. Register the folder:
 

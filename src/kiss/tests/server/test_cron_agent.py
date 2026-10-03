@@ -6,8 +6,8 @@
 
 Extracted from
 ``kiss.tests.agents.third_party_agents.test_cron_agent``: these two
-scenarios exercise the kiss-web daemon plumbing (the tools-file loader
-in ``kiss.server.tools_file`` and the scheduler thread started by
+scenarios exercise the kiss-web daemon plumbing (the agent-script
+loader in ``kiss.server.agent_file`` and the scheduler thread started by
 ``kiss.server.web_server.RemoteAccessServer``), so their dependency
 closure is kiss.agents.sorcar + kiss.server only — no third-party
 channel module is imported.
@@ -35,15 +35,15 @@ from kiss.tests.agents.sorcar.test_cron_agent import (  # noqa: F401
 )
 
 
-def test_tools_file_loaded_run_now_uses_daemon_endpoint_file(
+def test_agent_script_loaded_run_now_uses_daemon_endpoint_file(
     tmp_path: Path,
 ) -> None:
     # A run_agent(agent="cron", ...) session gets its cron_job tool from a
-    # FRESH synthetic module (the daemon's tools-file loader re-executes
+    # FRESH synthetic module (the daemon's agent-script loader re-executes
     # this file), whose own _daemon_endpoint_file global is never set:
     # run_now must still target the endpoint file recorded in the canonical
     # module by the daemon's scheduler thread.
-    from kiss.server.tools_file import ToolsFileError, execute_python_file
+    from kiss.server.agent_file import AgentFileError, execute_python_file
 
     custom_endpoint = tmp_path / "custom-daemon.json"
     stop_event = start_scheduler_thread(
@@ -51,9 +51,9 @@ def test_tools_file_loaded_run_now_uses_daemon_endpoint_file(
     )
     try:
         namespace = execute_python_file(
-            cron_agent.__file__, ToolsFileError, "tools file",
+            cron_agent.__file__, AgentFileError, "agent script",
         )
-        loaded_cron_job = namespace["tools"]()[0]
+        loaded_cron_job = namespace["add_to_tools"]()[0]
         # A distinct module copy — the very situation the canonical
         # lookup exists for.
         assert loaded_cron_job is not cron_job

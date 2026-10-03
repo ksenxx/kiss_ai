@@ -14,7 +14,7 @@ daemon and require a live LLM endpoint, which is unavailable (and
 non-deterministic) in unit tests; the failure path is covered via
 ``_execute_job``'s exception handling.
 
-The daemon/tools-file scenarios (pure kiss.agents.sorcar +
+The daemon/agent-script scenarios (pure kiss.agents.sorcar +
 kiss.server closure) moved to ``kiss.tests.server.test_cron_agent``;
 this file keeps the delivery test that imports real
 ``kiss.agents.third_party_agents`` channel modules and the
@@ -62,7 +62,7 @@ def test_delivery_error_notes() -> None:
 
 
 def test_get_tools_and_sorcar_wiring() -> None:
-    assert cron_agent.tools() == [cron_job, cron_agent.gateway_command]
+    assert cron_agent.add_to_tools() == [cron_job, cron_agent.gateway_command]
     # The module lives in the sorcar package and never imports from
     # kiss.agents.third_party_agents at module scope.
     source_text = Path(cron_agent.__file__).read_text(encoding="utf-8")

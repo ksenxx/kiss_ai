@@ -64,7 +64,7 @@ def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[An
             max_steps=6,
             max_budget=sea.max_budget(),
             model_config={"base_url": url, "api_key": "local"},
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             tool_profile=sea.tool_profile(),
             base_system_prompt=sea.system_prompt(),
             web_tools=sea.use_web_tools(),
@@ -84,13 +84,13 @@ def test_sea_getters_follow_the_contract() -> None:
     """Both SEAs pin their run: own prompt, own tool, bash profile, no extras."""
     assert remember_sea.system_prompt() == remember_sea.SYSTEM_PROMPT
     assert "`remember_instruction`" in remember_sea.SYSTEM_PROMPT
-    assert remember_sea.tools() == [
+    assert remember_sea.add_to_tools() == [
         remember_sea.remember_instruction, agents_md.list_instructions,
     ]
     assert forget_sea.system_prompt() == forget_sea.SYSTEM_PROMPT
     assert "`forget_instruction`" in forget_sea.SYSTEM_PROMPT
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
-    assert forget_sea.tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
+    assert forget_sea.add_to_tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
     for sea in (remember_sea, forget_sea):
         assert sea.tool_profile() == "bash"
         assert sea.max_budget() == 1.0

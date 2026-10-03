@@ -107,6 +107,9 @@ _META_LIST_JS = """
     values: items.map(
       li => li.querySelector('.meta-value').textContent.trim(),
     ),
+    weights: items.map(
+      li => getComputedStyle(li.querySelector('.meta-value')).fontWeight,
+    ),
   };
 }
 """
@@ -230,11 +233,12 @@ def test_meta_values_render_as_a_bulleted_list(
     browser: Browser,
     remote_url: str,
 ) -> None:
-    """The panel lists the live status values (Tokens / Cost / Steps /
-    Time / Machine / Workdir / Max budget) followed by the task's own
-    settings (Date / Base model / Worktree mode / Parallel mode / Chat
-    id / Task id / Parent task) as real ``<ul>`` bullet items.  The
-    Parent-task row starts hidden until a parent id arrives."""
+    """The panel lists the machine name first, in bold, then the live
+    status values (Tokens / Cost / Steps / Time / Workdir / Max budget)
+    followed by the task's own settings (Date / Base model / Worktree
+    mode / Parallel mode / Chat id / Task id / Parent task) as real
+    ``<ul>`` bullet items.  The Parent-task row starts hidden until a
+    parent id arrives."""
     page = _open_desktop_page(browser, remote_url, 1280)
     try:
         listing = page.evaluate(_META_LIST_JS)
@@ -247,11 +251,11 @@ def test_meta_values_render_as_a_bulleted_list(
         # a bullet; the hidden row collapses to display:none.
         assert listing["displays"] == ["list-item"] * 13 + ["none"], listing
         assert listing["labels"] == [
+            "Machine:",
             "Tokens:",
             "Cost:",
             "Steps:",
             "Time:",
-            "Machine:",
             "Workdir:",
             "Max budget:",
             "Date:",
@@ -262,10 +266,14 @@ def test_meta_values_render_as_a_bulleted_list(
             "Task id:",
             "Parent task:",
         ], listing
-        # Before any task ran the numeric values show the em-dash
-        # placeholder and the time mirrors the "Ready" status.
-        assert listing["values"][:3] == ["\u2014"] * 3, listing
-        assert listing["values"][3] == "Ready", listing
+        # Before any task ran the machine and numeric values show the
+        # em-dash placeholder and the time mirrors the "Ready" status.
+        assert listing["values"][:4] == ["\u2014"] * 4, listing
+        assert listing["values"][4] == "Ready", listing
+        # Only the machine name is bold; every other value keeps the
+        # list's normal weight.
+        assert listing["weights"][0] == "700", listing
+        assert set(listing["weights"][1:]) == {"400"}, listing
     finally:
         page.close()
 

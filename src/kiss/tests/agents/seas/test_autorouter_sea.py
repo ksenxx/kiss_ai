@@ -29,7 +29,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_file import apply_agent_overrides
-from kiss.server.tools_file import load_tools_file
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -76,7 +75,7 @@ def test_sea_getters_follow_the_contract() -> None:
     assert len(prompt) <= 5_000 + autorouter_sea.EVIDENCE_MAX_CHARS + len(
         autorouter_sea.EVIDENCE_CUT
     )
-    assert {tool.__name__ for tool in autorouter_sea.tools()} == _TOOL_NAMES
+    assert {tool.__name__ for tool in autorouter_sea.add_to_tools()} == _TOOL_NAMES
     # run_parallel workers inherit the parent's custom system prompt, which
     # would make every routed unit a router; dispatch goes through run_agent.
     assert autorouter_sea.is_parallel() is False
@@ -106,8 +105,8 @@ def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
     assert prompt.endswith("TASK TEXT FOR run_agent:\nadd a --json flag")
 
 
-def test_agent_file_loader_stages_the_sea_as_its_own_tools_file() -> None:
-    """The daemon-side loader applies the getters and loads the four tools from the file."""
+def test_agent_file_loader_stages_the_sea_tools() -> None:
+    """The daemon-side loader applies the getters and stages the four tools from the file."""
     cmd: dict[str, Any] = {
         "agentPath": str(_SEA_PATH),
         "toolProfile": "full",
@@ -118,7 +117,8 @@ def test_agent_file_loader_stages_the_sea_as_its_own_tools_file() -> None:
     assert overridden == {
         "appendToSystemPrompt",
         "model",
-        "toolsFile",
+        "tools",
+        "appendBasicTools",
         "useParallel",
         "classifyTasks",
         "webTools",
@@ -127,11 +127,13 @@ def test_agent_file_loader_stages_the_sea_as_its_own_tools_file() -> None:
     assert cmd["appendToSystemPrompt"] == "CALLER TEXT\n\n" + autorouter_sea.SYSTEM_PROMPT
     assert "systemPrompt" not in cmd
     assert cmd["model"] == autorouter_sea.orchestrator_model()
-    assert cmd["toolsFile"] == str(_SEA_PATH)
+    assert "toolsFile" not in cmd
+    # ``add_to_tools()``: the router's tools come on top of the basic toolset.
+    assert cmd["appendBasicTools"] is True
     assert cmd["useParallel"] is False
     assert cmd["classifyTasks"] is False and cmd["webTools"] is False and cmd["useMemory"] is False
     assert cmd["toolProfile"] == "full"
-    assert {tool.__name__ for tool in load_tools_file(cmd["toolsFile"])} == _TOOL_NAMES
+    assert {tool.__name__ for tool in cmd["tools"]} == _TOOL_NAMES
 
 
 def test_tier_candidates_are_distinct_catalog_models() -> None:
@@ -349,7 +351,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 max_budget=1.0,
                 model_config={"base_url": url, "api_key": "local"},
                 system_prompt=autorouter_sea.add_to_system_prompt(),
-                tools=autorouter_sea.tools(),
+                tools=autorouter_sea.add_to_tools(),
                 web_tools=autorouter_sea.use_web_tools(),
                 use_memory=autorouter_sea.use_memory(),
                 is_parallel=autorouter_sea.is_parallel(),

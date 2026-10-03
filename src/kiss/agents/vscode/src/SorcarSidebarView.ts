@@ -320,9 +320,9 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   // relayed to the webview; openFile is answered to this window with
   // `openResolvedFile` (handled in the client listener, opened in a
   // real editor tab) where a browser would get `fileContent`. workDir
-  // is forwarded as sent: the daemon stamps this connection's pinned
-  // workspace folder when it is empty and echoes the client's value
-  // on `pathsExist`, which the webview uses as a correlation key.
+  // is forwarded as sent: the daemon resolves an empty one against its
+  // global working directory and echoes the client's value on
+  // `pathsExist`, which the webview uses as a correlation key.
   openFile: ['path', 'line', 'workDir', 'tabId'],
   checkPaths: ['paths', 'workDir', 'tabId'],
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
@@ -551,7 +551,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _onFirstResolve: (() => void) | undefined;
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
-  private _workspaceFoldersSub: vscode.Disposable | undefined;
+  // The daemon's global working directory, as last reported by
+  // `configData` / `workDirChanged`; every task runs there.
+  private _daemonWorkDir = '';
   // One rendered-HTML or PDF tab per file path, mirroring the remote web
   // app's content tabs: a second click on the same link reveals (and
   // refreshes) the existing tab instead of stacking duplicates.
@@ -716,11 +718,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     this._client = client;
     this._installClientListener(client);
-    // The window's workspace folder leads every connection: the daemon
-    // pins it and stamps it on each later command sent without a
-    // workDir (a forwarded submit, openFile or checkPaths), including
-    // the ones queued while the daemon was down.
-    client.setPreamble({type: 'setWorkDir', workDir: this._getWorkDir()});
+    // The working directory is ONE global value every task on every
+    // surface runs in (config.json work_dir; changed from the "Working
+    // directory" panel or the remote Explorer).  The window's workspace
+    // folder only seeds it on a fresh install: `ifUnset` makes the
+    // daemon ignore this once a directory is persisted, so opening a
+    // window never overrides the user's pick.
+    client.setPreamble({
+      type: 'setWorkDir',
+      workDir: this._workspaceDir(),
+      ifUnset: true,
+    });
     client.on('connect', () => {
       if (!this._panelHooks) {
         // The window's ONE long-lived controller (the sidebar view;
@@ -767,18 +775,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       },
     );
     client.connect();
-    this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
-      () => {
-        const wd = this._getWorkDir();
-        client.setPreamble({type: 'setWorkDir', workDir: wd});
-        this._getApi().setWorkDir(wd);
-        // The webview scopes its tab bar and history to the workspace
-        // directory; tell it directly, because the daemon answers
-        // `setWorkDir` with no `configData` the webview could learn
-        // the change from.
-        this._sendToWebview({type: 'workspaceWorkDir', workDir: wd});
-      },
-    );
     return client;
   }
 
@@ -841,13 +837,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'configData' && msg.config) {
-        // Report this window's workspace folder as the config's work_dir
-        // (the webview scopes its history and tabs by it).
-        // When the window has none (and the host cwd is a filesystem
-        // root, so _getWorkDir reports nothing), keep the daemon's own
-        // work_dir: that is where the window's tasks will actually run.
-        const wd = this._getWorkDir();
-        if (wd) msg.config.work_dir = wd;
+        const wd = msg.config.work_dir;
+        if (typeof wd === 'string' && wd) this._daemonWorkDir = wd;
+      } else if (msg.type === 'workDirChanged' && msg.workDir) {
+        this._daemonWorkDir = msg.workDir;
       }
       if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
         this._onCommitMessage.fire({
@@ -1214,7 +1207,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return this._webviewHasFocus;
   }
 
+  /**
+   * The directory a path-taking webview message resolves against when
+   * it names none: the daemon's global working directory (where every
+   * task runs), or the window's own folder before the daemon reported
+   * one.
+   */
   private _getWorkDir(): string {
+    return this._daemonWorkDir || this._workspaceDir();
+  }
+
+  /** The window's workspace folder, or the host cwd unless that is a root. */
+  private _workspaceDir(): string {
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) {
       return folders[0].uri.fsPath;
@@ -1364,8 +1368,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'submit':
         if (message.tabId) this._activeTabId = message.tabId;
         // The daemon owns the classification (path-only prompt, follow-up
-        // or new run) and, when the tab carries no work dir, stamps this
-        // connection's pinned workspace folder (setWorkDir on connect);
+        // or new run) and runs the task in the global working directory;
         // the host adds only its visible editor file.
         this._getApi().submit({
           ...message,
@@ -1726,7 +1729,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'openWorkDir':
-        this._openWorkDir(message.path, message.tabId);
+        this._openWorkDir(message.path);
         break;
 
       case 'pickWorkDir': {
@@ -1739,7 +1742,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           defaultUri: wd ? vscode.Uri.file(wd) : undefined,
         });
         if (picked && picked[0]) {
-          this._openWorkDir(picked[0].fsPath, message.tabId);
+          this._openWorkDir(picked[0].fsPath);
         }
         break;
       }
@@ -1747,28 +1750,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Check *dir*, chosen in the "Working directory" panel, and hand it
-   * back to the webview as the working directory of chat tab *tabId*
-   * (the tab that was active when the panel asked; the reply names it
-   * again so a tab switch during the folder dialog cannot pin another
-   * tab).
+   * Make *dir*, chosen in the "Working directory" panel, the global
+   * working directory every task on every surface runs in.
    *
-   * Only that chat's next task moves to *dir*: the window keeps its
-   * workspace folder (no `vscode.openFolder`).  An existing directory
-   * is answered with `workDirPicked` carrying its real path (`..` and
-   * symlinks resolved) and recorded in the daemon's opened-so-far list;
-   * a path that is not a directory or is a file-system root is reported
-   * back as `workDirError`, which names the same `tabId` so the webview
-   * shows it only in the panel that asked.
+   * The window keeps its workspace folder (no `vscode.openFolder`).  An
+   * existing directory is sent to the daemon as `setWorkDir` (which
+   * persists it and broadcasts `workDirChanged` to every client) and
+   * answered with `workDirPicked` carrying its real path (`..` and
+   * symlinks resolved); a path that is not a directory or is a
+   * file-system root is reported back as `workDirError`.
    */
-  private _openWorkDir(dir: string, tabId: string): void {
+  private _openWorkDir(dir: string): void {
     const target = String(dir || '').trim();
     const real = realDirectory(target);
     if (!real) {
       this._sendToWebview({
         type: 'workDirError',
         text: 'Not a directory: ' + (target || '(empty path)'),
-        tabId,
       });
       return;
     }
@@ -1777,15 +1775,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._sendToWebview({
         type: 'workDirError',
         text: 'A file-system root cannot be the working directory; pick a folder.',
-        tabId,
       });
       return;
     }
-    this._getApi().forward({
-      type: 'recordWorkDir',
-      path: real,
-    } as unknown as AgentCommand);
-    this._sendToWebview({type: 'workDirPicked', path: real, tabId});
+    this._daemonWorkDir = real;
+    this._getApi().setWorkDir(real);
+    this._sendToWebview({type: 'workDirPicked', path: real});
   }
 
   /**
@@ -2536,10 +2531,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._configFileWatchTimer = undefined;
     }
     this._resolveAllWorktreeActions();
-    if (this._workspaceFoldersSub) {
-      this._workspaceFoldersSub.dispose();
-      this._workspaceFoldersSub = undefined;
-    }
     if (this._client) {
       this._client.dispose();
       this._client = null;

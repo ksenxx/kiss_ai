@@ -1803,12 +1803,11 @@ agents' dispatch preamble.
 """
 
 
-def tools() -> list:
-    """Return the cron tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the cron tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument — including when the module is passed
-    as the ``extension_agent_path``, which makes it its own tools file.
+    the API's ``extension_agent_path``.
 
     Returns:
         The :func:`cron_job` and :func:`gateway_command` tools.

@@ -166,7 +166,7 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "\n       Scores\n       Originality: N/10." in prompt
     assert all(f"       {d}: N/10." in prompt for d in review_paper_sea._DIMENSIONS)
     assert review_paper_sea._HEADINGS[-1] == "Scores"
-    assert [t.__name__ for t in review_paper_sea.tools()] == ["read_paper", "check_review"]
+    assert [t.__name__ for t in review_paper_sea.add_to_tools()] == ["read_paper", "check_review"]
     assert review_paper_sea.use_web_tools() is True
     assert review_paper_sea.is_parallel() is True
     assert review_paper_sea.classify_tasks() is False
@@ -371,7 +371,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_reports(tmp_path: Path)
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
             system_prompt=review_paper_sea.append_to_system_prompt(),
-            tools=review_paper_sea.tools(),
+            tools=review_paper_sea.add_to_tools(),
             web_tools=review_paper_sea.use_web_tools(),
             is_parallel=review_paper_sea.is_parallel(),
             verbose=False,

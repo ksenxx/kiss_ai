@@ -67,7 +67,8 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert 'use_memory="false"' in prompt and "Never pass `chat_id`" in prompt
     assert "`writer_task(" in prompt and "`reviewer_task(" in prompt and "`loop_status(" in prompt
     assert "ask the user once with `ask_user_question`" in prompt
-    assert [t.__name__ for t in sea.tools()] == ["writer_task", "reviewer_task", "loop_status"]
+    names = [t.__name__ for t in sea.add_to_tools()]
+    assert names == ["writer_task", "reviewer_task", "loop_status"]
     assert sea.use_web_tools() is False
     assert sea.is_parallel() is False
     assert sea.classify_tasks() is False
@@ -331,7 +332,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
             system_prompt=sea.append_to_system_prompt(),
-            tools=sea.tools(),
+            tools=sea.add_to_tools(),
             web_tools=sea.use_web_tools(),
             is_parallel=sea.is_parallel(),
             verbose=False,

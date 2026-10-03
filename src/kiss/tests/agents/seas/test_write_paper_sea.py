@@ -145,7 +145,7 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "`check_paper`" in prompt and "`build_paper`" in prompt
     assert "Em dashes: zero in prose" in prompt
     assert "Never add .aux" in prompt
-    tools = write_paper_sea.tools()
+    tools = write_paper_sea.add_to_tools()
     assert [t.__name__ for t in tools] == ["check_paper", "build_paper"]
     assert write_paper_sea.use_web_tools() is True
     assert write_paper_sea.is_parallel() is True
@@ -495,7 +495,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_gate_report(tmp_path: P
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
             system_prompt=write_paper_sea.append_to_system_prompt(),
-            tools=write_paper_sea.tools(),
+            tools=write_paper_sea.add_to_tools(),
             web_tools=write_paper_sea.use_web_tools(),
             is_parallel=write_paper_sea.is_parallel(),
             verbose=False,

@@ -1609,11 +1609,11 @@ def main() -> None:
     channel_main(OverleafAgent, "kiss-overleaf", channel_name="Overleaf", make_backend=None)
 
 
-def tools() -> list:
-    """Return the Overleaf channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Overleaf channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
+    the API's ``extension_agent_path``: builds a fresh agent from the
     credentials persisted under ``~/.kiss`` and returns its
     authentication and backend tools.
     """

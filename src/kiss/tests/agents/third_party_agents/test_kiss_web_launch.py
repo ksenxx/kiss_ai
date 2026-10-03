@@ -11,12 +11,12 @@ Every agent in ``kiss/agents/third_party_agents/`` must launch through
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's local endpoint, sends the documented ``run``
 command, and supplies the agent's channel tools through the API's
-``tools=`` *file path* contract: the agent's OWN module is the tools
-file, and the daemon imports it and calls its top-level ``tools()``
-to build a fresh agent from the credentials persisted under the
-active kiss home.  No bridge, registry, wrapper, or generated file is
-involved.  The task is executed by a daemon-built chat agent, NOT by
-the passed instance.
+``extension_agent_path`` agent-script contract: the agent's OWN
+module is the agent script, and the daemon imports it and calls its
+top-level ``add_to_tools()`` to build a fresh agent from the
+credentials persisted under the active kiss home.  No bridge,
+registry, wrapper, or generated file is involved.  The task is executed
+by a daemon-built chat agent, NOT by the passed instance.
 
 Test strategy (no mocks)
 ------------------------
@@ -26,8 +26,9 @@ isolated persistence/config.  The only replaced boundary is the LLM
 itself: ``RelentlessAgent.run`` (``SorcarAgent.__mro__[1].run``) is
 swapped for a stub returning canned YAML (precedent:
 ``test_server_sorcar_run.py``), so the daemon's full pipeline — local
-dispatch → ``_cmd_run`` → worker thread → tools-file loading → event
-broadcast → status end — executes for real without model API calls.
+dispatch → ``_cmd_run`` → worker thread → agent-script loading →
+event broadcast → status end — executes for real without model API
+calls.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ class _ApiLaunchBase(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-tp-api-launch-")
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         # The daemon re-executes each channel agent's module as the task's
-        # tools file, so credential paths are re-evaluated in that process:
+        # agent script, so credential paths are re-evaluated in that process:
         # point HOME and KISS_HOME at this empty tmpdir so every test
         # observes the deterministic "not authenticated" state and never
         # the developer machine's real credentials.
@@ -325,14 +326,15 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "Slack Authentication" in prompt
         assert "finish_slack_auth()" in prompt
 
-    def test_agent_module_is_the_tools_file(self) -> None:
+    def test_agent_module_is_the_agent_script(self) -> None:
         from kiss.agents.third_party_agents.slack import slack_sea
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         agent = SlackAgent()
-        assert agent.tools_file == str(slack_sea.__file__), (
-            "the agent's own module must be its tools file"
+        assert agent.sea_path == str(slack_sea.__file__), (
+            "the agent's own module must be its agent script"
         )
+        assert not hasattr(agent, "tools_file")
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
@@ -356,55 +358,27 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
         assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
 
-    def test_explicit_tools_file_overrides_agent_module(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
+    def test_launcher_has_no_tools_path_parameters(self) -> None:
+        """Extra tools come only from the agent's module (``sea_path``).
 
-        tools_py = Path(self.tmpdir) / "extra_tools.py"
-        tools_py.write_text(
-            "from pathlib import Path\n"
-            f"_LOG = Path({str(Path(self.tmpdir) / 'tool_calls.log')!r})\n"
-            "\n"
-            "def mytool(text: str, repeat: int = 1) -> str:\n"
-            '    """Echo *text* repeated *repeat* times.\n'
-            "\n"
-            "    Args:\n"
-            "        text: The text to echo.\n"
-            "        repeat: How many times to repeat it.\n"
-            '    """\n'
-            "    with _LOG.open('a') as f:\n"
-            "        f.write(text + '\\n')\n"
-            "    return text * repeat\n"
-            "\n"
-            "def get_tools():\n"
-            '    """Return the tools the agent may call."""\n'
-            "    return [mytool]\n",
-            encoding="utf-8",
+        ``run_agent_via_kiss_web`` exposes neither ``tools`` nor
+        ``append_basic_tools``: both went with the tools-file wire
+        contract, and the ``LAUNCH_KWARG_NAMES`` filter the channel
+        agents' ``run()`` shims pass their kwargs through drops them.
+        """
+        import inspect
+
+        from kiss.agents.third_party_agents._channel_agent_utils import (
+            filter_launch_kwargs,
         )
 
-        def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
-            tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
-            assert set(tools) >= {"mytool"}, "explicit tools file must win"
-            assert "check_slack_auth" not in tools, (
-                "an explicit tools= path must replace the agent module"
-            )
-            assert "Echo *text* repeated" in (tools["mytool"].__doc__ or "")
-            assert tools["mytool"](text="hi") == "hi"
-            assert tools["mytool"]("bye", repeat=2) == "byebye"
-            return "explicit tools ok"
-
-        self._install_stub(on_run=on_run)
-        result = run_agent_via_kiss_web(
-            SlackAgent(),
-            "use the tools",
-            work_dir=self.repo,
-            tools=str(tools_py),
-            endpoint_file=self.endpoint_file,
-        )
-        assert yaml.safe_load(result)["summary"] == "explicit tools ok"
-        log = Path(self.tmpdir) / "tool_calls.log"
-        assert log.read_text().splitlines() == ["hi", "bye"], (
-            "tools-file tools must really execute in the daemon process"
-        )
+        params = inspect.signature(run_agent_via_kiss_web).parameters
+        assert "tools" not in params
+        assert "append_basic_tools" not in params
+        assert "extension_agent_path" not in params
+        assert filter_launch_kwargs(
+            {"tools": "/x.py", "append_basic_tools": False, "max_budget": 2.0}
+        ) == {"max_budget": 2.0}
 
     def test_backend_tools_included_when_authenticated(self) -> None:
         notes = Path(self.tmpdir) / "notes.log"
@@ -444,7 +418,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "        return []\n"
             "\n"
             "\n"
-            "def tools() -> list:\n"
+            "def add_to_tools() -> list:\n"
             '    """Return the note-channel tools."""\n'
             "    return NoteAgent()._get_tools()\n",
             encoding="utf-8",
@@ -454,16 +428,15 @@ class TestLaunchViaApi(_ApiLaunchBase):
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
             assert "add_note" in tools, (
                 "the authenticated backend's tool must come from the "
-                "module's tools()"
+                "module's add_to_tools()"
             )
             return str(tools["add_note"](note="from daemon"))
 
         self._install_stub(on_run=on_run)
         result = run_agent_via_kiss_web(
-            KissWebChatAgent("Note Launch"),
+            KissWebChatAgent("Note Launch", sea_path=str(agent_py)),
             "note task",
             work_dir=self.repo,
-            tools=str(agent_py),
             endpoint_file=self.endpoint_file,
         )
         assert yaml.safe_load(result)["summary"] == "recorded:from daemon"
@@ -597,32 +570,35 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert getattr(call["agent"], "_use_web_tools", None) is False
         assert getattr(call["agent"], "_is_parallel", None) is True
 
-    def test_append_basic_tools_false_forwarded(self) -> None:
-        """``append_basic_tools=False`` reaches the daemon-built agent.
+    def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
+        """A carrier's ``sea_path`` script with ``tools()`` restricts the run.
 
-        The launcher (and the ``LAUNCH_KWARG_NAMES`` filter the channel
-        agents' ``run()`` shims pass their kwargs through) must forward
-        the restriction to ``sorcar.run`` — a dropped kwarg would
-        silently hand the channel task the full basic toolset.
+        The channel runner hands its channel module to the
+        :class:`KissWebChatAgent` carrier as ``sea_path``; the launcher
+        must pass it on as ``extension_agent_path`` so the daemon-built
+        agent gets exactly what that script's tool getter decides.
         """
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            filter_launch_kwargs,
+        agent_py = Path(self.tmpdir) / "restricting_agent.py"
+        agent_py.write_text(
+            "def only_tool() -> str:\n"
+            '    """Return a marker."""\n'
+            "    return 'only'\n"
+            "\n"
+            "def tools() -> list:\n"
+            '    """Run with only finish and only_tool."""\n'
+            "    return [only_tool]\n",
+            encoding="utf-8",
         )
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
-        assert filter_launch_kwargs(
-            {"append_basic_tools": False, "system_prompt": "dropped"}
-        ) == {"append_basic_tools": False}
         self._install_stub()
         run_agent_via_kiss_web(
-            SlackAgent(),
+            KissWebChatAgent("Restricted", sea_path=str(agent_py)),
             "task",
             work_dir=self.repo,
             endpoint_file=self.endpoint_file,
-            append_basic_tools=False,
         )
-        agent = self.stub_calls[0]["agent"]
-        assert getattr(agent, "_append_basic_tools", None) is False
+        call = self.stub_calls[0]
+        assert getattr(call["agent"], "_append_basic_tools", None) is False
+        assert [t.__name__ for t in call["kwargs"].get("tools") or []] == ["only_tool"]
 
     def test_append_to_prompts_forwarded(self) -> None:
         """Both append suffixes reach the daemon-built agent's run.
@@ -792,19 +768,19 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 if state.task_thread is not None:
                     state.task_thread.join(timeout=deadline)
 
-    def test_invalid_tools_file_raises_before_connecting(self) -> None:
-        from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
-
+    def test_invalid_sea_path_raises_before_connecting(self) -> None:
         self._install_stub()
         with self.assertRaises(ValueError):
             run_agent_via_kiss_web(
-                SlackAgent(),
+                KissWebChatAgent(
+                    "Bad Script",
+                    sea_path=str(Path(self.tmpdir) / "missing_agent.py"),
+                ),
                 "task",
                 work_dir=self.repo,
-                tools=str(Path(self.tmpdir) / "missing_tools.py"),
                 endpoint_file=self.endpoint_file,
             )
-        assert not self.stub_calls, "no task may start for a bad tools file"
+        assert not self.stub_calls, "no task may start for a bad agent script"
 
 
 class TestInProcessDaemonBootstrap(_ApiLaunchBase):
@@ -1067,7 +1043,7 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
 
     def _make_runner(
         self,
-        tools_file: str = "",
+        sea_path: str = "",
         thread_replies: list[dict[str, Any]] | None = None,
     ) -> Any:
         from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -1111,12 +1087,12 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             backend=backend,
             channel_name="chan",
             agent_name="Test Channel Agent",
-            tools_file=tools_file,
+            sea_path=sea_path,
             work_dir=str(Path(self.tmpdir) / "chanwork"),
         )
         return runner, outbox
 
-    def test_handle_message_passes_tools_file_and_context(self) -> None:
+    def test_handle_message_passes_sea_path_and_context(self) -> None:
         tools_py = Path(self.tmpdir) / "chan_tools.py"
         tools_py.write_text(
             "def shout(text: str) -> str:\n"
@@ -1127,17 +1103,17 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             '    """\n'
             "    return text.upper()\n"
             "\n"
-            "def get_tools():\n"
+            "def add_to_tools():\n"
             '    """Return the channel tools."""\n'
             "    return [shout]\n",
             encoding="utf-8",
         )
-        runner, outbox = self._make_runner(tools_file=str(tools_py))
+        runner, outbox = self._make_runner(sea_path=str(tools_py))
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
             assert "shout" in tools, (
-                "the runner's tools file must supply the task's tools"
+                "the runner's agent script must supply the task's tools"
             )
             assert tools["shout"](text="hi") == "HI"
             prompt = str(kwargs.get("prompt_template", ""))
@@ -1177,13 +1153,13 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             '    """Return pong."""\n'
             "    return 'pong'\n"
             "\n"
-            "def get_tools():\n"
+            "def add_to_tools():\n"
             '    """Return the channel tools."""\n'
             "    return [ping]\n",
             encoding="utf-8",
         )
         runner, outbox = self._make_runner(
-            tools_file=str(tools_py), thread_replies=[],
+            sea_path=str(tools_py), thread_replies=[],
         )
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:

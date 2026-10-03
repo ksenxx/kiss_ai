@@ -12,9 +12,9 @@ dispatch code:
    bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
    ``append_to_system_prompt`` MUST start with the no-internet and
    answer-quickly directives and carry the answering playbook,
-   ``tools`` MUST expose the single ``task_context`` tool,
-   ``if_append_basic_tools`` MUST be ``False`` (no built-in tool
-   besides ``finish``), and ``is_parallel``, ``use_web_tools`` and
+   ``tools`` (not ``add_to_tools``) MUST expose the single
+   ``task_context`` tool so there is no built-in tool besides
+   ``finish``, and ``is_parallel``, ``use_web_tools`` and
    ``use_memory`` MUST return ``False``.
 2. The command rewriter ``rewrite_prompt_if_command`` MUST recognise
    ``/ask <question>`` and emit a directive that instructs the outer
@@ -119,9 +119,10 @@ def test_append_to_system_prompt_returns_fixed_suffix() -> None:
 
 
 def test_tools_basic_tools_and_memory_getters() -> None:
-    """tools MUST be ``task_context`` alone, the built-in toolset off, memory off."""
+    """tools MUST be ``task_context`` alone (via ``tools()``, so no basic toolset), memory off."""
     assert [t.__name__ for t in ask_sea.tools()] == ["task_context"]
-    assert ask_sea.if_append_basic_tools() is False
+    assert not hasattr(ask_sea, "add_to_tools")
+    assert not hasattr(ask_sea, "if_append_basic_tools")
     assert not hasattr(ask_sea, "tool_profile")
     assert ask_sea.use_memory() is False
 
@@ -516,8 +517,9 @@ def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
     assert cmd["useParallel"] is False
     assert cmd["webTools"] is False
     assert cmd["useMemory"] is False
+    # ``tools()`` returns callables, staged on the daemon-side ``tools``
+    # field, and switches the basic toolset off.
     assert cmd["appendBasicTools"] is False
     assert "toolProfile" not in cmd
-    # ``tools()`` returns callables, so the SEA file doubles as its
-    # own tools file.
-    assert cmd["toolsFile"] == ask_path
+    assert all(callable(tool) for tool in cmd["tools"])
+    assert "toolsFile" not in cmd

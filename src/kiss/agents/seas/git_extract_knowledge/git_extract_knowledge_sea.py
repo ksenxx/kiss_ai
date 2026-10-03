@@ -36,7 +36,7 @@ only changed files and new commits are indexed, and the agent revises
 the pages the changes affect.  ``ask <question>`` answers from the
 memory.
 
-Module-level getters (``system_prompt()``, ``tools()``, ...) follow the
+Module-level getters (``system_prompt()``, ``add_to_tools()``, ...) follow the
 SEA contract in :mod:`kiss.server.agent_file`.
 """
 
@@ -651,8 +651,8 @@ def system_prompt() -> str:
     )
 
 
-def tools() -> list[Any]:
-    """Return the knowledge tools (this file doubles as its own tools file)."""
+def add_to_tools() -> list[Any]:
+    """Return the knowledge tools added to the built-in toolset."""
     return [
         index_repo, knowledge_status, knowledge_search, knowledge_read,
         list_knowledge_pages, read_knowledge_page, search_knowledge_pages,

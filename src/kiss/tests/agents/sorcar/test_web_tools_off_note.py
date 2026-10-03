@@ -61,8 +61,35 @@ def test_web_tools_on_keeps_the_prompt_unchanged(tmp_path: Path) -> None:
 
 
 def test_restricted_profile_note_covers_web_tools(tmp_path: Path) -> None:
-    """A restricted profile already disclaims browser research; no second note."""
+    """A browser-less profile already disclaims browser research; no second note."""
     request = _run(tmp_path, web_tools=False, tool_profile="shell")
     system = _system(request)
     assert "# Restricted tool profile: shell" in system
     assert "# Web tools are off" not in system
+
+
+def test_review_profile_offers_browser_and_talk(tmp_path: Path) -> None:
+    """The ``review`` profile browses and talks; its note lists those tools."""
+    request = _run(tmp_path, web_tools=True, tool_profile="review")
+    names = {t["function"]["name"] for t in request["tools"]}
+    assert _BROWSER_TOOLS | {"talk"} <= names
+    assert not names & {"Edit", "Write", "run_agent", "run_parallel"}
+    system = _system(request)
+    note = system.split("# Restricted tool profile: review", 1)[1]
+    assert "go_to_url" in note and "talk" in note
+    assert "# Web tools are off" not in system
+
+
+def test_review_profile_with_web_tools_off_withholds_browser_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """Web tools off beats the profile: no browser tools, none promised, and the
+    off-note is added so the Web Research rules are disclaimed."""
+    request = _run(tmp_path, web_tools=False, tool_profile="review")
+    names = {t["function"]["name"] for t in request["tools"]}
+    assert not names & _BROWSER_TOOLS
+    assert "talk" in names
+    system = _system(request)
+    note = system.split("# Restricted tool profile: review", 1)[1]
+    assert "go_to_url" not in note.split("# Web tools are off", 1)[0]
+    assert WEB_TOOLS_OFF_NOTE in system

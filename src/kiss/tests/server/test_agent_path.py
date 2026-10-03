@@ -202,6 +202,9 @@ class AgentPathApiTest(unittest.TestCase):
             seen["_auto_commit_attr"] = getattr(
                 self_agent, "auto_commit_enabled", None,
             )
+            seen["_append_basic_tools_attr"] = getattr(
+                self_agent, "_append_basic_tools", None,
+            )
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -230,10 +233,10 @@ class AgentPathApiTest(unittest.TestCase):
         repo2 = str(Path(self.tmpdir) / "repo2")
         Path(repo2).mkdir(parents=True, exist_ok=True)
         _init_repo(repo2)
-        tools_path = self._write_py(
-            "script_tools.py",
-            '''
-            """Tools the agent script picks."""
+        agent_path = self._write_py(
+            "my_agent.py",
+            f'''
+            """Agent script overriding every supported parameter."""
 
 
             def scripted_tool(x: int) -> int:
@@ -243,19 +246,6 @@ class AgentPathApiTest(unittest.TestCase):
                     x: Value to double.
                 """
                 return 2 * x
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [scripted_tool]
-            ''',
-        )
-        agent_path = self._write_py(
-            "my_agent.py",
-            f'''
-            """Agent script overriding every supported parameter."""
-
-            import pathlib
 
 
             def prompt():
@@ -275,8 +265,9 @@ class AgentPathApiTest(unittest.TestCase):
 
 
             def tools():
-                # A pathlib.Path is accepted like run(tools=...) does.
-                return pathlib.Path({tools_path!r})
+                # ``tools()`` makes these the whole tool set and
+                # switches the basic toolset off.
+                return [scripted_tool]
 
 
             def use_worktree():
@@ -312,22 +303,6 @@ class AgentPathApiTest(unittest.TestCase):
                 return False
             ''',
         )
-        client_tools = self._write_py(
-            "client_tools.py",
-            '''
-            """Tools the client passes (the script's must win)."""
-
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
-            ''',
-        )
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         result = sorcar.run(
@@ -335,7 +310,6 @@ class AgentPathApiTest(unittest.TestCase):
             work_dir=self.repo,
             model=available[0],
             system_prompt="client system prompt",
-            tools=client_tools,
             extension_agent_path=agent_path,
             use_worktree=True,
             auto_commit=True,
@@ -372,6 +346,9 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_use_memory_attr"] is False
         assert [t.__name__ for t in seen["tools"]] == ["scripted_tool"]
         assert seen["tools"][0](x=21) == 42
+        # ``tools()`` means ONLY these tools (+ finish): the basic
+        # toolset is switched off.
+        assert seen["_append_basic_tools_attr"] is False
 
     def test_missing_getters_keep_passed_and_default_values(self) -> None:
         """Parameters without an ``X()`` getter keep the caller's values.
@@ -415,46 +392,39 @@ class AgentPathApiTest(unittest.TestCase):
         assert seen["_is_parallel_attr"] is True
         assert seen["tools"] == []
 
-    def test_tools_none_drops_client_tools(self) -> None:
-        """A ``tools()`` returning ``None`` overrides to no tools."""
-        client_tools = self._write_py(
-            "dropped_tools.py",
-            '''
-            """Tools the client passes (dropped by the script)."""
+    def test_add_to_tools_keeps_basic_tools(self) -> None:
+        """An ``add_to_tools()`` script adds its tools and keeps the basic toolset.
 
-
-            def client_tool() -> str:
-                """Return a marker."""
-                return "client"
-
-
-            def get_tools():
-                """Return the tools the agent may call."""
-                return [client_tool]
-            ''',
-        )
+        The agent sees the script's tools, with the basic toolset kept
+        on.
+        """
         agent_path = self._write_py(
-            "no_tools_agent.py",
+            "add_tools_agent.py",
             '''
-            """Agent script clearing the tools."""
+            """Agent script adding a tool to the basic toolset."""
 
 
-            def tools():
-                return None
+            def script_tool() -> str:
+                """Return a marker."""
+                return "script"
+
+
+            def add_to_tools():
+                return [script_tool]
             ''',
         )
         seen: dict[str, Any] = {}
         self._install_recording_stub(seen)
         result = sorcar.run(
-            "run without tools",
+            "run with added tools",
             work_dir=self.repo,
-            tools=client_tools,
             extension_agent_path=agent_path,
             endpoint_file=self.endpoint_file,
             timeout=60,
         )
         assert result.success is True
-        assert seen["tools"] == []
+        assert [t.__name__ for t in seen["tools"]] == ["script_tool"]
+        assert seen["_append_basic_tools_attr"] is True
 
     def test_chat_id_continues_existing_chat(self) -> None:
         """A ``chat_id()`` override continues that chat's context.

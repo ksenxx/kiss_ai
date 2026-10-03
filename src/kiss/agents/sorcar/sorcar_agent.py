@@ -68,15 +68,23 @@ from kiss.core.utils import substitute_prompt_args
 logger = logging.getLogger(__name__)
 
 
+BROWSER_TOOL_NAMES: frozenset[str] = frozenset({
+    "go_to_url", "click", "type_text", "press_key", "scroll", "screenshot",
+    "get_page_content", "show_browser", "close_browser",
+})
+"""Names of the tools :meth:`WebUseTool.get_tools` returns."""
+
 TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     # ``None``: every tool the agent can build (today's default).
     "full": None,
-    # Reduced reviewer set: it can inspect the tree and run commands
-    # (Bash is unrestricted, so this is not a sandbox) but has no file
-    # editing, browser, talk, agent dispatch or fan-out tools.
+    # Reduced reviewer set: it can inspect the tree, run commands (Bash
+    # is unrestricted, so this is not a sandbox), browse the web to
+    # check facts and documentation, and speak to the user, but has no
+    # file editing, agent dispatch or fan-out tools.
     "review": frozenset({
         "Bash", "bash_job", "Read", "run_commands_parallel", "memory_search",
-        "memory_pull", "memory_read", "memory_list", "decide", "summary",
+        "memory_pull", "memory_read", "memory_list", "decide", "summary", "talk",
+        *BROWSER_TOOL_NAMES,
     }),
     # Shell runner: just enough to run commands and read their output.
     "shell": frozenset({"Bash", "bash_job", "Read", "run_commands_parallel"}),
@@ -93,7 +101,7 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
 """Tool profiles an agent can run with (``finish`` is always added).
 
 Every tool schema is re-sent on every model step, so a reviewer that
-carries the browser, channel, cron and fan-out tools pays for ~30
+carries the editing, channel, cron and fan-out tools pays for ~20
 schemas it never calls.  The fan-out engine gives reviewer-marked
 children the ``review`` profile; a parent may name a profile explicitly
 through ``run_parallel(..., tool_profile=...)``, and a top-level run
@@ -107,9 +115,9 @@ RESTRICTED_PROFILE_NOTE = """
 
 # Restricted tool profile: {profile}
 This sub-agent has only these tools plus finish: {tools}. Rules above that
-require any other tool (Write/Edit files, tmp/PROGRESS.md, browser research,
-memory writes, run_parallel, run_agent, ...) do not apply here: do not attempt
-them. Report everything in finish(summary_in_html=...).
+require any tool not listed here (e.g. Write/Edit files, tmp/PROGRESS.md,
+browser research, memory writes, run_parallel, run_agent) do not apply: do
+not attempt them. Report everything in finish(summary_in_html=...).
 """
 
 WEB_TOOLS_OFF_NOTE = """
@@ -1838,8 +1846,9 @@ class SorcarAgent(RelentlessAgent):
 
         The list is cut down to the agent's tool profile
         (:meth:`_tool_profile`): a ``review`` or ``shell`` sub-agent
-        never builds the browser, MCP, channel-dispatch or fan-out
-        tools, so its every step carries only the schemas it can use.
+        never builds the MCP, channel-dispatch or fan-out tools (and
+        the browser only where the profile names it), so its every
+        step carries only the schemas it can use.
         """
         profile = self._tool_profile()
         allowed = TOOL_PROFILES[profile]
@@ -2002,7 +2011,11 @@ class SorcarAgent(RelentlessAgent):
             # The Read dedupe assumes an earlier output is still in the
             # model's context; the executor calls this when it is not.
             self.context_reset_hook = useful_tools.forget_reads
-        if allowed is None and self._use_web_tools and self.web_use_tool is None:
+        if (
+            (allowed is None or allowed & BROWSER_TOOL_NAMES)
+            and self._use_web_tools
+            and self.web_use_tool is None
+        ):
             # Sub-agents run concurrently, so they get a throwaway profile
             # instead of contending for the shared profile's Chromium lock.
             self.web_use_tool = WebUseTool(
@@ -2064,7 +2077,8 @@ class SorcarAgent(RelentlessAgent):
                     costs a whole step on the wrong model.
                 tool_profile: ``"review"`` gives the sub-agents the
                     read-only toolset (Bash, bash_job, Read,
-                    run_commands_parallel, memory reads, decide, summary);
+                    run_commands_parallel, memory reads, browser tools,
+                    talk, decide, summary);
                     ``"shell"`` just Bash, bash_job, Read and
                     run_commands_parallel; ``"assistant"`` the shell set
                     plus ask_user_question, talk, decide, summary and
@@ -2265,7 +2279,7 @@ class SorcarAgent(RelentlessAgent):
         if allowed is not None:
             # Restricted profile: no skills, MCP servers, channel
             # dispatch or fan-out; user interaction and model switching
-            # only where the profile names them (``assistant``).
+            # only where the profile names them (``review``, ``assistant``).
             tools.extend([ask_user_question, talk, set_model, summary])
             if decisions_tool_available():
                 tools.append(make_decide_tool(self))
@@ -2819,11 +2833,16 @@ class SorcarAgent(RelentlessAgent):
                 assert allowed is not None
                 # The docker toolset has no job registry (see the docker
                 # ``Bash`` shim in :meth:`_get_tools`), so the note must
-                # not promise ``bash_job`` there.
+                # not promise ``bash_job`` there; nor the browser tools
+                # when the settings panel's "Use web tools" is off.
                 offered = set(allowed) - ({"bash_job"} if docker_image else set())
+                if not web_tools:
+                    offered -= BROWSER_TOOL_NAMES
                 system_instructions += RESTRICTED_PROFILE_NOTE.format(
                     profile=profile, tools=", ".join(sorted(offered)),
                 )
+                if not web_tools and allowed & BROWSER_TOOL_NAMES:
+                    system_instructions += WEB_TOOLS_OFF_NOTE
             elif self._append_basic_tools and not web_tools:
                 # The settings panel's "Use web tools" is off: the
                 # browser tools are not built (:meth:`_get_tools`), so

@@ -289,7 +289,7 @@ def _format_fields(text: str) -> set[str]:
 
 def _execute_sea(path: Path) -> dict[str, Any]:
     """Execute the SEA file at *path* and return its namespace."""
-    from kiss.server.tools_file import execute_python_file
+    from kiss.server.agent_file import execute_python_file
 
     return execute_python_file(str(path), ValueError, "SEA")
 
@@ -354,7 +354,6 @@ class SeaTarget(Target):
             ("use_web_tools", "web_tools"),
             ("use_memory", "use_memory"),
             ("append_to_system_prompt", "system_prompt"),
-            ("if_append_basic_tools", "append_basic_tools"),
             ("docker_image", "docker_image"),
             ("model", "model_name"),
             ("model_config", "model_config"),
@@ -364,13 +363,24 @@ class SeaTarget(Target):
             value = _call_getter(ns, getter)
             if value is not None:
                 kwargs[key] = value
-        tools = _call_getter(ns, "tools")
-        if isinstance(tools, list):
-            kwargs["tools"] = tools
-        elif isinstance(tools, (str, os.PathLike)) and os.fspath(tools):
-            from kiss.server.tools_file import load_tools_file
-
-            kwargs["tools"] = load_tools_file(os.fspath(tools))
+        # ``tools()`` is the whole tool set (no basic tools);
+        # ``add_to_tools()`` extends the basic toolset.  Same contract
+        # as the daemon's agent-file loader: at most one of the two,
+        # each a list of callables (never a file path).
+        if "tools" in ns and "add_to_tools" in ns:
+            raise ValueError(
+                f"{self.path.name}: defines both tools() and add_to_tools()"
+            )
+        for getter, append_basic_tools in (("tools", False), ("add_to_tools", True)):
+            if getter not in ns:
+                continue
+            tools = _call_getter(ns, getter)
+            if not isinstance(tools, (list, tuple)) or not all(callable(t) for t in tools):
+                raise ValueError(
+                    f"{self.path.name}: {getter}() must return a list of tool callables"
+                )
+            kwargs["tools"] = list(tools)
+            kwargs["append_basic_tools"] = append_basic_tools
         return kwargs
 
 
@@ -1491,7 +1501,7 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the optimizer to the orchestrating model."""
     return [optimize, status]
 

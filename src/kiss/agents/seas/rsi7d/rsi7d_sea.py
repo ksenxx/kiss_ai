@@ -130,8 +130,8 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.utils import rmtree_force
+from kiss.server.agent_file import execute_python_file
 from kiss.server.agent_state import current_agent
-from kiss.server.tools_file import execute_python_file
 
 DEFAULT_DAYS = 7
 MAX_RUNS_LISTED = 40
@@ -2191,7 +2191,7 @@ def replay_in_clone(
     return json.dumps(prepared, indent=1)
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Trajectory mining, prompt inspection, the gated prompt editors and clone replays."""
     return [
         indexed_seas,

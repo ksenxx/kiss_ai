@@ -90,14 +90,14 @@ DEFAULTS: dict[str, Any] = {
     "classify_tasks": True,
     # The one switch for OpenRouter's ~typesafe/jev-latest decisions
     # model (the settings panel's "Use Jev" checkbox; gate:
-    # kiss.agents.sorcar.decide_tool.decisions_tool_available).  True:
-    # the classifier asks Jev first (one typed question, ~$0.00003,
-    # ~0.2 s) and falls back to the LLM classifier when no
+    # kiss.agents.sorcar.decide_tool.decisions_tool_available).  True
+    # (default): the classifier asks Jev first (one typed question,
+    # ~$0.00003, ~0.2 s) and falls back to the LLM classifier when no
     # OPENROUTER_API_KEY is configured or the call fails, and every
-    # agent gets the ``decide`` tool.  False (default): the LLM
-    # classifier always answers (one non-agentic call on the run's
-    # model, skipped for cc/* and codex/* models) and no task calls Jev.
-    "classify_with_decisions": False,
+    # agent gets the ``decide`` tool.  False: the LLM classifier always
+    # answers (one non-agentic call on the run's model, skipped for
+    # cc/* and codex/* models) and no task calls Jev.
+    "classify_with_decisions": True,
     # Persistent agent memory (kiss.core.memoryfield), on by default:
     # SorcarAgent runs get the memory_* tools and the MEMORY_PROTOCOL
     # system-prompt block.  Pages live in ``memory_dir`` when set, else

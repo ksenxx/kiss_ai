@@ -1252,11 +1252,11 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.wait_for_selector(
             _explorer_row_sel("/plain/only.txt"), timeout=15000,
         )
-        # The daemon was told: setWorkDir + saved config; the Source
-        # Control view reports no repository.
+        # The daemon was told once, with setWorkDir (it persists the
+        # global value itself; no saveConfig); the Source Control view
+        # reports no repository.
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.plain_dir)
-        saved = _sent(frames, "saveConfig")
-        assert saved and saved[-1]["config"]["work_dir"] == str(harness.plain_dir)
+        assert not _sent(frames, "saveConfig")
         page.click("#activity-scm")
         page.wait_for_function(
             "document.getElementById('scm-changes').innerText.includes('Not a git repository')",
@@ -1268,7 +1268,8 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
         page.keyboard.press("Escape")
         page.wait_for_selector("#folder-picker", state="hidden")
-        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.plain_dir)
+        assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.plain_dir)
+        assert not _sent(frames, "saveConfig")
         # Highlighting a folder in the list and pressing Select picks it:
         # back to the repo (restoring the saved workspace for the other
         # tests too).
@@ -1285,7 +1286,7 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.click("#folder-picker .folder-picker-select")
         page.wait_for_selector("#folder-picker", state="hidden")
         _wait_explorer_root(page, "repo")
-        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.work_dir)
+        assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.work_dir)
         # "Add Folder to Explorer..." offers the folders opened so far
         # (the daemon's recent_work_dirs) minus the ones already shown:
         # the plain folder opened above, not the repo.  One click adds it.
@@ -1309,7 +1310,8 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
             '.explorer-row[aria-level="1"]', "els => els.map(e => e.dataset.explorerPath)",
         )
         assert roots == [str(harness.work_dir.resolve()), str(harness.plain_dir.resolve())]
-        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.work_dir)
+        assert _sent(frames, "setWorkDir")[-1]["workDir"] == str(harness.work_dir)
+        assert not _sent(frames, "saveConfig")
     finally:
         context.close()
 
@@ -2156,7 +2158,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         page.wait_for_selector(
             "#folder-picker .explorer-note:text-is('(no subfolders)')", timeout=15000,
         )
-        saves_before = len(_sent(frames, "saveConfig"))
+        picks_before = len(_sent(frames, "setWorkDir"))
         page.click("#folder-picker .folder-picker-select")
         page.wait_for_selector("#folder-picker", state="hidden")
         page.wait_for_function(
@@ -2170,7 +2172,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         assert only.get_attribute("data-explorer-root") == plain
         listed = [f for f in _sent(frames, "listDir") if f.get("path") == plain]
         assert listed and listed[-1]["workDir"] == plain
-        assert len(_sent(frames, "saveConfig")) == saves_before
+        assert len(_sent(frames, "setWorkDir")) == picks_before
         assert page.evaluate("JSON.parse(localStorage.getItem('kiss-explorer-roots'))") == [plain]
         # A file of the added folder opens as a content tab.
         tabs_before = page.locator(".chat-tab").count()
@@ -2198,9 +2200,10 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         (harness.plain_dir / "added.txt").unlink()
         # Set as Working Directory (the buttons show on hover) is the
         # "..." > Working directory flow for that folder: the daemon
-        # lists it first (the 'workdir:' listDir check), then the daemon
-        # pin and the saved config follow, and the old working directory
-        # stays listed as an added folder.
+        # lists it first (the 'workdir:' listDir check), then setWorkDir
+        # makes it the global working directory (the daemon persists it;
+        # no saveConfig), and the old working directory stays listed as
+        # an added folder.
         _click_root_button(page, plain, "set")
         _wait_first_root(page, plain)
         assert _root_paths(page) == [plain, repo]
@@ -2210,7 +2213,7 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         ]
         assert checks and checks[-1]["workDir"] == plain
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
-        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == plain
+        assert not _sent(frames, "saveConfig")
         assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain
         page.wait_for_selector(
             _row_at(os.path.join(plain, "only.txt")), timeout=15000,
@@ -2220,7 +2223,8 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         _menu_item(page, "Set as Working Directory").click()
         _wait_first_root(page, repo)
         assert _root_paths(page) == [repo, plain]
-        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == repo
+        assert _sent(frames, "setWorkDir")[-1]["workDir"] == repo
+        assert not _sent(frames, "saveConfig")
         # Remove the plain folder with its button: gone from the tree and
         # from storage, still on disk.
         fs_before = len(_sent(frames, "fsAction"))

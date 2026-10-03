@@ -6,15 +6,16 @@
 
 ``_stop_task``'s watchdog cancels a run by injecting an asynchronous
 ``KeyboardInterrupt`` into the task thread.  The untrusted-code
-loaders — ``apply_agent_overrides`` (agent-script ``X()`` getters)
-and ``load_tools_file`` (``get_tools()``) — execute caller-supplied
-Python on that thread and convert EVERY raise, ``BaseException``
-included, into their diagnostic error type.  An injected stop landing
-while such a getter runs was therefore swallowed:
+loader — ``apply_agent_overrides`` (agent-script ``X()`` getters,
+including the ``tools()`` / ``add_to_tools()`` tool getters) —
+executes caller-supplied Python on that thread and converts EVERY
+raise, ``BaseException`` included, into its diagnostic error type.
+An injected stop landing while such a getter runs was therefore
+swallowed:
 
 * the run was reported ``"Task failed: AgentFileError: prompt()
-  ... raised: KeyboardInterrupt"`` (or the ``ToolsFileError``
-  equivalent) instead of ``"Task stopped by user"``;
+  ... raised: KeyboardInterrupt"`` instead of ``"Task stopped by
+  user"``;
 * ``_cancel_outcome`` never ran, so the stop was never acknowledged
   (``AgentState.stop_acknowledged`` stayed ``False``) and the
   watchdog's 5-second retry could land a SECOND interrupt in the
@@ -251,10 +252,10 @@ class TestStopWrappedInterrupt(TestCase):
         script = self._write_script("agent.py", "prompt", "agent")
         self._run_and_stop("wrap-agent-tab", "agent", agentPath=script)
 
-    def test_stop_during_tools_file_get_tools_is_a_user_stop(self) -> None:
-        """KI inside ``get_tools()`` (ToolsFileError site, ``_run_task_inner``)."""
-        tools = self._write_script("tools.py", "get_tools", "tools")
-        self._run_and_stop("wrap-tools-tab", "tools", toolsFile=tools)
+    def test_stop_during_agent_script_tool_getter_is_a_user_stop(self) -> None:
+        """KI inside ``add_to_tools()`` (the tool-getter branch of the loader)."""
+        tools = self._write_script("tools.py", "add_to_tools", "tools")
+        self._run_and_stop("wrap-tools-tab", "tools", agentPath=tools)
 
     def test_broken_script_without_stop_stays_a_task_error(self) -> None:
         """No stop requested → a raising getter keeps its diagnostic.

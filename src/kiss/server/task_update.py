@@ -356,8 +356,9 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             model_name=model_name,
             work_dir=str(getattr(parent_agent, "work_dir", "") or "."),
             printer=printer,
+            # ``tools()`` is the SEA's whole tool set: no basic tools.
             tools=ask_sea.tools(),
-            append_basic_tools=ask_sea.if_append_basic_tools(),
+            append_basic_tools=False,
             is_parallel=ask_sea.is_parallel(),
             max_budget=UPDATE_BUDGET_USD,
             model_config=(

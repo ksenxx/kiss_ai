@@ -482,7 +482,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
             max_steps=4,
             model_config={"base_url": url, "api_key": "local"},
             tools=ask_sea.tools(),
-            append_basic_tools=ask_sea.if_append_basic_tools(),
+            append_basic_tools=False,
             base_system_prompt=ask_sea.system_prompt(),
             system_prompt=ask_sea.append_to_system_prompt(),
             web_tools=ask_sea.use_web_tools(),

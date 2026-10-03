@@ -429,13 +429,13 @@ def test_agent_hides_decide_when_use_jev_setting_is_off(
     assert "decide" in _tool_names(_make_agent()._get_tools())
 
 
-def test_use_jev_setting_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A fresh config has no ``classify_with_decisions`` key: Jev stays off."""
+def test_use_jev_setting_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh config has no ``classify_with_decisions`` key: Jev is on by default."""
     isolated = IsolatedKissHome("kiss-decide-tool-default-")
     try:
         monkeypatch.setattr(config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key")
-        assert not decisions_tool_available()
-        assert "decide" not in _tool_names(_make_agent()._get_tools())
+        assert decisions_tool_available()
+        assert "decide" in _tool_names(_make_agent()._get_tools())
     finally:
         isolated.cleanup()
 

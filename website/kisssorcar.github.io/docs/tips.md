@@ -16,7 +16,7 @@ In VS Code, you can run KISS Sorcar in two modes: full editor mode, where the ch
 
 ## Task Classifier
 
-KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected, the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" (the default) to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
+KISS Sorcar now uses a quick task classifier to determine whether the task should run with git worktree mode and whether the task is complex or simple. You can toggle the task classifier in the settings by selecting/deselecting the option "Classify tasks before running". With an OpenRouter API key and "Use Jev (decisions model)" selected (the default), the classifier asks the `~typesafe/jev-latest` decisions model (about 0.2 s and $0.00003 per task) and the agent gets the `decide` tool for its own classification, routing and scoring questions; deselect "Use Jev" to pin the LLM classifier, one non-agentic call on the run's own model (skipped for `cc/*` and `codex/*` models), and to keep every task from calling Jev.
 
 ## Sorcar Extension Agents (SEAs)
 
@@ -88,7 +88,7 @@ print(result.text, result.success, result.cost)
 sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`.
+Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `add_to_tools()` returns the extra tool functions.
 
 ## Run KISS Sorcar in a Docker Container
 

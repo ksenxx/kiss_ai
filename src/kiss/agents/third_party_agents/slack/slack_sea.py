@@ -139,7 +139,7 @@ def _slack_dir() -> Path:
 
     Resolved lazily on every call (like ``ChannelConfig.path``) so a
     ``KISS_HOME`` set after import, or a process that re-executes this
-    module as a tools file, never reads the developer's real tokens.
+    module as an agent script, never reads the developer's real tokens.
     """
     return kiss_home() / "third_party_agents" / "slack"
 
@@ -1503,11 +1503,11 @@ def main() -> None:
     )
 
 
-def tools() -> list:
-    """Return the Slack channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the Slack channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the token
+    the API's ``extension_agent_path``: builds a fresh agent from the token
     persisted under ``~/.kiss`` and returns its authentication and
     backend tools.  The workspace comes from the
     ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the

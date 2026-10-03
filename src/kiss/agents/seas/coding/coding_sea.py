@@ -370,11 +370,6 @@ class ContainerHarness:
         return f"container:{self.container}"
 
     @staticmethod
-    def if_append_basic_tools() -> bool:
-        """The full built-in toolset (minus the tools switched off below)."""
-        return True
-
-    @staticmethod
     def use_worktree() -> bool:
         """No host git worktree: all edits happen inside the container."""
         return False
@@ -945,7 +940,6 @@ max_budget = _harness.max_budget
 model_config = _harness.model_config
 work_dir = _harness.work_dir
 docker_image = _harness.docker_image
-if_append_basic_tools = _harness.if_append_basic_tools
 use_worktree = _harness.use_worktree
 auto_commit = _harness.auto_commit
 use_web_tools = _harness.use_web_tools

@@ -643,11 +643,11 @@ def main() -> None:
     channel_main(NtfyAgent, "kiss-ntfy", channel_name="ntfy", make_backend=_make_backend)
 
 
-def tools() -> list:
-    """Return the ntfy channel tools (``kiss.server.sorcar.run`` tools-file contract).
+def add_to_tools() -> list:
+    """Return the ntfy channel tools (``kiss.server.sorcar.run`` agent-script contract).
 
     Called by the kiss-web daemon when this module's path is passed as
-    the API's ``tools=`` argument: builds a fresh agent from the
+    the API's ``extension_agent_path``: builds a fresh agent from the
     credentials persisted under ``~/.kiss`` and returns its
     authentication and backend tools.
     """

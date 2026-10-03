@@ -32,7 +32,7 @@ The routing protocol (:data:`SYSTEM_PROMPT`) is added to the default Sorcar
 system prompt through the ``add_to_system_prompt()`` getter; the
 deterministic parts — the priced candidate menu, the pick, the cost estimate
 and the decision ledger — are the tools this module exposes through
-``tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
+``add_to_tools()``.  Candidate order per tier is :data:`TIERS`, ranked by measured
 coding quality per dollar (researched 2026-09-24); prices and availability
 come from :mod:`kiss.core.models.model_info` at call time, so the menu is
 always the one this installation can run.  The prompt's "Observed model
@@ -783,7 +783,7 @@ def model() -> str:
     return orchestrator_model()
 
 
-def tools() -> list[Any]:
+def add_to_tools() -> list[Any]:
     """Expose the priced menu, the pick, the cost estimate, the observed costs and the ledger."""
     return [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 

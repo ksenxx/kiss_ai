@@ -180,27 +180,22 @@ def test_sea_target_accepts_inline_literals_and_rejects_other_shapes(tmp_path: P
         load_target(tmp_path / "x.txt")
 
 
-def test_sea_target_maps_every_getter_and_a_tools_file(tmp_path: Path) -> None:
-    """Optional getters (tools list or path, hooks, model, ...) all reach the rollout kwargs."""
-    tools_file = tmp_path / "extra_tools.py"
-    tools_file.write_text(
-        'def greet(name: str) -> str:\n    """Greet.\n\n    Args:\n        name: Who.\n\n'
-        '    Returns:\n        Text.\n    """\n    return "hi " + name\n\n\n'
-        "def tools():\n    return [greet]\n",
-        encoding="utf-8",
-    )
+def test_sea_target_maps_every_getter_and_both_tool_getters(tmp_path: Path) -> None:
+    """Optional getters (tools / add_to_tools, hooks, model, ...) all reach the rollout kwargs."""
     sea = tmp_path / "full_sea.py"
     sea.write_text(
         "PROMPT = 'p'\n\n\ndef system_prompt():\n    return PROMPT\n\n\n"
         "def tool_profile():\n    return 'shell'\n\n\ndef model():\n    return 'm'\n\n\n"
         "def model_config():\n    return {'k': 1}\n\n\ndef append_to_system_prompt():\n"
-        "    return 'suffix'\n\n\ndef if_append_basic_tools():\n    return False\n\n\n"
+        "    return 'suffix'\n\n\n"
         "def docker_image():\n    return 'img'\n\n\ndef use_web_tools():\n    return True\n\n\n"
         "def llm_call_hook():\n    return lambda m: m\n\n\ndef tool_call_hook():\n"
         "    return lambda n, a: 'OK'\n\n\n"
         "def prompt():\n    return 'fixed prompt'\n\n\ndef append_to_prompt():\n"
-        "    return ' suffix'\n\n\nfrom pathlib import Path\n\n\n"
-        f"def tools():\n    return Path({str(tools_file)!r})\n",
+        "    return ' suffix'\n\n\n"
+        'def greet(name: str) -> str:\n    """Greet.\n\n    Args:\n        name: Who.\n\n'
+        '    Returns:\n        Text.\n    """\n    return "hi " + name\n\n\n'
+        "def tools():\n    return [greet]\n",
         encoding="utf-8",
     )
     kwargs = SeaTarget(sea).rollout_kwargs()
@@ -209,19 +204,46 @@ def test_sea_target_maps_every_getter_and_a_tools_file(tmp_path: Path) -> None:
     assert kwargs["model_name"] == "m"
     assert kwargs["model_config"] == {"k": 1}
     assert kwargs["system_prompt"] == "suffix"
+    # ``tools()`` is the whole tool set: no basic tools.
     assert kwargs["append_basic_tools"] is False
     assert kwargs["docker_image"] == "img"
     assert kwargs["web_tools"] is True
     assert callable(kwargs["llm_call_hook"]) and callable(kwargs["tool_call_hook"])
     assert [t.__name__ for t in kwargs["tools"]] == ["greet"]
     assert kwargs["prompt"] == "fixed prompt" and kwargs["append_to_prompt"] == " suffix"
-    inline_tools = tmp_path / "list_sea.py"
-    inline_tools.write_text(
+    added_tools = tmp_path / "list_sea.py"
+    added_tools.write_text(
         "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
-        "def tools():\n    return [helper]\n",
+        "def add_to_tools():\n    return (helper,)\n",
         encoding="utf-8",
     )
-    assert [t.__name__ for t in SeaTarget(inline_tools).rollout_kwargs()["tools"]] == ["helper"]
+    added = SeaTarget(added_tools).rollout_kwargs()
+    # ``add_to_tools()`` extends the basic toolset.
+    assert [t.__name__ for t in added["tools"]] == ["helper"]
+    assert added["append_basic_tools"] is True
+
+
+def test_sea_target_rejects_invalid_tool_getters(tmp_path: Path) -> None:
+    """Same contract as the daemon: one tool getter, returning callables, never a path."""
+    both = tmp_path / "both_sea.py"
+    both.write_text(
+        "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
+        "def tools():\n    return [helper]\n\n\ndef add_to_tools():\n    return [helper]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="both tools"):
+        SeaTarget(both).rollout_kwargs()
+    for getter, body in (
+        ("tools", "    return '/some/tools.py'"),
+        ("add_to_tools", "    return [1]"),
+    ):
+        bad = tmp_path / f"bad_{getter}_sea.py"
+        bad.write_text(
+            f"def system_prompt():\n    return 'q'\n\n\ndef {getter}():\n{body}\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match=f"{getter}\\(\\) must return a list"):
+            SeaTarget(bad).rollout_kwargs()
 
 
 def test_sea_fingerprint_detects_code_changes_outside_the_prompt(tmp_path: Path) -> None:
@@ -868,7 +890,7 @@ def test_missing_split_is_an_error(tmp_path: Path) -> None:
 def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     """The SkillOpt SEA is registered as ``/skillopt`` and exposes optimize/status."""
     assert skillopt_sea.system_prompt().startswith("You are SkillOpt")
-    assert [t.__name__ for t in skillopt_sea.tools()] == ["optimize", "status"]
+    assert [t.__name__ for t in skillopt_sea.add_to_tools()] == ["optimize", "status"]
     assert skillopt_sea.tool_profile() == "shell"
     assert skillopt_sea.use_worktree() is False
     assert skillopt_sea.auto_commit() is False
@@ -880,7 +902,7 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     cmd: dict[str, Any] = {"agentPath": str(_SKILLOPT_SEA)}
     assert "autoCommit" in apply_agent_overrides(cmd)
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
-    assert cmd["toolProfile"] == "shell" and cmd["toolsFile"] == str(_SKILLOPT_SEA)
+    assert cmd["toolProfile"] == "shell" and all(callable(tool) for tool in cmd["tools"])
     assert cmd["systemPrompt"] == skillopt_sea.SYSTEM_PROMPT
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.

@@ -79,7 +79,8 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
     assert harness.docker_image() == f"container:{container_name}"
-    assert harness.if_append_basic_tools()
+    assert not hasattr(harness, "if_append_basic_tools")
+    assert not hasattr(coding_sea, "tools") and not hasattr(coding_sea, "add_to_tools")
     assert not harness.use_memory() and not harness.use_web_tools()
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [

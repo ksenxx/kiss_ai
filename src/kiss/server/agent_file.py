@@ -13,11 +13,14 @@ daemon imports the file and, for
 every ``run`` parameter ``X`` the script defines a top-level ``X()``
 function for, calls that function and overrides the command's
 corresponding wire field with its return value
-(:func:`apply_agent_overrides`) — exactly like the daemon calls a
-tools file's ``get_tools()``.  Parameters the script defines no getter
-for keep the value the client sent (which is the parameter's default
-when the caller did not pass one).  The functions therefore execute in
-the daemon process, never serialized by the client.  A broken agent
+(:func:`apply_agent_overrides`).  Parameters the script defines no
+getter for keep the value the client sent (which is the parameter's
+default when the caller did not pass one).  The functions therefore
+execute in the daemon process, never serialized by the client; the
+script's ``tools()`` / ``add_to_tools()`` tool callables and
+``llm_call_hook()`` / ``tool_call_hook()`` hooks — values no wire
+field can carry — are staged on the daemon-side command dict for the
+task runner.  A broken agent
 script (malformed field, missing file, import failure, a raising
 getter, or a wrong-typed return value) raises :exc:`AgentFileError` so
 the task stops with a diagnostic error instead of silently running
@@ -28,12 +31,36 @@ from __future__ import annotations
 
 import logging
 import math
-import os
+import sys
+import types
+import uuid
+from pathlib import Path
 from typing import Any
 
-from kiss.server.tools_file import _safe_message, execute_python_file
-
 logger = logging.getLogger("kiss-vscode")
+
+
+def _safe_message(exc: BaseException) -> str:
+    """Format an untrusted exception without running its raising code.
+
+    ``str(exc)`` runs the exception's ``__str__``, which — for an
+    exception minted by an untrusted agent script — may itself raise
+    anything.  A diagnostic built here must never leak such a
+    secondary raise, so the string conversion is guarded and falls
+    back to the (trusted) type name alone.
+
+    Args:
+        exc: The exception raised by untrusted agent-script code.
+
+    Returns:
+        ``"TypeName: message"`` when the message renders, otherwise
+        ``"TypeName"``.
+    """
+    name = type(exc).__name__
+    try:
+        return f"{name}: {exc}"
+    except BaseException:  # noqa: BLE001 — untrusted __str__ may raise anything
+        return name
 
 
 class AgentFileError(Exception):
@@ -57,15 +84,12 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
     ("model", "model"),
     ("chat_id", "chatId"),
     ("system_prompt", "systemPrompt"),
-    ("tools", "toolsFile"),
     ("use_worktree", "useWorktree"),
     ("auto_commit", "autoCommit"),
     ("max_budget", "maxBudget"),
     ("model_config", "modelConfig"),
-    ("if_append_basic_tools", "appendBasicTools"),
     ("append_to_system_prompt", "appendToSystemPrompt"),
     ("append_to_prompt", "appendToPrompt"),
-    ("scope_work_dir", "tabScopeWorkDir"),
     ("use_web_tools", "webTools"),
     ("classify_tasks", "classifyTasks"),
     ("use_memory", "useMemory"),
@@ -77,19 +101,19 @@ PARAM_FIELDS: tuple[tuple[str, str], ...] = (
 
 Each entry maps the agent script's optional top-level ``X()`` getter
 to the ``run`` command wire field it overrides.  The getter name is
-the :func:`kiss.server.sorcar.run` parameter name, except
-``if_append_basic_tools``, whose getter
-``if_append_basic_tools()`` overrides the ``append_basic_tools``
-parameter (wire field ``appendBasicTools``).  ``timeout``,
+the :func:`kiss.server.sorcar.run` parameter name.  ``tools`` and
+``append_basic_tools`` are not here: a script's tool set comes from
+the :data:`TOOL_FIELDS` getters ``tools()`` / ``add_to_tools()``,
+which are not :func:`run` parameters at all (a callable cannot travel
+the wire).  ``scope_work_dir`` has no
+getter: the calling workspace recorded on the run's registry tab is
+the caller's identity, not the script's.  ``timeout``,
 ``stop_on_timeout``, and ``endpoint_file`` are absent by design: they are
 client-transport parameters — the script only runs on the daemon that
 ``endpoint_file`` selects, ``timeout`` bounds the client's local wait, and
 ``stop_on_timeout`` picks the client's timeout behavior — so a
 daemon-side getter could never take effect.
-``scope_work_dir()`` (wire field ``tabScopeWorkDir``) overrides the
-calling workspace recorded on the run's registry tab (informational:
-every client shows every tab); an empty override records none, like
-an empty client-sent ``scope_work_dir``.  ``use_web_tools()`` (wire field ``webTools``),
+``use_web_tools()`` (wire field ``webTools``),
 ``classify_tasks()`` (wire field ``classifyTasks``), and
 ``use_memory()`` (wire field ``useMemory``) return a bool for a
 per-run override or ``None`` to fall back to the daemon's default —
@@ -111,6 +135,27 @@ for the host.
 CALLING task's identity — what marks the dispatched run as that
 task's sub-agent — which the dispatched script must not be able to
 forge or re-parent.
+"""
+
+TOOL_FIELDS: tuple[tuple[str, bool], ...] = (
+    ("tools", False),
+    ("add_to_tools", True),
+)
+"""The agent-script tool getters, as ``(getter_name, append_basic_tools)`` pairs.
+
+Each getter returns the list of tool callables the script contributes.
+Like the :data:`HOOK_FIELDS` callables, the list is never
+wire-serialized: it is staged on the daemon-side command dict's
+``tools`` field, and the second element is staged as the
+``appendBasicTools`` field the getter implies:
+
+- ``tools()`` — the run's tool set is EXACTLY these tools plus
+  ``finish``; the built-in basic toolset is not built.
+- ``add_to_tools()`` — these tools are ADDED to the built-in basic
+  toolset (and ``finish``).
+
+A script defines at most one of the two.  A script with neither runs
+with the built-in toolset alone.
 """
 
 HOOK_FIELDS: tuple[tuple[str, str], ...] = (
@@ -161,24 +206,26 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
 
     Args:
         raw_path: The agent-script path, for diagnostic messages.
-        param: The getter name (:data:`PARAM_FIELDS` /
-            :data:`HOOK_FIELDS` / :data:`ADD_FIELDS` first element)
+        param: The getter name (:data:`PARAM_FIELDS` / :data:`TOOL_FIELDS`
+            / :data:`HOOK_FIELDS` / :data:`ADD_FIELDS` first element)
             whose ``{param}()`` produced *value*.
         value: The getter's return value.
 
     Returns:
         The value to use for the parameter — *value* itself, or its
-        normalized form (a ``tools()`` :class:`os.PathLike` becomes
-        its path string, a finite ``max_budget()`` number becomes a
-        ``float``).
+        normalized form (a finite ``max_budget()`` number becomes a
+        ``float``, a ``tools()`` / ``add_to_tools()`` tuple becomes a
+        list).
 
     Raises:
         AgentFileError: When *value* has the wrong type for *param* —
             each parameter accepts exactly the types its
             :func:`kiss.server.sorcar.run` docstring documents
             (``prompt`` additionally must be non-empty, ``max_budget``
-            finite); the :data:`HOOK_FIELDS` getters must return a
-            callable or ``None``.
+            finite); the :data:`TOOL_FIELDS` getters must return a list
+            or tuple of callables (a file path is rejected); the
+            :data:`HOOK_FIELDS` getters must return a callable or
+            ``None``.
     """
     ok = True
     expected = ""
@@ -188,30 +235,18 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     elif param in (
         "work_dir", "model", "chat_id", "system_prompt",
         "append_to_system_prompt", "add_to_system_prompt", "append_to_prompt",
-        "scope_work_dir", "tool_profile", "docker_image",
+        "tool_profile", "docker_image",
     ):
         ok = isinstance(value, str)
         expected = "a string"
-    elif param == "tools":
-        if isinstance(value, list):
-            # The agent script doubles as its own tools file: a
-            # ``tools()`` returning the tool callables themselves
-            # (the tools-file contract — e.g. every channel agent
-            # module) normalizes to the script's own path, which the
-            # task runner later imports as the ``toolsFile`` and whose
-            # ``tools()`` (or ``get_tools()``) it calls for the list.
-            value = raw_path
-        if isinstance(value, os.PathLike):
-            value = os.fspath(value)
-        ok = value is None or isinstance(value, str)
-        expected = (
-            "a tools-file path (string or pathlib.Path), a list of "
-            "tool callables, or None"
+    elif param in ("tools", "add_to_tools"):
+        ok = isinstance(value, (list, tuple)) and all(
+            callable(tool) for tool in value
         )
-    elif param in (
-        "use_worktree", "auto_commit", "if_append_basic_tools",
-        "is_parallel",
-    ):
+        expected = "a list of tool callables (not a file path)"
+        if ok:
+            value = list(value)
+    elif param in ("use_worktree", "auto_commit", "is_parallel"):
         ok = isinstance(value, bool)
         expected = "a bool"
     elif param in ("use_web_tools", "classify_tasks", "use_memory"):
@@ -254,6 +289,82 @@ def _check_override(raw_path: str, param: str, value: Any) -> Any:
     return value
 
 
+def execute_python_file(
+    raw_path: Any,
+    error_cls: type[Exception],
+    label: str,
+) -> dict[str, Any]:
+    """Import a caller-supplied Python file and return its namespace.
+
+    Daemon-side loader for the ``run`` command's ``agentPath`` agent
+    script (also used by SEAs that load other scripts, e.g.
+    ``skillopt``).  The source is compiled and executed directly (no
+    ``__pycache__`` read or write), so every run observes the file's
+    CURRENT contents and the caller's directory is never littered with
+    bytecode.
+
+    Args:
+        raw_path: The wire field naming the file — expected to be an
+            absolute path string, but treated as untrusted.
+        error_cls: The exception class to raise on any failure (e.g.
+            :exc:`AgentFileError`), so each caller keeps its own
+            diagnostic type.
+        label: Human-readable name of the file kind (e.g. ``"agent
+            script"``), used in diagnostic messages.
+
+    Returns:
+        The executed module's namespace dict.
+
+    Raises:
+        Exception: An *error_cls* instance when *raw_path* is not a
+            string, is not the path of an existing ``.py`` file, or
+            names a module that raises at import time.
+    """
+    # Type-check FIRST: comparing or repr-ing an untrusted non-string
+    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
+    # so nothing touches *raw_path* beyond isinstance until it is known
+    # to be a plain string.
+    if not isinstance(raw_path, str):
+        raise error_cls(
+            f"{label} field must be a path string, got "
+            f"{type(raw_path).__name__}"
+        )
+    path = Path(raw_path)
+    try:
+        is_py_file = path.suffix == ".py" and path.is_file()
+    except (OSError, ValueError):
+        # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
+        is_py_file = False
+    if not is_py_file:
+        raise error_cls(
+            f"{label} {raw_path!r} is not an existing Python (.py) file"
+        )
+    module_name = f"_kiss_client_file_{uuid.uuid4().hex}"
+    module = types.ModuleType(module_name)
+    module.__file__ = str(path)
+    sys.modules[module_name] = module
+    try:
+        source = path.read_text(encoding="utf-8")
+        code = compile(source, str(path), "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102
+    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
+        # BaseException (not just Exception/SystemExit): a file raising
+        # e.g. KeyboardInterrupt or SystemExit at import time is
+        # converted into *error_cls* like any other bad module — the
+        # task runner treats an escaping KeyboardInterrupt as a task
+        # CANCELLATION, so letting it propagate unwrapped would report
+        # a broken file as "task cancelled" instead of a task error
+        # with a diagnostic.
+        logger.warning("Failed to import %s %r", label, raw_path, exc_info=True)
+        raise error_cls(
+            f"{label} {raw_path!r} failed to import: "
+            f"{_safe_message(exc)}"
+        ) from exc
+    finally:
+        sys.modules.pop(module_name, None)
+    return module.__dict__
+
+
 def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     """Apply a ``run`` command's agent-script parameter overrides.
 
@@ -265,13 +376,18 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     command's corresponding wire field, in place.  The writes are
     atomic: they happen only after EVERY defined getter has succeeded,
     so a broken script leaves the command untouched.  Parameters
-    without a getter keep the field value the client sent.  A ``tools()``
-    return value is a tools-file *path* written to the ``toolsFile``
-    field — the task runner later imports that file and calls its
-    ``get_tools()`` (or ``tools()``) exactly as for a client-passed
-    ``tools`` path.  A ``tools()`` returning a *list* of tool callables
-    instead (the tools-file contract) makes the agent script its own
-    tools file: the script's path is written to ``toolsFile``.
+    without a getter keep the field value the client sent.
+
+    The script's tool set comes from the :data:`TOOL_FIELDS` getters.
+    ``tools()`` returns a list of tool callables that, with ``finish``,
+    become the run's ENTIRE tool set (``appendBasicTools`` is staged
+    ``False``); ``add_to_tools()`` returns a list of tool callables
+    ADDED to the built-in basic toolset (``appendBasicTools`` is staged
+    ``True``).  Either way the list itself is staged on the command's
+    ``tools`` field — a daemon-side field, like the hook fields below,
+    never sent on the wire — and the task runner passes it to the agent
+    as its ``tools`` argument.  Defining both getters, or returning a
+    file path, is an error.
 
     The script may additionally define ``llm_call_hook()`` and
     ``tool_call_hook()`` (:data:`HOOK_FIELDS`), each returning a
@@ -286,8 +402,8 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     ``append_to_system_prompt()`` value — instead of replacing it.
 
     The getters run in the daemon process on the task's worker thread,
-    like a tools file's ``get_tools()``, and the file is re-imported
-    from source on every run (no ``__pycache__``).
+    and the file is re-imported from source on every run (no
+    ``__pycache__``).
 
     Args:
         cmd: The ``run`` command dict; mutated in place.  An absent,
@@ -295,7 +411,7 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
             script" and leaves the command untouched.
 
     Returns:
-        The set of wire-field names that were overridden (empty when
+        The set of command-field names that were overridden (empty when
         the command carries no agent script), so the caller can tell an
         actual ``X()`` override apart from a client-sent value.
 
@@ -303,8 +419,9 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
         AgentFileError: When the ``agentPath`` field is not a string,
             is not the path of an existing ``.py`` file, names a module
             that raises at import time, or names a module with a
-            non-callable getter ``X``, an ``X()`` that raises, or an
-            ``X()`` return value of the wrong type.
+            non-callable getter ``X``, an ``X()`` that raises, an
+            ``X()`` return value of the wrong type, or both ``tools()``
+            and ``add_to_tools()``.
     """
     raw_path = cmd.get("agentPath")
     if raw_path is None:
@@ -312,6 +429,12 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     if isinstance(raw_path, str) and raw_path == "":
         return set()
     namespace = execute_python_file(raw_path, AgentFileError, "agent script")
+    if "tools" in namespace and "add_to_tools" in namespace:
+        raise AgentFileError(
+            f"agent script {raw_path!r} defines both tools() and "
+            f"add_to_tools(); define at most one"
+        )
+    tool_getters = dict(TOOL_FIELDS)
     # Overrides are STAGED and applied to the command only after every
     # getter has succeeded: a broken getter must leave the command
     # completely untouched, or a direct ``_run_task`` caller (no
@@ -321,7 +444,8 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     staged: dict[str, Any] = {}
     # ``ADD_FIELDS`` last: an addition applies on top of the value an
     # ``append_to_system_prompt()`` getter may have staged.
-    for param, field in PARAM_FIELDS + HOOK_FIELDS + ADD_FIELDS:
+    tool_params = tuple((param, "tools") for param in tool_getters)
+    for param, field in PARAM_FIELDS + tool_params + HOOK_FIELDS + ADD_FIELDS:
         # Membership (not ``.get() is None``) decides absence: a
         # DEFINED ``X = None`` is a broken getter, not a missing
         # one, and must stop the task like any other non-callable.
@@ -367,6 +491,8 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
             ) from exc
         if param == "add_to_system_prompt":
             value = _add_text(staged.get(field, cmd.get(field)), value)
+        elif param in tool_getters:
+            staged["appendBasicTools"] = tool_getters[param]
         staged[field] = value
     cmd.update(staged)
     return set(staged)

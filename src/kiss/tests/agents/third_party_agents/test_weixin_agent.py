@@ -30,7 +30,7 @@ from kiss.agents.third_party_agents.weixin.weixin_sea import (
     _config,
 )
 from kiss.agents.third_party_agents.weixin.weixin_sea import (
-    tools as module_tools,
+    add_to_tools as module_tools,
 )
 
 

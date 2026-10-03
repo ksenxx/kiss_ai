@@ -31,10 +31,11 @@ Overrides: :func:`system_prompt` swaps the base system prompt for the
 SYSTEM_LITE ablation prompt, :func:`append_to_system_prompt` supplies
 the fixed suffix (a getter defined in this file wins over the wire
 value, so it is the single source of truth for both dispatch paths),
-:func:`tools` adds :func:`task_context`, :func:`if_append_basic_tools`
-returns ``False`` so the session has no built-in tool besides
-``finish`` (the parent task is still running in the same working tree,
-so the answerer must never edit files or run commands), and
+:func:`tools` makes :func:`task_context` the whole tool set (a
+``tools()`` getter, unlike ``add_to_tools()``, builds no basic toolset)
+so the session has no built-in tool besides ``finish`` (the parent task
+is still running in the same working tree, so the answerer must never
+edit files or run commands), and
 :func:`is_parallel`, :func:`use_web_tools`, :func:`use_memory` return
 ``False`` so the answer comes from the context alone.
 """
@@ -156,18 +157,14 @@ def task_context(task_id: str) -> str:
 
 
 def tools() -> list[Any]:
-    """Return the single context tool, :func:`task_context`."""
-    return [task_context]
+    """Return the whole tool set: :func:`task_context` only (plus ``finish``).
 
-
-def if_append_basic_tools() -> bool:
-    """Never build the built-in toolset: the session has ``task_context`` and ``finish`` only.
-
-    The parent task is still running in the same working tree, so the
-    answerer must not run commands or touch files; and every extra
+    ``tools()`` (not ``add_to_tools()``) so the built-in toolset is never
+    built: the parent task is still running in the same working tree, so
+    the answerer must not run commands or touch files; and every extra
     tool schema is a temptation to take a step the user has to wait for.
     """
-    return False
+    return [task_context]
 
 
 def is_parallel() -> bool:

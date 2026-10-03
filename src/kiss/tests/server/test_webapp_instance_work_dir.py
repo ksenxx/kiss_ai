@@ -2,26 +2,22 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests: each remote-webapp instance keeps its own work_dir.
+"""Integration tests: every remote-webapp instance shares ONE work_dir.
 
 Each browser tab running the standalone web client is one webapp
-instance.  The instance pins its work_dir in ``sessionStorage`` (key
-``sorcar-work-dir``, scoped per tab) via the WS shim's ``postMessage``
-hook, and the shim replays ``setWorkDir`` to the server right after
-every successful (re)authentication — mirroring how each VS Code
-window re-announces its workspace folder on every local (re)connect.
-Server-side, the server API dispatcher
-(``kiss.server.sorcar.ServerApi.dispatch``) records the folder per
-connection and stamps it onto every later command from the same
-connection that lacks an explicit ``workDir``.
-
-Invariant under test: two webapp instances sharing one daemon can
-never observe each other's folder, across reconnects and reloads.
+instance.  The working directory is a single daemon-wide value: a
+``setWorkDir`` from any instance (the "Working directory" panel, the
+Explorer's check mark) adopts it for every task of every instance and
+every VS Code window, persists it as ``config.json`` ``work_dir`` and
+is broadcast back as ``workDirChanged``.  Nothing is pinned per tab:
+the WS shim keeps no ``sessionStorage`` copy and replays nothing on
+reconnect, so a reloaded or reconnected instance simply sees the
+global value.
 
 * The shim tests replay the REAL ``_WS_SHIM_JS`` source in Node with a
-  fake WebSocket, asserting the sessionStorage pin and the
-  auth_ok-time ``setWorkDir`` replay (ordered BEFORE any queued
-  commands, so the server stamps them with the right folder).
+  fake WebSocket, asserting that ``setWorkDir`` is an ordinary queued
+  command (sent after ``auth``, in order) and that no pin is kept or
+  replayed.
 * The WSS tests open real ``wss://`` connections (the webapp's actual
   transport) against a real :class:`RemoteAccessServer`.
 """
@@ -127,13 +123,13 @@ def _run_shim_harness(scenario_js: str) -> dict[str, Any]:
     return parsed
 
 
-class TestWsShimWorkDirPin(unittest.TestCase):
-    """The browser WS shim pins and replays the instance work_dir."""
+class TestWsShimNoWorkDirPin(unittest.TestCase):
+    """The browser WS shim neither pins nor replays a work_dir."""
 
-    def test_post_message_set_work_dir_pins_session_storage(self) -> None:
-        """``postMessage({type:'setWorkDir'})`` writes the per-tab pin
-        and the subsequent ``auth_ok`` replays it BEFORE flushing the
-        queued commands, so the server stamps them correctly."""
+    def test_set_work_dir_is_an_ordinary_queued_command(self) -> None:
+        """``postMessage({type:'setWorkDir'})`` writes no per-tab pin;
+        it goes out after ``auth`` in the order it was posted, like any
+        other command."""
         out = _run_shim_harness("""
 const api = window.acquireVsCodeApi();
 const ws0 = FakeWS.instances[0];
@@ -143,25 +139,18 @@ api.postMessage({type: 'getFiles', prefix: ''});
 ws0.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 out.sent = ws0.sent.map(s => JSON.parse(s));
 """)
-        self.assertEqual(out["sessionWorkDir"], "/inst/a")
-        sent = out["sent"]
-        self.assertEqual(sent[0]["type"], "auth")
-        self.assertEqual(sent[1]["type"], "setWorkDir")
-        self.assertEqual(sent[1]["workDir"], "/inst/a")
-        types_after = [m["type"] for m in sent[2:]]
-        self.assertIn("getFiles", types_after)
-        self.assertLess(
-            [m["type"] for m in sent].index("setWorkDir"),
-            [m["type"] for m in sent].index("getFiles"),
+        self.assertEqual(out["sessionWorkDir"], "")
+        self.assertEqual(
+            [m["type"] for m in out["sent"]][:3],
+            ["auth", "setWorkDir", "getFiles"],
         )
+        self.assertEqual(out["sent"][1]["workDir"], "/inst/a")
 
-    def test_reconnect_after_prior_auth_replays_pin_in_place(self) -> None:
+    def test_reconnect_replays_nothing(self) -> None:
         """After a dropped WebSocket post-auth the shim re-authenticates
-        the new connection without reloading the page, and the pinned
-        work_dir goes out FIRST on that connection, ahead of whatever
-        the page posted during the outage: the server stamps each
-        connection's work_dir onto later commands, so the pin must be
-        there before the outage-queued command is taken."""
+        the new connection and flushes what the page posted during the
+        outage -- and nothing else: there is no pin to replay, so the
+        reconnected instance sees the daemon's global work_dir."""
         out = _run_shim_harness("""
 globalThis.location.reload = () => {
   out.reloaded = (out.reloaded || 0) + 1;
@@ -183,41 +172,23 @@ ws1.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 out.sent1 = ws1.sent.map(s => JSON.parse(s));
 """)
         self.assertEqual(out.get("reloaded"), None, out)
-        sent1 = out["sent1"]
         self.assertEqual(
-            [m["type"] for m in sent1],
-            ["auth", "setWorkDir", "saveConfig", "ping"],
+            [m["type"] for m in out["sent1"]],
+            ["auth", "saveConfig", "ping"],
         )
-        self.assertEqual(sent1[1]["workDir"], "/inst/a")
-        self.assertEqual(out["sessionWorkDir"], "/inst/a")
+        self.assertEqual(out["sessionWorkDir"], "")
 
-    def test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok(self) -> None:
-        """A fresh shim whose sessionStorage already holds a pinned
-        work_dir (the user reloaded the page, or the browser restored
-        the tab) MUST replay ``setWorkDir`` on its first ``auth_ok``."""
+    def test_fresh_instance_sends_only_auth(self) -> None:
+        """A fresh instance sends nothing but the auth frame on connect,
+        even when an older page left a ``sorcar-work-dir`` key behind."""
         out = _run_shim_harness("""
-_ss['sorcar-work-dir'] = '/inst/a';  // pin from a prior page instance
-const ws0 = FakeWS.instances[0];
-ws0.onopen();
-ws0.onmessage({data: JSON.stringify({type: 'auth_ok'})});
-out.sent = ws0.sent.map(s => JSON.parse(s));
-""")
-        sent = out["sent"]
-        self.assertEqual(sent[0]["type"], "auth")
-        self.assertEqual(sent[1]["type"], "setWorkDir")
-        self.assertEqual(sent[1]["workDir"], "/inst/a")
-
-    def test_no_pin_means_no_replay(self) -> None:
-        """A fresh instance with no pinned work_dir sends nothing but
-        the auth frame on connect — the server's fallback applies."""
-        out = _run_shim_harness("""
+_ss['sorcar-work-dir'] = '/inst/stale';  // left by an older build
 const ws0 = FakeWS.instances[0];
 ws0.onopen();
 ws0.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 out.sent = ws0.sent.map(s => JSON.parse(s));
 """)
         self.assertEqual([m["type"] for m in out["sent"]], ["auth"])
-        self.assertEqual(out["sessionWorkDir"], "")
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -354,10 +325,10 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
             )
         return _pred
 
-    async def test_two_instances_keep_independent_work_dirs(self) -> None:
-        """Instance B pinning folder B must never redirect instance A's
-        work_dir-dependent commands (sent WITHOUT explicit workDir) to
-        folder B, even though B synced last (daemon fallback = B)."""
+    async def test_two_instances_share_one_work_dir(self) -> None:
+        """Instance B picking folder B moves instance A too: A's
+        work_dir-dependent commands (sent WITHOUT explicit workDir) run
+        in folder B, and both instances receive ``workDirChanged``."""
         ws_a = await self._connect_instance()
         ws_b = await self._connect_instance()
         await self._send(
@@ -366,12 +337,20 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         await self._send(
             ws_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )
+        for ws in (ws_a, ws_b):
+            await self._drain_until(
+                ws,
+                lambda m: (
+                    m.get("type") == "workDirChanged"
+                    and m.get("workDir") == str(self.dir_b)
+                ),
+            )
 
         await self._send(ws_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
-            ws_a, self._files_event_with("./alpha.txt"),
+            ws_a, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev_a))
+        self.assertNotIn("./alpha.txt", _file_names(ev_a))
 
         await self._send(ws_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
@@ -379,10 +358,9 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         )
         self.assertNotIn("./alpha.txt", _file_names(ev_b))
 
-    async def test_reconnect_replay_restores_instance_work_dir(self) -> None:
-        """A reconnecting instance that replays ``setWorkDir`` (exactly
-        what the WS shim does after ``auth_ok``) gets its folder back,
-        even though another instance moved the daemon fallback."""
+    async def test_reconnected_instance_sees_global_work_dir(self) -> None:
+        """A reconnecting instance replays nothing (there is no pin) and
+        simply works in the global work_dir another instance picked."""
         ws_a = await self._connect_instance()
         ws_b = await self._connect_instance()
         await self._send(
@@ -391,24 +369,26 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         await self._send(
             ws_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )
+        await self._drain_until(
+            ws_b,
+            lambda m: (
+                m.get("type") == "workDirChanged"
+                and m.get("workDir") == str(self.dir_b)
+            ),
+        )
 
         await ws_a.close()
         ws_a2 = await self._connect_instance()
-        await self._send(
-            ws_a2, {"type": "setWorkDir", "workDir": str(self.dir_a)},
-        )
         await self._send(ws_a2, {"type": "getFiles", "prefix": ""})
         ev = await self._drain_until(
-            ws_a2, self._files_event_with("./alpha.txt"),
+            ws_a2, self._files_event_with("./beta.txt"),
         )
-        self.assertNotIn("./beta.txt", _file_names(ev))
+        self.assertNotIn("./alpha.txt", _file_names(ev))
 
-    async def test_get_config_reports_instance_pin_over_persisted(
-        self,
-    ) -> None:
-        """``getConfig`` for a pinned instance must report ITS folder
-        even when another instance persisted a different work_dir
-        globally via saveConfig."""
+    async def test_set_work_dir_replaces_persisted_value(self) -> None:
+        """A pick (``setWorkDir``) replaces a previously persisted
+        work_dir: ``getConfig`` reports the picked folder and
+        ``config.json`` now holds it, so a daemon restart keeps it."""
         vc.save_config({"work_dir": str(self.dir_b)})
         ws_a = await self._connect_instance()
         await self._send(
@@ -422,3 +402,4 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
                 and m.get("config", {}).get("work_dir") == str(self.dir_a)
             ),
         )
+        self.assertEqual(vc.load_config().get("work_dir"), str(self.dir_a))

@@ -443,7 +443,7 @@ def test_agent_run_asks_the_user_through_the_tool_and_patches_only_what_was_gran
                 max_steps=6,
                 max_budget=sea.max_budget(),
                 model_config={"base_url": url, "api_key": "local"},
-                tools=sea.tools(),
+                tools=sea.add_to_tools(),
                 base_system_prompt=sea.system_prompt(),
                 web_tools=False,
                 use_memory=False,
