@@ -317,6 +317,7 @@ async function main() {
         running: false,
         cost: 0.12,
         updatedAt,
+        dueAt: updatedAt + 600000,
       });
       await sleep(300);
       const upd = lastMetaUpdate(wv);
@@ -324,6 +325,7 @@ async function main() {
         content: '<h4>Progress</h4><p>step one <strong>done</strong></p>',
         running: false,
         updatedAt,
+        dueAt: updatedAt + 600000,
         cost: 0.12,
         error: '',
       });
@@ -454,6 +456,7 @@ async function main() {
         content: '',
         running: true,
         updatedAt: 0,
+        dueAt: 0,
         cost: 0,
         error: '',
       });

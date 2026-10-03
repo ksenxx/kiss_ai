@@ -34,7 +34,13 @@ from types import SimpleNamespace
 import pytest
 
 from kiss.core.models.gemini_model import GeminiModel
-from kiss.core.models.model_info import MODEL_INFO, PACKAGE_MODEL_INFO_PATH, calculate_cost
+from kiss.core.models.model_info import (
+    MODEL_INFO,
+    PACKAGE_MODEL_INFO_PATH,
+    ModelInfo,
+    _apply_cache_pricing,
+    calculate_cost,
+)
 
 
 class TestOpenAIGpt56CacheWritePricing:
@@ -468,6 +474,61 @@ class TestGpt61SolPricing:
         assert cost == pytest.approx(expected)
         alias = calculate_cost("gpt-6.1-sol-medium", 100_000, 10_000, 150_000, 50_000)
         assert alias == pytest.approx(expected)
+
+
+class TestGptProLongContextTier:
+    """gpt-5.5-pro and gpt-5.4-pro bill $30/$180 below 272k prompt tokens
+    and $60/$270 above (https://developers.openai.com/api/docs/pricing).
+
+    ``update_models.py`` keeps ``-pro`` models out of the shipped catalog,
+    so the test registers them the way a user's MY_MODELS.json entry would.
+    """
+
+    @pytest.mark.parametrize("name", ["gpt-5.5-pro", "gpt-5.4-pro"])
+    def test_pro_long_context_uplift(self, name):
+        assert name not in MODEL_INFO
+        MODEL_INFO[name] = ModelInfo(1_050_000, 30.0, 180.0, True, False, True)
+        try:
+            short = calculate_cost(name, 272_000, 10_000)
+            assert short == pytest.approx((272_000 * 30.0 + 10_000 * 180.0) / 1e6)
+            long = calculate_cost(name, 272_001, 10_000)
+            assert long == pytest.approx((272_001 * 60.0 + 10_000 * 270.0) / 1e6)
+        finally:
+            del MODEL_INFO[name]
+
+
+class TestGeminiProLatestLongContextTier:
+    """OpenRouter's rolling ``~google/gemini-pro-latest`` carries the same
+    200K override as gemini-3.1-pro ($2/$0.20/$12 -> $4/$0.40/$18,
+    https://openrouter.ai/api/v1/models), so the token-priced fallback must
+    apply it too."""
+
+    def test_uplift_above_200k(self):
+        name = "openrouter/~google/gemini-pro-latest"
+        short = calculate_cost(name, 200_000, 10_000, 0)
+        assert short == pytest.approx((200_000 * 2.0 + 10_000 * 12.0) / 1e6)
+        long = calculate_cost(name, 150_000, 10_000, 60_000)
+        expected = (150_000 * 4.0 + 60_000 * 0.40 + 10_000 * 18.0) / 1e6
+        assert long == pytest.approx(expected)
+
+
+class TestDirectOverrideWithReadPriceOnly:
+    """A direct-provider entry that publishes only a read price (e.g. a
+    MY_MODELS.json override) keeps the provider's write rule; only
+    ``openrouter/*`` entries treat a missing write price as unpublished."""
+
+    def test_anthropic_override_gets_write_multipliers(self):
+        info = ModelInfo(200_000, 3.0, 15.0, True, False, True, 0.30)
+        _apply_cache_pricing("claude-sonnet-4-6", info)
+        assert info.cache_read_price_per_1M == pytest.approx(0.30)
+        assert info.cache_write_price_per_1M == pytest.approx(3.75)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(6.0)
+
+    def test_openrouter_published_read_keeps_missing_write(self):
+        info = ModelInfo(200_000, 3.0, 15.0, True, False, True, 0.30)
+        _apply_cache_pricing("openrouter/anthropic/claude-sonnet-4.6", info)
+        assert info.cache_write_price_per_1M is None
+        assert info.cache_write_1h_price_per_1M == pytest.approx(6.0)
 
 
 class TestTogetherCachedInputPrices:

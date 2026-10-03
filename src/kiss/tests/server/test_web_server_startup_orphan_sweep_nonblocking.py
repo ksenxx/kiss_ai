@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""kiss-web restart after ``install.sh`` must not be delayed by sorcar.db.
+"""kiss-web restart after ``install.sh`` must not be delayed by history.db.
 
 Production symptom
 ==================
@@ -97,7 +97,7 @@ def _row_result(db_path: Path, task_id: str) -> str:
 
 
 class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
-    """Server must bind its sockets while sorcar.db is write-locked."""
+    """Server must bind its sockets while history.db is write-locked."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-orphan-sweep-")
@@ -110,9 +110,9 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "sorcar.db"
+        _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
-        self.db_path = kiss_dir / "sorcar.db"
+        self.db_path = kiss_dir / "history.db"
         self.endpoint_file = tmp / "sorcar-local.json"
         self.url_file = tmp / "remote-url.json"
         self.server: RemoteAccessServer | None = None
@@ -187,7 +187,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         elapsed = time.monotonic() - started
         assert elapsed < _STARTUP_BUDGET_SECS, (
             f"server took {elapsed:.1f}s to accept a local connection while "
-            f"sorcar.db was write-locked — startup is blocked on the "
+            f"history.db was write-locked — startup is blocked on the "
             f"orphan-task sweep (pre-fix behaviour: ~30s busy_timeout)"
         )
         assert _row_result(self.db_path, orphan_id) == _SENTINEL, (

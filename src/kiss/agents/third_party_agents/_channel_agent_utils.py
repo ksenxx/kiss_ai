@@ -21,13 +21,12 @@ from typing import Any
 
 import yaml
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.file_lock import lock_exclusive, unlock
 from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_KISS_DIR = Path.home() / ".kiss"
 
 SILENCE_TOKENS = frozenset({"[SILENT]", "NO_REPLY"})
 
@@ -298,19 +297,29 @@ class ChannelConfig:
     def __init__(self, channel_dir: Path, required_keys: tuple[str, ...]) -> None:
         self._channel_dir = channel_dir
         self.required_keys = required_keys
-        try:
-            self._kiss_relative_dir: Path | None = channel_dir.relative_to(_DEFAULT_KISS_DIR)
-        except ValueError:
-            self._kiss_relative_dir = None
+        self._kiss_relative_dir: Path | None = None
+        # The homes a channel dir may have been built under: the current
+        # one (the bundled agents' ``kiss_home() / ...`` constants), the
+        # brand's default, and the stock ``~/.kiss`` that channel modules
+        # outside this package spell out literally.
+        for home in (kiss_home(), Path.home() / HOME_DIR, Path.home() / ".kiss"):
+            try:
+                self._kiss_relative_dir = channel_dir.relative_to(home)
+                break
+            except ValueError:
+                continue
 
     @property
     def path(self) -> Path:
         """Config file path, resolved lazily so ``KISS_HOME`` is honoured.
 
-        Channel dirs under the default ``~/.kiss`` are rebased onto
-        ``$KISS_HOME`` when that env var is set (the test suite points it
-        at a fresh per-process temp dir, isolating config state between
-        parallel test runs and protecting the user's real configs).
+        Channel dirs under a KISS home (the current one at construction
+        time, the brand's default or the stock ``~/.kiss``) are rebased
+        onto the current ``kiss_home()`` on every access, so a
+        ``KISS_HOME`` set later is honoured (the test suite points it at a
+        fresh per-process temp dir, isolating config state between
+        parallel test runs and protecting the user's real configs) and a
+        white-label brand's home is used for every channel.
         """
         if self._kiss_relative_dir is not None:
             return kiss_home() / self._kiss_relative_dir / "config.json"

@@ -365,7 +365,7 @@ class RunningTasksTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
-        self.db = self.tmp / "sorcar.db"
+        self.db = self.tmp / "history.db"
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -455,7 +455,7 @@ class FingerprintTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
-        self.db = self.tmp / "sorcar.db"
+        self.db = self.tmp / "history.db"
         con = sqlite3.connect(self.db)
         th._init_tables(con)
         con.execute(
@@ -748,8 +748,8 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.remote_kiss = self.remote_home / ".kiss"
         self.local_kiss.mkdir(parents=True)
         self.remote_kiss.mkdir(parents=True)
-        self.local_db = self.local_kiss / "sorcar.db"
-        self.remote_db = self.remote_kiss / "sorcar.db"
+        self.local_db = self.local_kiss / "history.db"
+        self.remote_db = self.remote_kiss / "history.db"
         bindir = Path(self.tmp) / "bin"
         bindir.mkdir()
         (bindir / "ssh").write_text(_FAKE_SSH)
@@ -833,7 +833,7 @@ class ReplacementNeverLosesTest(unittest.TestCase):
             path: Database to add the task to.
             task_id: Identifier of the task that will live in the -wal.
         """
-        staging = Path(self.tmp) / "staging" / "sorcar.db"
+        staging = Path(self.tmp) / "staging" / "history.db"
         staging.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(path, staging)
         con = sqlite3.connect(staging)
@@ -874,7 +874,7 @@ class ReplacementNeverLosesTest(unittest.TestCase):
 
     def _backups(self) -> list[Path]:
         """Return the databases a replacement moved aside, oldest first."""
-        return sorted(p for p in self.remote_kiss.glob("sorcar.db.replaced-*")
+        return sorted(p for p in self.remote_kiss.glob("history.db.replaced-*")
                       if not p.name.endswith("-wal"))
 
     def test_the_replaced_database_stays_readable_all_along(self) -> None:
@@ -891,8 +891,8 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(self._tasks(kept[0]), ["R1"])
         # Nothing of the old database's own journal is left beside the new one.
-        self.assertFalse((self.remote_kiss / "sorcar.db-wal").exists())
-        self.assertFalse((self.remote_kiss / "sorcar.db-shm").exists())
+        self.assertFalse((self.remote_kiss / "history.db-wal").exists())
+        self.assertFalse((self.remote_kiss / "history.db-shm").exists())
 
     def test_the_backup_holds_what_was_only_in_the_wal(self) -> None:
         """The last thing the server did is the likeliest to be only there.
@@ -913,8 +913,8 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.assertEqual(len(kept), 1)
         self.assertEqual(self._tasks(kept[0]), ["R1", "RWAL"])
         self.assertEqual(self._tasks(self.remote_db), ["L1"])
-        self.assertFalse((self.remote_kiss / "sorcar.db-wal").exists())
-        self.assertFalse((self.remote_kiss / "sorcar.db-shm").exists())
+        self.assertFalse((self.remote_kiss / "history.db-wal").exists())
+        self.assertFalse((self.remote_kiss / "history.db-shm").exists())
 
     def test_a_wal_a_reader_holds_open_is_kept_beside_the_backup(self) -> None:
         """A checkpoint can run without error and fold nothing in.
@@ -951,7 +951,7 @@ class ReplacementNeverLosesTest(unittest.TestCase):
         self.assertTrue(Path(f"{kept[0]}-wal").is_file())
         self.assertEqual(self._tasks(kept[0]), ["R1", "RPRE", "RWAL"])
         self.assertEqual(self._tasks(self.remote_db), ["L1"])
-        self.assertFalse((self.remote_kiss / "sorcar.db-wal").exists())
+        self.assertFalse((self.remote_kiss / "history.db-wal").exists())
 
     def test_the_usage_counters_of_the_replaced_database_come_back(self) -> None:
         """No sync moves them, so a replacement has to carry them over."""

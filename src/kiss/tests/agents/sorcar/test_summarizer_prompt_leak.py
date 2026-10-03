@@ -12,7 +12,7 @@ unconditionally printed the summarizer's internal ``SUMMARIZER_PROMPT``
 with ``type="prompt"``, so the front-end displayed an unexpected
 "# Summarizer\\n\\nThe executor's trajectory is saved at: ..." prompt
 message in the task's event stream (observed in production task
-``1ae49939d2a34039b72e8234eed52b02`` in ``~/.kiss/sorcar.db``).
+``1ae49939d2a34039b72e8234eed52b02`` in ``~/.kiss/history.db``).
 
 This test drives a real ``RelentlessAgent`` against a real
 ``ThreadingHTTPServer`` speaking the OpenAI chat-completions protocol

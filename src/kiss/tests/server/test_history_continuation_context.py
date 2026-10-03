@@ -8,7 +8,7 @@ augmented prompt the underlying agent receives.
 
 Spec
 ----
-1. A previous task (T1) with result R1 is persisted in ``sorcar.db``
+1. A previous task (T1) with result R1 is persisted in ``history.db``
    under chat id X.
 2. The user clicks the history row for T1.  The frontend's
    ``createNewTab()`` allocates a fresh tab with a new uuid Y and sends:
@@ -58,7 +58,7 @@ def _redirect_db(tmpdir: str) -> tuple:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return saved
 

@@ -769,7 +769,9 @@ class GeminiModel(Model):
             for chunk in events:
                 last_chunk = chunk
                 if chunk.usage_metadata is not None:
-                    usage_chunk = chunk
+                    # Billed already: kept for take_partial_usage_response
+                    # if the stream fails before it ends.
+                    usage_chunk = self._rejected_response = chunk
                 chunk_parts = self._parts_from_response(chunk)
                 self._stream_parts(chunk_parts)
                 parts.extend(chunk_parts)
@@ -780,6 +782,7 @@ class GeminiModel(Model):
         finally:
             events.close()
             self._close_thinking_if_open()
+        self._rejected_response = None
         return parts, usage_chunk or last_chunk
 
     def _generate_parts(

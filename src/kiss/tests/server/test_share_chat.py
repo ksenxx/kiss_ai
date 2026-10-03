@@ -64,7 +64,7 @@ def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return saved
 
@@ -90,7 +90,7 @@ class _LocalServerTestCase(unittest.TestCase):
 
     def setUp(self) -> None:
         # ignore_cleanup_errors: the server's worker threads keep their
-        # per-thread sorcar.db connections open, and Windows refuses to
+        # per-thread history.db connections open, and Windows refuses to
         # delete an open file (the OS reclaims the handle at exit).
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.work_dir = os.path.join(self.tmp.name, "workspace")

@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -27,8 +26,9 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
-_IMESSAGE_DIR = Path.home() / ".kiss" / "third_party_agents" / "imessage"
+_IMESSAGE_DIR = kiss_home() / "third_party_agents" / "imessage"
 _config = ChannelConfig(_IMESSAGE_DIR, ())
 
 _PLATFORM_ERROR = json.dumps(

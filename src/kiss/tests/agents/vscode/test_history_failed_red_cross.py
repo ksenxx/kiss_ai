@@ -320,7 +320,7 @@ def _history_event_for_persisted_result(result: str) -> dict[str, Any]:
     tmp = tempfile.mkdtemp(prefix="kiss-history-cancel-test-")
     orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
     th._close_db()
-    th._DB_PATH = Path(tmp) / "sorcar.db"  # type: ignore[attr-defined]
+    th._DB_PATH = Path(tmp) / "history.db"  # type: ignore[attr-defined]
     try:
         server = VSCodeServer()
         server.work_dir = tmp

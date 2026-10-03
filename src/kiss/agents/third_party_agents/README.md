@@ -414,7 +414,7 @@ reply lands in that task's transcript. No configuration or credentials are invol
 
 `govee.py` is a small helper for Govee smart lights (the Developer API), not a channel
 agent — but it is Muse-auth covered and it is the preferred way to act on home lights.
-This repository's `SORCAR.md` tells every session to use it for light actions, so
+This repository's `AGENTS.md` tells every session to use it for light actions, so
 plain prompts on any surface just work:
 
 > Turn off the living room lamp.
@@ -568,7 +568,7 @@ Then check the new events in Google Calendar itself (Muse tip 8).
 > then dim the Govee living room lamp to 15% at 2700K.
 
 (The Muse write policy still gates Govee's `/device/control` calls; run this from a
-workspace whose `SORCAR.md` points at `govee.py`, as this repository's does.)
+workspace whose `AGENTS.md` points at `govee.py`, as this repository's does.)
 
 **12. Twitch → Discord stream announcement:**
 

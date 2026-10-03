@@ -79,7 +79,7 @@
 #      delimited block to ~/.bashrc that sources it for interactive shells,
 #      keeping a copy of that file as it was and replacing it by an atomic
 #      rename.  Either way, install-api-keys.sh runs.
-#   4b. Sync the task database (~/.kiss/sorcar.db) both ways on every run, so
+#   4b. Sync the task database (~/.kiss/history.db) both ways on every run, so
 #      the History panel on *either* machine lists every task either machine
 #      ever ran, with the tasks that ran in one checkout re-pointed at the
 #      other (the panel hides tasks from other workspaces by default).
@@ -91,7 +91,7 @@
 #      both.  Only a remote without a usable database (first deploy) — or a
 #      merge the schemas refuse — falls back to a full copy, which stops the
 #      remote web app for the swap, keeps the database it replaces as
-#      sorcar.db.replaced (with the usage counters of that database carried
+#      history.db.replaced (with the usage counters of that database carried
 #      into the new one), and starts the web app again before returning.
 #   4c. Sync the agent's memory (~/.kiss/memories, or the ``memory_dir`` of
 #      ~/.kiss/config.json) both ways on every run, so the agent on either
@@ -299,9 +299,19 @@ ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-remote-prereqs.sh" \
 LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 [[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \
     || die "SORCAR_LIVE_TASK_WINDOW must be a number of seconds, got '$LIVE_TASK_WINDOW'."
+# The database was ~/.kiss/sorcar.db before version 2026.10.2: a remote still
+# running that version holds it under the old name, so that is the file asked
+# -- and renamed once the check has passed, so that the sync below (step 4b)
+# and the web app this deploy starts find the remote's history where they
+# look for it.  The old name stays as a symlink to the new one: the web app
+# still running the old version keeps writing to the same file until step 7c
+# restarts it, instead of recreating an empty sorcar.db.
+REMOTE_DB="$(ssh "$TARGET" '[ ! -e "$HOME/.kiss/history.db" ] && [ -e "$HOME/.kiss/sorcar.db" ] \
+    && echo sorcar.db || echo history.db')" \
+    || die "Could not look for the task database on $TARGET."
 if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
     step "Checking whether a task is running on $TARGET ..."
-    RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/sorcar.db\" \
+    RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/$REMOTE_DB\" \
         $(shquote "$LIVE_TASK_WINDOW")" \
         < "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" 2>/dev/null || echo unknown)"
     RUNNING_COUNT="$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')"
@@ -322,12 +332,21 @@ if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
             ;;
     esac
 fi
+if [[ "$REMOTE_DB" == sorcar.db ]]; then
+    step "Renaming $TARGET's ~/.kiss/sorcar.db to history.db, its name since version 2026.10.2 ..."
+    ssh "$TARGET" 'cd "$HOME/.kiss" || exit 1
+        for part in -wal -shm ""; do
+            if [ -e "sorcar.db$part" ]; then mv "sorcar.db$part" "history.db$part" || exit 1; fi
+        done
+        ln -s history.db sorcar.db' \
+        || die "Could not rename ~/.kiss/sorcar.db on $TARGET."
+fi
 
 # ---------------------------------------------------------------------------
 # 1c. Room for the deploy on the remote's disk
 #
 # Everything a deploy writes lands under the remote's $HOME: the whole task
-# database (step 4b, as large as this machine's ~/.kiss/sorcar.db), the
+# database (step 4b, as large as this machine's ~/.kiss/history.db), the
 # checkout, its .venv and uv's cache, code-server.  A cloud VM is often a
 # 10 GB boot disk with a large data disk mounted beside it, and none of that
 # fits on the boot disk: the upload died with "gzip: stdout: No space left
@@ -343,7 +362,7 @@ fi
 DISK_HEADROOM_GB="${SORCAR_DISK_HEADROOM_GB:-3}"
 [[ "$DISK_HEADROOM_GB" =~ ^[0-9]+$ ]] \
     || die "SORCAR_DISK_HEADROOM_GB must be a whole number of gigabytes, got '$DISK_HEADROOM_GB'."
-LOCAL_DB="${KISS_HOME:-$HOME/.kiss}/sorcar.db"
+LOCAL_DB="${KISS_HOME:-$HOME/.kiss}/history.db"
 DB_BYTES=0
 # The -wal holds committed pages the main file does not have yet; the
 # snapshot that travels contains both.
@@ -856,7 +875,7 @@ systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
 if [ "${FORCE_RESTART:-}" != "1" ] && [ "${LIVE_TASK_WINDOW:-300}" != "0" ]; then
     # The braces keep a failing probe from ending the pipeline (and, under
     # ``set -e``, this script) before its answer has been read.
-    LIVE=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/sorcar.db" \
+    LIVE=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/history.db" \
                   "${LIVE_TASK_WINDOW:-300}" || true; } | head -1 | tr -d '[:space:]')
     if [ "$LIVE" != "0" ]; then
         echo "ERROR: '$LIVE' task(s) are running on this host now (none were when" \

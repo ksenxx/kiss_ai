@@ -298,3 +298,48 @@ def test_concurrent_late_charges_publish_the_final_total_last() -> None:
     assert len(usage) == 16
     assert usage[-1]["cost"] == "$1.1600"
     assert usage[-1]["total_tokens"] == 116
+
+
+def test_running_task_late_spend_is_kept_in_its_replayed_transcript() -> None:
+    """Spend banked on a running task after its last usage event is replayed.
+
+    The task's transcript (the live recording while it runs, the events
+    table after) must end with the new cumulative totals, so a reload or
+    another surface shows the same cost as the task's final row.
+    """
+    from kiss.agents.sorcar.persistence import _flush_chat_events
+    from kiss.agents.sorcar.sorcar_agent import _attribute_sub_usage
+
+    task = _task(finished=False, cost=0.0)
+    server = VSCodeServer()
+    agent = WorktreeSorcarAgent("late-usage-transcript")
+    agent._last_task_id = task
+    agent_state.register(
+        AgentState(task, agent=agent, tab_id="tab-transcript", server_owned=True),
+    )
+    server.printer.ensure_recording_for_task(task)
+    _attribute_sub_usage(agent, 2.0, 100, 2)
+    server.printer.broadcast({
+        "type": "usage_info", "text": "", "taskId": task,
+        "total_tokens": 100, "cost": "$2.0000", "total_steps": 2,
+    })
+
+    charge_side_channel_usage(server.printer, agent, task, 0.5, 70, 1)
+
+    assert _agent_usage(agent) == (pytest.approx(2.5), 170, 3)
+    recorded = [
+        e for e in server.printer.peek_recording_for_task(task)
+        if e.get("type") == "usage_info"
+    ]
+    assert recorded[-1]["cost"] == "$2.5000"
+    assert len(recorded) == 2
+    _flush_chat_events(task)
+    session = _load_chat_events_by_task_id(task)
+    assert session is not None
+    persisted = [
+        e for e in session["events"]  # type: ignore[attr-defined]
+        if e.get("type") == "usage_info"
+    ]
+    assert [e["cost"] for e in persisted] == ["$2.0000", "$2.5000"]
+    assert persisted[-1]["total_tokens"] == 170
+    assert persisted[-1]["total_steps"] == 3

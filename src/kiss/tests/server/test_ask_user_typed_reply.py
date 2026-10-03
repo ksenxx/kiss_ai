@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests: a chat message typed while a question is pending answers it.
 
-Reproduces sorcar.db task ``e8a8407967d645c28c87750eda7a6cc0``: the agent
+Reproduces history.db task ``e8a8407967d645c28c87750eda7a6cc0``: the agent
 called ``ask_user_question`` and the user replied by typing into the chat
 box instead of the answer box.  The reply reached the daemon as a
 ``run``/``appendUserMessage`` command, was queued on

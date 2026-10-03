@@ -1415,7 +1415,7 @@ class VSCodeServer(
         """Send deduplicated composer texts for arrow-key cycling.
 
         Loads the full persisted history — every task stored in
-        ``sorcar.db`` plus every message typed into a running task
+        ``history.db`` plus every message typed into a running task
         (``steer_inputs``) — so ArrowUp can traverse each distinct
         text, not just an arbitrary recent subset.  Stamped with the
         requesting connection's ``conn_id`` (when non-empty) so the

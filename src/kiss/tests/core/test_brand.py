@@ -35,7 +35,7 @@ from kiss.core.brand import (
 from kiss.server import web_server
 
 _PLACEHOLDER = re.compile(
-    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|BRAND_JSON|BRAND_STYLE_HREF)\}\}",
+    r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR|BRAND_JSON|BRAND_STYLE_HREF)\}\}",
 )
 
 
@@ -72,6 +72,13 @@ def test_load_brand_custom_partial_and_broken_files(tmp_path: Path) -> None:
     assert loaded["identity"] == DEFAULT_BRAND["identity"]
     assert loaded["extension_description"] == DEFAULT_BRAND["extension_description"]
 
+    # home_dir must be a single directory name; anything else keeps ``.kiss``.
+    for bad in ("", ".", "..", "a/b", "a\\b", 7):
+        (tmp_path / "home.json").write_text(json.dumps({"home_dir": bad}), encoding="utf-8")
+        assert load_brand(tmp_path / "home.json")["home_dir"] == ".kiss", bad
+    (tmp_path / "home.json").write_text(json.dumps({"home_dir": ".s10s"}), encoding="utf-8")
+    assert load_brand(tmp_path / "home.json")["home_dir"] == ".s10s"
+
     assert load_brand(tmp_path / "missing.json") == DEFAULT_BRAND
     (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
     assert load_brand(tmp_path / "broken.json") == DEFAULT_BRAND
@@ -81,11 +88,14 @@ def test_load_brand_custom_partial_and_broken_files(tmp_path: Path) -> None:
 
 def test_render_brand_fills_known_tokens_only() -> None:
     """Known tokens are filled; foreign ``{{...}}`` tokens survive untouched."""
-    text = "{{IDENTITY}} {{PRODUCT_NAME}}/{{SHORT_NAME}} {{TAGLINE}} {{VERSION_SUFFIX}}"
+    text = (
+        "{{IDENTITY}} {{PRODUCT_NAME}}/{{SHORT_NAME}} {{TAGLINE}} ~/{{HOME_DIR}}/x "
+        "{{VERSION_SUFFIX}}"
+    )
     rendered = render_brand(text)
     assert rendered == (
         f"{BRAND['identity']} {BRAND['product_name']}/{BRAND['short_name']} "
-        f"{BRAND['tagline']} {{{{VERSION_SUFFIX}}}}"
+        f"{BRAND['tagline']} ~/{BRAND['home_dir']}/x {{{{VERSION_SUFFIX}}}}"
     )
     custom = dict(DEFAULT_BRAND, product_name="Seamless Loop", identity="You are Seamless Loop.")
     assert render_brand("{{IDENTITY}} {{PRODUCT_NAME}}", custom) == (
@@ -96,13 +106,18 @@ def test_render_brand_fills_known_tokens_only() -> None:
 def test_prompt_files_carry_placeholder_and_prompts_are_rendered() -> None:
     """SYSTEM.md/SYSTEM_LITE.md hold ``{{IDENTITY}}``; the loaded prompts hold the sentence."""
     pkg = Path(brand_module.__file__).resolve().parents[1]
+    for name in ("SYSTEM.md", "SYSTEM_LITE.md", "TIPS.md"):
+        raw = (pkg / name).read_text(encoding="utf-8")
+        assert "~/.kiss" not in raw, name  # the state dir is the brand's: ~/{{HOME_DIR}}
     for name in ("SYSTEM.md", "SYSTEM_LITE.md"):
         raw = (pkg / name).read_text(encoding="utf-8")
         assert "{{IDENTITY}}" in raw, name
         assert "You are KISS Sorcar" not in raw, name
+        assert "~/{{HOME_DIR}}/history.db" in raw, name
     for prompt in (SYSTEM_PROMPT, SYSTEM_PROMPT_LITE, ask_sea.system_prompt()):
         assert prompt.startswith("<identity>\n\n" + BRAND["identity"])
         assert not _PLACEHOLDER.search(prompt)
+        assert f"~/{BRAND['home_dir']}/history.db" in prompt
 
 
 def test_remote_webapp_page_is_branded() -> None:
@@ -165,14 +180,27 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
             "short_name": "s10s",
             "tagline": "SeamlessLabs' assistant.",
             "identity": "You are Seamless Loop (s10s), the AI assistant of SeamlessLabs.",
+            "home_dir": ".s10s",
         }),
         encoding="utf-8",
     )
     probe = (
+        "from pathlib import Path\n"
         "from kiss.core.base import SYSTEM_PROMPT, SYSTEM_PROMPT_LITE\n"
         "from kiss.core.brand import PRODUCT_NAME, SHORT_NAME\n"
+        "from kiss.core.config import kiss_home\n"
+        "from kiss.core.models.model_info import USER_MY_MODELS_PATH, user_model_info_path\n"
+        "from kiss.core.vscode_config import _RC_HOOK_LINE\n"
+        "from kiss.agents.third_party_agents.telegram import telegram_sea\n"
         "from kiss.server import web_server, tls_certs\n"
         "print(PRODUCT_NAME); print(SHORT_NAME)\n"
+        "print(kiss_home() == Path.home() / '.s10s')\n"
+        "print(USER_MY_MODELS_PATH == kiss_home() / 'MY_MODELS.json'\n"
+        "      and user_model_info_path() == kiss_home() / 'MODEL_INFO.json')\n"
+        "print(telegram_sea._config.path\n"
+        "      == kiss_home() / 'third_party_agents' / 'telegram' / 'config.json')\n"
+        "print(_RC_HOOK_LINE)\n"
+        "print('~/.s10s/history.db' in SYSTEM_PROMPT and '~/.kiss' not in SYSTEM_PROMPT)\n"
         "print(SYSTEM_PROMPT.splitlines()[2][:63])\n"
         "print(SYSTEM_PROMPT_LITE.splitlines()[2][:63])\n"
         "page = web_server._build_html()\n"
@@ -202,6 +230,11 @@ def test_custom_brand_json_rebrands_a_fresh_process(tmp_path: Path) -> None:
     assert result.stdout.splitlines() == [
         "Seamless Loop",
         "s10s",
+        "True",
+        "True",
+        "True",
+        '[ -f "$HOME/.s10s/api_keys.env" ] && . "$HOME/.s10s/api_keys.env"',
+        "True",
         "You are Seamless Loop (s10s), the AI assistant of SeamlessLabs.",
         "You are Seamless Loop (s10s), the AI assistant of SeamlessLabs.",
         "True",

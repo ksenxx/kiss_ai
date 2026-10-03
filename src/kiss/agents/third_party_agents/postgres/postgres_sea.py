@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -49,13 +48,14 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 10
 _MAX_ROWS_CAP = 10000
 
-_POSTGRES_DIR = Path.home() / ".kiss" / "third_party_agents" / "postgres"
+_POSTGRES_DIR = kiss_home() / "third_party_agents" / "postgres"
 _config = ChannelConfig(_POSTGRES_DIR, ("database_uri",))
 
 

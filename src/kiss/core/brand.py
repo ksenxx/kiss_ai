@@ -39,9 +39,21 @@ DEFAULT_BRAND: dict[str, str] = {
         "The open-source AI coding agent that beats Cursor and Claude Code on "
         "Terminal Bench. Free, local, bring your own API key."
     ),
+    # Name of the per-user state directory under $HOME (config.json,
+    # history.db, memories, ...).  ``KISS_HOME`` in the environment
+    # overrides it; see ``kiss.core.config.kiss_home``.  A white-label
+    # brand sets its own name so it never shares state with a stock
+    # install.  Must be a single path component (no separator, not ``.``
+    # or ``..``); anything else falls back to ``.kiss``.
+    "home_dir": ".kiss",
 }
 
-_PLACEHOLDER_RE = re.compile(r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY)\}\}")
+_PLACEHOLDER_RE = re.compile(r"\{\{(PRODUCT_NAME|SHORT_NAME|TAGLINE|IDENTITY|HOME_DIR)\}\}")
+
+
+def _is_dir_name(value: str) -> bool:
+    """Return True when *value* is a usable single path component."""
+    return value not in (".", "..") and "/" not in value and "\\" not in value
 
 
 def load_brand(path: Path = BRAND_FILE) -> dict[str, str]:
@@ -50,7 +62,8 @@ def load_brand(path: Path = BRAND_FILE) -> dict[str, str]:
     Missing or malformed files and missing keys fall back key-by-key to
     :data:`DEFAULT_BRAND`, so a partial ``brand.json`` (only a new
     ``product_name``) is enough to re-brand the product.  Non-string
-    values are ignored the same way.
+    values are ignored the same way, as is a ``home_dir`` that is not a
+    plain directory name.
     """
     brand = dict(DEFAULT_BRAND)
     try:
@@ -62,19 +75,25 @@ def load_brand(path: Path = BRAND_FILE) -> dict[str, str]:
             value = loaded.get(key)
             if isinstance(value, str) and value:
                 brand[key] = value
+    if not _is_dir_name(brand["home_dir"]):
+        brand["home_dir"] = DEFAULT_BRAND["home_dir"]
     return brand
 
 
 BRAND = load_brand()
 PRODUCT_NAME = BRAND["product_name"]
 SHORT_NAME = BRAND["short_name"]
+HOME_DIR = BRAND["home_dir"]
+"""Name of the state directory under ``$HOME`` (``~/.kiss`` for stock KISS)."""
 
 
 def render_brand(text: str, brand: dict[str, str] = BRAND) -> str:
     """Fill the brand placeholders in *text*.
 
     Recognised tokens: ``{{PRODUCT_NAME}}``, ``{{SHORT_NAME}}``,
-    ``{{TAGLINE}}`` and ``{{IDENTITY}}``.  Used on the prompt files
+    ``{{TAGLINE}}``, ``{{IDENTITY}}`` and ``{{HOME_DIR}}`` (the state
+    directory name, so ``~/{{HOME_DIR}}/history.db`` names the brand's
+    own file).  Used on the prompt files
     (``SYSTEM.md``, ``SYSTEM_LITE.md``) whose
     identity sentence is brand-specific.  Unknown ``{{...}}`` tokens are
     left untouched so other templating in the same file is unaffected.

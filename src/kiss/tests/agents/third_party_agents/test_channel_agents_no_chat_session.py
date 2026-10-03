@@ -120,7 +120,7 @@ def test_channel_agent_does_not_subclass_chat_sorcar_agent(
     The third-party agents previously inherited from
     :class:`ChatSorcarAgent`, which silently added a ``chat_id``,
     ``new_chat()``, ``resume_chat()`` etc. surface to every channel
-    agent (and to the on-disk ``sorcar.db`` ``task_history`` rows
+    agent (and to the on-disk ``history.db`` ``task_history`` rows
     they produced).  After the cleanup they are plain
     :class:`BaseChannelAgent` carriers and have none of that surface.
     """

@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for the two-way half of ``scripts/sync-task-db.sh``.
 
-A deploy used to push ``~/.kiss/sorcar.db`` one way only, so every task an
+A deploy used to push ``~/.kiss/history.db`` one way only, so every task an
 agent ran *on the server* stayed there: it showed up in the deployment's
 History panel and nowhere else, and the moment the push had to fall back to
 replacing the remote database wholesale it was gone for good.
@@ -124,7 +124,7 @@ def _chat_summaries(path: Path) -> list[tuple[str, str, int]]:
 def _backups(kiss_dir: Path) -> list[Path]:
     """Return the databases a wholesale replacement moved aside, oldest first."""
     return sorted(
-        p for p in kiss_dir.glob("sorcar.db.replaced-*") if not p.name.endswith("-wal")
+        p for p in kiss_dir.glob("history.db.replaced-*") if not p.name.endswith("-wal")
     )
 
 
@@ -166,8 +166,8 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.remote_kiss = self.remote_home / ".kiss"
         self.remote_kiss.mkdir(parents=True)
         self.local_kiss.mkdir(parents=True)
-        self.local_db = self.local_kiss / "sorcar.db"
-        self.remote_db = self.remote_kiss / "sorcar.db"
+        self.local_db = self.local_kiss / "history.db"
+        self.remote_db = self.remote_kiss / "history.db"
         bindir = Path(self.tmp) / "bin"
         bindir.mkdir()
         fake_ssh = bindir / "ssh"
@@ -436,7 +436,7 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         its tasks -- is not replaced by this machine's.
         """
         _make_db(self.remote_db, ["R1"])
-        (self.remote_kiss / "sorcar.db.outgoing").mkdir()
+        (self.remote_kiss / "history.db.outgoing").mkdir()
 
         result = self._sync(_LAPTOP, _SERVER)
 
@@ -531,8 +531,8 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
 
         self.assertEqual(self._sync(_LAPTOP, _SERVER).returncode, 0)
 
-        self.assertFalse((self.remote_kiss / "sorcar.db.outgoing").exists())
-        self.assertFalse((self.remote_kiss / "sorcar.db.incoming").exists())
+        self.assertFalse((self.remote_kiss / "history.db.outgoing").exists())
+        self.assertFalse((self.remote_kiss / "history.db.incoming").exists())
 
     def test_a_first_sync_here_downloads_the_remotes_database(self) -> None:
         """A machine with no history yet still ends up with the server's."""
@@ -613,7 +613,7 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
             (_SERVER,),
         )
         live.commit()
-        self.assertTrue((self.remote_kiss / "sorcar.db-wal").exists())
+        self.assertTrue((self.remote_kiss / "history.db-wal").exists())
 
         try:
             result = self._sync(_LAPTOP, _SERVER)
@@ -625,7 +625,7 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         kept = _backups(self.remote_kiss)
         self.assertEqual(len(kept), 1)
         self.assertEqual(sorted(_tasks(kept[0])), ["R1"])
-        self.assertFalse((self.remote_kiss / "sorcar.db-wal").exists())
+        self.assertFalse((self.remote_kiss / "history.db-wal").exists())
 
     def test_a_remote_whose_rows_cannot_be_taken_is_left_alone(self) -> None:
         """Refusing beats replacing: the rows are still only on the server.
@@ -719,7 +719,7 @@ class RelocateWorkDirTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
-        self.db = Path(self.tmp) / "sorcar.db"
+        self.db = Path(self.tmp) / "history.db"
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)

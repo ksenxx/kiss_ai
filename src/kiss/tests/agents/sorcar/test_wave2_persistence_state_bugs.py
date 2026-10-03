@@ -30,7 +30,7 @@ WAL ``_get_db()`` executed ``PRAGMA journal_mode=WAL`` on a fresh
     exclusive lock, and when a peer connection holds a RESERVED
     (write-transaction) lock SQLite reports ``SQLITE_BUSY``
     *immediately* — the busy handler is never consulted — so a peer
-    mid-write on a brand-new ``sorcar.db`` (e.g. a parallel sub-agent
+    mid-write on a brand-new ``history.db`` (e.g. a parallel sub-agent
     running ``_init_tables``, or the kiss-web daemon initialising) made
     ``_get_db()`` die instantly with ``database is locked``.  The
     pragma now sits inside the init lock with a bounded busy/locked
@@ -98,7 +98,7 @@ class _DBSandbox:
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         th._close_db()
 
@@ -234,7 +234,7 @@ class TestWalSwitchLockRace(_DBSandbox):
 
     Regression for the ``PRAGMA journal_mode=WAL`` race: two parallel
     sub-agents opening their first connections against a fresh
-    ``sorcar.db`` made one die instantly with ``sqlite3.OperationalError:
+    ``history.db`` made one die instantly with ``sqlite3.OperationalError:
     database is locked`` because the WAL switch ran outside
     ``_init_tables_lock`` with no retry — and when a peer connection
     holds a RESERVED (write-transaction) lock, the rollback→WAL

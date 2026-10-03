@@ -44,6 +44,10 @@
     !EDITOR_TAB_MODE && !document.body.classList.contains('remote-chat');
   if (SIDEBAR_CHAT_MODE) document.body.classList.add('sidebar-chat-mode');
 
+  // Both VS Code chat surfaces have an extension host behind
+  // postToHost; the remote webapp's postMessage goes to the daemon.
+  const VSCODE_CHAT_HOST = EDITOR_TAB_MODE || SIDEBAR_CHAT_MODE;
+
   // Chat panels of editor-tabs mode report their task-info values to
   // the host (metaUpdate), which relays the ACTIVE panel's into the
   // Task Info view. The two panel-shaped surfaces (history, task info)
@@ -550,10 +554,10 @@
     toast.className = 'kiss-notification kiss-notification-' + severity;
     toast.dataset.notificationSticky = sticky ? 'true' : 'false';
     toast.setAttribute('role', severity === 'error' ? 'alert' : 'status');
-    toast.setAttribute(
-      'aria-label',
-      notificationTitle(severity) + ': ' + (ev.message || ''),
-    );
+    // A caller may name the toast after its purpose ("Waiting for your
+    // answer") instead of its severity.
+    const titleText = ev.title || notificationTitle(severity);
+    toast.setAttribute('aria-label', titleText + ': ' + (ev.message || ''));
 
     const body = document.createElement('div');
     body.className = 'kiss-notification-body';
@@ -565,7 +569,7 @@
     content.className = 'kiss-notification-content';
     const title = document.createElement('div');
     title.className = 'kiss-notification-title';
-    title.textContent = notificationTitle(severity);
+    title.textContent = titleText;
     const message = document.createElement('div');
     message.className = 'kiss-notification-message';
     message.textContent = ev.message || '';
@@ -656,8 +660,7 @@
     if (liveRegion) {
       liveRegion.textContent = '';
       setTimeout(() => {
-        liveRegion.textContent =
-          notificationTitle(severity) + ': ' + (ev.message || '');
+        liveRegion.textContent = titleText + ': ' + (ev.message || '');
       }, 0);
     }
     scheduleNotificationDismiss(id, severity, sticky);
@@ -2135,7 +2138,11 @@
     const closed = tabs[origIdx];
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
-      if (i >= 0) tabs.splice(i, 1);
+      if (i >= 0) {
+        if (typeof tabs[i].askPendingQuestion === 'string')
+          dismissAskWaitingNotice(id);
+        tabs.splice(i, 1);
+      }
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -4517,10 +4524,12 @@
       if (draft) inputDrafts[t.id] = draft;
       // Likewise the answer typed into (or sent from, but never
       // confirmed) the composer, with its question: it comes back when
-      // the daemon asks that same question again after the reload.
-      const answer = asked ? typed : t.unackedAnswer;
+      // the daemon asks that same question again after the reload. A
+      // pending question is kept even before anything is typed, so the
+      // replay after the reload is recognised as already seen.
+      const answer = (asked ? typed : t.unackedAnswer) || '';
       const question = asked ? t.askPendingQuestion : t.unackedQuestion;
-      if (answer && typeof question === 'string') {
+      if ((answer || asked) && typeof question === 'string') {
         askDrafts[t.id] = {question, answer};
       }
     });
@@ -4802,6 +4811,8 @@
     removedIds.forEach(id => {
       const doomed = byId.get(id);
       if (doomed && doomed.isContentTab) disposeTabContentView(doomed);
+      if (doomed && typeof doomed.askPendingQuestion === 'string')
+        dismissAskWaitingNotice(id);
       forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
@@ -4944,13 +4955,11 @@
       savedAskDrafts = {};
       Object.keys(asks).forEach(id => {
         const d = asks[id];
-        if (
-          d &&
-          typeof d.question === 'string' &&
-          typeof d.answer === 'string' &&
-          d.answer
-        ) {
-          savedAskDrafts[id] = {question: d.question, answer: d.answer};
+        if (d && typeof d.question === 'string') {
+          savedAskDrafts[id] = {
+            question: d.question,
+            answer: typeof d.answer === 'string' ? d.answer : '',
+          };
         }
       });
     }
@@ -5446,16 +5455,17 @@
 
   // metainfo-coverage:start
   // The info subpanel of the task-info panel (#meta-info) shows the
-  // TASK UPDATE: what the task-update agent
-  // (src/kiss/agents/seas/task_update/task_update_sea.py) reports the task running
-  // in the visible tab has done so far and its partial results.  The
-  // daemon owns the report (kiss.server.task_update): it runs the agent
-  // when the tab's task has no report yet, again every 10 minutes while
-  // the panel keeps polling, and at once when the subpanel's refresh
-  // button is pressed.  So the client polls getTaskUpdate every
+  // TASK UPDATE: the /ask agent's (src/kiss/agents/seas/ask/ask_sea.py)
+  // short answer to "what has this task done so far, and what are its
+  // partial results?" for the task running in the visible tab.  The
+  // daemon owns the update (kiss.server.task_update): it runs the
+  // agent once the tab's task is a minute old, again every 10 minutes
+  // while the panel keeps polling, and at once when the subpanel's
+  // refresh button is pressed.  So the client polls getTaskUpdate every
   // META_INFO_POLL_MS while the task runs; the reply's sig makes an
-  // unchanged report cost one small message per poll, and a task
-  // without a report yet renders as the subpanel's "updating" state.
+  // unchanged update cost one small message per poll, a task younger
+  // than a minute renders as the subpanel's "first update due" state
+  // and a run in flight as its "updating" state.
   const metaInfoEl = document.getElementById('meta-info');
   const metaInfoContent = document.getElementById('meta-info-content');
   const metaInfoStatus = document.getElementById('meta-info-status');
@@ -5469,8 +5479,8 @@
   const metaCloseBtn = document.getElementById('meta-close');
   const META_INFO_POLL_MS = 5000;
   let metaInfoSig = '';
-  // The report behind the info subpanel (null when hidden): the last
-  // taskUpdate reply's {content, running, updatedAt, cost, error}.
+  // The update behind the info subpanel (null when hidden): the last
+  // taskUpdate reply's {content, running, updatedAt, dueAt, cost, error}.
   // This is what a chat editor panel relays to the Task Info view
   // (postMetaUpdate), which renders it exactly like this panel does.
   let metaInfoState = null;
@@ -5512,15 +5522,24 @@
     return div.innerHTML;
   }
 
+  /** Format an epoch-ms timestamp as a short local clock time. */
+  function shortClockTime(ms) {
+    return new Date(Number(ms)).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
   /**
-   * Paint one task-update state into the info subpanel: the report
-   * body, the status line under the header ("Updating…", or the time
-   * and cost of the last run, plus the last run's failure) and the
-   * refresh button's spinning / disabled state.  Shared by the polling
-   * surfaces and the Task Info view (renderMetaState).
+   * Paint one task-update state into the info subpanel: the answer
+   * body, the status line under the header ("Updating…", the time the
+   * first update is due, or the time and cost of the last run, plus
+   * the last run's failure) and the refresh button's spinning /
+   * disabled state.  Shared by the polling surfaces and the Task Info
+   * view (renderMetaState).
    *
-   * @param {object|null} state {content, running, updatedAt, cost,
-   *   error}, or null to empty and hide the subpanel.
+   * @param {object|null} state {content, running, updatedAt, dueAt,
+   *   cost, error}, or null to empty and hide the subpanel.
    */
   function renderTaskUpdate(state) {
     if (!metaInfoContent) return;
@@ -5528,7 +5547,13 @@
       state && typeof state.content === 'string' ? state.content : '';
     const running = !!(state && state.running);
     const error = state && typeof state.error === 'string' ? state.error : '';
-    if (!content.trim() && !running && !error) {
+    // The daemon dates the first run a minute after the task started;
+    // until it has run the subpanel says so instead of staying blank.
+    const firstDueAt =
+      state && !state.updatedAt && Number(state.dueAt) > 0
+        ? Number(state.dueAt)
+        : 0;
+    if (!content.trim() && !running && !error && !firstDueAt) {
       setMetaInfoHTML('');
       if (metaInfoStatus) metaInfoStatus.textContent = '';
       if (metaInfoRefreshBtn) {
@@ -5544,12 +5569,11 @@
       if (running) {
         status = 'Updating\u2026';
       } else if (state.updatedAt) {
-        const d = new Date(Number(state.updatedAt));
-        status =
-          'Updated ' +
-          d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        status = 'Updated ' + shortClockTime(state.updatedAt);
         const cost = Number(state.cost);
         if (cost > 0) status += ' \u00b7 $' + cost.toFixed(2);
+      } else if (firstDueAt) {
+        status = 'First update at ' + shortClockTime(firstDueAt);
       }
       if (error) {
         status += (status ? ' \u00b7 ' : '') + 'Last run failed: ' + error;
@@ -5559,11 +5583,14 @@
     if (content.trim()) {
       setMetaInfoHTML(taskUpdateBodyHTML(content));
     } else {
-      setMetaInfoHTML(
-        '<p class="meta-info-pending">' +
-          (running ? 'Preparing the first update\u2026' : 'No update yet.') +
-          '</p>',
-      );
+      let pending = 'No update yet.';
+      if (running) pending = 'Preparing the first update\u2026';
+      else if (firstDueAt) {
+        pending =
+          'The first update is asked a minute after the task starts; ' +
+          'press refresh to ask now.';
+      }
+      setMetaInfoHTML('<p class="meta-info-pending">' + pending + '</p>');
     }
     if (metaInfoRefreshBtn) {
       metaInfoRefreshBtn.disabled = running;
@@ -5594,7 +5621,7 @@
    * a hidden drawer must not poll the phone's network), or an
    * editor-tab chat panel (only while its task runs, so an idle panel
    * holds no live timer). The two panel-shaped webviews (history, Task
-   * Info) never poll — the Task Info view gets the report relayed from
+   * Info) never poll — the Task Info view gets the update relayed from
    * the active chat panel.
    */
   function metaInfoPollWanted() {
@@ -5728,6 +5755,7 @@
       content: typeof ev.content === 'string' ? ev.content : '',
       running: !!ev.running,
       updatedAt: Number(ev.updatedAt) || 0,
+      dueAt: Number(ev.dueAt) || 0,
       cost: Number(ev.cost) || 0,
       error: typeof ev.error === 'string' ? ev.error : '',
     };
@@ -6724,16 +6752,24 @@
     tip.style.top = '0px';
     const width = tip.offsetWidth;
     const height = tip.offsetHeight;
-    // Centered over the target, above it (below it when the graph's
-    // top is too close), kept inside the graph's edges.
+    // Centered over the target and kept inside the graph's edges: above
+    // the target, or below it when the graph's top is too close.  When
+    // neither side has room inside the graph (a narrow panel wraps the
+    // tooltip into many lines), the side that covers less of the target
+    // wins, so the hovered cell stays visible whenever it can.
     const rect = target.getBoundingClientRect();
     const graphRect = spendGraph.getBoundingClientRect();
     const x = rect.left - graphRect.left + rect.width / 2 - width / 2;
     tip.style.left =
       Math.max(2, Math.min(x, graphRect.width - width - 2)) + 'px';
-    const above = rect.top - graphRect.top - height - 6;
-    const y = above >= 0 ? above : rect.bottom - graphRect.top + 6;
-    tip.style.top = Math.max(0, Math.min(y, graphRect.height - height)) + 'px';
+    const top = rect.top - graphRect.top;
+    const bottom = rect.bottom - graphRect.top;
+    const clamp = y => Math.max(0, Math.min(y, graphRect.height - height));
+    const covered = y =>
+      Math.max(0, Math.min(y + height, bottom) - Math.max(y, top));
+    const above = clamp(top - height - 6);
+    const below = clamp(bottom + 6);
+    tip.style.top = (covered(above) <= covered(below) ? above : below) + 'px';
   }
 
   /** Hide the graph's tooltip (the pointer left the graph or a cell). */
@@ -7079,6 +7115,16 @@
   }
 
   /**
+   * Record the set of top-level folders the tree shows.  The folder
+   * picker's "Recently opened" section offers only folders not shown,
+   * so it follows every change of the set.
+   */
+  function setExplorerRootsKey(roots) {
+    explorerRootsKey = JSON.stringify(roots);
+    renderPickerRecentFolders();
+  }
+
+  /**
    * Rebuild the tree: one top-level row per folder in *roots*.  The
    * working directory (*wd*) starts expanded; a folder named in
    * *expandRoot* (one just added) opens too.
@@ -7086,7 +7132,7 @@
   function buildExplorerRoot(wd, roots, expandRoot) {
     explorerRoot = wd;
     roots = roots || explorerRoots(wd);
-    explorerRootsKey = JSON.stringify(roots);
+    setExplorerRootsKey(roots);
     explorerGeneration++;
     explorerDirs.clear();
     explorerTree.textContent = '';
@@ -7201,7 +7247,7 @@
       return;
     }
     appendExplorerRootRow(dir, false, true);
-    explorerRootsKey = JSON.stringify(explorerRoots(wd));
+    setExplorerRootsKey(explorerRoots(wd));
     rovingFocus(explorerTree, '.explorer-row', null);
   }
 
@@ -7229,7 +7275,7 @@
     dropExplorerSubtree(dir, dir);
     node.kids.remove();
     node.row.remove();
-    explorerRootsKey = JSON.stringify(roots);
+    setExplorerRootsKey(roots);
     rovingFocus(explorerTree, '.explorer-row', null);
     if (hadFocus) focusExplorerStop();
   }
@@ -7260,16 +7306,24 @@
     stop.focus({preventScroll: true});
   }
 
+  // The sequence (workDirCheckSeq) of the daemon check the Explorer's
+  // check mark / "Set as Working Directory" last asked for; the
+  // "Working directory" panel's own checks never carry this number.
+  // Its reply rebuilds the tree and hands the keyboard back to it
+  // (handleWorkDirListing).
+  let explorerWorkDirCheckSeq = 0;
+
   /**
-   * "Set as Working Directory" on a top-level folder: the folder
-   * becomes the workspace exactly as the folder picker's "Select
-   * Folder" makes it (applyPickedWorkDir).  The folder that was the
-   * working directory stays in the Explorer as an added folder, so
-   * switching never makes a tree disappear.
+   * "Set as Working Directory" (the check mark) on a top-level folder:
+   * exactly what "..." > Working directory does when that folder is
+   * opened there (openWorkDir): the daemon lists it first, and only a
+   * real folder, in its canonical spelling, becomes the workspace
+   * (applyPickedWorkDir); a refusal is reported as a notification.
+   * The folder that was the working directory stays in the Explorer as
+   * an added folder, so switching never makes a tree disappear.
    */
   function setExplorerWorkDir(dir) {
     if (!dir || isRootDir(dir)) return;
-    const hadFocus = explorerHasFocus();
     const previous = explorerRoot;
     if (
       previous &&
@@ -7280,10 +7334,10 @@
       explorerExtraRoots.push(previous);
       saveExplorerExtraRoots();
     }
-    applyPickedWorkDir(dir);
-    // The rebuilt tree keeps the keyboard: focus lands on its tab stop
-    // (the new working directory's row).
-    if (hadFocus) focusExplorerStop();
+    const seqBefore = workDirCheckSeq;
+    openWorkDir(dir);
+    if (workDirCheckSeq !== seqBefore)
+      explorerWorkDirCheckSeq = workDirCheckSeq;
   }
 
   /** The top-level folder an Explorer row belongs to. */
@@ -9798,7 +9852,9 @@
   // navigate (listDir with a `picker:` token), "Select Folder" makes the
   // folder the workspace — the same pin the "Working directory" panel
   // sets — so the Explorer, the Source Control view and new tasks
-  // follow it.
+  // follow it.  In "Add Folder to Explorer" mode the dialog also offers
+  // the panel's recently opened folders (renderPickerRecentFolders),
+  // each added with one click.
   let folderPickerEl = null;
   let folderPickerDir = '';
   let folderPickerSeq = 0;
@@ -9824,6 +9880,8 @@
       '<button type="button" class="folder-picker-close" aria-label="Close">&times;</button></div>' +
       '<div class="folder-picker-path"><button type="button" class="folder-picker-up" title="Parent folder" aria-label="Parent folder">\u2191</button>' +
       '<input type="text" class="folder-picker-input" aria-label="Folder path" spellcheck="false"></div>' +
+      '<div class="folder-picker-recent" hidden><div class="folder-picker-recent-hdr">Recently opened</div>' +
+      '<div class="folder-picker-recent-list" role="list" aria-label="Recently opened folders"></div></div>' +
       '<div class="folder-picker-list" role="listbox" aria-label="Folders"></div>' +
       '<div class="folder-picker-note"></div>' +
       '<div class="folder-picker-actions"><button type="button" class="folder-picker-cancel">Cancel</button>' +
@@ -9873,6 +9931,21 @@
         const item = e.target.closest('.folder-picker-item');
         if (item) folderPickerNavigate(item.dataset.path);
       });
+    // A recently opened folder is picked with one click (or Enter /
+    // Space); selectPickedFolder still has the daemon list it first,
+    // so a folder that has since vanished is reported, not added.
+    const recent = overlay.querySelector('.folder-picker-recent-list');
+    recent.addEventListener('click', e => {
+      const item = e.target.closest('.workdir-item');
+      if (item) selectPickedFolder(item.dataset.path);
+    });
+    recent.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const item = e.target.closest('.workdir-item');
+      if (!item) return;
+      e.preventDefault();
+      selectPickedFolder(item.dataset.path);
+    });
     overlay.addEventListener('mousedown', e => {
       if (e.target === overlay) closeFolderPicker();
     });
@@ -9977,6 +10050,10 @@
     el.hidden = false;
     folderPickerListed = '';
     folderPickerNavigate(sidebarWorkDir() || explorerRoot || '/');
+    renderPickerRecentFolders();
+    // Another window may have opened a folder since the last reply;
+    // the refreshed configData repaints the list (setRecentWorkDirs).
+    if (folderPickerMode === 'add') api.getConfig();
     const input = el.querySelector('.folder-picker-input');
     window.setTimeout(() => {
       // The dialog may already be gone (a pick made at once).
@@ -10141,7 +10218,20 @@
     setPanelOpen(panel, document.getElementById('workdir-overlay'), false);
   }
 
+  /**
+   * Report why a working directory was refused.  The panel shows it in
+   * its own error line; a switch asked for from the Explorer's check
+   * mark (the panel is closed) gets an error notification instead, so
+   * the refusal is never silent.
+   *
+   * @param {string} text The reason; '' clears the panel's error line.
+   */
   function setWorkDirError(text) {
+    const panel = document.getElementById('workdir-panel');
+    if (text && !(panel && panel.classList.contains('open'))) {
+      showNotification({message: text, severity: 'error'});
+      return;
+    }
     const el = document.getElementById('workdir-error');
     if (!el) return;
     el.textContent = text;
@@ -10193,37 +10283,90 @@
       .sort((a, b) => b.ts - a.ts);
     const panel = document.getElementById('workdir-panel');
     if (panel && panel.classList.contains('open')) renderRecentWorkDirs();
+    renderPickerRecentFolders();
+  }
+
+  /**
+   * One row of a recently opened folder: its path and when it was last
+   * opened.  Shared by the panel's list and the folder picker's
+   * "Recently opened" section.
+   *
+   * @param {{path: string, ts: number}} entry A recentWorkDirs row.
+   * @param {number} now Date.now(), so every row of a list agrees.
+   * @param {string} verb What a click does with the row ('Open', 'Add').
+   */
+  function recentWorkDirItem(entry, now, verb) {
+    const item = document.createElement('div');
+    item.className = 'workdir-item';
+    item.setAttribute('role', 'listitem');
+    item.tabIndex = 0;
+    item.dataset.path = entry.path;
+    item.title = verb + ' ' + entry.path;
+    const pathEl = document.createElement('span');
+    pathEl.className = 'workdir-item-path';
+    pathEl.textContent = entry.path;
+    const ago = document.createElement('span');
+    ago.className = 'workdir-item-ago';
+    ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
+    item.appendChild(pathEl);
+    item.appendChild(ago);
+    return item;
+  }
+
+  /**
+   * Replace the rows of *list* with one per entry of *rows*.  A repaint
+   * (a fresh configData, a change of the Explorer's folders) keeps the
+   * keyboard where it was: the row of the focused folder, if still
+   * listed, is focused again.
+   */
+  function renderRecentRows(list, rows, verb) {
+    const focused = list.contains(document.activeElement)
+      ? document.activeElement.dataset.path
+      : '';
+    list.textContent = '';
+    const now = Date.now();
+    rows.forEach(entry => {
+      const item = recentWorkDirItem(entry, now, verb);
+      list.appendChild(item);
+      if (entry.path === focused) item.focus();
+    });
   }
 
   function renderRecentWorkDirs() {
     const list = document.getElementById('workdir-list');
     if (!list) return;
-    list.textContent = '';
+    renderRecentRows(list, recentWorkDirs, 'Open');
     if (!recentWorkDirs.length) {
       const empty = document.createElement('div');
       empty.id = 'workdir-empty';
       empty.textContent = 'No working directory opened yet.';
       list.appendChild(empty);
-      return;
     }
-    const now = Date.now();
-    recentWorkDirs.forEach(entry => {
-      const item = document.createElement('div');
-      item.className = 'workdir-item';
-      item.setAttribute('role', 'listitem');
-      item.tabIndex = 0;
-      item.dataset.path = entry.path;
-      item.title = 'Open ' + entry.path;
-      const pathEl = document.createElement('span');
-      pathEl.className = 'workdir-item-path';
-      pathEl.textContent = entry.path;
-      const ago = document.createElement('span');
-      ago.className = 'workdir-item-ago';
-      ago.textContent = 'opened ' + taskLaunchedAgoText(entry.ts * 1000, now);
-      item.appendChild(pathEl);
-      item.appendChild(ago);
-      list.appendChild(item);
-    });
+  }
+
+  /**
+   * The folder picker's "Recently opened" section: in "Add Folder to
+   * Explorer" mode it lists the panel's recent working directories
+   * that the Explorer does not show yet, each added with one click;
+   * the section is hidden in "Open Folder" mode (the panel underneath
+   * already lists them) and when nothing is left to offer.
+   */
+  function renderPickerRecentFolders() {
+    if (!folderPickerEl || folderPickerEl.hidden) return;
+    const section = folderPickerEl.querySelector('.folder-picker-recent');
+    const shown = explorerRoots(sidebarWorkDir());
+    const rows =
+      folderPickerMode === 'add'
+        ? recentWorkDirs.filter(
+            entry => !shown.some(p => samePath(p, entry.path)),
+          )
+        : [];
+    section.hidden = !rows.length;
+    renderRecentRows(
+      section.querySelector('.folder-picker-recent-list'),
+      rows,
+      'Add',
+    );
   }
 
   /**
@@ -10237,7 +10380,9 @@
    * switch still lands on the tab that asked.
    * On the remote webapp the daemon lists *dir* first (listDir with a
    * 'workdir:' token): a real folder is adopted through
-   * applyPickedWorkDir, anything else is reported in the panel.
+   * applyPickedWorkDir, anything else is reported (setWorkDirError: in
+   * the panel, or as a notification when the Explorer's check mark
+   * asked with the panel closed).
    *
    * @param {string} dir The typed, chosen or previously opened path.
    */
@@ -10274,6 +10419,7 @@
   /** The daemon's answer to openWorkDir's listDir check (remote). */
   function handleWorkDirListing(ev) {
     if (String(ev.token) !== 'workdir:' + workDirCheckSeq) return;
+    const fromExplorer = workDirCheckSeq === explorerWorkDirCheckSeq;
     if (ev.error) {
       setWorkDirError(String(ev.error));
       return;
@@ -10289,6 +10435,10 @@
       return;
     }
     applyPickedWorkDir(dir);
+    // The Explorer asked: its rebuilt tree keeps the keyboard, which
+    // the rebuild stranded on the body (the clicked row is gone) --
+    // unless the user has moved it elsewhere while the daemon checked.
+    if (fromExplorer && explorerHasFocus()) focusExplorerStop();
   }
 
   /**
@@ -10826,6 +10976,21 @@
   // taskinfo-coverage:end
 
   // chevron-coverage:start
+  /**
+   * Fold the event panels of a finished task whose transcript was
+   * replayed (a reload, a tab switch, a neighbouring task spliced in).
+   *
+   * Every plain panel stays on screen, collapsed to its header and
+   * preview, so any event of a past task can be opened by a click.
+   * Left as they are: the panels of a running task, the result, a
+   * panel showing an image, a `/ask` answer, a panel the user opened
+   * (`user-pinned`), a panel that finished on screen (`_liveFinished`)
+   * and the panels a `summary` tool call adopted (`.summary-sub`, shown
+   * when the summary panel is opened).
+   *
+   * @param {string} taskName Only panels of this task are folded; a
+   *     falsy name folds every task on screen.
+   */
   function applyChevronState(taskName) {
     if (!O) return;
     const panels = O.querySelectorAll('.collapsible');
@@ -10843,39 +11008,24 @@
         p.classList.contains('rc') ||
         panelShowsImage(p) ||
         answerPanelStaysOpen(p)
-      ) {
-        p.classList.remove('chv-hidden');
+      )
         continue;
-      }
       // livedone-coverage:start
       // The panel was on screen when its task finished: the finish must
-      // not explicitly collapse or hide any event panel, so the panel
-      // keeps the exact state the live stream left it in — untouched —
-      // until a replay rebuilds the transcript (markPanelsLiveFinished).
+      // not explicitly collapse any event panel, so the panel keeps the
+      // exact state the live stream left it in — untouched — until a
+      // replay rebuilds the transcript (markPanelsLiveFinished).
       if (p._liveFinished) continue;
       // livedone-coverage:end
-      if (p.classList.contains('tc-summary')) {
-        p.classList.remove('chv-hidden');
-        if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
-        if (p.classList.contains('collapsed')) collapseNestedRunParallel(p);
-        syncCollapseAria(p);
-        continue;
-      }
-      if (p.closest('.summary-sub')) {
-        p.classList.remove('chv-hidden');
-        continue;
-      }
-      p.classList.add('chv-hidden');
-      if (p.classList.contains('tc-run-parallel')) {
-        p.classList.add('collapsed');
-        p.classList.remove('user-pinned');
-        collapsePreview(p);
-        syncRunParallelPanel(p);
-      } else {
-        // A hidden panel takes any fan-out panel it swallowed off
-        // screen with it, so those sub-agent tabs must close too.
-        collapseNestedRunParallel(p);
-      }
+      if (p.closest('.summary-sub')) continue;
+      if (p.classList.contains('user-pinned')) continue;
+      // Already folded: its preview was built when it collapsed and
+      // its nested fan-outs were folded with it.
+      if (p.classList.contains('collapsed')) continue;
+      p.classList.add('collapsed');
+      collapsePreview(p);
+      syncRunParallelPanel(p);
+      collapseNestedRunParallel(p);
     }
   }
   // chevron-coverage:end
@@ -13167,16 +13317,13 @@
     if (!wrap.childElementCount) return;
     container.appendChild(wrap);
     // imagepanel-coverage:start
-    // The panel now shows a picture: if an automatic pass folded or
-    // hid it before the result arrived (an older panel of a streaming
-    // transcript), bring it back on screen -- see panelShowsImage.
+    // The panel now shows a picture: if an automatic pass folded it
+    // before the result arrived (an older panel of a streaming
+    // transcript), open it again -- see panelShowsImage.
     const panel = container.closest ? container.closest('.collapsible') : null;
-    if (panel) {
-      panel.classList.remove('chv-hidden');
-      if (panel.classList.contains('collapsed')) {
-        panel.classList.remove('collapsed');
-        collapsePreview(panel);
-      }
+    if (panel && panel.classList.contains('collapsed')) {
+      panel.classList.remove('collapsed');
+      collapsePreview(panel);
     }
     // imagepanel-coverage:end
   }
@@ -14588,7 +14735,6 @@
     for (let i = 0; i < children.length; i++) {
       const el = children[i];
       if (el.id === 'welcome' || el.id === 'adjacent-loader') continue;
-      if (el.classList.contains('chv-hidden')) continue;
       if (el.classList.contains('adjacent-task')) {
         if (mainFirst) {
           regions.push({
@@ -15918,7 +16064,7 @@
         break;
       case 'refreshTaskUpdate':
         // The host relays the Task Info view's refresh button to the
-        // ACTIVE chat editor panel: run the task-update agent now.
+        // ACTIVE chat editor panel: ask the /ask agent now.
         if (POST_META_UPDATES) requestTaskUpdate(true);
         break;
       case 'activeTask':
@@ -15979,16 +16125,21 @@
         if (askTab.askPendingQuestion === askQuestion) break;
         enterAnswerMode(askTab, askQuestion);
         const draft = savedAskDrafts && savedAskDrafts[askTab.id];
+        // The question this client was already answering when it
+        // reloaded comes back in place; only a NEW question pulls the
+        // user over to its tab.
+        const knownQuestion = !!draft && draft.question === askQuestion;
         if (draft) {
           // The same question is still open: the answer goes back into
           // the (now empty) composer. A different one means the old
           // answer was taken.
-          if (draft.question === askQuestion)
-            setComposerTextOf(askTab, draft.answer);
+          if (knownQuestion) setComposerTextOf(askTab, draft.answer);
           delete savedAskDrafts[askTab.id];
         }
         syncAskComposer();
         renderTabBar();
+        showAskWaitingNotice(askTab);
+        if (!knownQuestion) focusAskingTab(askTab);
         break;
       }
       case 'askUserDone': {
@@ -17226,7 +17377,7 @@
     // streamtail-coverage:start
     // A deferred chunk tail must run while the task still counts as
     // running (exactly when its synchronous ancestor ran): swept after
-    // the flip below, applyChevronState() would hide the finished
+    // the flip below, applyChevronState() would fold the finished
     // task's panels and collapseOlderPanels() would drop its debt.
     if (!running) flushStreamTailSweep();
     // streamtail-coverage:end
@@ -17297,6 +17448,47 @@
       // ended, so tabs sharing its backend chat keep their own questions.
       if (tab.askPendingQuestion !== null) clearAskForTab(tab);
     }
+  }
+
+  // A new question brings its tab forward on every surface: the internal
+  // strip switches to it and, in VS Code, the host reveals the sidebar
+  // view or editor panel (raising a native notice when the webview was
+  // hidden). Unlike focusFinishedTab this ignores
+  // userInteractedSinceSubmit: the agent is blocked until the user
+  // answers, so the question is where they need to be.
+  function focusAskingTab(tab) {
+    if (tab.id !== activeTabId) switchToTab(tab.id);
+    if (VSCODE_CHAT_HOST) {
+      postToHost({
+        type: 'askWaiting',
+        tabId: tab.id,
+        question: tab.askPendingQuestion || '',
+      });
+    }
+  }
+
+  function askWaitingNoticeId(tabId) {
+    return 'ask:' + tabId;
+  }
+
+  // Sticky toast saying the agent is blocked on the user, with a button
+  // back to the question. The user clears it with its X; it also goes
+  // when the question is answered, its task ends or its tab closes
+  // (dismissAskWaitingNotice).
+  function showAskWaitingNotice(tab) {
+    showNotification({
+      id: askWaitingNoticeId(tab.id),
+      severity: 'info',
+      sticky: true,
+      title: 'Waiting for your answer',
+      message: tab.askPendingQuestion || '',
+      actions: [{label: 'Show question', onClick: () => switchToTab(tab.id)}],
+    });
+  }
+
+  function dismissAskWaitingNotice(tabId) {
+    removeNotification(askWaitingNoticeId(tabId), undefined, false);
+    if (VSCODE_CHAT_HOST) postToHost({type: 'askWaitingDone', tabId: tabId});
   }
 
   function focusFinishedTab(tabId) {
@@ -20707,6 +20899,8 @@
   // the parked prompt comes back. An answer still being typed is kept
   // too, above it, so nothing the user wrote is lost.
   function retireAskForTab(tab) {
+    if (typeof tab.askPendingQuestion === 'string')
+      dismissAskWaitingNotice(tab.id);
     tab.askPendingQuestion = null;
     const panel = lastQuestionPanel(tab);
     if (panel) setQuestionPanelPending(panel, false);

@@ -75,7 +75,7 @@ the metrics achieve the following values: <<give_concrete_values_for_metrics>>. 
 Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the
 kiss-agent-framework Python library using the following GEPA algorithm on the data at
 <<url_or_db_file_of_data>> using claude-fable-5? You can find the trajectory events of an agent
-execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset
+execution in ~/.kiss/history.db after the agent has finished its execution. Split the dataset
 into a 50% dev set and a 50% val set.
 
 RUN_GEPA: Sample 100 data points from the val set and call it the sval set. Maintain a Pareto
@@ -92,7 +92,7 @@ following algorithm.
    a. sample a minibatch of 5 data points from the dev set
    b. run the agent with the prompt from the node on the minibatch
    c. If the agent incorrectly predicts for some data points, analyze and reflect on the
-      trajectory events of the agent on those data points available at ~/.kiss/sorcar.db and
+      trajectory events of the agent on those data points available at ~/.kiss/history.db and
       propose a new prompt that will fix the mistakes made by the agent on data points
       incorrectly predicted
    d. If the agent predicts correctly on the minibatch, then evaluate it on the sval set and

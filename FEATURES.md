@@ -2,7 +2,7 @@
 
 Version 2026.9.27 · HEAD `5eb6496fd` (4,926 commits) · compiled 2026-09-30 · supersedes the 2026-09-21 inventory
 
-Every count and feature in this document was checked against the source tree at `5eb6496fd`, the packaged assets under `src/kiss/`, and the task database `~/.kiss/sorcar.db` on 2026-09-30. Items marked **NEW** did not exist at the previous inventory's commit `85d9f3cda` (2026-09-22); the 360 commits between the two are summarised in section 2. Where the code and a document disagree, the code wins and the disagreement is listed in section 23.
+Every count and feature in this document was checked against the source tree at `5eb6496fd`, the packaged assets under `src/kiss/`, and the task database `~/.kiss/history.db` on 2026-09-30. Items marked **NEW** did not exist at the previous inventory's commit `85d9f3cda` (2026-09-22); the 360 commits between the two are summarised in section 2. Where the code and a document disagree, the code wins and the disagreement is listed in section 23.
 
 ## Contents
 
@@ -89,7 +89,7 @@ On the TPC-H engine the human supplied a researched plan (5,979 characters: remo
 
 **Research artifacts built the same way.** Two July papers were built by Sorcar tasks (SWEDefend's under a prompt ending "Do AI discovery to get better results"): SWEDefend, a defence against SWExploit-style backdoored program-repair patches, whose combined pipeline at confidence threshold 0.9 catches 97.96% of 49 malicious cases with 0 of 100 benign vetoes where a naive fail-closed judge sat at ~20% false positives, and which reports its own defeat by an adaptive attacker (3 of 3 seeds by the third iteration); and Cleverest+, a fixed-budget (4,3,3) three-model portfolio with sanitizer-signature oracles that solved 6 of 6 issues on a three-subject mini-benchmark in 10 trials each, with no run yet on the 72-commit benchmark it targets.
 
-**The loop turned on the agent itself.** A speed audit of one week of the task database (2,786 tasks) measured where 110 hours of user waiting went: 38% in the agent's own LLM round trips (a trivial step takes 4.4 s at under 25k tokens of context and 9.8 s above 300k), 33% waiting on `run_parallel`, 25% in reviewer loops that never converged (0 of 135 rounds in tasks with three or more rounds came back clean; the same "run all tests" prompt took 0.2 h with 27 parallel splits and 7.9 h with a 12-round review). The cost-lever work that followed removed the mandatory `SORCAR.md` read (306 → 0 per day), shell-wrapper sub-agents (258 → 0) and reviewer overspend (7 trees → 0), reached a 0.970 prompt-cache hit ratio, and then found that its own context compaction was cache-hostile (57 of 57 compactions missed the cache, net +$130), which produced the cache-aware gate and the keep-alive ping (replay: input bill 0.66× of production). Six months of the agent developing its own repository (section 22) gave the controlled result behind the rules: the full prompt versus a lite one changed how the agent works (tests written in 68 of 71 cells vs 12) but not the hidden-test pass rate (+0.9 points, interval −2.8 to +4.1), while a second-vendor reviewer was the one intervention with a measured gain (+4.7 points, +1.2 to +9.4, at 2.5× the cost); in the ten-week two-vendor deployment the reviewer made 3 writes in 2,164 calls, all to `tmp/`, took 9.3% of task cost and reported roughly 1,500–2,000 findings, 53% of the coded sample functional bugs.
+**The loop turned on the agent itself.** A speed audit of one week of the task database (2,786 tasks) measured where 110 hours of user waiting went: 38% in the agent's own LLM round trips (a trivial step takes 4.4 s at under 25k tokens of context and 9.8 s above 300k), 33% waiting on `run_parallel`, 25% in reviewer loops that never converged (0 of 135 rounds in tasks with three or more rounds came back clean; the same "run all tests" prompt took 0.2 h with 27 parallel splits and 7.9 h with a 12-round review). The cost-lever work that followed removed the mandatory `AGENTS.md` read (306 → 0 per day), shell-wrapper sub-agents (258 → 0) and reviewer overspend (7 trees → 0), reached a 0.970 prompt-cache hit ratio, and then found that its own context compaction was cache-hostile (57 of 57 compactions missed the cache, net +$130), which produced the cache-aware gate and the keep-alive ping (replay: input bill 0.66× of production). Six months of the agent developing its own repository (section 22) gave the controlled result behind the rules: the full prompt versus a lite one changed how the agent works (tests written in 68 of 71 cells vs 12) but not the hidden-test pass rate (+0.9 points, interval −2.8 to +4.1), while a second-vendor reviewer was the one intervention with a measured gain (+4.7 points, +1.2 to +9.4, at 2.5× the cost); in the ten-week two-vendor deployment the reviewer made 3 writes in 2,164 calls, all to `tmp/`, took 9.3% of task cost and reported roughly 1,500–2,000 findings, 53% of the coded sample functional bugs.
 
 **Provenance.** Every headline figure above is a `\newcommand` macro recomputed by a script beside the paper (`kisssorcar/ks_numbers.py` and `ks_tb2.py`, `sesorcar/se_numbers.py`, the Collective Algebra `compute_numbers.py`, 326 macros in the main paper alone) from checked-in evidence (`kisssorcar/evidence/`, the 4,575-file `kisssorcar/ablation/`, `projects/kv_adversarial/DISCOVERY_LOG.md`, `projects/bespoke_tpch_x4/results/`, the 858-file `sorcarccl-production-set-main/`). Where sources disagree the numbers above follow the latest paper: the HydraKV process record is 8 tasks / 22.6 h / $516 in `kiss_sorcar.tex` but 6 / 17.2 h / $352 in `ks_assistant.tex` (which also attributes the starting engine to Claude Code rather than a Sorcar task); the held-out drop is "29%", "more than a quarter" and "a third" in three places; the Hacker News draft still says six prompts, ~3,970 lines and 5.51 Mops/s; the Collective Algebra paper exists twice with 55 vs 40 anchors and the end-to-end step-time result only in the older build; the Cleverest+ text still calls its campaign "not yet wired" in three paragraphs that its results section contradicts. The `/write_paper` SEA's `check_paper` gate (AI-slop and consistency checks) and `build_paper` (pdflatex + bibtex) run on every revision (section 9; 41 of the 64 slash-command tasks in the database are paper tasks).
 
@@ -118,15 +118,15 @@ On the TPC-H engine the human supplied a researched plan (5,979 characters: remo
  │  tools: Bash/bash_job/Read/Edit/Write/run_commands_parallel · 9 browser · 7 memory │
  │         run_agent/run_parallel/number_of_cores · MCP + connect_mcp_server · skill  │
  │         ask_user_question/talk/set_model/decide/summary/finish                     │
- │  prompt: SYSTEM.md (SYSTEM_LITE if simple) + ~/.kiss/SORCAR.md + memory protocol   │
+ │  prompt: SYSTEM.md (SYSTEM_LITE if simple) + ~/.kiss/AGENTS.md + memory protocol   │
  │  cost ledger · context compaction · prompt-cache keep-alive · fallback model       │
  └────────┬───────────────────────────────────────────────────────────────────────────┘
           │
  ┌────────▼───────────────┐ ┌──────────────────────┐ ┌───────────────────────────────┐
  │ Models (706 entries)   │ │ State in ~/.kiss     │ │ Extension points              │
- │ Anthropic/OpenAI/Gemini│ │ sorcar.db · memories/│ │ SEAs (seas/, SEAS.md folders) │
+ │ Anthropic/OpenAI/Gemini│ │ history.db · memories/│ │ SEAs (seas/, SEAS.md folders) │
  │ OpenRouter/Together/   │ │ cron/jobs.json ·     │ │ skills (SKILL.md) · MCP       │
- │ Z.ai/Moonshot · cc/    │ │ tabs.json · SORCAR.md│ │ servers · tools= files ·      │
+ │ Z.ai/Moonshot · cc/    │ │ tabs.json · AGENTS.md│ │ servers · tools= files ·      │
  │ codex/ CLIs · autorouter│ │ AUTOROUTER.md · TLS  │ │ INJECTIONS.md · MY_INJECTION  │
  └────────────────────────┘ └──────────────────────┘ └───────────────────────────────┘
 ```
@@ -149,7 +149,7 @@ Prompt assets shipped in `src/kiss/`:
 
 - `SYSTEM.md` (3,971 words): identity, rule precedence, visibility constraint, tool usage rules, web research protocol (10 sites, 1 for real-time data), code style, pre-flight checks, the 7-step AI discovery loop, adversarial testing and training, deep work, complex task planning, file browsing, testing, pre-finish verification, Sorcar-specific rules. The static part is sent under one Anthropic `cache_control` breakpoint; the per-task "Task Settings" block follows uncached. **NEW**
 - `SYSTEM_LITE.md` (753 words): the reduced prompt for tasks the classifier marks as simple; `/ask` ships its own `_ask_system_lite.md` (608 words) plus an answering playbook.
-- `~/.kiss/SORCAR.md`: standing user instructions appended to every system prompt, managed by `/remember` and `/forget`. **NEW management**
+- `~/.kiss/AGENTS.md`: standing user instructions appended to every system prompt, managed by `/remember` and `/forget`. **NEW management**
 - `INJECTIONS.md` (6 promptlets) plus `~/.kiss/MY_INJECTION.md` (user promptlets, editable in place from the Inject panel **NEW**); `TIPS.md` (23 tips shown once per version **NEW cadence**); `SAMPLE_TASKS.md` (12 sample tasks).
 - `~/.kiss/SEAS.md`: extra SEA folders, one per line, bottom line wins.
 
@@ -167,7 +167,7 @@ Prompt assets shipped in `src/kiss/`:
 ### RelentlessAgent (`src/kiss/agents/sorcar/relentless_agent.py`)
 
 - Runs KISSAgent sessions until the task finishes; a session ending on the context limit is summarised (60K-character cap) into a hand-off; the run stops after 2 zero-progress sessions. Defaults: model `claude-opus-4-6`, budget $200.
-- Appends `~/.kiss/SORCAR.md` to every system prompt, reading it with writer-tolerant IO so a rename in progress cannot abort the task.
+- Appends `~/.kiss/AGENTS.md` to every system prompt, reading it with writer-tolerant IO so a rename in progress cannot abort the task.
 - Usage ledger with epochs and seen-maps so sub-agent, classifier, TTS and side-channel spend are counted exactly once, including across stop interrupts; printer offsets are re-based before the failed-session summariser so the UI cost never drops. **NEW**
 - Docker mode: `docker_image=` starts a container with the task work dir bind-mounted at its host path and set as `WorkingDir`; `container:<id>` attaches to a running container without mounts; CLI models cannot be combined with Docker. **NEW mount**
 
@@ -179,7 +179,7 @@ Prompt assets shipped in `src/kiss/`:
 
 ### ChatSorcarAgent and WorktreeSorcarAgent
 
-- `ChatSorcarAgent` persists chats and task chains in `sorcar.db`; prompts carry at most 10 prior tasks, normally the newest two in full and the older ones as 600/300-character task/result digests, shortened further to fit a 6,000-character prefix cap (`chat_history_digest`, default on). It records the SEA name of the run (`task_history.sea`) **NEW** and bare-path prompts are turned into open-file directives **NEW**.
+- `ChatSorcarAgent` persists chats and task chains in `history.db`; prompts carry at most 10 prior tasks, normally the newest two in full and the older ones as 600/300-character task/result digests, shortened further to fit a 6,000-character prefix cap (`chat_history_digest`, default on). It records the SEA name of the run (`task_history.sea`) **NEW** and bare-path prompts are turned into open-file directives **NEW**.
 - `WorktreeSorcarAgent` gives a development-classified task its own `git worktree` under `.kiss-worktrees/` on branch `kiss/wt-*` (worktrees off, non-development verdicts, non-git directories and detached HEADs run directly); a spare worktree is prewarmed at daemon start and refilled after each worktree task ends **NEW**; outcomes: committed and removed, preserved (no auto-commit, commit failed, sub-agent active, rescue failed). Section 12 has the merge rules.
 
 ### Configuration knobs (`src/kiss/core/config.py`)
@@ -233,20 +233,20 @@ The 17 bundled SEAs (`src/kiss/agents/seas/`):
 | `/bestrouter` | claude-fable-5-1 writes, gpt-6-astra reviews read-only (≤75% budget); picker entry | default | **NEW** |
 | `/coding` | Unattended Sorcar inside a Docker container for benchmark trials (`ContainerHarness`, JSONL trajectories); generates per-trial SEAs | default | relocated |
 | `/dummy` | Plain Sorcar sub-agent; what `run_agent(agent="")` runs | default | |
-| `/forget` | Remove a standing instruction from `~/.kiss/SORCAR.md` | `bash`, $1 | **NEW** |
+| `/forget` | Remove a standing instruction from `~/.kiss/AGENTS.md` | `bash`, $1 | **NEW** |
 | `/git_extract_knowledge` | Index every tracked file and commit of a repository into its domain memory and an FTS5 block store; `update`, `ask` modes; daily 04:00 PT refresh job | `full`, parallel, no memory tools | **NEW** |
 | `/merge` | Resolve git merge conflicts and stage the result; also run automatically by auto-commit merges | $5, no worktree | |
-| `/remember` | Append a standing instruction to `~/.kiss/SORCAR.md` | `bash`, $1 | **NEW** |
+| `/remember` | Append a standing instruction to `~/.kiss/AGENTS.md` | `bash`, $1 | **NEW** |
 | `/review_paper` | Review a paper (PDF/.tex/.md/.txt) for a venue with web search, seven 1-10 scores, word-limit and AI-slop gates; second opinion from `gpt-5.6-sol` | web on, parallel, 2 h | **NEW** |
 | `/revise_and_review_paper` | Loop `/write_paper` and `/review_paper` (default 6 rounds, 1,000-word reviews) until strong accept or no further improvement | `full`, 24 h | **NEW** |
-| `/rsi7d` | Mine the last 7 days of SEA runs in `sorcar.db` for mistakes and cost sinks, patch SEA prompts (replaying file-modifying tasks in clones), refresh autorouter evidence, and with permission patch `SYSTEM.md`, `SORCAR.md` and Sorcar's code | $2,000, memory on | **NEW** |
+| `/rsi7d` | Mine the last 7 days of SEA runs in `history.db` for mistakes and cost sinks, patch SEA prompts (replaying file-modifying tasks in clones), refresh autorouter evidence, and with permission patch `SYSTEM.md`, `AGENTS.md` and Sorcar's code | $2,000, memory on | **NEW** |
 | `/sh` | Run one shell command in the tab's work dir and return its verbatim output | `bash`, no worktree | |
 | `/skillopt` | SkillOpt outer loop over a SKILL.md, a SEA prompt or a module constant against a JSON eval set; writes `<target>.proposed` | `shell` | **NEW** |
 | `/task_update` | Report what a task has done from its persisted transcript; run by the Task Info panel on first show, every 10 min and on refresh | `bash`, $1 | **NEW** |
 | `/write` | Concise professional prose with machine-text vocabulary banned | default + writing protocol | **NEW** |
 | `/write_paper` | Write or revise a LaTeX paper with `check_paper` (AI-slop and consistency gates) and `build_paper` (pdflatex + bibtex) and a read-only reviewer model | web on, parallel, 6 h | **NEW** |
 
-Files these SEAs keep under `~/.kiss`: `SORCAR.md`, `SEAS.md`, `AUTOROUTER.md`, `MODEL_DECISIONS.md`, `memories/<repo>/knowledge.sqlite3`, `cron/jobs.json` (weekly rsi7d and daily knowledge jobs), and read-only access to `sorcar.db`.
+Files these SEAs keep under `~/.kiss`: `AGENTS.md`, `SEAS.md`, `AUTOROUTER.md`, `MODEL_DECISIONS.md`, `memories/<repo>/knowledge.sqlite3`, `cron/jobs.json` (weekly rsi7d and daily knowledge jobs), and read-only access to `history.db`.
 
 ## 10. Sub-agents and parallelism
 
@@ -350,15 +350,15 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 - **Job kinds**: *prompt* jobs write a per-run SEA file (prompt, model, budget, work dir, worktree and auto-commit pinned, classifier off) and launch it through `run_agent`; *command* jobs run a shell command with no LLM and deliver stdout verbatim; channel gateways are command jobs.
 - **Tool actions**: `create` (refuses exact duplicates), `ensure` (idempotent by name; resumes a paused job) **NEW**, `list`, `remove`, `pause`, `resume`, `run_now`; `deliver` accepts a comma list of channels, `local` or `none`.
 - **Auto-scheduled jobs** **NEW**: picking `autorouter` ensures "Weekly rsi7d: autorouter evidence and prompt (Sat 1am PT)" (`0 1 * * 6`, claude-fable-5-1, $25 + $5 relay, 2 h nested run inside a 2 h 10 min job); `/git_extract_knowledge` ensures "git-knowledge daily update: <repo>" at 04:00 PT.
-- The Schedule subpanel lists jobs with next-run times and copy buttons. On the development machine 12 jobs are configured (6 prompt, 6 command; 10 enabled): daily test fix, README update, cost audit, model update, knowledge refresh, two weekly rsi7d jobs, a Slack gateway every minute, a 4-hourly sync of `sorcar.db` and memories to a shared machine, a nightly work index, and two paused reinstall jobs. 180 top-level tasks mention cron; 109 `cron_job` calls are recorded.
+- The Schedule subpanel lists jobs with next-run times and copy buttons. On the development machine 12 jobs are configured (6 prompt, 6 command; 10 enabled): daily test fix, README update, cost audit, model update, knowledge refresh, two weekly rsi7d jobs, a Slack gateway every minute, a 4-hourly sync of `history.db` and memories to a shared machine, a nightly work index, and two paused reinstall jobs. 180 top-level tasks mention cron; 109 `cron_job` calls are recorded.
 
 ## 20. Installation, deployment, Docker and release
 
 - **`install.sh`** (73,902 bytes): re-executes under `setsid`, takes a cross-process `flock` (dead holders no longer block retries **NEW**), five steps (git, Node **v22.23.3** **NEW pin**, VS Code CLI, extension build, extension install), installs the `rsorcar` and `sorcar-docker` launchers, applies the `.brand/` overlay **NEW**, and finally waits up to 900 s for the daemon and opens the web app (`kiss-web --trust-ca`, tunnel URL on a remote) **NEW**; `KISS_SKIP_LAUNCH`, `KISS_NONINTERACTIVE`, `KISS_CODE_CLI` control it. The Python package is `kiss-agent-framework` on PyPI; the extension is `ksenxx.kiss-sorcar` on the Marketplace.
-- **`rsorcar user@host`** (57,275 bytes), ten steps: ssh check and prerequisites, refuse to restart a remote with a running task unless `SORCAR_FORCE_RESTART=1`, disk headroom check, copy `~/.ssh` (never `authorized_keys`), two-way repository sync through `origin` (never force-push, never a `kiss/wt-*` branch), API keys only to a remote that has none with a probe that fails closed **NEW**, two-way `sorcar.db` merge, **memory sync with tombstones and clock-skew tolerance** **NEW**, sync of `AUTOROUTER.md` and `MODEL_DECISIONS.md` **NEW**, remote `install.sh` (code-server when no `code` CLI), `kiss-web` as a lingering systemd user service, Cloudflare tunnel with ntfy notification, GitHub credentials over stdin, public-URL verification, local `install.sh`. Thirteen `SORCAR_*` environment overrides.
+- **`rsorcar user@host`** (57,275 bytes), ten steps: ssh check and prerequisites, refuse to restart a remote with a running task unless `SORCAR_FORCE_RESTART=1`, disk headroom check, copy `~/.ssh` (never `authorized_keys`), two-way repository sync through `origin` (never force-push, never a `kiss/wt-*` branch), API keys only to a remote that has none with a probe that fails closed **NEW**, two-way `history.db` merge, **memory sync with tombstones and clock-skew tolerance** **NEW**, sync of `AUTOROUTER.md` and `MODEL_DECISIONS.md` **NEW**, remote `install.sh` (code-server when no `code` CLI), `kiss-web` as a lingering systemd user service, Cloudflare tunnel with ntfy notification, GitHub credentials over stdin, public-URL verification, local `install.sh`. Thirteen `SORCAR_*` environment overrides.
 - **Docker**: `sorcar-docker [PORT] [--rebuild]` builds `codercom/code-server` with uv **0.12.19** **NEW pin**, clones the repository, runs `install.sh` and serves code-server on 8080 with the extension preinstalled, forwarding `GH_TOKEN` and the API keys. Inside tasks, `docker_image=` runs the shell and file tools in a container with the work dir mounted at its host path **NEW**.
 - **Release** (`scripts/release.sh`, 13 steps): purge private paths from public history, bump the version in `_version.py`, README, SYSTEM.md and `package.json`, build the VSIX into the release commit, push filtered history and tag to `ksenxx/kiss_ai`, GitHub release, PyPI publish (100 MiB per-file check before upload; sdist restricted to `src/kiss` and `projects/swedefend` **NEW**), Marketplace publish, local reinstall.
-- **Windows**: MinGit 2.55.0.5 and uv installed by the extension; the 2026-09-24 Windows test run fixed cross-platform bugs in memoryfield, `sorcar_md`, and channel tests.
+- **Windows**: MinGit 2.55.0.5 and uv installed by the extension; the 2026-09-24 Windows test run fixed cross-platform bugs in memoryfield, `agents_md`, and channel tests.
 
 ## 21. Developer tooling and tests
 
@@ -370,7 +370,7 @@ One `chat.html` (639 lines, 34 template placeholders) and `main.js` (23,860 line
 
 ## 22. What the trajectories show
 
-Figures from `~/.kiss/sorcar.db` on the development machine, 2026-09-30 (first row 2026-04, plus two rows with a 2009 clock artefact).
+Figures from `~/.kiss/history.db` on the development machine, 2026-09-30 (first row 2026-04, plus two rows with a 2009 clock artefact).
 
 | Measure | Value |
 | --- | --- |

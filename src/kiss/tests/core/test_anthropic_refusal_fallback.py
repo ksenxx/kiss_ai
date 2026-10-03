@@ -5,7 +5,7 @@
 """End-to-end tests: Anthropic safety refusals must trigger model fallback.
 
 Bug reproduction (production failures at 2026-07-14 11:35-11:47 in
-``~/.kiss/sorcar.db``, tasks ``daa89a7e...`` and ``c3cd9c95...``, model =
+``~/.kiss/history.db``, tasks ``daa89a7e...`` and ``c3cd9c95...``, model =
 ``claude-fable-5``):
 
 * On a benign security-research prompt (the SWEdefend paper task),

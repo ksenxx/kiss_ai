@@ -20,9 +20,11 @@ import pytest
 
 import kiss.core.vscode_config as vscode_config
 from kiss.core.vscode_config import (
+    _RC_HOOK_LINE,
     API_KEY_ENV_VARS,
     DEFAULTS,
     RC_HOOK_BEGIN,
+    RC_HOOK_END,
     _get_user_shell,
     _resolve_shell_path,
     _shell_rc_path,
@@ -251,6 +253,20 @@ class TestApiKeySave:
         save_api_key("OPENAI_API_KEY", "two")
         rc = Path.home() / ".zshrc"
         assert rc.read_text().count(RC_HOOK_BEGIN) == 1
+
+    def test_save_key_joins_another_brands_hook_block(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A block another brand's install left (same markers, its own source line) gains
+        this brand's source line instead of blocking it or opening a second block."""
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        other = '[ -f "$HOME/.other/api_keys.env" ] && . "$HOME/.other/api_keys.env"'
+        rc = Path.home() / ".bashrc"
+        rc.write_text(f"# mine\n{RC_HOOK_BEGIN}\n{other}\n{RC_HOOK_END}\n")
+        save_api_key("OPENAI_API_KEY", "sk-test")
+        save_api_key("GEMINI_API_KEY", "g-test")
+        lines = rc.read_text().splitlines()
+        assert lines == ["# mine", RC_HOOK_BEGIN, other, _RC_HOOK_LINE, RC_HOOK_END]
 
     def test_save_key_fish_gets_no_hook(
         self, monkeypatch: pytest.MonkeyPatch,

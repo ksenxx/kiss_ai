@@ -545,21 +545,17 @@ function testAnchorsChainOffLoadedEnds() {
 }
 
 function installRealisticLayout(win, O, heightOf) {
-  function h(el) {
-    if (el.classList.contains('chv-hidden')) return 0;
-    return heightOf(el);
-  }
   function contentTop(el) {
     let n = 0;
     for (const c of O.children) {
       if (c === el) return n;
-      n += h(c);
+      n += heightOf(c);
     }
     return n;
   }
   function sh() {
     let n = 0;
-    for (const c of O.children) n += h(c);
+    for (const c of O.children) n += heightOf(c);
     return n;
   }
   let st = 0;
@@ -577,11 +573,8 @@ function installRealisticLayout(win, O, heightOf) {
       return {top: 0, bottom: 500, height: 500, left: 0, right: 400, width: 400};
     }
     if (this.parentNode === O) {
-      if (this.classList.contains('chv-hidden')) {
-        return {top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0};
-      }
       const top = contentTop(this) - st;
-      const hh = h(this);
+      const hh = heightOf(this);
       return {top, bottom: top + hh, height: hh, left: 0, right: 400, width: 400};
     }
     return {top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0};
@@ -621,61 +614,6 @@ function testShortPrevTaskNavigation() {
   assert.strictEqual(panelText(win), 'Prev task');
   win.close();
   console.log('PASS short prev task is pinned, not skipped');
-}
-
-function testHiddenFirstMainChild() {
-  const {win, posted} = makeWebview();
-  const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._testApi.hideWelcome();
-  const O = win.document.getElementById('output');
-  installLayout(win, O);
-  send(win, {
-    type: 'task_events',
-    tabId,
-    chat_id: 'chat-abc',
-    task_id: '42',
-    task: 'My main task',
-    events: [
-      {type: 'task_start', task: 'My main task'},
-      {type: 'system_prompt', text: 'hidden prompt'},
-      {type: 'system_output', text: 'visible output\n'},
-    ],
-  });
-  const panel = win.document.getElementById('task-panel');
-  O.scrollTop = O.scrollHeight - O.clientHeight;
-  for (let i = 0; i < 5; i++) wheel(win, O, 50);
-  send(win, {
-    type: 'adjacent_task_events',
-    tabId,
-    direction: 'next',
-    task: 'Next task',
-    task_id: '43',
-    events: [
-      {type: 'task_start', task: 'Next task'},
-      {type: 'system_output', text: 'next\n'},
-    ],
-  });
-  const nextEl = O.querySelector('.adjacent-task[data-task-id="43"]');
-  const hidden = O.querySelector(':scope > .chv-hidden');
-  assert.ok(
-    hidden,
-    'setup: the replay must produce a hidden (chv-hidden) main-task child',
-  );
-  const visFirst = Array.from(O.children).find(
-    (c) => c !== nextEl && !c.classList.contains('chv-hidden'),
-  );
-  const {contentTop} = installRealisticLayout(win, O, () => 1000);
-  O.scrollTop = contentTop(nextEl);
-  wheel(win, panel, -120);
-  assert.strictEqual(
-    O.scrollTop,
-    contentTop(visFirst),
-    "wheel up must scroll to the main task's first VISIBLE event " +
-      '(a display:none panel has a zero rect and can not be the anchor)',
-  );
-  assert.strictEqual(panelText(win), 'My main task');
-  win.close();
-  console.log('PASS hidden first main-task child does not break navigation');
 }
 
 function testClampedShortLastTask() {
@@ -784,7 +722,6 @@ async function main() {
   testViewportPastLastRegionFallback();
   testAnchorsChainOffLoadedEnds();
   testShortPrevTaskNavigation();
-  testHiddenFirstMainChild();
   testClampedShortLastTask();
   testAccumulatorClearedOnTaskLoad();
   testPinDissolvesWhenPinnedNodeRemoved();

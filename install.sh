@@ -313,11 +313,33 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
+# Name of the state directory under $HOME the build being installed uses
+# when $KISS_HOME is unset: ``home_dir`` of the brand overlay
+# (.brand/brand.json, see apply_brand_overlay below) when there is one,
+# else of the checkout's own media/brand.json -- ``.kiss`` for stock KISS
+# Sorcar.  The same key drives kiss.core.config.kiss_home() and the
+# extension's kissHomeDir() (src/kissHome.js), so the installer writes its
+# marker, progress file and MODEL_INFO.json where the installed product
+# reads them.  Anything but a single path component falls back to .kiss.
+brand_home_dir_name() {
+    local file name
+    for file in "$PROJECT_DIR/.brand/brand.json" \
+                "$PROJECT_DIR/src/kiss/agents/vscode/media/brand.json"; do
+        [ -f "$file" ] || continue
+        name="$(tr -d '\n\r' < "$file" | sed -n 's/.*"home_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+        break
+    done
+    case "$name" in
+        ""|.|..|*/*|*\\*) echo ".kiss" ;;
+        *) echo "$name" ;;
+    esac
+}
+BRAND_HOME_DIR_NAME="$(brand_home_dir_name)"
 # The extension's state directory (kissHomeDir() in userAssets.ts honours
 # $KISS_HOME).  The update marker and the progress file below must land
 # here, not in a hard-coded $HOME/.kiss, or a custom-KISS_HOME install
 # never sees them.
-KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
+KISS_HOME_DIR="${KISS_HOME:-$HOME/$BRAND_HOME_DIR_NAME}"
 # Current install step, mirrored by the VS Code extension as a live,
 # non-blocking progress notification (src/installProgress.ts).  Line 1 is
 # this script's pid (the toast is dropped when that process is gone, so a
@@ -1437,8 +1459,12 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # ``~/.kiss/MY_MODELS.json`` — auto-seeded on first import with a
     # short documentation block and one commented-out example entry —
     # matching the ``MY_INJECTION.md`` pattern.
+    # The state directory is spelled out here and below rather than taken
+    # from KISS_HOME_DIR: the tests paste these fragments into harnesses
+    # that define neither KISS_HOME_DIR nor BRAND_HOME_DIR_NAME (there the
+    # stock ``.kiss`` applies).
     MODEL_INFO_SRC="$PROJECT_DIR/src/kiss/core/models/MODEL_INFO.json"
-    MODEL_INFO_DST="${KISS_HOME:-$HOME/.kiss}/MODEL_INFO.json"
+    MODEL_INFO_DST="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}/MODEL_INFO.json"
     if [ -f "$MODEL_INFO_SRC" ]; then
         mkdir -p "$(dirname "$MODEL_INFO_DST")"
         cp "$MODEL_INFO_SRC" "$MODEL_INFO_DST"
@@ -1461,7 +1487,7 @@ exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE" 9>&-) 2>&1
     # Re-introducing the copy here would mean a stale user-side
     # ``~/.kiss/INJECTIONS.md`` shadowing the freshly installed
     # bundled file forever after the first install.
-    KISS_HOME_DIR="${KISS_HOME:-$HOME/.kiss}"
+    KISS_HOME_DIR="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}"
     mkdir -p "$KISS_HOME_DIR"
 
     # Post-install hooks: every executable in $KISS_HOME_DIR/post-install.d/
@@ -1595,7 +1621,7 @@ open_in_browser() {
 }
 
 open_webapp() {
-    local url_file="${KISS_HOME:-$HOME/.kiss}/remote-url.json"
+    local url_file="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}/remote-url.json"
     local remote=0 kiss_web="" tunnel="" loopback="" waited=0
     machine_is_remote && remote=1
     echo ""
@@ -1627,7 +1653,9 @@ open_webapp() {
     done
 
     echo "   Trusting the webapp's certificate authority in this user's browsers..."
-    if ! "$kiss_web" --trust-ca 9>&-; then
+    # The CLI reads $KISS_HOME/tls: pin the home this install uses (the
+    # binary may come from the checkout's venv, whose brand may differ).
+    if ! KISS_HOME="${KISS_HOME:-$HOME/${BRAND_HOME_DIR_NAME:-.kiss}}" "$kiss_web" --trust-ca 9>&-; then
         echo "   WARNING: 'kiss-web --trust-ca' failed; browsers may warn about the Local URL."
     fi
 

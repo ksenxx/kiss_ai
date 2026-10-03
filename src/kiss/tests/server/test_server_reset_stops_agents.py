@@ -69,7 +69,7 @@ import kiss.agents.sorcar.persistence as th
 kiss_dir = tmp / ".kiss"
 kiss_dir.mkdir(parents=True, exist_ok=True)
 th._KISS_DIR = kiss_dir
-th._DB_PATH = kiss_dir / "sorcar.db"
+th._DB_PATH = kiss_dir / "history.db"
 th._db_conn = None
 
 from kiss.server.web_server import (
@@ -321,7 +321,7 @@ class TestServerResetStopsRunningAgents(TestCase):
         )
 
         task_id = task_id_file.read_text(encoding="utf-8").strip()
-        db = sqlite3.connect(str(self.tmpdir / ".kiss" / "sorcar.db"))
+        db = sqlite3.connect(str(self.tmpdir / ".kiss" / "history.db"))
         db.row_factory = sqlite3.Row
         row = db.execute(
             "SELECT result FROM task_history WHERE id = ?", (task_id,),

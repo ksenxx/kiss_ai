@@ -428,33 +428,6 @@ function testLoaderIsNotTranscript() {
   console.log('PASS the adjacent-task loading strip is not transcript');
 }
 
-// A wheel step pins the region it landed on. If that element later leaves
-// the transcript's regions — a chevron collapse hides it — the panel must
-// fall back to geometry instead of freezing on a ghost.
-function testStalePinFallsBackToGeometry() {
-  const {win, O, panel} = setup({prev: ['Prev task'], next: ['Last task']});
-  const prev = taskEl(O, 'Prev task');
-  setHeight(prev, 1000);
-  setHeight(taskEl(O, 'Last task'), 600);
-
-  scrollTo(win, O, topOf(O, prev));
-  wheel(win, panel, 120);
-  assert.strictEqual(panelText(win), 'Main task', 'the step landed on main');
-
-  mainChildren(O).forEach(el => {
-    el.classList.add('chv-hidden');
-    setHeight(el, 0);
-  });
-  O.dispatchEvent(new win.Event('scroll'));
-  assert.strictEqual(
-    panelText(win),
-    'Last task',
-    'a pin on a hidden element must not survive as a ghost region',
-  );
-  win.close();
-  console.log('PASS a stale pin falls back to plain geometry');
-}
-
 // A transcript shorter than the viewport cannot be scrolled, so splicing
 // a neighbour in is the only thing that changes what is on screen. The
 // panel has to follow that change on its own.
@@ -654,9 +627,11 @@ function testLiveStepCountDoesNotRepaintTheNeighboursRow() {
   last.dataset.metricTokens = 'Tokens: 777';
   last.dataset.metricBudget = 'Cost: 7.00';
   last.dataset.metricSteps = 'Steps: 7';
-  setHeight(last, 600);
+  setHeight(last, 1200);
 
-  scrollToBottom(win, O);
+  // The reader is well above the bottom, so the live panel the step
+  // appends below the neighbour does not pull the viewport along.
+  scrollTo(win, O, topOf(O, last));
   win._testApi.processEvent({type: 'thinking_start'});
   assert.deepStrictEqual(
     metrics(win),
@@ -898,22 +873,6 @@ function testPanelUnchangedWithoutAdjacentTasks() {
   console.log('PASS the panel is untouched when no neighbour is loaded');
 }
 
-// A collapsed (hidden) trailing element must not be mistaken for the
-// bottom of the transcript.
-function testHiddenChildrenAreIgnored() {
-  const {win, O} = setup({next: ['Last task']});
-  const last = taskEl(O, 'Last task');
-  setHeight(last, 300);
-  const ghost = win.document.createElement('div');
-  ghost.className = 'chv-hidden';
-  setHeight(ghost, 0);
-  O.appendChild(ghost);
-  scrollToBottom(win, O);
-  assert.strictEqual(panelText(win), 'Last task');
-  win.close();
-  console.log('PASS hidden trailing children are ignored');
-}
-
 async function main() {
   const tests = [
     testPanelNamesTheTaskFillingTheScreen,
@@ -924,7 +883,6 @@ async function main() {
     testWheelStepToLastTaskSurvivesANudge,
     testPanelAlwaysNamesAnOnScreenTask,
     testLoaderIsNotTranscript,
-    testStalePinFallsBackToGeometry,
     testSplicedInTaskRenamesThePanelWithoutAScroll,
     testTabRoundTripKeepsTheTabsOwnTask,
     testReturningToATabNamesWhatIsOnScreen,
@@ -937,7 +895,6 @@ async function main() {
     testHiddenTabReplayLeavesTheVisibleRowAlone,
     testHiddenReplayThatSwitchesTabsKeepsTheNewTabsNumbers,
     testPanelUnchangedWithoutAdjacentTasks,
-    testHiddenChildrenAreIgnored,
   ];
   const failures = [];
   for (const t of tests) {

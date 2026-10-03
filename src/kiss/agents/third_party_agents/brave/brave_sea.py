@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -36,6 +35,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ _TIMEOUT = 30
 _DEFAULT_BASE_URL = "https://api.search.brave.com/res/v1"
 _MAX_OUTPUT_CHARS = 8000
 
-_BRAVE_SEARCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "brave_search"
+_BRAVE_SEARCH_DIR = kiss_home() / "third_party_agents" / "brave_search"
 _config = ChannelConfig(_BRAVE_SEARCH_DIR, ("api_key",))
 
 

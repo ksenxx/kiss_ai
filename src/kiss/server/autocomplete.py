@@ -751,7 +751,7 @@ class _AutocompleteMixin:
                 self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
                 reqs.pop(conn_id, None)
         except Exception:
-            # ``_load_file_usage`` hitting a corrupt ``sorcar.db`` must
+            # ``_load_file_usage`` hitting a corrupt ``history.db`` must
             # not strand the token: the connection's next ``getFiles``
             # has to complete normally (A-C1).
             logger.exception("indexed file-picker reply failed for %s", work_dir)

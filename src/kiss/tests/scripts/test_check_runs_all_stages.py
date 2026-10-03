@@ -4,7 +4,7 @@
 # add your name here
 """End-to-end tests for ``kiss.scripts.check.run_checks``.
 
-A 24-hour audit of ``sorcar.db`` (2026-09-21) found ``uv run check
+A 24-hour audit of ``history.db`` (2026-09-21) found ``uv run check
 --full`` executed 65 times across 30 tasks: the script stopped at the
 first failing stage, so an agent fixed ruff, re-ran, fixed mypy, re-ran,
 fixed pyright, re-ran — one full model step and about a minute per

@@ -4,7 +4,7 @@
 # add your name here
 """The live WAL must never be destroyed by ``_get_db``'s cleanup path.
 
-Reproduces the 2026-08-15 production corruption of ``sorcar.db``: under
+Reproduces the 2026-08-15 production corruption of ``history.db``: under
 heavy load a transient ``os.stat`` failure on the database path made
 ``_db_file_identity`` report "file does not exist", so every thread
 tore down its healthy connection and the reconnect path deleted the
@@ -44,7 +44,7 @@ def _redirect(tmpdir: str):
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return old
 
@@ -122,7 +122,7 @@ class TestWalCorruptionGuard:
         away and replaced with a DANGLING SYMLINK, so a reconnecting
         thread B sees a confirmed ENOENT — the exact trigger of the
         old unlink — while B's own SQLite sidecars resolve to the
-        symlink target's name, leaving A's ``sorcar.db-wal`` for
+        symlink target's name, leaving A's ``history.db-wal`` for
         application code alone to touch.  Before the fix, B unlinked
         it even though A still had it open; after the fix (which
         removes application-level sidecar deletion entirely) it

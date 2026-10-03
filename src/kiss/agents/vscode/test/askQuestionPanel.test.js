@@ -368,6 +368,13 @@ test('the question of a background tab is answered from that tab, not the one on
   assert.notStrictEqual(other, tab);
   askQuestionCall(win, tab, 'Background question?');
   send(win, {type: 'askUser', question: 'Background question?', tabId: tab});
+  // The question pulls the user over to its tab; they go back to the
+  // other tab to carry on there.
+  assert.strictEqual(win._testApi.getActiveTabId(), tab);
+  win.document
+    .querySelector(`.chat-tab[data-tab-id=${JSON.stringify(other)}]`)
+    .dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.strictEqual(win._testApi.getActiveTabId(), other);
   assert.ok(!answering(win), 'the tab on screen has no question');
   assert.strictEqual(inp.placeholder, 'Ask anything');
   posted.length = 0;

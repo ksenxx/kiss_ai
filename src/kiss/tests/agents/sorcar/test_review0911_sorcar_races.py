@@ -338,7 +338,7 @@ def kiss_home() -> Iterator[Path]:
     saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
-    persistence._DB_PATH = home / "sorcar.db"
+    persistence._DB_PATH = home / "history.db"
     persistence._db_conn = None
     try:
         yield home

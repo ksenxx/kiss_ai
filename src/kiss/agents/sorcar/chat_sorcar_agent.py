@@ -174,7 +174,7 @@ class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
 
     Maintains a ``chat_id`` and automatically loads prior chat context,
-    persists tasks and results to ``sorcar.db``, and augments prompts
+    persists tasks and results to ``history.db``, and augments prompts
     with previous session context — replicating the stateful workflow
     from the VS Code extension as a standalone reusable agent.
     """
@@ -232,7 +232,7 @@ class ChatSorcarAgent(SorcarAgent):
 
         The text as submitted — what the user typed, or the ``task`` a
         ``run_agent`` dispatch passed — before the chat history, the
-        bare-path directive or ``SORCAR.md`` are added to the prompt the
+        bare-path directive or ``AGENTS.md`` are added to the prompt the
         model sees.  A SEA's tool reads it through
         :func:`kiss.server.agent_state.current_agent` to parse options
         out of its own task (rsi7d's scope).

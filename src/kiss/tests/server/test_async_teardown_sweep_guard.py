@@ -68,7 +68,7 @@ class SweepTeardownRace(unittest.IsolatedAsyncioTestCase):
         self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_sweep_race_"))
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         db = th._get_db()
         old_ts = time.time() - 3600.0

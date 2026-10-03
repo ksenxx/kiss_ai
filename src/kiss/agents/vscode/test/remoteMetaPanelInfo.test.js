@@ -5,10 +5,10 @@
 //
 // End-to-end tests for the docked task-info panel's rows and its
 // "Task update" info subpanel (media/chat.html + media/main.js, remote
-// desktop mode). The subpanel shows the task-update agent's report
-// (src/kiss/agents/seas/task_update/task_update_sea.py) about the visible tab's
-// RUNNING task, fetched from the daemon through the getTaskUpdate /
-// taskUpdate protocol described in tmp/task-update-protocol.md:
+// desktop mode). The subpanel shows the /ask agent's
+// (src/kiss/agents/seas/ask/ask_sea.py) short answer on what the visible
+// tab's RUNNING task has done so far, fetched from the daemon through
+// the getTaskUpdate / taskUpdate protocol (kiss.server.task_update):
 //
 // * #meta-workdir / #meta-max-budget rows fall back to configData
 //   values (config.work_dir / config.max_budget) and adopt a live
@@ -25,6 +25,9 @@
 // * the report body is sanitized: HTML content (starting with '<') is
 //   rendered as-is through kissSanitize, anything else through marked;
 //   scripts and event-handler attributes never reach the DOM,
+// * a reply with no run yet but a dueAt (the daemon asks a minute
+//   after the task started) shows the "first update" paragraph and
+//   status "First update at HH:MM" with the refresh button enabled;
 // * running:true without content shows the "Preparing the first
 //   update…" paragraph, status "Updating…" and a disabled, spinning
 //   #meta-info-refresh button; a finished run shows "Updated HH:MM" plus
@@ -207,15 +210,17 @@ function click(win, el) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
+/** The HH:MM clock time main.js renders for an epoch-ms stamp. */
+function clockLabel(win, epochMs) {
+  return new win.Date(epochMs).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 /** The 'Updated HH:MM' prefix main.js renders for an epoch-ms stamp. */
 function updatedLabel(win, epochMs) {
-  return (
-    'Updated ' +
-    new win.Date(epochMs).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  );
+  return 'Updated ' + clockLabel(win, epochMs);
 }
 
 /** Boot a desktop webview with a running task and return its first poll. */
@@ -247,6 +252,7 @@ function reply(win, poll, fields) {
         running: false,
         cost: 0,
         updatedAt: 0,
+        dueAt: 0,
       },
       fields,
     ),
@@ -415,6 +421,50 @@ async function main() {
       wv.clock.advance(POLL_MS);
       assert.strictEqual(lastPoll(wv).token, tok, 'same generation');
       assert.strictEqual(lastPoll(wv).knownSig, '200:5');
+    },
+  );
+
+  await test(
+    'a task younger than a minute shows when its first update is due, ' +
+      'with the refresh button enabled',
+    () => {
+      const wv = runningWebview();
+      const win = wv.win;
+      const poll = lastPoll(wv);
+      const due = 1700000060000;
+      reply(win, poll, {sig: '0.000:0', dueAt: due});
+      const pending = contentEl(win).querySelector('p.meta-info-pending');
+      assert.ok(pending, 'first-update paragraph rendered');
+      assert.strictEqual(
+        pending.textContent,
+        'The first update is asked a minute after the task starts; ' +
+          'press refresh to ask now.',
+      );
+      assert.ok(infoVisible(win), 'the waiting state shows the subpanel');
+      assert.strictEqual(
+        statusText(win),
+        'First update at ' + clockLabel(win, due),
+      );
+      const btn = refreshBtn(win);
+      assert.strictEqual(btn.disabled, false, 'refresh may ask now');
+      assert.ok(!btn.classList.contains('spinning'));
+
+      // A finished run supersedes the due time: dueAt then names the
+      // NEXT run, which the status line does not show.
+      const at = 1700000090000;
+      reply(win, poll, {
+        sig: 'done-1',
+        content: '<p>answer</p>',
+        updatedAt: at,
+        dueAt: at + 600000,
+      });
+      assert.strictEqual(statusText(win), updatedLabel(win, at));
+      assert.ok(contentEl(win).textContent.includes('answer'));
+
+      // A reply with neither content, run, error nor due time hides it.
+      reply(win, poll, {sig: 'empty-1'});
+      assert.ok(!infoVisible(win), 'nothing to show hides the subpanel');
+      assert.strictEqual(statusText(win), '');
     },
   );
 

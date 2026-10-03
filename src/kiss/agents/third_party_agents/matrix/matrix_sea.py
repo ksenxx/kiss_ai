@@ -34,7 +34,6 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Coroutine
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -57,10 +56,11 @@ from kiss.agents.third_party_agents._device_auth import (
     consent_required,
 )
 from kiss.core.brand import PRODUCT_NAME
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-_MATRIX_DIR = Path.home() / ".kiss" / "third_party_agents" / "matrix"
+_MATRIX_DIR = kiss_home() / "third_party_agents" / "matrix"
 _config = ChannelConfig(
     _MATRIX_DIR,
     (

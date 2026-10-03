@@ -42,7 +42,7 @@ own task history shows about each model's cost, speed and reliability, at
 most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
 cuts a longer file at a line boundary).
 :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
-``~/.kiss/sorcar.db`` (so refreshing the evidence never edits this SEA),
+``~/.kiss/history.db`` (so refreshing the evidence never edits this SEA),
 refusing text over the same cap, and the protocol treats it as the
 posterior over the tier-order prior.
 
@@ -64,6 +64,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 from kiss.server.agent_state import current_agent
@@ -214,7 +215,7 @@ EVIDENCE_CUT = (
 """Line appended in place of the part of an over-long evidence file the prompt drops."""
 
 NO_EVIDENCE = (
-    "_No observed evidence yet: `~/.kiss/AUTOROUTER.md` is missing or empty. Route on the "
+    f"_No observed evidence yet: `~/{HOME_DIR}/AUTOROUTER.md` is missing or empty. Route on the "
     "tier order alone until `/rsi7d all` has measured this installation's task history._"
 )
 """What the prompt says in place of the evidence when the file is missing or empty."""
@@ -224,7 +225,7 @@ def evidence_path() -> Path:
     """Return the path of the observed model evidence: ``<KISS home>/AUTOROUTER.md``.
 
     The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss`` (the directory
-    of ``sorcar.db`` and the ledger), so the evidence ``/rsi7d`` measures from
+    of ``history.db`` and the ledger), so the evidence ``/rsi7d`` measures from
     the task history lives next to that history and travels with it.
     """
     return kiss_home() / EVIDENCE_NAME
@@ -268,54 +269,53 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
    a check stays in your own loop. Never route a single tool call.
 
 2. Classify each unit with `decide` (`state`: description, check, size, earlier failures).
-   Ask `tier` (type `choice`; small = mechanical work with an unambiguous spec: read, grep,
-   summarize, run tests, rename, format, boilerplate; medium = clear-spec engineering:
-   implement from a description, tests for existing code, known-cause bug, one-module
-   refactor, small diff review; frontier = open-ended reasoning: root cause, cross-module
-   design, security or concurrency review, final acceptance) and `guarded` (type `noul`:
-   touches auth, secrets, payments, deletion, migrations, anything the user cannot undo,
-   or decides whether the whole task is complete). `guarded` >= 0.5 is frontier; `tier`
-   confidence below 0.6 moves one tier up; a unit that failed on a tier starts one tier
-   higher with the failed model in `exclude`. Without `decide`, judge by the same criteria.
+   Ask `tier` (type `choice`; small = mechanical work: read, grep, summarize, run tests,
+   rename, format, boilerplate; medium = clear-spec engineering: implement a spec, tests
+   for existing code, known-cause bug, one-module refactor, small diff review; frontier =
+   open-ended reasoning: root cause, cross-module design, security or concurrency review,
+   final acceptance) and `guarded` (type `noul`: touches auth, secrets, payments, deletion,
+   migrations, anything the user cannot undo, or decides whether the whole task is
+   complete). `guarded` >= 0.5 is frontier; `tier` confidence below 0.6 moves one tier up;
+   a unit that failed on a tier starts one tier higher with the failed model in `exclude`.
+   `decide` precedes every `pick_model`.
 
 3. Pick with `pick_model(tier, tokens_in, tokens_out, exclude)`; a sub-agent that reads a
-   medium codebase and runs tests uses about 200k prompt and 20k completion tokens. Call
-   `observed_call_costs(days, model)` once per task and pass over a candidate whose
-   observed mean cost per call is over twice the catalog estimate or far slower than its
-   tier peers. Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
+   medium codebase and runs tests: about 200k prompt and 20k completion tokens. Then
+   `observed_call_costs(days, model)` once; pass over a candidate whose observed mean cost
+   per call is over twice the estimate or far slower than its tier peers.
+   Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
    never mid-context; the task text names the files the sub-agent may touch and the check
    that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
 
 4. Work kept in your own loop: plan and final acceptance on the frontier model, execution
-   on medium, volume work (exploration, test runs, log reading) on small sub-agents.
+   on medium, volume work (exploration, tests, logs) on small sub-agents.
    Caches are per model, so `set_model` only at a phase boundary: to the medium pick once
    the plan is written, back to the original model after two failed checks or for the
    final verification. No downgrade for a short task (under about 10 tool calls), a
    user-pinned model, or a request for the best result.
 
-5. Budget: `Budget: $spent/$max` follows every tool result. A pick whose `estimated_usd`
+5. `Budget: $spent/$max` follows every tool result. A pick whose `estimated_usd`
    exceeds 25% of the remaining budget is split, or dropped one tier when the classifier
-   allows it (never below the guarded floor); if neither is possible, tell the user
-   first. A user-named reviewer share
-   ("at most N% for reviewing") runs reviewers on small unless the diff is guarded.
+   allows it (never below the guarded floor); else tell the user first. A user-named
+   reviewer share ("at most N% for reviewing") runs reviewers on small unless the diff is
+   guarded.
 
 6. Verify with the acceptance check yourself, never with the sub-agent's summary. On
    failure escalate one tier up with the failure evidence in the new prompt and the failed
    model in `exclude`, two tiers for a reasoning failure (wrong approach, misunderstood
-   spec). Never retry the same tier; never escalate more than twice per unit; on the third
+   spec). Never retry the same tier or escalate more than twice per unit; on the third
    failure stop and report.
 
 7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and log again
    once the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
-   the ledger `~/.kiss/MODEL_DECISIONS.md` is shared by every task.
+   ledger: `~/.kiss/MODEL_DECISIONS.md`.
 
 ## Observed model evidence
 
-From this installation's task history (`~/.kiss/AUTOROUTER.md`, rewritten by `/rsi7d`); the
-tier order is the prior, this is the posterior. A model with a high observed failure share
-for the role goes into `exclude` even when `pick_model` ranks it first; among a tier's
-runnable models prefer the lower observed $ and seconds per step when at least 10 tasks
-back it. Prices still come from `model_menu`.
+From `~/.kiss/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
+prior. A model with a high observed failure share for the role goes into `exclude` even
+when `pick_model` ranks it first; prefer lower observed $ and s/step backed by at least 10
+tasks.
 
 {observed_evidence()}
 
@@ -328,10 +328,21 @@ back it. Prices still come from `model_menu`.
 - Never spawn a sub-agent to run a shell command; run it inline (`run_commands_parallel`
   for many).
 
+## Lessons from recent runs (rsi7d)
+
+- Nothing dispatched: no `decide`, `observed_call_costs` or `estimate_cost`; they follow
+  `pick_model`. Actual cost = the last `Budget:` figure plus each child's `run_agent`
+  result; never query `~/.kiss/sorcar.db`.
+- `estimated_usd` prices one call; a sub-agent re-reads its context every step: budget
+  about 50x. An audit you would re-check yourself is frontier work; delegate only raw
+  fact gathering (file lists, grep hits, test output).
+- No `rg`, `python` or brace expansion here: `grep -RnE --include=`, explicit file names,
+  `python3`.
+
 ## Finishing
 
-Task result first, then a routing summary: each unit's tier, model, estimated and actual
-cost, outcome and escalations, and the ledger path.
+Task result, then a routing summary: each unit's tier, model, estimated and actual cost,
+outcome, escalations, ledger path.
 """
 """The routing protocol; the operating manual for the orchestrating model."""
 
@@ -341,7 +352,7 @@ def description() -> str:
     return (
         "Splits a task into units, runs each on the cheapest model tier (small, medium, "
         "frontier) that passes its acceptance check, escalating on failure and logging every "
-        "decision to ~/.kiss/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
+        f"decision to ~/{HOME_DIR}/MODEL_DECISIONS.md; pick `autorouter` in the model picker, use "
         '`/autorouter <task>` in the chat, or run_agent(agent="autorouter", task="...").'
     )
 
@@ -448,7 +459,7 @@ def estimate_cost(
 def observed_call_costs(days: int = 7, model: str = "") -> str:
     """Aggregate the per-call ``llm_call`` events of recent tasks by model.
 
-    Every model call an agent makes is recorded in ``sorcar.db`` as an
+    Every model call an agent makes is recorded in ``history.db`` as an
     ``llm_call`` event with the call's own tokens, USD cost and duration
     (``KissAgent._print_llm_call``).  This reads the events of the tasks
     launched in the last *days* days and reports, per model, what a call
@@ -466,7 +477,7 @@ def observed_call_costs(days: int = 7, model: str = "") -> str:
         cache_read_share, mean_seconds}``; an empty list when no calls
         were recorded in the window.
     """
-    db_path = kiss_home() / "sorcar.db"
+    db_path = kiss_home() / "history.db"
     if not db_path.exists():
         return "[]"
     cutoff = time.time() - max(1, int(days)) * 86400
@@ -540,7 +551,7 @@ def ledger_path() -> Path:
     """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
 
     The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss``, the same
-    directory as ``sorcar.db``, so the ledger outlives the task's work
+    directory as ``history.db``, so the ledger outlives the task's work
     directory and worktree and every task appends to the same file.
     """
     return kiss_home() / LEDGER_NAME
@@ -549,7 +560,7 @@ def ledger_path() -> Path:
 def _current_task_id() -> str:
     """Return the persisted task id of the task calling this tool, or ``""`` outside a task.
 
-    The id is the ``task_history`` row id in ``sorcar.db`` (the one
+    The id is the ``task_history`` row id in ``history.db`` (the one
     ``/task_update <task_id>`` takes), read off the agent whose task thread
     is the calling thread (``None`` outside a registered task).
     """
@@ -564,7 +575,7 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     acceptance check has run, with the outcome.  Every row carries the id of
     the task that wrote it (``-`` outside a task), so the rows of one run can
     be told apart from the rest of the installation's routing history and
-    traced back to the task in ``sorcar.db``.  A row is one terse line: the
+    traced back to the task in ``history.db``.  A row is one terse line: the
     ``unit``, ``reason`` and ``outcome`` cells are collapsed to single-spaced
     text and cut at :data:`CELL_MAX_CHARS` characters (ending in ``...``).
 

@@ -1285,6 +1285,30 @@ def test_folder_picker_changes_the_workspace(browser, harness, worktree):
         page.wait_for_selector("#folder-picker", state="hidden")
         _wait_explorer_root(page, "repo")
         assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.work_dir)
+        # "Add Folder to Explorer..." offers the folders opened so far
+        # (the daemon's recent_work_dirs) minus the ones already shown:
+        # the plain folder opened above, not the repo.  One click adds it.
+        page.click("#explorer-add-folder")
+        page.wait_for_selector("#folder-picker:not([hidden])", timeout=5000)
+        page.wait_for_selector(
+            "#folder-picker .folder-picker-recent:not([hidden]) .workdir-item",
+            timeout=15000,
+        )
+        recent = page.eval_on_selector_all(
+            "#folder-picker .folder-picker-recent-list .workdir-item",
+            "els => els.map(e => e.dataset.path)",
+        )
+        assert str(harness.plain_dir.resolve()) in recent
+        assert str(harness.work_dir.resolve()) not in recent
+        plain = json.dumps(str(harness.plain_dir.resolve()))
+        page.click(f"#folder-picker .workdir-item[data-path={plain}]")
+        page.wait_for_selector("#folder-picker", state="hidden")
+        page.wait_for_selector(_explorer_row_sel("/plain/only.txt"), timeout=15000)
+        roots = page.eval_on_selector_all(
+            '.explorer-row[aria-level="1"]', "els => els.map(e => e.dataset.explorerPath)",
+        )
+        assert roots == [str(harness.work_dir.resolve()), str(harness.plain_dir.resolve())]
+        assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == str(harness.work_dir)
     finally:
         context.close()
 
@@ -2075,12 +2099,19 @@ def test_add_folder_set_work_dir_and_remove(browser, harness, worktree):
         )
         assert (harness.plain_dir / "added.txt").is_file()
         (harness.plain_dir / "added.txt").unlink()
-        # Set as Working Directory (the buttons show on hover): the daemon
-        # and the saved config follow, the old working directory stays
-        # listed as an added folder.
+        # Set as Working Directory (the buttons show on hover) is the
+        # "..." > Working directory flow for that folder: the daemon
+        # lists it first (the 'workdir:' listDir check), then the daemon
+        # pin and the saved config follow, and the old working directory
+        # stays listed as an added folder.
         _click_root_button(page, plain, "set")
         _wait_first_root(page, plain)
         assert _root_paths(page) == [plain, repo]
+        checks = [
+            f for f in _sent(frames, "listDir")
+            if str(f.get("token", "")).startswith("workdir:") and f.get("path") == plain
+        ]
+        assert checks and checks[-1]["workDir"] == plain
         assert _sent(frames, "setWorkDir")[-1]["workDir"] == plain
         assert _sent(frames, "saveConfig")[-1]["config"]["work_dir"] == plain
         assert page.locator(".explorer-row.is-workdir").get_attribute("data-explorer-path") == plain

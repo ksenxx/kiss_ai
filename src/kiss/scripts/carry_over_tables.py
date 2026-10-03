@@ -3,10 +3,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Carry the counters of a replaced ``sorcar.db`` into its replacement.
+"""Carry the counters of a replaced ``history.db`` into its replacement.
 
 ``sync_db.py`` synchronizes the two tables that hold a machine's history
--- ``task_history`` and ``events``.  A ``sorcar.db`` holds four more
+-- ``task_history`` and ``events``.  A ``history.db`` holds four more
 tables that no sync moves, each a tally the web app keeps so that its
 menus offer what you actually use:
 

@@ -37,7 +37,7 @@ def _redirect(tmpdir: str):
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return old
 
@@ -78,7 +78,7 @@ class TestStaleDbEvents:
             th._queue_chat_event(
                 {"type": "text_delta", "content": f"x{i}"}, task_id=task_a,
             )
-        th._DB_PATH = Path(self.tmpdir_b) / "sorcar.db"
+        th._DB_PATH = Path(self.tmpdir_b) / "history.db"
         th._db_conn = None
         db_b = th._get_db()
         import time as _time
@@ -105,7 +105,7 @@ class TestStaleDbEvents:
             {"type": "followup_suggestion", "text": "late suggestion"},
             task_id=task_id,
             task="some other task that completed in the old database",
-            origin_db_path="/nonexistent/old/sorcar.db",
+            origin_db_path="/nonexistent/old/history.db",
         )
         assert self._events_for(task_id) == []
 

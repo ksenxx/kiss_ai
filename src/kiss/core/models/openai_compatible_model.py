@@ -1283,7 +1283,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                                 tool_calls_accum, delta.tool_calls
                             )
                 if chunk.usage is not None:
-                    response = chunk
+                    # Billed already: kept for take_partial_usage_response
+                    # if the stream fails before it ends.
+                    response = self._rejected_response = chunk
         except (httpx.TimeoutException, APITimeoutError) as err:
             # The per-request clock fired (no headers, or no bytes between
             # events) before the watchdog did.  A Stop pressed while the
@@ -1317,6 +1319,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             if events is not None:
                 events.close()
             self._close_thinking_if_open()
+        self._rejected_response = None
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
 

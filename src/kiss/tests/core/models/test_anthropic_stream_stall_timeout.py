@@ -5,10 +5,10 @@
 """End-to-end tests: a stalled Anthropic stream must not hang the agent.
 
 Bug reproduction ("task stuck in thinking", production failure at
-2026-07-21 10:08 in ``~/.kiss/sorcar.db``, task
+2026-07-21 10:08 in ``~/.kiss/history.db``, task
 ``f554c68446fa42af89c2fd3c7cc14f63``, model = ``claude-fable-5``):
 
-* Step 1 of the task completed normally (Read ./SORCAR.md).  Step 2's
+* Step 1 of the task completed normally (Read ./AGENTS.md).  Step 2's
   provider request was issued at 10:08:16.710 ("Step 2/100 start" in
   ``~/.kiss/kiss-web-stderr.log``) and then NOTHING happened: no stream
   event, no thinking delta, no log line, no error — for 5.5 minutes,

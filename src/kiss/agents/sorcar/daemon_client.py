@@ -532,7 +532,7 @@ def run(
             replacing the default system prompt shipped in
             ``src/kiss/SYSTEM.md``.  The daemon still appends its
             per-run operational instructions (work directory, process
-            id, ``~/.kiss/SORCAR.md``) so the agent's tool contract
+            id, ``~/.kiss/AGENTS.md``) so the agent's tool contract
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
         tools: Optional path to a Python file supplying extra tools

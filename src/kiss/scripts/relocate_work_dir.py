@@ -3,7 +3,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Re-point the work directories recorded in a ``sorcar.db`` copy.
+"""Re-point the work directories recorded in a ``history.db`` copy.
 
 Every task remembers the directory it ran in, and the History panel hides
 tasks from other workspaces by default.  The same project checked out on

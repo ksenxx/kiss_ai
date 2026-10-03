@@ -26,7 +26,7 @@ class TestPersistence(unittest.TestCase):
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-persistence-bug-"))
         self._orig_db_path = persistence._DB_PATH
         self.addCleanup(self._restore_db_path)
-        persistence._DB_PATH = self.tmpdir / "sorcar.db"
+        persistence._DB_PATH = self.tmpdir / "history.db"
         persistence._close_db()
 
     def _restore_db_path(self):

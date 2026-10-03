@@ -61,7 +61,7 @@ class TestEmbeddedLauncherServerOwnsPrivateTabRegistry(TestCase):
             _persistence._DB_PATH, _persistence._db_conn, _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "sorcar.db"
+        _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
         self.canonical_tabs = kiss_dir / "tabs.json"
         # A tab bound to a chat, persisted by an earlier daemon session:

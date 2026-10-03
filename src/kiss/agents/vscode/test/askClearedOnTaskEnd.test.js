@@ -133,6 +133,10 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
     const userTab = api.getActiveTabId();
 
     send(win, {type: 'askUser', question: 'Which branch?', tabId: askTab});
+    // The question switched the client to its tab; the user goes back
+    // to their own, which flags the waiting tab.
+    assert.strictEqual(api.getActiveTabId(), askTab);
+    clickTab(win, userTab);
     assert.strictEqual(
       attentionGlyph(win, askTab),
       '?',
@@ -224,11 +228,15 @@ function testSameChatIdSiblingKeepsItsQuestion() {
   api.createNewTab();
   const siblingTab = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: 'shared-chat-id', tabId: siblingTab});
-  // The user sits on a third, uninvolved tab so nothing here is on screen.
+  // The user sits on a third, uninvolved tab so nothing here is on screen
+  // (each question pulls them over; they go back to it).
   api.createNewTab();
+  const thirdTab = api.getActiveTabId();
 
   send(win, {type: 'askUser', question: 'Which branch?', tabId: doneTab});
   send(win, {type: 'askUser', question: 'Which remote?', tabId: siblingTab});
+  assert.strictEqual(api.getActiveTabId(), siblingTab);
+  clickTab(win, thirdTab);
   assert.strictEqual(
     attentionGlyph(win, siblingTab),
     '?',

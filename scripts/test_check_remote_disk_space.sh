@@ -14,7 +14,7 @@
 #      the mount point in it, and never a tmpfs, the EFI partition or the NFS
 #      export as a place to move to;
 #   3. not enough and no other disk: the grow-the-disk advice instead;
-#   4. a stale sorcar.db.incoming and .outgoing in ~/.kiss are removed (and
+#   4. a stale history.db.incoming and .outgoing in ~/.kiss are removed (and
 #      counted in the INFO line) before the room is measured, and the live
 #      database beside them is left alone;
 #   5. NEED_BYTES missing or not a number is a usage error;
@@ -30,7 +30,7 @@ fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 
 mkdir -p "$WORK/home/.kiss" "$WORK/home/kiss" "$WORK/bin"
-echo live > "$WORK/home/.kiss/sorcar.db"
+echo live > "$WORK/home/.kiss/history.db"
 head -c 300000 /dev/zero > "$WORK/home/kiss/big"
 
 # df stub: $FAKE_DF names the table to answer with.
@@ -107,15 +107,15 @@ echo "$OUT" | grep -q "Grow the disk behind /home" || fail "the advice does not 
 pass "the root filesystem is never offered as the disk to move to"
 
 # --- 4. stale scratch files are removed first ----------------------------------
-head -c 2000000 /dev/zero > "$WORK/home/.kiss/sorcar.db.incoming"
-head -c 1000 /dev/zero > "$WORK/home/.kiss/sorcar.db.outgoing"
+head -c 2000000 /dev/zero > "$WORK/home/.kiss/history.db.incoming"
+head -c 1000 /dev/zero > "$WORK/home/.kiss/history.db.outgoing"
 OUT="$(run roomy 1000 0)" || fail "the check failed after removing scratch files: $OUT"
-echo "$OUT" | grep -q "Removed ~/.kiss/sorcar.db.incoming (1.9 MiB) on .*interrupted task-database sync" \
+echo "$OUT" | grep -q "Removed ~/.kiss/history.db.incoming (1.9 MiB) on .*interrupted task-database sync" \
     || fail "the incoming file's removal is not reported: $OUT"
-echo "$OUT" | grep -q "Removed ~/.kiss/sorcar.db.outgoing (1000 B)" || fail "the outgoing file's removal is not reported: $OUT"
-[ ! -e "$WORK/home/.kiss/sorcar.db.incoming" ] || fail "sorcar.db.incoming is still there"
-[ ! -e "$WORK/home/.kiss/sorcar.db.outgoing" ] || fail "sorcar.db.outgoing is still there"
-[ "$(cat "$WORK/home/.kiss/sorcar.db")" = live ] || fail "the live database was touched"
+echo "$OUT" | grep -q "Removed ~/.kiss/history.db.outgoing (1000 B)" || fail "the outgoing file's removal is not reported: $OUT"
+[ ! -e "$WORK/home/.kiss/history.db.incoming" ] || fail "history.db.incoming is still there"
+[ ! -e "$WORK/home/.kiss/history.db.outgoing" ] || fail "history.db.outgoing is still there"
+[ "$(cat "$WORK/home/.kiss/history.db")" = live ] || fail "the live database was touched"
 pass "stale scratch files of an interrupted sync are removed, the database kept"
 
 # --- 5. usage errors ------------------------------------------------------------

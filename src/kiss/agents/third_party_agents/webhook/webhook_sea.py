@@ -51,7 +51,6 @@ import threading
 import time
 from collections import OrderedDict, deque
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -68,6 +67,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ _ROUTE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_][A-Za-z0-9_.\-]*)\}")
 _MISSING = object()
 
-_WEBHOOK_DIR = Path.home() / ".kiss" / "third_party_agents" / "webhook"
+_WEBHOOK_DIR = kiss_home() / "third_party_agents" / "webhook"
 _config = ChannelConfig(_WEBHOOK_DIR, ("port",))
 
 

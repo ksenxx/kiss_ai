@@ -26,8 +26,8 @@
 # fit where.
 #
 # Two scratch files of an interrupted sync (scripts/sync-task-db.sh) are
-# removed first: sorcar.db.incoming is an upload that never verified, and
-# sorcar.db.outgoing a snapshot that was already read back or never was.
+# removed first: history.db.incoming is an upload that never verified, and
+# history.db.outgoing a snapshot that was already read back or never was.
 # Neither is ever the live database, and either can be as large as it.
 set -euo pipefail
 
@@ -51,7 +51,7 @@ DB_BYTES="${DB_BYTES:-0}"
 TARGET="${TARGET:-user@$HOST}"
 
 # --- Scratch files a sync that did not finish may have left ------------------
-for scratch in "$HOME/.kiss/sorcar.db.incoming" "$HOME/.kiss/sorcar.db.outgoing"; do
+for scratch in "$HOME/.kiss/history.db.incoming" "$HOME/.kiss/history.db.outgoing"; do
     [ -f "$scratch" ] || continue
     size="$(wc -c < "$scratch" | tr -d ' ')"
     rm -f "$scratch"
@@ -76,7 +76,7 @@ fi
 HEADROOM_BYTES=$((NEED_BYTES > DB_BYTES ? NEED_BYTES - DB_BYTES : 0))
 err "Not enough room on $HOST: $(human "$FREE_BYTES") free in $HOME (the $(human "$SIZE_BYTES") filesystem at $MOUNT)," \
     "and the deploy needs about $(human "$NEED_BYTES"):" \
-    "$(human "$DB_BYTES") for the task database (~/.kiss/sorcar.db) plus $(human "$HEADROOM_BYTES") for the checkout," \
+    "$(human "$DB_BYTES") for the task database (~/.kiss/history.db) plus $(human "$HEADROOM_BYTES") for the checkout," \
     "its Python environment (.venv, ~/.cache/uv) and the tools install.sh brings (code-server, Node.js)."
 
 # The five largest things in the home directory, so the reader knows whether
