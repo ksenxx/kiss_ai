@@ -989,10 +989,14 @@ class TaskResult:
   `src/kiss/agents/seas/` have the lowest precedence, so a `SEAS.md`
   folder can shadow them.  The 17 bundled SEA folders register
   these commands: `/ask` (answers a question about the current task
-  from a digest of its persisted events; typed into a running task's
+  in two or three sentences from one `task_context` call over its
+  status, spend, progress log and digested persisted events; its only
+  tools are `task_context` and `finish`, so it never touches the task's
+  files or shell; typed into a running task's
   tab it runs as a side channel that always dispatches the bundled
   `seas/ask/ask_sea.py`, even when a `SEAS.md` folder shadows the
-  command), `/autorouter` (runs a task on the cheapest model tier
+  command, and the task-info panel's Task update is the same agent
+  run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
   that will finish it), `/bestrouter` (runs a task on
   `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
   container; the module defines no top-level run-parameter getters, its
