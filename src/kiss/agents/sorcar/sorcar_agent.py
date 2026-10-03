@@ -2702,7 +2702,7 @@ class SorcarAgent(RelentlessAgent):
                 every sub-agent it spawns via ``run_parallel``.  The
                 *system_prompt* suffix, the active-editor-file line, and the
                 per-run operational instructions (work dir, PID,
-                ``~/.kiss/SORCAR.md``) are still appended.  Blank (default)
+                ``~/.kiss/AGENTS.md``) are still appended.  Blank (default)
                 keeps the default system prompt.  Appended after the
                 historical positional arguments so every one of them
                 keeps its position.

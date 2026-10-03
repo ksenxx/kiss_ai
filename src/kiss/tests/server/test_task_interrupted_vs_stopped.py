@@ -4,7 +4,7 @@
 # add your name here
 """Regression: server-shutdown cancellation must not masquerade as a user stop.
 
-Production failure (task 3025 in the bundled ``sorcar.db``): a task was
+Production failure (task 3025 in the bundled ``history.db``): a task was
 running in its worker thread (step 3 of 100) when ``kiss-web`` received a
 routine restart ``SIGTERM`` — a daemon / LaunchAgent restart triggered by
 an in-progress KISS Sorcar extension update.  The graceful-shutdown path

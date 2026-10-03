@@ -14,6 +14,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from kiss.core.file_lock import exclusive_file_lock
+
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
 
@@ -115,6 +117,57 @@ def kiss_home() -> Path:
     """
     env = os.environ.get("KISS_HOME")
     return Path(env) if env else Path.home() / ".kiss"
+
+
+def adopt_legacy_file(path: Path, legacy_name: str, suffixes: tuple[str, ...] = ("",)) -> None:
+    """Give a file created under its former name its current name.
+
+    When *path* does not exist but ``path.parent / legacy_name`` does, the
+    legacy file is renamed to *path*, so an install upgraded across a
+    rename keeps its data.  *suffixes* lists the sidecar files renamed
+    along with it, in order (``("-wal", "-shm", "")`` for an SQLite
+    database: the sidecars first, the main file last, so that nobody
+    opens the renamed database before its uncheckpointed pages are
+    beside it).  The old name is left behind as a symlink to the new
+    one, so a process of the previous version that is still running
+    (the web app before its restart, say) keeps writing to the same
+    file -- SQLite resolves the link, so both versions share one WAL --
+    instead of recreating an empty file under the old name.  Concurrent
+    adopters serialise on a lock file next to *path*, and the one that
+    arrives second finds nothing left to do.
+
+    Args:
+        path: The file's current location.
+        legacy_name: Its former file name, in the same directory.
+        suffixes: Suffixes appended to both names for every file to
+            rename; ``""`` is the file itself.
+    """
+    legacy = path.with_name(legacy_name)
+    if path.exists() or not legacy.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with exclusive_file_lock(path.with_name(path.name + ".rename.lock")):
+        if path.exists() or not legacy.exists():
+            return
+        for suffix in suffixes:
+            source = legacy.with_name(legacy.name + suffix)
+            if source.exists():
+                os.replace(source, path.with_name(path.name + suffix))
+        try:
+            os.symlink(path.name, legacy)
+        except OSError:
+            pass  # Windows without the symlink privilege: the old version is restarted anyway.
+
+
+def agents_md_path() -> Path:
+    """Return the path of the user's standing instructions, ``$KISS_HOME/AGENTS.md``.
+
+    The file was called ``SORCAR.md`` before version 2026.10.2; one left
+    under that name is renamed on the first call.
+    """
+    path = kiss_home() / "AGENTS.md"
+    adopt_legacy_file(path, "SORCAR.md")
+    return path
 
 
 def get_artifact_dir() -> str:

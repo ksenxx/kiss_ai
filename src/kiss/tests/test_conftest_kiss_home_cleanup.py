@@ -50,9 +50,9 @@ print("after child exit:", os.path.isdir(home))
 print(home)
 """
 
-# persistence's own atexit handler drains queued events into sorcar.db,
+# persistence's own atexit handler drains queued events into history.db,
 # recreating the home if it is already gone; a pending event at exit
-# used to leave ``kiss_test_*/sorcar.db`` behind.  The event is queued
+# used to leave ``kiss_test_*/history.db`` behind.  The event is queued
 # from an atexit handler registered *after* the conftest's, which atexit
 # therefore runs *before* it: the event is still pending (the writer
 # batches for 20 ms) when the home is removed, whatever the load.
@@ -173,11 +173,11 @@ def test_queued_event_at_exit_does_not_recreate_home(tmp_path: Path) -> None:
     """An event still queued at exit is drained before the home is removed."""
     (home,) = _run_python(_QUEUE_EVENT_AT_EXIT, tmp_path)
     if sys.platform == "win32":
-        # The drain reopens sorcar.db and the connection is deliberately
+        # The drain reopens history.db and the connection is deliberately
         # left open (see ``_remove_test_kiss_home``); Windows cannot
         # delete an open file, so only the database may survive.
         leftovers = [p.name for p in Path(home).rglob("*")] if Path(home).exists() else []
-        assert all(name.startswith("sorcar.db") for name in leftovers), leftovers
+        assert all(name.startswith("history.db") for name in leftovers), leftovers
         return
     assert not Path(home).exists()
     assert list(tmp_path.glob("kiss_test_*")) == []

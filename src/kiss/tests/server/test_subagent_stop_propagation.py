@@ -38,7 +38,7 @@ class _RecordingPrinter(JsonPrinter):
     """``JsonPrinter`` that records every broadcast event.
 
     Only broadcasts are recorded — no persistence path runs (we do
-    not call into ``sorcar.db``).
+    not call into ``history.db``).
     """
 
     def __init__(self) -> None:

@@ -326,7 +326,7 @@ def test_ask_message_without_allocated_owner_task_id_falls_through() -> None:
     no ``last_task_id``.  Dispatching the /ask side channel with an
     empty owner id would ship an ``append_to_prompt`` naming a
     blank task, and the answering agent would have nothing to read
-    from ``~/.kiss/sorcar.db``.  The safe behaviour is to fall
+    from ``~/.kiss/history.db``.  The safe behaviour is to fall
     through to the queue path (which stamps
     ``unattributed_prompt_echoes`` for the drain hook to persist
     once the task row exists) and skip the side channel.

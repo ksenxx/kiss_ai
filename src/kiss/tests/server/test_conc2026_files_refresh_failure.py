@@ -13,7 +13,7 @@ worker thread build the index and then run ``_emit_indexed_files`` (the
 *cold* path).  Both paths read ``_load_file_usage()`` — a raw SQLite
 read — between installing the connection's ``_files_latest_request``
 token and emitting the reply.  A database failure — here made real by
-redirecting the ``sorcar.db`` path to a **directory**, so ``sqlite3``
+redirecting the ``history.db`` path to a **directory**, so ``sqlite3``
 cannot open it — used to escape from the reply path, leaving the token
 in the map forever (violating its short-lived contract) and, on the
 cold path, killing the thread through the silent default excepthook so
@@ -113,7 +113,7 @@ class TestFilesRefreshFailure(unittest.TestCase):
         )
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = kiss_dir / "sorcar.db"
+        self.db_path = kiss_dir / "history.db"
         _persistence._KISS_DIR = kiss_dir
         _persistence._DB_PATH = self.db_path
         _persistence._db_conn = None
@@ -148,14 +148,14 @@ class TestFilesRefreshFailure(unittest.TestCase):
         durable open failure (``sqlite3.OperationalError: unable to
         open database file``) that needs no mocking.  The database
         path is redirected to a sibling directory rather than the
-        healthy ``sorcar.db`` being replaced in place: ``_get_db``
+        healthy ``history.db`` being replaced in place: ``_get_db``
         treats the path change exactly like an on-disk replacement
         (every thread's cached connection is stale and the reconnect
         fails), while unlinking the file is refused on Windows
         (``PermissionError`` WinError 32) for as long as any thread's
         SQLite connection still holds it open.
         """
-        broken = self.db_path.with_name("broken-sorcar.db")
+        broken = self.db_path.with_name("broken-history.db")
         broken.mkdir(exist_ok=True)
         _persistence._DB_PATH = broken
 

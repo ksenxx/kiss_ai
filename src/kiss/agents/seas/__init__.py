@@ -37,9 +37,9 @@ file, chunk, symbol, commit, change, tag, branch, contributor and
 directory plus curated pages in the repository's domain memory) and
 schedules its daily refresh, or :mod:`kiss.agents.seas.remember.remember_sea`
 and :mod:`kiss.agents.seas.forget.forget_sea`, which add the prompt to, or
-remove it from, the standing instructions in ``~/.kiss/SORCAR.md``
+remove it from, the standing instructions in ``~/.kiss/AGENTS.md``
 (the file appended to every task's system prompt; storage in
-:mod:`kiss.agents.seas.sorcar_md`), or :mod:`kiss.agents.seas.ask.ask_sea`,
+:mod:`kiss.agents.seas.agents_md`), or :mod:`kiss.agents.seas.ask.ask_sea`,
 which answers a question about a running task from a digest of its
 persisted events (the ``/ask`` command; typed into a running task's tab
 the server dispatches it as a side channel next to the agent), or
@@ -49,7 +49,7 @@ Sorcar unattended inside a Docker container (the trial runners in
 Every SEA here is a sub-package ``<name>/`` holding ``<name>_sea.py`` plus
 its helper modules and data files (``sh/sh_sea.py`` and ``sh/evals/``,
 ``coding/coding_sea.py`` and ``coding/coding_test_context.py``, ...);
-shared helpers such as :mod:`kiss.agents.seas.sorcar_md` stay at the
+shared helpers such as :mod:`kiss.agents.seas.agents_md` stay at the
 package top level.  :mod:`kiss.agents.sorcar.sea_commands` exposes every
 such folder as the chat slash command ``/<name>`` (``/merge``, ``/sh``,
 ``/autorouter``, ``/bestrouter``, ``/skillopt``, ``/write``, ``/write_paper``, ``/review_paper``,

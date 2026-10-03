@@ -333,8 +333,8 @@ The parameters without getters:
   after the prompt (`RelentlessAgent.perform_task`): the work
   directory (omitted when the tools run in an attached container that
   does not mount it), the process id, the task settings, and the
-  user's standing instructions from `~/.kiss/SORCAR.md`
-  (`$KISS_HOME/SORCAR.md`, the file the bundled `/remember` and
+  user's standing instructions from `~/.kiss/AGENTS.md`
+  (`$KISS_HOME/AGENTS.md`, the file the bundled `/remember` and
   `/forget` SEAs maintain) when that file exists.  A
   `model_config()["system_instruction"]` value, if present, takes
   precedence over the composed prompt (`KISSAgent.run` only
@@ -997,12 +997,12 @@ class TaskResult:
   container; the module defines no top-level run-parameter getters, its
   `ContainerHarness` getters are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`
-  (removes a standing instruction from `~/.kiss/SORCAR.md`),
+  (removes a standing instruction from `~/.kiss/AGENTS.md`),
   `/git_extract_knowledge` (builds and refreshes a repository's
   knowledge memory and can schedule its daily refresh), `/merge`
   (resolves git merge conflicts and stages the resolved files; commits
   only when asked), `/remember` (appends a standing instruction to
-  `~/.kiss/SORCAR.md`), `/review_paper` (reviews a research paper for
+  `~/.kiss/AGENTS.md`), `/review_paper` (reviews a research paper for
   a venue, scoring seven dimensions from 1 to 10), `/revise_and_review_paper` (writes a paper with
   `/write_paper`, has `/review_paper` review it fresh, and repeats until
   strong accept or no further improvement; task text carries `Writing:`
@@ -1025,7 +1025,7 @@ class TaskResult:
   (`coding/coding_test_context.py`,
   `git_extract_knowledge/git_knowledge_index.py`,
   `git_extract_knowledge/git_knowledge_store.py`, the shared
-  `sorcar_md.py`) are helpers, not commands: only
+  `agents_md.py`) are helpers, not commands: only
   `<name>/<name>_sea.py` folders are registered.  Syntax,
   precedence and the dispatch flow are
   documented in

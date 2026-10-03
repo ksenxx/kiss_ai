@@ -232,7 +232,7 @@ def test_merge_into_file_reports_what_it_did(tmp_path: Path) -> None:
     assert path.read_text() == HEADER + ROW_A + ROW_B
     assert sorted(p.name for p in tmp_path.iterdir()) == ["MODEL_DECISIONS.md"]
     with pytest.raises(notes.SyncError, match="not a synced note"):
-        notes.merge_note("SORCAR.md", "a", "b")
+        notes.merge_note("AGENTS.md", "a", "b")
 
 
 def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> None:
@@ -249,7 +249,7 @@ def test_command_line_merges_two_files_and_explains_itself(tmp_path: Path) -> No
     assert done.returncode == 0 and done.stdout.strip() == "updated"
     assert into.read_text() == other.read_text()
     done = subprocess.run(
-        [sys.executable, str(SCRIPT), "merge", "SORCAR.md", str(into), str(other)],
+        [sys.executable, str(SCRIPT), "merge", "AGENTS.md", str(into), str(other)],
         capture_output=True,
         text=True,
         check=False,

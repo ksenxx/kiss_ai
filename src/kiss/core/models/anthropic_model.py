@@ -1047,7 +1047,7 @@ class AnthropicModel(Model):
         """Raise :class:`ModelRefusalError` when the model refused the request.
 
         Adaptive-thinking Claude models (fable-5 in production, task
-        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/sorcar.db``) can return
+        ``daa89a7e``/``c3cd9c95`` in ``~/.kiss/history.db``) can return
         ``stop_reason="refusal"`` with an EMPTY ``content`` list when their
         safety layer declines an otherwise benign prompt (observed on
         security-research text that opus-4-8 answers normally).  Without

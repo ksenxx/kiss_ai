@@ -5,7 +5,7 @@
 """End-to-end tests for the History sidebar's date-range auto-fill.
 
 The redesigned History filter bar pre-fills its From/To date inputs
-with the FIRST and LAST task dates stored in ``~/.kiss/sorcar.db``.
+with the FIRST and LAST task dates stored in ``~/.kiss/history.db``.
 The backend side of that feature is:
 
 1. ``persistence._history_date_range()`` — returns the ``(min, max)``
@@ -38,7 +38,7 @@ def _redirect(tmpdir: str) -> tuple:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return saved
 

@@ -42,7 +42,7 @@ own task history shows about each model's cost, speed and reliability, at
 most :data:`EVIDENCE_MAX_CHARS` characters of it (:func:`observed_evidence`
 cuts a longer file at a line boundary).
 :mod:`kiss.agents.seas.rsi7d.rsi7d_sea` rewrites that file from
-``~/.kiss/sorcar.db`` (so refreshing the evidence never edits this SEA),
+``~/.kiss/history.db`` (so refreshing the evidence never edits this SEA),
 refusing text over the same cap, and the protocol treats it as the
 posterior over the tier-order prior.
 
@@ -224,7 +224,7 @@ def evidence_path() -> Path:
     """Return the path of the observed model evidence: ``<KISS home>/AUTOROUTER.md``.
 
     The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss`` (the directory
-    of ``sorcar.db`` and the ledger), so the evidence ``/rsi7d`` measures from
+    of ``history.db`` and the ledger), so the evidence ``/rsi7d`` measures from
     the task history lives next to that history and travels with it.
     """
     return kiss_home() / EVIDENCE_NAME
@@ -448,7 +448,7 @@ def estimate_cost(
 def observed_call_costs(days: int = 7, model: str = "") -> str:
     """Aggregate the per-call ``llm_call`` events of recent tasks by model.
 
-    Every model call an agent makes is recorded in ``sorcar.db`` as an
+    Every model call an agent makes is recorded in ``history.db`` as an
     ``llm_call`` event with the call's own tokens, USD cost and duration
     (``KissAgent._print_llm_call``).  This reads the events of the tasks
     launched in the last *days* days and reports, per model, what a call
@@ -466,7 +466,7 @@ def observed_call_costs(days: int = 7, model: str = "") -> str:
         cache_read_share, mean_seconds}``; an empty list when no calls
         were recorded in the window.
     """
-    db_path = kiss_home() / "sorcar.db"
+    db_path = kiss_home() / "history.db"
     if not db_path.exists():
         return "[]"
     cutoff = time.time() - max(1, int(days)) * 86400
@@ -540,7 +540,7 @@ def ledger_path() -> Path:
     """Return the path of the shared routing ledger: ``<KISS home>/MODEL_DECISIONS.md``.
 
     The KISS home is ``$KISS_HOME`` when set, else ``~/.kiss``, the same
-    directory as ``sorcar.db``, so the ledger outlives the task's work
+    directory as ``history.db``, so the ledger outlives the task's work
     directory and worktree and every task appends to the same file.
     """
     return kiss_home() / LEDGER_NAME
@@ -549,7 +549,7 @@ def ledger_path() -> Path:
 def _current_task_id() -> str:
     """Return the persisted task id of the task calling this tool, or ``""`` outside a task.
 
-    The id is the ``task_history`` row id in ``sorcar.db`` (the one
+    The id is the ``task_history`` row id in ``history.db`` (the one
     ``/task_update <task_id>`` takes), read off the agent whose task thread
     is the calling thread (``None`` outside a registered task).
     """
@@ -564,7 +564,7 @@ def log_decision(unit: str, tier: str, model: str, reason: str, outcome: str = "
     acceptance check has run, with the outcome.  Every row carries the id of
     the task that wrote it (``-`` outside a task), so the rows of one run can
     be told apart from the rest of the installation's routing history and
-    traced back to the task in ``sorcar.db``.  A row is one terse line: the
+    traced back to the task in ``history.db``.  A row is one terse line: the
     ``unit``, ``reason`` and ``outcome`` cells are collapsed to single-spaced
     text and cut at :data:`CELL_MAX_CHARS` characters (ending in ``...``).
 

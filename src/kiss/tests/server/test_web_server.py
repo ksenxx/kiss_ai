@@ -447,7 +447,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         )
         self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_ws_test_"))
         _persistence._KISS_DIR = self._persistence_dir
-        _persistence._DB_PATH = self._persistence_dir / "sorcar.db"
+        _persistence._DB_PATH = self._persistence_dir / "history.db"
         _persistence._db_conn = None
 
         self.port = _find_free_port()

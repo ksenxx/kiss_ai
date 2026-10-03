@@ -8,14 +8,14 @@ Typed into a tab as ``/forget <instruction>`` (for example
 ``/forget Always answer in British English``), the slash command
 dispatches this file as a Sorcar Extension Agent through ``run_agent``
 with the text as the task.  The agent deletes the matching bullet line
-from ``~/.kiss/SORCAR.md`` (``$KISS_HOME/SORCAR.md``), the file that
+from ``~/.kiss/AGENTS.md`` (``$KISS_HOME/AGENTS.md``), the file that
 :meth:`RelentlessAgent.perform_task` appends to every task's system
 prompt, so later tasks no longer follow the instruction.  When the text
 does not match a stored line exactly, the agent lists the stored
 instructions, picks the one the user means, and removes that one.
 
 The file is edited through
-:func:`kiss.agents.seas.sorcar_md.remove_instruction` in the daemon
+:func:`kiss.agents.seas.agents_md.remove_instruction` in the daemon
 process; the agent runs with the ``bash`` tool profile directly on the
 checkout (no worktree, no auto-commit, no classification, no browser,
 no memory, no fan-out).
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kiss.agents.seas.sorcar_md import list_instructions, remove_instruction
+from kiss.agents.seas.agents_md import list_instructions, remove_instruction
 
 SYSTEM_PROMPT = (
     "You remove a standing instruction the user stored earlier with /remember. The "
@@ -48,14 +48,14 @@ SYSTEM_PROMPT = (
 def description() -> str:
     """Return the one-sentence help text shown by ``/forget help``."""
     return (
-        "Removes a standing instruction that /remember stored in ~/.kiss/SORCAR.md so "
+        "Removes a standing instruction that /remember stored in ~/.kiss/AGENTS.md so "
         "later tasks stop following it; use it as `/forget <instruction text>` in the "
         'chat or `run_agent(agent="forget", task="<instruction text>")`.'
     )
 
 
 def forget_instruction(instruction: str) -> str:
-    """Remove a standing instruction from ~/.kiss/SORCAR.md.
+    """Remove a standing instruction from ~/.kiss/AGENTS.md.
 
     The instruction is matched against the stored bullet lines ignoring
     case, the bullet marker and the amount of whitespace; the text must
@@ -93,7 +93,7 @@ def max_budget() -> float:
 
 
 def use_worktree() -> bool:
-    """Never use a worktree: the agent edits ``~/.kiss/SORCAR.md``, not the checkout."""
+    """Never use a worktree: the agent edits ``~/.kiss/AGENTS.md``, not the checkout."""
     return False
 
 
@@ -118,5 +118,5 @@ def use_web_tools() -> bool:
 
 
 def use_memory() -> bool:
-    """Never load persistent memory tools: SORCAR.md is the memory here."""
+    """Never load persistent memory tools: AGENTS.md is the memory here."""
     return False

@@ -72,9 +72,9 @@ class TestSummarizeChat:
 
     def test_strips_filler_and_trims_trailing_stopwords(self) -> None:
         summary = summarize_chat(
-            ["can you modify ~/.kiss/sorcar.db in a backward compatible way in the following way:"]
+            ["can you modify ~/.kiss/history.db in a backward compatible way in the following way:"]
         )
-        assert summary == "modify ~/.kiss/sorcar.db in a backward compatible way"
+        assert summary == "modify ~/.kiss/history.db in a backward compatible way"
         assert 6 <= len(summary.split()) <= 8
 
     def test_short_first_sentence_borrows_from_later_sentences_and_tasks(self) -> None:
@@ -343,7 +343,7 @@ class TestBackfill:
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.db_path = Path(self.tmpdir) / "sorcar.db"
+        self.db_path = Path(self.tmpdir) / "history.db"
         _legacy_db(self.db_path)
 
     def teardown_method(self) -> None:

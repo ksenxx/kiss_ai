@@ -45,7 +45,7 @@ class TestWalUnlinkToctou:
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
 
     def teardown_method(self) -> None:
@@ -75,14 +75,14 @@ class TestWalUnlinkToctou:
                 scratch = Path(tempfile.mkdtemp(prefix="kiss_toctou_s_"))
                 kd = scratch / ".kiss"
                 kd.mkdir()
-                th._DB_PATH = kd / "sorcar.db"
+                th._DB_PATH = kd / "history.db"
                 th._KISS_DIR = kd
                 try:
                     _add_task("scratch row", chat_id="")
                 except Exception:  # noqa: BLE001 — path swap races are expected here
                     pass
                 for suffix in ("", "-wal", "-shm"):
-                    Path(str(kd / "sorcar.db") + suffix).unlink(missing_ok=True)
+                    Path(str(kd / "history.db") + suffix).unlink(missing_ok=True)
                 time.sleep(0.0005)
                 th._DB_PATH = shared_path
                 th._KISS_DIR = shared_kiss_dir

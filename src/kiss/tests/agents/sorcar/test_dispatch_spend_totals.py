@@ -4,7 +4,7 @@
 # add your name here
 """A dispatched task's full spend must reach the task that dispatched it.
 
-Found by the 2026-09-29 cost audit of ``~/.kiss/sorcar.db``:
+Found by the 2026-09-29 cost audit of ``~/.kiss/history.db``:
 
 1. Post-result spend was dropped.  ``SorcarAgent.run`` folds the pre-run
    classifier's spend into the task's totals AFTER the agent emitted

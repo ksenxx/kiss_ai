@@ -46,7 +46,7 @@ def _redirect(tmpdir: Path) -> tuple:
     kiss_dir = tmpdir / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     th._owner_state = None
     return saved
@@ -68,7 +68,7 @@ def _event_seq_writer(kiss_dir: str, task_id: str, count: int) -> None:
     import kiss.agents.sorcar.persistence as child_th
 
     child_th._KISS_DIR = Path(kiss_dir)
-    child_th._DB_PATH = child_th._KISS_DIR / "sorcar.db"
+    child_th._DB_PATH = child_th._KISS_DIR / "history.db"
     child_th._db_conn = None
     child_th._owner_state = None
     for i in range(count):

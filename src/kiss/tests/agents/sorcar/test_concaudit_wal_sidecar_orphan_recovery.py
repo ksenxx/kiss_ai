@@ -8,7 +8,7 @@ Reproduces the recurring production ``sqlite3.OperationalError: disk
 I/O error`` (``SQLITE_IOERR_SHORT_READ``) that made every NEW task fail
 within 100 ms of starting, and the "WAL loss" that followed a daemon
 restart.  The daemon at PID 2514112 was found holding sixteen file
-descriptors to ``sorcar.db-wal (deleted)`` and ``sorcar.db-shm
+descriptors to ``history.db-wal (deleted)`` and ``history.db-shm
 (deleted)``: something outside the daemon had unlinked the sidecars.
 
 SQLite maps ONE ``-shm`` per process per database inode (shared by every
@@ -53,7 +53,7 @@ def _redirect(tmpdir: str):
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return old
 

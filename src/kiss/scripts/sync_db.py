@@ -3,7 +3,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""One-way synchronization of ``sorcar.db``-shaped SQLite databases.
+"""One-way synchronization of ``history.db``-shaped SQLite databases.
 
 Copies rows of the task table (``task_history``) and the ``events``
 table from SOURCE into TARGET, then recomputes TARGET's per-chat
@@ -15,9 +15,9 @@ Both SOURCE and TARGET are unix-style paths to a SQLite database file,
 optionally prefixed with ``user@host:`` when the database lives on a
 machine reachable over ssh::
 
-    uv run python -m kiss.scripts.sync_db ~/.kiss/sorcar.db /tmp/backup.db
-    uv run python -m kiss.scripts.sync_db ksen@1.2.3.4:~/.kiss/sorcar.db \\
-        ~/.kiss/sorcar.db
+    uv run python -m kiss.scripts.sync_db ~/.kiss/history.db /tmp/backup.db
+    uv run python -m kiss.scripts.sync_db ksen@1.2.3.4:~/.kiss/history.db \\
+        ~/.kiss/history.db
 
 How it works (three phases, each run on the machine that owns the
 database, so a database file is never copied across machines):
@@ -32,7 +32,7 @@ database, so a database file is never copied across machines):
    new rows in a single transaction.
 
 Only the delta crosses the network, which keeps a repeated sync of a
-multi-gigabyte ``sorcar.db`` down to seconds.  Rows are matched by their
+multi-gigabyte ``history.db`` down to seconds.  Rows are matched by their
 stable natural keys -- ``task_history.id`` for tasks and
 ``(task_id, seq)`` for events -- and ``events.id`` (an ``AUTOINCREMENT``
 rowid that means different things in different databases) is never
@@ -1222,7 +1222,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sync_db",
         description=(
-            "One-way sync of the task_history and events tables of sorcar.db-shaped "
+            "One-way sync of the task_history and events tables of history.db-shaped "
             "SQLite databases, recomputing the target's chat_summaries rows of the "
             "chats that received tasks. SOURCE and TARGET are "
             "unix paths, optionally prefixed with user@host: for a "
