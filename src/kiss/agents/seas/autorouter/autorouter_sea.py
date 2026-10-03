@@ -281,9 +281,9 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
 
 3. Pick with `pick_model(tier, tokens_in, tokens_out, exclude)`; a sub-agent that reads a
    medium codebase and runs tests uses about 200k prompt and 20k completion tokens. Call
-   `observed_call_costs(days, model)` once per task and pass over a candidate whose
-   observed mean cost per call is over twice the catalog estimate or far slower than its
-   tier peers. Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
+   `observed_call_costs(days, model)` once per candidate you will dispatch, never for work
+   kept inline, and pass over a candidate whose observed mean cost per call is over twice
+   the catalog estimate or far slower than its tier peers. Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
    never mid-context; the task text names the files the sub-agent may touch and the check
    that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
 
@@ -333,6 +333,14 @@ back it. Prices still come from `model_menu`.
 
 Task result first, then a routing summary: each unit's tier, model, estimated and actual
 cost, outcome and escalations, and the ledger path.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- `rg` is absent on this host and `/bin/sh` does no brace expansion: search with
+  `grep -R -n -E <pattern> <dir> --include='*.py'` from the first call.
+- Work kept inline: no `estimate_cost`; report it as inline on <model>, no dispatch.
 """
 """The routing protocol; the operating manual for the orchestrating model."""
 
