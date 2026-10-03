@@ -936,6 +936,10 @@ class AnthropicModel(Model):
                 try:
                     for event in stream:
                         watchdog.beat()
+                        # The SDK accumulates message_start / message_delta
+                        # usage here; kept for take_partial_usage_response
+                        # if the stream fails before message_stop.
+                        self._rejected_response = stream.current_message_snapshot
                         if self.token_callback is None:
                             continue
                         if event.type == "content_block_start":
@@ -975,6 +979,7 @@ class AnthropicModel(Model):
                         raise stop_error()
                     if watchdog.stalled:
                         raise self._stall_error()
+                    self._rejected_response = None
                     return stream.get_final_message()
                 finally:
                     # Idempotent second stop for the exception paths.

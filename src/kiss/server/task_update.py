@@ -175,7 +175,9 @@ def charge_side_channel_usage(
     (:func:`~kiss.agents.sorcar.persistence._add_late_task_usage`),
     every updated task's tabs get its new totals as a persisted
     ``usage_info``, and a still-running ancestor, when there is one,
-    banks the spend on its live agent.  A task that finishes in the
+    banks the spend on its live agent.  A running task's new totals
+    are broadcast as its own ``usage_info`` (recorded and persisted),
+    so its replayed transcript ends with the cost its row will store.  A task that finishes in the
     moment between the row check and the bank, after its final save
     read its counters, loses the spend (the same narrow window every
     live-agent bank has).
@@ -228,19 +230,22 @@ def charge_side_channel_usage(
                 _attribute_sub_usage(agent, budget, tokens, steps, epoch=epoch)
                 banked = True
                 if printer is not None:
-                    # Show the new totals now (banked plus the in-flight
-                    # session's): the task may already be past its last
-                    # usage event, and a ``run_agent`` caller waiting on
-                    # it takes its spend from the latest one
-                    # (daemon_client.run).
+                    # Publish the new totals (banked plus the in-flight
+                    # session's) as one of the running task's own
+                    # events, recorded and persisted like its other
+                    # usage events: the task may already be past its
+                    # last one, and both its replayed transcript and a
+                    # ``run_agent`` caller waiting on it
+                    # (daemon_client.run) take the cost from the latest.
                     live_budget, live_tokens, live_steps = _live_agent_usage(agent)
-                    printer.broadcast_transient({
+                    printer.broadcast({
                         "type": "usage_info",
                         "text": "",
+                        "taskId": running,
                         "total_tokens": live_tokens,
                         "cost": f"${live_budget:.4f}",
                         "total_steps": live_steps,
-                    }, task_id=running)
+                    })
         for row_id, row_tokens, row_cost, row_steps in updated:
             event: dict[str, Any] = {
                 "type": "usage_info",

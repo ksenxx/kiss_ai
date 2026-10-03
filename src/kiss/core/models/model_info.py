@@ -1321,7 +1321,9 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     ``pricing.input_cache_write``, and a write price OpenRouter omits
     stays ``None`` (billed at the input price by ``calculate_cost``)
     rather than taking a provider default.  Only the Anthropic 1h-write
-    tier, which OpenRouter never publishes, is always derived.  Entries
+    tier, which OpenRouter never publishes, is always derived.  A direct
+    provider entry (e.g. a MY_MODELS.json override) that sets only a
+    read price still gets the provider's write rule.  Entries
     with no published prices get the full provider rule; providers
     without a documented cache discount are left as ``None`` so
     ``calculate_cost`` falls back to the full input price (a conservative
@@ -1337,10 +1339,13 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     if defaults is None:
         return
     read, write, write_1h = defaults
-    if info.cache_read_price_per_1M is None:
+    published = info.cache_read_price_per_1M is not None
+    if not published:
         info.cache_read_price_per_1M = read
-        if info.cache_write_price_per_1M is None:
-            info.cache_write_price_per_1M = write
+    if info.cache_write_price_per_1M is None and not (
+        published and name.startswith("openrouter/")
+    ):
+        info.cache_write_price_per_1M = write
     if info.cache_write_1h_price_per_1M is None:
         info.cache_write_1h_price_per_1M = write_1h
 
@@ -1755,9 +1760,12 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
     gpt-6-luna $0.10/$0.01/$0.125/$0.50 ->
     $0.20/$0.02/$0.25/$0.75, gpt-5.6-sol $4/$0.40/$5/$20 ->
     $8/$0.80/$10/$30, and likewise terra/luna/5.5/5.4 at exactly
-    2x/1.5x) and https://ai.google.dev/gemini-api/docs/pricing
+    2x/1.5x, including gpt-5.5-pro and gpt-5.4-pro $30/$180 ->
+    $60/$270; gpt-5.4-mini/nano have no long-context tier) and https://ai.google.dev/gemini-api/docs/pricing
     (gemini-3-pro $2/$12 -> $4/$18, gemini-2.5-pro $1.25/$10 ->
-    $2.50/$15).  The rolling :data:`_OPENAI_ROLLING_LATEST` aliases track
+    $2.50/$15; OpenRouter's rolling ``~google/gemini-pro-latest`` lists
+    the same 200K override, $2/$12 -> $4/$18).  The rolling
+    :data:`_OPENAI_ROLLING_LATEST` aliases track
     those same GPT-5.6/GPT-6 snapshots and inherit the uplift;
     ``gpt-mini-latest`` tracks gpt-5.4-mini, which has no long-context
     tier.
@@ -1784,16 +1792,13 @@ def _long_context_uplift(model_name: str) -> tuple[int, float, float] | None:
         + _OPENAI_ROLLING_LATEST
     ):
         return 272_000, 2.0, 1.5
-    if bare.startswith("gpt-5.5") and "-pro" not in bare:
+    if bare.startswith("gpt-5.5"):
         return 272_000, 2.0, 1.5
-    if (
-        bare.startswith("gpt-5.4")
-        and "-pro" not in bare
-        and "-mini" not in bare
-        and "-nano" not in bare
+    if bare.startswith("gpt-5.4") and "-mini" not in bare and "-nano" not in bare:
+        return 272_000, 2.0, 1.5
+    if bare.startswith(
+        ("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro", "gemini-pro-latest")
     ):
-        return 272_000, 2.0, 1.5
-    if bare.startswith(("gemini-3-pro", "gemini-3.1-pro", "gemini-2.5-pro")):
         return 200_000, 2.0, 1.5
     return None
 

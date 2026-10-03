@@ -375,7 +375,7 @@ def test_side_channel_spend_banked_on_a_finishing_child_reaches_the_caller(
     charge_side_channel_usage(server.printer, child_agent, child, 0.75, 10, 1)
     live = _usage_events(events)
     assert live == [{
-        "type": "usage_info", "text": "", "total_tokens": 1110,
+        "type": "usage_info", "text": "", "taskId": child, "total_tokens": 1110,
         "cost": "$11.7500", "total_steps": 8,
     }]
     parent = SorcarAgent("caller")
