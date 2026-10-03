@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Re-add sub-task spend that was never folded into its parent in ``sorcar.db``.
+"""Re-add sub-task spend that was never folded into its parent in ``history.db``.
 
 Usage::
 
@@ -100,7 +100,7 @@ def _own_spend(conn: sqlite3.Connection) -> dict[str, tuple[float, int]]:
     """Sum each task's own ``llm_call`` events into ``(cost, tokens)``.
 
     Args:
-        conn: Connection to the ``sorcar.db`` database.
+        conn: Connection to the ``history.db`` database.
 
     Returns:
         Task id to the cost and tokens of the LLM calls the task made
@@ -203,7 +203,7 @@ def plan_repairs(
     """Find the settled tasks whose totals fall short of their sub-tasks'.
 
     Args:
-        conn: Connection to the ``sorcar.db`` database.
+        conn: Connection to the ``history.db`` database.
         min_shortfall: Smallest missing cost, in USD, worth repairing;
             must be positive so a repair always raises the row.
         now_ms: The current time in epoch milliseconds (defaults to
@@ -276,7 +276,7 @@ def apply_repairs(conn: sqlite3.Connection, repairs: list[Repair]) -> list[Repai
     """Write *repairs* to ``task_history`` in one transaction.
 
     Args:
-        conn: Read-write connection to the ``sorcar.db`` database.
+        conn: Read-write connection to the ``history.db`` database.
         repairs: The rows to update, as returned by :func:`plan_repairs`.
 
     Returns:
@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         opened.
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
-    parser.add_argument("--db", default=str(kiss_home() / "sorcar.db"))
+    parser.add_argument("--db", default=str(kiss_home() / "history.db"))
     parser.add_argument(
         "--apply", action="store_true",
         help="write the repaired totals; without it the script only reports them",

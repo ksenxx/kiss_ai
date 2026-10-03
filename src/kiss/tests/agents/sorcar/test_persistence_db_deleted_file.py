@@ -8,7 +8,7 @@ Before the fix, ``_get_db()``'s fast path returned the cached
 per-thread connection without checking that the database file still
 existed on disk (or was still the SAME file).  If the file was deleted
 while a cached connection was open (log rotation, a test cleaning up
-``$KISS_HOME``, a user removing ``~/.kiss/sorcar.db`` while the daemon
+``$KISS_HOME``, a user removing ``~/.kiss/history.db`` while the daemon
 runs) — and possibly recreated at the same pathname by an independent
 ``sqlite3.connect`` — every subsequent write went into the orphaned
 inode and silently disappeared, while any NEW reader of ``_DB_PATH``
@@ -46,7 +46,7 @@ class TestDbFileDeletedUnderCachedConnection:
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
 
     def teardown_method(self) -> None:

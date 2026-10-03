@@ -33,7 +33,7 @@ def _fresh_persistence_module(tmp_path, db_path=None):
         del sys.modules[name]
     from kiss.agents.sorcar import persistence as P
     P._KISS_DIR = tmp_path
-    P._DB_PATH = db_path if db_path is not None else tmp_path / "sorcar.db"
+    P._DB_PATH = db_path if db_path is not None else tmp_path / "history.db"
     P._close_db()
     try:
         yield P
@@ -216,7 +216,7 @@ def test_shutdown_persist_in_flight_results_string_ids(fresh_kiss_db):
 
 def test_migration_from_old_schema(tmp_path, monkeypatch):
     """Build an old-schema DB, then connect and verify migration."""
-    db_path = tmp_path / "sorcar.db"
+    db_path = tmp_path / "history.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
         CREATE TABLE task_history (
@@ -336,7 +336,7 @@ def test_migration_skips_empty_db(tmp_path, monkeypatch):
 def test_resume_after_migration_uses_new_uuid_ids(tmp_path, monkeypatch):
     """End-to-end: after migration, queries that originally took int ids
     must accept str UUIDs and round-trip correctly."""
-    db_path = tmp_path / "sorcar.db"
+    db_path = tmp_path / "history.db"
     conn = sqlite3.connect(str(db_path))
     conn.executescript("""
         CREATE TABLE task_history (

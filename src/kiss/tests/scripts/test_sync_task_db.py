@@ -6,7 +6,7 @@
 
 Reproduces the reported defect: after ``./sorcar-cloud`` the remote web
 app's History panel showed only a handful of tasks instead of the whole
-list from the laptop's ``~/.kiss/sorcar.db``.
+list from the laptop's ``~/.kiss/history.db``.
 
 The cause is not the transfer being incomplete, it is *who else has the
 file open*.  ``scp`` writes into an existing destination in place —
@@ -114,7 +114,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self,
     ) -> None:
         """The defect itself: what a plain ``scp`` did to the remote."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         big = Path(self.tmp) / "laptop.db"
         _make_db(big, 2000)
 
@@ -145,29 +145,30 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_every_task_reaches_the_remote(self) -> None:
         """The full list arrives, replacing whatever was there before."""
-        _make_db(self.remote_home / ".kiss" / "sorcar.db", 3)
-        _make_db(self.local_home / "sorcar.db", 500)
+        _make_db(self.remote_home / ".kiss" / "history.db", 3)
+        _make_db(self.local_home / "history.db", 500)
 
         result = self._push()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 500)
+        self.assertEqual(_count(self.remote_home / ".kiss" / "history.db"), 500)
 
     def test_survives_a_live_reader_on_the_remote(self) -> None:
         """A leftover web app holding the old database loses the race."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 2)
         live = sqlite3.connect(remote_db)
         live.execute("PRAGMA journal_mode=WAL")
         live.execute("INSERT INTO task_history(task) VALUES ('leftover')")
         live.commit()
-        _make_db(self.local_home / "sorcar.db", 400)
+        _make_db(self.local_home / "history.db", 400)
 
         self.assertEqual(self._push().returncode, 0)
         live.close()  # the stale checkpoint now has nothing to damage
         self.assertEqual(_count(remote_db), 400)
 
-    def test_uncommitted_wal_pages_travel_too(self) -> None:
-        """Tasks living only in the -wal must not be left behind."""
+    def test_both_sides_still_named_sorcar_db_are_renamed_first(self) -> None:
+        """Databases under the pre-2026.10.2 name are renamed, then synced."""
+        _make_db(self.remote_home / ".kiss" / "sorcar.db", 3)
         local_db = self.local_home / "sorcar.db"
         _make_db(local_db, 10)
         writer = sqlite3.connect(local_db)
@@ -179,33 +180,56 @@ class SyncTaskDbPushTest(unittest.TestCase):
         writer.commit()
         self.assertTrue((self.local_home / "sorcar.db-wal").exists())
 
+        result = self._push()
+        writer.close()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for home in (self.local_home, self.remote_home / ".kiss"):
+            self.assertEqual(_count(home / "history.db"), 100, home)
+            # The old name points at the new file for a web app still
+            # running the old version.
+            self.assertEqual(os.readlink(home / "sorcar.db"), "history.db", home)
+            self.assertFalse((home / "sorcar.db-wal").exists(), home)
+
+    def test_uncommitted_wal_pages_travel_too(self) -> None:
+        """Tasks living only in the -wal must not be left behind."""
+        local_db = self.local_home / "history.db"
+        _make_db(local_db, 10)
+        writer = sqlite3.connect(local_db)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.executemany(
+            "INSERT INTO task_history(id, task) VALUES (?, ?)",
+            [(1000 + i, f"wal-only {i}") for i in range(90)],
+        )
+        writer.commit()
+        self.assertTrue((self.local_home / "history.db-wal").exists())
+
         self.assertEqual(self._push().returncode, 0)
-        self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 100)
+        self.assertEqual(_count(self.remote_home / ".kiss" / "history.db"), 100)
 
     def test_no_wal_or_shm_is_left_on_the_remote(self) -> None:
         """The -shm index is machine-local and must never be shipped."""
         kiss = self.remote_home / ".kiss"
-        _make_db(kiss / "sorcar.db", 2)
-        (kiss / "sorcar.db-wal").write_bytes(b"stale wal from an older deploy")
-        (kiss / "sorcar.db-shm").write_bytes(b"stale shm")
-        _make_db(self.local_home / "sorcar.db", 20)
+        _make_db(kiss / "history.db", 2)
+        (kiss / "history.db-wal").write_bytes(b"stale wal from an older deploy")
+        (kiss / "history.db-shm").write_bytes(b"stale shm")
+        _make_db(self.local_home / "history.db", 20)
 
         self.assertEqual(self._push().returncode, 0)
-        self.assertFalse((kiss / "sorcar.db-wal").exists())
-        self.assertFalse((kiss / "sorcar.db-shm").exists())
-        self.assertFalse((kiss / "sorcar.db.incoming").exists())
+        self.assertFalse((kiss / "history.db-wal").exists())
+        self.assertFalse((kiss / "history.db-shm").exists())
+        self.assertFalse((kiss / "history.db.incoming").exists())
 
     def test_a_truncated_upload_keeps_the_previous_database(self) -> None:
         """A cut-short transfer must not replace a good database."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 7)
-        _make_db(self.local_home / "sorcar.db", 300)
+        _make_db(self.local_home / "history.db", 300)
         # Truncate the stream the way a dropped connection would.
         truncating = Path(self.tmp) / "bin" / "gzip"
         truncating.write_text(
             "#!/bin/bash\n"
             'if [ "$1" = "-dc" ]; then head -c 4096 > /dev/null; '
-            'printf "" > "$HOME/.kiss/sorcar.db.incoming"; exit 0; fi\n'
+            'printf "" > "$HOME/.kiss/history.db.incoming"; exit 0; fi\n'
             'exec /usr/bin/env -i PATH=/usr/bin:/bin gzip "$@"\n'
         )
         truncating.chmod(0o755)
@@ -214,21 +238,21 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self.assertEqual(_count(remote_db), 7)
         # The truncated file is not left beside the database it failed to
         # replace, where it would take the room the next attempt needs.
-        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+        self.assertFalse((self.remote_home / ".kiss" / "history.db.incoming").exists())
 
     def test_an_upload_that_dies_leaves_no_partial_file_behind(self) -> None:
         """"No space left on device" half-way through the transfer.
 
-        The 4.4 GB ``sorcar.db.incoming`` such a failure left on a 10 GB
+        The 4.4 GB ``history.db.incoming`` such a failure left on a 10 GB
         boot disk is what made every later step of the deploy fail too.
         """
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 7)
-        _make_db(self.local_home / "sorcar.db", 300)
+        _make_db(self.local_home / "history.db", 300)
         failing = Path(self.tmp) / "bin" / "gzip"
         failing.write_text(
             "#!/bin/bash\n"
-            'if [ "$1" = "-dc" ]; then head -c 4096 > "$HOME/.kiss/sorcar.db.incoming"; '
+            'if [ "$1" = "-dc" ]; then head -c 4096 > "$HOME/.kiss/history.db.incoming"; '
             'echo "gzip: stdout: No space left on device" >&2; exit 1; fi\n'
             'exec /usr/bin/env -i PATH=/usr/bin:/bin gzip "$@"\n'
         )
@@ -238,7 +262,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Uploading the task database to user@example.com failed", result.stderr)
         self.assertEqual(_count(remote_db), 7)
-        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+        self.assertFalse((self.remote_home / ".kiss" / "history.db.incoming").exists())
         # The web app was stopped for the swap, and started again.
         recorded = self.systemctl_log.read_text()
         self.assertIn("stop kiss-web.service", recorded)
@@ -256,9 +280,9 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_a_remote_without_room_is_left_alone(self) -> None:
         """No room for the upload: nothing is stopped and nothing is written."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 7)
-        _make_db(self.local_home / "sorcar.db", 300)
+        _make_db(self.local_home / "history.db", 300)
         self._fake_df("1")  # 1 KiB free; the snapshot is far larger
 
         result = self._push()
@@ -266,7 +290,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self.assertIn("Not enough room on user@example.com for the task database", result.stdout)
         self.assertIn("0 MiB free in ~/.kiss, and the database is", result.stdout)
         self.assertEqual(_count(remote_db), 7)
-        self.assertFalse((self.remote_home / ".kiss" / "sorcar.db.incoming").exists())
+        self.assertFalse((self.remote_home / ".kiss" / "history.db.incoming").exists())
         self.assertFalse(
             self.systemctl_log.exists(),
             "the web app was stopped although nothing could be uploaded",
@@ -274,10 +298,10 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_a_stale_partial_upload_counts_as_room(self) -> None:
         """The prepare step removes it, so its bytes are available to the upload."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 7)
-        _make_db(self.local_home / "sorcar.db", 300)
-        stale = self.remote_home / ".kiss" / "sorcar.db.incoming"
+        _make_db(self.local_home / "history.db", 300)
+        stale = self.remote_home / ".kiss" / "history.db.incoming"
         stale.write_bytes(b"\0" * 4_000_000)
         self._fake_df("1")  # 1 KiB free by itself; 3.8 MiB once the stale file is gone
 
@@ -288,9 +312,9 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_room_that_cannot_be_read_stops_the_upload(self) -> None:
         """An answer that is not a number is not read as "plenty"."""
-        remote_db = self.remote_home / ".kiss" / "sorcar.db"
+        remote_db = self.remote_home / ".kiss" / "history.db"
         _make_db(remote_db, 7)
-        _make_db(self.local_home / "sorcar.db", 300)
+        _make_db(self.local_home / "history.db", 300)
         df = Path(self.tmp) / "bin" / "df"
         df.write_text(
             "#!/bin/bash\necho 'df: cannot read table of mounted file systems' >&2\nexit 1\n"
@@ -312,7 +336,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         agent does most of its work in ``.kiss-worktrees/``), while
         directories outside the project are left alone.
         """
-        local_db = self.local_home / "sorcar.db"
+        local_db = self.local_home / "history.db"
         _make_db(local_db, 0)
         con = sqlite3.connect(local_db)
         con.execute("ALTER TABLE task_history ADD COLUMN work_dir TEXT")
@@ -333,7 +357,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
+        con = sqlite3.connect(self.remote_home / ".kiss" / "history.db")
         shipped = dict(con.execute("SELECT task, work_dir FROM task_history"))
         con.close()
         self.assertEqual(shipped["in the checkout"], "/home/ubuntu/kiss")
@@ -347,7 +371,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_relocation_leaves_this_machines_database_untouched(self) -> None:
         """Shipping must never rewrite the laptop's own history."""
-        local_db = self.local_home / "sorcar.db"
+        local_db = self.local_home / "history.db"
         _make_db(local_db, 0)
         con = sqlite3.connect(local_db)
         con.execute("ALTER TABLE task_history ADD COLUMN work_dir TEXT")
@@ -372,11 +396,11 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_a_database_without_a_work_dir_column_still_ships(self) -> None:
         """Databases predating the flat ``work_dir`` column must not abort."""
-        _make_db(self.local_home / "sorcar.db", 12)  # no work_dir column
+        _make_db(self.local_home / "history.db", 12)  # no work_dir column
 
         result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 12)
+        self.assertEqual(_count(self.remote_home / ".kiss" / "history.db"), 12)
 
     def test_legacy_databases_keep_their_paths_in_extra_json(self) -> None:
         """The pre-migration schema stores work_dir inside ``extra``.
@@ -385,7 +409,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         unchanged, so it has to be relocated here or the imported
         history arrives complete and invisible.
         """
-        local_db = self.local_home / "sorcar.db"
+        local_db = self.local_home / "history.db"
         _make_db(local_db, 0)
         con = sqlite3.connect(local_db)
         con.execute("ALTER TABLE task_history ADD COLUMN extra TEXT")
@@ -406,7 +430,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-        con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
+        con = sqlite3.connect(self.remote_home / ".kiss" / "history.db")
         shipped = dict(con.execute("SELECT task, extra FROM task_history"))
         con.close()
         self.assertEqual(
@@ -422,7 +446,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
     def test_the_root_directory_relocates_nothing(self) -> None:
         """"/" is not a project, so no path may be rewritten against it."""
-        local_db = self.local_home / "sorcar.db"
+        local_db = self.local_home / "history.db"
         _make_db(local_db, 0)
         con = sqlite3.connect(local_db)
         con.execute("ALTER TABLE task_history ADD COLUMN work_dir TEXT")
@@ -435,7 +459,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
 
         self.assertEqual(self._push("/", "/home/ubuntu").returncode, 0)
 
-        con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
+        con = sqlite3.connect(self.remote_home / ".kiss" / "history.db")
         shipped = dict(con.execute("SELECT task, work_dir FROM task_history"))
         con.close()
         self.assertEqual(shipped, {"somewhere": "/Users/me/work/kiss",
@@ -445,7 +469,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self,
     ) -> None:
         """A failed deploy must not leave the remote without a web app."""
-        _make_db(self.local_home / "sorcar.db", 5)
+        _make_db(self.local_home / "history.db", 5)
         # Break the upload so the script takes its failure path.
         gzip = Path(self.tmp) / "bin" / "gzip"
         gzip.write_text('#!/bin/bash\nexit 3\n')
@@ -460,7 +484,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self,
     ) -> None:
         """The connection can drop after the service is already stopped."""
-        _make_db(self.local_home / "sorcar.db", 5)
+        _make_db(self.local_home / "history.db", 5)
         # The last command of the stop step; failing it aborts that step
         # after ``systemctl stop`` has already run.
         rm = Path(self.tmp) / "bin" / "rm"
@@ -476,7 +500,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         self,
     ) -> None:
         """The stop step must only ever match the remote's own web app."""
-        _make_db(self.local_home / "sorcar.db", 4)
+        _make_db(self.local_home / "history.db", 4)
         killed = Path(self.tmp) / "pkill.log"
         fake = Path(self.tmp) / "bin" / "pkill"
         fake.write_text(f'#!/bin/bash\necho "$@" >> {killed}\nexit 0\n')
@@ -498,7 +522,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
         saved = (th._KISS_DIR, th._DB_PATH, th._db_conn)
         try:
             th._KISS_DIR = self.local_home
-            th._DB_PATH = self.local_home / "sorcar.db"
+            th._DB_PATH = self.local_home / "history.db"
             th._db_conn = None
             th._close_db()
             for i in range(25):
@@ -507,7 +531,7 @@ class SyncTaskDbPushTest(unittest.TestCase):
             self.assertEqual(self._push().returncode, 0)
 
             th._KISS_DIR = self.remote_home / ".kiss"
-            th._DB_PATH = th._KISS_DIR / "sorcar.db"
+            th._DB_PATH = th._KISS_DIR / "history.db"
             th._db_conn = None
             th._close_db()
             titles = [str(e["task"]) for e in th._load_history()]

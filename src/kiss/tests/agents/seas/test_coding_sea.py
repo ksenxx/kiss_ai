@@ -285,7 +285,7 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     def harness(**extra: object) -> coding_sea.ContainerHarness:
         config = tmp_path / f"config-{len(extra)}.json"
         config.write_text(json.dumps({
-            "container": "c", "workdir": "/app/", "prompt": "p", "model": MODEL,
+            "container": "kiss-test-trial", "workdir": "/app/", "prompt": "p", "model": MODEL,
             "trajectory": str(tmp_path / "trajectory.jsonl"), **extra,
         }))
         return coding_sea.ContainerHarness(str(config))
@@ -376,7 +376,7 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     """The generated ``sea.py`` imports this package and exposes the harness's getters and hooks."""
     from kiss.agents.seas.coding import coding_sea
 
-    trial = {"container": "c", "workdir": "/app", "prompt": "p", "model": MODEL}
+    trial = {"container": "kiss-test-trial", "workdir": "/app", "prompt": "p", "model": MODEL}
     sea_path = coding_sea.write_trial_sea(tmp_path / "sea-trial", trial)
     config = json.loads((tmp_path / "sea-trial" / "config.json").read_text())
     assert config["trajectory"] == str(tmp_path / "sea-trial" / "trajectory.jsonl")
@@ -387,7 +387,7 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     spec.loader.exec_module(sea)
     assert sea.prompt() == "p"
     assert sea.model() == MODEL
-    assert sea.docker_image() == "container:c"
+    assert sea.docker_image() == "container:kiss-test-trial"
     assert sea.work_dir() == str(tmp_path / "sea-trial")
     assert sea.model_config() is None
     assert sea.use_web_tools() is False and sea.use_memory() is False

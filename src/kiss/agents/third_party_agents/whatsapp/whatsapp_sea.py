@@ -60,7 +60,7 @@ from kiss.core.processes import pid_alive as _pid_alive
 
 logger = logging.getLogger(__name__)
 
-_WHATSAPP_DIR = Path.home() / ".kiss" / "third_party_agents" / "whatsapp"
+_WHATSAPP_DIR = kiss_home() / "third_party_agents" / "whatsapp"
 _BRIDGE_REPO_URL = "https://github.com/lharries/whatsapp-mcp"
 _BRIDGE_BINARY_NAME = "kiss-whatsapp-bridge"
 # The upstream bridge hardcodes its REST port (startRESTServer(..., 8080)).

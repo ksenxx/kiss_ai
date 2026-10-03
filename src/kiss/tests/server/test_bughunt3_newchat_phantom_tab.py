@@ -35,7 +35,7 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
             _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
         )
         _pm._KISS_DIR = type(_pm._KISS_DIR)(self._tmpdir)
-        _pm._DB_PATH = type(_pm._DB_PATH)(self._tmpdir) / "sorcar.db"
+        _pm._DB_PATH = type(_pm._DB_PATH)(self._tmpdir) / "history.db"
         _vc.CONFIG_DIR = type(_vc.CONFIG_DIR)(self._tmpdir)
         _vc.CONFIG_PATH = type(_vc.CONFIG_PATH)(self._tmpdir) / "config.json"
 

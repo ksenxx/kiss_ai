@@ -29,7 +29,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -54,8 +53,9 @@ from kiss.agents.third_party_agents._oauth_apps import (
     missing_client_id_error,
     oauth_client_id,
 )
+from kiss.core.config import kiss_home
 
-_MSTEAMS_DIR = Path.home() / ".kiss" / "third_party_agents" / "msteams"
+_MSTEAMS_DIR = kiss_home() / "third_party_agents" / "msteams"
 _config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id",))
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 _DEFAULT_LOGIN_BASE = "https://login.microsoftonline.com"

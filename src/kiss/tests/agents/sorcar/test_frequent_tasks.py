@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tests for the frequent_tasks table in sorcar.db.
+"""Tests for the frequent_tasks table in history.db.
 
 Verifies counter incrementing, timestamp updates, top-N retrieval and
 the 100-row eviction policy (lowest count, oldest timestamp first).
@@ -23,7 +23,7 @@ def _redirect(tmpdir: str) -> tuple[Path, object, Path]:
     kiss_dir = Path(tmpdir) / ".kiss"
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
-    th._DB_PATH = kiss_dir / "sorcar.db"
+    th._DB_PATH = kiss_dir / "history.db"
     th._db_conn = None
     return saved  # type: ignore[return-value]
 

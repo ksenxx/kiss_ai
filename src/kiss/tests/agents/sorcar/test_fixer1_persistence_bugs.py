@@ -56,7 +56,7 @@ class _DBSandbox:
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         th._close_db()
 
@@ -193,7 +193,7 @@ class TestA3SeqCacheClearRace(_DBSandbox):
         tids = [_add_task(f"a3 task {i}")[0] for i in range(n_tasks)]
         _flush_chat_events()
         db1 = str(th._DB_PATH)
-        db2 = str(Path(self.tmpdir) / ".kiss2" / "sorcar.db")
+        db2 = str(Path(self.tmpdir) / ".kiss2" / "history.db")
         expected = 0
 
         for rnd in range(12):

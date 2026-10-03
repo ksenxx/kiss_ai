@@ -291,7 +291,7 @@ class TestFanOutForwardsUseMemory:
         home = _home(monkeypatch, tmp_path)
         _write_config(home, {"use_memory": True})
         monkeypatch.setattr(_persistence, "_KISS_DIR", home)
-        monkeypatch.setattr(_persistence, "_DB_PATH", home / "sorcar.db")
+        monkeypatch.setattr(_persistence, "_DB_PATH", home / "history.db")
         monkeypatch.setattr(_persistence, "_db_conn", None)
         (tmp_path / "work").mkdir(exist_ok=True)
         seen: list[dict[str, Any]] = []

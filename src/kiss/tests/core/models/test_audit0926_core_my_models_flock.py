@@ -45,8 +45,13 @@ for i in range(n):
 
 
 def _run_workers(home: Path, n: int, tags: list[str]) -> None:
-    """Start one ``save_custom_model`` worker per tag with ``HOME=home`` and wait."""
+    """Start one ``save_custom_model`` worker per tag with ``HOME=home`` and wait.
+
+    The registry lives in ``$KISS_HOME`` (``~/.kiss`` by default), so the
+    test runner's own ``KISS_HOME`` is dropped: ``HOME`` alone decides.
+    """
     env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+    env.pop("KISS_HOME", None)
     start_file = home / "start"
     procs = [
         subprocess.Popen(

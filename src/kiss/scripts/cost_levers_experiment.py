@@ -9,7 +9,7 @@ a lever switched off (the behaviour before
 ``projects/cost-levers-implementation-plan.md`` landed) and once with it
 on, and reports tokens, cost and steps from the agents' own usage
 counters.  Runs use an isolated ``KISS_HOME`` so nothing lands in the
-production ``sorcar.db``; the tasks only read the repository.
+production ``history.db``; the tasks only read the repository.
 
 Usage::
 
@@ -23,7 +23,7 @@ Experiments:
 * **E2 review-profile** — one reviewer sub-agent spawned through the fan-out
   engine with the ``full`` toolset vs the ``review`` profile.
 * **E3 system-prompt** — a trivial task with the previous ``SYSTEM.md``
-  (mandatory first ``Read("./SORCAR.md")``) vs the current one.
+  (mandatory first ``Read("./AGENTS.md")``) vs the current one.
 * **E4 chat-digest** — a trivial follow-up in a chat whose earlier tasks have
   long HTML results, with the chat-history digest off vs on.
 
@@ -69,7 +69,7 @@ def isolate_kiss_home() -> Path:
     os.environ["KISS_MUSE_AUTH"] = "0"
     th._db_conn = None
     th._KISS_DIR = home
-    th._DB_PATH = home / "sorcar.db"
+    th._DB_PATH = home / "history.db"
     return home
 
 
@@ -221,7 +221,7 @@ def _previous_system_prompt() -> str:
 
 
 def e3_system_prompt(model: str, repeat: int) -> list[Run]:
-    """Trivial task: previous SYSTEM.md (with the SORCAR.md mandate) vs current."""
+    """Trivial task: previous SYSTEM.md (with the AGENTS.md mandate) vs current."""
     runs = []
     for variant, prompt in (("previous", _previous_system_prompt()), ("current", SYSTEM_PROMPT)):
         agent, seconds, printer = _run_agent(TRIVIAL_TASK, model, base_system_prompt=prompt)

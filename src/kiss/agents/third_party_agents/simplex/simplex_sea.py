@@ -25,7 +25,6 @@ import queue
 import sys
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from websockets.exceptions import ConnectionClosed
@@ -38,6 +37,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ _DEFAULT_WS_URL = "ws://127.0.0.1:5225"
 _COMMAND_TIMEOUT = 15.0
 _PUMP_TIMEOUT = 0.2
 
-_SIMPLEX_DIR = Path.home() / ".kiss" / "third_party_agents" / "simplex"
+_SIMPLEX_DIR = kiss_home() / "third_party_agents" / "simplex"
 _config = ChannelConfig(_SIMPLEX_DIR, ("ws_url",))
 
 

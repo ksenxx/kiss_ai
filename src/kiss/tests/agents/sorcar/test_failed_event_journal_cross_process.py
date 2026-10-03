@@ -65,7 +65,7 @@ def kiss_home() -> Iterator[Path]:
     saved = (persistence._DB_PATH, persistence._db_conn, persistence._KISS_DIR)
     os.environ["KISS_HOME"] = str(home)
     persistence._KISS_DIR = home
-    persistence._DB_PATH = home / "sorcar.db"
+    persistence._DB_PATH = home / "history.db"
     persistence._db_conn = None
     try:
         yield home
@@ -111,7 +111,7 @@ def _journal_residue(home: Path) -> list[str]:
     """Return leftover journal files, ignoring the persistent lock file."""
     return sorted(
         p.name
-        for p in home.glob("sorcar.db.failed*")
+        for p in home.glob("history.db.failed*")
         if not p.name.endswith(".lock")
     )
 

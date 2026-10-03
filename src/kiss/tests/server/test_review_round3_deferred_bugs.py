@@ -32,7 +32,7 @@ from kiss.server import agent_state
 
 @pytest.fixture(autouse=True)
 def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    db_path = tmp_path / "sorcar.db"
+    db_path = tmp_path / "history.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
     with agent_state.STATE_LOCK:

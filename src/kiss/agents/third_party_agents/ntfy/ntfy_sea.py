@@ -34,7 +34,6 @@ import json
 import logging
 import sys
 import threading
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,13 +46,15 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.brand import HOME_DIR
+from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SERVER = "https://ntfy.sh"
 _DEFAULT_ECHO_TAG = "kiss-sorcar"
 
-_NTFY_DIR = Path.home() / ".kiss" / "third_party_agents" / "ntfy"
+_NTFY_DIR = kiss_home() / "third_party_agents" / "ntfy"
 _config = ChannelConfig(_NTFY_DIR, ("topic",))
 
 
@@ -61,7 +62,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/ntfy help``."""
     return (
         "Publishes notifications to and reads messages from the ntfy topic configured in "
-        "~/.kiss/third_party_agents/ntfy/config.json (optional self-hosted server and access "
+        f"~/{HOME_DIR}/third_party_agents/ntfy/config.json (optional self-hosted server and access "
         "token); use it with `run_agent(agent=\"ntfy\", task=...)` or the "
         "`kiss-ntfy -t \"<task>\"` CLI (`kiss-ntfy --channel <topic>` polls the topic and "
         "answers new messages)."

@@ -45,7 +45,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     _close_db()
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
-    monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")))
+    monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "history.db")))
     cfg_path = os.path.join(tmpdir, "config.json")
     monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
     monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))

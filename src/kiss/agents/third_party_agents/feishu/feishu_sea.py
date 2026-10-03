@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents._channel_agent_utils import (
@@ -27,8 +26,9 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
 )
 from kiss.core.browser_handoff import portal_handoff
+from kiss.core.config import kiss_home
 
-_FEISHU_DIR = Path.home() / ".kiss" / "third_party_agents" / "feishu"
+_FEISHU_DIR = kiss_home() / "third_party_agents" / "feishu"
 _config = ChannelConfig(
     _FEISHU_DIR,
     (

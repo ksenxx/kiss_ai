@@ -55,7 +55,7 @@ class TestResetMarkerClaim(IsolatedAsyncioTestCase):
         kiss_dir.mkdir()
         self._saved_th = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
         self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = 0.1

@@ -215,6 +215,33 @@ function rootRows(win) {
   return all(win, '#explorer-tree > .explorer-row.is-root');
 }
 
+/**
+ * The daemon's answer to the working-directory check "Set as Working
+ * Directory" makes (the same `listDir` with a 'workdir:' token that
+ * "..." > Working directory sends): the check is asserted to exist and
+ * be scoped to *dir* itself, then answered (with *error* when given).
+ */
+function answerWorkDirCheck(win, posted, dir, error) {
+  const checks = ofType(posted, 'listDir').filter(
+    m => String(m.token).startsWith('workdir:') && m.path === dir,
+  );
+  const req = checks[checks.length - 1];
+  assert.ok(req, 'a workdir: listDir check for ' + dir + ' was sent');
+  assert.strictEqual(req.workDir, dir, 'the check is scoped to the folder');
+  if (error) {
+    send(win, {type: 'dirListing', token: req.token, path: dir, error});
+    return req;
+  }
+  send(win, {
+    type: 'dirListing',
+    token: req.token,
+    path: dir,
+    root: dir,
+    entries: [],
+  });
+  return req;
+}
+
 function rowFor(win, p, root) {
   // Matched in JS rather than a CSS attribute selector: a backslash in
   // the path would be a CSS escape there.
@@ -404,6 +431,16 @@ async function main() {
     addOtherFolder(win, posted, []);
     const before = posted.length;
     click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    // The check mark does what "..." > Working directory does: the
+    // daemon lists the folder first; nothing changes until it answers.
+    assert.ok(
+      !posted
+        .slice(before)
+        .some(m => m.type === 'saveConfig' || m.type === 'setWorkDir'),
+      'no saveConfig / setWorkDir before the daemon confirms the folder',
+    );
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
+    answerWorkDirCheck(win, posted, OTHER);
     const after = posted.slice(before);
     const saved = after.find(m => m.type === 'saveConfig');
     assert.ok(
@@ -897,7 +934,7 @@ async function main() {
     assert.strictEqual(
       gA.querySelector('.history-chat-header').textContent.trim(),
       'Fix login and add tests',
-      'the summary is the header button\'s accessible name',
+      "the summary is the header button's accessible name",
     );
     // B's task finishes and the daemon summarises the chat: the next
     // refresh renames the panel. A summary of only whitespace does not
@@ -961,7 +998,7 @@ async function main() {
     [gA, gB] = groups(win);
     assert.ok(
       !collapsed(gA),
-      "a search expands A even though the user collapsed it before",
+      'a search expands A even though the user collapsed it before',
     );
     assert.ok(!collapsed(gB), 'B expands for the search too');
     // A collapse DURING the search applies to the search view only.
@@ -984,10 +1021,7 @@ async function main() {
     setSearch('');
     sendHistory(win, posted, 0, page());
     [gA, gB] = groups(win);
-    assert.ok(
-      collapsed(gA),
-      "clearing the search restores A's saved collapse",
-    );
+    assert.ok(collapsed(gA), "clearing the search restores A's saved collapse");
     assert.ok(collapsed(gB), 'clearing the search restores the default');
     // A NEW search starts from expanded matches again: the fold made
     // inside the previous search does not carry over.
@@ -1021,7 +1055,7 @@ async function main() {
     assert.strictEqual(
       groups(win)[0].dataset.chatId,
       'A',
-      "A still leads (its newest task is the youngest)",
+      'A still leads (its newest task is the youngest)',
     );
     assert.strictEqual(
       win.document.activeElement,
@@ -2549,6 +2583,7 @@ async function main() {
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
     click(win, menuItem(win, 'Set as Working Directory'));
+    answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     active = win.document.activeElement;
     assert.ok(
@@ -2665,6 +2700,7 @@ async function main() {
     rootRows(win)[1].focus();
     rightClick(win, rootRows(win)[1]);
     click(win, menuItem(win, 'Set as Working Directory'));
+    answerWorkDirCheck(win, posted, OTHER);
     assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
     await sleep(400);
     const active = win.document.activeElement;
@@ -2673,6 +2709,373 @@ async function main() {
       'focus still on a tree row after the retries, got ' +
         (active ? active.id || active.className : 'none'),
     );
+    win.close();
+  });
+
+  await test('Set as Working Directory on a folder the daemon refuses: an error notification, the tree unchanged', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    const before = posted.length;
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    answerWorkDirCheck(win, posted, OTHER, 'Not a directory: ' + OTHER);
+    assert.ok(
+      !posted
+        .slice(before)
+        .some(m => m.type === 'saveConfig' || m.type === 'setWorkDir'),
+      'a refused folder never reaches saveConfig / setWorkDir',
+    );
+    assert.deepStrictEqual(
+      rootRows(win).map(r => r.dataset.explorerPath),
+      [WD, OTHER],
+      'the working directory is unchanged',
+    );
+    assert.ok(rootRows(win)[0].classList.contains('is-workdir'));
+    // The panel is closed, so the refusal is a notification, not a
+    // line in the panel's error box.
+    const toast = win.document.querySelector('.kiss-notification');
+    assert.ok(toast, 'an error notification is shown');
+    assert.ok(
+      toast.textContent.indexOf('Not a directory: ' + OTHER) >= 0,
+      "the notification carries the daemon's reason",
+    );
+    const panelError = byId(win, 'workdir-error');
+    assert.ok(panelError.hidden, "the closed panel's error line stays hidden");
+    win.close();
+  });
+
+  await test('Set as Working Directory: a late daemon reply leaves the keyboard where the user moved it', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    rootRows(win)[1].focus();
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    // While the daemon checks the folder the user goes back to typing.
+    const input = byId(win, 'task-input');
+    input.focus();
+    assert.strictEqual(win.document.activeElement, input);
+    answerWorkDirCheck(win, posted, OTHER);
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
+    assert.strictEqual(
+      win.document.activeElement,
+      input,
+      'the switch does not pull the keyboard back into the tree',
+    );
+    win.close();
+  });
+
+  await test("The Working directory panel's own Open never focuses the Explorer, even after an abandoned check-mark switch", async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    addOtherFolder(win, posted, []);
+    rootRows(win)[1].focus();
+    click(win, rootRows(win)[1].querySelector('.explorer-root-set'));
+    const tickCheck = ofType(posted, 'listDir')
+      .filter(m => String(m.token).startsWith('workdir:'))
+      .pop();
+    // Before the daemon answers, the user opens "..." > Working
+    // directory and opens a third folder from there.
+    click(win, byId(win, 'more-btn'));
+    click(win, byId(win, 'workdir-btn'));
+    const box = byId(win, 'workdir-input');
+    box.value = '/data/third';
+    box.dispatchEvent(new win.Event('input', {bubbles: true}));
+    click(win, byId(win, 'workdir-open-btn'));
+    // The check mark's own reply is stale now and changes nothing.
+    send(win, {
+      type: 'dirListing',
+      token: tickCheck.token,
+      path: OTHER,
+      root: OTHER,
+      entries: [],
+    });
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, WD);
+    answerWorkDirCheck(win, posted, '/data/third');
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, '/data/third');
+    const active = win.document.activeElement;
+    assert.ok(
+      !(active && active.classList.contains('explorer-row')),
+      "the panel's switch leaves the Explorer alone, focus on " +
+        (active ? active.id || active.className : 'none'),
+    );
+    win.close();
+  });
+
+  // ---- "Add Folder to Explorer..." offers the recently opened folders --
+
+  const NOW_S = Math.floor(Date.now() / 1000);
+  const RECENTS = [
+    {path: '/data/old', ts: NOW_S - 86400 * 3},
+    {path: WD, ts: NOW_S},
+    {path: OTHER, ts: NOW_S - 3600},
+    {path: '/data/newer', ts: NOW_S - 60},
+  ];
+
+  function recentRows(picker) {
+    return Array.from(
+      picker.querySelectorAll('.folder-picker-recent-list .workdir-item'),
+    );
+  }
+
+  function lastPickerListing(posted) {
+    return ofType(posted, 'listDir')
+      .filter(m => String(m.token).startsWith('picker:'))
+      .pop();
+  }
+
+  await test('Add Folder: the picker lists the recently opened folders (newest first, those already shown left out) and one click adds one', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    const before = posted.length;
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    // The dialog asks for the daemon's latest list, as the panel does.
+    assert.strictEqual(ofType(posted.slice(before), 'getConfig').length, 1);
+    const section = picker.querySelector('.folder-picker-recent');
+    assert.ok(!section.hidden, 'the recent section shows');
+    assert.deepStrictEqual(
+      recentRows(picker).map(r => r.dataset.path),
+      ['/data/newer', OTHER, '/data/old'],
+      'newest first; the working directory (already shown) left out',
+    );
+    const row = recentRows(picker)[1];
+    assert.strictEqual(row.title, 'Add ' + OTHER);
+    assert.ok(
+      /opened .*ago/.test(row.querySelector('.workdir-item-ago').textContent),
+      'the row says when the folder was last opened',
+    );
+    // One click: the daemon lists the folder, then it is added.
+    click(win, row);
+    const req = lastPickerListing(posted);
+    assert.strictEqual(req.path, OTHER);
+    assert.strictEqual(req.workDir, OTHER);
+    assert.ok(!picker.hidden, 'the dialog waits for the listing');
+    assert.strictEqual(rootRows(win).length, 1, 'nothing added yet');
+    send(win, {
+      type: 'dirListing',
+      token: req.token,
+      path: OTHER,
+      root: OTHER,
+      entries: [],
+    });
+    assert.ok(picker.hidden, 'the dialog closes once the folder is listed');
+    assert.deepStrictEqual(
+      rootRows(win).map(r => r.dataset.explorerPath),
+      [WD, OTHER],
+    );
+    assert.deepStrictEqual(
+      JSON.parse(win.localStorage.getItem('kiss-explorer-roots')),
+      [OTHER],
+    );
+    assert.strictEqual(
+      posted
+        .slice(before)
+        .filter(m => m.type === 'saveConfig' || m.type === 'setWorkDir').length,
+      0,
+      'adding never touches the working directory',
+    );
+    // Reopened, the list no longer offers the folder just added.
+    click(win, byId(win, 'explorer-add-folder'));
+    assert.deepStrictEqual(
+      recentRows(picker).map(r => r.dataset.path),
+      ['/data/newer', '/data/old'],
+    );
+    // A fresher configData repaints the open dialog's list.
+    send(win, {
+      type: 'configData',
+      config: {
+        work_dir: WD,
+        recent_work_dirs: RECENTS.concat([
+          {path: '/data/fresh', ts: NOW_S + 5},
+        ]),
+      },
+    });
+    assert.deepStrictEqual(
+      recentRows(picker).map(r => r.dataset.path),
+      ['/data/fresh', '/data/newer', '/data/old'],
+    );
+    win.close();
+  });
+
+  await test('Add Folder: a recent folder the daemon refuses stays unadded, with the reason in the dialog', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    // Enter on a focused row picks it like a click.
+    const row = recentRows(picker).find(r => r.dataset.path === '/data/old');
+    key(win, row, 'Enter');
+    const req = lastPickerListing(posted);
+    assert.strictEqual(req.path, '/data/old');
+    send(win, {
+      type: 'dirListing',
+      token: req.token,
+      path: '/data/old',
+      error: 'No such directory',
+    });
+    assert.ok(!picker.hidden, 'the dialog stays open');
+    assert.strictEqual(
+      picker.querySelector('.folder-picker-note').textContent,
+      'No such directory',
+    );
+    assert.strictEqual(rootRows(win).length, 1, 'nothing added');
+    assert.strictEqual(win.localStorage.getItem('kiss-explorer-roots'), null);
+    // Other keys on a row do nothing; Space picks.
+    key(win, row, 'ArrowDown');
+    assert.strictEqual(
+      lastPickerListing(posted),
+      req,
+      'ArrowDown asks nothing',
+    );
+    key(win, row, ' ');
+    assert.notStrictEqual(lastPickerListing(posted), req, 'Space picks');
+    assert.strictEqual(lastPickerListing(posted).path, '/data/old');
+    win.close();
+  });
+
+  await test('The open dialog follows the Explorer: a repaint keeps the focused row, and a folder that becomes a top-level folder leaves the list', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    const row = recentRows(picker).find(r => r.dataset.path === OTHER);
+    row.focus();
+    // The daemon's reply to the dialog's getConfig rebuilds the rows;
+    // the keyboard stays on the same folder.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    assert.notStrictEqual(
+      win.document.activeElement,
+      row,
+      'the rows were rebuilt',
+    );
+    assert.strictEqual(win.document.activeElement.dataset.path, OTHER);
+    assert.ok(picker.contains(win.document.activeElement));
+    // Meanwhile another client of the daemon made OTHER the working
+    // directory (the next configData reports it): the Explorer rebuilds
+    // around it and the dialog stops offering it.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: OTHER, recent_work_dirs: RECENTS},
+    });
+    answer(win, posted, OTHER, [], OTHER);
+    assert.strictEqual(rootRows(win)[0].dataset.explorerPath, OTHER);
+    assert.deepStrictEqual(
+      recentRows(picker).map(r => r.dataset.path),
+      [WD, '/data/newer', '/data/old'],
+      'the new working directory left, the old one offered',
+    );
+    assert.ok(
+      !picker.contains(win.document.activeElement) ||
+        win.document.activeElement.dataset.path !== OTHER,
+      'no row of the vanished folder keeps focus',
+    );
+    win.close();
+  });
+
+  await test('Add Folder: a recent folder the dialog already lists is added at once, without another listing', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    send(win, {
+      type: 'configData',
+      config: {
+        work_dir: WD,
+        recent_work_dirs: [{path: WD + '/sub', ts: NOW_S}],
+      },
+    });
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    const req = lastPickerListing(posted);
+    assert.strictEqual(
+      req.path,
+      WD,
+      'the dialog opens on the working directory',
+    );
+    send(win, {
+      type: 'dirListing',
+      token: req.token,
+      path: WD,
+      root: WD,
+      entries: [{name: 'sub', path: WD + '/sub', isDir: true}],
+    });
+    const listings = ofType(posted, 'listDir').length;
+    click(win, recentRows(picker)[0]);
+    assert.ok(picker.hidden, 'added at once');
+    assert.deepStrictEqual(
+      rootRows(win).map(r => r.dataset.explorerPath),
+      [WD, WD + '/sub'],
+    );
+    // The only new listDir is the Explorer's own listing of the new folder.
+    const added = posted
+      .slice(0)
+      .filter(m => m.type === 'listDir')
+      .slice(listings);
+    assert.strictEqual(added.length, 1);
+    assert.strictEqual(added[0].path, WD + '/sub');
+    assert.ok(!String(added[0].token).startsWith('picker:'));
+    win.close();
+  });
+
+  await test('The recent section is hidden with nothing left to offer and in the "Open Folder" picker', async () => {
+    const {win, posted} = makeWebview();
+    openExplorer(win, posted, []);
+    // No recents at all.
+    click(win, byId(win, 'explorer-add-folder'));
+    const picker = byId(win, 'folder-picker');
+    assert.ok(picker.querySelector('.folder-picker-recent').hidden);
+    click(win, picker.querySelector('.folder-picker-cancel'));
+    // Every recent folder is already a top-level folder.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: [{path: WD, ts: NOW_S}]},
+    });
+    click(win, byId(win, 'explorer-add-folder'));
+    assert.ok(picker.querySelector('.folder-picker-recent').hidden);
+    assert.strictEqual(recentRows(picker).length, 0);
+    click(win, picker.querySelector('.folder-picker-cancel'));
+    // "Open Folder as Working Directory" never shows the section (the
+    // Working directory panel is where those are opened from) and
+    // asks for no configData.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    const before = posted.length;
+    click(win, byId(win, 'explorer-pick-folder'));
+    assert.strictEqual(
+      picker.querySelector('#folder-picker-title').textContent,
+      'Open Folder as Working Directory',
+    );
+    assert.ok(picker.querySelector('.folder-picker-recent').hidden);
+    assert.strictEqual(recentRows(picker).length, 0);
+    assert.strictEqual(ofType(posted.slice(before), 'getConfig').length, 0);
+    // A configData arriving meanwhile keeps it hidden.
+    send(win, {
+      type: 'configData',
+      config: {work_dir: WD, recent_work_dirs: RECENTS},
+    });
+    assert.ok(picker.querySelector('.folder-picker-recent').hidden);
+    // The panel's own list still carries every folder, titled "Open".
+    click(win, picker.querySelector('.folder-picker-cancel'));
+    click(win, byId(win, 'more-btn'));
+    click(win, byId(win, 'workdir-btn'));
+    const panelRows = all(win, '#workdir-list .workdir-item');
+    assert.strictEqual(panelRows.length, 4);
+    assert.strictEqual(panelRows[0].title, 'Open ' + WD);
     win.close();
   });
 

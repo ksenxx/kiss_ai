@@ -506,8 +506,9 @@ async function testChunkAfterSwitchRetargetsSweep() {
 // --------------------------------------------------------------------
 // Task end while a sweep is pending: the deferred tail must run
 // BEFORE the running state flips off — swept after it, the chevron
-// pass would hide the finished task's panels (chv-hidden) and the
-// collapse debt would be dropped.  A non-chunk event must likewise
+// pass would fold the finished task's newest panels (which the
+// synchronous tail never did) and the collapse debt would be
+// dropped.  A non-chunk event must likewise
 // settle the pending sweep first, keeping the old tail-per-event
 // ordering.
 // --------------------------------------------------------------------
@@ -533,17 +534,18 @@ async function testTaskEndFlushesPendingSweepWhileRunning() {
     'BUG: the pending sweep was not flushed before the running state ' +
       'flipped off, dropping the collapse debt',
   );
-  assert.strictEqual(
-    O.querySelectorAll('.chv-hidden').length,
-    0,
-    'BUG: sweeping after setRunningState(false) hid the finished ' +
-      "task's panels (chv-hidden), which the synchronous tail never did",
+  const newestOpen = () =>
+    !panels[1].classList.contains('collapsed') &&
+    !panels[2].classList.contains('collapsed');
+  assert.ok(
+    newestOpen(),
+    'BUG: sweeping after setRunningState(false) folded the finished ' +
+      "task's newest panels, which the synchronous tail never did",
   );
   await nextFrames(win);
-  assert.strictEqual(
-    O.querySelectorAll('.chv-hidden').length,
-    0,
-    'BUG: a straggler sweep hid panels after the task ended',
+  assert.ok(
+    newestOpen(),
+    'BUG: a straggler sweep folded the newest panels after the task ended',
   );
   assert.ok(
     panels[2].querySelector('.bash-panel-content').textContent.includes(
@@ -612,10 +614,11 @@ async function testReplayCancelsPendingSweep() {
   });
   const replayed = O.querySelectorAll('.ev.tc');
   assert.strictEqual(replayed.length, 1, 'replay must replace the transcript');
+  const stateBefore = replayed[0].className;
   await nextFrames(win);
   assert.strictEqual(
-    O.querySelectorAll('.chv-hidden').length,
-    0,
+    replayed[0].className,
+    stateBefore,
     'BUG: a sweep deferred for the outgoing transcript ran against ' +
       'the replayed one',
   );

@@ -94,7 +94,7 @@ class DaemonLocalHarness(unittest.TestCase):
             _persistence._KISS_DIR,
         )
         _persistence._KISS_DIR = kiss_dir
-        _persistence._DB_PATH = kiss_dir / "sorcar.db"
+        _persistence._DB_PATH = kiss_dir / "history.db"
         _persistence._db_conn = None
         self._saved_config_override = (
             vars(vscode_config).get("CONFIG_DIR"),

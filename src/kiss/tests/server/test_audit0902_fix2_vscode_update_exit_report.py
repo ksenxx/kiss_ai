@@ -99,7 +99,7 @@ class TestRunUpdateExitReport(IsolatedAsyncioTestCase):
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
 
         certfile = Path(self.tmpdir) / "cert.pem"
