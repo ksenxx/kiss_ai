@@ -31,7 +31,10 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   scheduler thread does not wait for the jobs: a tick that overlaps
   runs from a previous tick is not skipped — it simply leaves the
   jobs that are still running alone (they stay due and are picked up
-  by the first tick after they finish) and starts the rest.
+  by the first tick after they finish) and starts the rest.  Like
+  cron, missed occurrences are not made up: a repeating job found
+  more than :data:`MISSED_RUN_GRACE_SECONDS` overdue (the daemon was
+  down, the machine asleep) is rescheduled from now without running.
   ``kiss-cron --tick`` and ``kiss-cron --daemon`` remain available
   for running the scheduler outside the daemon; in that mode command
   jobs work standalone while prompt jobs still need a reachable
@@ -132,6 +135,19 @@ to the dead one's endpoint.
 """
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
+MISSED_RUN_GRACE_SECONDS = 10 * 60.0
+"""How late a repeating job may still run; a later occurrence is missed.
+
+Like cron, the scheduler never catches up on occurrences that passed
+while no scheduler was running (the kiss-web daemon was stopped,
+restarted by an install, or the machine was asleep): a tick that finds
+a repeating job overdue by more than this many seconds reschedules it
+from now without running it, so a daemon coming back after a day never
+fires every daily job at once.  The window is wide enough for a daemon
+restart and for a job that overlapped its own next occurrence by a few
+minutes.  One-shot jobs are exempt: they fire once, late, rather than
+never.
+"""
 MAX_STORED_SUMMARY_CHARS = 4000
 
 _UNIT_SECONDS = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
@@ -1020,11 +1036,20 @@ def tick(now: float | None = None, wait: bool = True) -> int:
     ``next_run_at`` or schedule) is disabled and skipped instead of
     aborting the tick.
 
+    A repeating job whose occurrence passed more than
+    :data:`MISSED_RUN_GRACE_SECONDS` ago is missed, not late: the tick
+    advances its ``next_run_at`` from now without running it and logs
+    a warning, so a scheduler starting after downtime (a daemon
+    restart by ``install.sh``, a machine asleep overnight) never fires
+    every missed daily job at once.  A one-shot still runs, once,
+    however late.
+
     A job still running from a previous tick of this process (see
     :data:`_running`) is not due: the tick leaves it untouched (its
     ``next_run_at`` stays in the past) and starts only the other due
-    jobs, so it runs again on the first tick after it finishes instead
-    of overlapping itself.  The registry is process-local, so
+    jobs, so it runs again on the first tick after it finishes — within
+    the grace window — instead of overlapping itself.  The registry is
+    process-local, so
     ``kiss-cron --tick`` in another process and ``run_now`` may still
     overlap a run; a one-shot claimed by a process that crashes
     mid-run is not retried.
@@ -1051,14 +1076,28 @@ def tick(now: float | None = None, wait: bool = True) -> int:
             if not job.get("enabled") or job["id"] in running:
                 continue
             try:
-                if float(job["next_run_at"]) > now:
+                overdue = now - float(job["next_run_at"])
+                if overdue < 0:
                     continue
                 next_run = (
                     None
                     if job.get("one_shot")
                     else compute_next_run(str(job["schedule"]), now)
                 )
-            except (TypeError, ValueError, KeyError) as e:
+                if overdue > MISSED_RUN_GRACE_SECONDS and not job.get("one_shot"):
+                    # timedelta(int(inf)) raises OverflowError: handled below.
+                    logger.warning(
+                        "kiss-cron: skipping the run of %r (%s) due %s ago, past "
+                        "the %s grace window; next run at %s",
+                        job.get("name"), job["id"],
+                        timedelta(seconds=int(overdue)),
+                        timedelta(seconds=MISSED_RUN_GRACE_SECONDS),
+                        format_schedule_time(next_run) if next_run else "never",
+                    )
+                    job["next_run_at"] = next_run
+                    changed = True
+                    continue
+            except (TypeError, ValueError, KeyError, OverflowError) as e:
                 logger.error("Disabling malformed cron job %s: %s", job.get("id"), e)
                 job["enabled"] = False
                 job["last_status"] = "error"

@@ -16,6 +16,7 @@ channel module is imported.
 from __future__ import annotations
 
 import socket
+import time
 from pathlib import Path
 
 import yaml
@@ -80,7 +81,7 @@ def test_kiss_web_daemon_runs_scheduler_thread(tmp_path: Path) -> None:
         "create", name="boot job", command="echo ran inside daemon",
         schedule="every 1h",
     ))
-    _set_job_fields(job["id"], next_run_at=1.0)  # due on the first tick
+    _set_job_fields(job["id"], next_run_at=time.time() - 1)  # due on the first tick
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

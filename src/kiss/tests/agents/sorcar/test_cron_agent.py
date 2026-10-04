@@ -437,6 +437,91 @@ def test_tick_one_shot_disables_job(tmp_path: Path) -> None:
     ).read_text(encoding="utf-8")
 
 
+def test_tick_after_downtime_skips_missed_repeating_runs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scheduler starting a day late does not fire every missed job at once.
+
+    This is what happened after ``install.sh`` restarted the kiss-web
+    daemon: every daily job whose time had passed while the daemon was
+    down ran together on the first tick.  Missed occurrences of
+    repeating jobs are now skipped (rescheduled from now, like cron);
+    a one-shot still runs late, once (``test_tick_one_shot_disables_job``
+    ticks a one-shot two billion seconds late).
+    """
+    schedules = {"nightly": "0 5 * * *", "sync": "every 4h", "poll": "every 1m"}
+    jobs = {
+        name: _create(cron_job(
+            "create", name=name, command=f"echo {name} ran", schedule=schedule,
+        ))
+        for name, schedule in schedules.items()
+    }
+    now = _ts(2026, 10, 4, 11, 12)
+    for job in jobs.values():
+        _set_job_fields(job["id"], next_run_at=now - 26 * 3600)
+    with caplog.at_level("WARNING", logger="kiss.agents.sorcar.cron_agent"):
+        assert tick(now) == 0
+    for name, job in jobs.items():
+        stored = next(j for j in load_jobs() if j["id"] == job["id"])
+        assert stored["enabled"] is True
+        assert stored["last_run_at"] is None, name
+        assert stored["next_run_at"] == compute_next_run(schedules[name], now), name
+        assert not (tmp_path / "cron" / "output" / f"{job['id']}.md").exists(), name
+        assert f"skipping the run of {name!r}" in caplog.text
+    assert "due 1 day, 2:00:00 ago, past the 0:10:00 grace window" in caplog.text
+    # The jobs resume their normal cadence: only the minutely poll is due
+    # a minute later, and it runs.
+    assert tick(now + 60) == 1
+    assert "poll ran" in (
+        tmp_path / "cron" / "output" / f"{jobs['poll']['id']}.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_tick_grace_window_boundary(tmp_path: Path) -> None:
+    """A run late by at most the grace window still happens; one second more is missed."""
+    late = _create(cron_job("create", name="late", command="echo late", schedule="every 1h"))
+    missed = _create(cron_job(
+        "create", name="missed", command="echo missed", schedule="every 1h",
+    ))
+    now = 2_000_000_000.0
+    _set_job_fields(late["id"], next_run_at=now - cron_agent.MISSED_RUN_GRACE_SECONDS)
+    _set_job_fields(missed["id"], next_run_at=now - cron_agent.MISSED_RUN_GRACE_SECONDS - 1)
+    assert tick(now) == 1
+    by_id = {job["id"]: job for job in load_jobs()}
+    assert by_id[late["id"]]["last_status"] == "ok"
+    assert by_id[late["id"]]["last_run_at"] == now
+    assert by_id[missed["id"]]["last_run_at"] is None
+    assert by_id[missed["id"]]["next_run_at"] == now + 3600
+    assert not (tmp_path / "cron" / "output" / f"{missed['id']}.md").exists()
+
+
+def test_missed_run_of_never_matching_cron_logs_never(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missed job whose expression has no future occurrence is logged as ``never``."""
+    job = _create(cron_job("create", name="feb31", command="echo x", schedule="0 0 1 1 *"))
+    now = 2_000_000_000.0
+    _set_job_fields(job["id"], schedule="0 0 31 2 *", next_run_at=now - 86400)
+    with caplog.at_level("WARNING", logger="kiss.agents.sorcar.cron_agent"):
+        assert tick(now) == 0
+    assert "next run at never" in caplog.text
+    assert load_jobs()[0]["next_run_at"] is None
+
+
+def test_infinitely_overdue_job_is_disabled_and_the_rest_run() -> None:
+    """A ``-Infinity`` timestamp (json accepts it) is malformed, not a tick-wide crash."""
+    bad = _create(cron_job("create", name="bad", command="echo bad", schedule="every 1h"))
+    good = _create(cron_job("create", name="good", command="echo good", schedule="every 1h"))
+    now = 2_000_000_000.0
+    _set_job_fields(bad["id"], next_run_at=float("-inf"))
+    _set_job_fields(good["id"], next_run_at=now - 1)
+    assert tick(now) == 1
+    by_id = {job["id"]: job for job in load_jobs()}
+    assert by_id[bad["id"]]["enabled"] is False
+    assert by_id[bad["id"]]["last_summary"].startswith("disabled: malformed job:")
+    assert by_id[good["id"]]["last_summary"] == "good"
+
+
 def test_silent_command_delivers_nothing(tmp_path: Path) -> None:
     job = _create(cron_job("create", name="quiet", command="true", schedule="every 1m"))
     _set_job_fields(job["id"], next_run_at=1.0)
@@ -649,7 +734,7 @@ def test_cli_create_list_tick_manage(
     )
     job_id = str(yaml.safe_load(out)["created"]["id"])
     assert "cli job" in _run_cli(monkeypatch, capsys, "--list")
-    _set_job_fields(job_id, next_run_at=1.0)
+    _set_job_fields(job_id, next_run_at=time.time() - 1)
     assert "ran 1 job(s)" in _run_cli(monkeypatch, capsys, "--tick")
     assert "ran:" in _run_cli(monkeypatch, capsys, "--run", job_id)
     assert load_jobs()[0]["last_summary"] == "from cli"
@@ -756,7 +841,7 @@ def test_scheduler_thread_runs_due_jobs_and_stops() -> None:
     job = _create(cron_job(
         "create", name="sched", command="echo scheduled", schedule="every 1h",
     ))
-    _set_job_fields(job["id"], next_run_at=1.0)
+    _set_job_fields(job["id"], next_run_at=time.time() - 1)
     stop_event = start_scheduler_thread(interval=0.05)
     try:
         deadline = time.time() + 10

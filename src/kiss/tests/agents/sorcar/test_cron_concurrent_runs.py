@@ -209,6 +209,9 @@ def test_overlapping_tick_runs_idle_jobs_and_skips_the_running_one(tmp_path: Pat
 
 def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:
     slow = _due_command_job("slow", "sleep 1.5; echo slow-done")
+    # The scheduler thread ticks with the real clock: a job due in 1970
+    # would count as missed, so make it due a second ago.
+    _set_job_fields(slow["id"], next_run_at=time.time() - 1)
     stop_event = start_scheduler_thread(interval=0.05)
     try:
         _wait_until(lambda: running_job_ids() == {slow["id"]})
@@ -219,7 +222,7 @@ def test_scheduler_thread_does_not_block_on_long_job(tmp_path: Path) -> None:
             deliver="none",
         ))
         with cron_agent._jobs_lock(blocking=True):
-            _set_job_fields(quick["id"], next_run_at=1.0)
+            _set_job_fields(quick["id"], next_run_at=time.time() - 1)
         _wait_until(lambda: _stored(quick["id"]).get("last_status") == "ok", timeout=1.0)
         assert slow["id"] in running_job_ids()
         _wait_until(lambda: _stored(slow["id"]).get("last_status") == "ok")
