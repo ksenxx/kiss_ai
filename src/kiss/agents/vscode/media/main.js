@@ -1839,10 +1839,11 @@
     // function stays self-contained.
     if (document.body.classList.contains('editor-tab-mode')) {
       // The EDITOR TAB is this chat's tab: mirror the root chat tab's
-      // title onto it through the host.
+      // label (the static task panel's text while the root is on
+      // screen, see tabLabel) onto it through the host.
       const root = editorRootTab();
       if (root) {
-        const title = root.title || 'new chat';
+        const title = tabLabel(root) || 'new chat';
         // Mirror the internal tab strip's status icon onto the EDITOR
         // tab: the host paints a spinner while the task runs and a
         // green tick / red cross after it ends (the same states
@@ -1910,7 +1911,8 @@
         'aria-selected',
         tab.id === activeTabId ? 'true' : 'false',
       );
-      el.setAttribute('aria-label', tab.title);
+      const label = tabLabel(tab);
+      el.setAttribute('aria-label', label);
       // All chat tabs swap the one shared chat surface (#output), so a
       // single shared tabpanel is the correct association.
       el.setAttribute('aria-controls', 'output');
@@ -1955,10 +1957,10 @@
         el.appendChild(attention);
       }
 
-      const label = document.createElement('span');
-      label.className = 'chat-tab-label';
-      label.textContent = tab.title;
-      el.appendChild(label);
+      const labelEl = document.createElement('span');
+      labelEl.className = 'chat-tab-label';
+      labelEl.textContent = label;
+      el.appendChild(labelEl);
 
       // Unsaved edits in a content tab's editor show as VS Code's
       // filled dot next to the name, so the user sees what a close
@@ -4594,6 +4596,28 @@
     const t = (title || '').trim();
     if (!t) return 'new chat';
     return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
+  }
+
+  /**
+   * The title a chat tab displays.
+   *
+   * The ACTIVE top-level chat tab names whatever the static task panel
+   * above the transcript names: the tab's own task normally, but also
+   * a neighbouring task the reader scrolled into or a history row's
+   * task shown read-only before any task ran. `tab.title` stays the
+   * tab's own task (its identity for the registry and the share
+   * title); only the label follows the panel. Every other tab - a
+   * background chat, a sub-agent, a file - shows its own title.
+   */
+  function tabLabel(tab) {
+    if (tab.id !== activeTabId || tab.isSubagentTab || tab.isContentTab)
+      return tab.title;
+    const panel = document.getElementById('task-panel');
+    const text = document.getElementById('task-panel-text');
+    if (!panel || !text || !panel.classList.contains('visible'))
+      return tab.title;
+    const shown = (text.textContent || '').trim();
+    return shown ? clipTabTitle(shown) : tab.title;
   }
 
   // Editor-tabs mode: the panel's single top-level chat tab. Sub-agent
@@ -10718,6 +10742,9 @@
   function setTaskText(text) {
     if (!taskPanel || !taskPanelText) return;
     const t = (text || '').trim();
+    const changed =
+      t !== taskPanelText.textContent ||
+      !!t !== taskPanel.classList.contains('visible');
     if (t) {
       taskPanelText.textContent = t;
       taskPanelText.setAttribute('data-tooltip', t);
@@ -10727,6 +10754,10 @@
       taskPanelText.removeAttribute('data-tooltip');
       taskPanel.classList.remove('visible');
     }
+    // The active tab's label (and, in editor-tabs mode, the editor
+    // tab's title) names what the panel names, see tabLabel. Only a
+    // real change repaints: scrolling calls this on every event.
+    if (changed) renderTabBar();
   }
 
   // taskinfo-coverage:start
