@@ -527,8 +527,9 @@ def run(
 
             ``settings()`` returns a dict of a ``preset`` and any of
             the keyword parameters of this function except the
-            transport and identity ones: ``prompt`` (non-empty),
-            ``work_dir``, ``model``, ``chat_id``, ``system_prompt``,
+            transport, identity and prompt ones (``prompt`` and
+            ``system_prompt`` are the functions above, not settings):
+            ``work_dir``, ``model``, ``chat_id``,
             ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
             ``model_config``, ``use_web_tools``, ``classify_tasks``,
             ``use_memory``, ``is_parallel``, ``tool_profile``,

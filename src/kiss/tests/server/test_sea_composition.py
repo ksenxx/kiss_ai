@@ -146,15 +146,12 @@ def _register(tmp_path: Path, folder: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_settings_vocabulary_has_no_prompt_keys_and_rejects_them_by_name() -> None:
+def test_settings_vocabulary_has_no_prompt_keys() -> None:
     assert "prompt" not in SETTING_TYPES and "system_prompt" not in SETTING_TYPES
     assert "extends" in SETTING_TYPES
-    with pytest.raises(ValueError, match=r"settings\(\)\['prompt'\] is no longer a setting"):
-        resolve_settings({"settings": lambda: {"prompt": "x"}})
-    with pytest.raises(ValueError, match=r"def system_prompt\(\) -> str"):
-        resolve_settings({"settings": lambda: {"system_prompt": "x"}})
-    with pytest.raises(ValueError, match=r"add_to_prompt.*def prompt\(task: str\)"):
-        resolve_settings({"settings": lambda: {"add_to_prompt": "x"}})
+    for key in ("prompt", "system_prompt", "add_to_prompt"):
+        with pytest.raises(ValueError, match=rf"settings\(\) has an unknown key '{key}'"):
+            resolve_settings({"settings": lambda key=key: {key: "x"}})
     # The tool's options vocabulary is the settings vocabulary (minus the
     # keys that describe a script and the tool's own arguments) plus the
     # channel workspace and the two appended texts.
@@ -425,11 +422,9 @@ def test_work_dir_option_and_script_work_dir(
     # The script's own work_dir wins over the option.
     run_agent("t", str(pinning), options='{"work_dir": "sub"}')
     assert captured[-1]["work_dir"] == str(pinned)
-    # The renamed option keys fail by name; the new ones are forwarded.
+    # The wire spellings are not option keys; the ``add_to_*`` ones are forwarded.
     out = run_agent("t", str(plain), options='{"append_to_system_prompt": "x"}')
-    assert out == (
-        "Error: options key 'append_to_system_prompt' was renamed to 'add_to_system_prompt'."
-    )
+    assert out.startswith("Error: options has an unknown key 'append_to_system_prompt'")
     run_agent("t", str(plain), options='{"add_to_system_prompt": "S", "add_to_prompt": "P"}')
     assert captured[-1]["append_to_system_prompt"] == "S"
     assert captured[-1]["append_to_prompt"] == "P"

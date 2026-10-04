@@ -247,12 +247,6 @@ def fanout_conflict(values: Mapping[str, Any]) -> str:
         return "names a workspace, which only a channel agent's run_agent dispatch holds"
     return ""
 
-_RENAMED_OPTIONS = {
-    "append_to_prompt": "add_to_prompt",
-    "append_to_system_prompt": "add_to_system_prompt",
-}
-"""Former ``options`` keys and their current names (one release of pointed errors)."""
-
 
 def _parse_bool(name: str, value: Any) -> bool | None:
     """Parse an optional boolean option.
@@ -305,7 +299,6 @@ def parse_run_options(options: str, tool_profile: str = "") -> RunOptions:
     resolve_tool_profile(tool_profile)
     if not options.strip():
         return RunOptions(tool_profile=tool_profile.strip())
-        return RunOptions()
     try:
         raw = json.loads(options)
     except ValueError as e:
@@ -314,10 +307,6 @@ def parse_run_options(options: str, tool_profile: str = "") -> RunOptions:
         raise ValueError(f"options must be a JSON object, got {options!r}.")
     parsed: dict[str, Any] = {}
     for key, value in raw.items():
-        if key in _RENAMED_OPTIONS:
-            raise ValueError(
-                f"options key {key!r} was renamed to {_RENAMED_OPTIONS[key]!r}."
-            )
         expected = OPTION_TYPES.get(key)
         if expected is None:
             raise ValueError(

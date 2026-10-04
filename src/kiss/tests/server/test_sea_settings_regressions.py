@@ -71,16 +71,14 @@ class _OverflowingNumber(int):
         raise OverflowError("too big")
 
 
-def test_removed_prompt_settings_name_their_replacement() -> None:
-    # ``prompt`` and ``system_prompt`` are functions now, not settings:
-    # the old spellings fail with the replacement, not as unknown keys.
+def test_prompt_settings_are_unknown_keys() -> None:
+    # ``prompt`` and ``system_prompt`` are functions, not settings: the
+    # key is rejected before its (untrusted) value is ever touched.
     namespace: dict[str, Any] = {"settings": lambda: {"prompt": _RaisingStr("x")}}
-    with pytest.raises(
-        SettingsError, match=r"settings\(\)\['prompt'\] is no longer a setting: define",
-    ):
+    with pytest.raises(SettingsError, match=r"settings\(\) has an unknown key 'prompt'"):
         resolve_settings(namespace)
     namespace = {"settings": lambda: {"system_prompt": "x"}}
-    with pytest.raises(SettingsError, match=r"define `def system_prompt\(\) -> str` instead"):
+    with pytest.raises(SettingsError, match=r"has an unknown key 'system_prompt'"):
         resolve_settings(namespace)
 
 

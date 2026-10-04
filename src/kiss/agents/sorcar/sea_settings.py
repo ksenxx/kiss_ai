@@ -111,23 +111,6 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
 KINDS = ("agent", "channel")
 """The values of the ``kind`` setting (see the module docstring)."""
 
-REMOVED_SETTINGS: dict[str, str] = {
-    "prompt": (
-        "define `def prompt(task: str) -> str` instead; it receives the "
-        "task text and returns the prompt body"
-    ),
-    "system_prompt": "define `def system_prompt() -> str` instead",
-    "add_to_prompt": (
-        "return the extra text from `def prompt(task: str) -> str` instead "
-        "(`{task_id}` in its result is replaced by the calling task's id)"
-    ),
-}
-"""Former ``settings()`` keys, each with the function that replaced it.
-
-Kept for one release so a script still using the old spelling fails
-with a pointed message instead of an "unknown key" one.
-"""
-
 WORKER_PRESET: dict[str, Any] = {
     "use_worktree": False,
     "auto_commit": False,
@@ -318,7 +301,7 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
 
     Raises:
         SettingsError: When ``settings()`` is not a function returning a
-            dict, names an unknown or removed key, an unknown preset or
+            dict, names an unknown key, an unknown preset or
             an unknown ``kind``, a value has the wrong type, or
             ``settings()`` raises (whatever it raises).
     """
@@ -337,10 +320,6 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
         declared = dict(declared)
     sources = {key: f"settings()[{key!r}]" for key in declared}
     for key in declared:
-        if key in REMOVED_SETTINGS:
-            raise SettingsError(
-                f"settings()[{key!r}] is no longer a setting: {REMOVED_SETTINGS[key]}"
-            )
         if key not in SETTING_TYPES:
             raise SettingsError(
                 f"settings() has an unknown key {key!r}; "

@@ -516,9 +516,9 @@ class AgentPathApiTest(unittest.TestCase):
                 ["prompt()", "must return a non-empty string"],
             ),
             (
-                "legacy_prompt_agent.py",
+                "prompt_setting_agent.py",
                 "def settings():\n    return {'prompt': 'x'}\n",
-                ["settings()['prompt']", "is no longer a setting", "def prompt(task: str) -> str"],
+                ["settings() has an unknown key 'prompt'"],
             ),
             (
                 "none_getter_agent.py",

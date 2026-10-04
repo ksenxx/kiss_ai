@@ -219,9 +219,7 @@ still runs without memory); otherwise the caller's or the persisted
 value stands.  A `bool` key given a non-`bool`, an `int`/`float` key
 given a `bool`, an unknown key, an unknown preset or `kind`, or a
 non-finite `max_budget` / `timeout` stops the task with a diagnostic
-(see [Error handling](#error-handling)).  The former keys `prompt`,
-`system_prompt` and `add_to_prompt` are rejected with the function
-that replaced them (`prompt(task)` / `system_prompt()`).
+(see [Error handling](#error-handling)).
 
 The prompt itself is not a setting: `settings()` is data, text and
 code come from the getters.  Three optional functions are the only
@@ -423,8 +421,7 @@ channel, forwarded to the daemon, which holds it for a `kind:
 "channel"` run and ignores it otherwise), `model_config`, `inherit`,
 `use_worktree`, `auto_commit`, `classify_tasks`, `use_web_tools`,
 `use_memory`, `is_parallel`, `docker_image`, `add_to_prompt` and
-`add_to_system_prompt`, e.g. `'{"use_web_tools": false}'` (the former
-`append_to_*` spellings fail naming the new key).  `wait="false"`
+`add_to_system_prompt`, e.g. `'{"use_web_tools": false}'`.  `wait="false"`
 returns with a job id as soon as the sub-task's tab exists (its
 initial `status running=true`, so the spawn lands inside the call's
 time window on every surface); the dispatch runs in a daemon thread
@@ -942,7 +939,6 @@ prefixes the message below with `Task failed: AgentFileError: `):
 | `settings()` returns something other than a dict | `agent script '...': settings() must return a dict, got ...` |
 | `settings()` raises | `agent script '...': settings() raised: ...` |
 | unknown key | `agent script '...': settings() has an unknown key 'x'; known keys: preset, extends, ...` |
-| the former `prompt` / `system_prompt` / `add_to_prompt` keys | `agent script '...': settings()['prompt'] is no longer a setting: define \`def prompt(task: str) -> str\` instead; ...` |
 | `extends` names no command or file, forms a cycle, or names a channel SEA | `agent script '...': extends 'x' is not a registered SEA command; ...`, `... extends chain is a cycle: ...`, `... cannot extend the channel agent script '...'` |
 | unknown preset | `agent script '...': unknown preset 'x'; known presets: session, worker, channel` |
 | unknown `kind` | `agent script '...': settings()['kind'] must be one of agent, channel; got 'x'` |

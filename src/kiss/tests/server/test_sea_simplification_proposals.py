@@ -15,7 +15,7 @@ dispatcher with a captured ``daemon_client.run``, a real
   the dispatcher key on those settings, not on the preset's name.
 * P2 — ``run_parallel`` refuses, with a message, a script or an
   ``options`` object pinning what a fan-out child cannot honour.
-* P3 — ``add_to_prompt`` is no longer a setting; ``{task_id}`` is
+* P3 — ``add_to_prompt`` is not a setting; ``{task_id}`` is
   substituted in what ``prompt(task)`` returns.
 * P4 — the classifier never demotes a ``use_worktree`` a script pinned.
 * P5 — ``run_agent`` and ``run_parallel`` share one argument order;
@@ -310,9 +310,7 @@ def test_run_parallel_refuses_pinned_settings_and_options_loudly(
 
 def test_add_to_prompt_setting_is_rejected_and_task_id_lives_in_prompt(tmp_path: Path) -> None:
     old = _write(tmp_path / "old_sea.py", "def settings():\n    return {'add_to_prompt': 'x'}\n")
-    with pytest.raises(
-        SeaScriptError, match=r"add_to_prompt.*is no longer a setting.*def prompt\(task: str\)",
-    ):
+    with pytest.raises(SeaScriptError, match=r"settings\(\) has an unknown key 'add_to_prompt'"):
         sea_settings(old)
     assert "add_to_prompt" not in SETTING_TYPES
     new = _write(

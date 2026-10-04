@@ -201,20 +201,20 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert _SYS_MARKER in call["system_prompt"]
         assert _PROMPT_MARKER in call["arguments"]["task_description"]
 
-    def test_agent_script_setting_wrong_type_fails_task(self) -> None:
-        """The removed ``settings()["add_to_prompt"]`` key stops the task loudly.
+    def test_agent_script_unknown_setting_fails_task(self) -> None:
+        """An unknown ``settings()`` key (``add_to_prompt``) stops the task loudly.
 
-        The diagnostic is the ``SettingsError`` text naming the key and
-        the ``prompt(task)`` replacement, prefixed with the script path.
+        The diagnostic is the ``SettingsError`` text naming the key,
+        prefixed with the script path.
         """
         agent_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
-            """Agent script with a removed setting."""
+            """Agent script with an unknown setting."""
 
 
             def settings() -> dict:
-                """Return the removed add_to_prompt key."""
+                """Return a key that is not a setting."""
                 return {"add_to_prompt": "suffix"}
             ''',
         )
@@ -230,8 +230,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script {agent_path!r}: settings()['add_to_prompt'] is no longer a setting: "
-            "return the extra text from `def prompt(task: str) -> str` instead"
+            f"agent script {agent_path!r}: settings() has an unknown key 'add_to_prompt'"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 

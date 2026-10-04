@@ -447,14 +447,14 @@ def test_apply_agent_overrides_substitutes_for_any_sea_defining_prompt(
         assert cmd["prompt"] == "q Report on task t-1."
 
 
-def test_add_to_prompt_is_no_longer_a_setting(tmp_path: Path) -> None:
-    """A script still declaring ``add_to_prompt`` MUST fail naming ``prompt(task)``."""
+def test_add_to_prompt_is_not_a_setting(tmp_path: Path) -> None:
+    """A script declaring ``add_to_prompt`` in ``settings()`` MUST fail as an unknown key."""
     script = tmp_path / "old_sea.py"
     script.write_text(
         "def settings():\n    return {'add_to_prompt': 'Report on task {task_id}.'}\n",
         encoding="utf-8",
     )
-    with pytest.raises(sea_commands.SeaError, match=r"add_to_prompt.*def prompt\(task: str\)"):
+    with pytest.raises(sea_commands.SeaError, match=r"has an unknown key 'add_to_prompt'"):
         sea_commands.sea_settings(script)
 
 
