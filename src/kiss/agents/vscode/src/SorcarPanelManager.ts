@@ -118,6 +118,13 @@ export class SorcarPanelManager {
   // tab is adopted — otherwise the chat's real tab would be skipped
   // forever on the strength of a claim that can no longer bind.
   private _pendingAdoptions: Map<string, RegistryTabEntry> = new Map();
+  // The chat-bound tabs of the latest controller snapshot, by tab id.
+  // A panel revived by the serializer after that snapshot learns its
+  // chat from here instead of waiting for its own socket's first
+  // snapshot, so a history click on that chat in between reveals the
+  // revived panel rather than opening a second one; the displacement
+  // sweep reads the snapshot's bindings from here too.
+  private _boundRegistryTabs: Map<string, RegistryTabEntry> = new Map();
   private _poster: ((message: NotificationMessage) => void) | undefined;
   // Where the ACTIVE panel's task-info values go: the secondary
   // sidebar's Task Info view (see extension.ts setMetaSink wiring).
@@ -229,9 +236,39 @@ export class SorcarPanelManager {
           panel.dispose();
           return Promise.resolve();
         }
+        // The controller's snapshot may already have listed this tab
+        // (it filtered the tab out of adoption for exactly this
+        // revival); take the chat binding from it — see
+        // _boundRegistryTabs.
+        const bound = this._boundRegistryTabs.get(tabId);
+        const dup = bound
+          ? [...this._panels.values()].find(cp => cp.chatId === bound.chatId)
+          : undefined;
+        if (bound && dup) {
+          // A history open of this tab's chat raced the revival: it
+          // found no panel yet and opened one resuming the chat. One
+          // chat, one panel — that resume is the user's latest action
+          // and its bind is about to displace this tab, so drop the
+          // husk (not retiring the tab: the registry still holds it).
+          // Should the claim never bind, the chat's registry tab is
+          // adopted from here (see _pendingAdoptions).
+          if (!dup.registryBound) {
+            this._pendingAdoptions.set(bound.chatId, bound);
+          }
+          if (this._recordPanelTab) this._recordPanelTab(tabId, false);
+          panel.dispose();
+          return Promise.resolve();
+        }
         // The workbench persisted the decorated title; the status it
         // carried belongs to the previous session.
-        this._adoptPanel(panel, {tabId, title: stripStatusPrefix(panel.title)});
+        const cp = this._adoptPanel(panel, {
+          tabId,
+          title: stripStatusPrefix(panel.title),
+        });
+        if (bound) {
+          cp.chatId = bound.chatId;
+          cp.registryBound = true;
+        }
         return Promise.resolve();
       },
     });
@@ -429,15 +466,38 @@ export class SorcarPanelManager {
   public enterMode(entries: RegistryTabEntry[]): void {
     for (const entry of entries) {
       if (this._panels.has(entry.tabId)) continue;
-      this._createPanel({
+      this._createRegistryPanel(entry);
+    }
+    this.ensureChatOpen();
+  }
+
+  /**
+   * Open the editor-tab panel for a tab the daemon registry lists,
+   * bound to the chat the registry says it shows. The binding is
+   * recorded on the panel right away rather than waiting for the
+   * panel's own daemon socket to report it (`chatBound`): a history
+   * click on that chat in the meantime must reveal this panel, not
+   * open a second one for the same chat.
+   */
+  private _createRegistryPanel(
+    entry: RegistryTabEntry,
+    opts?: {preserveFocus?: boolean},
+  ): ChatPanel {
+    const cp = this._createPanel(
+      {
         tabId: entry.tabId,
         title: entry.title,
         // Registry-born: the webview may treat the tab's absence from
         // its first snapshot as a close by another client.
         inRegistry: true,
-      });
+      },
+      opts,
+    );
+    if (entry.chatId) {
+      cp.chatId = entry.chatId;
+      cp.registryBound = true;
     }
-    this.ensureChatOpen();
+    return cp;
   }
 
   /**
@@ -446,8 +506,10 @@ export class SorcarPanelManager {
    * task run in the remote web app (or another window) opens as an
    * editor tab here, exactly like sidebar mode adopts the tab into
    * its internal strip. Tabs already open as a panel (by id or by
-   * chat) are left alone, and the new panel never steals the user's
-   * keyboard focus.
+   * chat) are left alone — except that a panel whose tab the registry
+   * displaced closes when its replacement opens, so a chat never has
+   * two panels in this window — and the new panel never steals the
+   * user's keyboard focus.
    *
    * @param entries The snapshot's newly added tabs (see
    *     RegistryTabsDelta.added), possibly filtered by the caller.
@@ -469,10 +531,13 @@ export class SorcarPanelManager {
       // and a displaced chat's replacement tab would be skipped for
       // good while the stale panel closes itself.
       listedIds = new Set();
+      this._boundRegistryTabs.clear();
       for (const entry of listed) {
         listedIds.add(entry.tabId);
+        if (!entry.chatId) continue;
+        this._boundRegistryTabs.set(entry.tabId, entry);
         const cp = this._panels.get(entry.tabId);
-        if (cp && entry.chatId) {
+        if (cp) {
           cp.chatId = entry.chatId;
           cp.registryBound = true;
         }
@@ -487,36 +552,63 @@ export class SorcarPanelManager {
     }
     for (const entry of entries) {
       if (this._panels.has(entry.tabId)) continue;
-      if (entry.chatId) {
-        const dup = [...this._panels.values()].find(
-          cp => cp.chatId === entry.chatId,
-        );
-        // Skip a chat some open panel already shows — UNLESS the
-        // registry DISPLACED that panel's tab (one tab per chat, the
-        // newest bind wins: the panel's registry-confirmed tab is no
-        // longer listed and its webview is about to close the panel),
-        // in which case the replacement tab must be adopted or the
-        // chat would lose its editor tab. A panel whose registration
-        // is still in flight (resume-born chatId, never yet listed in
-        // a snapshot) is not displaced — its absence from the list
-        // means nothing yet, and its own pending bind will displace
-        // this entry's tab in a moment.
-        if (
-          dup &&
-          (!dup.registryBound || !listedIds || listedIds.has(dup.tabId))
-        ) {
-          if (!dup.registryBound) {
-            // Remember the skip: the panel's claim may never bind
-            // (see _pendingAdoptions).
-            this._pendingAdoptions.set(entry.chatId, entry);
-          }
-          continue;
+      const dup = entry.chatId
+        ? [...this._panels.values()].find(cp => cp.chatId === entry.chatId)
+        : undefined;
+      // Skip a chat some open panel already shows — UNLESS the
+      // registry DISPLACED that panel's tab (one tab per chat, the
+      // newest bind wins: the panel's registry-confirmed tab is no
+      // longer listed), in which case the replacement tab must be
+      // adopted or the chat would lose its editor tab. A panel whose
+      // registration is still in flight (resume-born chatId, never
+      // yet listed in a snapshot) is not displaced — its absence from
+      // the list means nothing yet, and its own pending bind will
+      // displace this entry's tab in a moment.
+      if (
+        dup &&
+        (!dup.registryBound || !listedIds || listedIds.has(dup.tabId))
+      ) {
+        if (!dup.registryBound) {
+          // Remember the skip: the panel's claim may never bind
+          // (see _pendingAdoptions).
+          this._pendingAdoptions.set(entry.chatId, entry);
         }
+        continue;
       }
-      this._createPanel(
-        {tabId: entry.tabId, title: entry.title, inRegistry: true},
-        {preserveFocus: true},
+      this._createRegistryPanel(entry, {preserveFocus: true});
+    }
+    if (listedIds) this._closeDisplacedPanels(listedIds);
+  }
+
+  /**
+   * Close every panel whose registry-confirmed tab the snapshot no
+   * longer lists while a listed panel shows the same chat: the
+   * registry displaced it (one tab per chat, the newest bind wins —
+   * the replacement was adopted above, or is a panel this window
+   * opened itself, e.g. a history resume racing a revived panel's
+   * first snapshot). The displaced panel's webview closes it on its
+   * own next snapshot too, but that arrives on a separate socket with
+   * no ordering guarantee against this one; until then the chat would
+   * have two panels in this window. Nothing to retire: the registry
+   * already dropped the tab. The replacement is open, so the dispose
+   * handler's "last chat tab closed" fallback opens no fresh chat.
+   */
+  private _closeDisplacedPanels(listedIds: Set<string>): void {
+    const panels = [...this._panels.values()];
+    for (const cp of panels) {
+      if (!cp.chatId || !cp.registryBound || listedIds.has(cp.tabId)) continue;
+      // The replacement must be bound to the chat by THIS snapshot —
+      // a panel's own unconfirmed resume claim (chatId set locally,
+      // its tab listed unbound) proves nothing, least of all against
+      // a stale snapshot.
+      const replacement = panels.find(
+        other =>
+          other !== cp &&
+          this._boundRegistryTabs.get(other.tabId)?.chatId === cp.chatId,
       );
+      if (!replacement) continue;
+      cp.suppressCloseTab = true;
+      cp.panel.dispose();
     }
   }
 
@@ -531,6 +623,7 @@ export class SorcarPanelManager {
     // from `tabs_state`, and a stale memory could otherwise open a
     // long-vanished tab when the mode comes back.
     this._pendingAdoptions.clear();
+    this._boundRegistryTabs.clear();
     this._closingAll = true;
     try {
       for (const cp of [...this._panels.values()]) {
