@@ -635,6 +635,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       {
         location: vscode.ProgressLocation.Notification,
         title,
+        // The action belongs to one task's tab: its progress toast
+        // must not pop over another task's chat.
+        tabId,
       },
       progress => {
         // This may run a microtask after the entry was published.  If
@@ -806,6 +809,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           : 'too many requests were waiting';
       showWarningNotification(
         `Your request was not started because ${why}. Send it again.`,
+        {tabId},
       );
       return;
     }
@@ -998,26 +1002,40 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         } else {
           this._resolveAllWorktreeActions();
         }
+        // The outcome is one task's text, so the toast carries the
+        // task's tab: the webview shows it only over that tab, and the
+        // panel manager posts it to that tab's panel, never to whatever
+        // chat the user is looking at now.
+        const wrToast = {tabId: msg.tabId};
         if (msg.success) {
           if (!isSilentDiscardMessage(msg.message)) {
             showInformationNotification(
               msg.message || 'Worktree action completed.',
+              wrToast,
             );
           }
         } else {
-          showErrorNotification(msg.message || 'Worktree action failed.');
+          showErrorNotification(
+            msg.message || 'Worktree action failed.',
+            wrToast,
+          );
         }
       }
       if (msg.type === 'main_tree_result' && this._isOwnTab(msg.tabId)) {
         // Same toast rule as worktree_result above: the post-task
         // main-tree bar's Discard / Do nothing outcome is surfaced as
         // a notification (the webview renders the transcript line).
+        const mtToast = {tabId: msg.tabId};
         if (msg.success) {
           showInformationNotification(
             msg.message || 'Main-tree action completed.',
+            mtToast,
           );
         } else {
-          showErrorNotification(msg.message || 'Main-tree action failed.');
+          showErrorNotification(
+            msg.message || 'Main-tree action failed.',
+            mtToast,
+          );
         }
       }
       if (
@@ -1028,10 +1046,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // show the same outcome twice.
         !msg.manual
       ) {
+        const acToast = {tabId: msg.tabId};
         if (msg.success) {
-          showInformationNotification(msg.message || 'Auto-commit completed.');
+          showInformationNotification(
+            msg.message || 'Auto-commit completed.',
+            acToast,
+          );
         } else {
-          showErrorNotification(msg.message || 'Auto-commit failed.');
+          showErrorNotification(msg.message || 'Auto-commit failed.', acToast);
         }
       }
 
@@ -1303,6 +1325,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _isOwnTab(tabId: string | undefined): boolean {
     return !tabId || this._ownTabs.has(tabId);
+  }
+
+  /**
+   * True when this webview holds *tabId*: its root tab, a chat tab it
+   * opened, or a sub-agent tab nested under one of those.  The panel
+   * manager uses it to post a task's toast to the panel that shows the
+   * task, not to whichever panel is active.
+   *
+   * @param tabId The chat tab id to look up.
+   */
+  ownsTab(tabId: string): boolean {
+    return this._ownTabs.has(tabId);
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {

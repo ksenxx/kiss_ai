@@ -958,9 +958,24 @@ export class SorcarPanelManager {
   }
 
   /**
-   * Keep the shared webview toast poster pointing at the active chat
-   * panel while any panel exists; release it (identity-checked) when
-   * the last panel closes so the sidebar view can claim it back.
+   * The panel whose webview holds *tabId*, or undefined when no open
+   * panel owns it (the tab was closed, or belongs to the sidebar).
+   */
+  private _panelOwningTab(tabId: string): ChatPanel | undefined {
+    for (const cp of this._panels.values()) {
+      if (cp.controller.ownsTab(tabId)) return cp;
+    }
+    return undefined;
+  }
+
+  /**
+   * Keep the shared webview toast poster installed while any panel
+   * exists; release it (identity-checked) when the last panel closes so
+   * the sidebar view can claim it back.  A toast tagged with a tab goes
+   * to the panel that holds the tab (one task's auto-commit or worktree
+   * outcome must not pop over another task's chat) and is dropped when
+   * that panel is gone; an untagged, window-level toast goes to the
+   * active panel.
    */
   private _refreshPoster(): void {
     if (this._panels.size === 0) {
@@ -972,7 +987,10 @@ export class SorcarPanelManager {
     }
     if (this._poster) return;
     const poster = (message: NotificationMessage) => {
-      this._activePanel()?.panel.webview.postMessage(message);
+      const target = message.tabId
+        ? this._panelOwningTab(message.tabId)
+        : this._activePanel();
+      target?.panel.webview.postMessage(message);
     };
     this._poster = poster;
     setWebviewNotificationPoster(poster);

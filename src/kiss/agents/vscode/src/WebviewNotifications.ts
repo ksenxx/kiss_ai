@@ -83,17 +83,26 @@ export function resolveWebviewNotificationAction(
   resolve(action);
 }
 
+/**
+ * Options accepted by the show*Notification helpers: VS Code's message
+ * options plus `tabId`, the chat tab whose task the toast reports on.
+ * A tagged toast is shown only over that tab (and, in editor-tabs mode,
+ * only in that tab's panel); native VS Code notifications are
+ * window-level and ignore it.
+ */
+export type NotificationOptions = vscode.MessageOptions & {tabId?: string};
+
 function splitMessageArgs(items: readonly unknown[]): {
-  options: vscode.MessageOptions | undefined;
+  options: NotificationOptions | undefined;
   actions: string[];
 } {
-  let options: vscode.MessageOptions | undefined;
+  let options: NotificationOptions | undefined;
   const actions: string[] = [];
   for (const item of items) {
     if (typeof item === 'string') {
       actions.push(item);
     } else if (item && typeof item === 'object' && !Array.isArray(item)) {
-      options = item as vscode.MessageOptions;
+      options = item as NotificationOptions;
     }
   }
   return {options, actions};
@@ -128,7 +137,7 @@ function showNotification(
     return nativeShow(severity, message, options, actions);
   }
   const id = String(nextId++);
-  poster({
+  const toast: NotificationMessage = {
     type: 'notification',
     id,
     severity,
@@ -137,7 +146,9 @@ function showNotification(
     // Errors never auto-dismiss: the user must be able to read the cause
     // and act on it however long the failure takes to notice.
     sticky: severity === 'error' || !!options?.modal || actions.length > 0,
-  });
+  };
+  if (options?.tabId) toast.tabId = options.tabId;
+  poster(toast);
   if (actions.length === 0) return Promise.resolve(undefined);
   return new Promise(resolve => {
     pendingActions.set(id, resolve);
@@ -165,18 +176,32 @@ export function showErrorNotification(
   return showNotification('error', message, ...items);
 }
 
+/**
+ * Options for withWebviewNotificationProgress: VS Code's progress options
+ * plus `tabId`, the chat tab whose task the progress toast reports on
+ * (see NotificationOptions).
+ */
+export type ProgressNotificationOptions = vscode.ProgressOptions & {
+  tabId?: string;
+};
+
 export function withWebviewNotificationProgress<R>(
-  options: vscode.ProgressOptions,
+  options: ProgressNotificationOptions,
   task: (
     progress: vscode.Progress<{message?: string; increment?: number}>,
     token: vscode.CancellationToken,
   ) => Thenable<R>,
 ): Thenable<R> {
+  const {tabId, ...nativeOptions} = options;
   if (!poster || options.location !== vscode.ProgressLocation.Notification) {
-    return vscode.window.withProgress(options, task);
+    return vscode.window.withProgress(nativeOptions, task);
   }
   const id = String(nextId++);
   const title = options.title || PRODUCT_NAME;
+  // Every post of the toast's lifecycle (open, update, close) carries
+  // the same tab, so a task's progress never pops over another task's
+  // chat and the close reaches the toast wherever it was shown.
+  const tab = tabId ? {tabId} : {};
   // A cancellable progress toast carries a 'Cancel' action wired to the
   // token the task receives, exactly like the native progress
   // notification's Cancel button.  Every re-post must repeat the
@@ -189,6 +214,7 @@ export function withWebviewNotificationProgress<R>(
   poster({
     type: 'notification',
     id,
+    ...tab,
     severity: 'info',
     message: title,
     actions,
@@ -200,6 +226,7 @@ export function withWebviewNotificationProgress<R>(
       poster?.({
         type: 'notification',
         id,
+        ...tab,
         severity: 'info',
         message: title,
         actions,
@@ -213,7 +240,7 @@ export function withWebviewNotificationProgress<R>(
     .then(() => task(progress, source.token))
     .finally(() => {
       progressSources.delete(id);
-      poster?.({type: 'notification', id, close: true});
+      poster?.({type: 'notification', id, ...tab, close: true});
       source.dispose();
     });
 }

@@ -15652,7 +15652,13 @@
         // reportedChatTabId then) must still toast here — the toast
         // container is window-level, not transcript-bound, so nothing
         // can leak into another conversation's transcript.
+        //
+        // A close shows nothing, so it is never gated: the toast it
+        // retires was shown while its tab was on screen, and the user
+        // may have switched tabs since -- dropping the close would
+        // leave a sticky progress toast on screen for good.
         if (
+          !ev.close &&
           ev.tabId !== undefined &&
           ev.tabId !== reportedChatTabId &&
           !isForActiveTab(ev)

@@ -998,10 +998,15 @@ type ToWebviewMessageBody =
   // (WebviewNotifications.ts) and by the daemon (manual-commit outcome,
   // server-reset progress).  A stable `id` lets a later message replace
   // the toast in place; `close` retires it; `progress` marks a spinner
-  // toast whose text is `progressMessage`.
+  // toast whose text is `progressMessage`.  `tabId` names the chat tab
+  // whose task the toast reports on (a task's auto-commit, worktree or
+  // main-tree outcome): the webview shows such a toast only over that
+  // tab, so one task's text never pops over another task's chat.  An
+  // untagged toast is window-level (install progress, updates).
   | {
       type: 'notification';
       id: string;
+      tabId?: string;
       severity?: 'info' | 'warning' | 'error';
       message?: string;
       actions?: string[];
