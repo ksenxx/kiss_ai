@@ -25,6 +25,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.browser_handoff import portal_handoff
 from kiss.core.config import kiss_home
 
@@ -44,7 +45,7 @@ def description() -> str:
     return (
         "Sends and lists SMS, MMS and WhatsApp messages and places or lists voice calls through "
         "a Twilio account (account SID, auth token and from-number stored in "
-        "~/.kiss/third_party_agents/sms/config.json); use it with "
+        f"~/{HOME_DIR}/third_party_agents/sms/config.json); use it with "
         "`run_agent(agent=\"sms\", task=\"Send 'Hello!' to +14155238886\")` or the "
         "`kiss-sms -t '<task>'` CLI (`kiss-sms --channel <number>` runs one inbound poll tick)."
     )

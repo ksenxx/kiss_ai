@@ -308,11 +308,11 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
 
 7. Log each dispatch with `log_decision(unit, tier, model, reason, outcome)` and log again
    once the check has run. One short clause per cell (cut at {CELL_MAX_CHARS} characters);
-   ledger: `~/.kiss/MODEL_DECISIONS.md`.
+   ledger: `~/{HOME_DIR}/MODEL_DECISIONS.md`.
 
 ## Observed model evidence
 
-From `~/.kiss/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
+From `~/{HOME_DIR}/AUTOROUTER.md` (rewritten by `/rsi7d`): the posterior over the tier-order
 prior. A model with a high observed failure share for the role goes into `exclude` even
 when `pick_model` ranks it first; prefer lower observed $ and s/step backed by at least 10
 tasks.
@@ -332,7 +332,7 @@ tasks.
 
 - Nothing dispatched: no `decide`, `observed_call_costs` or `estimate_cost`; they follow
   `pick_model`. Actual cost = the last `Budget:` figure plus each child's `run_agent`
-  result; never query `~/.kiss/history.db`.
+  result; never query `~/{HOME_DIR}/history.db`.
 - `estimated_usd` prices one call; a sub-agent re-reads its context every step: budget
   about 50x. An audit you would re-check yourself is frontier work; delegate only raw
   fact gathering (file lists, grep hits, test output).

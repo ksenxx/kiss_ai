@@ -27,6 +27,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 _PHONE_DIR = kiss_home() / "third_party_agents" / "phone"
@@ -37,7 +38,7 @@ def description() -> str:
     """Return the one-sentence help text shown by ``/phone help``."""
     return (
         "Channel agent that controls an Android phone through its companion REST app "
-        "(configured by device IP under ~/.kiss/third_party_agents/phone) to send and read "
+        f"(configured by device IP under ~/{HOME_DIR}/third_party_agents/phone) to send and read "
         "SMS, make and end calls, read the call log and list, dismiss or reply to "
         "notifications; use `run_agent(agent=\"phone\", task=...)` or the `kiss-phone` CLI."
     )

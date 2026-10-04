@@ -216,7 +216,7 @@ why the loop stopped, and the weaknesses still open when the target was not reac
   children) and the verdicts went weak accept, weak reject, weak accept, weak reject,
   weak reject, weak reject.
 - Take each child's cost and step count from the text of its `run_agent` result and
-  write them into the log at once; never query `~/.kiss/sorcar.db` for them (a quoting
+  write them into the log at once; never query the task database (`history.db`) for them (a quoting
   error in the sqlite query cost two steps and the result was already on hand).
 """
 """The coordinator's rules, appended to the default system prompt."""

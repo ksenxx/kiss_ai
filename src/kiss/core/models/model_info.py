@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.core import config as config_module
+from kiss.core.brand import HOME_DIR
 from kiss.core.file_lock import exclusive_file_lock
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
@@ -388,7 +389,7 @@ def _entry_str(entry: dict[str, Any], key: str) -> str:
 
 
 _MY_MODELS_CORRUPT_ERROR = (
-    "~/.kiss/MY_MODELS.json is unreadable or not a JSON object; "
+    f"~/{HOME_DIR}/MY_MODELS.json is unreadable or not a JSON object; "
     "fix or remove the file by hand"
 )
 

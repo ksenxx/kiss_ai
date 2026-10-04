@@ -28,6 +28,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 _BB_DIR = kiss_home() / "third_party_agents" / "bluebubbles"
@@ -52,7 +53,7 @@ def description() -> str:
     return (
         "Reads and sends iMessages through a BlueBubbles server running on a local Mac "
         "(macOS only; server URL and password in "
-        "~/.kiss/third_party_agents/bluebubbles/config.json); use it with "
+        f"~/{HOME_DIR}/third_party_agents/bluebubbles/config.json); use it with "
         "`run_agent(agent=\"bluebubbles\", task=...)` or the `kiss-bluebubbles -t \"<task>\"` CLI "
         "(`kiss-bluebubbles --channel <chat guid>` polls a chat and answers new messages)."
     )

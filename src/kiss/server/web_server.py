@@ -94,7 +94,7 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _queue_chat_event,
 )
-from kiss.core.brand import BRAND, PRODUCT_NAME
+from kiss.core.brand import BRAND, HOME_DIR, PRODUCT_NAME
 from kiss.core.browser_handoff import set_browser_tab_opener
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
@@ -4049,8 +4049,13 @@ def _build_html() -> str:
         # user with several servers open can tell them apart.
         "PAGE_TITLE": html.escape(_page_title()),
         "TAGLINE": html.escape(BRAND["tagline"]),
+        "HOME_DIR": html.escape(HOME_DIR),
         "BRAND_JSON": json.dumps(
-            {"productName": PRODUCT_NAME, "shortName": BRAND["short_name"]},
+            {
+                "productName": PRODUCT_NAME,
+                "shortName": BRAND["short_name"],
+                "homeDir": HOME_DIR,
+            },
         ).replace("</", "<\\/"),
         "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
         "ENTERKEYHINT": ' enterkeyhint="send"',
@@ -5779,7 +5784,7 @@ class RemoteAccessServer:
                     "Settings and set a Remote password to allow it; "
                     "then come back to this page.",
                     "Only localhost may connect while remote_password is "
-                    "empty. Set remote_password in ~/.kiss/config.json "
+                    f"empty. Set remote_password in ~/{HOME_DIR}/config.json "
                     "(or in the app's Settings) to allow remote access.",
                 )
         request_path = urlsplit(request.path).path
@@ -10395,11 +10400,12 @@ class RemoteAccessServer:
                     None, _terminate_orphan_cloudflared, self.port,
                 )
                 logger.warning(
-                    "remote_password is not set in ~/.kiss/config.json; "
+                    "remote_password is not set in ~/%s/config.json; "
                     "refusing to start the cloudflared tunnel and "
                     "refusing non-localhost connections.  Set a "
                     "password in the config panel to enable remote "
                     "access.",
+                    HOME_DIR,
                 )
                 print(
                     "Warning: remote_password is empty; cloudflared "

@@ -65,7 +65,7 @@ at any point. You must answer quickly because the user is waiting.**
 ## How to answer (read-only side channel of a running task)
 You have exactly two tools: `task_context` and `finish`. There is no shell, \
 no file access, no memory and no browser; do not look for them and never try \
-to read ~/.kiss/history.db yourself.
+to read ~/{{HOME_DIR}}/history.db yourself.
 1. Call `task_context(task_id)` once with the task id named in the prompt. It \
 returns everything you can know: status, elapsed time, spend, the sub-agent \
 tasks, the tail of the task's own progress log, and the newest transcript \
@@ -138,9 +138,10 @@ def add_to_system_prompt() -> str:
     (``task_context`` then ``finish``) and the style of the answer.
     The daemon appends it for both dispatch paths (the ``/ask`` chat
     command and the running tab's side channel), so there is exactly
-    one copy of the text.
+    one copy of the text.  The ``{{HOME_DIR}}`` placeholder names the
+    brand's state directory (``~/.kiss`` for stock KISS Sorcar).
     """
-    return _PLAYBOOK
+    return render_brand(_PLAYBOOK)
 
 
 def task_context(task_id: str) -> str:

@@ -30,6 +30,7 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     channel_main,
     save_json_config,
 )
+from kiss.core.brand import HOME_DIR
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,8 @@ def description() -> str:
     return (
         "Channel agent for Mattermost that lists teams, channels and users and reads, posts "
         "and manages messages through the REST API with a personal access token stored under "
-        "~/.kiss/third_party_agents/mattermost; use `run_agent(agent=\"mattermost\", task=...)` "
-        "or the `kiss-mattermost` CLI."
+        f"~/{HOME_DIR}/third_party_agents/mattermost; use "
+        "`run_agent(agent=\"mattermost\", task=...)` or the `kiss-mattermost` CLI."
     )
 
 

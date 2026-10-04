@@ -240,8 +240,9 @@ def _restart_kiss_web_daemon() -> bool:
     if not _kiss_home_is_default():
         logger.warning(
             "Skipping kiss-web daemon restart: KISS_HOME=%r is not the "
-            "default ~/.kiss — the system daemon serves a different home",
+            "default ~/%s — the system daemon serves a different home",
             os.environ.get("KISS_HOME", ""),
+            HOME_DIR,
         )
         return False
     if sys.platform not in ("darwin", "linux"):
@@ -2354,7 +2355,7 @@ class _CommandsMixin:
             # A failed write (permissions, disk full) must answer the
             # client instead of killing its connection's dispatch.
             logger.warning("saveMyModel failed", exc_info=True)
-            error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+            error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
             self._send_error_to_sender(error, cmd)
             return
@@ -2387,7 +2388,7 @@ class _CommandsMixin:
                 error = delete_custom_model(name)
             except OSError as e:
                 logger.warning("deleteMyModel failed", exc_info=True)
-                error = f"Could not write ~/.kiss/MY_MODELS.json: {e}"
+                error = f"Could not write ~/{HOME_DIR}/MY_MODELS.json: {e}"
         if error:
             self._send_error_to_sender(error, cmd)
             return
@@ -2470,7 +2471,7 @@ class _CommandsMixin:
             error = edit(text if isinstance(text, str) else "")
         except OSError as e:
             logger.warning("%s failed", name, exc_info=True)
-            error = f"Could not write ~/.kiss/MY_INJECTION.md: {e}"
+            error = f"Could not write ~/{HOME_DIR}/MY_INJECTION.md: {e}"
         event: dict[str, Any] = {"type": "tricksData", **read_tricks_data()}
         if error:
             self._send_error_to_sender(error, cmd)

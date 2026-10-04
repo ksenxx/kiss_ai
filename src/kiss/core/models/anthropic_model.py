@@ -20,6 +20,7 @@ from anthropic import Anthropic, APITimeoutError
 from anthropic.resources.messages import Messages
 
 from kiss.core import stop_signal
+from kiss.core.brand import HOME_DIR
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
     _AUDIO_FORMAT_TO_MIME,
@@ -59,7 +60,7 @@ _WORKSPACE_ID_HINT = (
     "(API Keys section — applies from the next task on, no restart needed) "
     "or as a line\n"
     "    export ANTHROPIC_WORKSPACE_ID=wrkspc_...\n"
-    "in $KISS_HOME/api_keys.env (default ~/.kiss/api_keys.env), followed by "
+    f"in $KISS_HOME/api_keys.env (default ~/{HOME_DIR}/api_keys.env), followed by "
     "a daemon restart. To fix a remote install from the deploying machine "
     "instead, set it there and re-run ./rsorcar so the key store is shipped "
     "to the remote again."
