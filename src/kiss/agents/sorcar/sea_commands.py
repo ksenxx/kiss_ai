@@ -596,9 +596,10 @@ def sea_settings(sea_path: Path) -> dict[str, Any]:
 
     Executes the script and resolves its settings with
     :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (preset
-    defaults merged in, legacy per-field getters honoured).  The
-    dispatcher reads the ``preset`` and ``timeout`` from it; the task
-    runner reads ``use_worktree`` / ``auto_commit``.
+    defaults merged in; only ``settings()`` runs, never the script's
+    ``system_prompt()`` or other getters).  The dispatcher reads the
+    ``preset``, ``timeout`` and ``work_dir`` from it; the task runner
+    reads ``model`` and ``work_dir``.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.

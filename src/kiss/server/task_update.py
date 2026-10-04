@@ -329,10 +329,8 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{task_id}__update-{int(time.time() * 1000)}"
-    model_getter = getattr(ask_sea, "model", None)
-    model_name = str(
-        model_getter() if callable(model_getter) else parent_agent.model_name
-    )
+    ask_settings = resolve_settings(vars(ask_sea))
+    model_name = str(ask_settings.get("model") or parent_agent.model_name)
     agent = ChatSorcarAgent("Task update")
     agent._tab_id = sub_tab_id
     # A side channel like the ``/ask`` answerer: its answer lands in the
@@ -350,7 +348,6 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     agent.resume_chat_by_id(str(getattr(parent_agent, "chat_id", "") or ""))
     epoch_getter = getattr(parent_agent, "_usage_epoch", None)
     epoch = epoch_getter() if callable(epoch_getter) else None
-    ask_settings = resolve_settings(vars(ask_sea))
     result = ""
     try:
         result = agent.run(

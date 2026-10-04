@@ -10,7 +10,7 @@ tools attach to a REAL Docker container started by the test.  The only
 replaced boundary is the LLM: the executor's :meth:`KISSAgent.run` is
 swapped for a stub that records the tools it was handed and *calls* them,
 so the daemon's whole pipeline — wire ``dockerImage`` field →
-``apply_agent_overrides`` (an SEA's ``docker_image()`` getter) →
+``apply_agent_overrides`` (an SEA's ``settings()["docker_image"]``) →
 ``task_runner`` → ``SorcarAgent.run(docker_image=...)`` →
 ``DockerManager("container:<id>")`` → container-backed ``Bash`` /
 ``run_commands_parallel`` / ``Read`` / ``Write`` — executes for real.
@@ -19,7 +19,7 @@ Contract under test: ``container:<name-or-id>`` attaches the run's shell
 and file tools to an existing container (commands run in the container's
 own working directory, the container is left running afterwards);
 ``run_parallel`` children act in the parent's container; an SEA's
-``docker_image()`` getter has the same effect as the parameter; a
+``docker_image`` setting has the same effect as the parameter; a
 malformed wire value runs the tools on the host.
 
 The tests skip when no Docker daemon is reachable.
@@ -183,8 +183,8 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert child["container_id"] == self.container.id
         assert self.short_id in child["bash"], child["bash"]
 
-    def test_sea_docker_image_getter_attaches(self) -> None:
-        """An agent script's ``docker_image()`` getter selects the container."""
+    def test_sea_docker_image_setting_attaches(self) -> None:
+        """An agent script's ``settings()["docker_image"]`` selects the container."""
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls)
         script = self._write_py(
@@ -193,14 +193,9 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             """SEA attaching its tools to a test container."""
 
 
-            def docker_image() -> str:
-                """The container the run's tools execute in."""
-                return "container:{self.container.id}"
-
-
-            def use_worktree() -> bool:
-                """No worktree."""
-                return False
+            def settings() -> dict:
+                """The container the run's tools execute in; no worktree."""
+                return {{"docker_image": "container:{self.container.id}", "use_worktree": False}}
             ''',
         )
         result = sorcar.run(
@@ -214,19 +209,19 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         assert result.success is True, result.text
         assert calls[0]["container_id"] == self.container.id
 
-    def test_sea_docker_image_getter_must_return_a_string(self) -> None:
-        """A non-string ``docker_image()`` fails the task with the loader's diagnostic."""
+    def test_sea_docker_image_setting_must_be_a_string(self) -> None:
+        """A non-string ``settings()["docker_image"]`` fails the task with the diagnostic."""
         calls: list[dict[str, Any]] = []
         self._install_tool_running_stub(calls)
         script = self._write_py(
             "bad_attach_sea.py",
             '''
-            """SEA with a mistyped docker_image getter."""
+            """SEA with a mistyped docker_image setting."""
 
 
-            def docker_image() -> int:
+            def settings() -> dict:
                 """Wrong type."""
-                return 42
+                return {"docker_image": 42}
             ''',
         )
         result = sorcar.run(
@@ -239,7 +234,9 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
             timeout=120,
         )
         assert result.success is False
-        assert "docker_image()" in result.text and "a string" in result.text, result.text
+        assert (
+            f"agent script '{script}': settings()['docker_image'] must be str, got int"
+        ) in result.text, result.text
         assert calls == []
 
     def test_malformed_wire_value_runs_on_the_host(self) -> None:

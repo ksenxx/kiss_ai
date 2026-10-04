@@ -45,6 +45,7 @@ from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.server.agent_file import apply_agent_overrides
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -137,22 +138,19 @@ def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
     assert sea.settings() == {"preset": "worker", "tool_profile": "full", "is_parallel": True}
     # ``worker`` turns worktree, auto-commit, classifier, browser and memory
     # off; the explicit ``is_parallel`` wins over the preset's ``False``.
+    # ``system_prompt()`` is a getter the daemon applies (checked below
+    # through ``apply_agent_overrides``), not a settings key.
     assert resolve_settings(vars(sea)) == {
         "preset": "worker",
         "tool_profile": "full",
         "is_parallel": True,
-        "system_prompt": sea.system_prompt(),
         "use_worktree": False,
         "auto_commit": False,
         "classify_tasks": False,
         "use_web_tools": False,
         "use_memory": False,
     }
-    for legacy in (
-        "tool_profile", "is_parallel", "use_worktree", "auto_commit", "classify_tasks",
-        "use_web_tools", "use_memory", "tools",
-    ):
-        assert not hasattr(sea, legacy), legacy
+    assert_no_removed_getters(sea)
     names = [tool.__name__ for tool in sea.add_to_tools()]
     assert names == [
         "index_repo", "knowledge_status", "knowledge_search", "knowledge_read",
@@ -768,7 +766,8 @@ def test_schedule_daily_update_registers_one_cron_job(repo: Path) -> None:
         assert f"task       = {f'update {repo}'!r}" in job["prompt"]
         assert f"timeout    = {str(sea.DAILY_UPDATE_TIMEOUT_SECONDS)!r}" in job["prompt"]
         assert "max_budget = '2.5'" in job["prompt"]
-        assert f"model_name = {sea.DAILY_UPDATE_MODEL!r}" in job["prompt"]
+        assert f"model      = {sea.DAILY_UPDATE_MODEL!r}" in job["prompt"]
+        assert "model_name" not in job["prompt"]
         again = sea.schedule_daily_update(str(repo), max_budget=2.5)
         assert again.startswith(f"Already scheduled: job {job_id} ({name})")
         assert "Pacific time" in again
@@ -1064,7 +1063,7 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["is_parallel"],

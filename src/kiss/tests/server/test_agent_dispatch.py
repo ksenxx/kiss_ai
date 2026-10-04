@@ -76,16 +76,21 @@ def _hello() -> str:
 '''
 
 
-def test_agent_script_tools_stages_callables_without_basic_tools(
+def test_add_to_tools_with_none_profile_stages_callables_without_basic_tools(
     tmp_path: Path,
 ) -> None:
-    # Deprecated ``tools()`` -> the returned callables are staged on the
-    # daemon-side ``tools`` field and the run gets ONLY these tools
-    # (+ finish): the ``none`` tool profile is staged, which the daemon
-    # turns into ``append_basic_tools = False``.  Nothing names the
-    # script's path and no ``appendBasicTools`` field is written.
+    # ``add_to_tools()`` plus ``settings()["tool_profile"] == "none"`` is
+    # how a script gets ONLY its own tools (+ finish): the callables are
+    # staged on the daemon-side ``tools`` field and the ``none`` tool
+    # profile is staged over the caller's, which the daemon turns into
+    # ``append_basic_tools = False``.  Nothing names the script's path
+    # and no ``appendBasicTools`` field is written.
     script = tmp_path / "self_tools_agent.py"
-    script.write_text(_HELLO_TOOL + "\ndef tools() -> list:\n    return [_hello]\n")
+    script.write_text(
+        _HELLO_TOOL
+        + "\ndef settings() -> dict:\n    return {'tool_profile': 'none'}\n"
+        + "\ndef add_to_tools() -> list:\n    return [_hello]\n"
+    )
     cmd: dict[str, Any] = {"agentPath": str(script), "toolProfile": "full"}
     assert apply_agent_overrides(cmd) == {"tools", "toolProfile"}
     assert [t.__name__ for t in cmd["tools"]] == ["_hello"]
@@ -98,7 +103,7 @@ def test_agent_script_tools_stages_callables_without_basic_tools(
 def test_agent_script_add_to_tools_stages_callables_with_basic_tools(
     tmp_path: Path,
 ) -> None:
-    # ``add_to_tools()`` -> same staging, but ADDED to the built-in
+    # ``add_to_tools()`` alone -> same staging, but ADDED to the built-in
     # toolset: only ``tools`` is overridden, the caller's tool profile
     # stands.  A tuple is accepted and staged as a list.
     script = tmp_path / "add_tools_agent.py"
@@ -130,19 +135,25 @@ def test_client_sent_tools_field_is_replaced_by_the_getter(
     assert "toolProfile" not in cmd
 
 
-def test_agent_script_tools_wrong_type_still_rejected(
+def test_agent_script_add_to_tools_wrong_type_rejected(
     tmp_path: Path,
 ) -> None:
     script = tmp_path / "bad_tools_agent.py"
-    script.write_text("def tools():\n    return 42\n")
+    script.write_text("def add_to_tools():\n    return 42\n")
     cmd = {"agentPath": str(script)}
-    with pytest.raises(AgentFileError, match="tools"):
+    with pytest.raises(
+        AgentFileError,
+        match=(
+            r"add_to_tools\(\) of agent script '.*bad_tools_agent\.py' must return "
+            r"a list of tool callables \(not a file path\), got int"
+        ),
+    ):
         apply_agent_overrides(cmd)
+    assert "tools" not in cmd
 
 
-@pytest.mark.parametrize("getter", ["tools", "add_to_tools"])
-def test_agent_script_tool_getters_reject_paths_and_non_callables(
-    tmp_path: Path, getter: str,
+def test_agent_script_add_to_tools_rejects_paths_and_non_callables(
+    tmp_path: Path,
 ) -> None:
     # A file path (str or Path) is not a valid return value, nor is a
     # list holding a non-callable.
@@ -151,28 +162,13 @@ def test_agent_script_tool_getters_reject_paths_and_non_callables(
         "    from pathlib import Path\n    return Path('/some/tools.py')\n",
         "    return [1]\n",
     ):
-        script = tmp_path / f"bad_{getter}_agent.py"
-        script.write_text(f"def {getter}():\n{body}")
+        script = tmp_path / "bad_add_to_tools_agent.py"
+        script.write_text(f"def add_to_tools():\n{body}")
         cmd = {"agentPath": str(script), "appendBasicTools": True}
         with pytest.raises(AgentFileError, match="list of tool callables"):
             apply_agent_overrides(cmd)
         assert "tools" not in cmd, "a broken getter must not override"
         assert cmd["appendBasicTools"] is True
-
-
-def test_agent_script_defining_both_tool_getters_is_rejected(
-    tmp_path: Path,
-) -> None:
-    script = tmp_path / "both_tools_agent.py"
-    script.write_text(
-        _HELLO_TOOL
-        + "\ndef tools() -> list:\n    return [_hello]\n"
-        + "\ndef add_to_tools() -> list:\n    return [_hello]\n"
-    )
-    cmd = {"agentPath": str(script)}
-    with pytest.raises(AgentFileError, match="both tools"):
-        apply_agent_overrides(cmd)
-    assert "tools" not in cmd
 
 
 def test_removed_getters_are_plain_functions(tmp_path: Path) -> None:
@@ -190,20 +186,71 @@ def test_removed_getters_are_plain_functions(tmp_path: Path) -> None:
     assert cmd["appendBasicTools"] is True
 
 
-def test_new_getters_override_their_wire_fields(tmp_path: Path) -> None:
-    # ``use_web_tools()``, ``classify_tasks``, and ``is_parallel()`` are
-    # agent-script getters: each overrides its wire field on the run
-    # command.
-    script = tmp_path / "new_getters_agent.py"
+def test_legacy_per_field_getters_and_tools_are_plain_functions(tmp_path: Path) -> None:
+    # The per-field getters of the old contract (``model()``,
+    # ``use_memory()``, ``is_parallel()``, ...) and the whole-toolset
+    # ``tools()`` are ordinary module functions now: a script defining
+    # them overrides nothing, their return values are not type-checked,
+    # and the caller's wire fields stand exactly as sent.
+    script = tmp_path / "old_contract_agent.py"
     script.write_text(textwrap.dedent("""
-        def use_web_tools():
+        def model():
+            return 42
+
+        def use_memory():
+            return "yes"
+
+        def is_parallel():
             return False
+
+        def use_web_tools():
+            return 1
 
         def classify_tasks():
-            return True
+            return None
 
-        def is_parallel() -> bool:
-            return False
+        def tools():
+            return "/some/tools.py"
+
+        def append_to_system_prompt():
+            return 7
+
+        def dispatch_timeout():
+            return "soon"
+    """))
+    cmd: dict[str, Any] = {
+        "agentPath": str(script),
+        "model": "kept-model",
+        "useMemory": True,
+        "isParallel": True,
+        "useWebTools": None,
+        "classifyTasks": False,
+        "appendToSystemPrompt": "CALLER",
+    }
+    assert apply_agent_overrides(cmd) == set()
+    assert cmd == {
+        "agentPath": str(script),
+        "model": "kept-model",
+        "useMemory": True,
+        "isParallel": True,
+        "useWebTools": None,
+        "classifyTasks": False,
+        "appendToSystemPrompt": "CALLER",
+    }
+
+
+def test_settings_keys_override_their_wire_fields(tmp_path: Path) -> None:
+    # ``use_web_tools``, ``classify_tasks`` and ``is_parallel`` are
+    # ``settings()`` keys: each is written over its wire field on the
+    # run command, whatever the caller sent there.
+    script = tmp_path / "settings_agent.py"
+    script.write_text(textwrap.dedent("""
+        def settings() -> dict:
+            return {
+                "use_web_tools": False,
+                "classify_tasks": True,
+                "is_parallel": False,
+            }
     """))
     cmd = {
         "agentPath": str(script),
@@ -218,14 +265,14 @@ def test_new_getters_override_their_wire_fields(tmp_path: Path) -> None:
     assert cmd["isParallel"] is False
 
 
-def test_web_and_classify_getters_accept_none(tmp_path: Path) -> None:
+def test_web_and_classify_settings_accept_none(tmp_path: Path) -> None:
     # ``None`` means "no override": the key is dropped from the
     # settings, so the caller's wire value stands untouched (the task
     # runner then resolves it as it does for any client-sent value).
-    script = tmp_path / "none_getters_agent.py"
+    script = tmp_path / "none_settings_agent.py"
     script.write_text(
-        "def use_web_tools():\n    return None\n\n"
-        "def classify_tasks():\n    return None\n"
+        "def settings():\n"
+        "    return {'use_web_tools': None, 'classify_tasks': None}\n"
     )
     cmd = {"agentPath": str(script), "useWebTools": True, "classifyTasks": False}
     assert apply_agent_overrides(cmd) == set()
@@ -233,67 +280,81 @@ def test_web_and_classify_getters_accept_none(tmp_path: Path) -> None:
     assert cmd["classifyTasks"] is False
 
 
-def test_is_parallel_getter_accepts_none(tmp_path: Path) -> None:
-    # ``None`` is "no override" for EVERY settings key now, ``is_parallel``
+def test_is_parallel_setting_accepts_none(tmp_path: Path) -> None:
+    # ``None`` is "no override" for EVERY settings key, ``is_parallel``
     # included: the caller's ``isParallel`` stands and nothing is
     # reported as overridden.  (A non-bool, non-None value is still
-    # rejected: see the ``settings()`` type checks.)
+    # rejected: see the type-check tests below.)
     script = tmp_path / "none_parallel_agent.py"
-    script.write_text("def is_parallel():\n    return None\n")
+    script.write_text("def settings():\n    return {'is_parallel': None}\n")
     cmd = {"agentPath": str(script), "isParallel": True}
     assert apply_agent_overrides(cmd) == set()
     assert cmd["isParallel"] is True
 
 
-def test_is_parallel_getter_rejects_non_bool(tmp_path: Path) -> None:
+def test_is_parallel_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_parallel_agent.py"
-    script.write_text("def is_parallel():\n    return 'no'\n")
+    script.write_text("def settings():\n    return {'is_parallel': 'no'}\n")
     cmd = {"agentPath": str(script), "isParallel": True}
-    with pytest.raises(AgentFileError, match=r"is_parallel\(\) must be bool, got str"):
+    with pytest.raises(
+        AgentFileError,
+        match=(
+            r"agent script '.*bad_parallel_agent\.py': "
+            r"settings\(\)\['is_parallel'\] must be bool, got str"
+        ),
+    ):
         apply_agent_overrides(cmd)
-    assert cmd["isParallel"] is True, "a broken getter must not override"
+    assert cmd["isParallel"] is True, "a broken setting must not override"
 
 
-def test_use_web_tools_getter_rejects_non_bool(tmp_path: Path) -> None:
+def test_use_web_tools_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_web_agent.py"
-    script.write_text("def use_web_tools():\n    return 'yes'\n")
+    script.write_text("def settings():\n    return {'use_web_tools': 'yes'}\n")
     cmd = {"agentPath": str(script), "useWebTools": None}
-    with pytest.raises(AgentFileError, match="use_web_tools"):
+    with pytest.raises(
+        AgentFileError, match=r"settings\(\)\['use_web_tools'\] must be bool, got str",
+    ):
         apply_agent_overrides(cmd)
+    assert cmd["useWebTools"] is None
 
 
-def test_classify_tasks_getter_rejects_non_bool(tmp_path: Path) -> None:
+def test_classify_tasks_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_classify_agent.py"
-    script.write_text("def classify_tasks():\n    return 1\n")
+    script.write_text("def settings():\n    return {'classify_tasks': 1}\n")
     cmd = {"agentPath": str(script), "classifyTasks": None}
-    with pytest.raises(AgentFileError, match="classify_tasks"):
+    with pytest.raises(
+        AgentFileError, match=r"settings\(\)\['classify_tasks'\] must be bool, got int",
+    ):
         apply_agent_overrides(cmd)
+    assert cmd["classifyTasks"] is None
 
 
-def test_use_memory_getter_overrides_wire_field(tmp_path: Path) -> None:
-    # ``use_memory()`` is an agent-script getter like ``use_web_tools``:
-    # a bool return overrides the run command's ``useMemory`` field.
+def test_use_memory_setting_overrides_wire_field(tmp_path: Path) -> None:
+    # ``use_memory`` is a ``settings()`` key like ``use_web_tools``: a
+    # bool value overrides the run command's ``useMemory`` field.
     script = tmp_path / "memory_agent.py"
-    script.write_text("def use_memory():\n    return False\n")
+    script.write_text("def settings():\n    return {'use_memory': False}\n")
     cmd = {"agentPath": str(script), "useMemory": True}
     assert apply_agent_overrides(cmd) == {"useMemory"}
     assert cmd["useMemory"] is False
 
 
-def test_use_memory_getter_accepts_none(tmp_path: Path) -> None:
+def test_use_memory_setting_accepts_none(tmp_path: Path) -> None:
     # ``None`` means "no override": the caller's ``useMemory`` stands
     # and the field is not reported as overridden.
     script = tmp_path / "none_memory_agent.py"
-    script.write_text("def use_memory():\n    return None\n")
+    script.write_text("def settings():\n    return {'use_memory': None}\n")
     cmd = {"agentPath": str(script), "useMemory": True}
     assert apply_agent_overrides(cmd) == set()
     assert cmd["useMemory"] is True
 
 
-def test_use_memory_getter_rejects_non_bool(tmp_path: Path) -> None:
+def test_use_memory_setting_rejects_non_bool(tmp_path: Path) -> None:
     script = tmp_path / "bad_memory_agent.py"
-    script.write_text("def use_memory():\n    return 1\n")
+    script.write_text("def settings():\n    return {'use_memory': 1}\n")
     cmd = {"agentPath": str(script), "useMemory": None}
-    with pytest.raises(AgentFileError, match="use_memory"):
+    with pytest.raises(
+        AgentFileError, match=r"settings\(\)\['use_memory'\] must be bool, got int",
+    ):
         apply_agent_overrides(cmd)
-    assert cmd["useMemory"] is None, "a broken getter must not override"
+    assert cmd["useMemory"] is None, "a broken setting must not override"

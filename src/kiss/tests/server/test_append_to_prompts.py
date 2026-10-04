@@ -14,8 +14,8 @@ run's system prompt — right after the default ``SYSTEM.md`` prompt or
 the ``system_prompt`` replacement — and ``append_to_prompt`` is
 appended to the executed task prompt (to EACH subtask of a
 multi-``<task>`` prompt).  Both default to ``""`` (append nothing),
-are overridable by an agent script's ``append_to_system_prompt()``
-/ ``append_to_prompt()`` getters, and are treated as untrusted
+are extended by an agent script's ``add_to_system_prompt()`` getter
+and ``settings()["add_to_prompt"]`` key, and are treated as untrusted
 wire input by the daemon (non-string appends nothing).
 """
 
@@ -167,22 +167,22 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert sp.index(custom_base) < sp.index(_SYS_MARKER)
         assert SYSTEM_PROMPT[:80] not in sp
 
-    def test_agent_script_getters_override(self) -> None:
-        """Script ``append_to_*()`` getters override the client values."""
+    def test_agent_script_additions_override(self) -> None:
+        """``add_to_system_prompt()`` and ``settings()["add_to_prompt"]`` reach both prompts."""
         agent_path = self._write_py(
             "append_prompts_agent.py",
             f'''
             """Agent script appending to both prompts."""
 
 
-            def append_to_system_prompt() -> str:
+            def add_to_system_prompt() -> str:
                 """Append a system prompt suffix."""
                 return {_SYS_MARKER!r}
 
 
-            def append_to_prompt() -> str:
+            def settings() -> dict:
                 """Append a prompt suffix."""
-                return {_PROMPT_MARKER!r}
+                return {{"add_to_prompt": {_PROMPT_MARKER!r}}}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -201,28 +201,27 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert _SYS_MARKER in call["system_prompt"]
         assert _PROMPT_MARKER in call["arguments"]["task_description"]
 
-    def test_agent_script_getter_wrong_type_fails_task(self) -> None:
-        """A non-string ``append_to_prompt()`` stops the task loudly.
+    def test_agent_script_setting_wrong_type_fails_task(self) -> None:
+        """A non-string ``settings()["add_to_prompt"]`` stops the task loudly.
 
-        The deprecated getter stands for the ``add_to_prompt`` settings
-        key, so the diagnostic is the ``SettingsError`` text naming that
-        key and the offending type, suffixed with the script path.
+        The diagnostic is the ``SettingsError`` text naming the key and
+        the offending type, prefixed with the script path.
         """
         agent_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
-            """Agent script with a wrong-typed getter."""
+            """Agent script with a wrong-typed setting."""
 
 
-            def append_to_prompt() -> int:
-                """Return the wrong type."""
-                return 5
+            def settings() -> dict:
+                """Return the wrong type for add_to_prompt."""
+                return {"add_to_prompt": 5}
             ''',
         )
         calls: list[dict[str, Any]] = []
         self._install_executor_stub(calls)
         result = sorcar.run(
-            "script with broken append getter",
+            "script with broken add_to_prompt setting",
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
@@ -231,7 +230,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script '{agent_path}': append_to_prompt() must be str, got int"
+            f"agent script '{agent_path}': settings()['add_to_prompt'] must be str, got int"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 

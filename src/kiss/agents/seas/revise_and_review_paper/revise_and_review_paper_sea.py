@@ -40,7 +40,7 @@ Three tools make the mechanical steps deterministic:
 * :func:`loop_status` parses the ``Recommendation:`` and score lines
   of every round's review and says whether to stop or continue.
 
-Module-level getters (``append_to_system_prompt()``, ``add_to_tools()``,
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
 ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
 """
 
@@ -118,15 +118,15 @@ before the first round; the writer and the reviewer run unattended and must not 
 Both agents run through `run_agent` with the absolute path of their SEA file:
 
 - writer: `run_agent(task=<writer_task output>, agent="{WRITE_PAPER_SEA}",
-  use_worktree="false", auto_commit="false", timeout="{WRITER_TIMEOUT_SECONDS}",
-  max_budget=<share>)`;
+  options='{{"use_worktree": false, "auto_commit": false}}',
+  timeout="{WRITER_TIMEOUT_SECONDS}", max_budget=<share>)`;
 - reviewer: `run_agent(task=<reviewer_task output>, agent="{REVIEW_PAPER_SEA}",
-  use_worktree="false", auto_commit="false", use_memory="false",
+  options='{{"use_worktree": false, "auto_commit": false, "use_memory": false}}',
   timeout="{REVIEWER_TIMEOUT_SECONDS}", max_budget=<share>)`.
 
-Pass `model_name` when the user names a writer or reviewer model; use model names
-literally. Never pass `chat_id`: every round is a new session, and the paper, its sources
-and the review files carry the state. Pass the tool outputs of `writer_task` and
+Pass `model` when the user names a writer or reviewer model; use model names
+literally. Never pass `chat_id` in `options`: every round is a new session, and the
+paper, its sources and the review files carry the state. Pass the tool outputs of `writer_task` and
 `reviewer_task` as the task text verbatim; do not paraphrase them, and never paste an
 earlier review, your own opinion of the paper, or the round history into the reviewer's
 task. The writer and the reviewer share your working directory (`pwd` first; when the

@@ -9,7 +9,7 @@ SEA whose ``register_as_model()`` returns ``True`` in the picker
 (``VSCodeServer._get_models`` through ``sea_commands.model_seas``) and,
 when a run's model resolves to such an entry, ``_resolve_sea_model`` in
 the task runner rewrites the run into an agent-script run of the SEA on
-the model its ``model()`` getter names (else the default model), with the
+the model its ``settings()["model"]`` names (else the default model), with the
 SEA's ``add_to_system_prompt()`` protocol added to the system prompt.
 Runs that already name their agent (an explicit ``agentPath``, a ``/xxx``
 slash command) keep it and only take the model from the pick.
@@ -299,8 +299,8 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert run["model_name"] == "claude-fable-5-1"
         assert BESTROUTER_MARKER in run["system_prompt"]
 
-    def test_user_sea_without_model_getter_runs_on_the_default_model(self) -> None:
-        """A registered SEA that names no ``model()`` runs on the default model."""
+    def test_user_sea_without_model_setting_runs_on_the_default_model(self) -> None:
+        """A registered SEA whose settings name no ``model`` runs on the default model."""
         self._write_user_sea(
             "myrouter",
             "def register_as_model() -> bool:\n    return True\n"
@@ -325,14 +325,14 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert run["model_name"] == "claude-fable-5-1"
         assert BESTROUTER_MARKER not in run["system_prompt"]
 
-    def test_agent_script_model_getter_returning_blank_still_gets_a_real_model(self) -> None:
-        """A ``model()`` getter returning ``""`` means "the tab's pick" — never the router."""
+    def test_agent_script_blank_model_setting_still_gets_a_real_model(self) -> None:
+        """A ``settings()["model"]`` of ``""`` means "the tab's pick" — never the router."""
         vs = self.server._vscode_server
         with vs._state_lock:
             vs._default_model = AUTOROUTER
         sea = Path(self.tmpdir) / "blankmodel_sea.py"
         sea.write_text(
-            'def model() -> str:\n    return ""\n'
+            'def settings() -> dict:\n    return {"model": ""}\n'
             'def system_prompt() -> str:\n    return "BLANK MODEL SEA"\n',
             encoding="utf-8",
         )
@@ -355,12 +355,12 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert "AgentFileError" in str(results[-1]), results[-1]
         assert runs == []
 
-    def test_raising_model_getter_of_a_picked_sea_fails_the_run(self) -> None:
-        """A picked SEA whose ``model()`` raises stops the task with the diagnostic."""
+    def test_raising_settings_of_a_picked_sea_fails_the_run(self) -> None:
+        """A picked SEA whose ``settings()`` raises stops the task with the diagnostic."""
         self._write_user_sea(
             "badmodel",
             "def register_as_model() -> bool:\n    return True\n"
-            "def model() -> str:\n    raise RuntimeError('no model today')\n",
+            "def settings() -> dict:\n    raise RuntimeError('no model today')\n",
         )
         self._register_user_seas()
         runs: list[dict[str, Any]] = []
@@ -369,7 +369,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         self._raw_daemon_run({"model": "badmodel", "prompt": "say hello"}, events)
         results = [e for e in events if e.get("type") == "result"]
         assert results, events
-        assert "no model today" in str(results[-1]), results[-1]
+        assert "settings() raised: RuntimeError: no model today" in str(results[-1]), results[-1]
         assert runs == []
 
     def test_persisted_router_pick_is_not_a_model_for_direct_runs(self) -> None:

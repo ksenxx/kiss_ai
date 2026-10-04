@@ -27,15 +27,11 @@ callables), ``description()`` (``/xxx help`` text), the hooks
 ``register_as_model()`` / ``on_picked_as_model()``; those are read by
 :mod:`kiss.server.agent_file` and :mod:`kiss.agents.sorcar.sea_commands`.
 
-A long base system prompt reads better as a function, so
-``system_prompt()`` stays a getter (its value lands on the
-``system_prompt`` key).  Compatibility: a script written against the
-earlier contract — one zero-argument getter per field
-(``def use_worktree() -> bool`` ...), ``dispatch_timeout()`` for
-``timeout`` and ``append_to_prompt()`` for ``add_to_prompt`` — still
-works: :func:`resolve_settings` synthesizes the dict from those getters
-before applying ``settings()`` on top.  Those per-field getters are
-deprecated and will be dropped in a later release.
+A long base system prompt reads better as a function, so a script may
+also define ``system_prompt()``; :mod:`kiss.server.agent_file` applies
+its text to the run like a ``system_prompt`` key.  Only ``settings()``
+is evaluated here, so the dispatcher can read a script's preset,
+timeout and work directory without running its prompt code.
 """
 
 from __future__ import annotations
@@ -97,19 +93,6 @@ prepends the channel preamble to its system prompt (see
 :mod:`kiss.server.agent_file`).
 """
 
-FIELD_GETTERS: dict[str, str] = {
-    **{key: key for key in SETTING_TYPES if key not in ("preset", "add_to_prompt", "timeout")},
-    "dispatch_timeout": "timeout",
-    "append_to_prompt": "add_to_prompt",
-}
-"""Zero-argument getter name -> the ``settings()`` key it stands for.
-
-``system_prompt()`` is the supported way to supply a (usually long)
-base system prompt; every other entry is a deprecated per-field getter
-of the earlier contract, kept for one release.
-"""
-
-
 def script_name(path: str) -> str:
     """Return an agent script's display name: its file stem without a ``_sea`` suffix.
 
@@ -126,13 +109,11 @@ class SettingsError(ValueError):
 def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
     """Return the effective settings of the agent script executed into *namespace*.
 
-    Evaluates, in this order, the per-field getters the script defines
-    (:data:`FIELD_GETTERS`: ``system_prompt()`` and the deprecated
-    ones), then ``settings()``; the
-    later source wins per key, and the named ``preset``'s defaults sit
-    under both.  Every value is type-checked against
-    :data:`SETTING_TYPES`.  ``prompt`` and ``work_dir`` are kept as the
-    script returned them; the daemon resolves them.
+    Evaluates the script's ``settings()`` (when defined) and merges the
+    named ``preset``'s defaults under its keys.  Every value is
+    type-checked against :data:`SETTING_TYPES`.  ``prompt`` and
+    ``work_dir`` are kept as the script returned them; the daemon
+    resolves them.
 
     Args:
         namespace: The script's module namespace (``module.__dict__``).
@@ -145,39 +126,30 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
 
     Raises:
         SettingsError: When ``settings()`` is not a function returning a
-            dict, names an unknown key or preset, a value (of it or of
-            a getter) has the wrong type, or ``settings()`` / a getter
-            raises (whatever it raises; the message names the getter).
+            dict, names an unknown key or preset, a value has the wrong
+            type, or ``settings()`` raises (whatever it raises).
     """
     declared: dict[str, Any] = {}
-    sources: dict[str, str] = {}
-    for getter, key in FIELD_GETTERS.items():
-        if getter not in namespace:
-            continue
-        fn = namespace[getter]
-        if not callable(fn):
-            raise SettingsError(f"{getter} must be a callable, got {type(fn).__name__}")
-        declared[key] = _call(fn, f"{getter}()")
-        sources[key] = f"{getter}()"
-    settings_fn = namespace.get("settings")
-    if settings_fn is not None:
+    if "settings" in namespace:
+        settings_fn = namespace["settings"]
         if not callable(settings_fn):
-            raise SettingsError("settings must be a function returning a dict")
-        explicit = _call(settings_fn, "settings()")
-        if not isinstance(explicit, dict):
             raise SettingsError(
-                f"settings() must return a dict, got {type(explicit).__name__}"
+                f"settings must be a function returning a dict, got {type(settings_fn).__name__}"
             )
-        declared.update(explicit)
-        sources.update({key: f"settings()[{key!r}]" for key in explicit})
+        declared = _call(settings_fn, "settings()")
+        if not isinstance(declared, dict):
+            raise SettingsError(
+                f"settings() must return a dict, got {type(declared).__name__}"
+            )
+        declared = dict(declared)
+    sources = {key: f"settings()[{key!r}]" for key in declared}
     for key in declared:
         if key not in SETTING_TYPES:
             raise SettingsError(
                 f"settings() has an unknown key {key!r}; "
                 f"known keys: {', '.join(SETTING_TYPES)}"
             )
-    # ``None`` means "no override" (the caller's or persisted value
-    # stands), for a key of ``settings()`` and a legacy getter alike.
+    # ``None`` means "no override": the caller's or persisted value stands.
     declared = {key: value for key, value in declared.items() if value is not None}
     for key, value in declared.items():
         expected = SETTING_TYPES[key]

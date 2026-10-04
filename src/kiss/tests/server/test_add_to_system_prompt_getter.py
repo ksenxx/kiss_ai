@@ -5,11 +5,9 @@
 """The ``add_to_system_prompt()`` agent-script getter adds to ``appendToSystemPrompt``.
 
 ``add_to_system_prompt()`` appends its text after whatever the field
-already carries — the caller's text, then the text of the deprecated
-``append_to_system_prompt()`` getter (ADDITIVE too, under the new SEA
-contract: it no longer replaces the caller's text) — each part
-separated by a blank line.  Exercised directly through
-:func:`apply_agent_overrides`, the daemon-side loader.
+already carries — the caller's text, then the ``channel`` preset's
+preamble — each part separated by a blank line.  Exercised directly
+through :func:`apply_agent_overrides`, the daemon-side loader.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from kiss.server.agent_file import AgentFileError, apply_agent_overrides
+from kiss.server.agent_file import CHANNEL_PREAMBLE, AgentFileError, apply_agent_overrides
 
 
 def _script(tmp_path: Path, body: str) -> str:
@@ -44,21 +42,23 @@ def test_addition_follows_the_callers_text(tmp_path: Path) -> None:
     assert cmd["appendToSystemPrompt"] == "CALLER\n\nPROTOCOL"
 
 
-def test_legacy_append_getter_is_additive_and_precedes_the_addition(tmp_path: Path) -> None:
-    """``append_to_system_prompt()`` follows the caller's text; ``add_to_system_prompt()`` is last.
+def test_channel_preamble_precedes_the_addition(tmp_path: Path) -> None:
+    """The ``channel`` preamble follows the caller's text; ``add_to_system_prompt()`` is last.
 
-    The deprecated getter used to REPLACE the caller's text; it is now
-    additive like ``add_to_system_prompt()``, so all three parts survive
-    in caller -> legacy -> addition order.
+    All three parts survive in caller -> preamble -> addition order, so
+    a channel SEA's protocol never displaces the preamble that keeps it
+    from recursing into ``run_agent``.
     """
     script = _script(
         tmp_path,
-        "def append_to_system_prompt():\n    return 'REPLACED'\n"
+        "def settings():\n    return {'preset': 'channel'}\n"
         "def add_to_system_prompt():\n    return 'PROTOCOL'\n",
     )
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
     apply_agent_overrides(cmd)
-    assert cmd["appendToSystemPrompt"] == "CALLER\n\nREPLACED\n\nPROTOCOL"
+    assert cmd["appendToSystemPrompt"] == (
+        "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="adder") + "\n\nPROTOCOL"
+    )
 
 
 def test_empty_addition_and_non_string_caller_value(tmp_path: Path) -> None:

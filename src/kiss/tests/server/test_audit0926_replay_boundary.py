@@ -62,7 +62,7 @@ _FAILING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
         deadline = time.time() + 60
         while time.time() < deadline:

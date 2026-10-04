@@ -13,8 +13,8 @@ call, so its ``tools`` array is exactly the toolset the sub-agent got:
   parent tool named like one of the sub-agent's built-ins is skipped;
 * a sub-task whose own script also uses ``add_to_tools()`` has both
   sets, and a tool both scripts define by the same name once;
-* a sub-task whose script fixes the whole toolset with ``tools()``
-  keeps exactly that set.
+* a sub-task whose script fixes the whole toolset (``add_to_tools()``
+  with ``settings()['tool_profile'] == "none"``) keeps exactly that set.
 
 The tool callables cannot travel the wire: ``run_agent`` sends the
 ``inheritTools`` flag and the daemon takes them off the running parent
@@ -63,12 +63,12 @@ PARENT_SCRIPT = textwrap.dedent('''
         return [parent_ledger, number_of_cores]
 
 
-    def is_parallel():
+    def settings():
         # Without run_parallel the parent has no built-in
         # number_of_cores, so its own tool of that name registers; a
         # sub-task WITH run_parallel has the built-in and must skip the
         # inherited one instead of failing on the duplicate name.
-        return False
+        return {"is_parallel": False}
 
 
     def add_to_system_prompt():
@@ -96,7 +96,12 @@ CHILD_FIXED_SCRIPT = textwrap.dedent('''
         return what
 
 
-    def tools():
+    def settings():
+        # ``none``: no built-in toolset, so add_to_tools() is the whole set.
+        return {"tool_profile": "none"}
+
+
+    def add_to_tools():
         return [only_tool]
 ''')
 

@@ -18,7 +18,7 @@ through ``run_agent`` with the instructions as the task.  The task text
 supplies the paper (a PDF, .tex, .md or .txt file), the
 venue, the output path, the word limit, the cutoff date for the
 related-work search and, optionally, a second model that checks the
-review.  :func:`append_to_system_prompt` adds the reviewing rules (read
+review.  :func:`add_to_system_prompt` adds the reviewing rules (read
 everything, search the related work, judge the novelty, pinpoint
 problems by page and section, suggest how to fix them, write like
 Strunk and White, no AI slop) to the default system prompt, so the
@@ -48,7 +48,7 @@ Two tools implement the mechanical steps:
   scores, named related work, the slop and reviewer-boilerplate lists)
   and lists every hit with its line number.
 
-Module-level getters (``append_to_system_prompt()``, ``add_to_tools()``,
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
 ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
 """
 

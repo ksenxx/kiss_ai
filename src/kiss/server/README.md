@@ -333,8 +333,8 @@ inherited value: `chat_id`, `system_prompt`, `append_to_system_prompt`,
 `append_to_prompt`, `model_config`, `use_worktree`, `auto_commit`,
 `classify_tasks`, `use_web_tools`, `use_memory`, `is_parallel`,
 `tool_profile` and `docker_image`, e.g.
-`'{"tool_profile": "review", "use_web_tools": false}'`.  `model_name`
-is a deprecated alias of `model`.  `agent` names WHICH agent to run;
+`'{"tool_profile": "review", "use_web_tools": false}'`.  `agent`
+names WHICH agent to run;
 `agent_dispatch.resolve_agent` tries, in order:
 
 1. empty, or a generic label a model may invent (`general`, `reviewer`,
@@ -654,27 +654,19 @@ def tool_call_hook():
     return veto_destructive
 ```
 
-### Compatibility: the deprecated per-field getters
+### Only `settings()` configures a run
 
-A SEA written against the earlier contract still works for one
-release (`sea_settings.FIELD_GETTERS`; `resolve_settings` synthesizes
-the dict from the getters, then applies `settings()` on top, so a key
-of `settings()` wins over the getter of the same field):
-
-- one zero-argument getter per `run()` parameter key,
-  `def use_worktree() -> bool`, `def model() -> str`,
-  `def max_budget() -> float`, ...; `preset`, `timeout` and
-  `add_to_prompt` have no same-name getter;
-- `dispatch_timeout()` → the `timeout` key;
-- `append_to_prompt()` → the `add_to_prompt` key;
-- `append_to_system_prompt()` → treated like `add_to_system_prompt()`:
-  its text is now ADDITIVE (appended after the caller's suffix); it no
-  longer replaces the caller's text;
-- `tools()` → `add_to_tools()` plus `"tool_profile": "none"`.
-  Defining both `tools()` and `add_to_tools()` is an error.
-
-New SEAs should use `settings()`, `add_to_system_prompt()` and
-`add_to_tools()`; `system_prompt()` is not deprecated.
+The per-field getters of the earlier contract (`def use_worktree() ->
+bool`, `def model() -> str`, `def max_budget() -> float`, ...,
+`dispatch_timeout()`, `append_to_prompt()`, `append_to_system_prompt()`
+and the whole-toolset `tools()`) are no longer read: a module-level
+function with one of those names is an ordinary function the daemon
+ignores.  The dispatcher and the task runner evaluate `settings()`
+alone when they need a script's preset, timeout, model or work
+directory before the run exists (`sea_commands.sea_settings`), so
+`settings()` must be cheap and side-effect-free there; `system_prompt()`,
+`add_to_system_prompt()`, `add_to_tools()` and the hooks run only inside
+`apply_agent_overrides`, once per run.
 
 
 ## Tools: `add_to_tools()`
@@ -815,10 +807,10 @@ prefixes the message below with `Task failed: AgentFileError: `):
 | unknown preset | `agent script '...': unknown preset 'x'; known presets: session, worker, channel` |
 | wrong-typed value (`bool` for a number, `int` for a `str`, ...) | `agent script '...': settings()['max_budget'] must be int or float, got bool` |
 | empty `prompt`; non-finite `max_budget` / `timeout` | `agent script '...': settings()['prompt'] must return a non-empty string`, `... settings()['max_budget'] must return a finite number or None` |
-| `add_to_tools`, `add_to_system_prompt`, a hook or a deprecated getter `X` bound to a non-callable | `X of agent script '...' must be a callable, got ...` (a deprecated getter: `agent script '...': X must be a callable, got ...`) |
-| `X()` raises | `X() of agent script '...' raised: ...` (a deprecated getter: `agent script '...': X() raised: ...`) |
-| `X()` returns the wrong type | `add_to_tools() of agent script '...' must return a list of tool callables (not a file path), got ...`, `add_to_system_prompt() of agent script '...' must return a string, got ...`, `tool_call_hook() of agent script '...' must return a callable or None, got ...` |
-| both `tools()` and `add_to_tools()` defined | `agent script '...' defines both tools() and add_to_tools(); define at most one` |
+| `settings` bound to a non-callable | `agent script '...': settings must be a function returning a dict, got ...` |
+| `system_prompt`, `add_to_tools`, `add_to_system_prompt` or a hook `X` bound to a non-callable | `X of agent script '...' must be a callable, got ...` |
+| `X()` raises | `X() of agent script '...' raised: ...` |
+| `X()` returns the wrong type | `system_prompt() of agent script '...' must return a string, got ...`, `add_to_tools() of agent script '...' must return a list of tool callables (not a file path), got ...`, `add_to_system_prompt() of agent script '...' must return a string, got ...`, `tool_call_hook() of agent script '...' must return a callable or None, got ...` |
 | a value whose own methods raise (e.g. a `str` subclass with a raising `strip`) | `agent script '...': settings()['prompt'] returned a broken value: ...` |
 
 Overrides are **atomic**: if anything fails, the command keeps all

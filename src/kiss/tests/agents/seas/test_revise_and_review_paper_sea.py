@@ -117,8 +117,8 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
 
     The paper SEAs declare their own waits; a SEA without ``timeout``
     (the bundled ``/dummy``) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
-    Real SEA files with a non-numeric, boolean or raising legacy
-    ``dispatch_timeout()`` getter fail loudly at ``sea_settings`` (a
+    Real SEA files whose ``settings()`` returns a non-numeric, boolean or
+    infinite ``timeout``, or raises, fail loudly at ``sea_settings`` (a
     broken script must not run with guessed parameters); a non-positive
     value falls back to the default and a positive float is kept as is.
     """
@@ -141,9 +141,11 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
 
     resolved = {
         "": 3600.0,
-        "def dispatch_timeout():\n    return 0\n": 3600.0,
-        "def dispatch_timeout():\n    return 1800.0\n": 1800.0,
+        "def settings():\n    return {'timeout': 0}\n": 3600.0,
+        "def settings():\n    return {'timeout': 1800.0}\n": 1800.0,
         "def settings():\n    return {'timeout': 1800}\n": 1800.0,
+        # A removed legacy getter is an ordinary module function: ignored.
+        "def dispatch_timeout():\n    return 1800.0\n": 3600.0,
     }
     for n, (body, expected) in enumerate(resolved.items()):
         settings = sea_commands.sea_settings(_script(n, body))
@@ -151,9 +153,10 @@ def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path:
         # An explicit positive argument always wins over the script.
         assert resolve_timeout("42", settings) == 42.0, body
     broken = [
-        "def dispatch_timeout():\n    return 'soon'\n",
-        "def dispatch_timeout():\n    return True\n",
-        "def dispatch_timeout():\n    raise RuntimeError('broken')\n",
+        "def settings():\n    return {'timeout': 'soon'}\n",
+        "def settings():\n    return {'timeout': True}\n",
+        "def settings():\n    return {'timeout': float('inf')}\n",
+        "def settings():\n    raise RuntimeError('broken')\n",
     ]
     for n, body in enumerate(broken, start=len(resolved)):
         with pytest.raises(sea_commands.SeaScriptError):

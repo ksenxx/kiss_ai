@@ -1236,7 +1236,6 @@ def make_run_agent_tool(
         max_budget: str = "",
         workspace: str = "",
         options: str = "",
-        model_name: str = "",
     ) -> str:
         """Run an agent (channel, slash-command SEA, cron or any agent script) on a task now.
 
@@ -1354,8 +1353,6 @@ def make_run_agent_tool(
                 ``'{"tool_profile": "review", "use_web_tools": false}'``.
                 Usually leave it empty: the agent file's ``settings()``
                 already pin what it needs, and they win anyway.
-            model_name: Deprecated alias of ``model``; used when
-                ``model`` is empty.
 
         Returns:
             The sub-task's YAML result ("success" and "summary" keys),
@@ -1364,7 +1361,7 @@ def make_run_agent_tool(
             outlived ``timeout``.
         """
         return _run_agent(
-            work_dir, agent, task, workspace, model or model_name, max_budget,
+            work_dir, agent, task, workspace, model, max_budget,
             timeout, parent_agent, options,
         )
 

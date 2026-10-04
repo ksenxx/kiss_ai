@@ -479,13 +479,14 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["r3"] == 40
         assert seen["thread"] != threading.current_thread().name
 
-    def test_tools_getter_selects_exactly_the_returned_functions(self) -> None:
-        """``tools()`` alone decides which functions become tools.
+    def test_add_to_tools_selects_exactly_the_returned_functions(self) -> None:
+        """``add_to_tools()`` alone decides which functions become tools.
 
         The daemon must not scan the module: functions the file
-        defines but ``tools()`` does not return (helpers, private
-        functions) never become tools, and the returned list's order
-        is preserved.
+        defines but ``add_to_tools()`` does not return (helpers,
+        private functions) never become tools, and the returned list's
+        order is preserved.  With ``tool_profile: "none"`` the returned
+        list is the whole tool set: the basic toolset is switched off.
         """
         tools_path = self._write_agent_script(
             "selected_tools.py",
@@ -512,11 +513,16 @@ class SorcarRunApiTest(unittest.TestCase):
 
 
             def helper_not_a_tool(x: str) -> str:
-                """Defined at top level but NOT returned by tools()."""
+                """Defined at top level but NOT returned by add_to_tools()."""
                 return x
 
 
-            def tools():
+            def settings():
+                """Switch the basic toolset off."""
+                return {"tool_profile": "none"}
+
+
+            def add_to_tools():
                 """Return only the selected tools, in this order."""
                 return [also_good, good]
             ''',
@@ -525,6 +531,7 @@ class SorcarRunApiTest(unittest.TestCase):
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             seen["names"] = [t.__name__ for t in kwargs.get("tools") or []]
+            seen["append_basic_tools"] = self_agent._append_basic_tools
             self_agent.total_tokens_used = 1
             self_agent.budget_used = 0.001
             self_agent.total_steps = 1
@@ -544,6 +551,7 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         assert result.success is True
         assert seen["names"] == ["also_good", "good"]
+        assert seen["append_basic_tools"] is False
 
     def test_agent_script_relative_path_resolved_by_client(self) -> None:
         """A relative path is resolved by the CLIENT before sending.
@@ -686,13 +694,13 @@ class SorcarRunApiTest(unittest.TestCase):
     def test_misbehaving_tool_getter_fails_task(self) -> None:
         """An agent script with a bad tool getter fails the task loudly.
 
-        The contract requires ``tools()`` / ``add_to_tools()``, when
-        defined, to be callables returning a list/tuple of callables,
-        and at most one of the two.  A module that binds a getter to a
-        non-callable, raises inside it, returns a non-sequence (e.g. a
-        file path) or non-callable entries, or defines both getters
-        must stop the task with an ``AgentFileError`` diagnostic —
-        never invoke the agent.
+        The contract requires ``add_to_tools()``, when defined, to be a
+        callable returning a list/tuple of callables, and
+        ``settings()['tool_profile']`` to be a string.  A module that
+        binds the getter to a non-callable, raises inside it, returns
+        a non-sequence (e.g. a file path) or non-callable entries, or
+        names a wrong-typed tool profile must stop the task with an
+        ``AgentFileError`` diagnostic — never invoke the agent.
         """
         not_callable = self._write_agent_script(
             "not_callable_add_to_tools.py",
@@ -709,7 +717,7 @@ class SorcarRunApiTest(unittest.TestCase):
         bad_return = self._write_agent_script(
             "bad_return_tools.py",
             '''
-            def tools():
+            def add_to_tools():
                 """Return a path instead of a list."""
                 return "/some/tools_file.py"
             ''',
@@ -722,12 +730,12 @@ class SorcarRunApiTest(unittest.TestCase):
                 return [42]
             ''',
         )
-        both_getters = self._write_agent_script(
-            "both_tool_getters.py",
+        bad_profile = self._write_agent_script(
+            "bad_tool_profile.py",
             '''
-            def tools():
-                """The whole tool set."""
-                return []
+            def settings():
+                """Name a tool profile of the wrong type."""
+                return {"tool_profile": 7}
 
 
             def add_to_tools():
@@ -749,7 +757,7 @@ class SorcarRunApiTest(unittest.TestCase):
             (raising_getter, "RuntimeError: boom in add_to_tools"),
             (bad_return, "must return a list of tool callables"),
             (non_callable_entry, "must return a list of tool callables"),
-            (both_getters, "define at most one"),
+            (bad_profile, "settings()['tool_profile'] must be str, got int"),
         ):
             result_event = self._raw_daemon_run(agent_path)
             assert result_event is not None, f"no result for {agent_path!r}"
@@ -1457,11 +1465,11 @@ class SorcarRunApiTest(unittest.TestCase):
         assert entry["scopeWorkDir"] == workspace
 
     def test_scope_survives_agent_script_work_dir_override(self) -> None:
-        """A ``work_dir()`` override re-pins ``workDir``, not the scope.
+        """A ``settings()['work_dir']`` override re-pins ``workDir``, not the scope.
 
         The agent script overrides the execution directory via
-        ``work_dir()``, and ``_run_task`` re-pins the registry
-        tab's ``workDir`` to the overridden value.  The tab's
+        ``settings()['work_dir']``, and ``_run_task`` re-pins the
+        registry tab's ``workDir`` to the overridden value.  The tab's
         ``scopeWorkDir`` must survive that re-pin — it is what keeps a
         ``run_agent``-dispatched cron tab visible in the CALLING
         workspace — because a script must not disturb the client-sent
@@ -1471,8 +1479,8 @@ class SorcarRunApiTest(unittest.TestCase):
         override_dir = str(Path(self.tmpdir) / "script_work")
         agent_script = Path(self.tmpdir) / "scoped_agent.py"
         agent_script.write_text(
-            "def work_dir() -> str:\n"
-            f"    return {override_dir!r}\n"
+            "def settings() -> dict:\n"
+            f"    return {{'work_dir': {override_dir!r}}}\n"
         )
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:

@@ -6,16 +6,15 @@
 
 ``_stop_task``'s watchdog cancels a run by injecting an asynchronous
 ``KeyboardInterrupt`` into the task thread.  The untrusted-code
-loader — ``apply_agent_overrides`` (agent-script ``X()`` getters,
-including the ``tools()`` / ``add_to_tools()`` tool getters) —
-executes caller-supplied Python on that thread and converts EVERY
-raise, ``BaseException`` included, into its diagnostic error type.
-An injected stop landing while such a getter runs was therefore
-swallowed:
+loader — ``apply_agent_overrides`` (agent-script ``settings()`` and
+the ``add_to_tools()`` tool getter) — executes caller-supplied Python
+on that thread and converts EVERY raise, ``BaseException`` included,
+into its diagnostic error type.  An injected stop landing while such
+a getter runs was therefore swallowed:
 
-* the run was reported ``"Task failed: AgentFileError: prompt()
-  ... raised: KeyboardInterrupt"`` instead of ``"Task stopped by
-  user"``;
+* the run was reported ``"Task failed: AgentFileError: agent script
+  '...': settings() raised: KeyboardInterrupt"`` instead of ``"Task
+  stopped by user"``;
 * ``_cancel_outcome`` never ran, so the stop was never acknowledged
   (``AgentState.stop_acknowledged`` stayed ``False``) and the
   watchdog's 5-second retry could land a SECOND interrupt in the
@@ -148,7 +147,7 @@ _BLOCKING_GETTER = textwrap.dedent(
 
 _BROKEN_GETTER = textwrap.dedent(
     """
-    def prompt():
+    def settings():
         \"\"\"Raise immediately — a genuinely broken agent script.\"\"\"
         raise ValueError("script bug")
     """
@@ -248,8 +247,8 @@ class TestStopWrappedInterrupt(TestCase):
         self.client.wait_for("status", tab_id, running=False)
 
     def test_stop_during_agent_script_getter_is_a_user_stop(self) -> None:
-        """KI inside ``prompt()`` (AgentFileError site, ``_run_task``)."""
-        script = self._write_script("agent.py", "prompt", "agent")
+        """KI inside ``settings()`` (AgentFileError site, ``_run_task``)."""
+        script = self._write_script("agent.py", "settings", "agent")
         self._run_and_stop("wrap-agent-tab", "agent", agentPath=script)
 
     def test_stop_during_agent_script_tool_getter_is_a_user_stop(self) -> None:

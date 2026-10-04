@@ -77,7 +77,7 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until interrupted; raise if released or timed out.\"\"\"
         (_DIR / "entered").write_text("1", encoding="utf-8")
         deadline = time.time() + 60

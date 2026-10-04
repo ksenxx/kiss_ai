@@ -496,7 +496,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
             tools=ask_sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
             append_basic_tools=settings["tool_profile"] != "none",
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=ask_sea.system_prompt(),
             system_prompt=ask_sea.add_to_system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],

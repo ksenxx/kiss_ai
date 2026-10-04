@@ -139,7 +139,8 @@ WRAP_COLUMNS = 92
 """Prose written into a SEA prompt is wrapped here; the repo lints lines over 100."""
 SIGNATURE_CHARS = 200
 """Prompt prefix length that identifies a SEA run's ``system_prompt`` event."""
-PROMPT_GETTERS = ("system_prompt", "append_to_system_prompt", "add_to_system_prompt")
+PROMPT_GETTERS = ("system_prompt", "add_to_system_prompt")
+"""The SEA getters whose text is the prompt rsi7d patches, in precedence order."""
 STAMP_PREFIX = "_Observed in the task history"
 """First words of the stamp line ``write_autorouter_evidence`` puts above the evidence."""
 EVIDENCE_NAME = "AUTOROUTER.md"
@@ -612,7 +613,7 @@ def _runs_by_signature(task_ids: list[str], signatures: dict[str, str]) -> dict[
     *signatures* maps a SEA name to a distinctive prefix of the prompt
     text its getter returns; a SEA's prompt is persisted verbatim in
     the run's ``system_prompt`` event (alone for ``system_prompt()``
-    SEAs, appended to the default prompt for ``append_to_system_prompt()``
+    SEAs, appended to the default prompt for ``add_to_system_prompt()``
     ones), so the prefix identifies runs the server dispatched without a
     ``run_agent`` tool call (the side-channel task-update reports, runs
     started through ``sorcar.run(extension_agent_path=...)``).

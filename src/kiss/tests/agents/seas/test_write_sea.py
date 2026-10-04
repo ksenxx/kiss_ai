@@ -26,6 +26,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.agent_dispatch import resolve_timeout
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server.agent_file import apply_agent_overrides
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
 
 _SEA_PATH = Path(write_sea.__file__).resolve()
@@ -82,7 +83,9 @@ def test_slash_write_resolves_to_the_bundled_sea() -> None:
     assert settings == {"preset": "session", "timeout": 3600.0}
     assert resolve_timeout("", settings) == 3600.0
     assert resolve_timeout("120", settings) == 120.0
-    assert not hasattr(write_sea, "dispatch_timeout")
+    # The timeout lives in ``settings()`` alone: no removed getter
+    # (``dispatch_timeout()`` included) is defined, as none would be read.
+    assert_no_removed_getters(write_sea)
 
 
 def test_loader_adds_the_protocol_after_the_callers_suffix() -> None:

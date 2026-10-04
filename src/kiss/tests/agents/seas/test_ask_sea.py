@@ -47,6 +47,7 @@ from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.config import kiss_home
 from kiss.server.agent_file import apply_agent_overrides
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 
 # The placeholder the daemon substitutes with the calling task's id.
 _PLACEHOLDER = "{task_id}"
@@ -71,9 +72,12 @@ _EXPECTED_SETTINGS = {
     "use_memory": False,
     "tool_profile": "none",
     "add_to_prompt": _EXPECTED_ADD_TO_PROMPT,
-    # ``system_prompt()`` stays a getter; its value lands on this key.
-    "system_prompt": ask_sea.system_prompt(),
 }
+"""``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
+
+``system_prompt()`` is a getter the daemon applies to ``systemPrompt``
+(``apply_agent_overrides``), so its text is not a settings key.
+"""
 _ASK_PATH = str(Path(ask_sea.__file__).resolve())
 
 
@@ -133,8 +137,8 @@ def test_add_to_system_prompt_returns_fixed_suffix() -> None:
     assert "history.db" in text and "read-only" in text
     assert "task_overview" not in text and "task_transcript" not in text
     assert ask_sea.ADD_TO_PROMPT == _EXPECTED_ADD_TO_PROMPT
-    # The deprecated getter of the earlier contract is gone: the daemon
-    # would otherwise append the playbook twice.
+    # The earlier contract's name is gone: the daemon reads only
+    # ``add_to_system_prompt()``, so the old name would be dead code.
     assert not hasattr(ask_sea, "append_to_system_prompt")
 
 
@@ -146,8 +150,8 @@ def test_settings_follow_the_contract() -> None:
     toolset out so the answerer cannot run commands or touch files;
     ``add_to_prompt`` is the fixed sentence with ``{task_id}`` still a
     placeholder (the daemon fills it from ``parentTaskId``).  The
-    resolved settings add the preset's defaults and the value of the
-    ``system_prompt()`` getter.
+    resolved settings add the preset's defaults and nothing else: the
+    ``system_prompt()`` getter is applied by the daemon, not resolved here.
     """
     assert ask_sea.settings() == {
         "preset": "worker",
@@ -161,18 +165,14 @@ def test_settings_follow_the_contract() -> None:
 def test_add_to_tools_is_task_context_alone_and_legacy_getters_are_gone() -> None:
     """``add_to_tools`` MUST be ``task_context`` alone; no per-field getter remains.
 
-    The ``none`` tool profile (not the deprecated ``tools()`` getter) is
-    what removes the built-in toolset, so ``tools()`` MUST NOT exist
-    (defining both is an error) and neither may any of the deprecated
-    per-field getters the settings dict replaced.
+    The ``none`` tool profile (not the removed ``tools()`` getter) is
+    what removes the built-in toolset.  Nothing reads the old per-field
+    getters any more, so a SEA defining one would ship dead code that
+    silently does nothing; none may exist.
     """
     assert [t.__name__ for t in ask_sea.add_to_tools()] == ["task_context"]
-    for legacy in (
-        "tools", "if_append_basic_tools", "tool_profile", "use_memory",
-        "is_parallel", "use_web_tools", "append_to_prompt", "dispatch_timeout",
-        "APPEND_TO_PROMPT",
-    ):
-        assert not hasattr(ask_sea, legacy), legacy
+    assert_no_removed_getters(ask_sea)
+    assert not hasattr(ask_sea, "APPEND_TO_PROMPT")
 
 
 def test_system_lite_is_bundled_next_to_the_module() -> None:

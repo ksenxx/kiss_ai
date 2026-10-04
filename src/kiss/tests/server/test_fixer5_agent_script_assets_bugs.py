@@ -184,11 +184,11 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
             "    \"\"\"Return ok.\"\"\"\n"
             "    return 'ok'\n"
             "\n"
-            "def tools():\n"
+            "def add_to_tools():\n"
             "    \"\"\"Return a list whose iteration raises.\"\"\"\n"
             "    return _EvilList([ok])\n"
         )
-        with self.assertRaisesRegex(AgentFileError, "SystemExit"):
+        with self.assertRaisesRegex(AgentFileError, "add_to_tools.*broken list.*SystemExit"):
             _load_tools(path)
 
 

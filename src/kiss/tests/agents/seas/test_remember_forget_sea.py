@@ -34,6 +34,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -68,7 +69,7 @@ def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[An
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["is_parallel"],
@@ -95,11 +96,12 @@ def test_sea_getters_follow_the_contract() -> None:
     assert forget_sea.add_to_tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
     for sea in (remember_sea, forget_sea):
         assert sea.settings() == {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        # ``resolve_settings`` evaluates ``settings()`` plus the ``worker``
+        # preset only; ``system_prompt()`` is a getter the daemon applies.
         assert resolve_settings(vars(sea)) == {
             "preset": "worker",
             "tool_profile": "bash",
             "max_budget": 1.0,
-            "system_prompt": sea.SYSTEM_PROMPT,
             "use_worktree": False,
             "auto_commit": False,
             "classify_tasks": False,
@@ -107,11 +109,7 @@ def test_sea_getters_follow_the_contract() -> None:
             "use_web_tools": False,
             "use_memory": False,
         }, sea.__name__
-        for legacy in (
-            "tool_profile", "max_budget", "use_worktree", "auto_commit", "classify_tasks",
-            "is_parallel", "use_web_tools", "use_memory", "tools",
-        ):
-            assert not hasattr(sea, legacy), f"{sea.__name__}.{legacy}"
+        assert_no_removed_getters(sea)
 
 
 def test_slash_commands_resolve_to_the_bundled_seas() -> None:

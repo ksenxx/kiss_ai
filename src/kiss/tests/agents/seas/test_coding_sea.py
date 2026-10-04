@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 
 MODEL = "gpt-5.6-luna"
 
@@ -82,8 +83,12 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
     settings = resolve_settings({"settings": harness.settings})
     assert settings["docker_image"] == f"container:{container_name}"
+    # The trial adds no tools of its own (the container's shell is the
+    # toolset); neither the module nor the harness, whose methods the
+    # generated trial SEA exports as its getters, carries a removed name.
+    assert not hasattr(coding_sea, "add_to_tools")
+    assert_no_removed_getters(coding_sea)
     assert not hasattr(harness, "if_append_basic_tools")
-    assert not hasattr(coding_sea, "tools") and not hasattr(coding_sea, "add_to_tools")
     assert not settings["use_memory"] and not settings["use_web_tools"]
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
@@ -389,8 +394,9 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert spec is not None and spec.loader is not None
     sea = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sea)
-    assert sea.prompt() == "p"
+    assert not hasattr(sea, "prompt")
     settings = sea.settings()
+    assert settings["prompt"] == "p"
     assert settings["model"] == MODEL
     assert settings["docker_image"] == "container:kiss-test-trial"
     assert settings["work_dir"] == str(tmp_path / "sea-trial")

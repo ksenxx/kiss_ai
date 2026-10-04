@@ -16,6 +16,8 @@ place on the command dict:
   a ``preset`` plus per-run parameters, each written over the
   command's corresponding wire field (:data:`SETTING_FIELDS`), so a
   script's choice wins over whatever the caller sent;
+* the script's ``system_prompt()`` text, written over ``systemPrompt``
+  (the run's base system prompt);
 * the ``channel`` preset's preamble and the script's
   ``add_to_system_prompt()`` text, appended to ``appendToSystemPrompt``;
 * the script's ``add_to_tools()`` callables and ``llm_call_hook()`` /
@@ -270,18 +272,17 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
 
     Daemon-side counterpart of :func:`resolve_agent_path`: imports the
     Python file named by the command's ``agentPath`` field and applies
-    its ``settings()`` (:func:`~kiss.agents.sorcar.sea_settings.resolve_settings`:
-    preset defaults merged, deprecated per-field getters honoured), one
-    wire field per key (:data:`SETTING_FIELDS`).  A ``channel`` preset
-    appends :data:`CHANNEL_PREAMBLE` to the system prompt; the script's
-    ``add_to_system_prompt()`` text (or the deprecated
-    ``append_to_system_prompt()``) follows it; its ``add_to_prompt``
+    its ``settings()`` (:func:`~kiss.agents.sorcar.sea_settings.resolve_settings`,
+    preset defaults merged), one wire field per key
+    (:data:`SETTING_FIELDS`).  The script's ``system_prompt()`` text
+    becomes the run's base system prompt (``systemPrompt``; it wins
+    over a ``system_prompt`` key).  A ``channel`` preset appends
+    :data:`CHANNEL_PREAMBLE` to the system prompt and the script's
+    ``add_to_system_prompt()`` text follows it; its ``add_to_prompt``
     text, ``{task_id}`` in it replaced by the command's
     ``parentTaskId``, is appended to the caller's ``appendToPrompt``.
     ``add_to_tools()`` callables are staged on the daemon-side ``tools``
-    field (added to the run's built-in toolset); the deprecated
-    ``tools()`` stages the same list with the ``none`` tool profile, so
-    the list and ``finish`` are the run's whole tool set.
+    field (added to the run's built-in toolset);
     ``llm_call_hook()`` / ``tool_call_hook()`` callables are staged on
     ``llmCallHook`` / ``toolCallHook``.  The writes are atomic: they
     happen only after everything has succeeded, so a broken script
@@ -301,8 +302,8 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
         AgentFileError: When the ``agentPath`` field is not a string,
             is not the path of an existing ``.py`` file, names a module
             that raises at import time, has malformed settings, a
-            non-callable or raising getter, a getter returning the
-            wrong type, or both ``tools()`` and ``add_to_tools()``.
+            non-callable or raising getter, or a getter returning the
+            wrong type.
     """
     raw_path = cmd.get("agentPath")
     if raw_path is None:
@@ -310,11 +311,6 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
     if isinstance(raw_path, str) and raw_path == "":
         return set()
     namespace = execute_python_file(raw_path, AgentFileError, "agent script")
-    if "tools" in namespace and "add_to_tools" in namespace:
-        raise AgentFileError(
-            f"agent script {raw_path!r} defines both tools() and "
-            f"add_to_tools(); define at most one"
-        )
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
     # completely untouched, or a direct ``_run_task`` caller (no
@@ -341,26 +337,26 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
                 f"{_safe_message(exc)}"
             ) from exc
         staged["appendToPrompt"] = _add_text(cmd.get("appendToPrompt"), addition)
+    if "system_prompt" in namespace:
+        staged["systemPrompt"] = _check_text(
+            raw_path, "system_prompt", _getter_value(namespace, raw_path, "system_prompt"),
+        )
     system_suffix = cmd.get("appendToSystemPrompt")
     if settings["preset"] == "channel":
         system_suffix = _add_text(
             system_suffix, CHANNEL_PREAMBLE.format(name=script_name(raw_path)),
         )
         staged["appendToSystemPrompt"] = system_suffix
-    for name in ("append_to_system_prompt", "add_to_system_prompt"):
-        if name in namespace:
-            addition = _check_text(raw_path, name, _getter_value(namespace, raw_path, name))
-            system_suffix = _add_text(system_suffix, addition)
-            staged["appendToSystemPrompt"] = system_suffix
+    if "add_to_system_prompt" in namespace:
+        addition = _check_text(
+            raw_path, "add_to_system_prompt",
+            _getter_value(namespace, raw_path, "add_to_system_prompt"),
+        )
+        staged["appendToSystemPrompt"] = _add_text(system_suffix, addition)
     if "add_to_tools" in namespace:
         staged["tools"] = _check_tools(
             raw_path, "add_to_tools", _getter_value(namespace, raw_path, "add_to_tools"),
         )
-    elif "tools" in namespace:
-        staged["tools"] = _check_tools(
-            raw_path, "tools", _getter_value(namespace, raw_path, "tools"),
-        )
-        staged["toolProfile"] = NO_TOOLS_PROFILE
     for name, field in (("llm_call_hook", "llmCallHook"), ("tool_call_hook", "toolCallHook")):
         if name in namespace:
             staged[field] = _check_hook(raw_path, name, _getter_value(namespace, raw_path, name))

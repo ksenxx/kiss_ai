@@ -837,12 +837,6 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
-        # The wire vocabulary is the ``run()`` keyword vocabulary in
-        # camelCase; a client built before the rename still sends the
-        # old spellings for one release.
-        for legacy, field in (("webTools", "useWebTools"), ("useParallel", "isParallel")):
-            if legacy in cmd and field not in cmd:
-                cmd[field] = cmd[legacy]
         state: AgentState | None = None
         client_task_id = ""
         try:

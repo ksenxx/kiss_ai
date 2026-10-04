@@ -34,6 +34,7 @@ from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -178,11 +179,11 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert resolve_settings(vars(review_paper_sea)) == {
         "preset": "session", **review_paper_sea.settings()
     }
-    for legacy in (
-        "system_prompt", "use_web_tools", "is_parallel", "classify_tasks",
-        "dispatch_timeout", "append_to_system_prompt",
-    ):
-        assert not hasattr(review_paper_sea, legacy), legacy
+    # The default system prompt is kept: the SEA only appends to it (no
+    # ``system_prompt()`` getter), and defines none of the removed
+    # per-field getters, which nothing would read.
+    assert not hasattr(review_paper_sea, "system_prompt")
+    assert_no_removed_getters(review_paper_sea)
     # The paper's word gates are reused minus the one about draft talk (a review
     # is allowed to say "reviewer" and "submission").
     names = [gate[0] for gate in review_paper_sea._REVIEW_GATES]

@@ -471,7 +471,9 @@ def test_picking_autorouter_schedules_one_enabled_weekly_rsi7d_job_and_resumes_a
     assert f"agent        = {autorouter_sea.RSI7D_SEA_RELATIVE!r}" in prompt
     assert f"task         = {autorouter_sea.RSI7D_TASK!r}" in prompt
     assert "timeout      = '7200'" in prompt and "max_budget   = '25.0'" in prompt
-    assert "use_worktree = 'false'" in prompt and "auto_commit  = 'false'" in prompt
+    assert f"model        = {job['model_name']!r}" in prompt
+    assert "options      = '{\"use_worktree\": false, \"auto_commit\": false}'" in prompt
+    assert "model_name" not in prompt
     scope = parse_scope(autorouter_sea.RSI7D_TASK)
     assert scope.names == ("autorouter",) and scope.error == ""
 

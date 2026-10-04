@@ -561,14 +561,10 @@ class Verdict:
     note: typing.ClassVar[str] = "relay stays on the real checkout"
 
 
-def use_worktree() -> bool:
+def settings() -> dict:
     hints = typing.get_type_hints(Verdict)
     assert hints == {"worktree": bool, "note": typing.ClassVar[str]}, hints
-    return Verdict(worktree=False).worktree
-
-
-def auto_commit() -> bool:
-    return True
+    return {"use_worktree": Verdict(worktree=False).worktree, "auto_commit": True}
 '''
 
 
@@ -579,8 +575,8 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
     ``sys.modules[cls.__module__].__dict__`` while the class body runs,
     so the loader must register the module before executing it; the
     daemon's own agent loader does, and a ``/xxx`` relay evaluating
-    ``use_worktree()`` on the same file must not fail where the daemon
-    succeeds.  The getter also calls ``typing.get_type_hints`` after
+    ``settings()`` on the same file must not fail where the daemon
+    succeeds.  ``settings()`` also calls ``typing.get_type_hints`` after
     import, which needs the entry to still be there.
     """
     folder = tmp_path / "seas"
@@ -612,7 +608,7 @@ def test_failed_sea_import_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
 
 
 _SLOW_SEA = '''\
-"""Same-stem SEA whose getter resolves a forward reference after import."""
+"""Same-stem SEA whose settings() resolves a forward reference after import."""
 
 from __future__ import annotations
 
@@ -626,11 +622,11 @@ class {cls}:
     parent: {cls} | None = None
 
 
-def use_worktree() -> bool:
+def settings() -> dict:
     time.sleep({delay})
     hints = typing.get_type_hints({cls})
     assert hints["parent"] == ({cls} | None), hints
-    return False
+    return {{"use_worktree": False}}
 '''
 
 
@@ -639,7 +635,7 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
 ) -> None:
     """Two ``shared_sea.py`` files evaluated at once each keep their own module.
 
-    Task threads evaluate ``use_worktree()`` concurrently.  ``OnlyA``'s
+    Task threads evaluate ``settings()`` concurrently.  ``OnlyA``'s
     forward reference is resolved through ``sys.modules[__module__]``
     *after* import, while a second same-stem SEA is being loaded in
     another thread: a stem-keyed entry would by then point at the other
@@ -677,8 +673,8 @@ def description() -> str:
     return "  Echoes the task back; use it as /echo <text>.  "
 
 
-def use_worktree() -> bool:
-    return False
+def settings() -> dict:
+    return {"use_worktree": False}
 '''
 
 

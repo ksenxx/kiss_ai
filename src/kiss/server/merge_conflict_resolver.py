@@ -70,10 +70,8 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
     # parent its ``{parent}__sub_{task}`` tab, never its synthetic id.
     parent_tab_id = subagent_parent_tab_id_of(parent_agent)
     sub_tab_id = f"task-{parent_task_id or parent_tab_id}__merge"
-    model_getter = getattr(merge_sea, "model", None)
-    model_name = str(
-        model_getter() if callable(model_getter) else parent_agent.model_name
-    )
+    merge_settings = resolve_settings(vars(merge_sea))
+    model_name = str(merge_settings.get("model") or parent_agent.model_name)
     agent = ChatSorcarAgent("Merge conflict resolver")
     agent._tab_id = sub_tab_id
     # A side channel like the task-update child: its work is the
@@ -89,7 +87,6 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         "reviewer": False,
         "side_channel": True,
     }
-    merge_settings = resolve_settings(vars(merge_sea))
     try:
         agent.run(
             prompt_template=prompt,

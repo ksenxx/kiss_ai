@@ -103,13 +103,13 @@ DAILY_PROMPT = (
     "  task       = {task!r}\n"
     "  timeout    = {timeout!r}\n"
     "  max_budget = {max_budget!r}\n"
-    "  model_name = {model!r}\n"
+    "  model      = {model!r}\n"
     "Do not explore any source code, do not paraphrase the task, and do not call any "
     "other tool first.  When run_agent returns, relay its result as your final summary."
 )
 """Prompt of the daily cron job: a ``run_agent`` directive to this SEA.
 
-The ``timeout``, ``max_budget`` and ``model_name`` arguments matter: the
+The ``timeout``, ``max_budget`` and ``model`` arguments matter: the
 nested run gets the daemon's defaults for whatever the directive leaves out
 — a 300-second timeout (``agent_dispatch``), the configured default budget
 (thousands of dollars, not the job's) and the daemon's current model —

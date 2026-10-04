@@ -553,14 +553,6 @@ def run(
             with its ``add_to_system_prompt()`` protocol added to the
             system prompt.
 
-            Compatibility: the earlier per-field getters (``def
-            use_worktree() -> bool`` and so on for every settings key,
-            ``dispatch_timeout()`` for ``timeout``, ``append_to_prompt()``
-            for ``add_to_prompt``, ``append_to_system_prompt()`` for
-            ``add_to_system_prompt()``, and ``tools()`` for
-            ``add_to_tools()`` with the ``none`` profile) are still
-            accepted for one release and are deprecated.
-
             Everything the script defines runs **in the daemon
             process**; nothing is serialized by the client.
             ``timeout``, *stop_on_timeout*, *endpoint_file*,
@@ -624,8 +616,8 @@ def run(
             memory" checkbox, persisted as ``use_memory``, or the
             daemon process's ``KISS_USE_MEMORY`` environment
             variable).  A boolean override never bypasses the memory
-            safety gates: a run without the basic toolset (an agent
-            script's ``tools()``), a Docker run, a
+            safety gates: a run without the basic toolset (the
+            ``none`` tool profile), a Docker run, a
             run-to-completion CLI model (``cc/*``, ``codex/*``), or a
             caller-supplied ``model_config["system_instruction"]``
             stays memory-free even with ``True``.
@@ -662,8 +654,6 @@ def run(
             (the default) keeps the daemon's usual choice (the full
             toolset).
             An unknown name stops the task with a diagnostic error.
-            Ignored when the agent script's ``tools()`` supplies the
-            whole tool set, which builds no built-in toolset at all.
         docker_image: Run the task's file and shell tools (``Bash``,
             ``run_commands_parallel``, ``Read``, ``Edit``, ``Write``)
             inside a Docker container instead of on the daemon's host.
@@ -681,9 +671,9 @@ def run(
             daemon from the running parent (a callable cannot travel
             the wire).  They are added to the task's built-in toolset
             after the task's own script's ``add_to_tools()`` tools,
-            skipping names the task already has; a script whose
-            ``tools()`` supplies the whole tool set keeps exactly that
-            set.  ``run_agent`` sets this for the
+            skipping names the task already has; a script on the
+            ``none`` tool profile keeps exactly its own set.
+            ``run_agent`` sets this for the
             sub-tasks it dispatches in path mode, so a sub-task that
             inherits the caller's system prompt also has the tools
             that prompt refers to.  ``False`` (default) adds nothing;

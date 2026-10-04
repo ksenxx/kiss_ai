@@ -665,9 +665,9 @@ def _write_prompt_sea(job: dict[str, Any], scratch_dir: Path) -> Path:
 
     The generated file follows the SEA contract of
     ``src/kiss/server/README.md``: ``description()`` names the job
-    (every SEA must describe itself); ``prompt()`` returns the
-    Hermes-style preamble followed by the job's prompt; ``settings()``
-    carries the job's ``model`` and ``max_budget`` (``""`` / ``None``
+    (every SEA must describe itself); ``settings()`` carries the
+    ``prompt`` (the Hermes-style preamble followed by the job's prompt),
+    the job's ``model`` and ``max_budget`` (``""`` / ``None``
     mean "daemon default"), its ``work_dir`` when set (a prompt that
     must run inside a specific project) and otherwise the run's private
     scratch directory, its ``use_worktree`` and ``auto_commit`` flags
@@ -712,12 +712,9 @@ def _write_prompt_sea(job: dict[str, Any], scratch_dir: Path) -> Path:
         "    )\n"
         "\n"
         "\n"
-        "def prompt() -> str:\n"
-        "    return PREAMBLE + JOB_PROMPT\n"
-        "\n"
-        "\n"
         "def settings() -> dict:\n"
         "    return {\n"
+        "        'prompt': PREAMBLE + JOB_PROMPT,\n"
         f"        'work_dir': {str(work_dir)!r},\n"
         f"        'model': {str(job.get('model_name') or '')!r},\n"
         f"        'max_budget': {budget!r},\n"

@@ -345,7 +345,9 @@ class SeaTarget(Target):
         ns = _execute_sea(self.path)
         settings = resolve_settings(ns)
         kwargs: dict[str, Any] = {
-            "base_system_prompt": str(settings.get("system_prompt") or "")
+            "base_system_prompt": str(
+                _call_getter(ns, "system_prompt") or settings.get("system_prompt") or ""
+            )
         }
         if not kwargs["base_system_prompt"]:
             raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
@@ -364,32 +366,21 @@ class SeaTarget(Target):
                 kwargs[key] = settings[setting]
         for getter, key in (
             ("add_to_system_prompt", "system_prompt"),
-            ("append_to_system_prompt", "system_prompt"),
             ("llm_call_hook", "llm_call_hook"),
             ("tool_call_hook", "tool_call_hook"),
         ):
             value = _call_getter(ns, getter)
             if value is not None:
                 kwargs[key] = value
-        # ``add_to_tools()`` extends the built-in toolset; the legacy
-        # ``tools()`` is the whole set (the ``none`` tool profile).
-        # Same contract as the daemon's agent-file loader: at most one
-        # of the two, each a list of callables (never a file path).
-        if "tools" in ns and "add_to_tools" in ns:
-            raise ValueError(
-                f"{self.path.name}: defines both tools() and add_to_tools()"
-            )
-        for getter in ("tools", "add_to_tools"):
-            if getter not in ns:
-                continue
-            tools = _call_getter(ns, getter)
+        # ``add_to_tools()`` extends the built-in toolset (a list of
+        # callables, never a file path), as in the daemon's agent-file loader.
+        if "add_to_tools" in ns:
+            tools = _call_getter(ns, "add_to_tools")
             if not isinstance(tools, (list, tuple)) or not all(callable(t) for t in tools):
                 raise ValueError(
-                    f"{self.path.name}: {getter}() must return a list of tool callables"
+                    f"{self.path.name}: add_to_tools() must return a list of tool callables"
                 )
             kwargs["tools"] = list(tools)
-            if getter == "tools":
-                kwargs["tool_profile"] = "none"
         if kwargs.get("tool_profile") == "none":
             kwargs["append_basic_tools"] = False
         return kwargs
@@ -717,12 +708,12 @@ def run_rollout(
     """Run *task* against *target* in-process inside *work_dir* and grade it.
 
     *defaults* is the eval set's ``rollout`` object (``SorcarAgent.run``
-    keyword arguments plus ``max_steps``); the target's own getters override
-    it.  A target defining ``prompt()`` replaces the task's prompt with its
-    fixed one (such a SEA varies only through ``setup``); ``append_to_prompt()``
-    is appended to the task's prompt (after a ``prompt_suffix`` the defaults
-    name), and the whole suffix is recorded on the run so the target's
-    ``run_agent`` sub-tasks inherit it.
+    keyword arguments plus ``max_steps``); the target's own settings override
+    it.  A target whose ``settings()`` names a ``prompt`` replaces the task's
+    prompt with its fixed one (such a SEA varies only through ``setup``); its
+    ``add_to_prompt`` is appended to the task's prompt (after a
+    ``prompt_suffix`` the defaults name), and the whole suffix is recorded on
+    the run so the target's ``run_agent`` sub-tasks inherit it.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _live_agent_usage
 

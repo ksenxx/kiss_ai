@@ -2126,7 +2126,7 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
             tasks: str, max_workers: str = "", model: str = "",
-            tool_profile: str = "", model_name: str = "",
+            tool_profile: str = "",
         ) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
@@ -2189,8 +2189,6 @@ class SorcarAgent(RelentlessAgent):
                     with ``+`` for the union of their tools, e.g.
                     ``"shell+edit+memory"``.  Empty (default): review
                     tasks get ``"review"``, others the full toolset.
-                model_name: Deprecated alias of ``model``; used when
-                    ``model`` is empty.
 
             Returns:
                 A YAML-formatted string containing a list of result
@@ -2222,7 +2220,7 @@ class SorcarAgent(RelentlessAgent):
                 return f"Error: {exc}"
             results = self._run_tasks_parallel(
                 task_list, max_workers=workers,
-                model_name=model or model_name or None,
+                model_name=model or None,
                 tool_profile=tool_profile,
             )
             result_str: str = yaml.dump(results, sort_keys=False)
@@ -2826,7 +2824,7 @@ class SorcarAgent(RelentlessAgent):
                 Set to False for terminal-only environments.
             prompt_suffix: The caller-supplied text (the daemon's
                 ``appendToPrompt`` wire field, or an agent script's
-                ``append_to_prompt()``) that the caller has ALREADY
+                ``add_to_prompt`` setting) that the caller has ALREADY
                 appended to *prompt_template*; it is not added again
                 here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
                 sub-task dispatched during the run inherits it as its

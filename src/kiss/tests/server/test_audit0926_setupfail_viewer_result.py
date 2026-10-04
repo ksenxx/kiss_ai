@@ -17,7 +17,7 @@ subscribed tab, so the setup-failure result must be too — delivered
 live exactly once per watching tab, and recorded exactly once.
 
 Everything is real: a real ``VSCodeServer``, a run submitted through
-``_cmd_run`` whose agent-script ``prompt()`` getter parks on a file
+``_cmd_run`` whose agent-script ``settings()`` parks on a file
 and then raises (a real setup failure, no LLM call), and a real
 history-click attach through ``_replay_session``.
 """
@@ -44,7 +44,7 @@ _BLOCKING_SCRIPT = textwrap.dedent(
     _DIR = pathlib.Path(__file__).resolve().parent
 
 
-    def prompt():
+    def settings():
         \"\"\"Block until released, then raise (the task ends in setup).\"\"\"
         (_DIR / "entered").write_text("1", encoding="utf-8")
         deadline = time.time() + 60

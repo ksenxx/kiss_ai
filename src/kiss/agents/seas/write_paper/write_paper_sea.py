@@ -21,7 +21,7 @@ left as ``<<placeholders>>`` (venue, path, topic, sources of truth,
 reviewer model, options); the template's rules (contents and their
 order, facts and numbers, citations, Strunk and White style, the
 AI-slop list, the process and the gates) are appended to the default
-system prompt by :func:`append_to_system_prompt`, so the agent keeps
+system prompt by :func:`add_to_system_prompt`, so the agent keeps
 the full Sorcar toolset, browser tools (related work, venue
 guidelines, citation checks) and ``run_parallel`` (the read-only
 reviewer).
@@ -36,7 +36,7 @@ not re-derive them with ad-hoc greps:
   summarizes the log: errors, undefined references and citations,
   overfull boxes over 10 pt, and the page count.
 
-Module-level getters (``append_to_system_prompt()``, ``add_to_tools()``,
+Module-level getters (``add_to_system_prompt()``, ``add_to_tools()``,
 ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
 """
 

@@ -137,7 +137,9 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
 
     def test_help_on_a_sea_without_description_fails_with_a_diagnostic(self) -> None:
         """A SEA lacking ``description()`` makes ``/xxx help`` a failed task naming the file."""
-        self._register_user_sea("nodesc", "def use_worktree():\n    return False\n")
+        self._register_user_sea(
+            "nodesc", "def settings():\n    return {'use_worktree': False}\n",
+        )
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
         result = sorcar.run(

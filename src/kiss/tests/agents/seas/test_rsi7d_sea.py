@@ -84,7 +84,7 @@ short and cite every file you changed by path.
 """
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append to the default prompt."""
     return SYSTEM_PROMPT
 '''
@@ -173,14 +173,22 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert f"~/{HOME_DIR}/MODEL_INFO.json" in sea.system_prompt()
     assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
     assert sea.settings() == {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
-    # No preset named: the resolved settings are those three keys plus the
-    # ``system_prompt()`` getter's value under the default ``session`` preset.
-    assert resolve_settings(vars(sea)) == {
-        "preset": "session",
-        "system_prompt": sea.system_prompt(),
-        **sea.settings(),
-    }
-    for legacy in ("max_budget", "use_memory", "use_web_tools", "append_to_system_prompt"):
+    # No preset named: the resolved settings are exactly those three keys under
+    # the default ``session`` preset; ``system_prompt()`` is a getter the daemon
+    # applies separately, not a settings key.
+    assert resolve_settings(vars(sea)) == {"preset": "session", **sea.settings()}
+    assert "system_prompt" not in resolve_settings(vars(sea))
+    for legacy in (
+        "max_budget",
+        "use_memory",
+        "use_web_tools",
+        "append_to_system_prompt",
+        "add_to_system_prompt",
+        "tools",
+        "tool_profile",
+        "model",
+        "prompt",
+    ):
         assert not hasattr(sea, legacy), legacy
     names = [t.__name__ for t in sea.add_to_tools()]
     assert names == [
@@ -251,7 +259,7 @@ def test_indexed_seas_reports_editable_paths_and_prompt_shapes(checkout: Path) -
         "SYSTEM_PROMPT",
     )
     assert rows["demo"]["prompt_chars"] > 100
-    assert rows["fdemo"]["prompt_getter"] == "append_to_system_prompt"
+    assert rows["fdemo"]["prompt_getter"] == "add_to_system_prompt"
     assert rows["fdemo"]["prompt_constant"] == "SYSTEM_PROMPT"
     assert rows["fdemo"]["prompt_chars"] == len(
         _FSTRING_SEA.split("SYSTEM_PROMPT = ", 1)[1].split("\n\n\ndef")[0]
@@ -299,7 +307,7 @@ def test_sea_runs_links_dispatches_and_prompt_signatures(checkout: Path) -> None
     )
     _persist("plain", [_result_event(True)], result="<p>plain</p>", parent_task_id=parent, cost=0.5)
     fdemo = checkout / "fdemo" / "fdemo_sea.py"
-    fdemo_prompt = sea._execute_sea(fdemo)["append_to_system_prompt"]()
+    fdemo_prompt = sea._execute_sea(fdemo)["add_to_system_prompt"]()
     side = _persist(
         "What have the task done so far?",
         [
@@ -594,7 +602,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         )
         in source
     )
-    prompt = sea._execute_sea(path)["append_to_system_prompt"]()
+    prompt = sea._execute_sea(path)["add_to_system_prompt"]()
     assert "Run the gate `uv run pytest -q` before you finish" in prompt
     assert prompt.endswith("- Quote {GATE} literally.\n")
     # A replacement inside the f-string source doubles braces in the new text.
@@ -602,9 +610,7 @@ def test_patch_sea_prompt_edits_fstring_literals_and_doubles_braces(checkout: Pa
         "fdemo", "Keep the summary\nshort", "Keep the summary {short}"
     ).startswith("Patched")
     assert "Keep the summary {{short}}" in path.read_text(encoding="utf-8")
-    assert (
-        "Keep the summary {short} and cite" in sea._execute_sea(path)["append_to_system_prompt"]()
-    )
+    assert "Keep the summary {short} and cite" in sea._execute_sea(path)["add_to_system_prompt"]()
     ok_source = path.read_text(encoding="utf-8")
     # Closing the literal early would change code: rejected, file untouched.
     bad = sea.patch_sea_prompt("fdemo", "Never edit files", 'x"""\nimport os\ny = f"""z')
@@ -917,7 +923,7 @@ def _run_registered(
             max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=False,
             is_parallel=False,

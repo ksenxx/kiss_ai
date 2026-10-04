@@ -584,12 +584,14 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert getattr(call["agent"], "_is_parallel", None) is False
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
-        """A carrier's ``sea_path`` script with ``tools()`` restricts the run.
+        """A carrier's ``sea_path`` script restricts the run to its ``add_to_tools()``.
 
         The channel runner hands its channel module to the
         :class:`KissWebChatAgent` carrier as ``sea_path``; the launcher
         must pass it on as ``extension_agent_path`` so the daemon-built
-        agent gets exactly what that script's tool getter decides.
+        agent gets exactly what that script decides: the ``none`` tool
+        profile drops the built-in tools and ``add_to_tools()`` adds
+        the script's own.
         """
         agent_py = Path(self.tmpdir) / "restricting_agent.py"
         agent_py.write_text(
@@ -597,8 +599,11 @@ class TestLaunchViaApi(_ApiLaunchBase):
             '    """Return a marker."""\n'
             "    return 'only'\n"
             "\n"
-            "def tools() -> list:\n"
+            "def settings() -> dict:\n"
             '    """Run with only finish and only_tool."""\n'
+            "    return {'tool_profile': 'none'}\n"
+            "\n"
+            "def add_to_tools() -> list:\n"
             "    return [only_tool]\n",
             encoding="utf-8",
         )

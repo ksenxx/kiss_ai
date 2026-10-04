@@ -30,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
 )
 from kiss.agents.sorcar.sea_settings import resolve_settings
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -75,12 +76,12 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert sea.add_to_tools() == [sea.task_transcript]
     assert sea.settings() == {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
     # ``worker`` turns fan-out, browser, memory, worktree, auto-commit and
-    # the classifier off; ``system_prompt()`` stays a getter.
+    # the classifier off; ``system_prompt()`` stays a getter the daemon
+    # applies, so ``resolve_settings`` does not carry its text.
     assert resolve_settings(vars(sea)) == {
         "preset": "worker",
         "tool_profile": "bash",
         "max_budget": 1.0,
-        "system_prompt": sea.SYSTEM_PROMPT,
         "is_parallel": False,
         "use_web_tools": False,
         "use_memory": False,
@@ -88,11 +89,7 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
         "auto_commit": False,
         "classify_tasks": False,
     }
-    for legacy in (
-        "tool_profile", "max_budget", "is_parallel", "use_web_tools", "use_memory",
-        "use_worktree", "auto_commit", "classify_tasks",
-    ):
-        assert not hasattr(sea, legacy), legacy
+    assert_no_removed_getters(sea)
 
 
 def test_slash_task_update_resolves_to_the_bundled_sea() -> None:
@@ -278,7 +275,7 @@ def test_agent_reads_the_transcript_and_finishes_with_the_report(tmp_path: Path)
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
             tool_profile=settings["tool_profile"],
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=sea.system_prompt(),
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],
             is_parallel=settings["is_parallel"],

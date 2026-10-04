@@ -39,17 +39,16 @@ already-running daemon and block until it finishes::
     follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 
 ``extension_agent_path="/path/to/my_agent.py"`` names an *agent
-script* — a Sorcar Extension Agent (SEA) — whose top-level ``X()``
-functions compute the run's parameters on the daemon — e.g. a
-``model()`` overrides *model*, a
-``prompt()`` overrides *prompt* — while parameters without a getter
-keep the values passed to :func:`run` (see the :func:`run` docstring
-for the script format).  The script is also the only way to give the
-agent extra tools: its ``add_to_tools()`` returns functions (plain
-synchronous functions with keyword-bindable, type-annotated
-parameters and Google-style docstrings) that are added to the
-built-in toolset, and ``tools()`` returns functions that, with
-``finish``, become the whole toolset.  The client never serializes
+script* — a Sorcar Extension Agent (SEA) — whose ``settings()`` dict
+computes the run's parameters on the daemon — e.g. a ``"model"`` key
+overrides *model*, a ``"prompt"`` key overrides *prompt* — while
+parameters it leaves out keep the values passed to :func:`run` (see
+the :func:`run` docstring for the script format).  The script is also
+the only way to give the agent extra tools: its ``add_to_tools()``
+returns functions (plain synchronous functions with keyword-bindable,
+type-annotated parameters and Google-style docstrings) that are added
+to the built-in toolset; with ``"tool_profile": "none"`` they and
+``finish`` become the whole toolset.  The client never serializes
 Python functions — the daemon loads the script itself, so the tools
 execute **in the daemon process** like native agent tools::
 

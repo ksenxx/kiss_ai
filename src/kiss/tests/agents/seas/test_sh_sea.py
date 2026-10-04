@@ -26,6 +26,7 @@ from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
+from kiss.tests.agents.seas.sea_contract import assert_no_removed_getters
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -59,11 +60,11 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert sh_sea.settings() == {"preset": "worker", "tool_profile": "bash"}
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
     # The ``worker`` preset turns worktree, auto-commit, classifier,
-    # fan-out, browser and memory off; ``system_prompt()`` stays a getter.
+    # fan-out, browser and memory off; ``system_prompt()`` stays a getter
+    # the daemon applies, so ``resolve_settings`` does not carry its text.
     assert resolve_settings(vars(sh_sea)) == {
         "preset": "worker",
         "tool_profile": "bash",
-        "system_prompt": sh_sea.SYSTEM_PROMPT,
         "use_worktree": False,
         "auto_commit": False,
         "classify_tasks": False,
@@ -71,11 +72,7 @@ def test_sea_getters_follow_the_user_contract() -> None:
         "use_web_tools": False,
         "use_memory": False,
     }
-    for legacy in (
-        "tool_profile", "use_worktree", "auto_commit", "classify_tasks",
-        "is_parallel", "use_web_tools", "use_memory", "max_budget",
-    ):
-        assert not hasattr(sh_sea, legacy), legacy
+    assert_no_removed_getters(sh_sea)
 
 
 def test_slash_sh_resolves_to_the_bundled_sea() -> None:
@@ -115,7 +112,7 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
             max_steps=4,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            base_system_prompt=settings["system_prompt"],
+            base_system_prompt=sh_sea.system_prompt(),
             tool_profile=settings["tool_profile"],
             web_tools=settings["use_web_tools"],
             use_memory=settings["use_memory"],

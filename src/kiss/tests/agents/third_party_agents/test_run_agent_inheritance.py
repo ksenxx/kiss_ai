@@ -163,15 +163,14 @@ class TestDispatchResultInheritance:
 
         ``system_prompt()`` replaces the inherited base prompt;
         ``add_to_system_prompt()`` is added after the inherited suffix;
-        the (deprecated) ``append_to_prompt()`` stands for the
-        ``add_to_prompt`` setting and is added after the inherited
+        the ``add_to_prompt`` setting is added after the inherited
         prompt suffix.
         """
         script = env.repo / "prompts_sea.py"
         script.write_text(
             "def system_prompt() -> str:\n    return 'script base'\n\n"
             "def add_to_system_prompt() -> str:\n    return 'script addition'\n\n"
-            "def append_to_prompt() -> str:\n    return 'script prompt suffix'\n"
+            "def settings() -> dict:\n    return {'add_to_prompt': 'script prompt suffix'}\n"
         )
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         result = dispatch_result(
@@ -247,12 +246,13 @@ class TestDispatchResultInheritance:
 
         The parent's endpoint must therefore not be inherited when the
         script chooses the model: ``run_agent`` resolves the script's
-        ``settings()`` (a ``model`` key, or the deprecated ``model()``
-        getter the resolver folds into it) and hands them to
+        ``settings()`` (its ``model`` key) and hands them to
         ``dispatch_result``, where a ``model`` in them blocks the
         ``model_config`` inheritance.  A script that names no model, or
-        sets it to ``None``, leaves the inheritance; a script whose
-        settings cannot be evaluated is an error before any dispatch.
+        sets it to ``None``, leaves the inheritance (so does a script
+        defining the removed ``model()`` getter, which is an ordinary
+        function now); a script whose settings cannot be evaluated is
+        an error before any dispatch.
         """
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         run_agent = make_run_agent_tool(str(env.repo), parent)
@@ -264,10 +264,9 @@ class TestDispatchResultInheritance:
                 "def settings():\n"
                 "    return {'preset': 'worker', 'model': 'claude-sonnet-4-5'}\n"
             ),
-            "getter": "def model() -> str:\n    return 'claude-sonnet-4-5'\n",
             "conditional": (
                 "import os\nif os.name == 'posix':\n"
-                "    def model():\n        return 'claude-sonnet-4-5'\n"
+                "    def settings():\n        return {'model': 'claude-sonnet-4-5'}\n"
             ),
         }
         for label, body in picks_model.items():
@@ -283,6 +282,7 @@ class TestDispatchResultInheritance:
         leaves_inheritance = {
             "none": "def settings():\n    return {'model': None}\n",
             "other": "def model_name() -> str:\n    return 'x'\n\nmodels = []\n",
+            "legacy_getter": "def model() -> str:\n    return 'claude-sonnet-4-5'\n",
             "empty": "def settings():\n    return {}\n",
         }
         for label, body in leaves_inheritance.items():
@@ -294,15 +294,16 @@ class TestDispatchResultInheritance:
             assert captured[0]["model_config"] == PARENT_CONFIG, label
             assert captured[0]["model"] == PARENT_MODEL, label
         # A script whose settings cannot be evaluated — a syntax error,
-        # a ``model`` getter that is not a zero-argument callable
-        # returning a string — is a clean error and dispatches nothing.
+        # a ``settings`` that is not a zero-argument callable returning
+        # a dict — is a clean error and dispatches nothing.
         broken = {
-            "unparsable": "def model(:\n",
-            "async": "async def model():\n    return 'x'\n",  # a coroutine, not a str
-            "class": "class model:\n    pass\n",  # an instance, not a str
-            "import": "from os.path import basename as model\n",  # needs an argument
+            "unparsable": "def settings(:\n",
+            "async": "async def settings():\n    return {}\n",  # a coroutine, not a dict
+            "class": "class settings:\n    pass\n",  # an instance, not a dict
+            "import": "from os.path import basename as settings\n",  # needs an argument
             "raising": "def settings():\n    raise RuntimeError('boom')\n",
             "unknown_key": "def settings():\n    return {'models': 'x'}\n",
+            "wrong_type": "def settings():\n    return {'model': 5}\n",
         }
         for label, body in broken.items():
             script = scripts / f"{label}_sea.py"

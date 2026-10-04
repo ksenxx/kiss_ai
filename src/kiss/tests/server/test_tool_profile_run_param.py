@@ -12,12 +12,12 @@ LLM itself: the per-session executor's
 :meth:`kiss.core.kiss_agent.KISSAgent.run` is swapped for a stub that
 records the tools it was handed, so the daemon's full run pipeline —
 wire ``toolProfile`` field → ``apply_agent_overrides`` (the SEA's
-``tool_profile()`` getter) → ``task_runner`` validation →
+``settings()["tool_profile"]``) → ``task_runner`` validation →
 ``SorcarAgent.run(tool_profile=...)`` → ``_get_tools`` filtering —
 executes for real without any model API calls.
 
 Contract under test: ``tool_profile`` (the parameter, the wire field
-and the agent-script getter) cuts the built-in toolset down to the
+and the agent-script setting) cuts the built-in toolset down to the
 named ``TOOL_PROFILES`` entry; the bundled ``sh_sea.py`` therefore
 runs with ``Bash`` + ``finish`` only, in the caller's work directory
 (no worktree), with its own system prompt; an unknown name fails the
@@ -207,7 +207,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         The run is dispatched exactly as the ``/sh`` slash command
         dispatches it — the SEA path as ``extension_agent_path`` with
         the daemon defaults (``use_worktree=True``) that the script's
-        getters must override.
+        ``settings()`` must override.
         """
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
@@ -298,17 +298,17 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert "'bogus'" in result.text, result
         assert calls == [], "no executor session may start for an unknown profile"
 
-    def test_agent_script_profile_getter_wins_over_the_wire_value(self) -> None:
-        """A script's ``tool_profile()`` overrides the client's ``tool_profile``."""
+    def test_agent_script_profile_setting_wins_over_the_wire_value(self) -> None:
+        """A script's ``settings()["tool_profile"]`` overrides the client's ``tool_profile``."""
         agent_path = self._write_py(
             "shell_profile_agent.py",
             '''
             """Agent script choosing the shell profile."""
 
 
-            def tool_profile() -> str:
-                """Return the profile name."""
-                return "shell"
+            def settings() -> dict:
+                """Pick the shell profile."""
+                return {"tool_profile": "shell"}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -325,23 +325,23 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert result.success is True, result
         assert "bash_job" in self._single_call(calls)["tool_names"]
 
-    def test_wrong_typed_profile_getter_fails_task(self) -> None:
-        """A non-string ``tool_profile()`` result stops the task."""
+    def test_wrong_typed_profile_setting_fails_task(self) -> None:
+        """A non-string ``settings()["tool_profile"]`` stops the task."""
         agent_path = self._write_py(
             "bad_profile_agent.py",
             '''
-            """Agent script with a wrong-typed profile getter."""
+            """Agent script with a wrong-typed profile setting."""
 
 
-            def tool_profile() -> int:
-                """Return the wrong type."""
-                return 7
+            def settings() -> dict:
+                """Return the wrong type for tool_profile."""
+                return {"tool_profile": 7}
             ''',
         )
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
         result = sorcar.run(
-            "task with a broken profile getter",
+            "task with a broken profile setting",
             work_dir=self.repo,
             extension_agent_path=agent_path,
             use_worktree=False,
@@ -349,10 +349,9 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        # The deprecated getter stands for the ``tool_profile`` settings
-        # key, so the diagnostic is the SettingsError text naming it.
+        # The diagnostic is the SettingsError text naming the key.
         assert (
-            f"agent script '{agent_path}': tool_profile() must be str, got int"
+            f"agent script '{agent_path}': settings()['tool_profile'] must be str, got int"
         ) in result.text, result.text
         assert calls == []
 
@@ -372,7 +371,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         script = self._write_py(
             "plain_agent.py",
             '''
-            """Agent script with no getters: the tool's arguments decide."""
+            """Agent script with no settings: the tool's arguments decide."""
             ''',
         )
         calls: list[dict[str, Any]] = []

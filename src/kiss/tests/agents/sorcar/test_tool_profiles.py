@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests for tool profiles (WP1b),
-``run_parallel(model_name=..., tool_profile=...)`` (WP3), and the cost-lever
+``run_parallel(model=..., tool_profile=...)`` (WP3), and the cost-lever
 config toggles (WP0).
 
 The fan-out tests spawn real ``ChatSorcarAgent`` children against the
@@ -306,7 +306,7 @@ class TestFanoutPropagation:
             agent._last_task_id = uuid.uuid4().hex
             run_parallel = _tool(agent, "run_parallel")
             out = run_parallel(
-                '["Review module A for bugs"]', model_name=MODEL, tool_profile="review",
+                '["Review module A for bugs"]', model=MODEL, tool_profile="review",
             )
         # run_parallel returns a YAML list of per-child YAML result strings.
         result = yaml.safe_load(yaml.safe_load(out)[0])
@@ -341,7 +341,7 @@ class TestFanoutPropagation:
             agent._chat_id = ""
             agent._last_task_id = uuid.uuid4().hex
             run_parallel = _tool(agent, "run_parallel")
-            out = run_parallel('["summarize a"]', model_name="no-such-model-cost-levers")
+            out = run_parallel('["summarize a"]', model="no-such-model-cost-levers")
         assert requests == []
         assert yaml.safe_load(yaml.safe_load(out)[0])["success"] is False
         rows = _child_rows(agent)

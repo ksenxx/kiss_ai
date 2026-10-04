@@ -353,7 +353,8 @@ class ContainerHarness:
         """The trial's run settings (the SEA ``settings()`` contract).
 
         A ``worker`` whose sub-agents stay on (they share the trial
-        container): the trial's model, hard USD cap and per-trial model
+        container): the task :meth:`prompt`, the trial's model, hard USD
+        cap and per-trial model
         overrides (``None`` for the provider defaults), the host scratch
         directory the daemon runs the task in (the tools run in the
         container the ``docker_image`` attaches), no host git worktree or
@@ -362,6 +363,7 @@ class ContainerHarness:
         """
         return {
             "preset": "worker",
+            "prompt": self.prompt(),
             "model": self.model_name,
             "max_budget": self.budget,
             "model_config": self.model_overrides or None,
@@ -904,7 +906,6 @@ def description() -> str:
     )
 
 
-prompt = _harness.prompt
 system_prompt = _harness.system_prompt
 settings = _harness.settings
 llm_call_hook = _harness.llm_call_hook

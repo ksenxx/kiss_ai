@@ -19,8 +19,8 @@ Three ways to run it::
 
     run_agent(agent="src/kiss/agents/seas/bestrouter/bestrouter_sea.py", task="...")
 
-Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
-``model()``, ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
+``settings()`` and the module-level getters (``add_to_system_prompt()``,
+``register_as_model()``, ...) follow the SEA contract in :mod:`kiss.server.agent_file`.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def register_as_model() -> bool:
     """List ``bestrouter`` in the model picker.
 
     A picked ``bestrouter`` makes the daemon run every task of the tab
-    through this SEA on :data:`PRIMARY_MODEL` (``model()`` below), with
+    through this SEA on :data:`PRIMARY_MODEL` (``settings()`` below), with
     :data:`SYSTEM_PROMPT` added to the system prompt (``add_to_system_prompt()``).
     """
     return True
