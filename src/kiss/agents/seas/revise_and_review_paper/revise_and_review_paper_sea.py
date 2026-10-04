@@ -194,13 +194,30 @@ the PDF, the review file) before rerunning it once with a larger timeout.
 Keep `<work dir>/reports/<stem>-revise-review-log.md`: one section per round with the
 recommendation and score lines, each weakness and what the writer did with it (fixed
 where, experiment run with its numbers, declined why), the experiments run, the child's
-cost and time. Update `./tmp/PROGRESS.md` after each round. Git add the paper directory
+cost and time. Update `<work dir>/tmp/revise_review/PROGRESS.md` after each round (the
+writer writes its own `./tmp/PROGRESS.md` in the shared work dir and overwrites yours).
+Git add the paper directory
 (`.tex`, `.bib`, figures, scripts, raw results, `.pdf`; never `.aux`, `.bbl`, `.blg`,
 `.log`, `.out`), the review files and the log; the children run with auto-commit off.
 
 Report back: the recommendation of every round, the final paper's `.tex` and `.pdf` paths
 and page count, every review path, the log path, the cost of each round and the total,
 why the loop stopped, and the weaknesses still open when the target was not reached.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Override a `loop_status` STOP at most once per loop, and only under the rule above (a
+  weakness no earlier round attempted, with evidence the user allows). The STOP after
+  that extra round is final even if the fresh review names new fixable points: every
+  fresh reviewer does. Unless the user's task text itself says not to stop before every
+  comment is addressed, three overrides in one loop bought rounds 4 to 6 (about $66 of
+  children) and the verdicts went weak accept, weak reject, weak accept, weak reject,
+  weak reject, weak reject.
+- Take each child's cost and step count from the text of its `run_agent` result and
+  write them into the log at once; never query `~/.kiss/sorcar.db` for them (a quoting
+  error in the sqlite query cost two steps and the result was already on hand).
 """
 """The coordinator's rules, appended to the default system prompt."""
 

@@ -126,6 +126,14 @@ sense stays when no plain word means the same thing ("leverage" in a piece on de
    task names only as a source stays untouched. Otherwise the prose itself, as HTML
    paragraphs, is the final answer. The final answer carries the text, not a
    description of it.
+""" """\
+
+
+## Lessons from recent runs (rsi7d)
+
+- Run Python through `uv run python` (or `uv run python - <<'PY'`): `python` is not on
+  PATH and `python3` cannot import the project's packages, so a check script run with
+  either fails and costs two extra steps.
 """
 """The writing protocol added to the system prompt of every run."""
 

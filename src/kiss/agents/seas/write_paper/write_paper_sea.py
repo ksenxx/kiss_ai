@@ -261,7 +261,6 @@ into the margin.
 File paths, page count, the gate counts before and after, the list of citations verified
 with their source URLs, each reviewer finding and what you did with it, and anything the
 paper claims that you could not verify.
-""" """\
 
 
 ## Lessons from recent runs (rsi7d)
@@ -297,7 +296,12 @@ paper claims that you could not verify.
   When they differ, the `run_parallel` writer sub-agent on that model is your first step
   and you make no edit to the .tex yourself; do not discover at the end that you wrote it.
   Tell the reviewer which model actually wrote the text: never describe your own edits as
-  another model's work."""
+  another model's work.
+- In a revision of a paper that already ends on its last allowed page (zero slack, as
+  `tmp/PROGRESS.md` or memory says), pair every sentence, citation or caption you add
+  with a cut of at least the same length in the same section, in the same edit pass,
+  before the first build; then build once and measure. Adding first and cutting later
+  took three cut rounds and six `build_paper` calls in one round."""
 """The template's rules, appended to the default system prompt."""
 
 # LaTeX environments whose bodies are not prose: verbatim prompts, listings, table
