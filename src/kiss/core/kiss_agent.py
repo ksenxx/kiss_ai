@@ -517,11 +517,7 @@ class KISSAgent(Base):
                 ) from e
             raise
         except BaseException:
-            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
-            # so far to this run, not to the adapter's next call.  An
-            # unpriced model's KISSError must not replace the Stop.
-            with contextlib.suppress(KISSError):
-                self._bill_partial_usage()
+            self._bill_stopped_call(call_started)
             raise
         self._update_tokens_and_budget_from_response(response)
         self._print_llm_call(call_started)
@@ -798,6 +794,7 @@ class KISSAgent(Base):
         self._llm_hook_conversation_index = len(self.model.conversation)
         self._prompt_cache_touched_at = time.time()
         call_started = time.time()
+        self.last_call_usage = None
         try:
             function_calls, response_text, response = (
                 self.model.generate_and_process_with_tools(
@@ -807,23 +804,17 @@ class KISSAgent(Base):
         except Exception:
             # A truncated, incomplete or refused response raises but was
             # still billed; the retry/fallback loop must not drop it.
-            self.last_call_usage = None
             self._bill_partial_usage()
             self._print_llm_call(call_started)
             raise
         except BaseException:
-            # A Stop (KeyboardInterrupt) mid-stream: bill the usage seen
-            # so far to this run, not to the adapter's next call.  An
-            # unpriced model's KISSError must not replace the Stop.
-            with contextlib.suppress(KISSError):
-                self._bill_partial_usage()
+            self._bill_stopped_call(call_started)
             raise
         # ... and again AFTER it returns, so the assistant turn the call
         # appended is not treated as a "new" message on the next call.
         self._llm_hook_conversation_index = len(self.model.conversation)
         if response_text and response_text.strip():
             self._last_response_text = response_text
-        self.last_call_usage = None
         self._update_tokens_and_budget_from_response(response)
         self._print_llm_call(call_started)
         usage_info = self._get_usage_info_string()
@@ -1251,6 +1242,22 @@ class KISSAgent(Base):
         partial = take_partial() if callable(take_partial) else None
         if partial is not None:
             self._update_tokens_and_budget_from_response(partial)
+
+    def _bill_stopped_call(self, started: float) -> None:
+        """Account a call interrupted by a Stop (``KeyboardInterrupt``).
+
+        Bills the usage seen so far to this run (not to the adapter's
+        next call) and emits its ``llm_call`` event, so the per-call
+        records add up to the task's cost.  Nothing raised here may
+        replace the Stop: an unpriced model's ``KISSError`` and printer
+        failures are swallowed.
+
+        Args:
+            started: ``time.time()`` taken right before the call.
+        """
+        with contextlib.suppress(Exception):
+            self._bill_partial_usage()
+            self._print_llm_call(started)
 
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
         """Updates token counter and budget from API response.
