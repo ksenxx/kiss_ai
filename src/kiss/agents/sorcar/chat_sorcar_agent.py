@@ -610,7 +610,14 @@ class ChatSorcarAgent(SorcarAgent):
         # delegating here; this class has no toggle, and absent means
         # ON (schema default + legacy migration).
         auto_commit_mode = bool(getattr(self, "auto_commit_enabled", True))
-        start_ts_ms = int(time.time() * 1000)
+        # The row's start is the run's start, not the row's: the daemon
+        # (``TaskRunner._run_task_inner``) stamps a ``<task>`` block
+        # when it begins and passes it as ``_start_ms``, so the row,
+        # its ``task_settings`` event, the live ``status`` broadcast
+        # and ``task_done`` all count from one instant — the worktree
+        # setup and SEA import that precede this row would otherwise
+        # make a client that attaches mid-run start its timer late.
+        start_ts_ms = int(kwargs.pop("_start_ms", 0) or 0) or int(time.time() * 1000)
 
         early_extra = self._build_extra_payload(
             model=resolved_model,

@@ -2123,6 +2123,12 @@ class _TaskRunnerMixin:
                         # last-user-prompt cache; every other run
                         # persists as before.
                         _history_prompt=display_prompt if _is_slash_run else None,
+                        # This block's start, already carried by the
+                        # ``status running:true`` broadcast and the
+                        # final row (``_save_task_extra`` below): the
+                        # row the agent creates must not date the run
+                        # by its own, later, allocation time.
+                        _start_ms=sub_start_ms,
                     )
                     _run_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                     if _run_parsed and _run_parsed.get("summary"):
