@@ -19,8 +19,11 @@ Two ways to run it:
    auto-commit), with the user's text as the task — for example
    ``/merge finish the conflicted merge of kiss/wt-foo into main``.
 
-Module-level getters (``system_prompt()``, ``is_parallel()``, ...) follow
-the SEA contract in :mod:`kiss.server.agent_file`.
+Both ways run the same prompt: :func:`prompt` (the SEA ``prompt(task)``
+getter) wraps the task — the user's text, or the facts block
+:func:`conflict_task` builds for an auto-commit run — with the standing
+merge instructions.  The getters follow the SEA contract in
+:mod:`kiss.agents.sorcar.sea_settings`.
 """
 
 from __future__ import annotations
@@ -106,14 +109,31 @@ def settings() -> dict[str, Any]:
     }
 
 
-def build_prompt(
+def prompt(task: str) -> str:
+    """Return the prompt of a run on *task*: the task, then the standing instructions.
+
+    The SEA ``prompt(task)`` getter, so ``/merge <text>`` and
+    ``run_agent(agent="merge", task=...)`` get the same instructions as
+    an auto-commit run (:func:`conflict_task`).
+    """
+    return (
+        f"{task.strip()}\n\n"
+        "Resolve every conflict, remove all conflict markers, and stage the "
+        "resolved files with `git add`. Do not commit."
+    )
+
+
+def conflict_task(
     repo: Path,
     branch: str,
     original_branch: str,
     conflicted_files: list[str],
     task_prompt: str | None = None,
 ) -> str:
-    """Return the task text for one in-process conflict-resolution run.
+    """Return the task text of one auto-commit conflict-resolution run.
+
+    The facts :func:`prompt` wraps: the repository, the two branches,
+    the conflicted files and the task that produced the branch.
 
     Args:
         repo: The repository whose checkout holds the conflicted merge.
@@ -126,7 +146,7 @@ def build_prompt(
             do, or ``None``.
 
     Returns:
-        The prompt text.
+        The task text.
     """
     files = "\n".join(f"- {path}" for path in conflicted_files)
     lines = [
@@ -137,9 +157,6 @@ def build_prompt(
         "A squash merge of the task branch into the checked-out branch stopped "
         "with conflicts in these files:",
         files,
-        "",
-        "Resolve every conflict, remove all conflict markers, and stage the "
-        "resolved files with `git add`. Do not commit.",
     ]
     if task_prompt:
         lines += [

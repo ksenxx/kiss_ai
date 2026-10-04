@@ -21,9 +21,10 @@ fresh agent from the credentials persisted under ``~/.kiss`` and
 returns its authentication and backend tools, so the agent's OWN
 module file (``agent.sea_path``) is passed as ``extension_agent_path``
 and the daemon imports it and calls its ``add_to_tools()``.  No
-bridge, registry, wrapper, or generated file is involved.  The active
-workspace travels to the daemon-side ``add_to_tools()`` through the
-``KISS_CHANNEL_WORKSPACE`` environment variable.
+bridge, registry, wrapper, or generated file is involved.  The agent's
+workspace travels on the ``run`` command's ``workspace`` field; the
+daemon holds it for the run's lifetime and publishes it to the
+daemon-side ``add_to_tools()`` through ``KISS_CHANNEL_WORKSPACE``.
 """
 
 from __future__ import annotations
@@ -40,12 +41,6 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kiss.agents.sorcar.channel_workspace import (
-    enter_workspace as _enter_workspace,
-)
-from kiss.agents.sorcar.channel_workspace import (
-    exit_workspace as _exit_workspace,
-)
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 if TYPE_CHECKING:
@@ -54,11 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
-
-# The workspace publication registry (reference-counted, shared with
-# the sorcar ``run_agent`` dispatch tool) lives in
-# ``kiss.agents.sorcar.channel_workspace``; the private aliases above
-# keep this module's public surface unchanged.
 
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_ENDPOINT: str = ""
@@ -302,11 +292,11 @@ def run_agent_via_kiss_web(
     Unix-domain socket.  Blocks until the daemon reports the task
     finished (or *timeout* elapses) and returns the task's YAML result.
 
-    While the task runs, the ``KISS_CHANNEL_WORKSPACE`` environment
-    variable holds ``agent.workspace`` so the daemon-side
-    ``add_to_tools()`` authenticates under the same workspace (concurrent
-    launches from one process should therefore use the same
-    workspace).
+    ``agent.workspace`` is sent as the run's ``workspace``; the daemon
+    holds it while the task runs (a launch whose workspace differs from
+    a running channel task's waits for that task to finish) and exports
+    it as ``KISS_CHANNEL_WORKSPACE`` so the daemon-side ``add_to_tools()``
+    authenticates under the same workspace.
 
     The passed *agent* instance is never executed — the daemon builds
     its own chat agent.  The instance serves as the carrier of channel
@@ -369,34 +359,34 @@ def run_agent_via_kiss_web(
     # module as the run's agent script and calls its add_to_tools();
     # the daemon-built agent supplies the standard tools itself.
     endpoint = endpoint_file or _ENDPOINT_FILE_OVERRIDE or _ensure_api_server()
-    _enter_workspace(agent.workspace)
+    # The workspace travels on the wire; the daemon holds it (and
+    # publishes it to ``KISS_CHANNEL_WORKSPACE``) for the run's lifetime,
+    # exactly as it does for ``/slack ...`` and ``run_agent("slack")``.
     try:
-        try:
-            result = sorcar.run(
-                prompt,
-                work_dir=work_dir,
-                model=model_name,
-                chat_id=chat_id,
-                extension_agent_path=agent.sea_path,
-                use_worktree=use_worktree,
-                max_budget=max_budget,
-                model_config=model_config,
-                use_web_tools=web_tools,
-                is_parallel=is_parallel,
-                append_to_system_prompt=append_to_system_prompt,
-                append_to_prompt=append_to_prompt,
-                timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
-                endpoint_file=endpoint,
-            )
-        except TimeoutError:
-            logger.warning(
-                "kiss-web API launch timed out after %.1fs; the task "
-                "keeps running in the daemon",
-                timeout or 0.0,
-            )
-            return ""
-    finally:
-        _exit_workspace(agent.workspace)
+        result = sorcar.run(
+            prompt,
+            work_dir=work_dir,
+            model=model_name,
+            chat_id=chat_id,
+            extension_agent_path=agent.sea_path,
+            use_worktree=use_worktree,
+            max_budget=max_budget,
+            model_config=model_config,
+            use_web_tools=web_tools,
+            is_parallel=is_parallel,
+            append_to_system_prompt=append_to_system_prompt,
+            append_to_prompt=append_to_prompt,
+            workspace=agent.workspace,
+            timeout=timeout if timeout is not None else _NO_TIMEOUT_SECONDS,
+            endpoint_file=endpoint,
+        )
+    except TimeoutError:
+        logger.warning(
+            "kiss-web API launch timed out after %.1fs; the task "
+            "keeps running in the daemon",
+            timeout or 0.0,
+        )
+        return ""
 
     summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(

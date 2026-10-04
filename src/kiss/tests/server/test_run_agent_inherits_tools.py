@@ -175,10 +175,11 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     child_last_messages: dict[str, str] = {}
     parent_suffix = "\n\nPARENT-SUFFIX: end the summary with the word suffix."
 
-    def dispatch(agent: str, marker: str) -> dict[str, Any]:
+    def dispatch(agent: str, marker: str, options: str = "") -> dict[str, Any]:
         return tool_call_response(
             "run_agent",
-            {"agent": agent, "task": f"{marker} say done", "timeout": "120"},
+            {"agent": agent, "task": f"{marker} say done", "timeout": "120",
+             "options": options},
         )
 
     def responder(request: dict[str, Any]) -> dict[str, Any]:
@@ -197,7 +198,9 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
                 child_prompts[marker] = request_text(request)
                 child_last_messages[marker] = last
                 return finish_response(f"done-{marker}")
-        return dispatch("", "CHILD-A")
+        # The sequential parent's children inherit ``is_parallel``;
+        # CHILD-A asks for fan-out explicitly.
+        return dispatch("", "CHILD-A", '{"is_parallel": true}')
 
     model = StandInModelServer(responder)
     try:
@@ -230,7 +233,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     assert "parent_ledger" in plain
     assert "finish" in plain and "Bash" in plain
     assert "PARENT-PROTOCOL" in child_prompts["CHILD-A"]
-    # The sub-agent runs with run_parallel, so it has the built-in
+    # The sub-agent asked for run_parallel, so it has the built-in
     # ``number_of_cores``; the parent's same-named tool is skipped.
     assert "run_parallel" in plain
     assert plain.count("number_of_cores") == 1
@@ -241,6 +244,10 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     assert "child_probe" in adding
     assert adding.count("parent_ledger") == 1
     assert "Bash" in adding
+    # Nothing asked for fan-out: the sequential parent's choice is
+    # inherited, so the parent's ``number_of_cores`` tool is the only one.
+    assert "run_parallel" not in adding
+    assert adding.count("number_of_cores") == 1
 
     # A sub-task whose script fixes the toolset keeps exactly that set.
     fixed = child_tools["CHILD-C"]

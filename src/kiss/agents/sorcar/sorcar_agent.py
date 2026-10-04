@@ -32,7 +32,8 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
-from kiss.agents.sorcar.sea_commands import model_sea
+from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, join_text, model_sea
+from kiss.agents.sorcar.sea_settings import SeaError, merge_settings
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
     TaskClassification,
@@ -1772,13 +1773,18 @@ class SorcarAgent(RelentlessAgent):
         max_workers: int | None = None,
         model_name: str | None = None,
         tool_profile: str = "",
+        agent: str = "",
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
         Each task gets its own ``ChatSorcarAgent`` instance, resuming
         this agent's chat session and nested under this agent's
         persisted task, via the single fan-out engine
-        :func:`run_tasks_parallel`.
+        :func:`run_tasks_parallel`.  What the children take over from
+        this agent comes from the one inheritance table
+        :func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`
+        (shared with ``run_agent``); the budget is this agent's
+        remaining budget shared among the children.
 
         This method owns no frontend concepts (tabs, ``new_tab``
         broadcasts, ...): it only reads this agent's context and hands
@@ -1801,25 +1807,49 @@ class SorcarAgent(RelentlessAgent):
             tool_profile: Explicit tool profile for the children (a key
                 of :data:`TOOL_PROFILES`, or several joined with ``+``);
                 ``""`` lets each child pick.
+            agent: The agent script (SEA) the children run as, in the
+                spelling of ``run_agent``'s ``agent`` argument
+                (:func:`kiss.agents.sorcar.agent_dispatch.resolve_agent`);
+                ``""`` runs plain sub-agents.
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
+
+        Raises:
+            SeaError: When *agent* names no usable agent script, a
+                script of its chain is broken, or its preset is
+                ``channel`` (a channel agent holds a workspace and
+                inherits nothing: it runs through ``run_agent``).
         """
+        from kiss.agents.sorcar.agent_dispatch import (
+            RunOptions,
+            inherit_from_parent,
+            resolve_agent,
+        )
+        from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_layers
+
+        layers: list[SeaLayer] = []
+        if agent.strip():
+            resolved = resolve_agent(agent, self.work_dir)
+            if isinstance(resolved, str):
+                raise SeaScriptError(resolved.removeprefix("Error: "))
+            layers = sea_layers(Path(resolved[0]))
+            if merge_settings([layer.settings for layer in layers])["preset"] == "channel":
+                raise SeaScriptError(
+                    f"{resolved[1]} is a channel agent; run it through run_agent"
+                )
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
         self.reclaim_abandoned_subagents()
         monitor = _LiveUsageMonitor(self, self.printer)
         share = self._subagent_budget_share(len(tasks))
-        child_model = model_name or self.model_name
+        inherited = inherit_from_parent(
+            self, model_name or "", None,
+            RunOptions(tool_profile=tool_profile),
+            script_picks_model=any("model" in layer.settings for layer in layers),
+        )
         totals: dict[str, float | list[float]] = {}
-        # Sub-agents act in the parent's live container, not on the host
-        # and not in a fresh container of their own.
-        child_docker_image: str | None = None
-        if self.docker_manager is not None and self.docker_manager.container is not None:
-            from kiss.agents.sorcar.docker_manager import ATTACH_PREFIX
-
-            child_docker_image = ATTACH_PREFIX + self.docker_manager.container.id
         try:
             # Started inside the try: a stop injected between the start
             # and the try would otherwise leak the polling thread —
@@ -1828,30 +1858,27 @@ class SorcarAgent(RelentlessAgent):
             results = run_tasks_parallel(
                 tasks,
                 max_workers=max_workers,
-                model_name=child_model,
+                model_name=inherited.model_name,
                 work_dir=self.work_dir,
-                docker_image=child_docker_image,
+                docker_image=inherited.docker_image or None,
                 printer=self.printer,
                 totals_out=totals,
                 usage_monitor=monitor,
                 max_budget=share,
-                model_config=(
-                    getattr(self, "model_config", None)
-                    if child_model == self.model_name else None
-                ),
+                model_config=inherited.options.model_config,
                 tool_profile=tool_profile,
                 parent_agent=self,
-                chat_id=str(getattr(self, "_chat_id", "") or ""),
+                chat_id=inherited.options.chat_id,
                 parent_tab_id=self._subagent_parent_tab_id(),
-                base_system_prompt=str(
-                    getattr(self, "_base_system_prompt", "") or ""
-                ),
-                system_prompt_suffix=str(
-                    getattr(self, "_system_prompt_suffix", "") or ""
-                ),
-                web_tools=self._use_web_tools,
-                use_memory=self._use_memory_override,
+                base_system_prompt=inherited.options.system_prompt,
+                system_prompt_suffix=inherited.options.add_to_system_prompt,
+                web_tools=inherited.options.use_web_tools is not False,
+                use_memory=inherited.options.use_memory,
                 live_browser=self._live_browser,
+                sea_layers=layers,
+                prompt_suffix=inherited.options.add_to_prompt,
+                is_parallel=inherited.options.is_parallel is not False,
+                inherited_tools=list(self._extra_tools),
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -2126,12 +2153,15 @@ class SorcarAgent(RelentlessAgent):
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
             tasks: str, max_workers: str = "", model: str = "",
-            tool_profile: str = "",
+            tool_profile: str = "", agent: str = "",
         ) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
             Spawns a separate ChatSorcarAgent for each task string and executes
-            them in parallel threads.
+            them in parallel threads.  The children inherit this agent's
+            model, chat, system prompt, web/memory settings and container
+            (the same table as ``run_agent``); ``agent`` runs each of
+            them as an agent script (SEA) instead of a plain sub-agent.
 
             **When to call run_parallel:**
             - Multi-source / multi-topic research ("research these 5
@@ -2189,13 +2219,23 @@ class SorcarAgent(RelentlessAgent):
                     with ``+`` for the union of their tools, e.g.
                     ``"shell+edit+memory"``.  Empty (default): review
                     tasks get ``"review"``, others the full toolset.
+                agent: The agent script every child runs as: a ``.py``
+                    path (relative to this task's work directory) or a
+                    slash-command name (``"write_paper"``), exactly as
+                    ``run_agent``'s ``agent`` argument.  Its
+                    ``settings()`` win over the arguments here; its
+                    ``prompt(task)`` shapes each child's prompt.  Empty
+                    (default) runs plain sub-agents.  Channel agents
+                    (``"slack"``, ``"cron"``) are not accepted here:
+                    run them through ``run_agent``.
 
             Returns:
                 A YAML-formatted string containing a list of result
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
                 A string starting with ``Error:`` when the call was
-                refused by one of the hard limits above.
+                refused by one of the hard limits above or ``agent``
+                names no usable agent script.
             """
             try:
                 task_list = parse_tasks_json(tasks)
@@ -2218,11 +2258,15 @@ class SorcarAgent(RelentlessAgent):
                 resolve_tool_profile(tool_profile)
             except ValueError as exc:
                 return f"Error: {exc}"
-            results = self._run_tasks_parallel(
-                task_list, max_workers=workers,
-                model_name=model or None,
-                tool_profile=tool_profile,
-            )
+            try:
+                results = self._run_tasks_parallel(
+                    task_list, max_workers=workers,
+                    model_name=model or None,
+                    tool_profile=tool_profile,
+                    agent=agent,
+                )
+            except SeaError as exc:
+                return f"Error: {exc}"
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
 
@@ -3187,6 +3231,80 @@ def _coerce_tasks(tasks: Any) -> list[str]:
     )
 
 
+def _sea_run_kwargs(
+    layers: list[SeaLayer], task: str, defaults: dict[str, Any], parent_agent: Any,
+) -> dict[str, Any]:
+    """Return the ``run()`` keyword overrides an agent script makes for one child.
+
+    The in-process counterpart of the daemon's
+    :func:`kiss.server.agent_file.apply_agent_overrides`: the script's
+    merged settings win over *defaults* (the fan-out's arguments), its
+    ``prompt(task)`` and ``add_to_prompt`` shape the prompt, its
+    ``system_prompt()`` replaces the base system prompt, its
+    ``add_to_system_prompt()`` is added after the inherited suffix, and
+    its tools and hooks are passed through.  Settings that only a
+    daemon run has (``use_worktree``, ``auto_commit``,
+    ``classify_tasks``, ``chat_id``) are ignored: a fan-out child acts
+    on the parent's tree, in the parent's chat.
+
+    Args:
+        layers: The script's executed layers.
+        task: The child's task text.
+        defaults: The keyword arguments the child would run with
+            otherwise (read, not modified).
+        parent_agent: The fanning-out agent, for the ``{task_id}`` of
+            ``add_to_prompt``.
+
+    Returns:
+        The keyword arguments to update the child's with.
+
+    Raises:
+        SeaScriptError: When a getter is broken (see
+            :func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`).
+    """
+    run = evaluate_sea(layers, task, _persisted_task_id(parent_agent))
+    settings = run.settings
+    # The script's ``add_to_prompt`` follows the inherited suffix, as on
+    # the daemon; ``run()`` only records ``prompt_suffix``, so the
+    # prompt carries it here.
+    suffix = join_text(str(defaults.get("prompt_suffix") or ""), run.add_to_prompt)
+    overrides: dict[str, Any] = {
+        "prompt_template": run.prompt + suffix, "prompt_suffix": suffix,
+    }
+    if run.system_prompt is not None:
+        overrides["base_system_prompt"] = run.system_prompt
+    if run.add_to_system_prompt:
+        suffix = str(defaults.get("system_prompt") or "")
+        overrides["system_prompt"] = (
+            f"{suffix}\n\n{run.add_to_system_prompt}" if suffix else run.add_to_system_prompt
+        )
+    if run.tools:
+        overrides["tools"] = run.tools
+    if run.llm_call_hook is not None:
+        overrides["llm_call_hook"] = run.llm_call_hook
+    if run.tool_call_hook is not None:
+        overrides["tool_call_hook"] = run.tool_call_hook
+    for key, kwarg in (
+        ("model", "model_name"), ("max_budget", "max_budget"),
+        ("tool_profile", "tool_profile"), ("docker_image", "docker_image"),
+        ("work_dir", "work_dir"), ("use_web_tools", "web_tools"),
+        ("use_memory", "use_memory"), ("is_parallel", "is_parallel"),
+    ):
+        if key in settings and settings[key] != "":
+            overrides[kwarg] = settings[key]
+    if "model" in settings and settings["model"] != defaults.get("model_name"):
+        # The parent's model_config belongs to the parent's model.
+        overrides["model_config"] = None
+    if settings.get("model_config"):
+        overrides["model_config"] = settings["model_config"]
+    if overrides.get("tool_profile", defaults.get("tool_profile")) == "none":
+        # The script fixed the whole toolset: no built-ins, no tools
+        # taken over from the parent.
+        overrides["append_basic_tools"] = False
+        overrides["inherited_tools"] = []
+    return overrides
+
+
 def run_tasks_parallel(
     tasks: list[str],
     max_workers: int | None = None,
@@ -3207,6 +3325,10 @@ def run_tasks_parallel(
     tool_profile: str = "",
     live_browser: Any = None,
     docker_image: str | None = None,
+    sea_layers: list[SeaLayer] | None = None,
+    prompt_suffix: str = "",
+    is_parallel: bool = True,
+    inherited_tools: list[Callable[..., Any]] | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -3317,6 +3439,24 @@ def run_tasks_parallel(
         live_browser: The daemon's ``BrowserTabService`` for every child
             (see :meth:`SorcarAgent.run`), so a child's ``show_browser()``
             also reaches the user's Browser tab.
+        sea_layers: The executed layers of the agent script every child
+            runs as (:func:`kiss.agents.sorcar.sea_commands.sea_layers`),
+            evaluated per child on its task
+            (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea`): the
+            script's settings win over the arguments above, its
+            ``prompt(task)`` shapes the child's prompt, its system-prompt
+            texts, tools and hooks apply.  ``None``/empty runs plain
+            sub-agents.  A getter broken for one task fails that child
+            alone (a YAML failure entry), like any other child error.
+        prompt_suffix: Text appended to every child's task prompt (the
+            parent's own ``appendToPrompt``), recorded on the child as
+            its ``prompt_suffix`` so its sub-tasks inherit it in turn.
+        is_parallel: Whether the children may fan out themselves (the
+            parent's ``_is_parallel``).
+        inherited_tools: The parent's extra tools (its ``_extra_tools``:
+            its agent script's ``add_to_tools()`` plus what it inherited),
+            added to each child after its own tools under names it
+            lacks; dropped for a child on the ``none`` tool profile.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -3420,23 +3560,32 @@ def run_tasks_parallel(
         }
         if usage_monitor is not None:
             usage_monitor.track(agent)
+        run_kwargs: dict[str, Any] = {
+            # ``run()`` only records ``prompt_suffix``; the caller appends it.
+            "prompt_template": task + prompt_suffix,
+            "prompt_suffix": prompt_suffix,
+            "model_name": model_name,
+            "work_dir": work_dir,
+            "printer": printer,
+            "is_parallel": is_parallel,
+            "max_budget": max_budget,
+            "model_config": model_config,
+            "base_system_prompt": base_system_prompt,
+            "system_prompt": system_prompt_suffix or None,
+            "web_tools": web_tools,
+            "use_memory": use_memory,
+            "tool_profile": child_profile,
+            "docker_image": docker_image,
+            "live_browser": live_browser,
+            "inherited_tools": [] if child_profile == "none" else list(inherited_tools or []),
+        }
         try:
-            result: str = agent.run(
-                prompt_template=task,
-                model_name=model_name,
-                work_dir=work_dir,
-                printer=printer,
-                is_parallel=True,
-                max_budget=max_budget,
-                model_config=model_config,
-                base_system_prompt=base_system_prompt,
-                system_prompt=system_prompt_suffix or None,
-                web_tools=web_tools,
-                use_memory=use_memory,
-                tool_profile=child_profile,
-                docker_image=docker_image,
-                live_browser=live_browser,
-            )
+            if sea_layers:
+                # Inside the try: a getter broken for THIS task (its
+                # ``prompt(task)`` raised) fails this child alone, with
+                # the usual cleanup, instead of the whole fan-out.
+                run_kwargs.update(_sea_run_kwargs(sea_layers, task, run_kwargs, parent_agent))
+            result: str = agent.run(**run_kwargs)
             return result
         except KeyboardInterrupt:
             # Only THIS child was stopped: report it as a stopped task

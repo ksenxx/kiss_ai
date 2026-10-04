@@ -188,9 +188,10 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
     sea = tmp_path / "full_sea.py"
     sea.write_text(
         "PROMPT = 'p'\n\n\ndef system_prompt():\n    return PROMPT\n\n\n"
+        "def prompt(task):\n    return 'fixed prompt'\n\n\n"
         "def settings():\n    return {\n"
         "        'tool_profile': 'none', 'model': 'm', 'model_config': {'k': 1},\n"
-        "        'docker_image': 'img', 'use_web_tools': True, 'prompt': 'fixed prompt',\n"
+        "        'docker_image': 'img', 'use_web_tools': True,\n"
         "        'add_to_prompt': ' suffix',\n    }\n\n\n"
         "def add_to_system_prompt():\n    return 'suffix'\n\n\n"
         "def llm_call_hook():\n    return lambda m: m\n\n\ndef tool_call_hook():\n"
@@ -212,7 +213,8 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
     assert kwargs["web_tools"] is True
     assert callable(kwargs["llm_call_hook"]) and callable(kwargs["tool_call_hook"])
     assert [t.__name__ for t in kwargs["tools"]] == ["greet"]
-    assert kwargs["prompt"] == "fixed prompt" and kwargs["append_to_prompt"] == " suffix"
+    assert kwargs["prompt"]("any task") == "fixed prompt"
+    assert kwargs["add_to_prompt"] == " suffix"
     added_tools = tmp_path / "list_sea.py"
     added_tools.write_text(
         "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
@@ -230,7 +232,7 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
         "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
         "def tools():\n    return [helper]\n\n\ndef model():\n    return 'm'\n\n\n"
         "def tool_profile():\n    return 'shell'\n\n\ndef append_to_system_prompt():\n"
-        "    return 'suffix'\n\n\ndef prompt():\n    return 'fixed'\n",
+        "    return 'suffix'\n",
         encoding="utf-8",
     )
     assert SeaTarget(legacy).rollout_kwargs() == {"base_system_prompt": "q"}
@@ -247,7 +249,7 @@ def test_sea_target_rejects_invalid_tool_getters(tmp_path: Path) -> None:
             f"def system_prompt():\n    return 'q'\n\n\ndef add_to_tools():\n{body}\n",
             encoding="utf-8",
         )
-        with pytest.raises(ValueError, match="add_to_tools\\(\\) must return a list"):
+        with pytest.raises(ValueError, match="add_to_tools\\(\\) .*must return a list"):
             SeaTarget(bad).rollout_kwargs()
     malformed = tmp_path / "malformed_sea.py"
     malformed.write_text(
@@ -863,7 +865,8 @@ def test_run_rollout_applies_eval_defaults_and_prompt_settings(tmp_path: Path) -
     fixed = tmp_path / "fixed_sea.py"
     fixed.write_text(
         "def system_prompt():\n    return 'p'\n\n\n"
-        "def settings():\n    return {'prompt': 'fixed prompt', 'add_to_prompt': ' suffix',"
+        "def prompt(task):\n    return 'fixed prompt'\n\n\n"
+        "def settings():\n    return {'add_to_prompt': ' suffix',"
         " 'tool_profile': 'bash'}\n",
         encoding="utf-8",
     )
@@ -1025,3 +1028,43 @@ def test_cli_runs_the_optimizer(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert code == 0 and len(requests) == 3
     out = capsys.readouterr().out
     assert "rounds done: 1" in out and "analysts proposed no patches" in out
+
+
+def test_sea_target_rollout_composes_extends_and_runs_prompt_only_on_the_real_task(
+    tmp_path: Path,
+) -> None:
+    """A rollout evaluates the whole ``extends`` chain; ``prompt(task)`` sees no placeholder."""
+    base = tmp_path / "base_sea.py"
+    base.write_text(
+        'def helper(x: str) -> str:\n    """Help.\n\n    Args:\n        x: X.\n\n'
+        '    Returns:\n        X.\n    """\n    return x\n\n\n'
+        "def settings():\n    return {'tool_profile': 'none'}\n\n\n"
+        "def add_to_tools():\n    return [helper]\n\n\n"
+        "def add_to_system_prompt():\n    return 'BASE RULES'\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "strict_sea.py"
+    target.write_text(
+        "import json\n\n\nPROMPT = 'strict'\n\n\n"
+        f"def settings():\n    return {{'extends': {str(base)!r}}}\n\n\n"
+        "def system_prompt():\n    return PROMPT\n\n\n"
+        "def prompt(task):\n    return json.loads(task)['text']\n",
+        encoding="utf-8",
+    )
+    kwargs = SeaTarget(target).rollout_kwargs()
+    assert kwargs["base_system_prompt"] == "strict"
+    assert kwargs["system_prompt"] == "BASE RULES"
+    assert kwargs["tool_profile"] == "none" and kwargs["append_basic_tools"] is False
+    assert [t.__name__ for t in kwargs["tools"]] == ["helper"]
+    assert kwargs["prompt"]('{"text": "real task"}') == "real task"
+    # A candidate copy in a scratch directory still finds the absolute base.
+    assert SeaTarget(target).validate("tuned") == ""
+    # A relative base cannot be found from a candidate copy: rejected at validation.
+    relative = tmp_path / "relative_sea.py"
+    relative.write_text(
+        "PROMPT = 'rel'\n\n\ndef settings():\n    return {'extends': 'base_sea.py'}\n\n\n"
+        "def system_prompt():\n    return PROMPT\n",
+        encoding="utf-8",
+    )
+    assert SeaTarget(relative).rollout_kwargs()["system_prompt"] == "BASE RULES"
+    assert "not an existing Python" in SeaTarget(relative).validate("tuned")

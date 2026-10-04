@@ -27,6 +27,8 @@ from kiss.server.agent_file import (
     NO_TOOLS_PROFILE,
     AgentFileError,
     apply_agent_overrides,
+    channel_workspace,
+    load_layers,
 )
 
 
@@ -46,6 +48,9 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
         "tools", "appendToSystemPrompt", "workDir",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
+    # The workspace a channel run holds is decided from the settings
+    # alone (entered by the task runner before the tools are built).
+    assert channel_workspace(cmd, load_layers(cmd)) == "default"
     assert [t.__name__ for t in cmd["tools"]] == ["cron_job", "gateway_command"]
     assert "toolProfile" not in cmd
     assert "appendBasicTools" not in cmd

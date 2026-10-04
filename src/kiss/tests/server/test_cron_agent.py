@@ -43,7 +43,8 @@ def test_agent_script_loaded_run_now_uses_daemon_endpoint_file(
     # this file), whose own _daemon_endpoint_file global is never set:
     # run_now must still target the endpoint file recorded in the canonical
     # module by the daemon's scheduler thread.
-    from kiss.server.agent_file import AgentFileError, execute_python_file
+    from kiss.agents.sorcar.sea_settings import execute_python_file
+    from kiss.server.agent_file import AgentFileError
 
     custom_endpoint = tmp_path / "custom-daemon.json"
     stop_event = start_scheduler_thread(

@@ -105,12 +105,12 @@ class TestRunTaskGuardCoversWholeBody(unittest.TestCase):
         """KI in the setup region → running=False + task_thread cleared."""
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
-        # A real agent script whose settings()['prompt'] override forces
-        # the registry re-pin (the instrumented setup step) to run.
+        # A real agent script whose prompt(task) override forces the
+        # registry re-pin (the instrumented setup step) to run.
         script = Path(self.tmpdir) / "agent_script.py"
         script.write_text(
-            "def settings():\n"
-            "    return {'prompt': 'overridden prompt'}\n",
+            "def prompt(task):\n"
+            "    return 'overridden prompt'\n",
             encoding="utf-8",
         )
         tab_id = "rc2-tab"

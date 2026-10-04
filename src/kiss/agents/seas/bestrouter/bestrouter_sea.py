@@ -47,7 +47,9 @@ Use the model names literally without hallucinating new model names.
 
 ## Lessons from recent runs (rsi7d)
 
-- `Read` the region of a file before its first `Edit`, and after an `Edit` is rejected
+- `Read` the region of a file before its first `Edit`, and `Read` an existing file before
+  a `Write` that replaces it (an unread file is refused either way); after an `Edit` is
+  rejected
   with "has not been read in this session" send no further `Edit` of that file until the
   `Read` is done; three rejected edits of one file fired in a single block are three
   wasted steps.

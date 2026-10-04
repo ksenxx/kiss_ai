@@ -298,7 +298,16 @@ and what you did with it, and anything the paper claims that you could not verif
   the retry repeats the whole review text.
 - `run_commands_parallel` takes a JSON array of strings: double every backslash, prefer
   `grep -E 'a|b'` over `\\|`, and run multi-line Python through Bash with a heredoc; a
-  rejected array costs a step and resends every command."""
+  rejected array costs a step and resends every command.
+- When the task names no word limit, L is 700, the `check_review` default; write
+  "L = 700" into `tmp/PAPER-NOTES.md` before drafting and allot the sections from it.
+  Three runs of one task assumed L = 850 to 1000, drafted 1,044 to 1,217 words, learned
+  the limit from the first gate failure and needed four or five rewrites to fit.
+- On the first HTTP 429 from Semantic Scholar, run every remaining query through the
+  arXiv API in one Bash call (a loop over the query list, one request per three seconds);
+  do not retry the Semantic Scholar queries one by one.
+- Check all cited arXiv ids in one Bash call: one script over the whole id list, not
+  three ids per call followed by a repeat over all of them."""
 """The reviewing rules, appended to the default system prompt."""
 
 _HEADINGS = ("Summary", "Strengths", "Weaknesses", "Detailed review", "Scores")

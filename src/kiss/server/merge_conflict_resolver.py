@@ -52,7 +52,8 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
 
     Args:
         parent_agent: The agent of the task whose merge conflicted.
-        prompt: The task text (see :func:`merge_sea.build_prompt`).
+        prompt: The prompt text (:func:`merge_sea.prompt` of
+            :func:`merge_sea.conflict_task`).
         repo: The repository root holding the conflicted merge.
     """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -150,9 +151,9 @@ def resolve_merge_conflict(
         return MergeResult.CONFLICT
     try:
         if conflicted:
-            prompt = merge_sea.build_prompt(
+            prompt = merge_sea.prompt(merge_sea.conflict_task(
                 repo, wt.branch, wt.original_branch or "", conflicted, user_prompt,
-            )
+            ))
             try:
                 run_agent(parent_agent, prompt, repo)
             except Exception:

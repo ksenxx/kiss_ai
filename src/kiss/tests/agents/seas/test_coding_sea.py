@@ -394,9 +394,11 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     assert spec is not None and spec.loader is not None
     sea = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sea)
-    assert not hasattr(sea, "prompt")
+    # ``prompt(task)`` is the SEA getter: the config's instruction wins
+    # over the runner's task label.
+    assert sea.prompt("label") == "p"
     settings = sea.settings()
-    assert settings["prompt"] == "p"
+    assert "prompt" not in settings
     assert settings["model"] == MODEL
     assert settings["docker_image"] == "container:kiss-test-trial"
     assert settings["work_dir"] == str(tmp_path / "sea-trial")

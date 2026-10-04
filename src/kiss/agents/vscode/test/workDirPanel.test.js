@@ -37,6 +37,12 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
+// Every window a test opened; closed after the test so the webview's
+// timers (the 1 s meta-panel poll a desktop layout starts, Monaco's
+// load timeout) do not keep this node process alive once the tests
+// are done.
+const openWindows = [];
+
 function makeWebview(opts) {
   const {remote = false, desktop = false} = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -51,6 +57,7 @@ function makeWebview(opts) {
     url: 'https://localhost/',
   });
   const win = dom.window;
+  openWindows.push(win);
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
@@ -928,6 +935,8 @@ for (const [name, fn] of tests) {
     failed += 1;
     console.log('not ok - ' + name);
     console.log(e && e.stack ? e.stack : String(e));
+  } finally {
+    while (openWindows.length) openWindows.pop().close();
   }
 }
 if (failed) {
@@ -935,3 +944,4 @@ if (failed) {
   process.exit(1);
 }
 console.log(`all ${tests.length} workDirPanel tests passed`);
+process.exit(0);

@@ -2,28 +2,36 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent-script loading for ``kiss.server.sorcar.run``'s ``extension_agent_path``.
+"""Applying an agent script (SEA) to a ``run`` command.
 
 The caller of :func:`kiss.server.sorcar.run` may supply an *agent
-script* — a Sorcar Extension Agent (SEA), a Python file that configures
-the run — as a file path on the ``run`` command's ``agentPath`` field.
-The client validates and resolves the path
+script* — a Sorcar Extension Agent, a Python file that configures the
+run — as a file path on the ``run`` command's ``agentPath`` field.  The
+client validates and resolves the path
 (:func:`kiss.agents.sorcar.daemon_client.resolve_agent_path`); the
-daemon imports the file (:func:`apply_agent_overrides`) and applies, in
-place on the command dict:
+daemon executes the script and the scripts it extends
+(:func:`kiss.agents.sorcar.sea_commands.sea_layers`), evaluates them
+(:func:`kiss.agents.sorcar.sea_commands.evaluate_sea`) and applies the
+result in place on the command dict (:func:`apply_agent_overrides`):
 
-* the script's ``settings()`` dict (:mod:`kiss.agents.sorcar.sea_settings`):
-  a ``preset`` plus per-run parameters, each written over the
-  command's corresponding wire field (:data:`SETTING_FIELDS`), so a
-  script's choice wins over whatever the caller sent;
-* the script's ``system_prompt()`` text, written over ``systemPrompt``
-  (the run's base system prompt);
-* the ``channel`` preset's preamble and the script's
-  ``add_to_system_prompt()`` text, appended to ``appendToSystemPrompt``;
-* the script's ``add_to_tools()`` callables and ``llm_call_hook()`` /
+* the merged ``settings()``: a ``preset`` plus per-run parameters, each
+  written over the command's corresponding wire field
+  (:data:`SETTING_FIELDS`), so a script's choice wins over whatever
+  the caller sent;
+* ``prompt(task)``: the task text replaced by what the function
+  returns, and ``add_to_prompt`` appended to ``appendToPrompt``;
+* ``system_prompt()``, written over ``systemPrompt`` (the run's base
+  system prompt);
+* the ``channel`` preset's preamble and ``add_to_system_prompt()``,
+  appended to ``appendToSystemPrompt``;
+* ``add_to_tools()`` callables and ``llm_call_hook()`` /
   ``tool_call_hook()`` hooks — values no wire field can carry — staged
-  on the daemon-side fields ``tools`` / ``llmCallHook`` / ``toolCallHook``
-  for the task runner.
+  on the daemon-side fields ``tools`` / ``llmCallHook`` / ``toolCallHook``;
+* for a ``channel`` preset, the workspace the run holds for its
+  lifetime (:func:`channel_workspace`), which the task runner enters
+  BEFORE the tools are built — a channel's ``add_to_tools()`` binds the
+  credentials of the workspace active at that moment — and releases
+  when the run ends.
 
 The functions execute in the daemon process on the task's worker
 thread.  A broken agent script (malformed field, missing file, import
@@ -35,46 +43,27 @@ silently running with the wrong parameters.
 from __future__ import annotations
 
 import logging
-import sys
-import types
-import uuid
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.sea_commands import (
+    SeaLayer,
+    SeaScriptError,
+    evaluate_sea,
+    join_text,
+    sea_layers,
+)
 from kiss.agents.sorcar.sea_settings import (
     SETTING_TYPES,
-    SettingsError,
-    resolve_settings,
+    SeaError,
+    merge_settings,
     script_name,
 )
 
 logger = logging.getLogger("kiss-vscode")
 
 
-def _safe_message(exc: BaseException) -> str:
-    """Format an untrusted exception without running its raising code.
-
-    ``str(exc)`` runs the exception's ``__str__``, which — for an
-    exception minted by an untrusted agent script — may itself raise
-    anything.  A diagnostic built here must never leak such a
-    secondary raise, so the string conversion is guarded and falls
-    back to the (trusted) type name alone.
-
-    Args:
-        exc: The exception raised by untrusted agent-script code.
-
-    Returns:
-        ``"TypeName: message"`` when the message renders, otherwise
-        ``"TypeName"``.
-    """
-    name = type(exc).__name__
-    try:
-        return f"{name}: {exc}"
-    except BaseException:  # noqa: BLE001 — untrusted __str__ may raise anything
-        return name
-
-
-class AgentFileError(Exception):
+class AgentFileError(SeaError):
     """A ``run`` command's agent script is broken and the task must stop.
 
     Raised by :func:`apply_agent_overrides` when the ``agentPath`` wire
@@ -92,9 +81,14 @@ def wire_field(key: str) -> str:
     """Return the ``run`` command wire field of the ``run()`` keyword *key*.
 
     The wire vocabulary is the keyword vocabulary in camelCase
-    (``use_web_tools`` -> ``useWebTools``), so no hand-kept table is
-    needed.
+    (``use_web_tools`` -> ``useWebTools``), with two aliases kept from
+    the wire protocol's earlier vocabulary: ``add_to_prompt`` ->
+    ``appendToPrompt`` and ``add_to_system_prompt`` ->
+    ``appendToSystemPrompt``.
     """
+    aliases = {"add_to_prompt": "appendToPrompt", "add_to_system_prompt": "appendToSystemPrompt"}
+    if key in aliases:
+        return aliases[key]
     first, *rest = key.split("_")
     return first + "".join(part.capitalize() for part in rest)
 
@@ -102,13 +96,13 @@ def wire_field(key: str) -> str:
 SETTING_FIELDS: dict[str, str] = {
     key: wire_field(key)
     for key in SETTING_TYPES
-    if key not in ("preset", "timeout", "add_to_prompt")
+    if key not in ("preset", "extends", "timeout", "add_to_prompt")
 }
 """``settings()`` key -> the ``run`` command wire field it overrides.
 
-Every key is a parameter of :func:`kiss.server.sorcar.run`.  Three
-keys have no field of their own: the ``preset`` is expanded by
-:func:`~kiss.agents.sorcar.sea_settings.resolve_settings`, the
+Every key is a parameter of :func:`kiss.server.sorcar.run`.  Four
+keys have no field of their own: the ``preset`` and ``extends`` are
+resolved by :func:`~kiss.agents.sorcar.sea_commands.sea_layers`, the
 ``timeout`` is read by the dispatcher
 (:mod:`kiss.agents.sorcar.agent_dispatch`), and ``add_to_prompt`` is
 appended to the caller's ``appendToPrompt`` text.
@@ -128,170 +122,87 @@ CHANNEL_PREAMBLE = (
 NO_TOOLS_PROFILE = "none"
 """The tool profile of a run whose only built-in tool is ``finish``."""
 
-
-def _getter_value(namespace: dict[str, Any], raw_path: str, name: str) -> Any:
-    """Call the script's zero-argument getter *name*; ``None`` when undefined.
-
-    Membership (not ``.get() is None``) decides absence: a DEFINED
-    ``name = None`` is a broken getter, not a missing one.
-
-    Raises:
-        AgentFileError: When the getter is not callable or raises.
-    """
-    if name not in namespace:
-        return None
-    getter = namespace[name]
-    if not callable(getter):
-        raise AgentFileError(
-            f"{name} of agent script {raw_path!r} must be a callable, "
-            f"got {type(getter).__name__}"
-        )
-    try:
-        return getter()
-    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-        logger.warning("%s() of agentPath %r raised", name, raw_path, exc_info=True)
-        raise AgentFileError(
-            f"{name}() of agent script {raw_path!r} raised: {_safe_message(exc)}"
-        ) from exc
+DAEMON_SIDE_FIELDS = ("tools", "llmCallHook", "toolCallHook")
+"""Command fields only the daemon's SEA pipeline may set; a client-sent value is dropped."""
 
 
-def _check_tools(raw_path: str, name: str, value: Any) -> list[Any]:
-    """Return *value* as a list of tool callables, or raise :exc:`AgentFileError`."""
-    try:
-        if isinstance(value, list | tuple) and all(callable(tool) for tool in value):
-            return list(value)
-    except BaseException as exc:  # noqa: BLE001 — an untrusted list may raise while iterated
-        raise AgentFileError(
-            f"{name}() of agent script {raw_path!r} returned a broken list: "
-            f"{_safe_message(exc)}"
-        ) from exc
-    raise AgentFileError(
-        f"{name}() of agent script {raw_path!r} must return a list of tool "
-        f"callables (not a file path), got {type(value).__name__}"
-    )
+def channel_workspace(cmd: dict[str, Any], layers: list[SeaLayer]) -> str:
+    """Return the workspace a run holds for its lifetime; ``""`` unless its preset is ``channel``.
 
-
-def _check_text(raw_path: str, name: str, value: Any) -> str:
-    """Return *value* as a string, or raise :exc:`AgentFileError`."""
-    if isinstance(value, str):
-        return value
-    raise AgentFileError(
-        f"{name}() of agent script {raw_path!r} must return a string, "
-        f"got {type(value).__name__}"
-    )
-
-
-def _check_hook(raw_path: str, name: str, value: Any) -> Any:
-    """Return *value* when it is a callable or ``None``, or raise :exc:`AgentFileError`."""
-    if value is None or callable(value):
-        return value
-    raise AgentFileError(
-        f"{name}() of agent script {raw_path!r} must return a callable or "
-        f"None, got {type(value).__name__}"
-    )
-
-
-def execute_python_file(
-    raw_path: Any,
-    error_cls: type[Exception],
-    label: str,
-) -> dict[str, Any]:
-    """Import a caller-supplied Python file and return its namespace.
-
-    Daemon-side loader for the ``run`` command's ``agentPath`` agent
-    script (also used by SEAs that load other scripts, e.g.
-    ``skillopt``).  The source is compiled and executed directly (no
-    ``__pycache__`` read or write), so every run observes the file's
-    CURRENT contents and the caller's directory is never littered with
-    bytecode.
+    The command's ``workspace`` wire field (``run_agent(workspace=)``,
+    a channel launcher's account), else ``"default"``.  Decided from
+    the layers' settings alone, so the task runner can enter the
+    workspace before :func:`apply_agent_overrides` evaluates the
+    channel's ``add_to_tools()``.
 
     Args:
-        raw_path: The wire field naming the file — expected to be an
-            absolute path string, but treated as untrusted.
-        error_cls: The exception class to raise on any failure (e.g.
-            :exc:`AgentFileError`), so each caller keeps its own
-            diagnostic type.
-        label: Human-readable name of the file kind (e.g. ``"agent
-            script"``), used in diagnostic messages.
+        cmd: The ``run`` command dict.
+        layers: The run's executed layers (:func:`load_layers`).
+    """
+    if not layers or merge_settings([layer.settings for layer in layers])["preset"] != "channel":
+        return ""
+    workspace = cmd.get("workspace")
+    return workspace.strip() if isinstance(workspace, str) and workspace.strip() else "default"
+
+
+def load_layers(cmd: dict[str, Any], base: Path | None = None) -> list[SeaLayer]:
+    """Execute the agent script a ``run`` command names, and its bases.
+
+    Args:
+        cmd: The ``run`` command dict.  An absent, ``None`` or empty
+            ``agentPath`` means "no agent script": an empty list.
+        base: An outermost layer to lay under the script (the tab's
+            model-picker SEA), or ``None``.  With no ``agentPath`` the
+            base alone is the run's script.
 
     Returns:
-        The executed module's namespace dict.
+        The layers (see :func:`~kiss.agents.sorcar.sea_commands.sea_layers`).
 
     Raises:
-        Exception: An *error_cls* instance when *raw_path* is not a
-            string, is not the path of an existing ``.py`` file, or
-            names a module that raises at import time.
+        AgentFileError: When ``agentPath`` is not a string or names no
+            existing ``.py`` file, or a script of the chain fails to
+            import, has malformed settings or a bad ``extends``.
     """
-    # Type-check FIRST: comparing or repr-ing an untrusted non-string
-    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
-    # so nothing touches *raw_path* beyond isinstance until it is known
-    # to be a plain string.
+    raw_path = cmd.get("agentPath")
+    if raw_path is None or (isinstance(raw_path, str) and raw_path == ""):
+        if base is None:
+            return []
+        raw_path = str(base)
     if not isinstance(raw_path, str):
-        raise error_cls(
-            f"{label} field must be a path string, got "
-            f"{type(raw_path).__name__}"
+        raise AgentFileError(
+            f"agent script field must be a path string, got {type(raw_path).__name__}"
         )
-    path = Path(raw_path)
     try:
-        is_py_file = path.suffix == ".py" and path.is_file()
-    except (OSError, ValueError):
-        # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
-        is_py_file = False
-    if not is_py_file:
-        raise error_cls(
-            f"{label} {raw_path!r} is not an existing Python (.py) file"
-        )
-    module_name = f"_kiss_client_file_{uuid.uuid4().hex}"
-    module = types.ModuleType(module_name)
-    module.__file__ = str(path)
-    sys.modules[module_name] = module
-    try:
-        source = path.read_text(encoding="utf-8")
-        code = compile(source, str(path), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102
-    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
-        # BaseException (not just Exception/SystemExit): a file raising
-        # e.g. KeyboardInterrupt or SystemExit at import time is
-        # converted into *error_cls* like any other bad module — the
-        # task runner treats an escaping KeyboardInterrupt as a task
-        # CANCELLATION, so letting it propagate unwrapped would report
-        # a broken file as "task cancelled" instead of a task error
-        # with a diagnostic.
-        logger.warning("Failed to import %s %r", label, raw_path, exc_info=True)
-        raise error_cls(
-            f"{label} {raw_path!r} failed to import: "
-            f"{_safe_message(exc)}"
-        ) from exc
-    finally:
-        sys.modules.pop(module_name, None)
-    return module.__dict__
+        return sea_layers(Path(raw_path), base)
+    except SeaScriptError as exc:
+        raise AgentFileError(str(exc)) from exc
 
 
-def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
+def apply_agent_overrides(
+    cmd: dict[str, Any], layers: list[SeaLayer] | None = None,
+) -> set[str]:
     """Apply a ``run`` command's agent-script configuration, in place.
 
-    Daemon-side counterpart of :func:`resolve_agent_path`: imports the
-    Python file named by the command's ``agentPath`` field and applies
-    its ``settings()`` (:func:`~kiss.agents.sorcar.sea_settings.resolve_settings`,
-    preset defaults merged), one wire field per key
-    (:data:`SETTING_FIELDS`).  The script's ``system_prompt()`` text
-    becomes the run's base system prompt (``systemPrompt``; it wins
-    over a ``system_prompt`` key).  A ``channel`` preset appends
-    :data:`CHANNEL_PREAMBLE` to the system prompt and the script's
-    ``add_to_system_prompt()`` text follows it; its ``add_to_prompt``
-    text, ``{task_id}`` in it replaced by the command's
-    ``parentTaskId``, is appended to the caller's ``appendToPrompt``.
-    ``add_to_tools()`` callables are staged on the daemon-side ``tools``
-    field (added to the run's built-in toolset);
-    ``llm_call_hook()`` / ``tool_call_hook()`` callables are staged on
-    ``llmCallHook`` / ``toolCallHook``.  The writes are atomic: they
+    Evaluates the script's layers
+    (:func:`~kiss.agents.sorcar.sea_commands.evaluate_sea` on the
+    command's ``prompt`` and ``parentTaskId``) and writes the result
+    over the command: one wire field per merged setting
+    (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt(task)`` getter
+    rewrote the task; ``systemPrompt`` from ``system_prompt()``;
+    ``appendToSystemPrompt`` extended with :data:`CHANNEL_PREAMBLE`
+    (``channel`` preset) and ``add_to_system_prompt()``;
+    ``appendToPrompt`` extended with ``add_to_prompt``; the daemon-side
+    fields ``tools``, ``llmCallHook`` and ``toolCallHook``.  The writes
+    are atomic: they
     happen only after everything has succeeded, so a broken script
     leaves the command untouched.
 
     Args:
-        cmd: The ``run`` command dict; mutated in place.  An absent,
-            ``None``, or empty ``agentPath`` field means "no agent
-            script" and leaves the command untouched.
+        cmd: The ``run`` command dict; mutated in place.
+        layers: The already-executed layers (:func:`load_layers`), so
+            a run executes its scripts once; ``None`` loads them from
+            the command's ``agentPath``.  An empty list (no agent
+            script) leaves the command untouched.
 
     Returns:
         The set of command-field names that were overridden (empty when
@@ -305,67 +216,54 @@ def apply_agent_overrides(cmd: dict[str, Any]) -> set[str]:
             non-callable or raising getter, or a getter returning the
             wrong type.
     """
-    raw_path = cmd.get("agentPath")
-    if raw_path is None:
+    if layers is None:
+        layers = load_layers(cmd)
+    if not layers:
         return set()
-    if isinstance(raw_path, str) and raw_path == "":
-        return set()
-    namespace = execute_python_file(raw_path, AgentFileError, "agent script")
+    raw_prompt = cmd.get("prompt")
+    parent_task_id = cmd.get("parentTaskId")
+    try:
+        run = evaluate_sea(
+            layers,
+            raw_prompt if isinstance(raw_prompt, str) else "",
+            parent_task_id if isinstance(parent_task_id, str) else "",
+        )
+    except SeaScriptError as exc:
+        logger.warning("agent script %s rejected: %s", layers[-1].path, exc)
+        raise AgentFileError(str(exc)) from exc
     # Everything below is STAGED and applied to the command only after
     # every getter has succeeded: a broken getter must leave the command
     # completely untouched, or a direct ``_run_task`` caller (no
     # dispatch-created state) would seed its run state from a partially
     # overridden command.
     staged: dict[str, Any] = {}
-    try:
-        settings = resolve_settings(namespace)
-    except SettingsError as exc:
-        logger.warning("settings of agentPath %r rejected: %s", raw_path, exc)
-        raise AgentFileError(f"agent script {raw_path!r}: {exc}") from exc
     for key, field in SETTING_FIELDS.items():
-        if key in settings:
-            staged[field] = settings[key]
-    if "add_to_prompt" in settings:
-        parent_task_id = cmd.get("parentTaskId")
-        try:
-            addition = settings["add_to_prompt"].replace(
-                "{task_id}", parent_task_id if isinstance(parent_task_id, str) else "",
-            )
-        except BaseException as exc:  # noqa: BLE001 — an untrusted str subclass may raise
-            raise AgentFileError(
-                f"agent script {raw_path!r}: add_to_prompt is a broken value: "
-                f"{_safe_message(exc)}"
-            ) from exc
-        staged["appendToPrompt"] = _add_text(cmd.get("appendToPrompt"), addition)
-    if "system_prompt" in namespace:
-        staged["systemPrompt"] = _check_text(
-            raw_path, "system_prompt", _getter_value(namespace, raw_path, "system_prompt"),
-        )
+        if key in run.settings:
+            staged[field] = run.settings[key]
+    if any("prompt" in layer.namespace for layer in layers):
+        staged["prompt"] = run.prompt
+    if run.add_to_prompt:
+        staged["appendToPrompt"] = _add_text(cmd.get("appendToPrompt"), run.add_to_prompt)
+    if run.system_prompt is not None:
+        staged["systemPrompt"] = run.system_prompt
     system_suffix = cmd.get("appendToSystemPrompt")
-    if settings["preset"] == "channel":
+    if run.settings["preset"] == "channel":
         system_suffix = _add_text(
-            system_suffix, CHANNEL_PREAMBLE.format(name=script_name(raw_path)),
+            system_suffix, CHANNEL_PREAMBLE.format(name=script_name(str(layers[-1].path))),
         )
         staged["appendToSystemPrompt"] = system_suffix
-    if "add_to_system_prompt" in namespace:
-        addition = _check_text(
-            raw_path, "add_to_system_prompt",
-            _getter_value(namespace, raw_path, "add_to_system_prompt"),
-        )
-        staged["appendToSystemPrompt"] = _add_text(system_suffix, addition)
-    if "add_to_tools" in namespace:
-        staged["tools"] = _check_tools(
-            raw_path, "add_to_tools", _getter_value(namespace, raw_path, "add_to_tools"),
-        )
-    for name, field in (("llm_call_hook", "llmCallHook"), ("tool_call_hook", "toolCallHook")):
-        if name in namespace:
-            staged[field] = _check_hook(raw_path, name, _getter_value(namespace, raw_path, name))
+    if run.add_to_system_prompt:
+        staged["appendToSystemPrompt"] = _add_text(system_suffix, run.add_to_system_prompt)
+    if any("add_to_tools" in layer.namespace for layer in layers):
+        staged["tools"] = run.tools
+    if any("llm_call_hook" in layer.namespace for layer in layers):
+        staged["llmCallHook"] = run.llm_call_hook
+    if any("tool_call_hook" in layer.namespace for layer in layers):
+        staged["toolCallHook"] = run.tool_call_hook
     cmd.update(staged)
     return set(staged)
 
 
 def _add_text(base: Any, addition: str) -> str:
     """Return *addition* appended to *base* (a wire value; non-strings count as empty)."""
-    if not isinstance(base, str) or not base:
-        return addition
-    return f"{base}\n\n{addition}" if addition else base
+    return join_text(base if isinstance(base, str) else "", addition)

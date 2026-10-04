@@ -124,7 +124,7 @@ class TestUnknownAgentHints:
         expected = _run_agent("", "", "review it", "", "", "", "")
         assert expected.startswith("Error: the dummy agent task could not run:")
         for name in ("code-review", "general", "Agent", "sorcar", "analysis", " worker "):
-            assert resolve_agent(name, "") == ("path", DEFAULT_AGENT_PATH, "dummy")
+            assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "dummy")
             out = _run_agent("", name, "review it", "", "", "", "")
             assert out == expected
             assert "unknown agent" not in out and "Available channels" not in out

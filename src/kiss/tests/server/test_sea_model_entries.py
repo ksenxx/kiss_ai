@@ -311,8 +311,14 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert run["model_name"] == get_default_model()
         assert "MYROUTER PROTOCOL" in run["system_prompt"]
 
-    def test_explicit_agent_script_keeps_its_agent_on_the_routers_model(self) -> None:
-        """An ``agentPath`` run only takes the model from the router pick."""
+    def test_explicit_agent_script_runs_on_top_of_the_router(self) -> None:
+        """An ``agentPath`` run keeps the router pick as its base layer.
+
+        The script's ``system_prompt()`` is the base prompt, the router's
+        model is the model, and the router's protocol
+        (``add_to_system_prompt()``) is still appended, so a sub-agent or
+        a slash command on a router tab follows the same routing rules.
+        """
         sea = Path(self.tmpdir) / "plain_sea.py"
         sea.write_text(
             'def system_prompt() -> str:\n    return "PLAIN SEA PROMPT"\n', encoding="utf-8"
@@ -320,10 +326,11 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         run = self._run("say hello", model=AUTOROUTER, extension_agent_path=str(sea))
         assert run["model_name"] == orchestrator_model()
         assert run["system_prompt"].startswith("PLAIN SEA PROMPT")
-        assert AUTOROUTER_MARKER not in run["system_prompt"]
+        assert AUTOROUTER_MARKER in run["system_prompt"]
         run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
         assert run["model_name"] == "claude-fable-5-1"
-        assert BESTROUTER_MARKER not in run["system_prompt"]
+        assert run["system_prompt"].startswith("PLAIN SEA PROMPT")
+        assert BESTROUTER_MARKER in run["system_prompt"]
 
     def test_agent_script_blank_model_setting_still_gets_a_real_model(self) -> None:
         """A ``settings()["model"]`` of ``""`` means "the tab's pick" — never the router."""
@@ -339,6 +346,42 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         run = self._run("say hello", extension_agent_path=str(sea))
         assert run["model_name"] == orchestrator_model()
         assert run["system_prompt"].startswith("BLANK MODEL SEA")
+
+    def test_agent_script_naming_a_picker_as_its_model_runs_on_a_real_model(self) -> None:
+        """``settings()["model"]`` may name a picker entry: it is resolved, never forwarded.
+
+        The tab's own picker keeps its model; another picker is executed
+        once and contributes its model and its ``on_picked_as_model``
+        hook — a run never names a picker SEA as its LLM.
+        """
+        sea = Path(self.tmpdir) / "pickbest_sea.py"
+        sea.write_text(
+            f'def settings() -> dict:\n    return {{"model": "{BESTROUTER}"}}\n'
+            'def system_prompt() -> str:\n    return "PICKS BESTROUTER"\n',
+            encoding="utf-8",
+        )
+        run = self._run("say hello", model="gpt-6-astra", extension_agent_path=str(sea))
+        assert run["model_name"] == "claude-fable-5-1"
+        assert run["system_prompt"].startswith("PICKS BESTROUTER")
+        # The same name under the bestrouter tab: the picker's model, once.
+        run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
+        assert run["model_name"] == "claude-fable-5-1"
+        assert run["system_prompt"].count(BESTROUTER_MARKER) == 1
+
+    def test_agent_script_extending_the_tab_picker_runs_the_picker_once(self) -> None:
+        """A script that ``extends`` the tab's picker gets ONE picker layer, not two."""
+        sea = Path(self.tmpdir) / "onbest_sea.py"
+        sea.write_text(
+            f'def settings() -> dict:\n    return {{"extends": "{BESTROUTER}"}}\n'
+            'def add_to_system_prompt() -> str:\n    return "ONBEST PROTOCOL"\n',
+            encoding="utf-8",
+        )
+        run = self._run("say hello", model=BESTROUTER, extension_agent_path=str(sea))
+        assert run["model_name"] == "claude-fable-5-1"
+        assert run["system_prompt"].count(BESTROUTER_MARKER) == 1
+        assert run["system_prompt"].index(BESTROUTER_MARKER) < run["system_prompt"].index(
+            "ONBEST PROTOCOL"
+        )
 
     def test_malformed_agent_path_is_still_rejected(self) -> None:
         """A blank ``agentPath`` is not "no agent": it fails as it always did.
@@ -383,16 +426,16 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert SorcarAgent._resolve_model_name(None) == real
 
     def test_slash_command_keeps_its_own_agent(self) -> None:
-        """``/sh ...`` runs the sh SEA directly as the tab's agent; the pick only picks the model.
+        """``/sh ...`` runs the sh SEA directly as the tab's agent, on top of the pick.
 
         The run's ``agentPath`` is the ``/sh`` SEA (its base system prompt
         and ``bash`` tool profile shape the run), the LLM's task is the
         trailing ``echo hi`` (no ``run_agent`` relay), and the bestrouter
-        pick contributes just the model name, not its protocol.
+        pick is the base layer: its model and its routing protocol.
         """
         run = self._run("/sh echo hi", model=BESTROUTER)
         assert run["model_name"] == "claude-fable-5-1"
-        assert BESTROUTER_MARKER not in run["system_prompt"]
+        assert BESTROUTER_MARKER in run["system_prompt"]
         assert run["prompt"] == "# Task\necho hi", run["prompt"]
         assert run["system_prompt"].startswith(sh_sea.SYSTEM_PROMPT), run["system_prompt"]
         assert run["tool_names"] == ["Bash", "finish"], run["tool_names"]

@@ -147,7 +147,7 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         )
         assert result.success is False, result
         assert "nodesc_sea.py" in result.text and "description()" in result.text, result
-        assert "description must be a zero-argument function" in result.text, result
+        assert "description() must be a zero-argument function" in result.text, result
         assert calls == []
         row = persistence._load_chat_events_by_task_id(result.task_id)
         assert row is not None

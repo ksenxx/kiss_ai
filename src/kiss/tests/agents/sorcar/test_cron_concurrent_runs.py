@@ -176,8 +176,6 @@ def test_prompt_job_runs_in_private_work_dir_and_stops_on_timeout(
     assert str(kept) in stored["last_summary"]
     assert "was stopped" not in stored["last_summary"]
     assert kept.is_dir()
-    # The run's generated SEA is kept with it.
-    assert (kept / cron_agent.PROMPT_SEA_NAME).is_file()
     assert [path.name for path in _runs_dir(tmp_path).iterdir()] == [kept.name]
 
 

@@ -400,6 +400,7 @@ def run(
     tool_profile: str = "",
     docker_image: str = "",
     inherit_tools: bool = False,
+    workspace: str = "",
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     endpoint_file: str | Path | None = None,
@@ -678,6 +679,11 @@ def run(
             inherits the caller's system prompt also has the tools
             that prompt refers to.  ``False`` (default) adds nothing;
             ignored without *parent_task_id*.
+        workspace: Workspace/account identifier for multi-account
+            channels.  A ``channel``-preset agent script's run holds
+            it (``KISS_CHANNEL_WORKSPACE``) for its whole lifetime, so
+            its channel tools load that account's credentials; empty
+            means ``"default"``.  Ignored by every other run.
         timeout: Maximum seconds to wait for the task to finish;
             ``None`` waits indefinitely.
         stop_on_timeout: Whether a *timeout* expiry also STOPS the
@@ -814,6 +820,7 @@ def run(
             "toolProfile": tool_profile,
             "dockerImage": docker_image,
             "inheritTools": inherit_tools,
+            "workspace": workspace,
         }
         try:
             local_endpoint.send(ws, json.dumps(cmd))

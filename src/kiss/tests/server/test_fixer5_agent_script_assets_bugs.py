@@ -61,7 +61,18 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
         except AgentFileError as err:
             self.assertIn("failed to import", str(err))
             self.assertIn("KeyboardInterrupt", str(err))
-            self.assertIsInstance(err.__cause__, KeyboardInterrupt)
+            # The loader's SeaScriptError sits between the diagnostic and
+            # the original raise; ``task_runner._stop_interrupt_wrapped``
+            # walks the whole cause chain, so the interrupt must be in it.
+            causes: list[BaseException] = []
+            cause: BaseException | None = err.__cause__
+            while cause is not None:
+                causes.append(cause)
+                cause = cause.__cause__
+            self.assertTrue(
+                any(isinstance(c, KeyboardInterrupt) for c in causes),
+                f"KeyboardInterrupt missing from the cause chain: {causes!r}",
+            )
         except BaseException as err:  # noqa: BLE001 — the bug under test
             self.fail(
                 f"apply_agent_overrides let {type(err).__name__} escape "

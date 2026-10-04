@@ -87,6 +87,7 @@ from __future__ import annotations
 import argparse
 import ast
 import difflib
+import functools
 import html
 import importlib
 import json
@@ -109,6 +110,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.sea_settings import SeaError
 from kiss.agents.sorcar.useful_tools import _popen_kwargs
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import flatten_content_to_text
@@ -287,13 +289,6 @@ def _format_fields(text: str) -> set[str]:
     return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
 
 
-def _execute_sea(path: Path) -> dict[str, Any]:
-    """Execute the SEA file at *path* and return its namespace."""
-    from kiss.server.agent_file import execute_python_file
-
-    return execute_python_file(str(path), ValueError, "SEA")
-
-
 class SeaTarget(Target):
     """A SEA whose trainable text is the constant returned by ``system_prompt()``."""
 
@@ -331,7 +326,10 @@ class SeaTarget(Target):
             with tempfile.TemporaryDirectory(prefix="skillopt-") as tmp:
                 path = Path(tmp) / self.candidate_name()
                 path.write_text(candidate, encoding="utf-8")
-                returned = _execute_sea(path)["system_prompt"]()
+                # Loaded as a rollout would load it, bases included: a
+                # candidate copy whose ``extends`` cannot be resolved from
+                # a scratch directory is rejected here, not at rollout.
+                returned = _sea_layers(path)[-1].namespace["system_prompt"]()
         except Exception as exc:  # noqa: BLE001 - any failure is a gate reason
             return f"candidate cannot be loaded as a SEA: {exc}"
         if returned != text:
@@ -339,21 +337,37 @@ class SeaTarget(Target):
         return ""
 
     def rollout_kwargs(self) -> dict[str, Any]:
-        """Map the file's ``settings()`` and getters onto ``SorcarAgent.run`` arguments."""
-        from kiss.agents.sorcar.sea_settings import resolve_settings
+        """Map the file's layers (``extends`` included) onto ``SorcarAgent.run`` arguments.
 
-        ns = _execute_sea(self.path)
-        settings = resolve_settings(ns)
-        kwargs: dict[str, Any] = {
-            "base_system_prompt": str(
-                _call_getter(ns, "system_prompt") or settings.get("system_prompt") or ""
-            )
-        }
-        if not kwargs["base_system_prompt"]:
+        The composition the daemon applies to a run of the file
+        (:func:`~kiss.agents.sorcar.sea_commands.sea_layers` and
+        :func:`~kiss.agents.sorcar.sea_commands.sea_configuration`; the
+        ``prompt(task)`` chain runs once per rollout, on the real task),
+        so a rollout evaluates the agent the file actually configures.  A
+        relative ``extends`` path resolves against the file's own
+        directory, so a target rolled out from candidate copies must
+        name its base by command name or absolute path.
+
+        Raises:
+            ValueError: When a script of the chain is broken or the
+                effective ``system_prompt()`` is empty.
+        """
+        from kiss.agents.sorcar.sea_commands import sea_configuration, sea_prompt
+
+        layers = _sea_layers(self.path)
+        try:
+            run = sea_configuration(layers)
+        except SeaError as exc:
+            raise ValueError(str(exc)) from exc
+        if not run.system_prompt:
             raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
+        kwargs: dict[str, Any] = {"base_system_prompt": run.system_prompt}
+        if any("prompt" in layer.namespace for layer in layers):
+            # ``prompt(task)`` needs the task: handed to the rollout as a callable.
+            kwargs["prompt"] = functools.partial(sea_prompt, layers)
+        if run.add_to_prompt:
+            kwargs["add_to_prompt"] = run.add_to_prompt
         for setting, key in (
-            ("prompt", "prompt"),
-            ("add_to_prompt", "append_to_prompt"),
             ("tool_profile", "tool_profile"),
             ("is_parallel", "is_parallel"),
             ("use_web_tools", "web_tools"),
@@ -362,34 +376,31 @@ class SeaTarget(Target):
             ("model", "model_name"),
             ("model_config", "model_config"),
         ):
-            if setting in settings:
-                kwargs[key] = settings[setting]
-        for getter, key in (
-            ("add_to_system_prompt", "system_prompt"),
-            ("llm_call_hook", "llm_call_hook"),
-            ("tool_call_hook", "tool_call_hook"),
-        ):
-            value = _call_getter(ns, getter)
-            if value is not None:
-                kwargs[key] = value
+            if setting in run.settings:
+                kwargs[key] = run.settings[setting]
+        if run.add_to_system_prompt:
+            kwargs["system_prompt"] = run.add_to_system_prompt
+        if run.llm_call_hook is not None:
+            kwargs["llm_call_hook"] = run.llm_call_hook
+        if run.tool_call_hook is not None:
+            kwargs["tool_call_hook"] = run.tool_call_hook
         # ``add_to_tools()`` extends the built-in toolset (a list of
         # callables, never a file path), as in the daemon's agent-file loader.
-        if "add_to_tools" in ns:
-            tools = _call_getter(ns, "add_to_tools")
-            if not isinstance(tools, (list, tuple)) or not all(callable(t) for t in tools):
-                raise ValueError(
-                    f"{self.path.name}: add_to_tools() must return a list of tool callables"
-                )
-            kwargs["tools"] = list(tools)
+        if any("add_to_tools" in layer.namespace for layer in layers):
+            kwargs["tools"] = run.tools
         if kwargs.get("tool_profile") == "none":
             kwargs["append_basic_tools"] = False
         return kwargs
 
 
-def _call_getter(ns: dict[str, Any], name: str) -> Any:
-    """Call the SEA getter *name* in namespace *ns*; ``None`` when it is not defined."""
-    getter = ns.get(name)
-    return getter() if callable(getter) else None
+def _sea_layers(path: Path) -> list[Any]:
+    """Execute the SEA at *path* and its ``extends`` chain; ``ValueError`` when broken."""
+    from kiss.agents.sorcar.sea_commands import sea_layers
+
+    try:
+        return sea_layers(path)
+    except SeaError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 class ConstantTarget(Target):
@@ -729,8 +740,9 @@ def run_rollout(
     kwargs: dict[str, Any] = {"web_tools": False, "is_parallel": False, "use_memory": False}
     kwargs.update(defaults or {})
     kwargs.update(target.rollout_kwargs())
-    prompt_suffix = str(kwargs.pop("prompt_suffix", "")) + str(kwargs.pop("append_to_prompt", ""))
-    prompt = str(kwargs.pop("prompt", "") or task.prompt) + prompt_suffix
+    prompt_suffix = str(kwargs.pop("prompt_suffix", "")) + str(kwargs.pop("add_to_prompt", ""))
+    prompt_fn = kwargs.pop("prompt", None)
+    prompt = (str(prompt_fn(task.prompt)) if callable(prompt_fn) else task.prompt) + prompt_suffix
     record = _TrajectoryRecorder(
         cfg.trajectory_chars, kwargs.pop("llm_call_hook", None), kwargs.pop("tool_call_hook", None)
     )

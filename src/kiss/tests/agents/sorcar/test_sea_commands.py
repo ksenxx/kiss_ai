@@ -573,11 +573,11 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
 
     ``dataclasses`` resolves string annotations through
     ``sys.modules[cls.__module__].__dict__`` while the class body runs,
-    so the loader must register the module before executing it; the
-    daemon's own agent loader does, and a ``/xxx`` relay evaluating
-    ``settings()`` on the same file must not fail where the daemon
-    succeeds.  ``settings()`` also calls ``typing.get_type_hints`` after
-    import, which needs the entry to still be there.
+    so the one loader (``sea_settings.execute_python_file``) registers
+    the module before executing it.  ``settings()`` also calls
+    ``typing.get_type_hints`` after import, which needs the entry to
+    still be there: the module stays registered under a per-path name,
+    and a re-execution of the same file replaces it.
     """
     folder = tmp_path / "seas"
     sea = folder / "verdict" / "verdict_sea.py"
@@ -589,12 +589,16 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
     assert sea_commands.slash_command_task("/verdict go") == ("go", sea.resolve())
     settings = sea_commands.sea_settings(sea)
     assert settings == {"preset": "session", "use_worktree": False, "auto_commit": True}
-    with sea_commands._load_sea_module(sea) as loaded:
-        assert sys.modules[loaded.__name__] is loaded
-        assert loaded.__name__.startswith("_kiss_sea_verdict_sea_")
-        assert loaded.__file__ == str(sea)
-        assert loaded.Verdict.note == "relay stays on the real checkout"
-    assert loaded.__name__ not in sys.modules
+    loaded = sea_commands.load_sea(sea)
+    name = loaded["__name__"]
+    assert name.startswith("_kiss_sea_verdict_sea_")
+    assert sys.modules[name].__dict__ is loaded
+    assert loaded["__file__"] == str(sea)
+    assert loaded["Verdict"].note == "relay stays on the real checkout"
+    # One module per script file, not one per run.
+    again = sea_commands.load_sea(sea)
+    assert again["__name__"] == name and sys.modules[name].__dict__ is again
+    assert len([n for n in sys.modules if n.startswith("_kiss_sea_verdict_sea_")]) == 1
 
 
 def test_failed_sea_import_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
@@ -662,7 +666,8 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
     _evaluate("b", sea_b)
     thread_a.join(timeout=10)
     assert results == {"a": True, "b": True}, results
-    assert not [n for n in sys.modules if n.startswith("_kiss_sea_shared_sea_")]
+    # Same stem, different folders: two distinct module entries.
+    assert len({n for n in sys.modules if n.startswith("_kiss_sea_shared_sea_")}) == 2
 
 
 _DESCRIBED_SEA = '''\
@@ -710,11 +715,11 @@ def test_help_reports_missing_or_broken_description(tmp_path: Path) -> None:
 
     missing = _touch_sea(folder, "nodesc")
     sea_commands.refresh_registry()
-    with pytest.raises(sea_commands.SeaScriptError, match="description must be"):
+    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be"):
         sea_commands.help_text_if_command("/nodesc help")
 
     missing.write_text("description = 'not callable'\n", encoding="utf-8")
-    with pytest.raises(sea_commands.SeaScriptError, match="description must be"):
+    with pytest.raises(sea_commands.SeaScriptError, match="description.*must be"):
         sea_commands.sea_description(missing)
 
     missing.write_text("def description():\n    return 42\n", encoding="utf-8")
