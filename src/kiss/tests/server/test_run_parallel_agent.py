@@ -43,11 +43,11 @@ CHILD_SEA = textwrap.dedent('''
 
 
     def settings():
-        return {"tool_profile": "bash", "is_parallel": False, "add_to_prompt": "CHILD-ADD"}
+        return {"tool_profile": "bash", "is_parallel": False}
 
 
     def prompt(task: str) -> str:
-        return "[child-sea] " + task
+        return "[child-sea] " + task + "\\n\\nCHILD-ADD"
 
 
     def system_prompt() -> str:
@@ -176,7 +176,7 @@ def test_run_parallel_children_run_as_the_named_agent_script(
     assert any(
         "no-such-agent-xyz" in t and "Error:" in t for t in parent_texts
     ), parent_texts[-1][-500:]
-    assert any("ntfy is a channel agent; run it through run_agent" in t for t in parent_texts)
+    assert any("ntfy is a channel agent, which run_parallel cannot run" in t for t in parent_texts)
 
 
 PARENT_SEA = textwrap.dedent('''

@@ -24,6 +24,7 @@ Depends only on ``websockets`` and the sorcar/core layers.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -80,6 +81,30 @@ class StopUnconfirmedTimeoutError(TimeoutError):
     workspace.  Callers that report the timeout onward — the
     ``run_agent`` dispatch — must not claim the task was stopped.
     """
+
+class CancelledError(Exception):
+    """The caller's *cancel* event was set while :func:`run` waited.
+
+    The task is stopped exactly like a ``stop_on_timeout`` timeout: the
+    ``stop`` is sent and the read loop keeps going (bounded by
+    :data:`_STOP_CONFIRM_GRACE_SECONDS`) until the task's terminal
+    ``status running=false`` proves it is dead.  Not a
+    :class:`TimeoutError`: the task did not outlive a deadline, the
+    caller asked for it to go.
+
+    Attributes:
+        result: The task's :class:`TaskResult` with the spend reported
+            so far (all-zero when no ``result`` event arrived).
+        confirmed: ``True`` when the terminal status arrived; ``False``
+            when the grace expired first, so the stop stays best-effort
+            and the task may still be running on the daemon.
+    """
+
+    def __init__(self, message: str, result: TaskResult, confirmed: bool) -> None:
+        super().__init__(message)
+        self.result = result
+        self.confirmed = confirmed
+
 
 class StoppedOnTimeoutError(TimeoutError):
     """Timeout whose ``stop_on_timeout`` stop the daemon confirmed.
@@ -404,6 +429,8 @@ def run(
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     endpoint_file: str | Path | None = None,
+    cancel: threading.Event | None = None,
+    running: threading.Event | None = None,
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
@@ -489,6 +516,7 @@ def run(
 
                 def description() -> str: ...        # /xxx help text
                 def settings() -> dict: ...           # preset + run() keywords
+                def prompt(task: str) -> str: ...     # replaces the task text
                 def system_prompt() -> str: ...       # replaces the base prompt
                 def add_to_system_prompt() -> str: ... # appended to the system prompt
                 def add_to_tools() -> list: ...       # extra tool callables
@@ -504,18 +532,22 @@ def run(
             ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
             ``model_config``, ``use_web_tools``, ``classify_tasks``,
             ``use_memory``, ``is_parallel``, ``tool_profile``,
-            ``docker_image``; plus ``timeout`` (seconds a ``run_agent``
-            call waits for this script's sub-task) and ``add_to_prompt``
-            (text appended to the task prompt after *append_to_prompt*,
-            ``{task_id}`` in it replaced by *parent_task_id*).  A
-            ``None`` value means "no override".  Presets: ``session``
-            (default, changes nothing), ``worker`` (``use_worktree``,
+            ``docker_image``; plus four dispatcher keys: ``extends`` (a
+            base SEA), ``timeout`` (seconds a ``run_agent`` call waits
+            for this script's sub-task), ``inherit`` (whether a
+            ``run_agent`` sub-task inherits the caller's model, chat,
+            tools and prompt suffixes) and ``kind`` (``"agent"`` or
+            ``"channel"``: a channel gets the channel preamble and a
+            workspace held for the run).  ``prompt(task)`` receives the
+            task text and returns the prompt body; ``{task_id}`` in its
+            result is replaced by *parent_task_id*.  A ``None`` value
+            means "no override".  Presets are pure defaults: ``session``
+            (changes nothing), ``worker`` (``use_worktree``,
             ``auto_commit``, ``classify_tasks``, ``is_parallel``,
             ``use_web_tools``, ``use_memory`` all off) and ``channel``
-            (a worker for an external service: ``run_agent`` runs it in
-            ``~/.kiss/channel_work`` and inherits nothing into it, and
-            the daemon prepends a channel preamble to its system
-            prompt).  Explicit keys override the preset.
+            (``worker`` plus ``kind: "channel"``, ``inherit: False``
+            and ``work_dir: ~/.kiss/channel_work``).  Explicit keys
+            override the preset.
 
             ``add_to_system_prompt()`` returns text ADDED to the run's
             system prompt after *append_to_system_prompt*, never
@@ -716,6 +748,18 @@ def run(
             :class:`StopUnconfirmedTimeoutError` all the same.
         endpoint_file: Daemon endpoint file override (defaults to
             ``$KISS_SORCAR_LOCAL`` or ``$KISS_HOME/sorcar-local.json``).
+        cancel: An event the caller may set from another thread to
+            stop the task (``agent_job(..., "kill")``): the daemon is
+            sent a ``stop`` and the wait continues until the task's
+            terminal status confirms it is dead (or the confirmation
+            grace expires), then :class:`CancelledError` is raised with
+            ``confirmed`` set accordingly.  ``None`` (the default)
+            waits for the task or the timeout.
+        running: An event set when the task's initial ``status
+            running=true`` arrives — the moment its tab exists on every
+            client — or when this wait ends without one.  A background
+            ``run_agent`` job returns its notice only after it, so the
+            spawn lands inside the tool call's time window.
 
     Returns:
         A :class:`TaskResult` with the result text, success flag, cost
@@ -827,7 +871,8 @@ def run(
         except ConnectionClosed as exc:
             raise _closed_error(exc) from exc
         started = False
-        stopping = False  # stop-on-timeout sent; awaiting confirmation
+        stopping = False  # stop sent (timeout or cancel); awaiting confirmation
+        cancelled = False  # the stop was requested through *cancel*
         timeout_msg = f"Task did not finish within {timeout} seconds"
         # Inside a tool call (the run_agent dispatch) the wait wakes
         # often enough for that call's Stop button to feel immediate.
@@ -840,8 +885,24 @@ def run(
             # The calling task's tool-call panel Stop is honored
             # cooperatively: every wake checks it (raising
             # ToolCallInterrupted, which the finally below turns
-            # into a stop of the dispatched task).
+            # into a stop of the dispatched task).  A background job's
+            # kill is the same abort, requested through *cancel*.
             tool_interrupt.raise_if_interrupted()
+            if cancel is not None and cancel.is_set() and not cancelled:
+                # Stop the task and keep reading until its terminal
+                # status confirms it is dead — the same stop-and-confirm
+                # as a stop-on-timeout, decided below in the
+                # ``stopping`` branches with ``cancelled`` set.
+                cancelled = stopping = True
+                deadline = time.monotonic() + _STOP_CONFIRM_GRACE_SECONDS
+                try:
+                    _send_stop(ws, tab_id, run_token)
+                except OSError as send_exc:
+                    raise ConnectionError(
+                        "The sorcar daemon connection failed while "
+                        f"stopping the cancelled task: {send_exc}"
+                    ) from send_exc
+                continue
             if deadline is None:
                 # No deadline: wake periodically so an injected
                 # abort (see _NO_DEADLINE_WAKE_SECONDS) can be
@@ -892,6 +953,12 @@ def run(
                         # proves the task thread exited (see the
                         # terminal-status branch below, the one place
                         # a stored result may be returned).
+                        if cancelled:
+                            raise CancelledError(
+                                "the stop was sent but not confirmed",
+                                _to_task_result(result_event, chat_id, task_id, totals_event),
+                                confirmed=False,
+                            )
                         raise StopUnconfirmedTimeoutError(timeout_msg)
                     raise TimeoutError(timeout_msg)
                 # Capped like the no-deadline wait: an injected abort
@@ -927,6 +994,8 @@ def run(
             elif etype == "status":
                 if event.get("running"):
                     started = True
+                    if running is not None:
+                        running.set()
                 elif stopping:
                     if result_event is not None and result_event.get("success"):
                         # The task finished ON ITS OWN while the client
@@ -954,6 +1023,12 @@ def run(
                     # ``task_runner._run_task``) — that is a confirmed
                     # stop, not an unconfirmed one.  The stopped task's
                     # failure result still reports its spend.
+                    if cancelled:
+                        raise CancelledError(
+                            "the task was stopped by the caller",
+                            _to_task_result(result_event, chat_id, task_id, totals_event),
+                            confirmed=True,
+                        )
                     raise StoppedOnTimeoutError(
                         timeout_msg,
                         _to_task_result(result_event, chat_id, task_id, totals_event),
@@ -971,7 +1046,7 @@ def run(
                     return _to_task_result(result_event, chat_id, task_id, totals_event)
     except BaseException as exc:
         aborted = exc
-        if ws is not None and not isinstance(exc, TimeoutError):
+        if ws is not None and not isinstance(exc, (TimeoutError, CancelledError)):
             # The dispatched task is stopped below, but whatever it
             # already spent stays spent: hand the caller the latest
             # totals so it can still charge them (``run_agent`` folds
@@ -981,9 +1056,15 @@ def run(
             )
         raise
     finally:
+        if running is not None:
+            running.set()
         # Nothing to cascade or close when the connect itself failed:
         # there is no task and no tab on the daemon's side.
-        if ws is not None and aborted is not None and not isinstance(aborted, TimeoutError):
+        if (
+            ws is not None
+            and aborted is not None
+            and not isinstance(aborted, (TimeoutError, CancelledError))
+        ):
             # The wait was aborted — typically by the KeyboardInterrupt
             # injected when the CALLING task is stopped while blocked
             # here.  Cascade the stop to the dispatched task: without
@@ -993,8 +1074,8 @@ def run(
             # user" is refused with "A task is still running in this
             # folder".  A TimeoutError is excluded on purpose: its
             # documented contract is "the task keeps running", and a
-            # ``stop_on_timeout`` timeout already sent its stop (and
-            # awaited confirmation) inside the read loop.
+            # ``stop_on_timeout`` timeout or a *cancel* already sent its
+            # stop (and awaited confirmation) inside the read loop.
             # Best-effort, like the closeTab below.
             # ``taskId`` carries this run's token so the daemon
             # rejects the stop if the tab was already reused by a

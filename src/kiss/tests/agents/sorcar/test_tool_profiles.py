@@ -241,9 +241,11 @@ class TestComposableProfiles:
     def test_agents_group_builds_dispatch_and_fanout(self, tmp_path: Path) -> None:
         """``agents`` builds ``run_agent`` and, in parallel mode, the fan-out."""
         agent = _bare_agent(tmp_path, _tool_profile_name="agents")
-        assert _names(agent._get_tools()) == {"run_agent", "run_parallel", "number_of_cores"}
+        assert _names(agent._get_tools()) == {
+            "run_agent", "agent_job", "run_parallel", "number_of_cores",
+        }
         serial = _bare_agent(tmp_path, _tool_profile_name="agents", _is_parallel=False)
-        assert _names(serial._get_tools()) == {"run_agent"}
+        assert _names(serial._get_tools()) == {"run_agent", "agent_job"}
 
     def test_mcp_group_builds_the_sign_in_pair(self, tmp_path: Path) -> None:
         agent = _bare_agent(tmp_path, _tool_profile_name="mcp")

@@ -473,7 +473,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     the daemon derives ``append_basic_tools=False``), the
     ``system_prompt()`` getter as the base prompt, ``add_to_system_prompt()``
     as the suffix, ``add_to_tools()`` as the extra tools and
-    ``add_to_prompt`` with ``{task_id}`` filled in appended to the task.
+    ``prompt(task)`` with ``{task_id}`` filled in as the task.
     """
     task_id = _persist("Run the benchmark", _running_task_events())
     answer = "<p>2 of 10 trials are done; the last step failed to edit paper.tex.</p>"
@@ -483,8 +483,9 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
     ]
     settings = resolve_settings(vars(ask_sea))
     assert settings["tool_profile"] == "none"
-    assert settings["add_to_prompt"] == ask_sea.ADD_TO_PROMPT
-    prompt = "how many trials are done?" + settings["add_to_prompt"].format(task_id=task_id)
+    assert "add_to_prompt" not in settings
+    prompt = ask_sea.prompt("how many trials are done?").format(task_id=task_id)
+    assert prompt.endswith(ask_sea.ADD_TO_PROMPT.format(task_id=task_id))
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(

@@ -365,8 +365,6 @@ class SeaTarget(Target):
         if any("prompt" in layer.namespace for layer in layers):
             # ``prompt(task)`` needs the task: handed to the rollout as a callable.
             kwargs["prompt"] = functools.partial(sea_prompt, layers)
-        if run.add_to_prompt:
-            kwargs["add_to_prompt"] = run.add_to_prompt
         for setting, key in (
             ("tool_profile", "tool_profile"),
             ("is_parallel", "is_parallel"),
@@ -720,11 +718,9 @@ def run_rollout(
 
     *defaults* is the eval set's ``rollout`` object (``SorcarAgent.run``
     keyword arguments plus ``max_steps``); the target's own settings override
-    it.  A target whose ``settings()`` names a ``prompt`` replaces the task's
-    prompt with its fixed one (such a SEA varies only through ``setup``); its
-    ``add_to_prompt`` is appended to the task's prompt (after a
-    ``prompt_suffix`` the defaults name), and the whole suffix is recorded on
-    the run so the target's ``run_agent`` sub-tasks inherit it.
+    it.  A target that defines ``prompt(task)`` shapes the task's prompt with
+    it; a ``prompt_suffix`` the defaults name is appended after that and
+    recorded on the run so the target's ``run_agent`` sub-tasks inherit it.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _live_agent_usage
 
@@ -740,7 +736,7 @@ def run_rollout(
     kwargs: dict[str, Any] = {"web_tools": False, "is_parallel": False, "use_memory": False}
     kwargs.update(defaults or {})
     kwargs.update(target.rollout_kwargs())
-    prompt_suffix = str(kwargs.pop("prompt_suffix", "")) + str(kwargs.pop("add_to_prompt", ""))
+    prompt_suffix = str(kwargs.pop("prompt_suffix", ""))
     prompt_fn = kwargs.pop("prompt", None)
     prompt = (str(prompt_fn(task.prompt)) if callable(prompt_fn) else task.prompt) + prompt_suffix
     record = _TrajectoryRecorder(

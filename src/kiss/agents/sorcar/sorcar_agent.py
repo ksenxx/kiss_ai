@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import math
@@ -24,6 +25,14 @@ from typing import Any, NamedTuple, cast
 import yaml
 
 from kiss.agents.sorcar._concurrency import _race_delay
+from kiss.agents.sorcar.agent_dispatch import (
+    RunOptions,
+    fanout_conflict,
+    inherit_from_parent,
+    parse_budget,
+    parse_run_options,
+    resolve_agent,
+)
 from kiss.agents.sorcar.decide_tool import decisions_tool_available, make_decide_tool
 from kiss.agents.sorcar.fanout_guard import (
     is_implementation_task,
@@ -32,7 +41,7 @@ from kiss.agents.sorcar.fanout_guard import (
 )
 from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, resolve_work_dir
-from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, join_text, model_sea
+from kiss.agents.sorcar.sea_commands import SeaLayer, evaluate_sea, model_sea
 from kiss.agents.sorcar.sea_settings import SeaError, merge_settings
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.task_classifier import (
@@ -97,7 +106,7 @@ TOOL_GROUPS: dict[str, frozenset[str]] = {
     # Persistent memory pages.
     "memory": MEMORY_TOOL_NAMES,
     # Sub-agents: channel/cron/agent-script dispatch and the parallel fan-out.
-    "agents": frozenset({"run_agent", "run_parallel", "number_of_cores"}),
+    "agents": frozenset({"run_agent", "agent_job", "run_parallel", "number_of_cores"}),
     # MCP servers: their tools plus the OAuth sign-in pair.
     "mcp": MCP_AUTH_TOOL_NAMES,
     # Project and user skills.
@@ -1774,6 +1783,8 @@ class SorcarAgent(RelentlessAgent):
         model_name: str | None = None,
         tool_profile: str = "",
         agent: str = "",
+        max_budget: float | None = None,
+        options: RunOptions | None = None,
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
@@ -1811,42 +1822,58 @@ class SorcarAgent(RelentlessAgent):
                 spelling of ``run_agent``'s ``agent`` argument
                 (:func:`kiss.agents.sorcar.agent_dispatch.resolve_agent`);
                 ``""`` runs plain sub-agents.
+            max_budget: Per-child USD budget; ``None`` shares this
+                agent's remaining budget among the children.
+            options: Parsed ``options`` of the ``run_parallel`` call
+                (:func:`kiss.agents.sorcar.agent_dispatch.parse_run_options`);
+                ``None`` for no overrides.
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
 
         Raises:
             SeaError: When *agent* names no usable agent script, a
-                script of its chain is broken, or its preset is
-                ``channel`` (a channel agent holds a workspace and
-                inherits nothing: it runs through ``run_agent``).
+                script of its chain is broken, or its settings — or
+                *options* — pin what a fan-out child cannot honour
+                (:func:`kiss.agents.sorcar.agent_dispatch.fanout_conflict`).
         """
-        from kiss.agents.sorcar.agent_dispatch import (
-            RunOptions,
-            inherit_from_parent,
-            resolve_agent,
-        )
         from kiss.agents.sorcar.sea_commands import SeaScriptError, sea_layers
 
+        run_options = RunOptions(tool_profile=tool_profile) if options is None else options
         layers: list[SeaLayer] = []
+        settings: dict[str, Any] = {}
         if agent.strip():
             resolved = resolve_agent(agent, self.work_dir)
             if isinstance(resolved, str):
                 raise SeaScriptError(resolved.removeprefix("Error: "))
             layers = sea_layers(Path(resolved[0]))
-            if merge_settings([layer.settings for layer in layers])["preset"] == "channel":
-                raise SeaScriptError(
-                    f"{resolved[1]} is a channel agent; run it through run_agent"
-                )
+            settings = merge_settings([layer.settings for layer in layers])
+            conflict = fanout_conflict(settings)
+            if conflict:
+                raise SeaScriptError(f"{resolved[1]} {conflict}")
+        # The SEA's settings win over *options* (the one precedence rule),
+        # so an option is refused only when the effective value conflicts.
+        pinned = {
+            key: value for key, value in dataclasses.asdict(run_options).items()
+            if value not in (None, "")
+        }
+        conflict = fanout_conflict({**pinned, **settings})
+        if conflict:
+            raise SeaScriptError(f"run_parallel options {conflict}")
+        work_dir = self.work_dir
+        if run_options.work_dir:
+            requested = Path(run_options.work_dir).expanduser()
+            if not requested.is_absolute():
+                requested = Path(self.work_dir) / requested
+            work_dir = str(requested)
         # Bank whatever an earlier fan-out's abandoned children spent
         # after this agent stopped waiting for them, before the budget
         # share below is computed from those totals.
         self.reclaim_abandoned_subagents()
         monitor = _LiveUsageMonitor(self, self.printer)
-        share = self._subagent_budget_share(len(tasks))
+        share = self._subagent_budget_share(len(tasks)) if max_budget is None else max_budget
         inherited = inherit_from_parent(
-            self, model_name or "", None,
-            RunOptions(tool_profile=tool_profile),
+            self, model_name or "", None, run_options,
             script_picks_model=any("model" in layer.settings for layer in layers),
         )
         totals: dict[str, float | list[float]] = {}
@@ -1859,14 +1886,14 @@ class SorcarAgent(RelentlessAgent):
                 tasks,
                 max_workers=max_workers,
                 model_name=inherited.model_name,
-                work_dir=self.work_dir,
+                work_dir=work_dir,
                 docker_image=inherited.docker_image or None,
                 printer=self.printer,
                 totals_out=totals,
                 usage_monitor=monitor,
                 max_budget=share,
                 model_config=inherited.options.model_config,
-                tool_profile=tool_profile,
+                tool_profile=run_options.tool_profile,
                 parent_agent=self,
                 chat_id=inherited.options.chat_id,
                 parent_tab_id=self._subagent_parent_tab_id(),
@@ -2152,16 +2179,17 @@ class SorcarAgent(RelentlessAgent):
             )
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
-            tasks: str, max_workers: str = "", model: str = "",
-            tool_profile: str = "", agent: str = "",
+            tasks: str, agent: str = "", model: str = "", tool_profile: str = "",
+            max_budget: str = "", max_workers: str = "", options: str = "",
         ) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
             Spawns a separate ChatSorcarAgent for each task string and executes
             them in parallel threads.  The children inherit this agent's
             model, chat, system prompt, web/memory settings and container
-            (the same table as ``run_agent``); ``agent`` runs each of
-            them as an agent script (SEA) instead of a plain sub-agent.
+            (the same table as ``run_agent``, whose arguments these
+            mirror); ``agent`` runs each of them as an agent script
+            (SEA) instead of a plain sub-agent.
 
             **When to call run_parallel:**
             - Multi-source / multi-topic research ("research these 5
@@ -2196,10 +2224,16 @@ class SorcarAgent(RelentlessAgent):
                         '["Read src/foo.py and summarize its purpose", '
                         '"Read src/bar.py and summarize its purpose", '
                         '"Find the current weather in San Francisco"]'
-                max_workers: Maximum number of concurrent threads, as a
-                    string containing an integer (e.g. ``"4"``).  An empty
-                    string (default) lets Python choose automatically.
-                    Set to a lower number to limit concurrency.
+                agent: The agent script every child runs as: a ``.py``
+                    path (relative to this task's work directory) or a
+                    slash-command name (``"write_paper"``), exactly as
+                    ``run_agent``'s ``agent`` argument.  Its
+                    ``settings()`` win over the arguments here; its
+                    ``prompt(task)`` shapes each child's prompt.  Empty
+                    (default) runs plain sub-agents.  Channel agents
+                    (``"slack"``, ``"cron"``) and scripts pinning a
+                    worktree, auto-commit, the classifier or a chat are
+                    refused: run them through ``run_agent``.
                 model: LLM model for the sub-agents (e.g. a cheaper
                     or a different reviewer model).  Empty (default)
                     uses this agent's model.  Prefer this over asking
@@ -2219,23 +2253,32 @@ class SorcarAgent(RelentlessAgent):
                     with ``+`` for the union of their tools, e.g.
                     ``"shell+edit+memory"``.  Empty (default): review
                     tasks get ``"review"``, others the full toolset.
-                agent: The agent script every child runs as: a ``.py``
-                    path (relative to this task's work directory) or a
-                    slash-command name (``"write_paper"``), exactly as
-                    ``run_agent``'s ``agent`` argument.  Its
-                    ``settings()`` win over the arguments here; its
-                    ``prompt(task)`` shapes each child's prompt.  Empty
-                    (default) runs plain sub-agents.  Channel agents
-                    (``"slack"``, ``"cron"``) are not accepted here:
-                    run them through ``run_agent``.
+                max_budget: Per-child USD budget as a number string;
+                    empty shares this task's remaining budget among
+                    the children.
+                max_workers: Maximum number of concurrent threads, as a
+                    string containing an integer (e.g. ``"4"``).  An empty
+                    string (default) lets Python choose automatically.
+                    Set to a lower number to limit concurrency.
+                options: Optional JSON object of run settings, as for
+                    ``run_agent``: ``work_dir`` (relative to this
+                    task's), ``add_to_system_prompt`` / ``add_to_prompt``
+                    (appended text), ``model_config``, ``docker_image``,
+                    and the booleans ``use_web_tools``, ``use_memory``,
+                    ``is_parallel``.  A child is a thread of this task
+                    on its own tree and chat, so ``use_worktree``,
+                    ``auto_commit``, ``classify_tasks``, ``chat_id``
+                    and ``workspace`` are refused.  Usually leave it
+                    empty.
 
             Returns:
                 A YAML-formatted string containing a list of result
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
                 A string starting with ``Error:`` when the call was
-                refused by one of the hard limits above or ``agent``
-                names no usable agent script.
+                refused by one of the hard limits above, ``agent``
+                names no usable agent script, or the script or
+                ``options`` pin what a child cannot honour.
             """
             try:
                 task_list = parse_tasks_json(tasks)
@@ -2254,16 +2297,21 @@ class SorcarAgent(RelentlessAgent):
                 )
             if workers is not None and workers < 1:
                 return f"Error: max_workers must be at least 1, got {workers}."
+            budget = parse_budget(max_budget)
+            if isinstance(budget, str):
+                return budget
             try:
-                resolve_tool_profile(tool_profile)
+                run_options = parse_run_options(options, tool_profile)
             except ValueError as exc:
                 return f"Error: {exc}"
             try:
                 results = self._run_tasks_parallel(
                     task_list, max_workers=workers,
                     model_name=model or None,
-                    tool_profile=tool_profile,
+                    tool_profile=run_options.tool_profile,
                     agent=agent,
+                    max_budget=budget,
+                    options=run_options,
                 )
             except SeaError as exc:
                 return f"Error: {exc}"
@@ -2443,7 +2491,7 @@ class SorcarAgent(RelentlessAgent):
             except Exception:
                 logger.warning("MCP tool setup failed", exc_info=True)
         if allowed is None or "run_agent" in allowed:
-            from kiss.agents.sorcar.agent_dispatch import make_run_agent_tool
+            from kiss.agents.sorcar.agent_dispatch import make_agent_job_tool, make_run_agent_tool
 
             # Scheduled automations (cron) are not a built-in tool: the
             # agent dispatches them via run_agent(agent="cron", ...), which
@@ -2452,6 +2500,7 @@ class SorcarAgent(RelentlessAgent):
             # into THIS task's accounting, so the end-of-task cost shown
             # to the user includes run_agent sub-tasks (like run_parallel).
             tools.append(make_run_agent_tool(self.work_dir or "", self))
+            tools.append(make_agent_job_tool(self))
         tools.append(ask_user_question)
         tools.append(talk)
         tools.append(set_model)
@@ -2867,10 +2916,10 @@ class SorcarAgent(RelentlessAgent):
                 daemon) shows a local window instead.
                 Set to False for terminal-only environments.
             prompt_suffix: The caller-supplied text (the daemon's
-                ``appendToPrompt`` wire field, or an agent script's
-                ``add_to_prompt`` setting) that the caller has ALREADY
-                appended to *prompt_template*; it is not added again
-                here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
+                ``appendToPrompt`` wire field, e.g. a ``run_agent``
+                call's ``add_to_prompt`` option) that the caller has
+                ALREADY appended to *prompt_template*; it is not added
+                again here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
                 sub-task dispatched during the run inherits it as its
                 own ``append_to_prompt`` (see
                 ``agent_dispatch.inherit_from_parent``).  Defaults to
@@ -3239,21 +3288,22 @@ def _sea_run_kwargs(
     The in-process counterpart of the daemon's
     :func:`kiss.server.agent_file.apply_agent_overrides`: the script's
     merged settings win over *defaults* (the fan-out's arguments), its
-    ``prompt(task)`` and ``add_to_prompt`` shape the prompt, its
-    ``system_prompt()`` replaces the base system prompt, its
-    ``add_to_system_prompt()`` is added after the inherited suffix, and
-    its tools and hooks are passed through.  Settings that only a
-    daemon run has (``use_worktree``, ``auto_commit``,
-    ``classify_tasks``, ``chat_id``) are ignored: a fan-out child acts
-    on the parent's tree, in the parent's chat.
+    ``prompt(task)`` shapes the prompt, its ``system_prompt()`` replaces
+    the base system prompt, its ``add_to_system_prompt()`` is added
+    after the inherited suffix, and its tools and hooks are passed
+    through.  A fan-out child acts on the parent's tree, in the
+    parent's chat, so a script pinning the opposite is refused (see
+    :func:`check_fanout_settings`); ``timeout`` and ``inherit`` do not
+    apply (the caller's own step bounds the children, which always
+    inherit).
 
     Args:
         layers: The script's executed layers.
         task: The child's task text.
         defaults: The keyword arguments the child would run with
             otherwise (read, not modified).
-        parent_agent: The fanning-out agent, for the ``{task_id}`` of
-            ``add_to_prompt``.
+        parent_agent: The fanning-out agent, whose persisted task id
+            replaces ``{task_id}`` in the prompt.
 
     Returns:
         The keyword arguments to update the child's with.
@@ -3264,12 +3314,9 @@ def _sea_run_kwargs(
     """
     run = evaluate_sea(layers, task, _persisted_task_id(parent_agent))
     settings = run.settings
-    # The script's ``add_to_prompt`` follows the inherited suffix, as on
-    # the daemon; ``run()`` only records ``prompt_suffix``, so the
-    # prompt carries it here.
-    suffix = join_text(str(defaults.get("prompt_suffix") or ""), run.add_to_prompt)
+    # ``run()`` only records ``prompt_suffix``: the prompt carries it.
     overrides: dict[str, Any] = {
-        "prompt_template": run.prompt + suffix, "prompt_suffix": suffix,
+        "prompt_template": run.prompt + str(defaults.get("prompt_suffix") or ""),
     }
     if run.system_prompt is not None:
         overrides["base_system_prompt"] = run.system_prompt

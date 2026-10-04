@@ -763,7 +763,7 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     (the daemon appends it to the system prompt suffix), not the task.
     """
     from kiss.agents.sorcar.sea_commands import sea_settings
-    from kiss.agents.sorcar.sea_settings import PRESETS
+    from kiss.agents.sorcar.sea_settings import presets
     from kiss.server.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
 
     work_dir = cron_agent.cron_work_dir()
@@ -771,7 +771,9 @@ def test_agent_script_getters(tmp_path: Path) -> None:
     assert Path(work_dir).is_dir()
     assert cron_agent.settings() == {"preset": "channel", "work_dir": work_dir}
     resolved = sea_settings(Path(cron_agent.__file__))
-    assert resolved == {"preset": "channel", **PRESETS["channel"], "work_dir": work_dir}
+    assert resolved == {"preset": "channel", **presets()["channel"], "work_dir": work_dir}
+    assert resolved["kind"] == "channel"
+    assert resolved["inherit"] is False
     assert resolved["use_worktree"] is False
     assert resolved["auto_commit"] is False
     assert resolved["classify_tasks"] is False

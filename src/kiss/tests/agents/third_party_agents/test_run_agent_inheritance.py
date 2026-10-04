@@ -163,14 +163,14 @@ class TestDispatchResultInheritance:
 
         ``system_prompt()`` replaces the inherited base prompt;
         ``add_to_system_prompt()`` is added after the inherited suffix;
-        the ``add_to_prompt`` setting is added after the inherited
-        prompt suffix.
+        ``prompt(task)`` shapes the prompt body and leaves the inherited
+        prompt suffix as sent.
         """
         script = env.repo / "prompts_sea.py"
         script.write_text(
             "def system_prompt() -> str:\n    return 'script base'\n\n"
             "def add_to_system_prompt() -> str:\n    return 'script addition'\n\n"
-            "def settings() -> dict:\n    return {'add_to_prompt': 'script prompt suffix'}\n"
+            "def prompt(task: str) -> str:\n    return task + ' script prompt suffix'\n"
         )
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         result = dispatch_result(
@@ -184,16 +184,16 @@ class TestDispatchResultInheritance:
         assert call["append_to_prompt"] == PARENT_PROMPT_SUFFIX
         cmd = {
             "agentPath": call["extension_agent_path"],
+            "prompt": "say hi",
             "systemPrompt": call["system_prompt"],
             "appendToSystemPrompt": call["append_to_system_prompt"],
             "appendToPrompt": call["append_to_prompt"],
         }
-        assert apply_agent_overrides(cmd) == {
-            "systemPrompt", "appendToSystemPrompt", "appendToPrompt",
-        }
+        assert apply_agent_overrides(cmd) == {"systemPrompt", "appendToSystemPrompt", "prompt"}
         assert cmd["systemPrompt"] == "script base"
         assert cmd["appendToSystemPrompt"] == f"{PARENT_SUFFIX}\n\nscript addition"
-        assert cmd["appendToPrompt"] == f"{PARENT_PROMPT_SUFFIX}\n\nscript prompt suffix"
+        assert cmd["prompt"] == "say hi script prompt suffix"
+        assert cmd["appendToPrompt"] == PARENT_PROMPT_SUFFIX
 
     def test_parent_worktree_and_auto_commit_on_are_inherited_over_config_off(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],

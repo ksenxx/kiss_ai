@@ -409,7 +409,7 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 `src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
 described here because it is used from the same chat surfaces. On an idle tab,
 `/ask <question>` runs the SEA directly in the tab, like every slash command, with your
-question as the task; the SEA's `add_to_prompt` setting appends an instruction naming
+question as the task; the SEA's `prompt(task)` getter appends an instruction naming
 the task you are asking about (`{task_id}`, filled in by the daemon from the run's
 parent task id) and telling the agent to call `task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
 and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the

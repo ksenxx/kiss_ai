@@ -1334,7 +1334,7 @@ _RESERVED_TOOL_NAMES = frozenset({
     "screenshot", "get_page_content", "show_browser", "close_browser",
     "skill", "ask_user_question", "talk", "set_model", "decide",
     "run_parallel", "number_of_cores", "summary",
-    "cron_job", "run_agent",
+    "cron_job", "run_agent", "agent_job",
     "connect_mcp_server", "finish_mcp_server_connect",
 })
 

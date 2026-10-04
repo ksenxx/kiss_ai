@@ -8,9 +8,9 @@ What these tests pin down (``reports/sea-run-agent-semantics-and-defects-2026-10
 proposals F1–F5):
 
 * ``prompt(task)`` is the one prompt surface: it receives the task and
-  returns the prompt body; ``add_to_prompt`` is appended after it;
-  ``settings()["prompt"]`` / ``["system_prompt"]`` are rejected with a
-  pointed message.
+  returns the prompt body, ``{task_id}`` in it replaced by the calling
+  task's id; ``settings()["prompt"]`` / ``["system_prompt"]`` /
+  ``["add_to_prompt"]`` are rejected with a pointed message.
 * ``settings()["extends"]`` lays a base script under a script, and a
   model-picker SEA is the outermost layer of every run on its tab:
   settings merge (later wins, ``session`` never masks a preset),
@@ -74,11 +74,11 @@ BASE_SEA = textwrap.dedent('''
 
 
     def settings() -> dict:
-        return {"preset": "worker", "use_web_tools": True, "add_to_prompt": "BASE-ADD {task_id}"}
+        return {"preset": "worker", "use_web_tools": True}
 
 
     def prompt(task: str) -> str:
-        return "[base] " + task
+        return "[base] " + task + " BASE-ADD {task_id}"
 
 
     def system_prompt() -> str:
@@ -112,11 +112,11 @@ DERIVED_SEA_TEMPLATE = textwrap.dedent('''
 
 
     def settings() -> dict:
-        return {{"extends": {base!r}, "max_budget": 2.0, "add_to_prompt": "DERIVED-ADD"}}
+        return {{"extends": {base!r}, "max_budget": 2.0}}
 
 
     def prompt(task: str) -> str:
-        return "[derived] " + task
+        return "[derived] " + task + " DERIVED-ADD"
 
 
     def add_to_system_prompt() -> str:
@@ -153,13 +153,17 @@ def test_settings_vocabulary_has_no_prompt_keys_and_rejects_them_by_name() -> No
         resolve_settings({"settings": lambda: {"prompt": "x"}})
     with pytest.raises(ValueError, match=r"def system_prompt\(\) -> str"):
         resolve_settings({"settings": lambda: {"system_prompt": "x"}})
+    with pytest.raises(ValueError, match=r"add_to_prompt.*def prompt\(task: str\)"):
+        resolve_settings({"settings": lambda: {"add_to_prompt": "x"}})
     # The tool's options vocabulary is the settings vocabulary (minus the
-    # tool's own arguments) plus the option form of add_to_system_prompt.
+    # keys that describe a script and the tool's own arguments) plus the
+    # channel workspace and the two appended texts.
     assert set(agent_dispatch.OPTION_TYPES) == (
-        set(SETTING_TYPES) - {"preset", "extends", "timeout", "model", "max_budget"}
-    ) | {"add_to_system_prompt"}
+        set(SETTING_TYPES)
+        - {"preset", "extends", "kind", "timeout", "model", "max_budget", "tool_profile"}
+    ) | {"workspace", "add_to_prompt", "add_to_system_prompt"}
     assert set(RunOptions.__dataclass_fields__) == set(agent_dispatch.OPTION_TYPES) | {
-        "system_prompt"
+        "system_prompt", "tool_profile"
     }
 
 
@@ -198,8 +202,7 @@ def test_extends_by_command_name_and_by_path_evaluates_both_layers(tmp_path: Pat
         assert settings["preset"] == "worker"
         assert settings["use_web_tools"] is True and settings["max_budget"] == 2.0
         run = evaluate_sea(layers, "do it", task_id="T-1")
-        assert run.prompt == "[derived] [base] do it"
-        assert run.add_to_prompt == "BASE-ADD T-1\n\nDERIVED-ADD"
+        assert run.prompt == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
         assert run.system_prompt == "BASE SYSTEM"
         assert run.add_to_system_prompt == "BASE PROTOCOL\n\nDERIVED PROTOCOL"
         assert [t.__name__ for t in run.tools] == ["base_tool", "shared"]
@@ -210,13 +213,13 @@ def test_extends_by_command_name_and_by_path_evaluates_both_layers(tmp_path: Pat
     # merged settings and the daemon-side fields.
     cmd: dict[str, Any] = {"agentPath": str(by_name), "prompt": "do it", "parentTaskId": "T-1"}
     overridden = apply_agent_overrides(cmd)
-    assert cmd["prompt"] == "[derived] [base] do it"
-    assert cmd["appendToPrompt"] == "BASE-ADD T-1\n\nDERIVED-ADD"
+    assert cmd["prompt"] == "[derived] [base] do it BASE-ADD T-1 DERIVED-ADD"
+    assert "appendToPrompt" not in cmd
     assert cmd["systemPrompt"] == "BASE SYSTEM"
     assert cmd["appendToSystemPrompt"] == "BASE PROTOCOL\n\nDERIVED PROTOCOL"
     assert cmd["maxBudget"] == 2.0 and cmd["useWebTools"] is True
     assert cmd["llmCallHook"] is not None and "toolCallHook" not in cmd
-    assert {"prompt", "appendToPrompt", "systemPrompt", "tools", "llmCallHook"} <= overridden
+    assert {"prompt", "systemPrompt", "tools", "llmCallHook"} <= overridden
 
 
 def test_extends_errors_name_the_script(tmp_path: Path) -> None:
@@ -271,7 +274,8 @@ def test_extends_errors_name_the_script(tmp_path: Path) -> None:
     assert held_workspace({"agentPath": str(base)}, load_layers({"agentPath": str(base)})) == ""
     apply_agent_overrides(cmd, layers)
     assert cmd["appendToSystemPrompt"].startswith(CHANNEL_PREAMBLE.format(name="chan2"))
-    assert cmd["prompt"] == "[base] p"
+    # No parent task: ``{task_id}`` becomes the empty string.
+    assert cmd["prompt"] == "[base] p BASE-ADD "
 
 
 def test_a_file_shared_by_the_base_and_the_extends_chain_runs_once(tmp_path: Path) -> None:
@@ -365,7 +369,7 @@ def test_prompt_getter_is_checked(tmp_path: Path) -> None:
         evaluate_sea(sea_layers(sea), "t")
     sea = _write(tmp_path / "noprompt_sea.py", "def settings():\n    return {}\n")
     run = evaluate_sea(sea_layers(sea), "kept")
-    assert run.prompt == "kept" and run.add_to_prompt == "" and run.tools == []
+    assert run.prompt == "kept" and run.tools == []
     cmd: dict[str, Any] = {"agentPath": str(sea), "prompt": "kept"}
     assert apply_agent_overrides(cmd) == set() and cmd == {"agentPath": str(sea), "prompt": "kept"}
     with pytest.raises(AgentFileError, match="must be a path string"):
@@ -430,7 +434,7 @@ def test_work_dir_option_and_script_work_dir(
     assert captured[-1]["append_to_system_prompt"] == "S"
     assert captured[-1]["append_to_prompt"] == "P"
     # ``workspace`` travels as its own wire field; nothing is held here.
-    run_agent("t", "ntfy", workspace="acct-2")
+    run_agent("t", "ntfy", options='{"workspace": "acct-2"}')
     assert captured[-1]["workspace"] == "acct-2"
     assert captured[-1]["extension_agent_path"].endswith("ntfy/ntfy_sea.py")
     assert captured[-1]["work_dir"] == str(kiss_home() / "channel_work")

@@ -45,6 +45,7 @@ from kiss.agents.sorcar.agent_dispatch import (
     make_run_agent_tool,
 )
 from kiss.agents.third_party_agents.auth_status import _agent_class
+from kiss.core.config import kiss_home
 from kiss.server.agent_file import apply_agent_overrides, channel_workspace, load_layers
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
@@ -378,9 +379,12 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert out.startswith(
         "Error: options has an unknown key 'tools'; known keys: work_dir, chat_id, "
     )
-    out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
+    out = run_agent("say hi", "ntfy", tool_profile="bogus")
     assert out.startswith("Error: tool_profile must be one of ")
     assert out.endswith("got 'bogus'.")
+    # ``tool_profile`` is the tool's own argument, not an options key.
+    out = run_agent("say hi", "ntfy", options='{"tool_profile": "review"}')
+    assert out.startswith("Error: options has an unknown key 'tool_profile'")
     # Extra tools come only from the agent script's ``add_to_tools()``:
     # the tool has no tools-path arguments, and the old per-option
     # keyword arguments (and the ``model_name`` alias) are gone.
@@ -388,11 +392,9 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
 
     params = inspect.signature(run_agent).parameters
     assert list(params) == [
-        "task", "agent", "timeout", "model", "max_budget", "workspace", "options",
+        "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
     ]
-    for kwarg in (
-        "tools", "use_worktree", "chat_id", "tool_profile", "add_to_prompt", "model_name",
-    ):
+    for kwarg in ("tools", "use_worktree", "chat_id", "add_to_prompt", "model_name", "workspace"):
         with pytest.raises(TypeError):
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
 
@@ -490,9 +492,9 @@ def test_run_options_are_forwarded_to_daemon(
             "use_memory": "true",
             "is_parallel": false,
             "add_to_system_prompt": "Answer in French.",
-            "add_to_prompt": "Cite sources.",
-            "tool_profile": " review "
+            "add_to_prompt": "Cite sources."
         }""",
+        tool_profile=" review ",
     )
     sent = captured_dispatch[0]
     assert sent["chat_id"] == "chat-123"
@@ -647,7 +649,7 @@ def test_path_mode_dispatch_unreachable_daemon_is_a_clean_error(
 
     script = tmp_path / "my_researcher.py"
     script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
-    out = run_agent("say hi", str(script), workspace="ignored-ws")
+    out = run_agent("say hi", str(script), options='{"workspace": "ignored-ws"}')
     assert out.startswith("Error: the my_researcher agent task could not run:")
     assert "no-daemon.json" in out
     # Path mode never touches the channel workspace env var.
@@ -707,9 +709,9 @@ def test_tool_schema_requires_only_task() -> None:
     """The schema the LLM sees marks ``task`` required and every other parameter optional.
 
     The per-option keyword arguments of the earlier contract are gone:
-    the tool has exactly the seven parameters below, the further
-    ``kiss.server.sorcar.run`` keywords travel in the ``options`` JSON
-    object.
+    the tool has exactly the eight parameters below (the first seven
+    mirror ``run_parallel``), the further ``kiss.server.sorcar.run``
+    keywords travel in the ``options`` JSON object.
     """
     from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
     from kiss.core.models.model_info import model
@@ -718,13 +720,13 @@ def test_tool_schema_requires_only_task() -> None:
     params = schema["function"]["parameters"]
     assert params["required"] == ["task"]
     assert list(params["properties"]) == [
-        "task", "agent", "timeout", "model", "max_budget", "workspace", "options",
+        "task", "agent", "model", "tool_profile", "max_budget", "timeout", "options", "wait",
     ]
     agent_doc = params["properties"]["agent"]["description"]
     assert "plain Sorcar sub-agent" in agent_doc
     assert "JSON object" in params["properties"]["options"]["description"]
     # The full docstring names the keys ``options`` accepts.
-    for key in ("tool_profile", "use_worktree", "model_config", "chat_id"):
+    for key in ("workspace", "use_worktree", "model_config", "chat_id", "inherit"):
         assert key in (run_agent.__doc__ or ""), key
 
 
@@ -796,12 +798,12 @@ def test_dispatch_forwards_the_workspace_to_the_daemon(
     captured_dispatch: list[dict[str, Any]],
 ) -> None:
     # The dispatcher never touches the process-global workspace: it
-    # forwards the ``workspace`` argument as a wire field, and the
+    # forwards the ``workspace`` option as a wire field, and the
     # daemon's task runner holds it for the channel run's lifetime
-    # (see kiss.server.task_runner).  Options never carry it.
+    # (see kiss.server.task_runner).
     import os
 
-    run_agent("say hi", "ntfy", workspace=" my-ws ")
+    run_agent("say hi", "ntfy", options='{"workspace": " my-ws "}')
     assert captured_dispatch[0]["workspace"] == "my-ws"
     assert captured_dispatch[0]["extension_agent_path"].endswith("ntfy/ntfy_sea.py")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
@@ -885,8 +887,9 @@ def test_channel_module_is_a_valid_agent_script() -> None:
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
         "tools", "useWorktree", "autoCommit", "classifyTasks", "isParallel",
-        "useWebTools", "useMemory", "appendToSystemPrompt",
+        "useWebTools", "useMemory", "appendToSystemPrompt", "workDir",
     }
+    assert cmd["workDir"] == str(kiss_home() / "channel_work")
     assert channel_workspace(cmd, load_layers(cmd)) == "default"
     assert cmd["tools"] and all(callable(t) for t in cmd["tools"])
     assert "appendBasicTools" not in cmd

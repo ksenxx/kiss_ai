@@ -58,7 +58,6 @@ from kiss.agents.sorcar.sea_commands import (
 from kiss.agents.sorcar.sea_commands import (
     slash_command_task as _slash_command_task,
 )
-from kiss.agents.sorcar.sea_settings import default_work_dir, merge_settings
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, resolve_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.agents.sorcar.worktree_sorcar_agent import (
@@ -829,8 +828,8 @@ class _TaskRunnerMixin:
         command becomes a run of the SEA ``xxx`` on ``text`` (the raw
         prompt kept on ``displayPrompt``); the tab's model-picker SEA, if
         any, becomes the outermost layer (:meth:`_picker_sea`); the
-        layers are executed once (:func:`load_layers`); a ``channel``
-        preset's workspace is entered on this thread (released by
+        layers are executed once (:func:`load_layers`); a channel
+        agent's workspace is entered on this thread (released by
         ``_run_task``'s outer ``finally``); the layers are applied
         (:func:`apply_agent_overrides`); client-sent values of the
         daemon-side fields are dropped; a picker entry a layer's
@@ -859,18 +858,7 @@ class _TaskRunnerMixin:
         layers = load_layers(cmd, base=None if picked is None else picked[1])
         if picked is not None:
             cmd["model"] = _picker_model(layers, picked[1])
-        if _slash is not None:
-            # The same work-directory rule as ``run_agent``: a
-            # ``channel``-preset SEA (``/slack ...``) works in the
-            # channel scratch directory, not the project.
-            _client_work_dir = str(cmd.get("workDir") or self.work_dir)
-            _slash_work_dir = default_work_dir(
-                merge_settings([layer.settings for layer in layers]), _client_work_dir,
-            )
-            if _slash_work_dir != _client_work_dir:
-                cmd["workDir"] = _slash_work_dir
-                overridden.add("workDir")
-        # A ``channel``-preset run holds its workspace (the account its
+        # A ``kind: "channel"`` run holds its workspace (the account its
         # channel tools load credentials for) from BEFORE its tools are
         # built — ``add_to_tools()`` binds the workspace active at that
         # moment — until ``_run_task``'s outer ``finally`` releases what
@@ -966,6 +954,10 @@ class _TaskRunnerMixin:
                 overridden_fields = self._apply_sea(cmd)
             except AgentFileError as exc:
                 agent_file_error = exc
+            # A ``use_worktree`` an agent script pinned is a decision,
+            # not a default: ``_run_task_inner``'s classifier must not
+            # demote it (it still demotes a client/persisted default).
+            cmd["_seaPinnedWorktree"] = "useWorktree" in overridden_fields
             client_task_id = _client_task_id_of(cmd)
             # Capture the state OBJECT up front: the printer bridge re-keys
             # it to the persisted task id mid-run, so a key lookup in the
@@ -1808,7 +1800,11 @@ class _TaskRunnerMixin:
             model_config=_classify_model_config,
             enabled=_classify_enabled,
         )
-        if _classify_verdict is not None:
+        # The verdict only ever DEMOTES a default; a ``use_worktree`` the
+        # run's agent script pinned stands (``_run_task`` marks it), here
+        # and in ``agent.run`` below.
+        worktree_pinned = bool(cmd.pop("_seaPinnedWorktree", False))
+        if _classify_verdict is not None and not worktree_pinned:
             use_worktree = use_worktree and _classify_verdict.is_development
             with self._state_lock:
                 state.use_worktree = use_worktree
@@ -2132,6 +2128,7 @@ class _TaskRunnerMixin:
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=state.use_parallel,
                         use_worktree=use_worktree,
+                        worktree_pinned=worktree_pinned,
                         # The per-run wire toggle WINS over the
                         # persisted "Auto commit" setting, and both
                         # sides of the run must read the same value:

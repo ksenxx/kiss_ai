@@ -1809,6 +1809,15 @@ def cron_work_dir() -> str:
     return str(work_dir)
 
 
+def description() -> str:
+    """Return the one-sentence help text shown by ``/cron help``."""
+    return (
+        "Scheduled automations: create, list, pause, resume, remove or run now "
+        "the cron jobs of this KISS home (a polled messaging gateway is a cron "
+        "job too)."
+    )
+
+
 def settings() -> dict[str, Any]:
     """Configure a cron-management session: a ``channel`` worker in the cron work directory.
 

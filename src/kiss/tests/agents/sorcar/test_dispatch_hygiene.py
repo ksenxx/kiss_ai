@@ -121,13 +121,13 @@ class TestUnknownAgentHints:
 
         monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
         monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
-        expected = _run_agent("", "", "review it", "", "", "", "")
+        expected = _run_agent("", "review it", "")
         assert expected.startswith("Error: the dummy agent task could not run:")
         for name in ("code-review", "general", "Agent", "sorcar", "analysis", " worker "):
             assert resolve_agent(name, "") == (DEFAULT_AGENT_PATH, "dummy")
-            out = _run_agent("", name, "review it", "", "", "", "")
+            out = _run_agent("", "review it", name)
             assert out == expected
-            assert "unknown agent" not in out and "Available channels" not in out
+            assert "unknown agent" not in out and "Commands:" not in out
 
     def test_misspelled_channel_gets_a_suggestion(self) -> None:
         channels = available_channels()
@@ -135,11 +135,11 @@ class TestUnknownAgentHints:
             pytest.skip("no channel agents installed")
         target = channels[0]
         typo = target[:-1] + "x" if len(target) > 3 else target + "x"
-        out = _run_agent("", typo, "x", "", "", "", "")
+        out = _run_agent("", "x", typo)
         assert out.startswith(f"Error: unknown agent {typo!r}")
         assert f"Did you mean {target!r}?" in out
-        assert "Available channels" in out
+        assert "Commands:" in out and target in out
 
     def test_nonsense_name_has_no_suggestion(self) -> None:
-        out = _run_agent("", "zzqqxxjjvv", "x", "", "", "", "")
-        assert "Did you mean" not in out and "Available channels" in out
+        out = _run_agent("", "x", "zzqqxxjjvv")
+        assert "Did you mean" not in out and "Commands:" in out

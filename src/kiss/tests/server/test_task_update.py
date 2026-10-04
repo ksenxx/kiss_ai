@@ -383,7 +383,7 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     prompt = task_update.build_prompt(task_id)
     assert prompt.startswith(task_update.UPDATE_QUESTION)
-    # The ask SEA's ``add_to_prompt`` with ``{task_id}`` filled in.
+    # The ask SEA's ``prompt(task)`` suffix with ``{task_id}`` filled in.
     assert prompt.endswith(ask_sea.ADD_TO_PROMPT.replace("{task_id}", task_id))
     assert "{task_id}" not in prompt
     assert prompt in str(user["content"])

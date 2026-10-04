@@ -10,9 +10,10 @@ side channel in :mod:`kiss.server.commands` (running tab) hand this
 script:
 
 * the user's question as the sub-task prompt,
-* ``add_to_prompt`` = :data:`ADD_TO_PROMPT` with ``{task_id}``
-  substituted by the calling (parent) task's id, so the answering
-  agent knows which task the user is asking about,
+* ``prompt(question)`` = the question followed by :data:`ADD_TO_PROMPT`,
+  whose ``{task_id}`` the daemon substitutes with the calling (parent)
+  task's id, so the answering agent knows which task the user is
+  asking about,
 * ``add_to_system_prompt()`` — the no-internet directive plus the
   answering playbook.
 
@@ -31,7 +32,7 @@ Configuration: :func:`settings` picks the ``worker`` preset with the
 ``none`` tool profile (no built-in tool besides ``finish`` — the parent
 task is still running in the same working tree, so the answerer must
 never edit files or run commands), the SYSTEM_LITE ablation prompt as
-the base system prompt and :data:`ADD_TO_PROMPT`;
+the base system prompt; :func:`prompt` appends :data:`ADD_TO_PROMPT`,
 :func:`add_to_system_prompt` supplies the playbook and
 :func:`add_to_tools` makes :func:`task_context` the only tool.
 """
@@ -51,9 +52,9 @@ from kiss.core.brand import render_brand
 # study actually ran and is not read by the product.
 _SYSTEM_LITE_PATH = Path(__file__).resolve().parent / "_ask_system_lite.md"
 
-# The prompt suffix of every ``/ask`` dispatch (``settings()["add_to_prompt"]``):
-# the daemon fills ``{task_id}`` with the calling task's id; the side
-# channel (:mod:`kiss.server.commands`) formats it itself.
+# The prompt suffix of every ``/ask`` dispatch (appended by ``prompt()``):
+# the daemon fills ``{task_id}`` with the calling task's id, for the
+# chat command and the side channel (:mod:`kiss.server.commands`) alike.
 ADD_TO_PROMPT = (
     "The question above is about the task with id {task_id}. "
     "Call task_context with that task id, then answer the question."
@@ -120,14 +121,18 @@ def settings() -> dict[str, Any]:
     answerer (which shares the running task's tree) cannot run commands
     or touch files.  ``system_prompt`` is the SYSTEM_LITE ablation prompt
     (``_ask_system_lite.md`` next to this module, brand placeholders
-    filled).  ``add_to_prompt`` names the task the question is about:
-    ``{task_id}`` is the calling task's id, filled in by the daemon.
+    filled).
     """
-    return {
-        "preset": "worker",
-        "tool_profile": "none",
-        "add_to_prompt": ADD_TO_PROMPT,
-    }
+    return {"preset": "worker", "tool_profile": "none"}
+
+
+def prompt(task: str) -> str:
+    """Return the question followed by :data:`ADD_TO_PROMPT`.
+
+    ``{task_id}`` in the result is the calling task's id, filled in by
+    the daemon: it names the task the question is about.
+    """
+    return task + "\n\n" + ADD_TO_PROMPT
 
 
 def add_to_system_prompt() -> str:

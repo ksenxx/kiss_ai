@@ -1610,7 +1610,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
           is not a development task (``is_development=False``); the
           verdict can only DEMOTE a requested worktree run to direct
           execution, never promote a pinned-off one (see
-          ``kiss.agents.sorcar.task_classifier``)
+          ``kiss.agents.sorcar.task_classifier``) — and never demotes
+          a run whose ``worktree_pinned`` kwarg is ``True`` (the run's
+          agent script decided ``use_worktree`` in its ``settings()``)
         - ``work_dir`` is not inside a git repo
         - The repo has no commits
         - HEAD is detached (no merge target)
@@ -1622,7 +1624,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 ``ChatSorcarAgent.run()``.  The optional
                 ``use_worktree`` kwarg (default ``True``) gates the
                 worktree behavior — when ``False`` the call is
-                equivalent to ``ChatSorcarAgent.run()``.  The optional
+                equivalent to ``ChatSorcarAgent.run()``; the optional
+                ``worktree_pinned`` kwarg (default ``False``) keeps the
+                classifier from demoting a ``True``.  The optional
                 ``auto_commit`` kwarg overrides the user's persisted
                 "Auto commit" setting for this run and every automatic
                 cleanup that follows it; omit it to use the setting.
@@ -1654,6 +1658,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self.set_printer(printer)
 
         use_worktree = bool(kwargs.pop("use_worktree", True))
+        worktree_pinned = bool(kwargs.pop("worktree_pinned", False))
         # Pre-run task classification (see
         # ``kiss.agents.sorcar.task_classifier``): when it yields a
         # verdict, the task's ``is_development`` decides worktree
@@ -1677,7 +1682,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             kwargs.get("model_config"),
             arguments=kwargs.get("arguments"),
         )
-        if classification is not None:
+        if classification is not None and not worktree_pinned:
             use_worktree = use_worktree and classification.is_development
         self.use_worktree_enabled = use_worktree
 

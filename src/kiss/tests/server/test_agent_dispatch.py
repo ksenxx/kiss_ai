@@ -21,7 +21,8 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import cron_agent
-from kiss.agents.sorcar.sea_settings import PRESETS
+from kiss.agents.sorcar.sea_settings import WORKER_PRESET, presets
+from kiss.core.config import kiss_home
 from kiss.server.agent_file import (
     CHANNEL_PREAMBLE,
     NO_TOOLS_PROFILE,
@@ -56,8 +57,12 @@ def test_cron_agent_module_is_a_valid_agent_script() -> None:
     assert "appendBasicTools" not in cmd
     assert "toolsFile" not in cmd
     assert cmd["workDir"] == cron_agent.cron_work_dir()
-    for key, value in PRESETS["channel"].items():
+    for key, value in WORKER_PRESET.items():
         assert value is False, key
+    assert presets()["channel"] == {
+        **WORKER_PRESET, "kind": "channel", "inherit": False,
+        "work_dir": str(kiss_home() / "channel_work"),
+    }
     assert cmd["useWorktree"] is False
     assert cmd["autoCommit"] is False
     assert cmd["classifyTasks"] is False

@@ -15,7 +15,7 @@ the ``system_prompt`` replacement — and ``append_to_prompt`` is
 appended to the executed task prompt (to EACH subtask of a
 multi-``<task>`` prompt).  Both default to ``""`` (append nothing),
 are extended by an agent script's ``add_to_system_prompt()`` getter
-and ``settings()["add_to_prompt"]`` key, and are treated as untrusted
+and ``prompt(task)`` getter, and are treated as untrusted
 wire input by the daemon (non-string appends nothing).
 """
 
@@ -168,7 +168,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert SYSTEM_PROMPT[:80] not in sp
 
     def test_agent_script_additions_override(self) -> None:
-        """``add_to_system_prompt()`` and ``settings()["add_to_prompt"]`` reach both prompts."""
+        """``add_to_system_prompt()`` and ``prompt(task)`` reach both prompts."""
         agent_path = self._write_py(
             "append_prompts_agent.py",
             f'''
@@ -180,9 +180,9 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
                 return {_SYS_MARKER!r}
 
 
-            def settings() -> dict:
+            def prompt(task: str) -> str:
                 """Append a prompt suffix."""
-                return {{"add_to_prompt": {_PROMPT_MARKER!r}}}
+                return task + {_PROMPT_MARKER!r}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -202,20 +202,20 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert _PROMPT_MARKER in call["arguments"]["task_description"]
 
     def test_agent_script_setting_wrong_type_fails_task(self) -> None:
-        """A non-string ``settings()["add_to_prompt"]`` stops the task loudly.
+        """The removed ``settings()["add_to_prompt"]`` key stops the task loudly.
 
         The diagnostic is the ``SettingsError`` text naming the key and
-        the offending type, prefixed with the script path.
+        the ``prompt(task)`` replacement, prefixed with the script path.
         """
         agent_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
-            """Agent script with a wrong-typed setting."""
+            """Agent script with a removed setting."""
 
 
             def settings() -> dict:
-                """Return the wrong type for add_to_prompt."""
-                return {"add_to_prompt": 5}
+                """Return the removed add_to_prompt key."""
+                return {"add_to_prompt": "suffix"}
             ''',
         )
         calls: list[dict[str, Any]] = []
@@ -230,7 +230,8 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script {agent_path!r}: settings()['add_to_prompt'] must be str, got int"
+            f"agent script {agent_path!r}: settings()['add_to_prompt'] is no longer a setting: "
+            "return the extra text from `def prompt(task: str) -> str` instead"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 

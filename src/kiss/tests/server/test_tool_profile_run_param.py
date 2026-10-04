@@ -22,8 +22,8 @@ named ``TOOL_PROFILES`` entry; the bundled ``sh_sea.py`` therefore
 runs with ``Bash`` + ``finish`` only, in the caller's work directory
 (no worktree), with its own system prompt; an unknown name fails the
 task before any executor session starts; a malformed wire value means
-"no profile"; the ``run_agent`` tool validates and forwards the
-``tool_profile`` key of its ``options`` JSON; and a ``/xxx`` command
+"no profile"; the ``run_agent`` tool validates and forwards its
+``tool_profile`` argument; and a ``/xxx`` command
 runs the SEA directly in the tab's own run, which honours the SEA's
 ``use_worktree`` / ``auto_commit`` settings (a broken SEA fails that
 run with the loader's diagnostic).
@@ -382,8 +382,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         try:
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
-                "run with the bash profile", script,
-                options='{"use_worktree": false, "tool_profile": "bash"}',
+                "run with the bash profile", script, tool_profile="bash",
+                options='{"use_worktree": false}',
             )
         finally:
             cron_agent._daemon_endpoint_file = saved_endpoint
@@ -391,13 +391,10 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert self._single_call(calls)["tool_names"] == ["finish", "Bash"]
 
     def test_run_agent_tool_rejects_unknown_profile_locally(self) -> None:
-        """``options='{"tool_profile": "bogus"}'`` is refused with no daemon round trip."""
+        """``tool_profile="bogus"`` is refused with no daemon round trip."""
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
-        text = _run_agent(
-            self.repo, _SH_SEA_PATH, "printf hi", "", "", "", "",
-            options='{"tool_profile": "bogus"}',
-        )
+        text = _run_agent(self.repo, "printf hi", _SH_SEA_PATH, tool_profile="bogus")
         assert text.startswith("Error: tool_profile must be one of"), text
         assert "'bogus'" in text
         assert calls == []

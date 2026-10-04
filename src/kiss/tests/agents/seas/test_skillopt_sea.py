@@ -188,11 +188,10 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
     sea = tmp_path / "full_sea.py"
     sea.write_text(
         "PROMPT = 'p'\n\n\ndef system_prompt():\n    return PROMPT\n\n\n"
-        "def prompt(task):\n    return 'fixed prompt'\n\n\n"
+        "def prompt(task):\n    return 'fixed prompt suffix'\n\n\n"
         "def settings():\n    return {\n"
         "        'tool_profile': 'none', 'model': 'm', 'model_config': {'k': 1},\n"
-        "        'docker_image': 'img', 'use_web_tools': True,\n"
-        "        'add_to_prompt': ' suffix',\n    }\n\n\n"
+        "        'docker_image': 'img', 'use_web_tools': True,\n    }\n\n\n"
         "def add_to_system_prompt():\n    return 'suffix'\n\n\n"
         "def llm_call_hook():\n    return lambda m: m\n\n\ndef tool_call_hook():\n"
         "    return lambda n, a: 'OK'\n\n\n"
@@ -213,8 +212,8 @@ def test_sea_target_maps_every_setting_and_getter(tmp_path: Path) -> None:
     assert kwargs["web_tools"] is True
     assert callable(kwargs["llm_call_hook"]) and callable(kwargs["tool_call_hook"])
     assert [t.__name__ for t in kwargs["tools"]] == ["greet"]
-    assert kwargs["prompt"]("any task") == "fixed prompt"
-    assert kwargs["add_to_prompt"] == " suffix"
+    assert kwargs["prompt"]("any task") == "fixed prompt suffix"
+    assert "add_to_prompt" not in kwargs
     added_tools = tmp_path / "list_sea.py"
     added_tools.write_text(
         "def helper():\n    return 1\n\n\ndef system_prompt():\n    return 'q'\n\n\n"
@@ -865,9 +864,8 @@ def test_run_rollout_applies_eval_defaults_and_prompt_settings(tmp_path: Path) -
     fixed = tmp_path / "fixed_sea.py"
     fixed.write_text(
         "def system_prompt():\n    return 'p'\n\n\n"
-        "def prompt(task):\n    return 'fixed prompt'\n\n\n"
-        "def settings():\n    return {'add_to_prompt': ' suffix',"
-        " 'tool_profile': 'bash'}\n",
+        "def prompt(task):\n    return 'fixed prompt suffix'\n\n\n"
+        "def settings():\n    return {'tool_profile': 'bash'}\n",
         encoding="utf-8",
     )
     task = EvalTask(id="t", prompt="ignored task prompt", expect=["done"])
@@ -895,19 +893,20 @@ def test_run_rollout_applies_eval_defaults_and_prompt_settings(tmp_path: Path) -
 def test_run_rollout_sub_task_inherits_the_prompt_suffix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``run_agent`` sub-task of a rollout gets the SEA's ``add_to_prompt`` text.
+    """A ``run_agent`` sub-task of a rollout gets the eval set's ``prompt_suffix``.
 
-    ``run_rollout`` appends the setting's text (after a ``prompt_suffix``
-    from the eval set's defaults) to the prompt itself and hands it to
+    ``run_rollout`` appends the defaults' ``prompt_suffix`` to the prompt
+    (after the SEA's ``prompt(task)`` shaped it) and hands it to
     ``SorcarAgent.run(prompt_suffix=...)``, so the dispatch inherits it
-    like a daemon-run task's ``appendToPrompt``.
+    like a daemon-run task's ``appendToPrompt``; the SEA's own suffix
+    belongs to the prompt body and is not inherited.
     """
     from kiss.agents.sorcar import daemon_client
 
     sea = tmp_path / "suffix_sea.py"
     sea.write_text(
         "def system_prompt():\n    return 'p'\n\n\n"
-        "def settings():\n    return {'add_to_prompt': '\\n\\nROLLOUT-SUFFIX'}\n",
+        "def prompt(task):\n    return task + '\\n\\nROLLOUT-SUFFIX'\n",
         encoding="utf-8",
     )
     dispatched: list[dict[str, Any]] = []
@@ -933,10 +932,10 @@ def test_run_rollout_sub_task_inherits_the_prompt_suffix(
         )
     assert rollout.passed, rollout
     user = [m for m in requests[0]["messages"] if m["role"] == "user"]
-    assert str(user[0]["content"]).rstrip().endswith("EVAL-SUFFIX\n\nROLLOUT-SUFFIX")
+    assert str(user[0]["content"]).rstrip().endswith("ROLLOUT-SUFFIX\n\nEVAL-SUFFIX")
     (call,) = dispatched
     assert call["prompt"] == "child task"
-    assert call["append_to_prompt"] == "\n\nEVAL-SUFFIX\n\nROLLOUT-SUFFIX"
+    assert call["append_to_prompt"] == "\n\nEVAL-SUFFIX"
 
 
 def test_missing_split_is_an_error(tmp_path: Path) -> None:

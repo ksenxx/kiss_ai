@@ -258,6 +258,30 @@ def test_ask_help_answers_with_the_description_without_dispatch() -> None:
     assert [c["question"] for c in calls] == ["help me"]
 
 
+def test_ask_check_answers_with_the_dry_run_report_without_dispatch() -> None:
+    """``/ask check`` on a live tab is the daemon's dry-run report, not a dispatch.
+
+    ``check`` is reserved like ``help`` (``sea_commands.RESERVED_SUBCOMMANDS``):
+    the report of ``sea_commands.sea_check`` is broadcast as the
+    ``ask_answer`` and no answering agent is launched.
+    """
+    from kiss.agents.seas.ask import ask_sea
+
+    server, events = _make_server()
+    _register_running_task("task-abc", "tab-1", chat_id="chat-1")
+    calls = _install_dispatch_capture(server)
+    sea_commands.refresh_registry()
+
+    server._cmd_append_user_message({"tabId": "tab-1", "prompt": "/ask check"})
+
+    assert calls == []
+    (answer,) = [e for e in events if e.get("type") == "ask_answer"]
+    assert answer["success"] is True and answer["question"] == "check"
+    assert answer["text"] == sea_commands.sea_check("ask", Path(ask_sea.__file__))
+    assert answer["text"].startswith("/ask: " + ask_sea.description())
+    assert "tools added: task_context" in answer["text"]
+
+
 def test_non_ask_message_still_queues_and_does_not_dispatch() -> None:
     """A plain follow-up MUST take the original queue path.
 
@@ -429,7 +453,7 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     - ``prompt`` is the user's question (verbatim).
     - ``extension_agent_path`` is the resolved ``ask_sea.py`` path.
     - ``parent_task_id`` is the OWNER's task id: the daemon applies the
-      ask SEA's ``settings()`` itself — its ``add_to_prompt``
+      ask SEA's getters itself — its ``prompt(task)``
       (``{task_id}`` -> the owner id) and ``add_to_system_prompt()`` — so
       the side channel passes NO ``append_to_prompt`` /
       ``append_to_system_prompt`` of its own.
@@ -464,12 +488,15 @@ def test_side_channel_calls_daemon_run_with_correct_arguments(
     cmd: dict[str, Any] = {
         "agentPath": kwargs["extension_agent_path"],
         "parentTaskId": kwargs["parent_task_id"],
+        "prompt": kwargs["prompt"],
     }
     apply_agent_overrides(cmd)
-    assert cmd["appendToPrompt"] == (
+    assert cmd["prompt"] == (
+        "why did the last step fail?\n\n"
         "The question above is about the task with id task-abc. "
         "Call task_context with that task id, then answer the question."
     )
+    assert "appendToPrompt" not in cmd
     assert cmd["appendToSystemPrompt"] == ask_sea.add_to_system_prompt()
     assert cmd["appendToSystemPrompt"].startswith(
         "**MUST FOLLOW: You MUST NOT USE internet or internet search at any point. "
@@ -489,7 +516,7 @@ def test_side_channel_ask_sea_path_resolves_to_bundled_seas_file(
     The bundled ``seas/`` folder has the lowest registry precedence, so
     a ``SEAS.md`` folder shipping ``ask/ask_sea.py`` shadows the ``/ask``
     chat command.  The side channel relies on the bundled module's
-    ``settings()`` (``add_to_prompt`` naming the owner task) and
+    ``prompt(task)`` (naming the owner task) and
     ``add_to_system_prompt()``, so it must dispatch that file even
     while the command is shadowed.
     """

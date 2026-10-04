@@ -749,10 +749,14 @@ def test_every_bundled_sea_has_a_description() -> None:
     _write_seas_md([])
     commands = sea_commands.refresh_registry()
     assert len(commands) >= 58
+    assert "cron" in commands
     for name in commands:
         path = sea_commands.get_command(name)
         assert path is not None
-        assert path.parent.name == name, path
+        if name in sea_commands.BUILTIN_COMMANDS:
+            assert path.name == "cron_agent.py", path
+        else:
+            assert path.parent.name == name, path
         text = sea_commands.sea_description(path)
         assert text.rstrip(".").strip(), name
 

@@ -14,17 +14,17 @@ real daemon-side loader and the real dispatch code:
    answer-quickly directives and carry the answering playbook,
    ``add_to_tools`` MUST expose the single ``task_context`` tool, and
    ``settings()`` MUST be a ``worker`` with the ``none`` tool profile
-   (so there is no built-in tool besides ``finish``) and the fixed
-   ``add_to_prompt`` carrying the ``{task_id}`` placeholder.
+   (so there is no built-in tool besides ``finish``), and ``prompt()``
+   MUST append the fixed sentence carrying the ``{task_id}`` placeholder.
 2. The slash-command resolver ``slash_command_task`` MUST recognise
    ``/ask <question>`` and hand back the question verbatim with the
    registered ``ask_sea.py`` path: the daemon runs the SEA directly on
    it (no relay directive, no nested sub-agent).
 3. The daemon-side loader ``apply_agent_overrides`` MUST apply the
-   settings to the wire fields, substitute ``{task_id}`` in
-   ``add_to_prompt`` with the command's ``parentTaskId`` (empty string
-   when absent) and append the playbook AFTER any caller text on the
-   system-prompt suffix.
+   settings to the wire fields, substitute ``{task_id}`` in what
+   ``prompt()`` returns with the command's ``parentTaskId`` (empty
+   string when absent) and append the playbook AFTER any caller text
+   on the system-prompt suffix.
 4. The dispatch layer ``_dispatch`` MUST thread the calling task's
    ``last_task_id`` to the daemon as ``parent_task_id`` and pass the
    caller's ``append_to_prompt`` through verbatim: the substitution is
@@ -71,7 +71,6 @@ _EXPECTED_SETTINGS = {
     "use_web_tools": False,
     "use_memory": False,
     "tool_profile": "none",
-    "add_to_prompt": _EXPECTED_ADD_TO_PROMPT,
 }
 """``resolve_settings`` output: ``settings()`` plus the ``worker`` preset.
 
@@ -143,23 +142,20 @@ def test_add_to_system_prompt_returns_fixed_suffix() -> None:
 
 
 def test_settings_follow_the_contract() -> None:
-    """``settings()`` MUST be a tool-less worker whose prompt suffix names the task.
+    """``settings()`` MUST be a tool-less worker; ``prompt()`` MUST name the task.
 
     ``worker`` pins worktree, auto-commit, classifier, fan-out, browser
     and memory off; ``tool_profile: "none"`` keeps even the built-in
-    toolset out so the answerer cannot run commands or touch files;
-    ``add_to_prompt`` is the fixed sentence with ``{task_id}`` still a
-    placeholder (the daemon fills it from ``parentTaskId``).  The
-    resolved settings add the preset's defaults and nothing else: the
-    ``system_prompt()`` getter is applied by the daemon, not resolved here.
+    toolset out so the answerer cannot run commands or touch files.
+    ``prompt(question)`` is the question followed by the fixed sentence
+    with ``{task_id}`` still a placeholder (the daemon fills it from
+    ``parentTaskId``).  The resolved settings add the preset's defaults
+    and nothing else: the getters are applied by the daemon.
     """
-    assert ask_sea.settings() == {
-        "preset": "worker",
-        "tool_profile": "none",
-        "add_to_prompt": _EXPECTED_ADD_TO_PROMPT,
-    }
+    assert ask_sea.settings() == {"preset": "worker", "tool_profile": "none"}
     assert resolve_settings(vars(ask_sea)) == _EXPECTED_SETTINGS
-    assert _PLACEHOLDER in ask_sea.settings()["add_to_prompt"]
+    assert ask_sea.prompt("why?") == "why?\n\n" + _EXPECTED_ADD_TO_PROMPT
+    assert _PLACEHOLDER in ask_sea.prompt("why?")
 
 
 def test_add_to_tools_is_task_context_alone_and_legacy_getters_are_gone() -> None:
@@ -321,7 +317,7 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
     overridden = apply_agent_overrides(cmd)
     assert overridden == {
-        "systemPrompt", "appendToSystemPrompt", "appendToPrompt", "toolProfile", "tools",
+        "systemPrompt", "appendToSystemPrompt", "prompt", "toolProfile", "tools",
         "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
     }
     assert cmd["systemPrompt"] == ask_sea.system_prompt()
@@ -337,12 +333,12 @@ def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
     assert all(callable(tool) for tool in cmd["tools"])
     assert "appendBasicTools" not in cmd
     assert "toolsFile" not in cmd
-    # The prompt body itself is never rewritten by the loader.
-    assert cmd["prompt"] == "why did the run fail?"
+    # The question opens the prompt; ``prompt()`` appends the task framing.
+    assert cmd["prompt"].startswith("why did the run fail?\n\n")
 
 
 def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> None:
-    """``{task_id}`` in ``add_to_prompt`` MUST become the command's ``parentTaskId``.
+    """``{task_id}`` in ``prompt()``'s result MUST become the command's ``parentTaskId``.
 
     Both ``/ask`` paths dispatch the answering run as a sub-agent of
     the task the question is about, so ``parentTaskId`` IS the id the
@@ -354,8 +350,11 @@ def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> 
         "parentTaskId": "task-abc-123",
     }
     apply_agent_overrides(cmd)
-    assert _PLACEHOLDER not in cmd["appendToPrompt"]
-    assert cmd["appendToPrompt"] == _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-abc-123")
+    assert _PLACEHOLDER not in cmd["prompt"]
+    assert cmd["prompt"] == (
+        "why did the last step fail?\n\n"
+        + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-abc-123")
+    )
     assert cmd["parentTaskId"] == "task-abc-123"
 
 
@@ -373,20 +372,21 @@ def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> Non
     ]
     for cmd in cmds:
         apply_agent_overrides(cmd)
-        assert _PLACEHOLDER not in cmd["appendToPrompt"]
+        assert _PLACEHOLDER not in cmd["prompt"]
         # Every other character of the sentence is preserved.
-        assert cmd["appendToPrompt"].startswith(
-            "The question above is about the task with id . Call"
+        assert cmd["prompt"].endswith(
+            "The question above is about the task with id . Call task_context "
+            "with that task id, then answer the question."
         )
 
 
-def test_apply_agent_overrides_appends_the_prompt_suffix_and_the_system_one() -> None:
-    """Both ``add_to_*`` texts are additive: the caller's suffixes come first.
+def test_apply_agent_overrides_keeps_the_callers_prompt_suffix_and_appends_the_system_one() -> None:
+    """The caller's ``appendToPrompt`` is not the SEA's to touch; the system suffix is additive.
 
-    The substituted ``add_to_prompt`` is APPENDED after the caller's
-    ``appendToPrompt`` (``CALLER\\n\\nTEXT``), exactly as
-    ``add_to_system_prompt()`` is appended after the caller's
-    system-prompt suffix, instead of replacing either.
+    ``prompt()`` shapes the prompt body; the caller's ``appendToPrompt``
+    stays as sent, and ``add_to_system_prompt()`` is appended after the
+    caller's system-prompt suffix (``CALLER\\n\\nTEXT``) instead of
+    replacing it.
     """
     cmd: dict[str, Any] = {
         "agentPath": _ASK_PATH,
@@ -396,55 +396,66 @@ def test_apply_agent_overrides_appends_the_prompt_suffix_and_the_system_one() ->
         "appendToSystemPrompt": "caller system text",
     }
     apply_agent_overrides(cmd)
-    assert cmd["appendToPrompt"] == (
-        "stale caller suffix\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
-    )
+    assert cmd["appendToPrompt"] == "stale caller suffix"
+    assert cmd["prompt"] == "q\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
     assert cmd["appendToSystemPrompt"] == (
         "caller system text\n\n" + _EXPECTED_ADD_TO_SYSTEM_PROMPT
     )
 
 
-def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_add_to_prompt(
+def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_prompt_getter(
     tmp_path: Path,
 ) -> None:
-    """The substitution is a property of ``add_to_prompt``, not of the wire field.
+    """The substitution is a property of ``prompt()``'s result, not of the wire fields.
 
-    A script that declares no ``add_to_prompt`` leaves the caller's
-    ``appendToPrompt`` untouched: the literal ``{task_id}`` in the
-    caller's own text reaches the run unchanged.
+    A script that defines no ``prompt`` leaves the task text and the
+    caller's ``appendToPrompt`` untouched: a literal ``{task_id}`` in
+    the caller's own text reaches the run unchanged.
     """
     other = tmp_path / "other_sea.py"
     other.write_text("# stub\n", encoding="utf-8")
     cmd: dict[str, Any] = {
         "agentPath": str(other),
-        "prompt": "q",
+        "prompt": "literal {task_id} in the task",
         "parentTaskId": "task-xyz",
         "appendToPrompt": "literal {task_id} stays here",
     }
     assert apply_agent_overrides(cmd) == set()
+    assert cmd["prompt"] == "literal {task_id} in the task"
     assert cmd["appendToPrompt"] == "literal {task_id} stays here"
 
 
-def test_apply_agent_overrides_substitutes_for_any_sea_declaring_add_to_prompt(
+def test_apply_agent_overrides_substitutes_for_any_sea_defining_prompt(
     tmp_path: Path,
 ) -> None:
-    """``{task_id}`` substitution is general: every SEA's ``add_to_prompt`` gets it.
+    """``{task_id}`` substitution is general: every SEA's ``prompt()`` result gets it.
 
     The earlier dispatch-side rewrite was special-cased on the file
-    name ``ask_sea.py``; the daemon-side one is part of the
-    ``add_to_prompt`` setting, so a user SEA under any name (including
-    a look-alike such as ``my_ask_sea.py``) gets the same treatment.
+    name ``ask_sea.py``; the daemon-side one is part of the ``prompt``
+    getter, so a user SEA under any name (including a look-alike such
+    as ``my_ask_sea.py``) gets the same treatment.
     """
     for name in ("notify_sea.py", "my_ask_sea.py", "test_ask_sea.py"):
         script = tmp_path / name
         script.write_text(
-            "def settings():\n"
-            "    return {'add_to_prompt': 'Report on task {task_id}.'}\n",
+            "def prompt(task):\n"
+            "    return task + ' Report on task {task_id}.'\n",
             encoding="utf-8",
         )
         cmd: dict[str, Any] = {"agentPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
-        assert apply_agent_overrides(cmd) == {"appendToPrompt"}
-        assert cmd["appendToPrompt"] == "Report on task t-1."
+        assert apply_agent_overrides(cmd) == {"prompt"}
+        assert cmd["prompt"] == "q Report on task t-1."
+
+
+def test_add_to_prompt_is_no_longer_a_setting(tmp_path: Path) -> None:
+    """A script still declaring ``add_to_prompt`` MUST fail naming ``prompt(task)``."""
+    script = tmp_path / "old_sea.py"
+    script.write_text(
+        "def settings():\n    return {'add_to_prompt': 'Report on task {task_id}.'}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(sea_commands.SeaError, match=r"add_to_prompt.*def prompt\(task: str\)"):
+        sea_commands.sea_settings(script)
 
 
 # ---------------------------------------------------------------------------

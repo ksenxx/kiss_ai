@@ -30,7 +30,11 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _record_steer_input,
 )
-from kiss.agents.sorcar.sea_commands import SeaScriptError, run_picked_hook
+from kiss.agents.sorcar.sea_commands import (
+    RESERVED_SUBCOMMANDS,
+    SeaScriptError,
+    run_picked_hook,
+)
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as sea_help_text,
 )
@@ -1402,8 +1406,8 @@ class _CommandsMixin:
 
         The answering session is dispatched with the owner as its
         ``parent_task_id``: the daemon applies the ask script's
-        ``settings()`` (its ``add_to_prompt`` names that id as the task
-        the question is about) and ``add_to_system_prompt()``.
+        ``prompt(task)`` (which names that id as the task the question
+        is about) and ``add_to_system_prompt()``.
 
         Args:
             tab_id: The frontend tab whose ``/ask`` produced this
@@ -1645,9 +1649,11 @@ class _CommandsMixin:
             # in the running task's history stream, right where the
             # answer will land.
             self._echo_injected_prompt(tab_id, prompt, owner_task)
-            if ask_question.lower() == "help":
-                # ``/ask help`` is the SEA's ``description()``, like
-                # every ``/xxx help`` — answered here, no dispatch.
+            if ask_question.lower() in RESERVED_SUBCOMMANDS:
+                # ``/ask help`` is the SEA's ``description()`` and
+                # ``/ask check`` its dry-run report, like every
+                # ``/xxx help`` / ``/xxx check`` — answered here, no
+                # dispatch.
                 try:
                     help_text, help_ok = sea_help_text(prompt), True
                 except SeaScriptError as exc:

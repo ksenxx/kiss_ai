@@ -16,12 +16,16 @@ from __future__ import annotations
 from typing import Any
 
 REMOVED_GETTERS: tuple[str, ...] = (
-    "model", "prompt", "work_dir", "chat_id", "docker_image", "model_config",
+    "model", "work_dir", "chat_id", "docker_image", "model_config",
     "max_budget", "tool_profile", "use_worktree", "auto_commit", "classify_tasks",
     "is_parallel", "use_web_tools", "use_memory", "dispatch_timeout",
     "append_to_prompt", "append_to_system_prompt", "tools", "if_append_basic_tools",
 )
-"""Module-level names the old per-field getter contract used; none is read any more."""
+"""Module-level names the old per-field getter contract used; none is read any more.
+
+``prompt(task)`` is not among them: it is the one getter that shapes
+the task prompt (the former ``add_to_prompt`` setting folded into it).
+"""
 
 
 def assert_no_removed_getters(sea: Any) -> None:

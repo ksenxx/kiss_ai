@@ -10,27 +10,61 @@ module-level functions.  The run parameters come from ``settings()``::
     def settings() -> dict:
         return {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
 
-The dict holds a ``preset`` (a named bundle of defaults, see
-:data:`PRESETS`), optionally ``extends`` (the command name or path of a
-base script whose configuration this one refines, see
-:func:`kiss.agents.sorcar.sea_commands.sea_layers`) and any of the
+``settings()`` is data: a ``preset`` (a named dict of defaults, see
+:func:`presets`), optionally ``extends`` (the command name or path of
+a base script whose configuration this one refines, see
+:func:`kiss.agents.sorcar.sea_commands.sea_layers`), any of the
 per-run parameters of :func:`kiss.server.sorcar.run` listed in
-:data:`SETTING_TYPES`, plus two read by the dispatcher and the daemon
-respectively: ``timeout`` (seconds a ``run_agent`` call waits for this
-script's sub-task) and ``add_to_prompt`` (text appended to the task
-prompt; ``{task_id}`` in it is replaced by the calling task's id).
+:data:`SETTING_TYPES`, and three keys read by the dispatcher:
+``timeout`` (seconds a ``run_agent`` call waits for this script's
+sub-task), ``inherit`` (whether a ``run_agent`` sub-task takes the
+calling task's model, budget share, chat, prompt suffixes, tools and
+container; default ``True``) and ``kind`` (``"agent"``, the default,
+or ``"channel"``: a worker for an external service, see below).
 Explicit keys override the preset; the result overrides whatever the
 caller (a ``run_agent`` argument, a ``run()`` keyword, the chat panel)
 sent for the same field.
 
-The prompt surfaces are exactly three functions: ``system_prompt()``
-replaces the base system prompt, ``add_to_system_prompt()`` appends to
-it, and ``prompt(task)`` receives the task text and returns the prompt
-body (``add_to_prompt`` appends to that).  A script may further define
-``add_to_tools()`` (extra tool callables), ``description()`` (``/xxx
-help`` text), the hooks ``llm_call_hook`` / ``tool_call_hook`` and the
-model-picker pair ``register_as_model()`` / ``on_picked_as_model()``;
-:mod:`kiss.agents.sorcar.sea_commands` evaluates them.
+Getters are text and code: ``system_prompt()`` replaces the base
+system prompt, ``add_to_system_prompt()`` appends to it, and
+``prompt(task)`` receives the task text and returns the prompt body
+(``{task_id}`` in the result is replaced by the calling task's id).  A
+script may further define ``add_to_tools()`` (extra tool callables),
+``description()`` (``/xxx help`` text), the hooks ``llm_call_hook`` /
+``tool_call_hook`` and the model-picker pair ``register_as_model()`` /
+``on_picked_as_model()``; :mod:`kiss.agents.sorcar.sea_commands`
+evaluates them.
+
+A script runs in one of three ways; what differs is only where it runs
+and which settings apply:
+
+==================  ====================  ======================  ========================
+                    ``/<name> task``      ``run_agent(agent=)``   ``run_parallel(agent=)``
+==================  ====================  ======================  ========================
+Where               the tab's own run     a daemon sub-task in    a thread of the caller
+                                          its own tab
+Settings honoured   all but ``timeout``,  all                     all but ``timeout``,
+                    ``inherit``                                   ``inherit`` (always
+                                                                  inherits); a pinned
+                                                                  ``use_worktree`` /
+                                                                  ``auto_commit`` /
+                                                                  ``classify_tasks: True``
+                                                                  or ``chat_id`` is
+                                                                  refused with an error
+Parent inheritance  none (tab settings)   yes, unless             yes; budget =
+                                          ``inherit`` is          remaining / (N+1)
+                                          ``False``
+``timeout``         none                  argument > setting      none
+                                          > 3600
+``kind: "channel"`` allowed               allowed                 refused
+==================  ====================  ======================  ========================
+
+``kind: "channel"`` is the one key the daemon acts on beyond passing a
+value through: the run holds its channel workspace
+(``run_agent(options='{"workspace": ...}')``, default ``"default"``)
+for its lifetime, the channel preamble is added to its system prompt,
+and it can be neither a ``run_parallel`` child nor an ``extends``
+base.
 
 :func:`execute_python_file` is the ONE loader every reader of a script
 uses: it compiles and executes the file into a throw-away module, so
@@ -68,10 +102,14 @@ SETTING_TYPES: dict[str, type | tuple[type, ...]] = {
     "is_parallel": bool,
     "tool_profile": str,
     "docker_image": str,
-    "add_to_prompt": str,
     "timeout": (int, float),
+    "inherit": bool,
+    "kind": str,
 }
 """Every key ``settings()`` may return, with the type its value must have."""
+
+KINDS = ("agent", "channel")
+"""The values of the ``kind`` setting (see the module docstring)."""
 
 REMOVED_SETTINGS: dict[str, str] = {
     "prompt": (
@@ -79,6 +117,10 @@ REMOVED_SETTINGS: dict[str, str] = {
         "task text and returns the prompt body"
     ),
     "system_prompt": "define `def system_prompt() -> str` instead",
+    "add_to_prompt": (
+        "return the extra text from `def prompt(task: str) -> str` instead "
+        "(`{task_id}` in its result is replaced by the calling task's id)"
+    ),
 }
 """Former ``settings()`` keys, each with the function that replaced it.
 
@@ -95,24 +137,35 @@ WORKER_PRESET: dict[str, Any] = {
     "use_memory": False,
 }
 
-PRESETS: dict[str, dict[str, Any]] = {
-    "session": {},
-    "worker": WORKER_PRESET,
-    "channel": WORKER_PRESET,
-}
-"""Named bundles of defaults a script picks with ``settings()["preset"]``.
+PRESET_NAMES = ("session", "worker", "channel")
+"""The presets a script may name (see :func:`presets`)."""
 
-``session`` (the default when no preset is named) changes nothing: the
-sub-task is an ordinary Sorcar session with the caller's or the user's
-settings.  ``worker`` is a focused tool-bound run on the caller's tree:
-no worktree, no auto-commit, no classifier, no fan-out, no browser, no
-memory.  ``channel`` is a worker for an external service: it runs in
-the shared ``~/.kiss/channel_work`` scratch directory instead of the
-caller's project (unless the script's own ``work_dir`` says otherwise),
-inherits nothing from the caller, holds the channel workspace for the
-run's lifetime, and the daemon prepends the channel preamble to its
-system prompt (see :mod:`kiss.server.agent_file`).
-"""
+
+def presets() -> dict[str, dict[str, Any]]:
+    """Return the named dicts of defaults a script picks with ``settings()["preset"]``.
+
+    A preset is nothing but defaults laid under the script's explicit
+    keys.  ``session`` (the default when no preset is named) is empty:
+    the run is an ordinary Sorcar session with the caller's or the
+    user's settings.  ``worker`` is a focused tool-bound run on the
+    caller's tree: no worktree, no auto-commit, no classifier, no
+    fan-out, no browser, no memory.  ``channel`` is a worker for an
+    external service: ``kind: "channel"``, ``inherit: False`` and a
+    ``work_dir`` of the shared ``~/.kiss/channel_work`` scratch
+    directory (never the caller's project, whose git lifecycle it does
+    not join).  Computed on every call so a redirected ``$KISS_HOME``
+    is honoured.
+    """
+    return {
+        "session": {},
+        "worker": dict(WORKER_PRESET),
+        "channel": {
+            **WORKER_PRESET,
+            "kind": "channel",
+            "inherit": False,
+            "work_dir": str(kiss_home() / "channel_work"),
+        },
+    }
 
 
 class SeaError(Exception):
@@ -259,14 +312,15 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
     Returns:
         A new dict: ``{"preset": name, <key>: value, ...}`` with the
         preset's defaults already merged in under the explicit keys.
-        A key whose value is ``None`` is dropped: it means "no
-        override", so the caller's or the persisted value stands.
+        A key whose value is ``None`` is dropped — as is a ``model`` of
+        ``""`` — it means "no override", so the caller's or the
+        persisted value stands.
 
     Raises:
         SettingsError: When ``settings()`` is not a function returning a
-            dict, names an unknown or removed key or an unknown preset,
-            a value has the wrong type, or ``settings()`` raises
-            (whatever it raises).
+            dict, names an unknown or removed key, an unknown preset or
+            an unknown ``kind``, a value has the wrong type, or
+            ``settings()`` raises (whatever it raises).
     """
     declared: dict[str, Any] = {}
     if "settings" in namespace:
@@ -292,8 +346,13 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
                 f"settings() has an unknown key {key!r}; "
                 f"known keys: {', '.join(SETTING_TYPES)}"
             )
-    # ``None`` means "no override": the caller's or persisted value stands.
-    declared = {key: value for key, value in declared.items() if value is not None}
+    # ``None`` means "no override": the caller's or persisted value
+    # stands.  So does an empty ``model`` (the spelling of "no model" a
+    # script computing its model may produce).
+    declared = {
+        key: value for key, value in declared.items()
+        if value is not None and not (key == "model" and value == "")
+    }
     for key, value in declared.items():
         expected = SETTING_TYPES[key]
         wrong_bool = isinstance(value, bool) and expected is not bool
@@ -307,11 +366,11 @@ def resolve_settings(namespace: Mapping[str, Any]) -> dict[str, Any]:
             )
         declared[key] = _check_value(sources[key], key, value)
     preset = declared.get("preset", "session")
-    if preset not in PRESETS:
+    if preset not in PRESET_NAMES:
         raise SettingsError(
-            f"unknown preset {preset!r}; known presets: {', '.join(PRESETS)}"
+            f"unknown preset {preset!r}; known presets: {', '.join(PRESET_NAMES)}"
         )
-    return {"preset": preset, **PRESETS[preset], **declared}
+    return {"preset": preset, **presets()[preset], **declared}
 
 
 def merge_settings(chain: list[dict[str, Any]]) -> dict[str, Any]:
@@ -347,11 +406,13 @@ def _check_value(source: str, key: str, value: Any) -> Any:
     (``coerce_budget_override`` would otherwise SILENTLY discard a
     NaN/infinite budget downstream) and are returned as floats.  A
     value whose own methods raise (an untrusted number subclass) is
-    reported as broken.
+    reported as broken.  ``kind`` must be one of :data:`KINDS`.
 
     Raises:
         SettingsError: Naming *source* (``settings()['timeout']``).
     """
+    if key == "kind" and value not in KINDS:
+        raise SettingsError(f"{source} must be one of {', '.join(KINDS)}; got {value!r}")
     if key in ("max_budget", "timeout"):
         try:
             value = float(value)
@@ -364,23 +425,6 @@ def _check_value(source: str, key: str, value: Any) -> Any:
         if not math.isfinite(value):
             raise SettingsError(f"{source} must return a finite number or None")
     return value
-
-
-def default_work_dir(settings: Mapping[str, Any], fallback: str) -> str:
-    """Return the work directory a run of a script with *settings* defaults to.
-
-    The script's own ``work_dir`` when it names one; else, for the
-    ``channel`` preset, the channel agents' shared scratch directory
-    ``~/.kiss/channel_work`` (an external-service worker must not act
-    in the calling project, whose git lifecycle it does not join);
-    else *fallback* (the caller's directory).
-    """
-    declared = str(settings.get("work_dir") or "")
-    if declared:
-        return declared
-    if settings.get("preset") == "channel":
-        return str(kiss_home() / "channel_work")
-    return fallback
 
 
 def _call(fn: Any, label: str) -> Any:

@@ -19,7 +19,7 @@ result in place on the command dict (:func:`apply_agent_overrides`):
   (:data:`SETTING_FIELDS`), so a script's choice wins over whatever
   the caller sent;
 * ``prompt(task)``: the task text replaced by what the function
-  returns, and ``add_to_prompt`` appended to ``appendToPrompt``;
+  returns (``{task_id}`` in it -> the calling task's id);
 * ``system_prompt()``, written over ``systemPrompt`` (the run's base
   system prompt);
 * the ``channel`` preset's preamble and ``add_to_system_prompt()``,
@@ -93,19 +93,22 @@ def wire_field(key: str) -> str:
     return first + "".join(part.capitalize() for part in rest)
 
 
+DISPATCHER_SETTINGS = ("preset", "extends", "timeout", "inherit", "kind")
+"""``settings()`` keys with no ``run`` command wire field.
+
+``preset`` and ``extends`` are resolved by
+:func:`~kiss.agents.sorcar.sea_commands.sea_layers`; ``timeout`` and
+``inherit`` are read by the dispatcher
+(:mod:`kiss.agents.sorcar.agent_dispatch`); ``kind`` is read from the
+layers by :func:`channel_workspace` and :func:`apply_agent_overrides`.
+"""
+
 SETTING_FIELDS: dict[str, str] = {
-    key: wire_field(key)
-    for key in SETTING_TYPES
-    if key not in ("preset", "extends", "timeout", "add_to_prompt")
+    key: wire_field(key) for key in SETTING_TYPES if key not in DISPATCHER_SETTINGS
 }
 """``settings()`` key -> the ``run`` command wire field it overrides.
 
-Every key is a parameter of :func:`kiss.server.sorcar.run`.  Four
-keys have no field of their own: the ``preset`` and ``extends`` are
-resolved by :func:`~kiss.agents.sorcar.sea_commands.sea_layers`, the
-``timeout`` is read by the dispatcher
-(:mod:`kiss.agents.sorcar.agent_dispatch`), and ``add_to_prompt`` is
-appended to the caller's ``appendToPrompt`` text.
+Every key is a parameter of :func:`kiss.server.sorcar.run`.
 """
 
 CHANNEL_PREAMBLE = (
@@ -117,7 +120,14 @@ CHANNEL_PREAMBLE = (
     "broken, report the failure in your result so it is fixed in a normal "
     "development task."
 )
-"""System-prompt preamble of every ``channel``-preset run; ``{name}`` is the script's name."""
+"""System-prompt preamble of every ``kind: "channel"`` run; ``{name}`` is the script's name."""
+
+
+def is_channel(layers: list[SeaLayer]) -> bool:
+    """Return whether the run of *layers* is a channel agent (``kind: "channel"``)."""
+    if not layers:
+        return False
+    return merge_settings([layer.settings for layer in layers]).get("kind") == "channel"
 
 NO_TOOLS_PROFILE = "none"
 """The tool profile of a run whose only built-in tool is ``finish``."""
@@ -127,19 +137,19 @@ DAEMON_SIDE_FIELDS = ("tools", "llmCallHook", "toolCallHook")
 
 
 def channel_workspace(cmd: dict[str, Any], layers: list[SeaLayer]) -> str:
-    """Return the workspace a run holds for its lifetime; ``""`` unless its preset is ``channel``.
+    """Return the workspace a run holds for its lifetime; ``""`` unless its kind is ``channel``.
 
-    The command's ``workspace`` wire field (``run_agent(workspace=)``,
-    a channel launcher's account), else ``"default"``.  Decided from
-    the layers' settings alone, so the task runner can enter the
-    workspace before :func:`apply_agent_overrides` evaluates the
-    channel's ``add_to_tools()``.
+    The command's ``workspace`` wire field (the ``run_agent`` option
+    ``workspace``, a channel launcher's account), else ``"default"``.
+    Decided from the layers' settings alone, so the task runner can
+    enter the workspace before :func:`apply_agent_overrides` evaluates
+    the channel's ``add_to_tools()``.
 
     Args:
         cmd: The ``run`` command dict.
         layers: The run's executed layers (:func:`load_layers`).
     """
-    if not layers or merge_settings([layer.settings for layer in layers])["preset"] != "channel":
+    if not is_channel(layers):
         return ""
     workspace = cmd.get("workspace")
     return workspace.strip() if isinstance(workspace, str) and workspace.strip() else "default"
@@ -190,12 +200,10 @@ def apply_agent_overrides(
     (:data:`SETTING_FIELDS`); ``prompt`` when a ``prompt(task)`` getter
     rewrote the task; ``systemPrompt`` from ``system_prompt()``;
     ``appendToSystemPrompt`` extended with :data:`CHANNEL_PREAMBLE`
-    (``channel`` preset) and ``add_to_system_prompt()``;
-    ``appendToPrompt`` extended with ``add_to_prompt``; the daemon-side
-    fields ``tools``, ``llmCallHook`` and ``toolCallHook``.  The writes
-    are atomic: they
-    happen only after everything has succeeded, so a broken script
-    leaves the command untouched.
+    (``kind: "channel"``) and ``add_to_system_prompt()``; the
+    daemon-side fields ``tools``, ``llmCallHook`` and ``toolCallHook``.
+    The writes are atomic: they happen only after everything has
+    succeeded, so a broken script leaves the command untouched.
 
     Args:
         cmd: The ``run`` command dict; mutated in place.
@@ -242,12 +250,10 @@ def apply_agent_overrides(
             staged[field] = run.settings[key]
     if any("prompt" in layer.namespace for layer in layers):
         staged["prompt"] = run.prompt
-    if run.add_to_prompt:
-        staged["appendToPrompt"] = _add_text(cmd.get("appendToPrompt"), run.add_to_prompt)
     if run.system_prompt is not None:
         staged["systemPrompt"] = run.system_prompt
     system_suffix = cmd.get("appendToSystemPrompt")
-    if run.settings["preset"] == "channel":
+    if run.settings.get("kind") == "channel":
         system_suffix = _add_text(
             system_suffix, CHANNEL_PREAMBLE.format(name=script_name(str(layers[-1].path))),
         )

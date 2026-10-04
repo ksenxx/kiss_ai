@@ -11,9 +11,12 @@ command named after the folder: ``/xxx``.  When a user submits a
 prompt that starts with ``/xxx`` — optionally followed by whitespace
 and free-form text — the daemon runs the SEA directly on the trailing
 text (:func:`slash_command_task`): the same run ``run_agent(agent="xxx",
-task=text)`` makes.  The special prompt ``/xxx help`` does not run the
-SEA: the daemon answers with the return value of the script's mandatory
-``description()`` function (see :func:`help_text_if_command`).
+task=text)`` makes.  Two special prompts do not run the SEA: ``/xxx
+help`` answers with the return value of the script's mandatory
+``description()`` function, and ``/xxx check`` executes the script
+and reports its effective settings, model, tools and sample prompt —
+or the first error (see :func:`help_text_if_command`,
+:func:`sea_check`).
 
 This module also evaluates a SEA for a run: :func:`sea_layers` executes
 the script and the scripts it ``extends`` (each exactly once, with the
@@ -22,7 +25,7 @@ one loader :func:`kiss.agents.sorcar.sea_settings.execute_python_file`),
 :class:`SeaRun`), and :func:`sea_settings` gives the dispatcher the
 merged settings.
 
-The registry is built from three sources, in decreasing precedence:
+The registry is built from four sources, in decreasing precedence:
 
 1. ``src/kiss/agents/third_party_agents/`` (highest precedence,
    discovered through the ``kiss.agents.third_party_agents`` package).
@@ -32,10 +35,12 @@ The registry is built from three sources, in decreasing precedence:
    at the top when both contain the same command name.  Blank lines
    and lines starting with ``#`` are ignored; ``~`` and environment
    variables in a folder path are expanded.
-3. ``src/kiss/agents/seas/`` (lowest precedence: the bundled SEAs that
-   extend Sorcar itself, e.g. ``/merge``; discovered through
-   ``kiss.agents.seas``).  Any ``SEAS.md`` folder that ships a file of
-   the same name replaces the bundled one.
+3. ``src/kiss/agents/seas/`` (the bundled SEAs that extend Sorcar
+   itself, e.g. ``/merge``; discovered through ``kiss.agents.seas``).
+   Any ``SEAS.md`` folder that ships a file of the same name replaces
+   the bundled one.
+4. The built-in agent scripts of :data:`BUILTIN_COMMANDS` (``/cron``,
+   lowest precedence).
 
 The registry is refreshed lazily on every lookup and, in the daemon,
 proactively by a background polling watcher (see
@@ -64,6 +69,8 @@ holding ``_lock``.
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import json
 import logging
 import os
 import re
@@ -80,6 +87,7 @@ from kiss.agents.sorcar.sea_settings import (
     merge_settings,
     resolve_settings,
     safe_message,
+    script_name,
 )
 from kiss.core.config import kiss_home
 
@@ -238,6 +246,29 @@ def _scan_folder(folder: Path) -> dict[str, Path]:
     return out
 
 
+BUILTIN_COMMANDS: dict[str, str] = {"cron": "kiss.agents.sorcar.cron_agent"}
+"""Agent scripts that are modules of the framework, by command name.
+
+``/cron`` is the scheduled-automations agent
+(:mod:`kiss.agents.sorcar.cron_agent`): the same script
+``run_agent(agent="cron")`` dispatches, registered so one lookup —
+:func:`list_commands` — knows every name a task may run.
+"""
+
+
+def _builtin_commands() -> dict[str, Path]:
+    """Return ``{command_name: script_path}`` for :data:`BUILTIN_COMMANDS`.
+
+    The modules are located, not imported.
+    """
+    out: dict[str, Path] = {}
+    for command, module in BUILTIN_COMMANDS.items():
+        spec = importlib.util.find_spec(module)
+        if spec is not None and spec.origin:
+            out[command] = Path(spec.origin).resolve()
+    return out
+
+
 def _read_seas_md_folders() -> list[Path]:
     """Return the folder list from ``SEAS.md``, top to bottom.
 
@@ -304,7 +335,9 @@ def refresh_registry() -> list[str]:
     global _last_broadcast
 
     sources: list[dict[str, Path]] = []
-    # Bundled ``seas/`` first: any SEAS.md folder may shadow it.
+    # Built-in agent scripts and the bundled ``seas/`` first: any
+    # SEAS.md folder may shadow them.
+    sources.append(_builtin_commands())
     seas_dir = _seas_dir()
     if seas_dir is not None:
         sources.append(_scan_folder(seas_dir))
@@ -571,7 +604,7 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[SeaLayer]:
             settings, names an ``extends`` that is no registered
             command or existing ``.py`` file, forms a cycle (or a chain
             deeper than :data:`MAX_EXTENDS_DEPTH`), or when any layer
-            but the last has the ``channel`` preset: a channel agent is
+            but the last is of ``kind: "channel"``: a channel agent is
             a worker for an external service and cannot be extended.
     """
     loaded: dict[Path, SeaLayer] = {}
@@ -580,7 +613,7 @@ def sea_layers(sea_path: Path, base: Path | None = None) -> list[SeaLayer]:
         if not any(layer is seen for seen in layers):
             layers.append(layer)
     for layer in layers[:-1]:
-        if layer.settings["preset"] == "channel":
+        if layer.settings.get("kind") == "channel":
             raise SeaScriptError(
                 f"agent script {str(layers[-1].path)!r}: cannot extend the channel agent "
                 f"script {str(layer.path)!r}"
@@ -667,9 +700,8 @@ class SeaRun:
 
     Attributes:
         settings: The merged settings (:func:`merge_settings`).
-        prompt: The task text after every layer's ``prompt(task)``.
-        add_to_prompt: The layers' ``add_to_prompt`` texts, joined,
-            ``{task_id}`` replaced; empty when none.
+        prompt: The task text after every layer's ``prompt(task)``,
+            ``{task_id}`` replaced by the calling task's id.
         system_prompt: The innermost ``system_prompt()`` text (the base
             system prompt), or ``None`` when no layer defines one.
         add_to_system_prompt: The layers' ``add_to_system_prompt()``
@@ -682,7 +714,6 @@ class SeaRun:
 
     settings: dict[str, Any]
     prompt: str
-    add_to_prompt: str = ""
     system_prompt: str | None = None
     add_to_system_prompt: str = ""
     tools: list[Callable[..., Any]] = field(default_factory=list)
@@ -695,15 +726,15 @@ def evaluate_sea(layers: list[SeaLayer], task: str, task_id: str = "") -> SeaRun
 
     Each layer is applied on top of the previous ones: ``prompt(task)``
     chains (a layer receives what the layer below returned),
-    ``add_to_prompt`` / ``add_to_system_prompt()`` texts concatenate,
-    ``add_to_tools()`` lists union by tool name, and the innermost
-    (last) layer that defines ``system_prompt()`` or a hook wins.
+    ``add_to_system_prompt()`` texts concatenate, ``add_to_tools()``
+    lists union by tool name, and the innermost (last) layer that
+    defines ``system_prompt()`` or a hook wins.
 
     Args:
         layers: The layers of :func:`sea_layers`.
         task: The task text the run was submitted with.
         task_id: The calling task's id, substituted for ``{task_id}``
-            in ``add_to_prompt`` texts (empty when there is none).
+            in what ``prompt(task)`` returns (empty when there is none).
 
     Returns:
         The run's configuration.
@@ -713,12 +744,12 @@ def evaluate_sea(layers: list[SeaLayer], task: str, task_id: str = "") -> SeaRun
             returns a value of the wrong type (``prompt()`` must return
             a non-empty string).
     """
-    run = sea_configuration(layers, task_id)
-    run.prompt = sea_prompt(layers, task)
+    run = sea_configuration(layers)
+    run.prompt = sea_prompt(layers, task, task_id)
     return run
 
 
-def sea_configuration(layers: list[SeaLayer], task_id: str = "") -> SeaRun:
+def sea_configuration(layers: list[SeaLayer]) -> SeaRun:
     """Evaluate every getter of *layers* but ``prompt(task)``.
 
     :func:`evaluate_sea` without the task: the returned run's ``prompt``
@@ -728,7 +759,6 @@ def sea_configuration(layers: list[SeaLayer], task_id: str = "") -> SeaRun:
 
     Args:
         layers: The layers of :func:`sea_layers`.
-        task_id: As for :func:`evaluate_sea`.
 
     Raises:
         SeaScriptError: As for :func:`evaluate_sea`.
@@ -738,9 +768,6 @@ def sea_configuration(layers: list[SeaLayer], task_id: str = "") -> SeaRun:
     for layer in layers:
         label = str(layer.path)
         namespace = layer.namespace
-        if "add_to_prompt" in layer.settings:
-            addition = layer.settings["add_to_prompt"].replace("{task_id}", task_id)
-            run.add_to_prompt = join_text(run.add_to_prompt, addition)
         if "system_prompt" in namespace:
             run.system_prompt = _check_text(
                 label, "system_prompt", call_getter(namespace, label, "system_prompt"),
@@ -763,11 +790,15 @@ def sea_configuration(layers: list[SeaLayer], task_id: str = "") -> SeaRun:
     return run
 
 
-def sea_prompt(layers: list[SeaLayer], task: str) -> str:
+def sea_prompt(layers: list[SeaLayer], task: str, task_id: str = "") -> str:
     """Return *task* after every layer's ``prompt(task)``, outermost first.
 
     The prompt half of :func:`evaluate_sea`, for callers that shape
-    many tasks with one executed chain (``skillopt`` rollouts).
+    many tasks with one executed chain (``skillopt`` rollouts).  A
+    layer that defines ``prompt`` has ``{task_id}`` in its result
+    replaced by *task_id* (the calling task's id, or ``""`` when there
+    is none); a task text shaped by no ``prompt`` getter is returned as
+    submitted.
 
     Raises:
         SeaScriptError: When a ``prompt`` getter is not callable, raises,
@@ -778,6 +809,7 @@ def sea_prompt(layers: list[SeaLayer], task: str) -> str:
             continue
         label = str(layer.path)
         task = _check_text(label, "prompt", call_getter(layer.namespace, label, "prompt", task))
+        task = task.replace("{task_id}", task_id)
         if not task.strip():
             raise SeaScriptError(
                 f"prompt() of agent script {label!r} must return a non-empty string"
@@ -1014,32 +1046,143 @@ def sea_description(sea_path: Path) -> str:
     return text.strip()
 
 
-def help_text_if_command(prompt: str) -> str | None:
-    """Return the SEA description when *prompt* is ``/xxx help``.
+CHECK_SAMPLE_TASK = "<the task text>"
+"""The task :func:`sea_check` hands ``prompt(task)``; ``{task_id}`` becomes ``<task id>``."""
 
-    ``help`` (case-insensitive, nothing after it) is the one sub-task
-    every command reserves: instead of relaying it to the SEA, the
-    daemon answers with the return value of the SEA's ``description()``.
+RESERVED_SUBCOMMANDS = ("help", "check")
+"""The ``/xxx <word>`` prompts the daemon answers itself instead of running the SEA."""
+
+
+def sea_check(name: str, sea_path: Path) -> str:
+    """Execute the SEA *name* at *sea_path* and report what a run of it would use.
+
+    What ``/xxx check`` shows, so a script author sees the effect of
+    ``settings()`` and the getters without running a task: the layers
+    (the script and what it ``extends``), the effective merged
+    settings, the model a run takes, the names of the tools
+    ``add_to_tools()`` adds, which optional getters and hooks are
+    defined, and the prompt ``prompt(task)`` yields for
+    :data:`CHECK_SAMPLE_TASK`.  A broken script yields the first
+    error instead, in the words the daemon would use.
+
+    Args:
+        name: The command name.
+        sea_path: The SEA's script.
+
+    Returns:
+        The report, one item per line.
+    """
+    # The daemon's own path (``load_layers`` + ``apply_agent_overrides``
+    # on a ``run`` command), so the report is what a run would get and
+    # a script that reads the run command from those frames works.
+    # Imported here: ``agent_file`` imports this module.
+    from kiss.server.agent_file import apply_agent_overrides, load_layers
+
+    cmd: dict[str, Any] = {
+        "agentPath": str(sea_path), "prompt": CHECK_SAMPLE_TASK, "parentTaskId": "<task id>",
+    }
+    try:
+        layers = load_layers(cmd)
+        apply_agent_overrides(cmd, layers)
+        description = sea_description(sea_path)
+        innermost = layers[-1].namespace
+        label = str(layers[-1].path)
+        registers = call_getter(innermost, label, "register_as_model")
+        if "register_as_model" in innermost and not isinstance(registers, bool):
+            raise SeaScriptError(
+                f"register_as_model() of agent script {label!r} must return a bool, "
+                f"got {type(registers).__name__}"
+            )
+        if "on_picked_as_model" in innermost:
+            _check_picked_hook(innermost["on_picked_as_model"], label)
+    except SeaError as exc:
+        return f"/{name} is broken: {exc}"
+    merged = merge_settings([layer.settings for layer in layers])
+    settings = {key: value for key, value in merged.items() if key != "preset"}
+    model = settings.get("model") or "the calling task's model (else the default model)"
+    tools = cmd.get("tools") or []
+    defined = [
+        getter for getter in (
+            "system_prompt", "add_to_system_prompt", "prompt", "llm_call_hook",
+            "tool_call_hook", "register_as_model", "on_picked_as_model",
+        ) if any(getter in layer.namespace for layer in layers)
+    ]
+    lines = [
+        f"/{name}: {description}",
+        "layers: " + " > ".join(script_name(str(layer.path)) for layer in layers),
+        f"preset: {merged['preset']}",
+        "settings: " + (json.dumps(settings, sort_keys=True, default=str) or "{}"),
+        f"model: {model}",
+        "tools added: " + (", ".join(_tool_name(tool) for tool in tools) or "none"),
+        "getters and hooks defined: " + (", ".join(defined) or "none"),
+        f"prompt for {CHECK_SAMPLE_TASK}: {cmd['prompt']}",
+    ]
+    if "description" not in innermost:
+        lines.append("note: description() comes from an extended script")
+    return "\n".join(lines)
+
+
+def _check_picked_hook(picked: Any, label: str) -> None:
+    """Raise :exc:`SeaScriptError` unless *picked* is callable as ``on_picked_as_model(work_dir)``.
+
+    The check :func:`run_picked_hook` would otherwise fail at pick time:
+    the hook must be callable and must bind one positional argument.
+    """
+    if not callable(picked):
+        raise SeaScriptError(
+            f"on_picked_as_model of agent script {label!r} must be a callable, "
+            f"got {type(picked).__name__}"
+        )
+    try:
+        signature = inspect.signature(picked)
+    except ValueError:
+        return  # a builtin without introspectable signature: callable is all we can check
+    try:
+        signature.bind("<work_dir>")
+    except TypeError as exc:
+        raise SeaScriptError(
+            f"on_picked_as_model of agent script {label!r} must take one positional "
+            f"argument (work_dir): {exc}"
+        ) from exc
+
+
+def _tool_name(tool: Any) -> str:
+    """Return the name a tool callable is registered under (its ``__name__`` or its type's)."""
+    return str(getattr(tool, "__name__", None) or type(tool).__name__)
+
+
+def help_text_if_command(prompt: str) -> str | None:
+    """Return the daemon's own answer when *prompt* is ``/xxx help`` or ``/xxx check``.
+
+    ``help`` and ``check`` (case-insensitive, nothing after them) are
+    the sub-tasks every command reserves (:data:`RESERVED_SUBCOMMANDS`):
+    instead of relaying them to the SEA, the daemon answers ``help``
+    with the return value of the SEA's ``description()`` and ``check``
+    with :func:`sea_check`'s report.
 
     Args:
         prompt: The raw user prompt (as submitted by the client).
 
     Returns:
-        The description text when *prompt* is ``/xxx help`` for a
-        registered command ``xxx``, else ``None``.
+        The description or the check report when *prompt* is
+        ``/xxx help`` / ``/xxx check`` for a registered command
+        ``xxx``, else ``None``.
 
     Raises:
         SeaScriptError: Propagated from :func:`sea_description` when the
-            SEA is broken or lacks ``description()``.
+            SEA is broken or lacks ``description()`` (``help`` only;
+            ``check`` reports the error as its text).
     """
     if not isinstance(prompt, str):
         return None
     parsed = _split_slash_command(prompt)
-    if parsed is None or parsed[1].lower() != "help":
+    if parsed is None or parsed[1].lower() not in RESERVED_SUBCOMMANDS:
         return None
     sea_path = get_command(parsed[0])
     if sea_path is None:
         return None
+    if parsed[1].lower() == "check":
+        return sea_check(parsed[0], sea_path)
     return sea_description(sea_path)
 
 
@@ -1055,9 +1198,9 @@ def slash_command_task(prompt: str) -> tuple[str, Path] | None:
 
     Returns:
         ``(task_text, sea_path)`` when *prompt* starts with a registered
-        command followed by non-empty text other than ``help`` (which
-        :func:`help_text_if_command` answers); else ``None`` — the
-        prompt runs as an ordinary task.
+        command followed by non-empty text other than ``help`` or
+        ``check`` (which :func:`help_text_if_command` answers); else
+        ``None`` — the prompt runs as an ordinary task.
     """
     if not isinstance(prompt, str):
         return None
@@ -1065,7 +1208,7 @@ def slash_command_task(prompt: str) -> tuple[str, Path] | None:
     if parsed is None:
         return None
     command, task_text = parsed
-    if not task_text or task_text.lower() == "help":
+    if not task_text or task_text.lower() in RESERVED_SUBCOMMANDS:
         return None
     sea_path = get_command(command)
     if sea_path is None:
