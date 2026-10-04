@@ -796,6 +796,9 @@ function testOrphanedFileTabBrowsesTheGlobalDir() {
   click(win, byId(win, 'activity-scm'));
   const status = msgs(posted, 'gitStatus').pop();
   assert.strictEqual(status.workDir, '/new');
+  // The desktop layout polls the task info every 5 s for as long as the
+  // page lives; closing the window drops that timer so node can exit.
+  win.close();
 }
 
 function testClosedSheetIsInertAndEscapeCloses(remote) {

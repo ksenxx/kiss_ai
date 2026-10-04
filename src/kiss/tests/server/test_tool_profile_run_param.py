@@ -349,9 +349,10 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        # The diagnostic is the SettingsError text naming the key.
+        # The diagnostic is the SettingsError text naming the key; the
+        # path is quoted with repr (Windows backslashes come doubled).
         assert (
-            f"agent script '{agent_path}': settings()['tool_profile'] must be str, got int"
+            f"agent script {agent_path!r}: settings()['tool_profile'] must be str, got int"
         ) in result.text, result.text
         assert calls == []
 

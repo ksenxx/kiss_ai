@@ -230,7 +230,7 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script '{agent_path}': settings()['add_to_prompt'] must be str, got int"
+            f"agent script {agent_path!r}: settings()['add_to_prompt'] must be str, got int"
         ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 

@@ -10512,7 +10512,7 @@ class RemoteAccessServer:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
-            cron_stop.set()
+            cron_agent.stop_scheduler_thread(cron_stop)
             self._close_ws_listeners()
             if not serve_task.done():
                 serve_task.cancel()

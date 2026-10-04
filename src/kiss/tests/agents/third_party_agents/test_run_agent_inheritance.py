@@ -264,8 +264,10 @@ class TestDispatchResultInheritance:
                 "def settings():\n"
                 "    return {'preset': 'worker', 'model': 'claude-sonnet-4-5'}\n"
             ),
+            # ``settings`` defined under a condition the script evaluates
+            # at import time (true on every platform the suite runs on).
             "conditional": (
-                "import os\nif os.name == 'posix':\n"
+                "import os\nif os.name in ('posix', 'nt'):\n"
                 "    def settings():\n        return {'model': 'claude-sonnet-4-5'}\n"
             ),
         }
@@ -312,10 +314,13 @@ class TestDispatchResultInheritance:
             text = run_agent(task="say hi", agent=str(script), timeout="30")
             # A file that does not even compile "failed to import";
             # one that runs but misdeclares its settings "failed while
-            # evaluating settings()".
+            # evaluating settings()".  The diagnostic names the script
+            # by its canonical path (``resolve_agent_path``), which on
+            # macOS differs from the ``/var`` spelling of ``tmp_path``.
+            canonical = script.resolve()
             expected = (
-                f"Error: SEA '{script}' failed to import" if label == "unparsable"
-                else f"Error: SEA {script} failed while evaluating settings()"
+                f"Error: SEA '{canonical}' failed to import" if label == "unparsable"
+                else f"Error: SEA {canonical} failed while evaluating settings()"
             )
             assert text.startswith(expected), (label, text)
             assert captured == [], label

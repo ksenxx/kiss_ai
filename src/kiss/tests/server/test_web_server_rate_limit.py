@@ -331,6 +331,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared on PATH is a bash script")
     async def test_rate_limit_line_marks_server(self) -> None:
         self._install_fake_cloudflared(
             'echo "ERR Error unmarshaling QuickTunnel response: '
@@ -349,6 +350,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         )
 
     @pytest.mark.slow
+    @posix_only("fake cloudflared on PATH is a bash script")
     async def test_clean_failure_does_not_mark_server(self) -> None:
         self._install_fake_cloudflared(
             'echo "INF starting tunnel" >&2\n'

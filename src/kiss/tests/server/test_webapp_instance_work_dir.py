@@ -315,6 +315,24 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         )
 
     @staticmethod
+    def _work_dir_changed_to(path: Path) -> Callable[[dict[str, Any]], bool]:
+        """Predicate: the ``workDirChanged`` broadcast announcing *path*."""
+        def _pred(msg: dict[str, Any]) -> bool:
+            return msg.get("type") == "workDirChanged" and msg.get("workDir") == str(path)
+        return _pred
+
+    async def _pick_work_dir(self, ws: ClientConnection, path: Path) -> None:
+        """Pick *path* from instance *ws* and wait until the daemon adopted it.
+
+        Picks from two instances are two independent connections: sent
+        back to back, the daemon may handle the second before the
+        first, so a test that means "B picks AFTER A" must see A's
+        ``workDirChanged`` before sending B's pick.
+        """
+        await self._send(ws, {"type": "setWorkDir", "workDir": str(path)})
+        await self._drain_until(ws, self._work_dir_changed_to(path))
+
+    @staticmethod
     def _files_event_with(name: str) -> Callable[[dict[str, Any]], bool]:
         """Predicate: a populated ``files`` event containing *name*."""
         def _pred(msg: dict[str, Any]) -> bool:
@@ -331,20 +349,9 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         in folder B, and both instances receive ``workDirChanged``."""
         ws_a = await self._connect_instance()
         ws_b = await self._connect_instance()
-        await self._send(
-            ws_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
-        )
-        await self._send(
-            ws_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
-        )
-        for ws in (ws_a, ws_b):
-            await self._drain_until(
-                ws,
-                lambda m: (
-                    m.get("type") == "workDirChanged"
-                    and m.get("workDir") == str(self.dir_b)
-                ),
-            )
+        await self._pick_work_dir(ws_a, self.dir_a)
+        await self._pick_work_dir(ws_b, self.dir_b)
+        await self._drain_until(ws_a, self._work_dir_changed_to(self.dir_b))
 
         await self._send(ws_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
@@ -363,19 +370,8 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         simply works in the global work_dir another instance picked."""
         ws_a = await self._connect_instance()
         ws_b = await self._connect_instance()
-        await self._send(
-            ws_a, {"type": "setWorkDir", "workDir": str(self.dir_a)},
-        )
-        await self._send(
-            ws_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
-        )
-        await self._drain_until(
-            ws_b,
-            lambda m: (
-                m.get("type") == "workDirChanged"
-                and m.get("workDir") == str(self.dir_b)
-            ),
-        )
+        await self._pick_work_dir(ws_a, self.dir_a)
+        await self._pick_work_dir(ws_b, self.dir_b)
 
         await ws_a.close()
         ws_a2 = await self._connect_instance()

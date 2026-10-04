@@ -235,7 +235,7 @@ class DockerImageRunParamTest(DaemonRunApiHarness):
         )
         assert result.success is False
         assert (
-            f"agent script '{script}': settings()['docker_image'] must be str, got int"
+            f"agent script {script!r}: settings()['docker_image'] must be str, got int"
         ) in result.text, result.text
         assert calls == []
 

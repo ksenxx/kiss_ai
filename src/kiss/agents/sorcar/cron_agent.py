@@ -129,7 +129,10 @@ non-default endpoint file.  Read by
 imports the CANONICAL ``kiss.agents.sorcar.cron_agent`` module: a
 dispatched cron session gets its ``cron_job`` tool from a fresh
 synthetic copy of this module whose own global is never set, and its
-``run_now`` still has to find the recorded endpoint.
+``run_now`` still has to find the recorded endpoint.  Cleared by
+:func:`stop_scheduler_thread` when that daemon shuts down, so a later
+daemon in the same process (an in-process restart, a test) is not sent
+to the dead one's endpoint.
 """
 CRON_SCAN_DAYS = 4 * 366 + 1  # covers the largest gap between leap days
 DEFAULT_TICK_INTERVAL_SECONDS = 60.0
@@ -1215,6 +1218,23 @@ def start_scheduler_thread(
         daemon=True,
     ).start()
     return stop_event
+
+
+def stop_scheduler_thread(stop_event: threading.Event) -> None:
+    """Stop a scheduler started by :func:`start_scheduler_thread`.
+
+    Sets *stop_event* so the loop exits, and forgets the hosting
+    daemon's endpoint file (:data:`_daemon_endpoint_file`): once that
+    daemon is down, dispatched sub-tasks and ``run_now`` in this
+    process must fall back to the standard endpoint resolution instead
+    of a dead endpoint.
+
+    Args:
+        stop_event: The event returned by :func:`start_scheduler_thread`.
+    """
+    global _daemon_endpoint_file
+    stop_event.set()
+    _daemon_endpoint_file = None
 
 
 def _job_view(job: dict[str, Any]) -> dict[str, Any]:
