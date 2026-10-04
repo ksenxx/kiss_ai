@@ -2125,6 +2125,10 @@ class _TaskRunnerMixin:
                         tools=client_tools,
                         append_basic_tools=_append_basic_tools,
                         inherited_tools=_inherited_tools,
+                        # Already part of ``task_prompt`` (see the
+                        # ``subtasks`` suffixing above); recorded so a
+                        # ``run_agent`` sub-task inherits it.
+                        prompt_suffix=append_to_prompt,
                         base_system_prompt=system_prompt_override,
                         _open_bare_path=_open_bare_path,
                         # ``SorcarAgent.run``'s ``system_prompt`` is an

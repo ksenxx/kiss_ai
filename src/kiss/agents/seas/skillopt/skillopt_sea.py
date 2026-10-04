@@ -709,7 +709,9 @@ def run_rollout(
     keyword arguments plus ``max_steps``); the target's own getters override
     it.  A target defining ``prompt()`` replaces the task's prompt with its
     fixed one (such a SEA varies only through ``setup``); ``append_to_prompt()``
-    is appended to the task's prompt.
+    is appended to the task's prompt (after a ``prompt_suffix`` the defaults
+    name), and the whole suffix is recorded on the run so the target's
+    ``run_agent`` sub-tasks inherit it.
     """
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _live_agent_usage
 
@@ -725,7 +727,8 @@ def run_rollout(
     kwargs: dict[str, Any] = {"web_tools": False, "is_parallel": False, "use_memory": False}
     kwargs.update(defaults or {})
     kwargs.update(target.rollout_kwargs())
-    prompt = str(kwargs.pop("prompt", "") or task.prompt) + str(kwargs.pop("append_to_prompt", ""))
+    prompt_suffix = str(kwargs.pop("prompt_suffix", "")) + str(kwargs.pop("append_to_prompt", ""))
+    prompt = str(kwargs.pop("prompt", "") or task.prompt) + prompt_suffix
     record = _TrajectoryRecorder(
         cfg.trajectory_chars, kwargs.pop("llm_call_hook", None), kwargs.pop("tool_call_hook", None)
     )
@@ -744,6 +747,7 @@ def run_rollout(
             verbose=False,
             llm_call_hook=record,
             tool_call_hook=record.tool_call,
+            prompt_suffix=prompt_suffix,
             **kwargs,
         )
         success, summary = _parse_result(raw)

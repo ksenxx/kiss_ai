@@ -1531,6 +1531,9 @@ class SorcarAgent(RelentlessAgent):
         # ``run_agent`` sub-task dispatched DURING the run can take
         # them over (``task_runner`` reads them off the parent agent).
         self._extra_tools: list[Callable[..., Any]] = []
+        # The ``appendToPrompt`` suffix of the current run (see
+        # ``run(prompt_suffix=...)``), kept on self for the same reason.
+        self._prompt_suffix: str = ""
         # Background jobs started by ``Bash(background=True)``, kept on
         # the agent (not the per-run UsefulTools) so a follow-up prompt
         # in the same chat can still wait on, tail or kill them.
@@ -2789,6 +2792,7 @@ class SorcarAgent(RelentlessAgent):
         use_memory: bool | None = None,
         tool_profile: str = "",
         live_browser: Any = None,
+        prompt_suffix: str = "",
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -2814,6 +2818,16 @@ class SorcarAgent(RelentlessAgent):
                 every surface (forwarded to every sub-agent).  None (no
                 daemon) shows a local window instead.
                 Set to False for terminal-only environments.
+            prompt_suffix: The caller-supplied text (the daemon's
+                ``appendToPrompt`` wire field, or an agent script's
+                ``append_to_prompt()``) that the caller has ALREADY
+                appended to *prompt_template*; it is not added again
+                here.  Recorded as ``_prompt_suffix`` so a ``run_agent``
+                sub-task dispatched during the run inherits it as its
+                own ``append_to_prompt`` (see
+                ``agent_dispatch.inherit_from_parent``).  Defaults to
+                "" (the run has no suffix).  Last in the signature so
+                every earlier argument keeps its position.
             is_parallel: Whether to include the run_parallel tool. Defaults to True.
                 When True, the agent can spawn parallel sub-agents for independent tasks.
             verbose: Whether to print output to console. Defaults to config verbose setting.
@@ -2908,6 +2922,7 @@ class SorcarAgent(RelentlessAgent):
         self._is_parallel = is_parallel
         self._append_basic_tools = append_basic_tools
         self._inherited_tools = list(inherited_tools or [])
+        self._prompt_suffix = prompt_suffix if prompt_suffix else ""
         # Stored on self (not just a local) so the ``run_parallel``
         # fan-out — which executes DURING ``super().run`` below — can
         # forward the same base system prompt to every sub-agent.

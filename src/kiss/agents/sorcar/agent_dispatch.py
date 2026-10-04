@@ -602,6 +602,11 @@ def inherit_from_parent(
       ``system_prompt()`` / ``append_to_system_prompt()`` getters still
       replace them on the daemon, and its ``add_to_system_prompt()``
       text is added after the inherited suffix.
+    - ``append_to_prompt``: the suffix the caller's own task prompt
+      was given (``_prompt_suffix``, the ``appendToPrompt`` of its
+      run), so the sub-task's prompt ends with the same text.  An
+      agent script's ``append_to_prompt()`` getter still replaces it
+      on the daemon.
     - the caller's extra tools (its agent script's ``add_to_tools()``
       list, plus those the caller inherited itself): not resolved
       here — a callable cannot travel the wire — but requested from
@@ -669,6 +674,10 @@ def inherit_from_parent(
         append_to_system_prompt=(
             options.append_to_system_prompt
             or str(getattr(parent_agent, "_system_prompt_suffix", "") or "")
+        ),
+        append_to_prompt=(
+            options.append_to_prompt
+            or str(getattr(parent_agent, "_prompt_suffix", "") or "")
         ),
         model_config=model_config,
         use_web_tools=(
@@ -894,18 +903,6 @@ def dispatch_result(
         resolve_tab = getattr(parent_agent, "_subagent_parent_tab_id", None)
         if callable(resolve_tab):
             parent_tab_id = str(resolve_tab() or "")
-    # A sub-task of an unattended (cron) run inherits the no-questions
-    # rule: without it a channel agent asked the user for an approval
-    # nobody could give and blocked until the run_agent timeout.  It
-    # travels in ``append_to_prompt``, which the daemon adds after an
-    # agent script's ``prompt()`` override has replaced the prompt body.
-    from kiss.agents.sorcar import cron_agent
-
-    if cron_agent.is_unattended(parent_agent):
-        options = dataclasses.replace(
-            options,
-            append_to_prompt=cron_agent.unattended_child_suffix(options.append_to_prompt),
-        )
     # A caller whose worktree was already torn down (a finished worktree
     # task) hands over the removed directory; creating it here would
     # leave an unregistered husk under ``.kiss-worktrees/``.
@@ -920,6 +917,22 @@ def dispatch_result(
         parent_agent if inherit else None, model_name, budget, options, agent_path,
     )
     model_name, budget, options = inherited.model_name, inherited.budget, inherited.options
+    # A sub-task of an unattended (cron) run inherits the no-questions
+    # rule: without it a channel agent asked the user for an approval
+    # nobody could give and blocked until the run_agent timeout.  It
+    # travels in ``append_to_prompt``, which the daemon adds after an
+    # agent script's ``prompt()`` override has replaced the prompt body.
+    # After ``inherit_from_parent`` so it follows the suffix inherited
+    # from the caller (the caller's own copy of this preamble, when
+    # the caller is itself such a sub-task, is kept rather than
+    # doubled).
+    from kiss.agents.sorcar import cron_agent
+
+    if cron_agent.is_unattended(parent_agent):
+        options = dataclasses.replace(
+            options,
+            append_to_prompt=cron_agent.unattended_child_suffix(options.append_to_prompt),
+        )
     # The caller's explicit overrides win over the dispatch-mode
     # defaults (``_dispatch`` has already refused a worktree /
     # auto-commit request in the pinned-off modes).  In the git
@@ -1356,7 +1369,8 @@ def make_run_agent_tool(
         conversation's earlier tasks and results), its system prompt
         additions together with the extra tools this task's own agent
         script added (so the sub-task can call the tools the inherited
-        instructions refer to), its web-tools and memory settings, its
+        instructions refer to), the text appended to this task's own
+        prompt, its web-tools and memory settings, its
         Docker container, and its effective worktree / auto-commit
         choices (both off inside a container: the sub-task then works
         in this task's tree).  Channel and cron sub-tasks inherit none
@@ -1452,8 +1466,12 @@ def make_run_agent_tool(
                 system prompt, so a run's extra system instructions reach its whole
                 task tree.  An agent script's ``append_to_system_prompt()`` still wins
                 and its ``add_to_system_prompt()`` text is added after it.
-            append_to_prompt: Extra text appended to the sub-task's prompt; empty appends nothing.
-                Appended to each ``<task>`` when the task holds several.
+            append_to_prompt: Extra text appended to the sub-task's prompt (to each
+                ``<task>`` when the task holds several).  The default for a
+                path-named agent script is the text appended to this task's own
+                prompt, so a run's extra prompt instructions reach its whole task
+                tree; for a channel or cron agent, empty appends nothing.  An
+                agent script's ``append_to_prompt()`` still wins.
             tool_profile: Tool profile the sub-task's built-in toolset is cut down to:
                 ``"full"`` (everything), ``"review"`` (read, run, browse and talk; no
                 editing or dispatch), ``"assistant"`` (shell plus ask_user_question,

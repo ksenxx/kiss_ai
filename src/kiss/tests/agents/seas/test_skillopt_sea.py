@@ -874,6 +874,53 @@ def test_run_rollout_applies_eval_defaults_and_prompt_getters(tmp_path: Path) ->
     assert rollout.passed is False and rollout.verdict == "missing expected text: ['done']"
 
 
+def test_run_rollout_sub_task_inherits_the_prompt_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``run_agent`` sub-task of a rollout gets the SEA's ``append_to_prompt()`` text.
+
+    ``run_rollout`` appends the getter's text (after a ``prompt_suffix``
+    from the eval set's defaults) to the prompt itself and hands it to
+    ``SorcarAgent.run(prompt_suffix=...)``, so the dispatch inherits it
+    like a daemon-run task's ``appendToPrompt``.
+    """
+    from kiss.agents.sorcar import daemon_client
+
+    sea = tmp_path / "suffix_sea.py"
+    sea.write_text(
+        "def system_prompt():\n    return 'p'\n\n\n"
+        "def append_to_prompt():\n    return '\\n\\nROLLOUT-SUFFIX'\n",
+        encoding="utf-8",
+    )
+    dispatched: list[dict[str, Any]] = []
+
+    def capture_run(prompt: str, **kwargs: Any) -> daemon_client.TaskResult:
+        dispatched.append({"prompt": prompt, **kwargs})
+        return daemon_client.TaskResult(
+            text="child ok", success=True, cost=0.0, tokens=1, steps=1, chat_id="c",
+        )
+
+    monkeypatch.setattr(daemon_client, "run", capture_run)
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+    task = EvalTask(id="t", prompt="parent task", expect=["done"])
+    bodies = [
+        tool_call_body("run_agent", {"task": "child task", "agent": "", "timeout": "30"}, 500),
+        finish_body("<p>done</p>", 600),
+    ]
+    with serve(bodies) as (url, requests):
+        cfg = _config(tmp_path, sea, tmp_path / "unused.json", url)
+        rollout = run_rollout(
+            SeaTarget(sea), task, cfg, tmp_path / "w1",
+            {"max_steps": 7, "prompt_suffix": "\n\nEVAL-SUFFIX"},
+        )
+    assert rollout.passed, rollout
+    user = [m for m in requests[0]["messages"] if m["role"] == "user"]
+    assert str(user[0]["content"]).rstrip().endswith("EVAL-SUFFIX\n\nROLLOUT-SUFFIX")
+    (call,) = dispatched
+    assert call["prompt"] == "child task"
+    assert call["append_to_prompt"] == "\n\nEVAL-SUFFIX\n\nROLLOUT-SUFFIX"
+
+
 def test_missing_split_is_an_error(tmp_path: Path) -> None:
     """An eval set with no train task (or no selection task) cannot be optimized."""
     sea = _copy_sh_sea(tmp_path)

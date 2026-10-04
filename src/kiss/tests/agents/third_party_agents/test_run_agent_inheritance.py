@@ -9,8 +9,9 @@ task's project, so the arguments the call leaves empty are filled from the
 calling agent the way a ``run_parallel`` child's are
 (:func:`kiss.agents.sorcar.agent_dispatch.inherit_from_parent`): model,
 same-model model configuration, half of the remaining budget, chat id,
-the run's replacement system prompt and appended system-prompt text,
-web-tools and memory settings, the live Docker container, and the
+the run's replacement system prompt, appended system-prompt text and
+appended prompt text, web-tools and memory settings, the live Docker
+container, and the
 effective worktree / auto-commit choices.  Channel and cron sub-tasks and
 explicit programmatic callers (``inherit=False``) inherit nothing.
 
@@ -35,6 +36,7 @@ import yaml
 from kiss.agents.sorcar import agent_dispatch, daemon_client
 from kiss.agents.sorcar.agent_dispatch import RunOptions, dispatch_result, make_run_agent_tool
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.cron_agent import UNATTENDED_CHILD_PREAMBLE, unattended_child_suffix
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import BudgetExceededError
 from kiss.server.agent_file import apply_agent_overrides
@@ -54,6 +56,7 @@ PARENT_MODEL = "gpt-4o-mini"
 PARENT_CONFIG = {"base_url": "http://127.0.0.1:1/v1", "api_key": "kiss-test-key"}
 PARENT_BASE_PROMPT = "You are the parent run's replacement system prompt."
 PARENT_SUFFIX = "Parent rule: answer in French."
+PARENT_PROMPT_SUFFIX = "\n\nWhen done, append the word PARENT-SUFFIX to your summary."
 
 
 @pytest.fixture()
@@ -99,6 +102,7 @@ def _parent_after_a_run(repo: Path, auto_commit: bool, use_worktree: bool) -> Wo
     parent._chat_id = "chat-parent"
     parent._base_system_prompt = PARENT_BASE_PROMPT
     parent._system_prompt_suffix = PARENT_SUFFIX
+    parent._prompt_suffix = PARENT_PROMPT_SUFFIX
     parent._use_web_tools = False
     parent._use_memory_override = True
     parent.auto_commit_enabled = auto_commit
@@ -141,6 +145,7 @@ class TestDispatchResultInheritance:
         assert call["chat_id"] == "chat-parent"
         assert call["system_prompt"] == PARENT_BASE_PROMPT
         assert call["append_to_system_prompt"] == PARENT_SUFFIX
+        assert call["append_to_prompt"] == PARENT_PROMPT_SUFFIX
         assert call["use_web_tools"] is False
         assert call["use_memory"] is True
         assert call["docker_image"] == ""
@@ -157,12 +162,14 @@ class TestDispatchResultInheritance:
         """The daemon applies the script's getters to the wire fields the parent filled.
 
         ``system_prompt()`` replaces the inherited base prompt;
-        ``add_to_system_prompt()`` is added after the inherited suffix.
+        ``add_to_system_prompt()`` is added after the inherited suffix;
+        ``append_to_prompt()`` replaces the inherited prompt suffix.
         """
         script = env.repo / "prompts_sea.py"
         script.write_text(
             "def system_prompt() -> str:\n    return 'script base'\n\n"
-            "def add_to_system_prompt() -> str:\n    return 'script addition'\n"
+            "def add_to_system_prompt() -> str:\n    return 'script addition'\n\n"
+            "def append_to_prompt() -> str:\n    return 'script prompt suffix'\n"
         )
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         result = dispatch_result(
@@ -173,14 +180,19 @@ class TestDispatchResultInheritance:
         (call,) = captured
         assert call["system_prompt"] == PARENT_BASE_PROMPT
         assert call["append_to_system_prompt"] == PARENT_SUFFIX
+        assert call["append_to_prompt"] == PARENT_PROMPT_SUFFIX
         cmd = {
             "agentPath": call["extension_agent_path"],
             "systemPrompt": call["system_prompt"],
             "appendToSystemPrompt": call["append_to_system_prompt"],
+            "appendToPrompt": call["append_to_prompt"],
         }
-        assert apply_agent_overrides(cmd) == {"systemPrompt", "appendToSystemPrompt"}
+        assert apply_agent_overrides(cmd) == {
+            "systemPrompt", "appendToSystemPrompt", "appendToPrompt",
+        }
         assert cmd["systemPrompt"] == "script base"
         assert cmd["appendToSystemPrompt"] == f"{PARENT_SUFFIX}\n\nscript addition"
+        assert cmd["appendToPrompt"] == "script prompt suffix"
 
     def test_parent_worktree_and_auto_commit_on_are_inherited_over_config_off(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -200,6 +212,7 @@ class TestDispatchResultInheritance:
         options = RunOptions(
             chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
             system_prompt="explicit base", append_to_system_prompt="explicit suffix",
+            append_to_prompt="explicit prompt suffix",
             use_worktree=False, auto_commit=False, use_web_tools=True, use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
@@ -210,6 +223,7 @@ class TestDispatchResultInheritance:
         assert call["chat_id"] == "chat-explicit"
         assert call["system_prompt"] == "explicit base"
         assert call["append_to_system_prompt"] == "explicit suffix"
+        assert call["append_to_prompt"] == "explicit prompt suffix"
         assert call["use_web_tools"] is True
         assert call["use_memory"] is False
         assert call["use_worktree"] is False
@@ -343,11 +357,31 @@ class TestDispatchResultInheritance:
         assert call["chat_id"] == ""
         assert call["system_prompt"] == ""
         assert call["append_to_system_prompt"] == ""
+        assert call["append_to_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["inherit_tools"] is False
         assert call["use_worktree"] is True
         assert call["auto_commit"] is True
+
+    def test_unattended_preamble_follows_the_inherited_prompt_suffix(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """A cron sub-task's no-questions rule is added after the inherited suffix.
+
+        A caller that is itself an unattended sub-task already carries
+        the preamble in its suffix; the child's suffix is then the
+        caller's, not the preamble twice.
+        """
+        parent = _parent_after_a_run(env.repo, auto_commit=False, use_worktree=False)
+        parent.task_description = "nightly chores" + unattended_child_suffix("")
+        _dispatch(parent)
+        assert captured[0]["append_to_prompt"] == (
+            PARENT_PROMPT_SUFFIX + "\n\n" + UNATTENDED_CHILD_PREAMBLE
+        )
+        parent._prompt_suffix = unattended_child_suffix("")
+        _dispatch(parent)
+        assert captured[1]["append_to_prompt"] == unattended_child_suffix("")
 
     def test_exhausted_parent_budget_raises_like_run_parallel(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],
@@ -374,6 +408,7 @@ class TestDispatchResultInheritance:
         assert call["chat_id"] == ""
         assert call["system_prompt"] == ""
         assert call["append_to_system_prompt"] == ""
+        assert call["append_to_prompt"] == ""
         assert call["use_web_tools"] is None
         assert call["use_memory"] is None
         assert call["docker_image"] == ""
@@ -488,6 +523,26 @@ class TestFullRunInheritance:
         (call,) = captured
         assert call["system_prompt"] == PARENT_BASE_PROMPT
         assert call["append_to_system_prompt"] == PARENT_SUFFIX
+
+    def test_run_prompt_suffix_reaches_the_sub_task(
+        self, env: IsolatedKissHome, captured: list[dict[str, Any]],
+    ) -> None:
+        """The ``appendToPrompt`` text a run was given becomes the sub-task's.
+
+        The daemon appends the suffix to the prompt itself and hands
+        it to ``run(prompt_suffix=...)`` for the record; the dispatch
+        sends it as the sub-task's ``append_to_prompt``.
+        """
+        env.write_config(classify_tasks=False, is_worktree=False, auto_commit_mode=False)
+        server = StandInModelServer(_DelegatingModel())
+        try:
+            parent = _run_parent(
+                env, server, use_worktree=False, prompt_suffix=PARENT_PROMPT_SUFFIX,
+            )
+        finally:
+            server.stop()
+        assert parent._prompt_suffix == PARENT_PROMPT_SUFFIX
+        assert captured[0]["append_to_prompt"] == PARENT_PROMPT_SUFFIX
 
     def test_worktree_run_passes_its_worktree_and_its_directory(
         self, env: IsolatedKissHome, captured: list[dict[str, Any]],

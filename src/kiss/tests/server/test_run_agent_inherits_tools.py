@@ -20,6 +20,11 @@ The tool callables cannot travel the wire: ``run_agent`` sends the
 ``inheritTools`` flag and the daemon takes them off the running parent
 (``task_runner._parent_extra_tools``) and hands them to
 ``SorcarAgent.run(inherited_tools=...)``.
+
+The same run checks that the parent's ``append_to_prompt`` text ends
+every sub-task's prompt too: the daemon records the suffix it appended
+on the parent agent (``SorcarAgent.run(prompt_suffix=...)``) and the
+dispatch sends it as each sub-task's ``append_to_prompt``.
 """
 
 from __future__ import annotations
@@ -162,6 +167,8 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
     (repo / "child_fixed_sea.py").write_text(CHILD_FIXED_SCRIPT, encoding="utf-8")
     child_tools: dict[str, list[str]] = {}
     child_prompts: dict[str, str] = {}
+    child_last_messages: dict[str, str] = {}
+    parent_suffix = "\n\nPARENT-SUFFIX: end the summary with the word suffix."
 
     def dispatch(agent: str, marker: str) -> dict[str, Any]:
         return tool_call_response(
@@ -183,6 +190,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
             if marker in last:
                 child_tools[marker] = _tool_names(request)
                 child_prompts[marker] = request_text(request)
+                child_last_messages[marker] = last
                 return finish_response(f"done-{marker}")
         return dispatch("", "CHILD-A")
 
@@ -196,6 +204,7 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
             model_config=model.model_config,
             use_worktree=False,
             auto_commit=False,
+            append_to_prompt=parent_suffix,
             endpoint_file=daemon,
             timeout=300,
         )
@@ -203,6 +212,12 @@ def test_run_agent_sub_tasks_get_the_parents_add_to_tools(
         model.stop()
     assert result.success is True, result
     assert "parent-done" in result.text
+
+    # Every sub-task's prompt ends with the parent's own prompt suffix.
+    for marker in ("CHILD-A", "CHILD-B", "CHILD-C"):
+        assert child_last_messages[marker].rstrip().endswith(parent_suffix.strip()), (
+            marker, child_last_messages[marker][-300:],
+        )
 
     # The plain sub-agent (dummy_sea.py) runs the basic toolset plus
     # the parent's tool — and reads the parent's protocol it refers to.
