@@ -23949,7 +23949,8 @@
       const empty = document.createElement('div');
       empty.className = 'custom-models-empty';
       const homeDir = (window.__BRAND__ && window.__BRAND__.homeDir) || '.kiss';
-      empty.textContent = 'No custom models in ~/' + homeDir + '/MY_MODELS.json';
+      empty.textContent =
+        'No custom models in ~/' + homeDir + '/MY_MODELS.json';
       list.appendChild(empty);
       return;
     }
