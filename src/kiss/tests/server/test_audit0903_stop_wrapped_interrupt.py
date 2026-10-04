@@ -223,7 +223,7 @@ class TestStopWrappedInterrupt(TestCase):
             "taskId": run_token,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             **run_fields,
         })
@@ -273,7 +273,7 @@ class TestStopWrappedInterrupt(TestCase):
             "tabId": tab_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(script),
         })

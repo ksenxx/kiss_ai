@@ -332,7 +332,7 @@ class DaemonRunApiHarness(unittest.TestCase):
                 "workDir": self.repo,
                 "model": "",
                 "useWorktree": False,
-                "webTools": False,
+                "useWebTools": False,
                 **extra_cmd,
             }
             ws.send(json.dumps(cmd))

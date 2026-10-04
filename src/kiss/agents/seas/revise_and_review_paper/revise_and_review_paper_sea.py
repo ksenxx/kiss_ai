@@ -484,7 +484,7 @@ def loop_status(reviews: str, max_rounds: int = DEFAULT_MAX_ROUNDS, overrides: s
     return "\n".join(lines)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the coordinator's rules to the default system prompt."""
     return SYSTEM_PROMPT
 
@@ -494,31 +494,21 @@ def add_to_tools() -> list[Any]:
     return [writer_task, reviewer_task, loop_status]
 
 
-def use_web_tools() -> bool:
-    """No browsing: the writer and the reviewer browse; the coordinator only dispatches them."""
-    return False
+def settings() -> dict[str, Any]:
+    """A sequential coordinator with the full toolset that may run for a day.
 
-
-def is_parallel() -> bool:
-    """No ``run_parallel``: the rounds are sequential ``run_agent`` calls."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the loop always needs the full system prompt."""
-    return False
-
-
-def tool_profile() -> str:
-    """Keep the full toolset: a task text that reads as a review would otherwise put the
-    coordinator on the read-only ``review`` profile, which has no ``run_agent``."""
-    return "full"
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/revise_and_review_paper`` relay waits for the loop before stopping it.
-
-    The rounds run for hours; the default 300 s ``run_agent`` wait would stop the loop
-    during the first writing round.
+    The rounds run as ``run_agent`` sub-tasks, so fan-out stays off; the
+    ``full`` profile keeps ``run_agent`` available even when a reviewer
+    dispatches the loop (the read-only ``review`` profile has none).  The
+    ``timeout`` tells the dispatcher a ``/revise_and_review_paper`` run
+    may take up to a day.
     """
-    return DISPATCH_TIMEOUT_SECONDS
+    return {
+        "use_web_tools": False,
+        "is_parallel": False,
+        "classify_tasks": False,
+        "tool_profile": "full",
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

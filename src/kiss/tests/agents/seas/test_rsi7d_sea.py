@@ -40,6 +40,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.utils import rmtree_force
@@ -171,9 +172,16 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     assert "{{HOME_DIR}}" in sea.SYSTEM_PROMPT and "{{" not in sea.system_prompt()
     assert f"~/{HOME_DIR}/MODEL_INFO.json" in sea.system_prompt()
     assert "--seas-dir" in sea.description() and "--seas-dir" in sea.SYSTEM_PROMPT
-    assert sea.max_budget() == 2000.0
-    assert sea.use_memory() is True
-    assert sea.use_web_tools() is False
+    assert sea.settings() == {"max_budget": 2000.0, "use_memory": True, "use_web_tools": False}
+    # No preset named: the resolved settings are those three keys plus the
+    # ``system_prompt()`` getter's value under the default ``session`` preset.
+    assert resolve_settings(vars(sea)) == {
+        "preset": "session",
+        "system_prompt": sea.system_prompt(),
+        **sea.settings(),
+    }
+    for legacy in ("max_budget", "use_memory", "use_web_tools", "append_to_system_prompt"):
+        assert not hasattr(sea, legacy), legacy
     names = [t.__name__ for t in sea.add_to_tools()]
     assert names == [
         "indexed_seas",
@@ -196,11 +204,10 @@ def test_sea_getters_and_prompt_follow_the_contract() -> None:
     for name in names:
         assert f"`{name}" in sea.SYSTEM_PROMPT or name in sea.SYSTEM_PROMPT, name
     assert sea_commands.get_command("rsi7d") == _SEA_PATH
-    assert (
-        sea_commands.rewrite_prompt_if_command("/rsi7d") is None
-    )  # a slash command needs task text
-    rewritten = sea_commands.rewrite_prompt_if_command("/rsi7d all")
-    assert rewritten is not None and rewritten[1] == _SEA_PATH
+    assert sea_commands.slash_command_task("/rsi7d") is None  # a slash command needs task text
+    hit = sea_commands.slash_command_task("/rsi7d all")
+    assert hit == ("all", _SEA_PATH)
+    assert sea_commands.sea_settings(_SEA_PATH) == resolve_settings(vars(sea))
 
 
 def test_sea_name_of_handles_paths_channels_and_plain_subagents() -> None:
@@ -899,6 +906,7 @@ def _run_registered(
     agent: WorktreeSorcarAgent, task: str, script: list[bytes], work_dir: Path
 ) -> tuple[str, list[dict[str, Any]]]:
     """Run *agent* on *task* against the scripted model; return the raw result and requests."""
+    settings = resolve_settings(vars(sea))
     with serve(script) as (url, requests):
         result = agent.run(
             prompt_template=task,
@@ -906,11 +914,11 @@ def _run_registered(
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=8,
-            max_budget=sea.max_budget(),
+            max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
-            base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
+            base_system_prompt=settings["system_prompt"],
+            web_tools=settings["use_web_tools"],
             use_memory=False,
             is_parallel=False,
             verbose=False,

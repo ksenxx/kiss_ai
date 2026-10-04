@@ -202,7 +202,12 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
         assert _PROMPT_MARKER in call["arguments"]["task_description"]
 
     def test_agent_script_getter_wrong_type_fails_task(self) -> None:
-        """A non-string ``append_to_prompt()`` stops the task loudly."""
+        """A non-string ``append_to_prompt()`` stops the task loudly.
+
+        The deprecated getter stands for the ``add_to_prompt`` settings
+        key, so the diagnostic is the ``SettingsError`` text naming that
+        key and the offending type, suffixed with the script path.
+        """
         agent_path = self._write_py(
             "bad_append_prompt_agent.py",
             '''
@@ -225,8 +230,9 @@ class AppendToPromptsApiTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "append_to_prompt" in result.text
-        assert "string" in result.text
+        assert (
+            f"agent script '{agent_path}': append_to_prompt() must be str, got int"
+        ) in result.text, result.text
         assert calls == [], "no executor session may start for a broken script"
 
     def test_malformed_wire_fields_append_nothing(self) -> None:

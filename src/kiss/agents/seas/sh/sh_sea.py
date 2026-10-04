@@ -19,6 +19,8 @@ follow the SEA contract in :mod:`kiss.server.agent_file`.
 
 from __future__ import annotations
 
+from typing import Any
+
 SYSTEM_PROMPT = (
     "You are a shell-command execution assistant. The user's message contains a shell "
     "command they want executed in their own sandbox. Your job: (1) call the Bash tool "
@@ -52,40 +54,15 @@ def description() -> str:
 
 
 def system_prompt() -> str:
-    """Return the shell agent's base system prompt."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
 
 
-def tool_profile() -> str:
-    """Give the agent the ``Bash`` tool and no other built-in tool."""
-    return "bash"
+def settings() -> dict[str, Any]:
+    """A worker with Bash only, on the real checkout, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "preset": "worker",
+        "tool_profile": "bash",
+    }
 
 
-def use_worktree() -> bool:
-    """Run the command directly in the tab's working directory."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never auto-commit: the run only reports a command's output."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the run needs no lite/full prompt choice."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Never fan out: one command, one Bash call."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Never enable browser tools: the command runs in the shell."""
-    return False
-
-
-def use_memory() -> bool:
-    """Never load persistent memory tools: a command's output is not knowledge."""
-    return False

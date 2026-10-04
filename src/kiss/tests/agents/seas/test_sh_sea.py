@@ -24,6 +24,7 @@ import yaml
 from kiss.agents.seas.sh import sh_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.sorcar_agent import TOOL_PROFILES
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -55,25 +56,37 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "call the Bash tool with the user's command exactly as written" in prompt
     assert "call the `finish` tool" in prompt
     assert "must never be empty" in prompt
-    assert sh_sea.tool_profile() == "bash"
+    assert sh_sea.settings() == {"preset": "worker", "tool_profile": "bash"}
     assert TOOL_PROFILES["bash"] == frozenset({"Bash"})
-    assert sh_sea.use_worktree() is False
-    assert sh_sea.auto_commit() is False
-    assert sh_sea.classify_tasks() is False
-    assert sh_sea.is_parallel() is False
-    assert sh_sea.use_web_tools() is False
-    assert sh_sea.use_memory() is False
+    # The ``worker`` preset turns worktree, auto-commit, classifier,
+    # fan-out, browser and memory off; ``system_prompt()`` stays a getter.
+    assert resolve_settings(vars(sh_sea)) == {
+        "preset": "worker",
+        "tool_profile": "bash",
+        "system_prompt": sh_sea.SYSTEM_PROMPT,
+        "use_worktree": False,
+        "auto_commit": False,
+        "classify_tasks": False,
+        "is_parallel": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
+    for legacy in (
+        "tool_profile", "use_worktree", "auto_commit", "classify_tasks",
+        "is_parallel", "use_web_tools", "use_memory", "max_budget",
+    ):
+        assert not hasattr(sh_sea, legacy), legacy
 
 
 def test_slash_sh_resolves_to_the_bundled_sea() -> None:
-    """``/sh <command>`` is rewritten into a ``run_agent`` directive on this file."""
+    """``/sh <command>`` resolves to the command text and this file (run directly)."""
     assert sea_commands.get_command("sh") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/sh git status --short")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/sh git status --short")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert f'agent = "{_SEA_PATH}"' in prompt
-    assert prompt.endswith("TASK TEXT FOR run_agent:\ngit status --short")
+    assert task_text == "git status --short"
+    assert sea_commands.sea_settings(path) == resolve_settings(vars(sh_sea))
 
 
 def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) -> None:
@@ -92,6 +105,7 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
         ),
         finish_body("<pre>sh-sea-output 42</pre>", prompt_tokens=600),
     ]
+    settings = resolve_settings(vars(sh_sea))
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("sh-sea-test")
         result = agent.run(
@@ -101,11 +115,11 @@ def test_bash_profile_runs_the_command_and_returns_its_output(tmp_path: Path) ->
             max_steps=4,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            base_system_prompt=sh_sea.system_prompt(),
-            tool_profile=sh_sea.tool_profile(),
-            web_tools=sh_sea.use_web_tools(),
-            use_memory=sh_sea.use_memory(),
-            is_parallel=sh_sea.is_parallel(),
+            base_system_prompt=settings["system_prompt"],
+            tool_profile=settings["tool_profile"],
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            is_parallel=settings["is_parallel"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

@@ -955,28 +955,23 @@ def _execute_sea(path: Path) -> dict[str, Any]:
 
 
 def system_prompt() -> str:
-    """Replace the default Sorcar system prompt with the rsi7d procedure (brand rendered)."""
+    """Return :data:`SYSTEM_PROMPT` with the brand placeholders filled."""
     return render_brand(SYSTEM_PROMPT)
 
 
-def max_budget() -> float:
-    """Sweeping several SEAs needs room for replays of past runs that cost up to $500 each.
+def settings() -> dict[str, Any]:
+    """Run :data:`SYSTEM_PROMPT` with memory, without the browser, under a $2000 cap.
 
-    A sub-agent's spend counts toward this task's total, so the cap must
-    hold the mining work plus a few $500-class replays (the procedure
-    limits replays to 60% of the remaining budget).
+    Sweeping several SEAs needs room for replays of past runs that cost
+    up to $500 each: a sub-agent's spend counts toward this task's total,
+    so the cap must hold the mining work plus a few $500-class replays
+    (the procedure limits replays to 60% of the remaining budget).
     """
-    return 2000.0
-
-
-def use_memory() -> bool:
-    """Lessons about SEA failure modes are worth remembering across sweeps."""
-    return True
-
-
-def use_web_tools() -> bool:
-    """Replays and evidence mining are local; no browsing."""
-    return False
+    return {
+        "max_budget": 2000.0,
+        "use_memory": True,
+        "use_web_tools": False,
+    }
 
 
 @dataclass(frozen=True)

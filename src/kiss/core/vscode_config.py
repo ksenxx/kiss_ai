@@ -125,7 +125,7 @@ purges it from both the value read and the file written.
 
 ``is_parallel`` is retired rather than merely removed for that reason:
 it never had a single reader — whether a run may spawn parallel
-sub-agents comes from the run command's ``useParallel`` flag — yet it
+sub-agents comes from the run command's ``isParallel`` flag — yet it
 was written to every user's ``config.json`` and broadcast in every
 ``configData``, which invites a future reader to wire it up and
 silently disagree with the real source of truth.

@@ -694,5 +694,20 @@ def add_to_tools() -> list:
     return EmailAgent()._get_tools()
 
 
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"preset": "channel"}
+
+
+def add_to_system_prompt() -> str:
+    """Return the channel guidance appended to the run's system prompt."""
+    return EmailAgent.channel_system_prompt
+
+
 if __name__ == "__main__":
     main()

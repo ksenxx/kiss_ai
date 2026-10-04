@@ -342,7 +342,7 @@ class TestTabMirroring(TabMirroringBase):
             "workDir": self.tmpdir,
             "tabId": "tab-run",
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
 
@@ -628,7 +628,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
             "workDir": self.tmpdir,
             "tabId": "tab-tt",
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
         })
         stt_b = await self._wait_for_event(
@@ -671,7 +671,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
                 "model": "definitely-not-a-real-model",
                 "workDir": self.tmpdir,
                 "useWorktree": False,
-                "useParallel": False,
+                "isParallel": False,
                 "autoCommit": False,
             }).encode("utf-8") + b"\n")
             await writer.drain()
@@ -776,7 +776,7 @@ class TestTabMirroringReviewFixes(TabMirroringBase):
                     "workDir": self.tmpdir,
                     "agentPath": str(tools_py),
                     "useWorktree": False,
-                    "useParallel": False,
+                    "isParallel": False,
                     "autoCommit": False,
                 }).encode("utf-8") + b"\n")
                 await writer.drain()

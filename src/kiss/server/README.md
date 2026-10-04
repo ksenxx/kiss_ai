@@ -2,24 +2,28 @@
 
 A **Sorcar Extension Agent (SEA)** is a plain Python file whose path you pass as
 `extension_agent_path` to `kiss.server.sorcar.run()`.  The daemon
-imports the file, calls its top-level `X()` functions — named after
-`run()`'s parameters — and uses
-the return values to override the run's parameters.  Parameters
-without a getter keep whatever the caller passed (or the default).
-The getters execute **in the daemon process** and are re-imported from
-source on every run (no `__pycache__` is written).
+imports the file, calls its top-level `settings()` function — which
+returns a dict of a `preset` and the `run()` parameters the SEA wants
+to pin — and writes those values over the run's parameters.
+Parameters the dict does not name keep whatever the caller passed (or
+the default).  A few more top-level functions add to the run: a
+replacement `system_prompt()`, additive `add_to_system_prompt()` and
+`add_to_tools()`, and two hook getters.  Everything the file defines
+executes **in the daemon process** and is re-imported from source on
+every run (no `__pycache__` is written).
 
 Each SEA lives in its own folder named after it, `<name>/<name>_sea.py`,
 together with the helper modules and data files it needs (the bundled
 `src/kiss/agents/seas/sh/sh_sea.py` and
 `src/kiss/agents/third_party_agents/slack/slack_sea.py` are laid out this
-way).  Besides the run-parameter getters, every SEA must define
+way).  Besides `settings()`, every SEA must define
 `description()`: a zero-argument function returning one sentence that
 says what the SEA does and how to use it.  It is what the chat command
 `/<name> help` prints (see the slash-command bullet under [Tips](#tips)).
 
-This tutorial covers every overridable parameter, the two tool
-getters, error handling, and ends with a complete working example.
+This tutorial covers every `settings()` key and preset, the additive
+functions, how `run_agent` and `/xxx` commands run a SEA, error
+handling, and ends with a complete working example.
 
 ### Prerequisites
 
@@ -48,14 +52,13 @@ def description() -> str:
     )
 
 
-def prompt() -> str:
-    return "Look up the current weather in San Francisco and report it."
-
-def max_budget() -> float:
-    return 0.50
-
-def use_worktree() -> bool:
-    return False  # no repo changes expected
+def settings() -> dict:
+    return {
+        "preset": "worker",       # no worktree, auto-commit, classifier, fan-out, browser, memory
+        "tool_profile": "none",   # no built-in tool: get_weather + finish only
+        "prompt": "Look up the current weather in San Francisco and report it.",
+        "max_budget": 0.50,
+    }
 
 def system_prompt() -> str:
     return (
@@ -75,8 +78,7 @@ def get_weather(city: str) -> str:
     resp.raise_for_status()
     return resp.text.strip()
 
-def tools() -> list:
-    """The agent's whole tool set: get_weather + finish (no built-in tools)."""
+def add_to_tools() -> list:
     return [get_weather]
 ```
 
@@ -86,7 +88,7 @@ Launch it:
 from kiss.server import sorcar
 
 result = sorcar.run(
-    "placeholder",  # required non-blank; overridden by prompt()
+    "placeholder",  # required non-blank; overridden by settings()["prompt"]
     extension_agent_path="weather/weather_sea.py",
 )
 print(result.text, result.success, result.cost)
@@ -94,8 +96,8 @@ print(result.text, result.success, result.cost)
 
 The client-side `prompt` argument must be non-empty (the client
 validates this before connecting to the daemon), but when the agent
-script defines `prompt()`, the script's return value replaces it
-on the daemon.
+script's `settings()` has a `prompt` key, that value replaces it on
+the daemon.
 
 
 ## How it works
@@ -109,12 +111,13 @@ on the daemon.
  )                                       apply_agent_overrides(cmd)
    │                                         │
    │ validate path exists                    │ import agent.py
-   │ resolve to absolute                     │ for each getter X the script defines:
-   │ send JSON {"agentPath": "…", …}        │   call X()
-   │ over the local WSS endpoint             │   type-check return value
-   │                                         │   stage override
-   ▼                                         │ apply staged overrides to cmd
- block, read events ◄───────────────────     │ (tools()/add_to_tools() list → cmd["tools"])
+   │ resolve to absolute                     │ settings = resolve_settings(module)
+   │ send JSON {"agentPath": "…", …}        │   preset defaults + explicit keys
+   │ over the local WSS endpoint             │   type-check every value
+   │                                         │ stage one wire field per key
+   ▼                                         │ stage add_to_system_prompt(), add_to_prompt,
+ block, read events ◄───────────────────     │   add_to_tools() → cmd["tools"], hooks
+                                             │ apply staged overrides to cmd
                                              ▼
                                          agent.run(tools=cmd["tools"], …)
 ```
@@ -127,81 +130,147 @@ on the daemon.
    `ValueError` immediately (before any daemon connection).
 
 2. **Daemon side** — `apply_agent_overrides()` (in
-   `kiss.server.agent_file`) imports the file, iterates every
-   overridable parameter, calls `X()` when defined, type-checks
-   the return value, and writes the checked value into the command
-   dict.  Overrides are staged: they apply atomically only after every
-   getter succeeds.  A broken getter raises `AgentFileError` and the
-   task fails with a diagnostic message in `TaskResult.text`.
+   `kiss.server.agent_file`) imports the file and resolves its
+   settings (`kiss.agents.sorcar.sea_settings.resolve_settings`: the
+   named preset's defaults with the explicit keys of `settings()` on
+   top, every value type-checked), then writes each key into the
+   command dict's wire field.  `add_to_system_prompt()` and the
+   `add_to_prompt` setting are appended to the command's
+   `appendToSystemPrompt` / `appendToPrompt`.  Overrides are staged:
+   they apply atomically only after everything succeeds.  A broken
+   script raises `AgentFileError` and the task fails with a diagnostic
+   message in `TaskResult.text`.
 
-3. **Tools** — The list of callables a `tools()` or `add_to_tools()`
-   getter returned is staged on the daemon-side command dict's `tools`
-   field (never on the wire, like the hooks) and passed straight to
-   the agent as its tools, together with the `appendBasicTools` flag
-   the getter implies.  Nothing is re-imported.
+3. **Tools** — The list of callables `add_to_tools()` returned is
+   staged on the daemon-side command dict's `tools` field (never on
+   the wire, like the hooks) and passed straight to the agent, added
+   to its built-in toolset; with `"tool_profile": "none"` the daemon
+   builds no built-in toolset and the list plus `finish` is the whole
+   tool set.  Nothing is re-imported.
 
 
-## Overridable parameters
+## `settings()`: the run parameters
 
-Every parameter of `sorcar.run()` except `timeout`, `stop_on_timeout`,
-`endpoint_file`, `parent_task_id`, `parent_tab_id`, `parent_reviewer`,
-`side_channel`, and `extension_agent_path` itself has a corresponding
-getter the SEA may define.  The getter is named `X()` for parameter `X`.
+A SEA pins the parameters of its run with ONE optional top-level
+function, `settings()`, returning a dict of a `preset` (a named bundle
+of defaults) and any of the keys below (`sea_settings.SETTING_TYPES`).
+Every key but `preset`, `timeout` and `add_to_prompt` is a parameter
+of `sorcar.run()` and lands on that parameter's wire field; the wire
+name is the keyword in camelCase (`agent_file.wire_field`:
+`use_web_tools` → `useWebTools`), so no hand-kept table is needed.
 Extra tools have no `run()` parameter at all (a callable cannot travel
-the wire): they come from one of the two tool getters, `tools()` or
-`add_to_tools()` (see below).  `scope_work_dir` has no getter either:
-the calling workspace is the caller's identity.  The table below lists
-them all.
+the wire): they come from `add_to_tools()` (see below).  The bundled
+`/sh` agent is the whole pattern:
 
-| Getter function              | Return type                     | `run()` default           | Wire field          |
-|------------------------------|---------------------------------|---------------------------|---------------------|
-| `prompt()`               | `str` (non-empty)               | (required argument)       | `prompt`            |
-| `work_dir()`             | `str`                           | `""` (daemon default)     | `workDir`           |
-| `model()`                | `str`                           | `""` (daemon default)     | `model`             |
-| `chat_id()`              | `str`                           | `""` (new chat)           | `chatId`            |
-| `system_prompt()`        | `str`                           | `""` (daemon-selected)    | `systemPrompt`      |
-| `tools()`                | `list` of callables             | (no parameter)            | daemon-side `tools` + `appendBasicTools=False` |
-| `add_to_tools()`         | `list` of callables             | (no parameter)            | daemon-side `tools` + `appendBasicTools=True`  |
-| `use_worktree()`         | `bool`                          | `True`                    | `useWorktree`       |
-| `auto_commit()`          | `bool`                          | `True`                    | `autoCommit`        |
-| `max_budget()`           | finite `int`/`float` (not `bool`) or `None` | `None` (daemon default) | `maxBudget`  |
-| `model_config()`         | `dict` or `None`                | `None`                    | `modelConfig`       |
-| `append_to_system_prompt()` | `str`                        | `""` (append nothing)     | `appendToSystemPrompt` |
-| `append_to_prompt()`     | `str`                           | `""` (append nothing)     | `appendToPrompt`    |
-| `use_web_tools()`        | `bool` or `None`                | `None` (daemon default)   | `webTools`          |
-| `classify_tasks()`       | `bool` or `None`                | `None` (daemon default)   | `classifyTasks`     |
-| `use_memory()`           | `bool` or `None`                | `None` (daemon default)   | `useMemory`         |
-| `is_parallel()`          | `bool`                          | `True`                    | `useParallel`       |
-| `tool_profile()`         | `str`                           | `""` (daemon's choice)    | `toolProfile`       |
-| `docker_image()`         | `str`                           | `""` (host)               | `dockerImage`       |
+```python
+def settings() -> dict[str, Any]:
+    """A worker with Bash only, on the real checkout, running SYSTEM_PROMPT."""
+    return {
+        "preset": "worker",
+        "tool_profile": "bash",
+    }
+```
 
-When a getter is absent, the caller's value is used (which is the
-`run()` default when the caller did not pass one).  When the caller is
-a running agent's `run_agent` tool naming an agent-script PATH (which
-is how every `/xxx` slash command and the empty `agent` default are
-dispatched), the arguments it leaves empty are first filled from that
-calling agent, as a `run_parallel` child's would be
-(`agent_dispatch.inherit_from_parent`): its model (and its
+| `settings()` key  | Type                                | `run()` default           | Wire field          |
+|-------------------|-------------------------------------|---------------------------|---------------------|
+| `preset`          | `str`: `session`, `worker`, `channel` | `session`               | (expanded into the keys below) |
+| `prompt`          | `str` (non-empty)                   | (required argument)       | `prompt`            |
+| `work_dir`        | `str`                               | `""` (daemon default)     | `workDir`           |
+| `model`           | `str`                               | `""` (daemon default)     | `model`             |
+| `chat_id`         | `str`                               | `""` (new chat)           | `chatId`            |
+| `system_prompt`   | `str`                               | `""` (daemon-selected)    | `systemPrompt`      |
+| `use_worktree`    | `bool`                              | `True`                    | `useWorktree`       |
+| `auto_commit`     | `bool`                              | `True`                    | `autoCommit`        |
+| `max_budget`      | finite `int`/`float` (not `bool`)   | `None` (daemon default)   | `maxBudget`         |
+| `model_config`    | `dict`                              | `None`                    | `modelConfig`       |
+| `use_web_tools`   | `bool`                              | `None` (daemon default)   | `useWebTools`       |
+| `classify_tasks`  | `bool`                              | `None` (daemon default)   | `classifyTasks`     |
+| `use_memory`      | `bool`                              | `None` (daemon default)   | `useMemory`         |
+| `is_parallel`     | `bool`                              | `True`                    | `isParallel`        |
+| `tool_profile`    | `str`                               | `""` (daemon's choice)    | `toolProfile`       |
+| `docker_image`    | `str`                               | `""` (host)               | `dockerImage`       |
+| `add_to_prompt`   | `str`; `{task_id}` → the calling task's id | `""` (append nothing) | appended to `appendToPrompt` |
+| `timeout`         | finite `int`/`float` seconds        | 3600 (`run_agent` default) | (read by the dispatcher, not sent) |
+
+A key whose value is `None` is dropped and behaves like an absent
+key: the preset's default applies when the preset has one for it
+(`{"preset": "worker", "use_memory": None}` still runs without
+memory); otherwise the caller's or the persisted value stands.  A `bool` key given a non-`bool`, an
+`int`/`float` key given a `bool`, an unknown key, an unknown preset,
+an empty `prompt` or a non-finite `max_budget` / `timeout` stops the
+task with a diagnostic (see [Error handling](#error-handling)).
+
+### Presets
+
+`settings()["preset"]` picks a bundle of defaults
+(`sea_settings.PRESETS`); explicit keys of the same dict override it.
+
+| Preset    | Defaults                                                                                   | Use                                                                 |
+|-----------|--------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
+| `session` | none (the default when no preset is named)                                                 | an ordinary Sorcar session with the caller's or the user's settings (`/write`, `/write_paper`, `bestrouter`) |
+| `worker`  | `use_worktree`, `auto_commit`, `classify_tasks`, `is_parallel`, `use_web_tools`, `use_memory` all `False` | a focused tool-bound run on the caller's tree: `/sh`, `/ask`, `/merge`, `/remember`, `/forget`, `/task_update` |
+| `channel` | the `worker` defaults                                                                      | a worker for an external service: the user-facing `third_party_agents/<name>/<name>_sea.py` channels and the cron agent (`a2a` and `oai` are protocol plumbing, not channels, and declare no `settings()`) |
+
+The `channel` preset also changes how the run is dispatched and
+prompted: `run_agent` runs it in the shared `~/.kiss/channel_work`
+scratch directory (unless the SEA's own `work_dir` says otherwise:
+cron uses `cron_agent.cron_work_dir()`) and inherits NOTHING from the
+calling task into it, and the daemon appends the channel preamble
+(`agent_file.CHANNEL_PREAMBLE`, "You are the {name} agent: this
+session already has the {name} tools ... Never call run_agent here
+...", `{name}` being the script's file stem without `_sea`) to the
+system prompt suffix, before the SEA's own `add_to_system_prompt()`.
+A channel SEA is three functions:
+
+```python
+def settings() -> dict:
+    return {"preset": "channel"}
+
+def add_to_system_prompt() -> str:
+    return SlackAgent.channel_system_prompt
+
+def add_to_tools() -> list:
+    return [...]  # the channel's authenticated API tools
+```
+
+### Precedence
+
+One rule decides every setting of a dispatched run:
+
+> SEA `settings()` > `run_agent` arguments and `options` (or the
+> `run()` keywords a client passed) > values inherited from the
+> calling task > the user's persisted settings.
+
+The one exception is the dispatch `timeout`: an explicit
+`run_agent(timeout=...)` beats the SEA's `timeout` setting, because
+the caller knows how long it is willing to wait.
+
+Inheritance (`agent_dispatch.inherit_from_parent`) applies to every
+dispatched script whose preset is not `channel`: the `run_agent`
+arguments the caller leaves empty are first filled from the calling
+agent, as a `run_parallel` child's would be: its model (and its
 `model_config`, but only when the sub-task runs the model the caller
-was launched with and the script binds no `model` name itself: a
-script-chosen model runs with default provider routing), half of its
-remaining budget (the other half stays reserved for the caller), its
-chat id (so the sub-task sees the conversation's earlier tasks and
-results), its own replacement system prompt and appended system-prompt
-text (the `system_prompt` / `append_to_system_prompt` its run was
-given, so a run's extra system instructions constrain its whole task
-tree as they do through `run_parallel`; the classifier's lite-vs-full
-choice is not among them, the sub-task is classified on its own), its
-web-tools and memory settings, its live Docker
-container (`container:<id>`), and its effective worktree and
-auto-commit choices after the classifier's demotion (both `False`
-when the container is inherited: the sub-task then works in the
-caller's tree).  The script's getters still win over the inherited
-values.  Channel dispatches (`agent="slack"`, ...) and `agent="cron"`
-inherit none of these: they run on the daemon's default model and
-budget unless the call passes its own, never in a worktree and never
-with auto-commit (asking for either is rejected), and the cron
-dispatch also skips the task classifier.
+was launched with and the script's `settings()` names no `model`
+itself: a script-chosen model runs with default provider routing),
+half of its remaining budget (the other half stays reserved for the
+caller), its chat id (so the sub-task sees the conversation's earlier
+tasks and results), its own replacement system prompt and appended
+system-prompt text (the `system_prompt` / `append_to_system_prompt`
+its run was given, so a run's extra system instructions constrain its
+whole task tree as they do through `run_parallel`; the classifier's
+lite-vs-full choice is not among them, the sub-task is classified on
+its own), the text appended to its own prompt, the extra tools its
+own agent script added (so the tools the inherited system prompt
+refers to exist; not into a run on the `none` profile), its web-tools
+and memory settings, its live Docker container (`container:<id>`), and
+its effective worktree and auto-commit choices after the classifier's
+demotion (both `False` when the container is inherited: the sub-task
+then works in the caller's tree).  The script's `settings()` still win
+over the inherited values.  A `channel`-preset script (`agent="slack"`,
+`agent="cron"`, ...) inherits none of these: it runs on the daemon's
+default model and budget unless the call passes its own, and the
+preset's `use_worktree: False` / `auto_commit: False` /
+`classify_tasks: False` win over whatever the call's `options` say.
 
 ### `description()` — mandatory, not a run parameter
 
@@ -211,30 +280,93 @@ dispatch also skips the task classifier.
 
 Every SEA must define `description()`, a zero-argument function that
 returns one sentence saying what the SEA does and how to use it.  It
-is not one of the 20 run-parameter getters: `apply_agent_overrides()`
-ignores it and it never reaches the command dict.  The slash-command
-registry calls it when the prompt is `/<name> help` (the bare word
-`help`, any letter case, nothing after it): the daemon does not run
-the SEA and calls no model, it imports the script, calls
-`description()` and posts the returned sentence as the task result.  A
-SEA without a callable `description()`, or whose `description()`
-raises or returns something other than a non-empty string, yields a
-diagnostic instead.
+is not a run parameter: `apply_agent_overrides()` ignores it and it
+never reaches the command dict.  The slash-command registry calls it
+when the prompt is `/<name> help` (the bare word `help`, any letter
+case, nothing after it; `sea_commands.help_text_if_command`): the
+daemon does not run the SEA and calls no model, it imports the script,
+calls `description()` and posts the returned sentence as the task
+result.  A SEA without a callable `description()`, or whose
+`description()` raises or returns something other than a non-empty
+string, yields a diagnostic instead.
 
-### `dispatch_timeout()` — optional, for SEAs that run longer than five minutes
+### `timeout` — optional, for SEAs that run longer than an hour
 
-| Function             | Return type              | Used by                                   |
-|----------------------|--------------------------|-------------------------------------------|
-| `dispatch_timeout()` | `int` or `float` seconds | the `/<name>` relay's `run_agent` call (`sea_commands.rewrite_prompt_if_command`) |
+A `run_agent` call waits for its sub-task and stops it when the wait
+runs out (`agent_dispatch.resolve_timeout`): an explicit `timeout`
+argument wins; an empty one takes the SEA's `settings()["timeout"]`
+when that is positive; with neither,
+`DEFAULT_DISPATCH_TIMEOUT_SECONDS`, 3600 s.  A SEA whose
+runs may take longer declares it (`/write_paper` 6 h, `/review_paper`
+2 h, `/revise_and_review_paper` 24 h); `/write` pins the default
+explicitly:
 
-The `/<name>` rewrite makes the tab's agent call `run_agent`, whose
-wait defaults to 300 s and stops the sub-task when it runs out.  An SEA
-whose runs take longer (`/write_paper` returns 6 h, `/review_paper`
-2 h, `/revise_and_review_paper` 24 h, `/write` 1 h) defines `dispatch_timeout()`;
-the directive then carries `timeout = "<seconds>"`.  A missing getter,
-a value that is not a positive number, or a script that fails to
-import adds no line, so the relay behaves as before.  Not a run
-parameter: `apply_agent_overrides()` ignores it.
+```python
+DISPATCH_TIMEOUT_SECONDS = 3600.0
+
+def settings() -> dict[str, Any]:
+    return {"timeout": DISPATCH_TIMEOUT_SECONDS}
+```
+
+The setting is read only when `run_agent`'s `agent` resolves to a
+path or a registered command name; a channel-name dispatch uses the
+explicit argument or the default.  Not a run parameter: it has no wire
+field, and a `/xxx text` command, which runs the SEA directly in the
+tab's own run, has no dispatch timer at all.
+
+### Running a SEA: `run_agent` and `/xxx` commands
+
+A running agent dispatches a SEA with the `run_agent` tool
+(`agent_dispatch.make_run_agent_tool`):
+
+```text
+run_agent(task, agent="", timeout="", model="", max_budget="", workspace="", options="")
+```
+
+`task` is the sub-task's prompt (a SEA's `prompt` setting replaces
+it); `timeout` is the wait above, as a number string; `model` and
+`max_budget` override the inherited model and budget (a SEA's `model`
+/ `max_budget` settings still win); `workspace` is the account of a
+multi-account channel (ignored for scripts); `options` is a JSON
+object of the remaining `run()` keywords, each only to override the
+inherited value: `chat_id`, `system_prompt`, `append_to_system_prompt`,
+`append_to_prompt`, `model_config`, `use_worktree`, `auto_commit`,
+`classify_tasks`, `use_web_tools`, `use_memory`, `is_parallel`,
+`tool_profile` and `docker_image`, e.g.
+`'{"tool_profile": "review", "use_web_tools": false}'`.  `model_name`
+is a deprecated alias of `model`.  `agent` names WHICH agent to run;
+`agent_dispatch.resolve_agent` tries, in order:
+
+1. empty, or a generic label a model may invent (`general`, `reviewer`,
+   `worker`, `assistant`, `default`, ...): the plain sub-agent,
+   `seas/dummy/dummy_sea.py`;
+2. a path (a `.py` suffix or a path separator): that agent script, a
+   relative path resolved against the calling task's work directory;
+3. `cron`: the scheduled-automations agent, `kiss.agents.sorcar.cron_agent`;
+4. an installed channel name (`slack`, `telegram`, ...; case, spaces,
+   hyphens and underscores are ignored, so "Home Assistant" is
+   `homeassistant`);
+5. a registered SEA command name (`write_paper`, `sh`, a `SEAS.md`
+   folder): that SEA's script.
+
+Anything else returns `Error: unknown agent '...' — not the built-in
+cron agent, not an installed channel, not a registered SEA command,
+and not a path to a .py agent script.` with the closest known name,
+the installed channels and the registered commands.  The sub-task is
+reported under the resolved name: `cron`, the command or channel
+name, else the script's file stem without `_sea`.
+
+A `/xxx text` prompt typed into a chat tab is NOT a dispatch: the
+daemon (`task_runner._run_task`, via `sea_commands.slash_command_task`)
+runs the SEA `xxx` directly in the tab's own run, with `text` as the
+prompt and the SEA's path as the run's `agentPath`, so the SEA's
+settings, system prompt and tools apply to that very run; there is no
+relay LLM turn and no nested sub-agent tab, and the raw `/xxx text`
+line stays what the task panel and the chat history show
+(`displayPrompt`).  `/xxx help` answers with `description()` without
+running anything.  A model-picker SEA (`bestrouter`) selected while
+running `/sh ...` only supplies the model; `/sh`'s own `agentPath`
+stays.
 
 ### `add_to_system_prompt()`, `register_as_model()` and `on_picked_as_model()` — model routing SEAs
 
@@ -246,9 +378,8 @@ parameter: `apply_agent_overrides()` ignores it.
 
 `add_to_system_prompt()` carries a SEA's *model routing protocol*: the
 returned text is appended to the run's system prompt after whatever
-`appendToSystemPrompt` already holds (the caller's text, or the value
-an `append_to_system_prompt()` getter staged), separated by a blank
-line.  Unlike `append_to_system_prompt()` it never replaces the
+`appendToSystemPrompt` already holds (the caller's text, or the
+channel preamble), separated by a blank line.  It never replaces the
 caller's value, so the protocol reaches every run of the SEA and the
 caller's own additions survive; `run_parallel` workers inherit it like
 any system-prompt suffix.  `register_as_model()` is a registry flag,
@@ -256,10 +387,22 @@ not a run parameter: `kiss.agents.sorcar.sea_commands.model_seas()`
 lists every registered SEA whose `register_as_model()` returns `True`,
 the daemon offers them in the model picker (vendor `Router`, once at
 least one catalog model is runnable), and a task run with such a pick
-becomes an agent-script run of the SEA on the model its `model()`
-getter names (else the default model) — `/xxx` slash commands and runs
-that already carry an `agentPath` keep their agent and only take that
-model.  The bundled `autorouter` and `bestrouter` are such SEAs.
+becomes an agent-script run of the SEA on the model its
+`settings()["model"]` names (else the default model) — `/xxx` slash
+commands and runs that already carry an `agentPath` keep their agent
+and only take that model.  The bundled `autorouter` and `bestrouter`
+are such SEAs; `bestrouter` is three functions besides `description()`:
+
+```python
+def register_as_model() -> bool:
+    return True
+
+def add_to_system_prompt() -> str:
+    return SYSTEM_PROMPT  # the routing protocol
+
+def settings() -> dict[str, Any]:
+    return {"model": PRIMARY_MODEL}
+```
 
 `on_picked_as_model(work_dir)` is the picked SEA's chance to act on
 being chosen.  `kiss.agents.sorcar.sea_commands.run_picked_hook` runs it
@@ -276,7 +419,7 @@ SEA the model pick names.  `autorouter` uses it to make sure an
 enabled weekly cron job that runs `/rsi7d autorouter` exists
 (`autorouter_sea.schedule_weekly_rsi7d`: an enabled job of that name is
 kept as is, a paused one is resumed, and when there is none one is
-created — a relay prompt job in the KISS checkout the work directory
+created — a prompt job in the KISS checkout the work directory
 is in, with worktree and auto-commit, or a scratch-directory job that
 still refreshes `$KISS_HOME/AUTOROUTER.md` when there is no checkout;
 a linked task worktree resolves to its owning checkout).  Hooks from
@@ -284,10 +427,14 @@ concurrent picks may overlap — a SEA file is executed afresh on every
 call and cannot hold a lock of its own — so the look-up-then-create is
 the cron store's atomic `cron_job("ensure")`, not the SEA's.
 
-The parameters without getters:
+The `run()` parameters without a `settings()` key (the allowlist is
+`sea_settings.SETTING_TYPES`; naming one of these stops the task with
+`settings() has an unknown key ...`):
 
 - **`timeout`** — bounds the *client's* local wait (`None` waits
-  indefinitely); the daemon never sees it.
+  indefinitely); the daemon never sees it.  (The `timeout` KEY of
+  `settings()` is a different thing: the dispatcher's wait for a
+  `run_agent` sub-task, see above.)
 - **`stop_on_timeout`** — whether a `timeout` expiry also stops the
   task, awaiting the stop's confirmation (default `False`: the task
   keeps running); a client-side choice the script must not override.
@@ -314,65 +461,79 @@ The parameters without getters:
   meaningful with `parent_task_id`, and not forgeable for the same
   reason.
 - **`extension_agent_path`** — the script cannot override its own path.
+- **`append_to_system_prompt` / `append_to_prompt`** — the caller's
+  additions; a SEA adds its own with `add_to_system_prompt()` and the
+  `add_to_prompt` key, which are appended AFTER the caller's text and
+  never replace it.
 
-### Getter semantics
+### Setting semantics
 
-- **`model()`** — an empty string `""` means "use the daemon's
-  configured default model".  A non-empty string must name a model in
+- **`model`** — leave the key out to keep the caller's model (the
+  tab's pick, or the calling task's model for a `run_agent`
+  dispatch).  An explicit empty string `""` blanks the command's
+  model back to the tab's selected model, and to the daemon's
+  configured default model when the tab has none
+  (`task_runner._tab_model`).  A non-empty string must name a model in
   the daemon's available model list or the task fails.
-- **`chat_id()`** — an empty string `""` starts a fresh chat.  A
+- **`chat_id`** — an empty string `""` starts a fresh chat.  A
   non-empty string resumes that chat session.
-- **`system_prompt()`** — an empty or blank string leaves the base
-  prompt to the daemon: with task classification enabled (the
-  default) a task classified as simple runs on the reduced
-  `SYSTEM_LITE.md`, everything else on the full `SYSTEM.md`.  Both
-  files are loaded with their `{{IDENTITY}}` brand placeholder filled
-  in (`kiss.core.brand.render_brand`); a
-  string returned by `system_prompt()` or
-  `append_to_system_prompt()` is used verbatim, with no placeholder
-  rendering.  A non-empty string replaces that base prompt.  Either
-  way the agent still appends its per-run operational instructions
-  after the prompt (`RelentlessAgent.perform_task`): the work
-  directory (omitted when the tools run in an attached container that
-  does not mount it), the process id, the task settings, and the
-  user's standing instructions from `~/.kiss/AGENTS.md`
-  (`$KISS_HOME/AGENTS.md`, the file the bundled `/remember` and
-  `/forget` SEAs maintain) when that file exists.  A
-  `model_config()["system_instruction"]` value, if present, takes
-  precedence over the composed prompt (`KISSAgent.run` only
+- **`system_prompt`** — a long base prompt reads better as a
+  function, so this key is usually supplied by a `system_prompt()`
+  getter (`/sh`, `/merge`, `/ask` do; its value lands on the
+  `system_prompt` key, and a `settings()["system_prompt"]` wins over
+  it).  An empty or blank string leaves the base prompt to the daemon:
+  with task classification enabled (the default) a task classified as
+  simple runs on the reduced `SYSTEM_LITE.md`, everything else on the
+  full `SYSTEM.md`.  Both files are loaded with their `{{IDENTITY}}`
+  brand placeholder filled in (`kiss.core.brand.render_brand`); a
+  string from `system_prompt()` or `add_to_system_prompt()` is used
+  verbatim, with no placeholder rendering.  A non-empty string
+  replaces that base prompt.  Either way the agent still appends its
+  per-run operational instructions after the prompt
+  (`RelentlessAgent.perform_task`): the work directory (omitted when
+  the tools run in an attached container that does not mount it), the
+  process id, the task settings, and the user's standing instructions
+  from `~/.kiss/AGENTS.md` (`$KISS_HOME/AGENTS.md`, the file the
+  bundled `/remember` and `/forget` SEAs maintain) when that file
+  exists.  A `model_config["system_instruction"]` value, if present,
+  takes precedence over the composed prompt (`KISSAgent.run` only
   `setdefault`s it).
-- **`tools()`** — returns a list of tool callables that, with
-  `finish`, are the run's **entire** tool set: the built-in toolset is
-  not built.
-- **`add_to_tools()`** — returns a list of tool callables **added** to
-  the built-in toolset.  A SEA defines at most one of `tools()` /
-  `add_to_tools()`; neither may return a file path.
-- **`append_to_system_prompt()`** — extra text **appended** to
-  the run's system prompt (the daemon-selected base prompt or the
-  `system_prompt()` replacement) when the agent is executed.
-  Unlike `system_prompt()`, it does not replace anything.
-- **`append_to_prompt()`** — extra text **appended** to the
-  executed task prompt.  A run with an agent script executes its
-  prompt as one task: the task runner does not split `<task>` blocks
-  into subtasks for an `agentPath` run (they are the SEA's to
-  interpret), so the text is appended once.  A prompt that is nothing
-  but a filesystem path is likewise handed to the SEA as-is rather
-  than turned into an "open this file" request, as it is for a path
-  typed into a chat box.  The appended text becomes part of the
-  recorded prompt in chat history.
-- **`use_web_tools()`** — per-run browser-tool enablement.  `None`
+- **`add_to_prompt`** — extra text **appended** to the executed task
+  prompt, after whatever the caller's `append_to_prompt` added
+  (separated by a blank line).  `{task_id}` in it is replaced by the
+  calling task's id (the command's `parentTaskId`; the empty string
+  when the run has no parent), which is how `/ask` names the task a
+  question is about:
+
+  ```python
+  ADD_TO_PROMPT = (
+      "The question above is about the task with id {task_id}. "
+      "Call task_context with that task id, then answer the question."
+  )
+  ```
+
+  A run with an agent script executes its prompt as one task: the
+  task runner does not split `<task>` blocks into subtasks for an
+  `agentPath` run (they are the SEA's to interpret), so the text is
+  appended once.  A prompt that is nothing but a filesystem path is
+  likewise handed to the SEA as-is rather than turned into an "open
+  this file" request, as it is for a path typed into a chat box.  The
+  appended text becomes part of the recorded prompt in chat history,
+  except for a `/xxx text` run, whose history keeps the `/xxx text`
+  line the user typed.
+- **`use_web_tools`** — per-run browser-tool enablement.  `None`
   falls back to the daemon's configured default (the settings panel's
   "Use web tools" checkbox, persisted as `use_web_browser`).  Under
   the daemon the browser tools include `show_browser()`, which moves
   the page the agent is browsing into the Browser tab on every surface
   (the daemon's `BrowserTabService`, passed to the run as
   `live_browser` and forwarded to its sub-agents) so the user can
-  watch and act on it; there is no getter for it.
-- **`classify_tasks()`** — per-run pre-run task classification.
+  watch and act on it; there is no setting for it.
+- **`classify_tasks`** — per-run pre-run task classification.
   `None` falls back to the daemon's configured default (the settings
   panel's "Classify tasks before running" checkbox, persisted as
   `classify_tasks`).
-- **`use_memory()`** — per-run persistent agent memory
+- **`use_memory`** — per-run persistent agent memory
   (`kiss.core.memoryfield`): the seven `memory_*` tools plus the
   memory protocol prompt block.  `True` enables, `False` disables,
   `None` falls back to the daemon's configured default (the settings
@@ -390,14 +551,14 @@ The parameters without getters:
   repository's main checkout directory (linked worktrees resolve to it
   through `git rev-parse --git-common-dir`, so they share one domain;
   `sorcar_agent._memory_settings`, `_repo_memory_domains`).
-- **`use_worktree()`** — whether the run executes in a fresh git
+- **`use_worktree`** — whether the run executes in a fresh git
   worktree on its own branch (when `work_dir` is inside a git
   repository; the daemon may hand it a spare worktree it prepared in
   advance) instead of the main working tree.  With task classification
   enabled, a task not classified as development work also runs
   without a worktree; the verdict only ever demotes a `True`, so
   `False` stays `False`.
-- **`auto_commit()`** — whether the run's changes are committed when
+- **`auto_commit`** — whether the run's changes are committed when
   it finishes successfully.  A worktree run's branch is committed and
   squash-merged into the original branch (a conflicting merge is
   handed to the bundled `/merge` SEA, which resolves and stages the
@@ -413,9 +574,9 @@ The parameters without getters:
   files, whoever made them (an unreadable status blocks too); untracked
   scratch files alone do not block it
   (`merge_flow._main_tree_blocks_merge`).
-- **`is_parallel()`** — whether the agent may spawn parallel
-  sub-agents (`run_parallel`).
-- **`tool_profile()`** — the name of the tool profile the run's
+- **`is_parallel`** — whether the agent may spawn parallel
+  sub-agents (`run_parallel`); `run_agent` stays available either way.
+- **`tool_profile`** — the name of the tool profile the run's
   built-in toolset is cut down to: `"full"` (everything), `"review"`
   (read, run, browse and talk; no editing or dispatch), `"assistant"`
   (the `shell` group plus `ask_user_question`, `talk`, `decide`,
@@ -427,11 +588,12 @@ The parameters without getters:
   sign-in pair), `"skills"`, `"user"` (`ask_user_question`, `talk`),
   `"decide"`, `"control"` (`summary`, `set_model`).  Join several with
   `+` to keep the union of their tools (`"shell+edit+memory"`);
-  `finish` is always added.
-  `""` keeps the daemon's usual choice.  An unknown name fails the
-  task when it starts.  Ignored for a SEA with a `tools()` getter,
-  which builds no built-in toolset at all.
-- **`docker_image()`** — the Docker image the run's shell and file
+  `finish` is always added.  `"none"` builds no built-in toolset at
+  all: the run's tools are `finish` and whatever `add_to_tools()`
+  returns (the bundled `/ask` agent's choice, so its only tools are
+  `task_context` and `finish`).  `""` keeps the daemon's usual choice.
+  An unknown name fails the task when it starts.
+- **`docker_image`** — the Docker image the run's shell and file
   tools (`Bash`, `run_commands_parallel`, `Read`, `Edit`, `Write`)
   execute in: an image name starts a fresh container that is removed
   when the task ends (the task's `work_dir` is bind-mounted at the
@@ -443,21 +605,21 @@ The parameters without getters:
   `run_parallel` sub-agents share the task's container; `bash_job`
   and persistent memory are unavailable in a Docker run.  A
   run-to-completion CLI model (`cc/*`, `codex/*`) executes its own
-  tools on the host, so a non-empty `docker_image()` with such a
+  tools on the host, so a non-empty `docker_image` with such a
   model fails the task with a `KISSError` instead of silently
   bypassing the container.  The bundled `seas/coding/coding_sea.py`'s
   `ContainerHarness` is the reference user of the attach form: its
-  `docker_image()` returns `container:<id>` for the trial container
-  it is given.
+  `docker_image()` method returns `container:<id>` for the trial
+  container it is given, and the generated per-trial SEAs expose it.
 
 ### Hook getters (no `run()` parameter)
 
 The script may also define two hook getters with no corresponding
-`sorcar.run()` parameter — a callable cannot be JSON-serialized, so
-the hooks exist ONLY as agent-script getters, evaluated in the daemon
-process:
+`sorcar.run()` parameter or `settings()` key — a callable cannot be
+JSON-serialized, so the hooks exist ONLY as agent-script functions,
+evaluated in the daemon process:
 
-| Getter function        | Return type          | Staged command field |
+| Function               | Return type          | Staged command field |
 |------------------------|----------------------|----------------------|
 | `llm_call_hook()`  | callable or `None`   | `llmCallHook`        |
 | `tool_call_hook()` | callable or `None`   | `toolCallHook`       |
@@ -477,9 +639,9 @@ are not hooked).  Per `KISSAgent.run()`'s contract:
   tool execute; any other returned string suppresses the call and is
   given to the model as the tool's result.
 
-Returning `None` from a getter means "no hook".  Any other
+Returning `None` from a hook function means "no hook".  Any other
 non-callable return value fails the task with a diagnostic error,
-like every wrong-typed getter.
+like every wrong-typed value.
 
 ```python
 # guarded_agent.py
@@ -492,32 +654,55 @@ def tool_call_hook():
     return veto_destructive
 ```
 
+### Compatibility: the deprecated per-field getters
 
-## Tools: two getters
+A SEA written against the earlier contract still works for one
+release (`sea_settings.FIELD_GETTERS`; `resolve_settings` synthesizes
+the dict from the getters, then applies `settings()` on top, so a key
+of `settings()` wins over the getter of the same field):
 
-An SEA supplies tools to the LLM agent through one of two getters,
-each returning a **list of callables** (a file path is not accepted,
-and a SEA defines at most one of the two).  There is no other way to
-give the agent extra tools: `sorcar.run()` has no tools parameter,
-because a callable cannot travel the wire.
+- one zero-argument getter per `run()` parameter key,
+  `def use_worktree() -> bool`, `def model() -> str`,
+  `def max_budget() -> float`, ...; `preset`, `timeout` and
+  `add_to_prompt` have no same-name getter;
+- `dispatch_timeout()` → the `timeout` key;
+- `append_to_prompt()` → the `add_to_prompt` key;
+- `append_to_system_prompt()` → treated like `add_to_system_prompt()`:
+  its text is now ADDITIVE (appended after the caller's suffix); it no
+  longer replaces the caller's text;
+- `tools()` → `add_to_tools()` plus `"tool_profile": "none"`.
+  Defining both `tools()` and `add_to_tools()` is an error.
 
-- `tools()` — the returned tools plus `finish` are the agent's
-  **entire** tool set; the built-in toolset is not built.  Pair it
-  with a `system_prompt()` written for those tools.
-- `add_to_tools()` — the returned tools are **added** to the built-in
-  toolset (`Bash`, `Read`, `Edit`, `Write`, browser tools, ...).
+New SEAs should use `settings()`, `add_to_system_prompt()` and
+`add_to_tools()`; `system_prompt()` is not deprecated.
 
-Either way the daemon calls the getter once, while applying the
-script's overrides, and hands the returned callables to the agent.  A
-single file provides both parameter overrides and tools.  The file is
-re-executed from source on every run (no `__pycache__`), so keep
-module-level side effects cheap or idempotent.
+
+## Tools: `add_to_tools()`
+
+An SEA supplies tools to the LLM agent through one function,
+`add_to_tools()`, returning a **list of callables** (a file path is
+not accepted).  There is no other way to give the agent extra tools:
+`sorcar.run()` has no tools parameter, because a callable cannot
+travel the wire.
+
+- By default the returned tools are **added** to the built-in toolset
+  (`Bash`, `Read`, `Edit`, `Write`, browser tools, ...), or to the
+  tool profile the SEA's `tool_profile` setting selects.
+- With `"tool_profile": "none"` the returned tools plus `finish` are
+  the agent's **entire** tool set; the built-in toolset is not built.
+  Pair it with a `system_prompt()` written for those tools.
+
+The daemon calls `add_to_tools()` once, while applying the script's
+settings, and hands the returned callables to the agent.  A single
+file provides both settings and tools.  The file is re-executed from
+source on every run (no `__pycache__`), so keep module-level side
+effects cheap or idempotent.
 
 ```python
 # self_contained_agent.py
 
-def prompt() -> str:
-    return "Double the number 21."
+def settings() -> dict:
+    return {"prompt": "Double the number 21."}
 
 def double(n: int) -> int:
     """Double a number.
@@ -559,8 +744,9 @@ def search_database(query: str, max_results: int = 10) -> str:
 
 ## The built-in toolset
 
-By default — no tool getter, or `add_to_tools()` — the agent gets
-`finish` (always present) and the built-in KISS Sorcar toolset — `Bash` (with
+By default — no `tool_profile` setting, with or without
+`add_to_tools()` — the agent gets `finish` (always present) and the
+built-in KISS Sorcar toolset — `Bash` (with
 `background=True` for detached jobs), `bash_job` (wait for / tail /
 kill a background job), `run_commands_parallel` (several shell
 commands at once, no LLM sub-agents), `Read`, `Edit`, `Write`,
@@ -574,12 +760,14 @@ sub-agent dispatched with `run_parallel(..., tool_profile="review")`)
 filters that built-in set, including the memory tools; extension tools
 are still appended.
 
-With a `tools()` getter the agent's **only** tools are `finish` and
-the returned tools; the built-in toolset is not built, so
-`use_web_tools`, `is_parallel` and `tool_profile` have nothing to act
-on.  This is useful for building focused, restricted agents.  A SEA
-that wants the built-in toolset plus its own tools returns them from
-`add_to_tools()` instead.
+With `"tool_profile": "none"` the agent's **only** tools are `finish`
+and the tools `add_to_tools()` returned; the built-in toolset is not
+built, so `use_web_tools` and `is_parallel` have nothing to act on,
+and a `run_agent` caller's extra tools are not merged in either.
+This is useful for building focused, restricted agents (`/ask`).  A
+SEA that wants the built-in toolset plus its own tools leaves
+`tool_profile` alone (or picks a narrower profile such as `"bash"`,
+as `/remember` does).
 
 When restricting tools, the full default system prompt (`SYSTEM.md`)
 assumes the full toolset (its workflow rules name `Read`, `Edit`,
@@ -587,7 +775,10 @@ assumes the full toolset (its workflow rules name `Read`, `Edit`,
 matches the tools you provide:
 
 ```python
-def tools() -> list:
+def settings() -> dict:
+    return {"preset": "worker", "tool_profile": "none"}
+
+def add_to_tools() -> list:
     return [get_weather]  # the whole tool set: get_weather + finish
 
 def system_prompt() -> str:
@@ -617,12 +808,20 @@ prefixes the message below with `Task failed: AgentFileError: `):
 |-----------|---------------|
 | File deleted between client validation and daemon import | `agent script '...' is not an existing Python (.py) file` |
 | File raises at import time | `agent script '...' failed to import: ...` |
-| `X` defined but not callable | `X of agent script '...' must be a callable, got ...` |
-| `X()` raises an exception | `X() of agent script '...' raised: ...` |
-| `X()` returns wrong type | `X() of agent script '...' must return ..., got ...` |
-| `X()` returns a value whose type check itself raises (e.g. a `str` subclass with a raising `strip`) | `X() of agent script '...' returned a broken value: ...` |
+| `settings` bound to a non-function other than `None` (`settings = None` counts as absent) | `agent script '...': settings must be a function returning a dict` |
+| `settings()` returns something other than a dict | `agent script '...': settings() must return a dict, got ...` |
+| `settings()` raises | `agent script '...': settings() raised: ...` |
+| unknown key | `agent script '...': settings() has an unknown key 'x'; known keys: preset, prompt, ...` |
+| unknown preset | `agent script '...': unknown preset 'x'; known presets: session, worker, channel` |
+| wrong-typed value (`bool` for a number, `int` for a `str`, ...) | `agent script '...': settings()['max_budget'] must be int or float, got bool` |
+| empty `prompt`; non-finite `max_budget` / `timeout` | `agent script '...': settings()['prompt'] must return a non-empty string`, `... settings()['max_budget'] must return a finite number or None` |
+| `add_to_tools`, `add_to_system_prompt`, a hook or a deprecated getter `X` bound to a non-callable | `X of agent script '...' must be a callable, got ...` (a deprecated getter: `agent script '...': X must be a callable, got ...`) |
+| `X()` raises | `X() of agent script '...' raised: ...` (a deprecated getter: `agent script '...': X() raised: ...`) |
+| `X()` returns the wrong type | `add_to_tools() of agent script '...' must return a list of tool callables (not a file path), got ...`, `add_to_system_prompt() of agent script '...' must return a string, got ...`, `tool_call_hook() of agent script '...' must return a callable or None, got ...` |
+| both `tools()` and `add_to_tools()` defined | `agent script '...' defines both tools() and add_to_tools(); define at most one` |
+| a value whose own methods raise (e.g. a `str` subclass with a raising `strip`) | `agent script '...': settings()['prompt'] returned a broken value: ...` |
 
-Overrides are **atomic**: if any getter fails, the command keeps all
+Overrides are **atomic**: if anything fails, the command keeps all
 its original values (no partial overrides).
 
 
@@ -651,29 +850,29 @@ result2 = sorcar.run(
 )
 ```
 
-An SEA can also force a specific chat via `chat_id()`.
+An SEA can also force a specific chat via `settings()["chat_id"]`.
 
 
 ## Model configuration
 
-Use `model_config()` to pass custom endpoint URLs, headers, or
-sampling parameters:
+Use the `model_config` setting to pass custom endpoint URLs, headers,
+or sampling parameters:
 
 ```python
-def model() -> str:
-    return "my-custom-model"
-
-def model_config() -> dict:
+def settings() -> dict:
     return {
-        "base_url": "http://localhost:8080/v1",
-        "api_key": "sk-local-key",
+        "model": "my-custom-model",
+        "model_config": {
+            "base_url": "http://localhost:8080/v1",
+            "api_key": "sk-local-key",
+        },
     }
 ```
 
 When `model_config` contains a `base_url`, the model factory bypasses
 its normal provider routing and creates an OpenAI-compatible model
 pointing at that URL.  The daemon still runs its model-availability
-preflight first: `model()` must return a generation-capable name from
+preflight first: `model` must name a generation-capable model from
 the bundled catalog or from `~/.kiss/MY_MODELS.json` whose provider is
 usable (an API key for HTTP providers, the executable on `PATH` for
 `cc/*` / `codex/*`), so replace `my-custom-model` above with such a
@@ -688,9 +887,9 @@ managing a SQLite task database.  Its tools come from
 `add_to_tools()`, so the LLM can also use the built-in `Bash`, `Read`,
 `Write`, etc. alongside the custom database tools.
 
-The agent does **not** define `prompt()` or `model()`, so
-the caller's prompt reaches the LLM and the daemon's configured
-default model is used.
+Its `settings()` names neither `prompt` nor `model`, so the caller's
+prompt reaches the LLM and the caller's model (the tab's pick, or the
+daemon's configured default) is used.
 
 ```python
 # task_manager/task_manager_sea.py
@@ -740,16 +939,15 @@ def _get_db() -> sqlite3.Connection:
     return conn
 
 
-# --- Overridable parameter getters ---
-# No prompt() — the caller's prompt is used as-is.
-# No model() — the daemon's configured default model is used.
+# --- Run settings ---
+# No "prompt" key — the caller's prompt is used as-is.
+# No "model" key — the caller's model is used.
 
-def max_budget() -> float:
-    return 1.0
-
-
-def use_worktree() -> bool:
-    return False  # no code changes expected
+def settings() -> dict:
+    return {
+        "max_budget": 1.0,
+        "use_worktree": False,  # no code changes expected
+    }
 
 
 def system_prompt() -> str:
@@ -829,8 +1027,8 @@ def complete_task(task_id: int) -> str:
     return json.dumps({"error": f"Task {task_id} not found or already done"})
 
 
-def tools() -> list:
-    """The agent's whole tool set (plus finish); no built-in tools."""
+def add_to_tools() -> list:
+    """The database tools, added to the built-in toolset."""
     return [add_task, list_tasks, complete_task]
 ```
 
@@ -885,6 +1083,7 @@ def run(
     append_to_prompt: str = "",
     tool_profile: str = "",
     docker_image: str = "",
+    inherit_tools: bool = False,
     timeout: float | None = 3600.0,
     stop_on_timeout: bool = False,
     endpoint_file: str | Path | None = None,
@@ -907,22 +1106,27 @@ class TaskResult:
 ## Tips
 
 - The client-side `prompt` argument must be **non-empty** even when
-  `prompt()` overrides it; the client validates before connecting.
-- An SEA **may define any subset** of the getters.  Only
-  define the ones whose defaults you want to change.
-- Omit `model()` to use the daemon's configured default model
-  rather than hard-coding one.
-- Extra tools come only from `tools()` / `add_to_tools()`, each
-  returning a **list of callables**; `add_to_tools()` (built-in
-  toolset plus yours) is the most common pattern.
+  the `prompt` setting overrides it; the client validates before
+  connecting.
+- `settings()` **may name any subset** of the keys, or be left out
+  altogether.  Only pin the ones whose defaults you want to change;
+  a preset covers the common bundles.
+- Omit the `model` key to keep the caller's model (the tab's pick, or
+  the daemon's configured default) rather than hard-coding one.
+- Extra tools come only from `add_to_tools()`, returning a **list of
+  callables**; the built-in toolset plus yours is the most common
+  pattern, `"tool_profile": "none"` gives an exact tool set.
 - The agent script is **re-imported from source** on every run.
   Edits take effect immediately without restarting the daemon.
-- `max_budget()` must return a **finite** number.  `NaN`,
+- `max_budget` and `timeout` must be **finite** numbers.  `NaN`,
   `±inf`, or an overflowing value raises `AgentFileError`.
-- A getter defined as a non-callable (e.g. a module-level variable
-  named `model` or `tools`) is treated as a broken getter and stops
-  the task — it is not treated as "absent".  Avoid module-level
-  variables that share a getter's name.
+- A contract name bound to a non-callable (e.g. a module-level
+  variable named `settings`, `model` or `add_to_tools`) is treated as
+  a broken function and stops the task — it is not treated as
+  "absent" (the one exception is `None`, which the loader reads as
+  "undefined").  Avoid module-level variables that share a contract
+  name's spelling (a constant such as `ADD_TO_PROMPT` or
+  `DISPATCH_TIMEOUT_SECONDS` is fine).
 - The SEA and its tools run **in the daemon process**
   with the daemon user's privileges and environment.  Any libraries
   your code imports must be installed in the daemon's Python
@@ -934,9 +1138,10 @@ class TaskResult:
 - Put the SEA in a folder named after the command, `xxx/xxx_sea.py`,
   and list that folder's parent in `~/.kiss/SEAS.md` (one folder per
   line; blank lines and `#` comments are ignored) to expose it as the
-  chat command `/xxx`; `/xxx some text` runs the SEA on "some text" via
-  `run_agent`, and `/xxx help` prints its `description()` without
-  running it.  The command is the folder name, so it must match
+  chat command `/xxx`; `/xxx some text` runs the SEA on "some text"
+  directly in the tab's run, and `/xxx help` prints its
+  `description()` without running it.  The same name also works as
+  `run_agent(agent="xxx", ...)`.  The command is the folder name, so it must match
   `[A-Za-z0-9_-]+`; a loose `xxx_sea.py` placed directly in a listed
   folder is not a command.  Bundled
   `src/kiss/agents/third_party_agents/<name>/<name>_sea.py` scripts take
@@ -955,8 +1160,8 @@ class TaskResult:
   run in-process by `kiss.server.task_update`), `/autorouter` (runs a task on the cheapest model tier
   that will finish it), `/bestrouter` (runs a task on
   `claude-fable-5-1` and has `gpt-6-astra` review it), `/coding` (unattended coding in a Docker
-  container; the module defines no top-level run-parameter getters, its
-  `ContainerHarness` getters are exposed by generated per-trial SEAs,
+  container; the module defines no top-level `settings()`, its
+  `ContainerHarness` methods are exposed by generated per-trial SEAs,
   so the bare command runs Sorcar with its defaults), `/forget`
   (removes a standing instruction from `~/.kiss/AGENTS.md`),
   `/git_extract_knowledge` (builds and refreshes a repository's
@@ -976,13 +1181,13 @@ class TaskResult:
   (optimizes the prompt text of a skill or SEA against an eval set),
   `/task_update` (reports what a running task has done so far),
   `/write` (writes prose for a general audience in concise, professional
-  American English that reads as human-written; its only getters are
-  `description()`, `add_to_system_prompt()` and `dispatch_timeout()`,
-  1 h), `/write_paper` (writes
+  American English that reads as human-written; it defines only
+  `description()`, `add_to_system_prompt()` and a `settings()` of
+  `{"timeout": 3600.0}`), `/write_paper` (writes
   or revises a research paper), and `/dummy`
-  (`seas/dummy/dummy_sea.py`, an SEA whose only getter is
+  (`seas/dummy/dummy_sea.py`, an SEA whose only function is
   `description()`, is what `run_agent` runs when its `agent` argument
-  is empty).  The other modules in that package
+  is empty or a generic label).  The other modules in that package
   (`coding/coding_test_context.py`,
   `git_extract_knowledge/git_knowledge_index.py`,
   `git_extract_knowledge/git_knowledge_store.py`, the shared
@@ -992,19 +1197,11 @@ class TaskResult:
   documented in
   [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md)
   (source: `website/kisssorcar.github.io/docs/sea-commands.md`).
-- The outer run of a `/xxx` command is only a relay that calls
-  `run_agent` with the SEA's path, the task text and, when the SEA
-  defines `dispatch_timeout()`, a `timeout` (the `/ask` relay also
-  passes an `append_to_prompt` naming the task to answer about);
-  everything else is left empty, so the SEA run inherits the relay's
-  model, half of its remaining budget, its chat, its web-tools and memory settings and
-  its worktree / auto-commit choices unless a getter of the SEA says
-  otherwise (see the inheritance paragraph under the getter table).
-  Before the relay starts, for each relay setting that is enabled
-  (worktree isolation, auto-commit) the daemon imports the resolved SEA
-  and checks the matching `use_worktree()` or `auto_commit()` getter.
-  An exact `False` demotes that setting on the relay as well (the SEA is
-  not handed the relay's worktree, and the relay does not auto-commit
-  what the SEA left in the tree); an import or getter exception during
-  such a check fails the relay with `SeaScriptError`, so keep
-  module-level side effects idempotent.
+- A `/xxx text` command has no outer relay run: the tab's run IS the
+  SEA run (`agentPath` set to the SEA, `text` as the prompt), with the
+  tab's model, budget, chat and settings as the caller's values and
+  the SEA's `settings()` on top of them, exactly as for a `run_agent`
+  dispatch (see [Precedence](#precedence)).  The SEA is loaded by the
+  same `apply_agent_overrides` as any `agentPath` run, so a broken
+  script fails the run with an `AgentFileError` before the agent
+  starts.

@@ -296,10 +296,9 @@ def run_agent_via_kiss_web(
     ``extension_agent_path`` agent-script contract (``agent.sea_path``
     — the agent's own module, whose top-level ``add_to_tools()`` the
     daemon calls to build a fresh agent from the credentials persisted
-    under ``~/.kiss``), appends the agent's ``channel_system_prompt``
-    guidance to the prompt (kept out of the system prompt so the
-    daemon's default system prompt stays intact), and
-    submits the task to the in-process kiss-web daemon over its
+    under ``~/.kiss`` and whose ``settings()`` / ``add_to_system_prompt()``
+    make the run a ``channel``-preset session with the channel's
+    guidance in its system prompt), and submits the task to the in-process kiss-web daemon over its
     Unix-domain socket.  Blocks until the daemon reports the task
     finished (or *timeout* elapses) and returns the task's YAML result.
 
@@ -319,8 +318,7 @@ def run_agent_via_kiss_web(
 
     Args:
         agent: The third-party agent instance supplying the channel
-            agent script (``agent.sea_path``), the workspace,
-            ``channel_system_prompt`` guidance, and the chat id to
+            agent script (``agent.sea_path``), the workspace, and the chat id to
             continue (``agent.chat_id`` on :class:`KissWebChatAgent`
             carriers).
         prompt_template: The task prompt.
@@ -338,9 +336,7 @@ def run_agent_via_kiss_web(
             system prompt when the daemon executes the agent (see
             :func:`kiss.server.sorcar.run`).
         append_to_prompt: Extra text appended to the executed task
-            prompt, after the ``channel_system_prompt`` guidance this
-            launcher already appends (see
-            :func:`kiss.server.sorcar.run`).
+            prompt (see :func:`kiss.server.sorcar.run`).
         timeout: Max seconds to wait for the task; ``None`` waits
             indefinitely.  On timeout the task keeps running in the
             daemon and ``""`` is returned.
@@ -359,7 +355,7 @@ def run_agent_via_kiss_web(
     """
     from kiss.server import sorcar
 
-    prompt = prompt_template + agent.channel_system_prompt
+    prompt = prompt_template
     if not prompt.strip():
         result_yaml = str(yaml.safe_dump(
             {"success": False, "summary": "Task failed: empty prompt"},

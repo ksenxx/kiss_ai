@@ -142,9 +142,9 @@ function testTogglesInitializedFalseFromConfigData() {
     'submit must carry useWorktree:false after configData turned the toggle off',
   );
   assert.strictEqual(
-    run.webTools,
+    run.useWebTools,
     false,
-    'submit must carry webTools:false after configData turned the toggle off',
+    'submit must carry useWebTools:false after configData turned the toggle off',
   );
   win.close();
   console.log('  ok - configData false values initialize toggles and submit flags');
@@ -248,16 +248,16 @@ function testSubmitBeforeConfigDataOmitsWebTools() {
 
   // Submit BEFORE any configData reply: the checkbox still holds
   // chat.html's hardcoded checked state, which is NOT the user's
-  // persisted setting.  The submit must omit webTools so the daemon
+  // persisted setting.  The submit must omit useWebTools so the daemon
   // falls back to the persisted use_web_browser config instead of an
   // invented per-run override.
   typeAndSend(win, 'run before config arrives');
   const early = lastMsg(posted, 'submit');
   assert.ok(early, 'clicking send must post a submit command');
   assert.strictEqual(
-    'webTools' in early,
+    'useWebTools' in early,
     false,
-    'a submit before configData must omit webTools (an invented ' +
+    'a submit before configData must omit useWebTools (an invented ' +
       'override would defeat the daemon config fallback)',
   );
 
@@ -268,12 +268,12 @@ function testSubmitBeforeConfigDataOmitsWebTools() {
   typeAndSend(win, 'run after an explicit toggle');
   const afterToggle = lastMsg(posted, 'submit');
   assert.strictEqual(
-    afterToggle.webTools,
+    afterToggle.useWebTools,
     false,
     'a submit after the user toggled the checkbox must carry its state',
   );
   win.close();
-  console.log('  ok - submit omits webTools until the state is known');
+  console.log('  ok - submit omits useWebTools until the state is known');
 }
 
 function testToggleStatePersistedOnSettingsClose() {

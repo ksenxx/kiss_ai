@@ -5,8 +5,9 @@
 """End-to-end tests for the ``run_agent`` dispatch ``timeout``.
 
 The ``run_agent`` tool has a ``timeout`` parameter (a number string;
-empty applies ``agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS``,
-300 s).  On timeout the tool returns an error string and STOPS the
+empty applies the agent script's ``timeout`` setting, else
+``agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS``, 3600 s).  On
+timeout the tool returns an error string and STOPS the
 sub-task (``stop_on_timeout=True``): a channel sub-task must not
 outlive its process-global workspace reservation — released the
 moment the dispatch returns — or it could bind another account's
@@ -25,8 +26,9 @@ These tests run real local-WSS daemon stand-ins (served by
   ``KISS_SORCAR_LOCAL``) returns the delayed sub-task's YAML result,
   both with the default timeout and with an explicit one.  The delay
   is seconds, so this cannot behaviorally pin the default at exactly
-  300 s — only a five-minute test could; the shrunk-constant timeout
-  test below is the practical guard for the default wiring.
+  3600 s — only an hour-long test could; the shrunk-constant timeout
+  test below is the practical guard for the default wiring, and a
+  script-declared ``timeout`` setting is exercised at its real value.
 * A too-small ``timeout`` (explicit, or the shrunk default) yields the
   "did not finish within" error, with a ``stop`` + ``closeTab``
   cascade; the raw client sends the ``stop`` only when
@@ -314,7 +316,7 @@ def test_run_agent_tool_waits_past_delayed_result(
 
     End-to-end through the real tool (path mode) and the standard
     ``KISS_SORCAR_LOCAL`` endpoint resolution: the sub-task's result
-    arrives after a delay well under the timeout (the 300-s default,
+    arrives after a delay well under the timeout (the 3600-s default,
     and an explicit ``"30"``), and the tool returns the YAML result —
     not a "did not finish within …s" timeout message.
     """
@@ -623,22 +625,22 @@ def test_stop_confirmed_before_initial_running_status(
 def test_empty_timeout_applies_the_default_constant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty ``timeout`` falls back to the 300-s default constant.
+    """An empty ``timeout`` falls back to the 3600-s default constant.
 
-    Waiting out the real 300-s default would take five minutes, so
-    ``DEFAULT_DISPATCH_TIMEOUT_SECONDS`` (asserted to be 300 in
+    Waiting out the real one-hour default is out of the question, so
+    ``DEFAULT_DISPATCH_TIMEOUT_SECONDS`` (asserted to be 3600 in
     production) is shrunk to 0.3 s and the tool is called WITHOUT a
     timeout argument against a silent daemon: the timeout error naming
     0.3 s proves the empty-string path reads the constant.
     """
-    assert agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS == 300.0
+    assert agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
     monkeypatch.setattr(
         agent_dispatch, "DEFAULT_DISPATCH_TIMEOUT_SECONDS", 0.3,
     )
     daemon = _StopConfirmingDaemon()
     monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
     script = tmp_path / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
+    script.write_text("def settings() -> dict:\n    return {'model': 'm'}\n")
     try:
         out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
         assert "did not finish within 0.3s" in out
@@ -647,13 +649,57 @@ def test_empty_timeout_applies_the_default_constant(
         daemon.close()
 
 
-@pytest.mark.parametrize("bad", ["abc", "1.5s", "0", "-5", "inf", "nan"])
-def test_invalid_timeout_rejected_before_dispatch(bad: str) -> None:
-    """A malformed or non-positive ``timeout`` is rejected up front.
+def test_empty_timeout_takes_the_script_timeout_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty ``timeout`` takes ``settings()["timeout"]`` before the default.
 
-    No daemon is listening anywhere in this test: the error must come
-    from the tool's argument validation, before any path resolution or
-    dispatch (the agent path passed here does not even exist).
+    The script declares a 0.3-s timeout while the default constant is
+    left at its production value: the timeout error naming 0.3 s proves
+    the SEA's setting is read.  An explicit argument still wins over it.
     """
-    out = make_run_agent_tool("")("task", "no_such_agent.py", timeout=bad)
-    assert out.startswith("Error: timeout must be")
+    daemon = _StopConfirmingDaemon()
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    script = tmp_path / "helper.py"
+    script.write_text("def settings() -> dict:\n    return {'timeout': 0.3}\n")
+    try:
+        out = make_run_agent_tool(str(tmp_path))("never finishes", str(script))
+        assert "did not finish within 0.3s" in out
+        assert "was stopped" in out
+    finally:
+        daemon.close()
+    daemon = _StopConfirmingDaemon()
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    try:
+        out = make_run_agent_tool(str(tmp_path))(
+            "never finishes", str(script), timeout="0.5",
+        )
+        assert "did not finish within 0.5s" in out
+    finally:
+        daemon.close()
+
+
+@pytest.mark.parametrize("bad", ["abc", "1.5s", "0", "-5", "inf", "nan"])
+def test_invalid_timeout_rejected_before_dispatch(
+    bad: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed or non-positive ``timeout`` is rejected before any dispatch.
+
+    The timeout is validated after the agent is resolved (a script's
+    own ``timeout`` setting is the fallback for an empty argument), so
+    the agent here is a real script — one that even declares a valid
+    ``timeout`` of its own — and a daemon stand-in is listening: the
+    error must come from the argument validation, and the daemon must
+    never see a ``run`` command.
+    """
+    script = tmp_path / "helper.py"
+    script.write_text("def settings() -> dict:\n    return {'timeout': 5}\n")
+    daemon = _StopConfirmingDaemon()
+    monkeypatch.setenv("KISS_SORCAR_LOCAL", str(daemon.endpoint_file))
+    try:
+        out = make_run_agent_tool(str(tmp_path))("task", str(script), timeout=bad)
+        assert out.startswith("Error: timeout must be")
+        assert repr(bad) in out
+        assert daemon.run_cmd is None
+    finally:
+        daemon.close()

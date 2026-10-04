@@ -339,39 +339,47 @@ class SeaTarget(Target):
         return ""
 
     def rollout_kwargs(self) -> dict[str, Any]:
-        """Map the file's getters onto ``SorcarAgent.run`` arguments."""
+        """Map the file's ``settings()`` and getters onto ``SorcarAgent.run`` arguments."""
+        from kiss.agents.sorcar.sea_settings import resolve_settings
+
         ns = _execute_sea(self.path)
+        settings = resolve_settings(ns)
         kwargs: dict[str, Any] = {
-            "base_system_prompt": str(_call_getter(ns, "system_prompt") or "")
+            "base_system_prompt": str(settings.get("system_prompt") or "")
         }
         if not kwargs["base_system_prompt"]:
             raise ValueError(f"{self.path.name}: system_prompt() returned nothing")
-        for getter, key in (
+        for setting, key in (
             ("prompt", "prompt"),
-            ("append_to_prompt", "append_to_prompt"),
+            ("add_to_prompt", "append_to_prompt"),
             ("tool_profile", "tool_profile"),
             ("is_parallel", "is_parallel"),
             ("use_web_tools", "web_tools"),
             ("use_memory", "use_memory"),
-            ("append_to_system_prompt", "system_prompt"),
             ("docker_image", "docker_image"),
             ("model", "model_name"),
             ("model_config", "model_config"),
+        ):
+            if setting in settings:
+                kwargs[key] = settings[setting]
+        for getter, key in (
+            ("add_to_system_prompt", "system_prompt"),
+            ("append_to_system_prompt", "system_prompt"),
             ("llm_call_hook", "llm_call_hook"),
             ("tool_call_hook", "tool_call_hook"),
         ):
             value = _call_getter(ns, getter)
             if value is not None:
                 kwargs[key] = value
-        # ``tools()`` is the whole tool set (no basic tools);
-        # ``add_to_tools()`` extends the basic toolset.  Same contract
-        # as the daemon's agent-file loader: at most one of the two,
-        # each a list of callables (never a file path).
+        # ``add_to_tools()`` extends the built-in toolset; the legacy
+        # ``tools()`` is the whole set (the ``none`` tool profile).
+        # Same contract as the daemon's agent-file loader: at most one
+        # of the two, each a list of callables (never a file path).
         if "tools" in ns and "add_to_tools" in ns:
             raise ValueError(
                 f"{self.path.name}: defines both tools() and add_to_tools()"
             )
-        for getter, append_basic_tools in (("tools", False), ("add_to_tools", True)):
+        for getter in ("tools", "add_to_tools"):
             if getter not in ns:
                 continue
             tools = _call_getter(ns, getter)
@@ -380,7 +388,10 @@ class SeaTarget(Target):
                     f"{self.path.name}: {getter}() must return a list of tool callables"
                 )
             kwargs["tools"] = list(tools)
-            kwargs["append_basic_tools"] = append_basic_tools
+            if getter == "tools":
+                kwargs["tool_profile"] = "none"
+        if kwargs.get("tool_profile") == "none":
+            kwargs["append_basic_tools"] = False
         return kwargs
 
 
@@ -1501,48 +1512,21 @@ def status(out_dir: str) -> str:
 
 
 def system_prompt() -> str:
-    """Replace the default system prompt with the SkillOpt manual."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
+
+
+def settings() -> dict[str, Any]:
+    """A worker with the shell tools, on the real checkout, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "preset": "worker",
+        "tool_profile": "shell",
+    }
 
 
 def add_to_tools() -> list[Any]:
     """Expose the optimizer to the orchestrating model."""
     return [optimize, status]
-
-
-def tool_profile() -> str:
-    """Bash and Read for inspecting the target, eval set and proposal; no editing tools."""
-    return "shell"
-
-
-def use_worktree() -> bool:
-    """Nothing is committed; run directly in the work dir."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never commit: the proposal is for the user to adopt."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """The task is always the same kind; skip classification."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Rollouts run in the tool's own thread pool."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """No browsing."""
-    return False
-
-
-def use_memory() -> bool:
-    """No persistent memory."""
-    return False
 
 
 # --------------------------------------------------------------------------

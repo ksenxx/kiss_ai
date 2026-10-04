@@ -25,6 +25,7 @@ import yaml
 
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server import agent_state
@@ -54,13 +55,12 @@ def test_sea_getters_follow_the_contract() -> None:
     assert prompt == autorouter_sea.SYSTEM_PROMPT
     assert prompt.startswith("## Model routing protocol (autorouter)")
     assert autorouter_sea.register_as_model() is True
-    assert autorouter_sea.model() == autorouter_sea.orchestrator_model()
     flat = " ".join(prompt.split())
     for phrase in (
         "cost per accepted task",
         "`decide`",
         "`pick_model(tier, tokens_in, tokens_out, exclude)`",
-        "`run_agent(task=..., model_name=<picked>)`, one call per unit",
+        "`run_agent(task=..., model=<picked>)`, one call per unit",
         "`set_model` only at a phase boundary",
         "`log_decision(unit, tier, model, reason, outcome)`",
         "`observed_call_costs(days, model)`",
@@ -78,14 +78,25 @@ def test_sea_getters_follow_the_contract() -> None:
     assert {tool.__name__ for tool in autorouter_sea.add_to_tools()} == _TOOL_NAMES
     # run_parallel workers inherit the parent's custom system prompt, which
     # would make every routed unit a router; dispatch goes through run_agent.
-    assert autorouter_sea.is_parallel() is False
-    assert autorouter_sea.classify_tasks() is False
-    assert autorouter_sea.use_web_tools() is False
-    assert autorouter_sea.use_memory() is False
-    # The protocol is ADDED to the default prompt, never a replacement; the
-    # caller's budget, worktree and tool profile must win.
-    for getter in ("system_prompt", "max_budget", "use_worktree", "auto_commit", "tool_profile"):
-        assert not hasattr(autorouter_sea, getter), getter
+    assert autorouter_sea.settings() == {
+        "model": autorouter_sea.orchestrator_model(),
+        "is_parallel": False,
+        "classify_tasks": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
+    # No preset named: the resolved settings are the five keys above under
+    # the default ``session`` preset (which adds no defaults), so the
+    # caller's budget, worktree, auto-commit and tool profile win.  The
+    # protocol is ADDED to the default prompt, never a replacement.
+    assert resolve_settings(vars(autorouter_sea)) == {
+        "preset": "session", **autorouter_sea.settings()
+    }
+    for name in (
+        "system_prompt", "max_budget", "use_worktree", "auto_commit", "tool_profile",
+        "model", "is_parallel", "classify_tasks", "use_web_tools", "use_memory",
+    ):
+        assert not hasattr(autorouter_sea, name), name
 
 
 def test_autorouter_is_a_model_picker_sea() -> None:
@@ -95,14 +106,14 @@ def test_autorouter_is_a_model_picker_sea() -> None:
 
 
 def test_slash_autorouter_resolves_to_the_bundled_sea() -> None:
-    """``/autorouter <task>`` is rewritten into a ``run_agent`` directive on this file."""
+    """``/autorouter <task>`` resolves to the task text and this file (run directly)."""
     assert sea_commands.get_command("autorouter") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/autorouter add a --json flag")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/autorouter add a --json flag")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert f'agent = "{_SEA_PATH}"' in prompt
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nadd a --json flag")
+    assert task_text == "add a --json flag"
+    assert sea_commands.sea_settings(path) == {"preset": "session", **autorouter_sea.settings()}
 
 
 def test_agent_file_loader_stages_the_sea_tools() -> None:
@@ -118,20 +129,22 @@ def test_agent_file_loader_stages_the_sea_tools() -> None:
         "appendToSystemPrompt",
         "model",
         "tools",
-        "appendBasicTools",
-        "useParallel",
+        "isParallel",
         "classifyTasks",
-        "webTools",
+        "useWebTools",
         "useMemory",
     }
     assert cmd["appendToSystemPrompt"] == "CALLER TEXT\n\n" + autorouter_sea.SYSTEM_PROMPT
     assert "systemPrompt" not in cmd
     assert cmd["model"] == autorouter_sea.orchestrator_model()
     assert "toolsFile" not in cmd
-    # ``add_to_tools()``: the router's tools come on top of the basic toolset.
-    assert cmd["appendBasicTools"] is True
-    assert cmd["useParallel"] is False
-    assert cmd["classifyTasks"] is False and cmd["webTools"] is False and cmd["useMemory"] is False
+    # ``add_to_tools()``: the router's tools come on top of the basic
+    # toolset; only a ``none`` tool profile removes it, and nothing
+    # stages ``appendBasicTools`` any more.
+    assert "appendBasicTools" not in cmd
+    assert cmd["isParallel"] is False
+    assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
+    assert cmd["useMemory"] is False
     assert cmd["toolProfile"] == "full"
     assert {tool.__name__ for tool in cmd["tools"]} == _TOOL_NAMES
 
@@ -321,6 +334,7 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
     monkeypatch.setenv("KISS_HOME", str(home))
     runnable = _runnable_candidates("medium")
     model = runnable[0] if runnable else autorouter_sea.TIERS["medium"][0][0]
+    settings = autorouter_sea.settings()
     script = [
         tool_call_body("pick_model", {"tier": "medium"}, prompt_tokens=500),
         tool_call_body(
@@ -352,9 +366,9 @@ def test_agent_run_offers_routing_and_dispatch_tools_and_logs_with_the_task_id(
                 model_config={"base_url": url, "api_key": "local"},
                 system_prompt=autorouter_sea.add_to_system_prompt(),
                 tools=autorouter_sea.add_to_tools(),
-                web_tools=autorouter_sea.use_web_tools(),
-                use_memory=autorouter_sea.use_memory(),
-                is_parallel=autorouter_sea.is_parallel(),
+                web_tools=settings["use_web_tools"],
+                use_memory=settings["use_memory"],
+                is_parallel=settings["is_parallel"],
                 verbose=False,
             )
     finally:

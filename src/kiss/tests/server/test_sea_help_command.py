@@ -35,7 +35,10 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             if kwargs.get("is_agentic") is False:
                 return ""
-            calls.append(dict(kwargs.get("arguments") or {}))
+            calls.append({
+                **dict(kwargs.get("arguments") or {}),
+                "system_prompt": str(kwargs.get("system_prompt") or ""),
+            })
             self_agent.step_count = 1
             raw = "success: true\nis_continue: false\nsummary: agent ok\n"
             printer = kwargs.get("printer")
@@ -96,11 +99,12 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         assert extra.get("endTs", 0) >= extra.get("startTs", 1)
 
     def test_help_is_case_insensitive_and_needs_the_bare_word(self) -> None:
-        """``/echo HELP`` is help; ``/echo help me`` is a relay of the sub-task ``help me``."""
+        """``/echo HELP`` is help; ``/echo help me`` runs the echo SEA directly on ``help me``."""
         self._register_user_sea(
             "echo",
             'def description():\n    return "Echoes; use /echo <text>."\n\n\n'
-            "def use_worktree():\n    return False\n",
+            "def settings():\n    return {'use_worktree': False}\n\n\n"
+            "def add_to_system_prompt():\n    return 'ECHO-PROTOCOL'\n",
         )
         calls: list[dict[str, Any]] = []
         self._install_counting_stub(calls)
@@ -121,9 +125,15 @@ class SeaHelpCommandTest(DaemonRunApiHarness):
         )
         assert result.success is True, result
         assert result.chat_id == first_chat
+        # One LLM run in the tab's own session: the SEA's settings apply
+        # to it and its task is the trailing text, not a run_agent relay
+        # (the chat history keeps the raw ``/echo HELP`` exchange).
         assert len(calls) == 1, calls
-        assert "run_agent" in calls[0]["task_description"]
-        assert calls[0]["task_description"].endswith("help me")
+        task = calls[0]["task_description"]
+        assert task.endswith("# Task (work on it now)\n\nhelp me"), task
+        assert "run_agent" not in task
+        assert "/echo HELP" in task and "Echoes; use /echo <text>." in task
+        assert "ECHO-PROTOCOL" in calls[0]["system_prompt"]
 
     def test_help_on_a_sea_without_description_fails_with_a_diagnostic(self) -> None:
         """A SEA lacking ``description()`` makes ``/xxx help`` a failed task naming the file."""

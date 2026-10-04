@@ -504,7 +504,7 @@ class AgentPathApiTest(unittest.TestCase):
             (
                 "badtype_agent.py",
                 "def max_budget():\n    return 'lots'\n",
-                ["max_budget()", "must return a finite number or None", "str"],
+                ["max_budget()", "must be int or float", "str"],
             ),
             (
                 "noncallable_agent.py",

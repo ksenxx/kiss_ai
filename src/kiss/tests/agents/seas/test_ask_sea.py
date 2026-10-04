@@ -4,30 +4,31 @@
 # add your name here
 """End-to-end tests for the ``/ask`` SEA and its wiring.
 
-Three surfaces are pinned here, and only these — the tests use no
-mocks, just the real registry, the real rewriter and the real
-dispatch code:
+Four surfaces are pinned here, and only these — the tests use no
+mocks, just the real registry, the real slash-command resolver, the
+real daemon-side loader and the real dispatch code:
 
 1. The ``ask_sea`` module itself: ``system_prompt`` MUST return the
    bundled SYSTEM_LITE ablation prompt (``_ask_system_lite.md``),
-   ``append_to_system_prompt`` MUST start with the no-internet and
+   ``add_to_system_prompt`` MUST start with the no-internet and
    answer-quickly directives and carry the answering playbook,
-   ``tools`` (not ``add_to_tools``) MUST expose the single
-   ``task_context`` tool so there is no built-in tool besides
-   ``finish``, and ``is_parallel``, ``use_web_tools`` and
-   ``use_memory`` MUST return ``False``.
-2. The command rewriter ``rewrite_prompt_if_command`` MUST recognise
-   ``/ask <question>`` and emit a directive that instructs the outer
-   LLM to call ``run_agent`` with the fixed ``append_to_prompt`` (with
-   the ``<task_id>`` placeholder still intact); the system-prompt
-   suffix is supplied daemon-side by the SEA getter, not repeated in
-   the directive.
-3. The dispatch layer ``_dispatch`` MUST substitute the
-   literal ``<task_id>`` in ``options.append_to_prompt`` with the
-   calling task's ``last_task_id`` before the daemon round trip,
-   and MUST leave the substitution untouched for any other agent
-   path (so an unrelated SEA whose ``append_to_prompt`` happens to
-   contain the literal string is not mutated).
+   ``add_to_tools`` MUST expose the single ``task_context`` tool, and
+   ``settings()`` MUST be a ``worker`` with the ``none`` tool profile
+   (so there is no built-in tool besides ``finish``) and the fixed
+   ``add_to_prompt`` carrying the ``{task_id}`` placeholder.
+2. The slash-command resolver ``slash_command_task`` MUST recognise
+   ``/ask <question>`` and hand back the question verbatim with the
+   registered ``ask_sea.py`` path: the daemon runs the SEA directly on
+   it (no relay directive, no nested sub-agent).
+3. The daemon-side loader ``apply_agent_overrides`` MUST apply the
+   settings to the wire fields, substitute ``{task_id}`` in
+   ``add_to_prompt`` with the command's ``parentTaskId`` (empty string
+   when absent) and append the playbook AFTER any caller text on the
+   system-prompt suffix.
+4. The dispatch layer ``_dispatch`` MUST thread the calling task's
+   ``last_task_id`` to the daemon as ``parent_task_id`` and pass the
+   caller's ``append_to_prompt`` through verbatim: the substitution is
+   the daemon's job now, so no dispatch-side rewrite touches the text.
 """
 
 from __future__ import annotations
@@ -42,22 +43,38 @@ import pytest
 from kiss.agents.seas.ask import ask_sea
 from kiss.agents.sorcar import agent_dispatch, sea_commands
 from kiss.agents.sorcar.agent_dispatch import RunOptions
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.brand import BRAND, render_brand
 from kiss.core.config import kiss_home
+from kiss.server.agent_file import apply_agent_overrides
 
-# The literal placeholder the /ask flow substitutes at dispatch time.
-_PLACEHOLDER = "<task_id>"
+# The placeholder the daemon substitutes with the calling task's id.
+_PLACEHOLDER = "{task_id}"
 
 # The exact prompt suffix both dispatch paths use.
-_EXPECTED_APPEND_TO_PROMPT = (
-    "The question above is about the task with id <task_id>. "
+_EXPECTED_ADD_TO_PROMPT = (
+    "The question above is about the task with id {task_id}. "
     "Call task_context with that task id, then answer the question."
 )
-_EXPECTED_APPEND_TO_SYSTEM_PROMPT = ask_sea.append_to_system_prompt()
+_EXPECTED_ADD_TO_SYSTEM_PROMPT = ask_sea.add_to_system_prompt()
 _EXPECTED_SUFFIX_START = (
     "**MUST FOLLOW: You MUST NOT USE internet or internet search "
     "at any point. You must answer quickly because the user is waiting.**"
 )
+_EXPECTED_SETTINGS = {
+    "preset": "worker",
+    "use_worktree": False,
+    "auto_commit": False,
+    "classify_tasks": False,
+    "is_parallel": False,
+    "use_web_tools": False,
+    "use_memory": False,
+    "tool_profile": "none",
+    "add_to_prompt": _EXPECTED_ADD_TO_PROMPT,
+    # ``system_prompt()`` stays a getter; its value lands on this key.
+    "system_prompt": ask_sea.system_prompt(),
+}
+_ASK_PATH = str(Path(ask_sea.__file__).resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +114,8 @@ def test_system_prompt_returns_system_lite_md() -> None:
     assert "<identity>" in text
 
 
-def test_append_to_system_prompt_returns_fixed_suffix() -> None:
-    """append_to_system_prompt MUST open with the two fixed directives
+def test_add_to_system_prompt_returns_fixed_suffix() -> None:
+    """add_to_system_prompt MUST open with the two fixed directives
     and carry the answering playbook.
 
     The no-internet directive comes first, then the answer-quickly
@@ -108,33 +125,54 @@ def test_append_to_system_prompt_returns_fixed_suffix() -> None:
     three plain sentences, one ``<p>``) and the pitfalls seen in
     earlier runs (raw DB reads, editing files).
     """
-    text = ask_sea.append_to_system_prompt()
+    text = ask_sea.add_to_system_prompt()
     assert text.startswith(_EXPECTED_SUFFIX_START)
     assert "exactly two tools: `task_context` and `finish`" in text
     assert text.index("task_context(task_id)") < text.index("Call `finish`")
     assert "Two or three sentences" in text and "<p>…</p>" in text
     assert "history.db" in text and "read-only" in text
     assert "task_overview" not in text and "task_transcript" not in text
-    assert ask_sea.APPEND_TO_PROMPT == _EXPECTED_APPEND_TO_PROMPT
+    assert ask_sea.ADD_TO_PROMPT == _EXPECTED_ADD_TO_PROMPT
+    # The deprecated getter of the earlier contract is gone: the daemon
+    # would otherwise append the playbook twice.
+    assert not hasattr(ask_sea, "append_to_system_prompt")
 
 
-def test_tools_basic_tools_and_memory_getters() -> None:
-    """tools MUST be ``task_context`` alone (via ``tools()``, so no basic toolset), memory off."""
-    assert [t.__name__ for t in ask_sea.tools()] == ["task_context"]
-    assert not hasattr(ask_sea, "add_to_tools")
-    assert not hasattr(ask_sea, "if_append_basic_tools")
-    assert not hasattr(ask_sea, "tool_profile")
-    assert ask_sea.use_memory() is False
+def test_settings_follow_the_contract() -> None:
+    """``settings()`` MUST be a tool-less worker whose prompt suffix names the task.
+
+    ``worker`` pins worktree, auto-commit, classifier, fan-out, browser
+    and memory off; ``tool_profile: "none"`` keeps even the built-in
+    toolset out so the answerer cannot run commands or touch files;
+    ``add_to_prompt`` is the fixed sentence with ``{task_id}`` still a
+    placeholder (the daemon fills it from ``parentTaskId``).  The
+    resolved settings add the preset's defaults and the value of the
+    ``system_prompt()`` getter.
+    """
+    assert ask_sea.settings() == {
+        "preset": "worker",
+        "tool_profile": "none",
+        "add_to_prompt": _EXPECTED_ADD_TO_PROMPT,
+    }
+    assert resolve_settings(vars(ask_sea)) == _EXPECTED_SETTINGS
+    assert _PLACEHOLDER in ask_sea.settings()["add_to_prompt"]
 
 
-def test_is_parallel_returns_false() -> None:
-    """is_parallel MUST be False so the Q&A run does not fan out."""
-    assert ask_sea.is_parallel() is False
+def test_add_to_tools_is_task_context_alone_and_legacy_getters_are_gone() -> None:
+    """``add_to_tools`` MUST be ``task_context`` alone; no per-field getter remains.
 
-
-def test_use_web_tools_returns_false() -> None:
-    """use_web_tools MUST be False so the Q&A run is offline."""
-    assert ask_sea.use_web_tools() is False
+    The ``none`` tool profile (not the deprecated ``tools()`` getter) is
+    what removes the built-in toolset, so ``tools()`` MUST NOT exist
+    (defining both is an error) and neither may any of the deprecated
+    per-field getters the settings dict replaced.
+    """
+    assert [t.__name__ for t in ask_sea.add_to_tools()] == ["task_context"]
+    for legacy in (
+        "tools", "if_append_basic_tools", "tool_profile", "use_memory",
+        "is_parallel", "use_web_tools", "append_to_prompt", "dispatch_timeout",
+        "APPEND_TO_PROMPT",
+    ):
+        assert not hasattr(ask_sea, legacy), legacy
 
 
 def test_system_lite_is_bundled_next_to_the_module() -> None:
@@ -173,49 +211,42 @@ def test_ask_command_is_registered_by_default() -> None:
     """Refreshing the registry MUST expose /ask as a known command.
 
     A regression here breaks the whole slash-command flow: no
-    registry entry, no rewrite, no dispatch.
+    registry entry, no resolution, no run.
     """
     commands = sea_commands.refresh_registry()
     assert "ask" in commands
 
 
 # ---------------------------------------------------------------------------
-# 2. The rewriter
+# 2. The slash-command resolver
 # ---------------------------------------------------------------------------
 
 
-def test_rewriter_emits_ask_directive_with_fixed_arguments() -> None:
-    """``/ask <question>`` MUST rewrite to a run_agent directive.
+def test_slash_ask_resolves_to_the_question_and_the_bundled_sea() -> None:
+    """``/ask <question>`` MUST resolve to the question verbatim and ``ask_sea.py``.
 
-    The directive MUST reference the resolved ``ask_sea.py`` path,
-    carry the exact ``append_to_prompt`` string (with ``<task_id>``
-    still a literal placeholder — dispatch substitutes it later), not
-    repeat the multi-line system-prompt suffix (the SEA getter supplies
-    it daemon-side), and end with the user's question verbatim.
+    The daemon runs the SEA directly on that text (its ``settings()``
+    supply the prompt suffix and the ``none`` tool profile), so the
+    resolver hands back nothing but the user's words and the path: no
+    directive, no ``run_agent`` arguments, no placeholder.
     """
     sea_commands.refresh_registry()
-    hit = sea_commands.rewrite_prompt_if_command(
-        "/ask why did the last step fail?"
-    )
+    hit = sea_commands.slash_command_task("/ask why did the last step fail?")
     assert hit is not None
-    rewritten, sea_path = hit
+    task_text, sea_path = hit
     assert sea_path.name == "ask_sea.py"
-    assert f'agent = "{sea_path}"' in rewritten
-    assert f'append_to_prompt = "{_EXPECTED_APPEND_TO_PROMPT}"' in rewritten
-    assert "append_to_system_prompt" not in rewritten
-    assert rewritten.endswith("why did the last step fail?")
-    # The placeholder MUST reach dispatch intact — the rewriter has no
-    # access to the calling task's id yet.
-    assert _PLACEHOLDER in rewritten
+    assert sea_path.resolve() == Path(_ASK_PATH)
+    assert task_text == "why did the last step fail?"
+    assert _PLACEHOLDER not in task_text
+    # The settings the daemon will apply to that very run.
+    assert sea_commands.sea_settings(sea_path) == _EXPECTED_SETTINGS
 
 
-def test_rewriter_leaves_unrelated_slash_commands_alone(
-    tmp_path: Path,
-) -> None:
-    """A non-``/ask`` slash command MUST NOT carry the ask arguments.
+def test_slash_resolver_treats_unrelated_commands_the_same_way(tmp_path: Path) -> None:
+    """A non-``/ask`` slash command MUST resolve to its own text and path.
 
-    Regression guard: the /ask branch is opt-in on the command name
-    only; a sibling SEA must still get the generic directive.
+    Regression guard: nothing of the ask flow (its prompt suffix, its
+    playbook) leaks into a sibling SEA's resolution.
     """
     folder = tmp_path / "user-seas"
     folder.mkdir(parents=True, exist_ok=True)
@@ -225,23 +256,20 @@ def test_rewriter_leaves_unrelated_slash_commands_alone(
     (kiss_home() / "SEAS.md").write_text(str(folder) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
 
-    hit = sea_commands.rewrite_prompt_if_command("/notify hello")
+    hit = sea_commands.slash_command_task("/notify hello")
     assert hit is not None
-    rewritten, _ = hit
-    assert "append_to_prompt" not in rewritten
-    assert "append_to_system_prompt" not in rewritten
-    assert _EXPECTED_APPEND_TO_SYSTEM_PROMPT not in rewritten
+    task_text, sea_path = hit
+    assert task_text == "hello"
+    assert sea_path == folder / "notify" / "notify_sea.py"
+    assert sea_commands.sea_settings(sea_path) == {"preset": "session"}
 
 
-def test_rewriter_uses_generic_directive_for_user_sea_shadowing_ask(
-    tmp_path: Path,
-) -> None:
-    """A ``SEAS.md`` folder that shadows ``/ask`` MUST still rewrite.
+def test_slash_resolver_honours_a_user_sea_shadowing_ask(tmp_path: Path) -> None:
+    """A ``SEAS.md`` folder that shadows ``/ask`` MUST win the resolution.
 
     The bundled ``seas/ask`` has the lowest registry precedence, so a
-    user SEA named ``ask`` wins.  It does not define the private
-    ``APPEND_TO_PROMPT`` constant, so the rewriter must fall back to
-    the ordinary directive for that path instead of raising.
+    user SEA named ``ask`` wins; it defines none of the ask settings,
+    so the daemon would run it as a plain session on the question.
     """
     shadow = tmp_path / "user-seas" / "ask"
     shadow.mkdir(parents=True)
@@ -250,28 +278,177 @@ def test_rewriter_uses_generic_directive_for_user_sea_shadowing_ask(
     (kiss_home() / "SEAS.md").write_text(str(shadow.parent) + "\n", encoding="utf-8")
     sea_commands.refresh_registry()
     assert sea_commands.get_command("ask") == shadow / "ask_sea.py"
-    hit = sea_commands.rewrite_prompt_if_command("/ask what happened?")
+    hit = sea_commands.slash_command_task("/ask what happened?")
     assert hit is not None
-    rewritten, sea_path = hit
+    task_text, sea_path = hit
     assert sea_path == shadow / "ask_sea.py"
-    assert f'agent = "{sea_path}"' in rewritten
-    assert "append_to_prompt" not in rewritten
-    assert rewritten.endswith("what happened?")
+    assert task_text == "what happened?"
+    assert sea_commands.sea_settings(sea_path) == {"preset": "session"}
 
 
-def test_rewriter_rejects_bare_ask_without_question() -> None:
-    """``/ask`` with no trailing text MUST NOT rewrite.
+def test_slash_resolver_rejects_bare_ask_and_answers_help_from_description() -> None:
+    """``/ask`` with no trailing text MUST NOT resolve; ``/ask help`` is the description.
 
     Same contract as every other slash command: an empty task text
-    would be rejected downstream by ``run_agent``.
+    runs nothing, and ``help`` (in any case) is answered from
+    ``description()`` without a run.
     """
     sea_commands.refresh_registry()
-    assert sea_commands.rewrite_prompt_if_command("/ask") is None
-    assert sea_commands.rewrite_prompt_if_command("/ask ") is None
+    assert sea_commands.slash_command_task("/ask") is None
+    assert sea_commands.slash_command_task("/ask ") is None
+    assert sea_commands.slash_command_task("/ask help") is None
+    assert sea_commands.slash_command_task("/ask HELP") is None
+    assert sea_commands.help_text_if_command("/ask help") == ask_sea.description()
 
 
 # ---------------------------------------------------------------------------
-# 3. The dispatch-time <task_id> substitution
+# 3. The daemon-side loader: settings on the wire, {task_id} substitution
+# ---------------------------------------------------------------------------
+
+
+def test_apply_agent_overrides_applies_the_ask_settings_to_the_wire() -> None:
+    """The daemon loader MUST wire the ask settings and getters onto the cmd.
+
+    This exercises the real ``apply_agent_overrides`` path —
+    :meth:`TaskRunner._run_task_inner` calls it just before the run —
+    so ``system_prompt()`` lands on ``systemPrompt``, the ``worker``
+    preset on ``useWorktree`` / ``autoCommit`` / ``classifyTasks`` /
+    ``isParallel`` / ``useWebTools`` / ``useMemory``, the ``none`` profile
+    on ``toolProfile`` (the daemon derives "no built-in tools" from it:
+    nothing stages ``appendBasicTools`` any more) and ``add_to_tools()``
+    on the daemon-side ``tools`` field.
+    """
+    cmd: dict[str, Any] = {"agentPath": _ASK_PATH, "prompt": "why did the run fail?"}
+    overridden = apply_agent_overrides(cmd)
+    assert overridden == {
+        "systemPrompt", "appendToSystemPrompt", "appendToPrompt", "toolProfile", "tools",
+        "useWorktree", "autoCommit", "classifyTasks", "isParallel", "useWebTools", "useMemory",
+    }
+    assert cmd["systemPrompt"] == ask_sea.system_prompt()
+    assert cmd["appendToSystemPrompt"] == _EXPECTED_ADD_TO_SYSTEM_PROMPT
+    assert cmd["toolProfile"] == "none"
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
+    assert cmd["classifyTasks"] is False
+    assert cmd["isParallel"] is False
+    assert cmd["useWebTools"] is False
+    assert cmd["useMemory"] is False
+    assert [tool.__name__ for tool in cmd["tools"]] == ["task_context"]
+    assert all(callable(tool) for tool in cmd["tools"])
+    assert "appendBasicTools" not in cmd
+    assert "toolsFile" not in cmd
+    # The prompt body itself is never rewritten by the loader.
+    assert cmd["prompt"] == "why did the run fail?"
+
+
+def test_apply_agent_overrides_substitutes_task_id_with_the_parent_task_id() -> None:
+    """``{task_id}`` in ``add_to_prompt`` MUST become the command's ``parentTaskId``.
+
+    Both ``/ask`` paths dispatch the answering run as a sub-agent of
+    the task the question is about, so ``parentTaskId`` IS the id the
+    answerer must pass to ``task_context``.
+    """
+    cmd: dict[str, Any] = {
+        "agentPath": _ASK_PATH,
+        "prompt": "why did the last step fail?",
+        "parentTaskId": "task-abc-123",
+    }
+    apply_agent_overrides(cmd)
+    assert _PLACEHOLDER not in cmd["appendToPrompt"]
+    assert cmd["appendToPrompt"] == _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-abc-123")
+    assert cmd["parentTaskId"] == "task-abc-123"
+
+
+def test_apply_agent_overrides_substitutes_empty_when_no_parent_task_id() -> None:
+    """A missing or non-string ``parentTaskId`` MUST still strip the placeholder.
+
+    Leaving the literal ``{task_id}`` in place would confuse the
+    answering agent; substituting with an empty string gives an
+    obviously-empty task id that surfaces the bug loudly.
+    """
+    cmds: list[dict[str, Any]] = [
+        {"agentPath": _ASK_PATH, "prompt": "q"},
+        {"agentPath": _ASK_PATH, "prompt": "q", "parentTaskId": None},
+        {"agentPath": _ASK_PATH, "prompt": "q", "parentTaskId": 42},
+    ]
+    for cmd in cmds:
+        apply_agent_overrides(cmd)
+        assert _PLACEHOLDER not in cmd["appendToPrompt"]
+        # Every other character of the sentence is preserved.
+        assert cmd["appendToPrompt"].startswith(
+            "The question above is about the task with id . Call"
+        )
+
+
+def test_apply_agent_overrides_appends_the_prompt_suffix_and_the_system_one() -> None:
+    """Both ``add_to_*`` texts are additive: the caller's suffixes come first.
+
+    The substituted ``add_to_prompt`` is APPENDED after the caller's
+    ``appendToPrompt`` (``CALLER\\n\\nTEXT``), exactly as
+    ``add_to_system_prompt()`` is appended after the caller's
+    system-prompt suffix, instead of replacing either.
+    """
+    cmd: dict[str, Any] = {
+        "agentPath": _ASK_PATH,
+        "prompt": "q",
+        "parentTaskId": "task-xyz",
+        "appendToPrompt": "stale caller suffix",
+        "appendToSystemPrompt": "caller system text",
+    }
+    apply_agent_overrides(cmd)
+    assert cmd["appendToPrompt"] == (
+        "stale caller suffix\n\n" + _EXPECTED_ADD_TO_PROMPT.replace(_PLACEHOLDER, "task-xyz")
+    )
+    assert cmd["appendToSystemPrompt"] == (
+        "caller system text\n\n" + _EXPECTED_ADD_TO_SYSTEM_PROMPT
+    )
+
+
+def test_apply_agent_overrides_leaves_a_callers_placeholder_alone_without_add_to_prompt(
+    tmp_path: Path,
+) -> None:
+    """The substitution is a property of ``add_to_prompt``, not of the wire field.
+
+    A script that declares no ``add_to_prompt`` leaves the caller's
+    ``appendToPrompt`` untouched: the literal ``{task_id}`` in the
+    caller's own text reaches the run unchanged.
+    """
+    other = tmp_path / "other_sea.py"
+    other.write_text("# stub\n", encoding="utf-8")
+    cmd: dict[str, Any] = {
+        "agentPath": str(other),
+        "prompt": "q",
+        "parentTaskId": "task-xyz",
+        "appendToPrompt": "literal {task_id} stays here",
+    }
+    assert apply_agent_overrides(cmd) == set()
+    assert cmd["appendToPrompt"] == "literal {task_id} stays here"
+
+
+def test_apply_agent_overrides_substitutes_for_any_sea_declaring_add_to_prompt(
+    tmp_path: Path,
+) -> None:
+    """``{task_id}`` substitution is general: every SEA's ``add_to_prompt`` gets it.
+
+    The earlier dispatch-side rewrite was special-cased on the file
+    name ``ask_sea.py``; the daemon-side one is part of the
+    ``add_to_prompt`` setting, so a user SEA under any name (including
+    a look-alike such as ``my_ask_sea.py``) gets the same treatment.
+    """
+    for name in ("notify_sea.py", "my_ask_sea.py", "test_ask_sea.py"):
+        script = tmp_path / name
+        script.write_text(
+            "def settings():\n"
+            "    return {'add_to_prompt': 'Report on task {task_id}.'}\n",
+            encoding="utf-8",
+        )
+        cmd: dict[str, Any] = {"agentPath": str(script), "prompt": "q", "parentTaskId": "t-1"}
+        assert apply_agent_overrides(cmd) == {"appendToPrompt"}
+        assert cmd["appendToPrompt"] == "Report on task t-1."
+
+
+# ---------------------------------------------------------------------------
+# 4. The dispatch layer threads the parent id and leaves the text alone
 # ---------------------------------------------------------------------------
 
 
@@ -293,7 +470,7 @@ class _DispatchCaptured(BaseException):
 
     Inherits :class:`BaseException` (not :class:`Exception`) so it is
     NOT caught by the generic ``except Exception`` in
-    :func:`_dispatch` that turns any daemon failure into an
+    :func:`dispatch_result` that turns any daemon failure into an
     "Error:" string — the test needs the exception to propagate up so
     it can read the captured kwargs.
     """
@@ -332,122 +509,53 @@ def _run_dispatch(
             timeout=1.0,
             parent_agent=parent,
             scope_work_dir="",
-            git_lifecycle=False,
-            classify=True,
             options=options,
+            settings=sea_commands.sea_settings(Path(agent_path)),
         )
     except _DispatchCaptured as captured:
         return captured.kwargs
     raise AssertionError("daemon_client.run was not invoked")
 
 
-def test_dispatch_substitutes_task_id_placeholder_for_ask_sea(
+def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """``<task_id>`` in append_to_prompt MUST be replaced for ask_sea.
+    """``_dispatch`` MUST send the caller's id as ``parent_task_id`` and not rewrite text.
 
-    The substitution uses the calling agent's persisted
-    ``last_task_id``: that is the ``task_id`` of the task that is
-    running when the /ask dispatch happens.
+    The daemon substitutes ``{task_id}`` from that ``parentTaskId``
+    (section 3), so the dispatcher no longer touches
+    ``append_to_prompt``: a caller's text with the placeholder, a
+    caller's text without it, and the empty default all reach the
+    daemon verbatim, as does ``append_to_system_prompt``.
     """
-    ask_path = str(Path(ask_sea.__file__).resolve())
-    options = dataclasses.replace(
-        RunOptions(),
-        append_to_prompt=_EXPECTED_APPEND_TO_PROMPT,
-        append_to_system_prompt=_EXPECTED_APPEND_TO_SYSTEM_PROMPT,
-    )
-    captured = _run_dispatch(
-        ask_path, options, parent_task_id="task-abc-123",
-        monkeypatch=monkeypatch, tmp_path=tmp_path,
-    )
-    # The literal placeholder is gone; the calling task's id is in.
-    assert _PLACEHOLDER not in captured["append_to_prompt"]
-    assert "task-abc-123" in captured["append_to_prompt"]
-    # The append_to_system_prompt reaches the daemon untouched.
-    assert (
-        captured["append_to_system_prompt"] == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
-    )
-    # Parent identity is threaded through so the answering run is a
-    # sub-agent of the calling task (and its events show up in the
-    # right chat webview).
-    assert captured["parent_task_id"] == "task-abc-123"
+    for text in ("literal {task_id} stays here", "no placeholder at all", ""):
+        options = dataclasses.replace(
+            RunOptions(),
+            append_to_prompt=text,
+            append_to_system_prompt="caller system text",
+        )
+        captured = _run_dispatch(
+            _ASK_PATH, options, parent_task_id="task-abc-123",
+            monkeypatch=monkeypatch, tmp_path=tmp_path,
+        )
+        assert captured["append_to_prompt"] == text
+        assert captured["append_to_system_prompt"] == "caller system text"
+        assert captured["parent_task_id"] == "task-abc-123"
+        assert captured["extension_agent_path"] == _ASK_PATH
+        assert captured["prompt"] == "why did the last step fail?"
 
 
-def test_dispatch_substitutes_even_when_parent_task_id_is_empty(
+def test_dispatch_with_an_empty_parent_task_id_sends_an_empty_parent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """An empty parent id MUST still strip the placeholder for ask_sea.
-
-    Leaving the literal ``<task_id>`` in place would confuse the
-    answering agent; substituting with an empty string gives an
-    obviously-empty task id that surfaces the bug loudly.
-    """
-    ask_path = str(Path(ask_sea.__file__).resolve())
-    options = dataclasses.replace(
-        RunOptions(), append_to_prompt=_EXPECTED_APPEND_TO_PROMPT,
-    )
+    """A caller without a persisted row MUST dispatch a top-level task (empty parent)."""
     captured = _run_dispatch(
-        ask_path, options, parent_task_id="",
+        _ASK_PATH, RunOptions(), parent_task_id="",
         monkeypatch=monkeypatch, tmp_path=tmp_path,
     )
-    assert _PLACEHOLDER not in captured["append_to_prompt"]
-    # Every other character of the sentence is preserved.
-    assert captured["append_to_prompt"].startswith(
-        "The question above is about the task with id . Call"
-    )
-
-
-def test_dispatch_does_not_touch_placeholder_for_other_agents(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """A non-``ask_sea.py`` dispatch MUST leave ``<task_id>`` intact.
-
-    Guards against widening the substitution beyond the /ask flow —
-    an unrelated agent that happens to use the literal string
-    ``<task_id>`` in its own append_to_prompt must reach the daemon
-    unchanged.
-    """
-    other_path = str(tmp_path / "other_sea.py")
-    Path(other_path).write_text("# stub\n", encoding="utf-8")
-    options = dataclasses.replace(
-        RunOptions(),
-        append_to_prompt="literal <task_id> stays here",
-    )
-    captured = _run_dispatch(
-        other_path, options, parent_task_id="task-xyz",
-        monkeypatch=monkeypatch, tmp_path=tmp_path,
-    )
-    assert captured["append_to_prompt"] == "literal <task_id> stays here"
-
-
-@pytest.mark.parametrize(
-    "look_alike_name",
-    ["test_ask_sea.py", "not_ask_sea.py", "my_ask_sea.py"],
-)
-def test_dispatch_ignores_suffix_lookalikes(
-    look_alike_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A path whose stem ENDS with ``ask_sea.py`` is not ``ask_sea.py``.
-
-    Regression for a bug where ``agent_path.endswith("ask_sea.py")``
-    matched ``test_ask_sea.py`` (and any other ``*ask_sea.py``), so a
-    dispatch of an unrelated file whose name happens to end that way
-    had its ``append_to_prompt`` rewritten.  The guard now compares
-    ``Path(agent_path).name`` against ``"ask_sea.py"`` exactly.
-    """
-    look_alike = tmp_path / look_alike_name
-    look_alike.write_text("# stub\n", encoding="utf-8")
-    options = dataclasses.replace(
-        RunOptions(),
-        append_to_prompt="literal <task_id> stays here",
-    )
-    captured = _run_dispatch(
-        str(look_alike), options, parent_task_id="task-xyz",
-        monkeypatch=monkeypatch, tmp_path=tmp_path,
-    )
-    assert captured["append_to_prompt"] == "literal <task_id> stays here"
+    assert captured["parent_task_id"] == ""
+    assert captured["parent_tab_id"] == ""
+    assert captured["append_to_prompt"] == ""
 
 
 def test_ask_sea_is_not_advertised_as_a_channel() -> None:
@@ -461,65 +569,3 @@ def test_ask_sea_is_not_advertised_as_a_channel() -> None:
     from kiss.agents.sorcar.agent_dispatch import available_channels
 
     assert "ask" not in available_channels()
-
-
-def test_dispatch_leaves_ask_sea_append_alone_when_no_placeholder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """The guard MUST also gate on the placeholder being present.
-
-    A caller that overrides ``append_to_prompt`` to a string without
-    ``<task_id>`` (an unusual but legal use of the ask agent as a
-    plain read-only Q&A) must pass through unchanged.
-    """
-    ask_path = str(Path(ask_sea.__file__).resolve())
-    options = dataclasses.replace(
-        RunOptions(), append_to_prompt="no placeholder at all",
-    )
-    captured = _run_dispatch(
-        ask_path, options, parent_task_id="task-abc",
-        monkeypatch=monkeypatch, tmp_path=tmp_path,
-    )
-    assert captured["append_to_prompt"] == "no placeholder at all"
-
-
-# ---------------------------------------------------------------------------
-# 4. The ask_sea overrides seen by apply_agent_overrides
-# ---------------------------------------------------------------------------
-
-
-def test_apply_agent_overrides_reads_ask_sea_getters(tmp_path: Path) -> None:
-    """The daemon loader MUST wire the ask_sea getters onto the cmd.
-
-    This exercises the real ``apply_agent_overrides`` path —
-    :meth:`TaskRunner._run_task_inner` calls it just before the run —
-    so the four getters ``system_prompt``, ``append_to_system_prompt``,
-    ``is_parallel``, ``use_web_tools`` reach the ``systemPrompt`` /
-    ``appendToSystemPrompt`` / ``useParallel`` / ``webTools`` wire
-    fields correctly.  A stale wire value for ``appendToSystemPrompt``
-    (e.g. from an older client) MUST be replaced by the getter's text.
-    """
-    from kiss.server.agent_file import apply_agent_overrides
-
-    ask_path = str(Path(ask_sea.__file__).resolve())
-    cmd: dict[str, Any] = {
-        "agentPath": ask_path,
-        "prompt": "why did the run fail?",
-        "appendToSystemPrompt": "stale wire value",
-    }
-    overridden = apply_agent_overrides(cmd)
-    assert "systemPrompt" in overridden
-    assert "appendToSystemPrompt" in overridden
-    assert "useParallel" in overridden
-    assert "webTools" in overridden
-    assert cmd["systemPrompt"] == ask_sea.system_prompt()
-    assert cmd["appendToSystemPrompt"] == _EXPECTED_APPEND_TO_SYSTEM_PROMPT
-    assert cmd["useParallel"] is False
-    assert cmd["webTools"] is False
-    assert cmd["useMemory"] is False
-    # ``tools()`` returns callables, staged on the daemon-side ``tools``
-    # field, and switches the basic toolset off.
-    assert cmd["appendBasicTools"] is False
-    assert "toolProfile" not in cmd
-    assert all(callable(tool) for tool in cmd["tools"])
-    assert "toolsFile" not in cmd

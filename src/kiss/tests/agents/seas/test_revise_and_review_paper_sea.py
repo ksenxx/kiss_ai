@@ -17,13 +17,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from kiss.agents.seas.review_paper import review_paper_sea
 from kiss.agents.seas.revise_and_review_paper import revise_and_review_paper_sea as sea
 from kiss.agents.seas.write_paper import write_paper_sea
 from kiss.agents.sorcar import fanout_guard, sea_commands
+from kiss.agents.sorcar.agent_dispatch import DEFAULT_DISPATCH_TIMEOUT_SECONDS, resolve_timeout
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -57,7 +60,7 @@ def _review(tmp_path: Path, name: str, tail: str) -> Path:
 
 def test_sea_getters_follow_the_user_contract() -> None:
     """The SEA appends the coordinator rules, offers three tools, neither browses nor fans out."""
-    prompt = sea.append_to_system_prompt()
+    prompt = sea.add_to_system_prompt()
     assert prompt == sea.SYSTEM_PROMPT
     assert sea.WRITE_PAPER_SEA in prompt and sea.REVIEW_PAPER_SEA in prompt
     assert Path(sea.WRITE_PAPER_SEA) == Path(write_paper_sea.__file__).resolve()
@@ -69,56 +72,92 @@ def test_sea_getters_follow_the_user_contract() -> None:
     assert "ask the user once with `ask_user_question`" in prompt
     names = [t.__name__ for t in sea.add_to_tools()]
     assert names == ["writer_task", "reviewer_task", "loop_status"]
-    assert sea.use_web_tools() is False
-    assert sea.is_parallel() is False
-    assert sea.classify_tasks() is False
-    assert sea.tool_profile() == "full"
-    assert sea.dispatch_timeout() == sea.DISPATCH_TIMEOUT_SECONDS == 86400
-    assert not hasattr(sea, "system_prompt")
+    assert sea.settings() == {
+        "use_web_tools": False,
+        "is_parallel": False,
+        "classify_tasks": False,
+        "tool_profile": "full",
+        "timeout": sea.DISPATCH_TIMEOUT_SECONDS,
+    }
+    assert sea.DISPATCH_TIMEOUT_SECONDS == 86400
+    # No preset named, so the resolved settings are these five keys under
+    # the default ``session`` preset; the deprecated getters are gone.
+    assert resolve_settings(vars(sea)) == {"preset": "session", **sea.settings()}
+    for legacy in (
+        "system_prompt", "use_web_tools", "is_parallel", "classify_tasks", "tool_profile",
+        "dispatch_timeout", "append_to_system_prompt",
+    ):
+        assert not hasattr(sea, legacy), legacy
     assert "strong accept" in sea.description()
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:
-    """``/revise_and_review_paper <text>`` becomes a ``run_agent`` directive on this file."""
+    """``/revise_and_review_paper <text>`` resolves to the text and this file.
+
+    The daemon runs the SEA directly on the text; a ``run_agent``
+    dispatch of the same file waits ``settings()["timeout"]`` (a day)
+    when the caller names no timeout.
+    """
     assert sea_commands.get_command("revise_and_review_paper") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command(
+    hit = sea_commands.slash_command_task(
         "/revise_and_review_paper Writing: a paper. Review: for ICLR."
     )
-    assert rewritten is not None
-    prompt, path = rewritten
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    assert (
-        f'agent = "{_SEA_PATH}"\n  task  = the text below, verbatim\n  timeout = "86400"\n'
-        in prompt
-    )
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nWriting: a paper. Review: for ICLR.")
+    assert task_text == "Writing: a paper. Review: for ICLR."
+    settings = sea_commands.sea_settings(path)
+    assert settings == {"preset": "session", **sea.settings()}
+    assert resolve_timeout("", settings) == 86400.0
     assert sea_commands.sea_description(_SEA_PATH) == sea.description()
 
 
-def test_slash_relays_pass_the_dispatch_timeout_of_long_running_seas(tmp_path: Path) -> None:
-    """The relay directive carries ``timeout`` only when ``dispatch_timeout()`` is positive."""
-    for command, seconds in [("write_paper", 21600), ("review_paper", 7200)]:
-        rewritten = sea_commands.rewrite_prompt_if_command(f"/{command} x")
-        assert rewritten is not None
-        assert f'\n  timeout = "{seconds}"\n' in rewritten[0], rewritten[0]
-    dummy = sea_commands.rewrite_prompt_if_command("/dummy x")
-    assert dummy is not None and "timeout" not in dummy[0]
-    # Real SEA files with a missing, non-numeric, non-positive, boolean or raising getter
-    # add no line; a float is printed without a trailing ``.0``.
-    cases = {
-        "": "",
-        "def dispatch_timeout():\n    return 'soon'\n": "",
-        "def dispatch_timeout():\n    return 0\n": "",
-        "def dispatch_timeout():\n    return True\n": "",
-        "def dispatch_timeout():\n    raise RuntimeError('broken')\n": "",
-        "def dispatch_timeout():\n    return 1800.0\n": '  timeout = "1800"\n',
-    }
-    for n, (body, expected) in enumerate(cases.items()):
+def test_dispatch_timeout_comes_from_the_settings_of_long_running_seas(tmp_path: Path) -> None:
+    """``resolve_timeout`` takes ``settings()["timeout"]`` when positive, else the default.
+
+    The paper SEAs declare their own waits; a SEA without ``timeout``
+    (the bundled ``/dummy``) gets :data:`DEFAULT_DISPATCH_TIMEOUT_SECONDS`.
+    Real SEA files with a non-numeric, boolean or raising legacy
+    ``dispatch_timeout()`` getter fail loudly at ``sea_settings`` (a
+    broken script must not run with guessed parameters); a non-positive
+    value falls back to the default and a positive float is kept as is.
+    """
+    for command, seconds in [("write_paper", 21600.0), ("review_paper", 7200.0)]:
+        path = sea_commands.get_command(command)
+        assert path is not None
+        assert resolve_timeout("", sea_commands.sea_settings(path)) == seconds, command
+    dummy = sea_commands.get_command("dummy")
+    assert dummy is not None
+    dummy_settings = sea_commands.sea_settings(dummy)
+    assert "timeout" not in dummy_settings
+    assert resolve_timeout("", dummy_settings) == DEFAULT_DISPATCH_TIMEOUT_SECONDS == 3600.0
+
+    def _script(n: int, body: str) -> Path:
         folder = tmp_path / f"t{n}"
         folder.mkdir()
         script = folder / f"t{n}_sea.py"
         script.write_text(f"def description():\n    return 'x'\n{body}", encoding="utf-8")
-        assert sea_commands._timeout_argument_line(script) == expected, body
+        return script
+
+    resolved = {
+        "": 3600.0,
+        "def dispatch_timeout():\n    return 0\n": 3600.0,
+        "def dispatch_timeout():\n    return 1800.0\n": 1800.0,
+        "def settings():\n    return {'timeout': 1800}\n": 1800.0,
+    }
+    for n, (body, expected) in enumerate(resolved.items()):
+        settings = sea_commands.sea_settings(_script(n, body))
+        assert resolve_timeout("", settings) == expected, body
+        # An explicit positive argument always wins over the script.
+        assert resolve_timeout("42", settings) == 42.0, body
+    broken = [
+        "def dispatch_timeout():\n    return 'soon'\n",
+        "def dispatch_timeout():\n    return True\n",
+        "def dispatch_timeout():\n    raise RuntimeError('broken')\n",
+    ]
+    for n, body in enumerate(broken, start=len(resolved)):
+        with pytest.raises(sea_commands.SeaScriptError):
+            sea_commands.sea_settings(_script(n, body))
 
 
 def test_writer_task_first_round_and_revision_rounds() -> None:
@@ -322,6 +361,7 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
         ),
         finish_body("<pre>STOP: strong accept after round 1</pre>", prompt_tokens=700),
     ]
+    settings = sea.settings()
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("revise-review-sea-test")
         result = agent.run(
@@ -331,10 +371,11 @@ def test_agent_gets_the_rules_and_the_tools_and_the_real_results(tmp_path: Path)
             max_steps=5,
             max_budget=1.0,
             model_config={"base_url": url, "api_key": "local"},
-            system_prompt=sea.append_to_system_prompt(),
+            system_prompt=sea.add_to_system_prompt(),
             tools=sea.add_to_tools(),
-            web_tools=sea.use_web_tools(),
-            is_parallel=sea.is_parallel(),
+            tool_profile=settings["tool_profile"],
+            web_tools=settings["use_web_tools"],
+            is_parallel=settings["is_parallel"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

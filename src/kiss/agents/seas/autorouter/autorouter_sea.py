@@ -284,7 +284,7 @@ availability come from `model_menu`, `pick_model` and `estimate_cost`; never inv
    medium codebase and runs tests: about 200k prompt and 20k completion tokens. Then
    `observed_call_costs(days, model)` once; pass over a candidate whose observed mean cost
    per call is over twice the estimate or far slower than its tier peers.
-   Dispatch with `run_agent(task=..., model_name=<picked>)`, one call per unit,
+   Dispatch with `run_agent(task=..., model=<picked>)`, one call per unit,
    never mid-context; the task text names the files the sub-agent may touch and the check
    that ends it. Units run in sequence; a sub-agent may fan out with its own `run_parallel`.
 
@@ -779,9 +779,22 @@ def add_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def model() -> str:
-    """Run the router itself on the frontier orchestrator model."""
-    return orchestrator_model()
+def settings() -> dict[str, Any]:
+    """Configure a routed session: the orchestrator model, no fan-out, no browser, no memory.
+
+    ``is_parallel`` is off because ``run_parallel`` forwards the parent's
+    system-prompt additions to every worker, which would turn each routed
+    unit into another router without the routing tools; ``run_agent`` is
+    the dispatch primitive (one unit per call).  Classification is off so
+    the router always sees the full protocol.
+    """
+    return {
+        "model": orchestrator_model(),
+        "is_parallel": False,
+        "classify_tasks": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
 
 
 def add_to_tools() -> list[Any]:
@@ -789,30 +802,3 @@ def add_to_tools() -> list[Any]:
     return [model_menu, pick_model, estimate_cost, observed_call_costs, log_decision]
 
 
-def is_parallel() -> bool:
-    """Withhold ``run_parallel``: its workers would inherit this protocol in their prompt.
-
-    ``run_parallel`` forwards the parent's system-prompt additions to every
-    worker, which would turn each routed unit into another router without
-    the routing tools.  ``run_agent`` is the dispatch primitive (one unit
-    per call): its sub-task inherits the caller's prompt additions together
-    with the caller's ``add_to_tools()`` tools, so a routed unit that reads
-    this protocol also has ``pick_model`` and the ledger tools, and runs in
-    its own tab with its own model and budget.
-    """
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the lite/full prompt classifier: the router always gets the full prompt."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """No browser for the router itself; a routed sub-agent may still get one."""
-    return False
-
-
-def use_memory() -> bool:
-    """No persistent memory: the shared ledger in the KISS home is the record."""
-    return False

@@ -312,7 +312,13 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert parsed["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
 
-    def test_channel_prompt_appended_to_task_prompt(self) -> None:
+    def test_channel_prompt_appended_to_system_prompt(self) -> None:
+        """The channel guidance reaches the run as system-prompt text, not task text.
+
+        The launcher sends the task verbatim; the daemon applies the
+        channel module's ``add_to_system_prompt()`` (the agent class's
+        ``channel_system_prompt``) to the run's system prompt.
+        """
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         self._install_stub()
@@ -322,9 +328,13 @@ class TestLaunchViaApi(_ApiLaunchBase):
             work_dir=self.repo,
             endpoint_file=self.endpoint_file,
         )
-        prompt = str(self.stub_calls[0]["kwargs"].get("prompt_template", ""))
-        assert "Slack Authentication" in prompt
-        assert "finish_slack_auth()" in prompt
+        kwargs = self.stub_calls[0]["kwargs"]
+        prompt = str(kwargs.get("prompt_template", ""))
+        assert "auth prompt task" in prompt
+        assert "Slack Authentication" not in prompt
+        system_prompt = str(kwargs.get("system_prompt", ""))
+        assert "Slack Authentication" in system_prompt
+        assert "finish_slack_auth()" in system_prompt
 
     def test_agent_module_is_the_agent_script(self) -> None:
         from kiss.agents.third_party_agents.slack import slack_sea
@@ -568,7 +578,10 @@ class TestLaunchViaApi(_ApiLaunchBase):
             "base_url": "http://localhost:9999/v1",
         }
         assert getattr(call["agent"], "_use_web_tools", None) is False
-        assert getattr(call["agent"], "_is_parallel", None) is True
+        # The channel module's ``settings()`` (the ``channel`` preset:
+        # no fan-out) win over the launcher's ``is_parallel=True`` on
+        # the daemon, like every agent script's settings do.
+        assert getattr(call["agent"], "_is_parallel", None) is False
 
     def test_carrier_tools_getter_restricts_the_daemon_built_agent(self) -> None:
         """A carrier's ``sea_path`` script with ``tools()`` restricts the run.
@@ -908,7 +921,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
 
         return _Plain("Plain Direct Agent")
 
-    def test_direct_run_appends_channel_prompt_to_prompt(self) -> None:
+    def test_direct_run_appends_channel_prompt_to_system_prompt(self) -> None:
         from kiss.agents.third_party_agents.slack.slack_sea import SlackAgent
 
         self._install_stub()
@@ -927,7 +940,9 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         )
         prompt = str(call["kwargs"].get("prompt_template", ""))
         assert "direct slack" in prompt
-        assert "Slack Authentication" in prompt
+        assert "Slack Authentication" not in prompt
+        # The daemon applies the module's ``add_to_system_prompt()``.
+        assert "Slack Authentication" in str(call["kwargs"].get("system_prompt", ""))
 
     def test_direct_run_without_channel_prompt(self) -> None:
         self._install_stub()
@@ -936,11 +951,11 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
             prompt_template="direct plain", work_dir=self.repo,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
-        prompt = str(
-            self.stub_calls[0]["kwargs"].get("prompt_template", ""),
-        )
+        kwargs = self.stub_calls[0]["kwargs"]
+        prompt = str(kwargs.get("prompt_template", ""))
         assert "direct plain" in prompt
         assert "## Slack Authentication" not in prompt
+        assert "## Slack Authentication" not in str(kwargs.get("system_prompt", ""))
 
     def test_direct_run_failure_returns_failure_yaml(self) -> None:
         self._install_stub(raise_exc=RuntimeError("plain-boom"))

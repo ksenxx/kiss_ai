@@ -66,11 +66,20 @@ exactly what interactive authentication and write-approval flows need.
 ## How a prompt reaches a channel
 
 Name the service in your prompt and Sorcar routes it. Internally the session calls its
-`run_agent` tool with the channel name and your request; the dispatched sub-session
-already carries that channel's authenticated tools and is instructed to use them
-directly, without exploring source code. The `agent` argument is optional: omitting it
-(or passing it blank) runs the bundled `src/kiss/agents/seas/dummy/dummy_sea.py`, a plain
-Sorcar sub-session with the standard toolset, on the task in the caller's work directory.
+`run_agent` tool with the channel name and your request (`run_agent(agent="slack",
+task=...)`); your request goes through verbatim as the sub-session's task. The channel's
+SEA declares `settings()` returning `{"preset": "channel"}`, so the sub-session runs in
+the shared `~/.kiss/channel_work` directory with no worktree, auto-commit, classifier,
+fan-out, web tools or memory, inherits nothing from the calling task (model and budget
+are the daemon defaults unless the caller passes them), and carries that channel's
+authenticated tools; the daemon appends the channel preamble to its system prompt,
+which tells it to use those tools directly, without exploring source code. The `agent`
+argument is optional: omitting it (or passing it blank, or a generic label such as
+`"general"` or `"reviewer"`) runs the bundled `src/kiss/agents/seas/dummy/dummy_sea.py`,
+a plain Sorcar sub-session with the standard toolset, on the task in the caller's work
+directory. The same argument also takes `"cron"`, a path to an agent script, or the name
+of a registered slash command; the call waits for the SEA's `timeout` setting, else
+3600 s, unless `timeout` is passed.
 
 > Send "dinner at 7" to Telegram chat 123456789.
 
@@ -88,16 +97,18 @@ modules (`a2a`, `oai`) are surfaces, not services you ask Sorcar to act on.
 
 Prompts that span several services also work in a single message: the top-level
 session orchestrates, dispatching one channel at a time and passing results between
-them. Each dispatched channel session is instructed to handle only its own service and
-never call `run_agent` (it keeps the standard toolset, so this is a prompt rule, not a
-tool restriction), so let the session you are chatting with do the coordination — which
+them. Each dispatched channel session's system prompt tells it to handle only its own service
+and never call `run_agent` (it keeps the standard toolset, so this is a prompt rule, not
+a tool restriction), so let the session you are chatting with do the coordination — which
 it does by default.
 
 When you want a specific channel with no routing guesswork, start the prompt with its
 slash command: `/slack post "deploy done" to #eng`. Every SEA folder `xxx/xxx_sea.py`
 in this package is registered as `/xxx` (the command is the folder name), the chat box
-autocompletes the names, and the daemon turns the prompt into a direct `run_agent` call
-on that file. `/xxx help` runs nothing and prints the module's `description()`, one
+autocompletes the names, and the daemon runs that file directly in the tab with the rest
+of the prompt as the task: no relay turn by the chat agent and no nested sub-agent tab,
+the channel's settings, system prompt and tools apply to that very run, and the tab
+keeps showing `/xxx ...` as you typed it. `/xxx help` runs nothing and prints the module's `description()`, one
 sentence saying what the agent does and how to use it. Folders of your own SEAs
 listed in `~/.kiss/SEAS.md` are registered the same way; the file syntax and the
 dispatch flow are in
@@ -110,11 +121,20 @@ the kiss-web daemon, and the daemon builds a full chat agent with the standard t
 (bash, file editing, browser automation). The channel agent instance is the *carrier*
 of channel identity (see `BaseChannelAgent` in `_channel_agent_utils.py`):
 
-- Every module defines `description()`, the one-sentence summary `/xxx help` prints,
-  and an `add_to_tools()` function. The daemon calls
+- Every module defines `description()`, the one-sentence summary `/xxx help` prints;
+  `settings()`, which returns `{"preset": "channel"}` (the worker preset — worktree,
+  auto-commit, classifier, fan-out, web tools and memory off — plus a run in
+  `~/.kiss/channel_work` that inherits nothing from the calling task); an
+  `add_to_tools()` function; and, when its agent class sets `channel_system_prompt`,
+  `add_to_system_prompt()` returning that text. The daemon calls
   `add_to_tools()` to build the channel's tool list, added to the standard toolset: the agent's **auth tools** (always present, e.g. `check_slack_auth`,
   `authenticate_slack`) plus, once authenticated, every public method of the module's
   `*ChannelBackend` class (e.g. `post_message`, `read_messages`, `search_messages`).
+  It appends the channel preamble (`agent_file.CHANNEL_PREAMBLE`: use the channel tools
+  directly, never call `run_agent`, never edit source or run tests) and then the
+  `add_to_system_prompt()` guidance to the run's **system** prompt; the task text itself
+  is not modified (the `kiss-<channel>` CLI launcher no longer appends
+  `channel_system_prompt` to the prompt either).
 - Config lives under `~/.kiss/third_party_agents/<service>/` (`$KISS_HOME` overrides
   `~/.kiss`). On Linux, outbound API secrets for the 18 Muse-covered services (see
   below) migrate out of those files into the `~/.kiss/muse_auth/vault` credential
@@ -388,22 +408,23 @@ Sorcar to act on, but ways for *other software* to send prompts to your daemon.
 `/ask` wraps no external service, so its SEA is not in this package: it is
 `src/kiss/agents/seas/ask/ask_sea.py`, next to the other Sorcar-extending SEAs, and is
 described here because it is used from the same chat surfaces. On an idle tab,
-`/ask <question>` is rewritten into a `run_agent` sub-task whose prompt is your question
-plus an instruction naming the task you are asking about and telling the agent to call
-`task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
+`/ask <question>` runs the SEA directly in the tab, like every slash command, with your
+question as the task; the SEA's `add_to_prompt` setting appends an instruction naming
+the task you are asking about (`{task_id}`, filled in by the daemon from the run's
+parent task id) and telling the agent to call `task_context` on it. The answering session has exactly two tools: `task_context(task_id)`
 and `finish`. `task_context` (over `kiss.agents.sorcar.task_digest.context`) returns the
 whole context in one call: the task's status, model, spend and the sub-agents it
 dispatched, the newest 8k characters of the progress log the task keeps in its work dir
 (`PROGRESS_LOG.md`, `PROGRESS.md` or `tmp/PROGRESS.md`, freshest wins), and its digested
 transcript entries oldest first, the whole text capped at 60k characters by dropping the
-oldest entries. The script swaps the system prompt for the compact SYSTEM_LITE prompt (the
+oldest entries. The script's `settings()` swaps the system prompt for the compact SYSTEM_LITE prompt (the
 bundled `seas/ask/_ask_system_lite.md`, a copy of the ablation prompt with the brand
-identity as a `{{IDENTITY}}` placeholder) with a no-internet, answer-quickly suffix and a
-playbook asking for two or three plain sentences drawn only from the context, supplies
-its single `task_context` tool through `tools()` (not `add_to_tools()`) so no built-in
-tool (no shell, no file access) is offered, and returns `False` from `is_parallel()`,
-`use_web_tools()`, and `use_memory()`,
-so there are no browser tools, no memory tools, and no parallel sub-agents either; it
+identity as a `{{IDENTITY}}` placeholder), its `add_to_system_prompt()` adds a
+no-internet, answer-quickly directive and a playbook asking for two or three plain
+sentences drawn only from the context, and `add_to_tools()` supplies the single
+`task_context` tool under `"tool_profile": "none"`, so no built-in tool (no shell, no
+file access) is offered; the `worker` preset turns off web tools, memory and parallel
+sub-agents, so there are no browser tools, no memory tools, and no fan-out either; it
 cannot touch the running task's working tree. Typed into a tab whose task is still running, the question
 is instead dispatched directly to the daemon through a background side channel that does
 not interrupt the running agent:

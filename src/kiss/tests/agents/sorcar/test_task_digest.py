@@ -30,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _save_task_result,
 )
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
     finish_body,
@@ -462,17 +463,28 @@ def test_context_keeps_the_newest_entries_within_the_budget(tmp_path: Path) -> N
 
 
 def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path: Path) -> None:
-    """A real ReAct loop configured from the ``/ask`` SEA getters offers
+    """A real ReAct loop configured from the ``/ask`` SEA ``settings()`` offers
     exactly ``task_context`` and ``finish`` (no built-in tools at all),
     receives the playbook as the system-prompt suffix, gets the real
-    context back as a tool result and finishes with the answer."""
+    context back as a tool result and finishes with the answer.
+
+    The run is configured the way the daemon configures it: the
+    ``worker`` preset's flags, the ``none`` tool profile (from which
+    the daemon derives ``append_basic_tools=False``), the
+    ``system_prompt()`` getter as the base prompt, ``add_to_system_prompt()``
+    as the suffix, ``add_to_tools()`` as the extra tools and
+    ``add_to_prompt`` with ``{task_id}`` filled in appended to the task.
+    """
     task_id = _persist("Run the benchmark", _running_task_events())
     answer = "<p>2 of 10 trials are done; the last step failed to edit paper.tex.</p>"
     script = [
         tool_call_body("task_context", {"task_id": task_id}, prompt_tokens=500),
         finish_body(answer, prompt_tokens=700),
     ]
-    prompt = "how many trials are done?" + ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id)
+    settings = resolve_settings(vars(ask_sea))
+    assert settings["tool_profile"] == "none"
+    assert settings["add_to_prompt"] == ask_sea.ADD_TO_PROMPT
+    prompt = "how many trials are done?" + settings["add_to_prompt"].format(task_id=task_id)
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("ask-sea-test")
         result = agent.run(
@@ -481,13 +493,14 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
             work_dir=str(tmp_path),
             max_steps=4,
             model_config={"base_url": url, "api_key": "local"},
-            tools=ask_sea.tools(),
-            append_basic_tools=False,
-            base_system_prompt=ask_sea.system_prompt(),
-            system_prompt=ask_sea.append_to_system_prompt(),
-            web_tools=ask_sea.use_web_tools(),
-            use_memory=ask_sea.use_memory(),
-            is_parallel=ask_sea.is_parallel(),
+            tools=ask_sea.add_to_tools(),
+            tool_profile=settings["tool_profile"],
+            append_basic_tools=settings["tool_profile"] != "none",
+            base_system_prompt=settings["system_prompt"],
+            system_prompt=ask_sea.add_to_system_prompt(),
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            is_parallel=settings["is_parallel"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)
@@ -501,7 +514,7 @@ def test_ask_agent_has_only_task_context_and_finish_and_answers_from_it(tmp_path
         assert names == {"task_context", "finish"}
         system = str(next(m for m in request["messages"] if m["role"] == "system")["content"])
         assert system.startswith(ask_sea.system_prompt())
-        assert ask_sea.append_to_system_prompt() in system
+        assert ask_sea.add_to_system_prompt() in system
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     assert f"task with id {task_id}" in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]

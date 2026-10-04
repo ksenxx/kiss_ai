@@ -41,6 +41,7 @@ from kiss.agents.seas.git_extract_knowledge.git_knowledge_store import (
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cron_agent import cron_job, load_jobs
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.config import kiss_home
 from kiss.core.memoryfield.pages import MemoryDir
 from kiss.server.agent_file import apply_agent_overrides
@@ -132,14 +133,26 @@ def _keys(hits: list[Any]) -> list[str]:
 
 
 def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
-    """The getters pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
-    assert sea.tool_profile() == "full"
-    assert sea.is_parallel() is True
-    assert sea.use_worktree() is False
-    assert sea.auto_commit() is False
-    assert sea.classify_tasks() is False
-    assert sea.use_web_tools() is False
-    assert sea.use_memory() is False
+    """The settings pin the run: full tools + knowledge tools, no worktree, no web, no memory."""
+    assert sea.settings() == {"preset": "worker", "tool_profile": "full", "is_parallel": True}
+    # ``worker`` turns worktree, auto-commit, classifier, browser and memory
+    # off; the explicit ``is_parallel`` wins over the preset's ``False``.
+    assert resolve_settings(vars(sea)) == {
+        "preset": "worker",
+        "tool_profile": "full",
+        "is_parallel": True,
+        "system_prompt": sea.system_prompt(),
+        "use_worktree": False,
+        "auto_commit": False,
+        "classify_tasks": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
+    for legacy in (
+        "tool_profile", "is_parallel", "use_worktree", "auto_commit", "classify_tasks",
+        "use_web_tools", "use_memory", "tools",
+    ):
+        assert not hasattr(sea, legacy), legacy
     names = [tool.__name__ for tool in sea.add_to_tools()]
     assert names == [
         "index_repo", "knowledge_status", "knowledge_search", "knowledge_read",
@@ -152,24 +165,34 @@ def test_sea_getters_follow_the_contract(tmp_path: Path) -> None:
     assert "ABSOLUTE path" in prompt
     for page in ("overview", "domain-glossary", "architecture", "history", "faq"):
         assert f"`{page}`" in prompt
-    # The real loader accepts the file and stages the ``tools()``
-    # callables on the daemon-side ``tools`` field.
+    # The real loader accepts the file and stages the ``add_to_tools()``
+    # callables on the daemon-side ``tools`` field and the settings on
+    # their wire fields.
     cmd: dict[str, Any] = {"agentPath": str(_SEA_PATH), "workDir": str(tmp_path)}
-    apply_agent_overrides(cmd)
+    assert apply_agent_overrides(cmd) == {
+        "systemPrompt", "tools", "toolProfile", "isParallel", "useWorktree", "autoCommit",
+        "classifyTasks", "useWebTools", "useMemory",
+    }
+    assert [tool.__name__ for tool in cmd["tools"]] == names
     assert all(callable(tool) for tool in cmd["tools"])
-    assert "toolsFile" not in cmd
+    assert "toolsFile" not in cmd and "appendBasicTools" not in cmd
     assert cmd["toolProfile"] == "full"
-    assert cmd["useWorktree"] is False
+    assert cmd["isParallel"] is True
+    assert cmd["useWorktree"] is False and cmd["autoCommit"] is False
+    assert cmd["classifyTasks"] is False and cmd["useWebTools"] is False
+    assert cmd["useMemory"] is False
     assert cmd["systemPrompt"] == prompt
 
 
 def test_slash_command_resolves_to_the_bundled_sea() -> None:
-    """``/git_extract_knowledge <repo>`` dispatches this SEA through ``run_agent``."""
+    """``/git_extract_knowledge <repo>`` resolves to the repo text and this SEA."""
     assert sea_commands.get_command("git_extract_knowledge") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/git_extract_knowledge /tmp/repo")
-    assert rewritten is not None
-    assert rewritten[1] == _SEA_PATH
-    assert rewritten[0].endswith("TASK TEXT FOR run_agent:\n/tmp/repo")
+    hit = sea_commands.slash_command_task("/git_extract_knowledge /tmp/repo")
+    assert hit is not None
+    task_text, path = hit
+    assert path == _SEA_PATH
+    assert task_text == "/tmp/repo"
+    assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
 
 
 def test_full_index_builds_every_block_kind_and_the_lookup_page(repo: Path) -> None:
@@ -1029,6 +1052,7 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
         ),
         finish_body("<h3>Memory built</h3>", prompt_tokens=800),
     ]
+    settings = resolve_settings(vars(sea))
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent("git-knowledge-sea-test")
         result = agent.run(
@@ -1039,11 +1063,11 @@ def test_agent_indexes_writes_a_page_and_finishes(repo: Path, tmp_path: Path) ->
             max_budget=5.0,
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
-            tool_profile=sea.tool_profile(),
-            base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
-            use_memory=sea.use_memory(),
-            is_parallel=sea.is_parallel(),
+            tool_profile=settings["tool_profile"],
+            base_system_prompt=settings["system_prompt"],
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            is_parallel=settings["is_parallel"],
             verbose=False,
         )
     parsed = yaml.safe_load(result)

@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.sea_settings import resolve_settings
+
 MODEL = "gpt-5.6-luna"
 
 
@@ -78,10 +80,11 @@ def test_hooks_log_every_call_and_answer_interactive_tools(tmp_path: Path) -> No
     assert harness.on_tool_call("ask_user_question", {"question": "?"}) != "OK"
     assert harness.on_tool_call("talk", {"text": "hi", "language": "en"}) != "OK"
     assert harness.on_tool_call("run_agent", {"agent": "slack", "task": "x"}) != "OK"
-    assert harness.docker_image() == f"container:{container_name}"
+    settings = resolve_settings({"settings": harness.settings})
+    assert settings["docker_image"] == f"container:{container_name}"
     assert not hasattr(harness, "if_append_basic_tools")
     assert not hasattr(coding_sea, "tools") and not hasattr(coding_sea, "add_to_tools")
-    assert not harness.use_memory() and not harness.use_web_tools()
+    assert not settings["use_memory"] and not settings["use_web_tools"]
     assert "/app" in harness.system_prompt() and "wall-clock" not in harness.system_prompt()
     events = [
         json.loads(line)
@@ -368,9 +371,9 @@ def test_shell_guards_and_finish_gate(tmp_path: Path) -> None:
     assert "byte for byte" not in prompt
     assert "checker" not in prompt.lower()
     assert "no internet" not in prompt.lower()
-    assert plain.model_config() is None
+    assert plain.settings()["model_config"] is None
     tuned = harness(model_config={"output_config": {"effort": "medium"}})
-    assert tuned.model_config() == {"output_config": {"effort": "medium"}}
+    assert tuned.settings()["model_config"] == {"output_config": {"effort": "medium"}}
 
 
 def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
@@ -387,11 +390,14 @@ def test_generated_trial_sea_binds_to_a_shared_harness(tmp_path: Path) -> None:
     sea = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sea)
     assert sea.prompt() == "p"
-    assert sea.model() == MODEL
-    assert sea.docker_image() == "container:kiss-test-trial"
-    assert sea.work_dir() == str(tmp_path / "sea-trial")
-    assert sea.model_config() is None
-    assert sea.use_web_tools() is False and sea.use_memory() is False
+    settings = sea.settings()
+    assert settings["model"] == MODEL
+    assert settings["docker_image"] == "container:kiss-test-trial"
+    assert settings["work_dir"] == str(tmp_path / "sea-trial")
+    assert settings["model_config"] is None
+    assert resolve_settings(vars(sea))["use_web_tools"] is False
+    assert resolve_settings(vars(sea))["use_memory"] is False
+    assert resolve_settings(vars(sea))["is_parallel"] is True
     assert sea.tool_call_hook()("Bash", {"command": "ls"}) == "OK"
     harness = coding_sea.ContainerHarness.shared(str(tmp_path / "sea-trial" / "config.json"))
     assert sea._harness is harness

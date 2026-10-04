@@ -25,6 +25,8 @@ Module-level getters (``add_to_system_prompt()``, ``register_as_model()``,
 
 from __future__ import annotations
 
+from typing import Any
+
 PRIMARY_MODEL = "claude-fable-5-1"
 """The model that does every task."""
 
@@ -78,6 +80,8 @@ def add_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def model() -> str:
-    """Run the task on the primary model."""
-    return PRIMARY_MODEL
+def settings() -> dict[str, Any]:
+    """Run every task of the tab on :data:`PRIMARY_MODEL`."""
+    return {"model": PRIMARY_MODEL}
+
+

@@ -771,7 +771,7 @@ def build_paper(tex_path: str, tex_bin: str = "") -> str:
     return "\n".join(report)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the paper-writing rules to the default system prompt."""
     return SYSTEM_PROMPT
 
@@ -781,25 +781,20 @@ def add_to_tools() -> list[Any]:
     return [check_paper, build_paper]
 
 
-def use_web_tools() -> bool:
-    """Browse: related work, venue guidelines and citation sources are on the web."""
-    return True
+DISPATCH_TIMEOUT_SECONDS = 21600
+"""Seconds a ``run_agent`` call waits for a ``/write_paper`` run: six hours."""
 
+def settings() -> dict[str, Any]:
+    """Browse (related work, venue guidelines), fan out (the reviewer), skip the classifier.
 
-def is_parallel() -> bool:
-    """Fan out: the read-only reviewer runs as a ``run_parallel`` sub-agent."""
-    return True
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: writing a paper always needs the full system prompt."""
-    return False
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/write_paper`` relay waits for the agent before stopping it.
-
-    Writing a paper with its research, experiments, builds and review rounds takes
-    hours; the default 300 s ``run_agent`` wait would stop it during the research.
+    The ``timeout`` tells the dispatcher a ``/write_paper`` run may take
+    up to :data:`DISPATCH_TIMEOUT_SECONDS`.
     """
-    return 6 * 3600
+    return {
+        "use_web_tools": True,
+        "is_parallel": True,
+        "classify_tasks": False,
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

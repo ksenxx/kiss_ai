@@ -32,6 +32,7 @@ from kiss.agents.seas.forget import forget_sea
 from kiss.agents.seas.remember import remember_sea
 from kiss.agents.sorcar import sea_commands
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.core.utils import read_bytes_waiting_for_writer
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -55,6 +56,7 @@ def _fresh_agents_md() -> Iterator[Path]:
 
 def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[Any, list]:
     """Run *sea* on *prompt* against the scripted model; return (parsed result, requests)."""
+    settings = resolve_settings(vars(sea))
     with serve(script) as (url, requests):
         agent = ChatSorcarAgent(f"{sea.__name__}-test")
         result = agent.run(
@@ -62,14 +64,14 @@ def _run(sea: Any, prompt: str, script: list[bytes], work_dir: Path) -> tuple[An
             model_name=MODEL,
             work_dir=str(work_dir),
             max_steps=6,
-            max_budget=sea.max_budget(),
+            max_budget=settings["max_budget"],
             model_config={"base_url": url, "api_key": "local"},
             tools=sea.add_to_tools(),
-            tool_profile=sea.tool_profile(),
-            base_system_prompt=sea.system_prompt(),
-            web_tools=sea.use_web_tools(),
-            use_memory=sea.use_memory(),
-            is_parallel=sea.is_parallel(),
+            tool_profile=settings["tool_profile"],
+            base_system_prompt=settings["system_prompt"],
+            web_tools=settings["use_web_tools"],
+            use_memory=settings["use_memory"],
+            is_parallel=settings["is_parallel"],
             verbose=False,
         )
     return yaml.safe_load(result), [r for r in requests if r.get("tools")]
@@ -92,29 +94,42 @@ def test_sea_getters_follow_the_contract() -> None:
     assert "`list_instructions`" in forget_sea.SYSTEM_PROMPT
     assert forget_sea.add_to_tools() == [forget_sea.forget_instruction, agents_md.list_instructions]
     for sea in (remember_sea, forget_sea):
-        assert sea.tool_profile() == "bash"
-        assert sea.max_budget() == 1.0
-        for getter in (
-            sea.use_worktree, sea.auto_commit, sea.classify_tasks,
-            sea.is_parallel, sea.use_web_tools, sea.use_memory,
+        assert sea.settings() == {"preset": "worker", "tool_profile": "bash", "max_budget": 1.0}
+        assert resolve_settings(vars(sea)) == {
+            "preset": "worker",
+            "tool_profile": "bash",
+            "max_budget": 1.0,
+            "system_prompt": sea.SYSTEM_PROMPT,
+            "use_worktree": False,
+            "auto_commit": False,
+            "classify_tasks": False,
+            "is_parallel": False,
+            "use_web_tools": False,
+            "use_memory": False,
+        }, sea.__name__
+        for legacy in (
+            "tool_profile", "max_budget", "use_worktree", "auto_commit", "classify_tasks",
+            "is_parallel", "use_web_tools", "use_memory", "tools",
         ):
-            assert getter() is False, f"{sea.__name__}.{getter.__name__}"
+            assert not hasattr(sea, legacy), f"{sea.__name__}.{legacy}"
 
 
 def test_slash_commands_resolve_to_the_bundled_seas() -> None:
-    """``/remember text`` and ``/forget text`` run these files through ``run_agent``."""
+    """``/remember text`` and ``/forget text`` resolve to the text and these files."""
     assert sea_commands.get_command("remember") == _REMEMBER_PATH
     assert sea_commands.get_command("forget") == _FORGET_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/remember Always reply tersely")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/remember Always reply tersely")
+    assert hit is not None
+    task_text, path = hit
     assert path == _REMEMBER_PATH
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nAlways reply tersely")
-    rewritten = sea_commands.rewrite_prompt_if_command("/forget Always reply tersely")
-    assert rewritten is not None
-    prompt, path = rewritten
+    assert task_text == "Always reply tersely"
+    hit = sea_commands.slash_command_task("/forget Always reply tersely")
+    assert hit is not None
+    task_text, path = hit
     assert path == _FORGET_PATH
-    assert prompt.endswith("TASK TEXT FOR run_agent:\nAlways reply tersely")
+    assert task_text == "Always reply tersely"
+    for path, sea in ((_REMEMBER_PATH, remember_sea), (_FORGET_PATH, forget_sea)):
+        assert sea_commands.sea_settings(path) == resolve_settings(vars(sea))
 
 
 def test_remember_creates_the_file_and_appends_bullets(_fresh_agents_md: Path) -> None:

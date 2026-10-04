@@ -22,10 +22,11 @@ named ``TOOL_PROFILES`` entry; the bundled ``sh_sea.py`` therefore
 runs with ``Bash`` + ``finish`` only, in the caller's work directory
 (no worktree), with its own system prompt; an unknown name fails the
 task before any executor session starts; a malformed wire value means
-"no profile"; the ``run_agent`` tool validates and forwards its
-``tool_profile`` argument; and the OUTER relay run of a ``/xxx``
-command honours the SEA's ``use_worktree()`` / ``auto_commit()``
-verdicts (a broken SEA fails that relay with a diagnostic).
+"no profile"; the ``run_agent`` tool validates and forwards the
+``tool_profile`` key of its ``options`` JSON; and a ``/xxx`` command
+runs the SEA directly in the tab's own run, which honours the SEA's
+``use_worktree`` / ``auto_commit`` settings (a broken SEA fails that
+run with the loader's diagnostic).
 """
 
 from __future__ import annotations
@@ -142,13 +143,14 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert self._git("status", "--porcelain") == "?? sentinel.txt"
         assert self._git("rev-list", "--count", "HEAD") == commits_before
 
-    def test_broken_user_sea_fails_the_relay_instead_of_stopping_it(self) -> None:
+    def test_broken_user_sea_fails_the_tabs_run_instead_of_stopping_it(self) -> None:
         """An SEA raising ``KeyboardInterrupt`` at import is a task ERROR, not a stop.
 
-        The relay demotion imports the SEA on the task thread; whatever
-        the script raises is normalised into ``SeaScriptError`` (with
-        the original raise as the cause), so the runner reports a
-        failed task with the diagnostic rather than "stopped by user".
+        ``/boom anything`` runs the SEA directly in the tab's own run,
+        so the loader imports it on the task thread; whatever the script
+        raises is normalised into ``AgentFileError`` (with the original
+        raise as the cause), so the runner reports a failed task with
+        the diagnostic naming the file rather than "stopped by user".
         """
         folder = Path(self.tmpdir) / "user-seas"
         (folder / "boom").mkdir(parents=True)
@@ -175,8 +177,8 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             seas_md.unlink()
             sea_commands._reset_for_tests()
         assert result.success is False, result
-        assert "Task failed: SeaScriptError" in result.text, result
-        assert "boom_sea.py" in result.text and "use_worktree()" in result.text, result
+        assert "Task failed: AgentFileError" in result.text, result
+        assert "boom_sea.py' failed to import" in result.text, result
         assert "KeyboardInterrupt: boom at import" in result.text, result
         assert "stopped" not in result.text.lower(), result
         assert calls == []
@@ -347,8 +349,11 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             timeout=60,
         )
         assert result.success is False
-        assert "tool_profile" in result.text
-        assert "a string" in result.text
+        # The deprecated getter stands for the ``tool_profile`` settings
+        # key, so the diagnostic is the SettingsError text naming it.
+        assert (
+            f"agent script '{agent_path}': tool_profile() must be str, got int"
+        ) in result.text, result.text
         assert calls == []
 
     def test_malformed_wire_profile_means_no_profile(self) -> None:
@@ -378,7 +383,7 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
             tool = make_run_agent_tool(self.repo, None)
             text = tool(
                 "run with the bash profile", script,
-                use_worktree="false", tool_profile="bash",
+                options='{"use_worktree": false, "tool_profile": "bash"}',
             )
         finally:
             cron_agent._daemon_endpoint_file = saved_endpoint
@@ -386,12 +391,12 @@ class ToolProfileRunParamTest(DaemonRunApiHarness):
         assert self._single_call(calls)["tool_names"] == ["finish", "Bash"]
 
     def test_run_agent_tool_rejects_unknown_profile_locally(self) -> None:
-        """``run_agent(tool_profile="bogus")`` is refused without a daemon round trip."""
+        """``options='{"tool_profile": "bogus"}'`` is refused with no daemon round trip."""
         calls: list[dict[str, Any]] = []
         self._install_recording_stub(calls)
         text = _run_agent(
             self.repo, _SH_SEA_PATH, "printf hi", "", "", "", "",
-            tool_profile="bogus",
+            options='{"tool_profile": "bogus"}',
         )
         assert text.startswith("Error: tool_profile must be one of"), text
         assert "'bogus'" in text

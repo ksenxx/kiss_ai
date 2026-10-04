@@ -212,11 +212,11 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface (`model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config`, `use_web_tools`, `use_memory`, `tool_profile`, `docker_image`, `timeout`, and more) plus options that customize the agent itself: `system_prompt`, `append_to_system_prompt`, `append_to_prompt`, and `extension_agent_path` (run a Sorcar Extension Agent — a Python file whose `add_to_tools()` / `tools()` supply extra tool functions, imported and run in the daemon process). Every option is documented in [src/kiss/server/README.md](src/kiss/server/README.md).
+`run()` accepts keyword options mirroring the chat interface (`model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config`, `use_web_tools`, `use_memory`, `tool_profile`, `docker_image`, `timeout`, and more) plus options that customize the agent itself: `system_prompt`, `append_to_system_prompt`, `append_to_prompt`, and `extension_agent_path` (run a Sorcar Extension Agent — a Python file whose `settings()` configures the run and whose `add_to_tools()` supplies extra tool functions, imported and run in the daemon process). Every option is documented in [src/kiss/server/README.md](src/kiss/server/README.md).
 
 ### Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()`. The daemon imports it on every run and calls its top-level functions named after `run()`'s parameters (`prompt()`, `model()`, `max_budget()`, `system_prompt()`, ...) to compute the run's parameters; parameters without a getter keep whatever the caller passed. Tools come from one of two getters, each returning a list of callables: `tools()` makes them, plus `finish`, the agent's entire tool set (no built-in toolset), while `add_to_tools()` adds them to the built-in toolset. Every SEA also defines `description()`, one sentence that `/<name> help` prints. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
+A **Sorcar Extension Agent (SEA)** is a plain Python file, `<name>/<name>_sea.py`, whose path you pass as `extension_agent_path` to `sorcar.run()` (or as the `agent` of the `run_agent` tool). The daemon imports it on every run and reads a few optional top-level functions. `settings()` returns a dict holding a `preset` and any of `run()`'s per-run parameters (`prompt`, `model`, `max_budget`, `tool_profile`, `work_dir`, `use_worktree`, `auto_commit`, `use_web_tools`, `use_memory`, `is_parallel`, `classify_tasks`, `model_config`, `docker_image`, ...), plus `timeout` (seconds a `run_agent` call waits for the script) and `add_to_prompt` (text appended to the task; `{task_id}` becomes the calling task's id). The presets: `session` (the default) changes nothing; `worker` turns off worktree, auto-commit, the classifier, parallel fan-out, web tools, and memory; `channel` is `worker` plus a run in `~/.kiss/channel_work` that inherits nothing from the calling task. Explicit keys override the preset, and the whole result overrides whatever the caller passed; parameters the SEA leaves out keep the caller's values. `system_prompt()` replaces the base system prompt, `add_to_system_prompt()` appends to it, and `add_to_tools()` returns extra tool callables added to the built-in toolset; `"tool_profile": "none"` drops the built-in toolset so those callables plus `finish` are the agent's entire tool set. Every SEA also defines `description()`, one sentence that `/<name> help` prints. The older one-function-per-field form (`model()`, `max_budget()`, `tools()`, `dispatch_timeout()`, `append_to_prompt()`, ...) still loads but is deprecated. Two hook getters, `llm_call_hook()` and `tool_call_hook()`, return functions that run before each model call and tool call of the task's executor sessions (internal helper sessions and `run_parallel` sub-agents are not hooked; a tool hook returning anything but `"OK"` suppresses the call and hands its string to the model). One file is a complete custom agent:
 
 ```python
 # weather/weather_sea.py — a minimal SEA
@@ -226,11 +226,14 @@ import requests
 def description() -> str:
     return "Reports the current weather in San Francisco from wttr.in."
 
-def prompt() -> str:
-    return "Look up the current weather in San Francisco and report it."
-
-def max_budget() -> float:
-    return 0.50
+def settings() -> dict:
+    """A worker run whose only tools are get_weather and finish."""
+    return {
+        "preset": "worker",
+        "prompt": "Look up the current weather in San Francisco and report it.",
+        "max_budget": 0.50,
+        "tool_profile": "none",
+    }
 
 def system_prompt() -> str:
     return ("You are a weather assistant. Use the get_weather tool "
@@ -246,8 +249,8 @@ def get_weather(city: str) -> str:
     resp.raise_for_status()
     return resp.text.strip()
 
-def tools() -> list:
-    """The agent's whole tool set: get_weather + finish (use add_to_tools() to keep the built-in tools)."""
+def add_to_tools() -> list:
+    """Extra tools; with tool_profile "none" above they are the whole tool set besides finish."""
     return [get_weather]
 ```
 
@@ -257,7 +260,7 @@ from kiss.server import sorcar
 result = sorcar.run("placeholder", extension_agent_path="weather/weather_sea.py")
 ```
 
-**Slash commands.** Every SEA folder in a scanned folder is also a chat command: `/xxx some text` runs `xxx/xxx_sea.py` as a sub-agent with "some text" as the task. The channel agents are registered this way (`/slack`, `/gmail`, ...), and so are the 17 bundled SEAs in `src/kiss/agents/seas/`: `/ask` (answer a question about the current task from its persisted events), `/sh` (run a shell command), `/dummy` (a plain sub-agent), `/coding` (the unattended benchmark harness), `/rsi7d` (seven-day recursive self-improvement of the bundled SEAs from their logged runs), `/merge` (resolve a conflicted git merge), `/task_update` (progress report on a task), `/autorouter` and `/bestrouter` (the model routers above), `/skillopt` (optimize a skill or prompt constant against an evaluation set), `/write_paper`, `/review_paper`, and `/revise_and_review_paper` (write, review, and iterate on a research paper), `/git_extract_knowledge` (build and maintain a repository's durable memory), `/write` (prose for a general audience), and `/remember` and `/forget` (add or remove a standing instruction in `~/.kiss/AGENTS.md`). List your own SEA folders, one per line, in `~/.kiss/SEAS.md`; they are picked up within two seconds. The getter semantics, type checking, hooks, and dispatch flow are in [src/kiss/server/README.md](src/kiss/server/README.md) and [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
+**Slash commands.** Every SEA folder in a scanned folder is also a chat command: `/xxx some text` runs `xxx/xxx_sea.py` directly in the tab with "some text" as the task, the SEA's settings, system prompt, and tools applied to that very run (no relay turn by the chat agent and no nested sub-agent tab); `/xxx help` prints the SEA's `description()` without a model call. The same SEA runs as a sub-task of any task through `run_agent(agent="xxx", task=...)`. The channel agents are registered this way (`/slack`, `/gmail`, ...), and so are the 17 bundled SEAs in `src/kiss/agents/seas/`: `/ask` (answer a question about the current task from its persisted events), `/sh` (run a shell command), `/dummy` (a plain sub-agent), `/coding` (the unattended benchmark harness), `/rsi7d` (seven-day recursive self-improvement of the bundled SEAs from their logged runs), `/merge` (resolve a conflicted git merge), `/task_update` (progress report on a task), `/autorouter` and `/bestrouter` (the model routers above), `/skillopt` (optimize a skill or prompt constant against an evaluation set), `/write_paper`, `/review_paper`, and `/revise_and_review_paper` (write, review, and iterate on a research paper), `/git_extract_knowledge` (build and maintain a repository's durable memory), `/write` (prose for a general audience), and `/remember` and `/forget` (add or remove a standing instruction in `~/.kiss/AGENTS.md`). List your own SEA folders, one per line, in `~/.kiss/SEAS.md`; they are picked up within two seconds. The `settings()` contract, type checking, hooks, and dispatch flow are in [src/kiss/server/README.md](src/kiss/server/README.md) and [docs/sea-commands.md](https://kisssorcar.github.io/docs/sea-commands.md).
 
 ### Skills, MCP servers, and customization
 
@@ -275,7 +278,7 @@ Ten more are service agents that give Sorcar authenticated API tools for product
 
 Brave Search (`kiss-brave`) · Firecrawl (`kiss-firecrawl`) · GitHub (`kiss-github`) · Google Calendar (`kiss-gcal`) · Google Docs (`kiss-gdocs`) · Google Drive (`kiss-gdrive`) · Google Sheets (`kiss-gsheets`) · Notion (`kiss-notion`) · Overleaf (`kiss-overleaf`) · PostgreSQL (`kiss-postgres`)
 
-In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") and Sorcar dispatches the matching agent through its `run_agent` tool. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...). Gateway-capable channels also work **inbound**: a recurring poll tick (ask for "an always-on Telegram gateway" in chat) runs each new message as a Sorcar task, with thread continuity, sender allow-lists, and an optional pairing handshake. Two infrastructure agents round out the set: an **A2A agent** (`kiss-a2a`) exposing Sorcar over the agent-to-agent protocol and an **OpenAI-compatible server** (`kiss-oai`).
+In a chat task, just say what you want ("send 'running late' to Alice on WhatsApp", "list my open GitHub PRs") and Sorcar dispatches the matching agent through its `run_agent` tool (`run_agent(agent="whatsapp", task=...)`): the channel SEA runs with the `channel` preset in `~/.kiss/channel_work`, inheriting nothing from the calling task, with the channel's authenticated tools and its own system-prompt preamble. Each agent also has its own CLI entry point (`kiss-slack`, `kiss-gmail`, `kiss-whatsapp`, ...). Gateway-capable channels also work **inbound**: a recurring poll tick (ask for "an always-on Telegram gateway" in chat) runs each new message as a Sorcar task, with thread continuity, sender allow-lists, and an optional pairing handshake. Two infrastructure agents round out the set: an **A2A agent** (`kiss-a2a`) exposing Sorcar over the agent-to-agent protocol and an **OpenAI-compatible server** (`kiss-oai`).
 
 **Sign-in.** Every service agent carries `check_<service>_auth` / `authenticate_<service>` tools, so a task can connect a service on the spot, and the Apps panel of the sidebar starts such a task when you click a service that is not connected. The six Google Workspace agents go through Composio (Google only lets verified OAuth apps request Workspace scopes, so no Google token is stored locally); GitHub, Microsoft Teams, Slack, and Discord use public OAuth apps with device-code or PKCE flows and no client secret. Every sign-in ends on a page only you may complete, shown in the Browser tab under the daemon; the agent never asks for your password or a 2FA code. On Linux, credentials for the 18 Muse-covered connectors are isolated by default behind a local auth daemon that swaps opaque surrogate tokens for the real ones at the network edge and applies an allow/deny/ask policy with an audit log (`python -m kiss.agents.third_party_agents.muse_auth`; opt out with `KISS_MUSE_AUTH=0`).
 

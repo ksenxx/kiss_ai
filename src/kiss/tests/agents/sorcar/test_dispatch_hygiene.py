@@ -7,7 +7,8 @@
 * parent-repo paths in sub-agent task text are rewritten to the active
   worktree at dispatch (fan-out engine and ``run_agent`` path mode);
 * the Bash guard's refusal suggests the rewritten command;
-* ``run_agent`` with a generic or misspelled name gets a useful hint.
+* ``run_agent`` with a generic name runs the plain sub-agent; a
+  misspelled name gets a useful hint.
 """
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import sorcar_agent as sa
-from kiss.agents.sorcar.agent_dispatch import _run_agent, available_channels
+from kiss.agents.sorcar.agent_dispatch import (
+    DEFAULT_AGENT_PATH,
+    _run_agent,
+    available_channels,
+    resolve_agent,
+)
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
     _bash_parent_repo_guard,
@@ -98,12 +104,30 @@ def test_fanout_rewrites_child_task_text(worktree, monkeypatch: pytest.MonkeyPat
 
 
 class TestUnknownAgentHints:
-    def test_generic_name_points_to_run_parallel(self) -> None:
-        out = _run_agent("", "code-review", "review it", "", "", "", "")
-        assert out.startswith("Error: 'code-review' is not an agent.")
-        assert "run_parallel" in out and "Available channels" not in out
-        for name in ("general", "Agent", "sorcar", "analysis"):
-            assert "run_parallel" in _run_agent("", name, "x", "", "", "", "")
+    def test_generic_name_runs_the_plain_sub_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A generic label means what an empty ``agent`` means: the plain sub-agent.
+
+        ``code-review``, ``general``, ``Agent``, ... resolve to the
+        bundled ``dummy_sea.py`` instead of erroring, so the dispatch
+        reaches the daemon.  Both endpoint sources are pointed at a
+        daemon that does not exist (an absent ``KISS_SORCAR_LOCAL``
+        file, no endpoint recorded by an in-process cron scheduler), so
+        the reply is the dummy agent's could-not-run error — the same
+        text an empty ``agent`` produces — not an unknown-agent hint.
+        """
+        from kiss.agents.sorcar import cron_agent
+
+        monkeypatch.setenv("KISS_SORCAR_LOCAL", str(tmp_path / "no-daemon.json"))
+        monkeypatch.setattr(cron_agent, "_daemon_endpoint_file", None)
+        expected = _run_agent("", "", "review it", "", "", "", "")
+        assert expected.startswith("Error: the dummy agent task could not run:")
+        for name in ("code-review", "general", "Agent", "sorcar", "analysis", " worker "):
+            assert resolve_agent(name, "") == ("path", DEFAULT_AGENT_PATH, "dummy")
+            out = _run_agent("", name, "review it", "", "", "", "")
+            assert out == expected
+            assert "unknown agent" not in out and "Available channels" not in out
 
     def test_misspelled_channel_gets_a_suggestion(self) -> None:
         channels = available_channels()

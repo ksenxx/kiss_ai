@@ -20,7 +20,7 @@ KISS Sorcar now uses a quick task classifier to determine whether the task shoul
 
 ## Sorcar Extension Agents (SEAs)
 
-A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its top-level `X()` functions — named after `sorcar.run()`'s parameters — compute the run's task prompt, system prompt, model, budget, tools, and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in the [README](https://github.com/ksenxx/kiss_ai#sorcar-extension-agents-seas) for a full example, and the detailed SEA guide at [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
+A **Sorcar Extension Agent (SEA)** is a plain Python file that defines a complete custom agent: its `settings()` returns a dict with a preset (`session`, `worker`, `channel`) and the run's per-run settings (model, budget, tool profile, dispatch timeout, ...; the list is in [Client Interfaces](cli.md#sorcar-extension-agents-seas)), and its `system_prompt()`, `add_to_system_prompt()`, `add_to_tools()`, `llm_call_hook()` and `tool_call_hook()` supply the prompts, tools and safety hooks. Pass the file's path as `extension_agent_path` to `sorcar.run()` and the daemon imports it on every run; in the chat, `/<name> <text>` runs it directly and a running task dispatches it with `run_agent(agent="<name>", task=...)`. All third-party agents, such as the Slack and Gmail agents, are implemented in KISS Sorcar as SEAs. See the "Sorcar Extension Agents (SEAs)" section in the [README](https://github.com/ksenxx/kiss_ai#sorcar-extension-agents-seas) for a full example, and the detailed SEA guide at [`src/kiss/server/README.md`](https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/server/README.md).
 
 ## Prompt KISS Sorcar Like the Developer of KISS Sorcar
 
@@ -88,7 +88,7 @@ print(result.text, result.success, result.cost)
 sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `add_to_tools()` returns the extra tool functions.
+Extra tools come from a Sorcar Extension Agent: pass `extension_agent_path="/path/to/my_agent.py"`, a Python file whose `add_to_tools()` returns the extra tool functions (added to the built-in toolset; return `{"tool_profile": "none"}` from its `settings()` to run with those tools and `finish` only).
 
 ## Run KISS Sorcar in a Docker Container
 

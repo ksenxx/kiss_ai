@@ -191,7 +191,7 @@ process, whose working directory is not the task's. Use model names literally; n
 
 6. Run the `check_review` tool with the word limit and fix everything it flags.
 7. When the task names a second model (default `{SECOND_OPINION_MODEL}`), have it check
-   the review read-only through `run_parallel(tasks, model_name=<second model>,
+   the review read-only through `run_parallel(tasks, model=<second model>,
    tool_profile="review")`. It does not have `read_paper`: give it the paper path and
    the review path, and tell it that `pdftotext <paper> -` in Bash (or Read for a text
    file) gives the paper text. Ask: does every finding hold against the paper, are the
@@ -585,7 +585,7 @@ def check_review(review_path: str, word_limit: int = DEFAULT_WORD_LIMIT) -> str:
     return "\n".join(lines)
 
 
-def append_to_system_prompt() -> str:
+def add_to_system_prompt() -> str:
     """Append the reviewing rules to the default system prompt."""
     return SYSTEM_PROMPT
 
@@ -595,25 +595,21 @@ def add_to_tools() -> list[Any]:
     return [read_paper, check_review]
 
 
-def use_web_tools() -> bool:
-    """Browse: related work and the venue's reviewer guidelines are on the web."""
-    return True
+DISPATCH_TIMEOUT_SECONDS = 7200
+"""Seconds a ``run_agent`` call waits for a ``/review_paper`` run: two hours."""
 
+def settings() -> dict[str, Any]:
+    """Browse (related work), fan out (second opinion), skip the classifier, wait two hours.
 
-def is_parallel() -> bool:
-    """Fan out: the read-only second opinion runs as a ``run_parallel`` sub-agent."""
-    return True
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: reviewing a paper always needs the full system prompt."""
-    return False
-
-
-def dispatch_timeout() -> float:
-    """Seconds the ``/review_paper`` relay waits for the agent before stopping it.
-
-    Reading the paper, searching the related work and the second-opinion round take
-    well over the default 300 s ``run_agent`` wait.
+    Reading the paper, searching the related work and the second-opinion
+    round take far longer than the default ``run_agent`` wait; the
+    ``timeout`` tells the dispatcher how long a ``/review_paper`` run may run.
     """
-    return 2 * 3600
+    return {
+        "use_web_tools": True,
+        "is_parallel": True,
+        "classify_tasks": False,
+        "timeout": DISPATCH_TIMEOUT_SECONDS,
+    }
+
+

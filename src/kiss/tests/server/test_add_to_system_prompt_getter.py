@@ -4,12 +4,12 @@
 # add your name here
 """The ``add_to_system_prompt()`` agent-script getter adds to ``appendToSystemPrompt``.
 
-Unlike ``append_to_system_prompt()``, which replaces the caller's value,
-``add_to_system_prompt()`` (``agent_file.ADD_FIELDS``) appends its text
-after whatever the field already carries — the caller's text or the
-value an ``append_to_system_prompt()`` getter staged — separated by a
-blank line.  Exercised directly through :func:`apply_agent_overrides`,
-the daemon-side loader.
+``add_to_system_prompt()`` appends its text after whatever the field
+already carries — the caller's text, then the text of the deprecated
+``append_to_system_prompt()`` getter (ADDITIVE too, under the new SEA
+contract: it no longer replaces the caller's text) — each part
+separated by a blank line.  Exercised directly through
+:func:`apply_agent_overrides`, the daemon-side loader.
 """
 
 from __future__ import annotations
@@ -44,8 +44,13 @@ def test_addition_follows_the_callers_text(tmp_path: Path) -> None:
     assert cmd["appendToSystemPrompt"] == "CALLER\n\nPROTOCOL"
 
 
-def test_addition_follows_a_staged_replacement(tmp_path: Path) -> None:
-    """``append_to_system_prompt()`` replaces the caller's text; the addition then follows."""
+def test_legacy_append_getter_is_additive_and_precedes_the_addition(tmp_path: Path) -> None:
+    """``append_to_system_prompt()`` follows the caller's text; ``add_to_system_prompt()`` is last.
+
+    The deprecated getter used to REPLACE the caller's text; it is now
+    additive like ``add_to_system_prompt()``, so all three parts survive
+    in caller -> legacy -> addition order.
+    """
     script = _script(
         tmp_path,
         "def append_to_system_prompt():\n    return 'REPLACED'\n"
@@ -53,7 +58,7 @@ def test_addition_follows_a_staged_replacement(tmp_path: Path) -> None:
     )
     cmd: dict[str, Any] = {"agentPath": script, "appendToSystemPrompt": "CALLER"}
     apply_agent_overrides(cmd)
-    assert cmd["appendToSystemPrompt"] == "REPLACED\n\nPROTOCOL"
+    assert cmd["appendToSystemPrompt"] == "CALLER\n\nREPLACED\n\nPROTOCOL"
 
 
 def test_empty_addition_and_non_string_caller_value(tmp_path: Path) -> None:

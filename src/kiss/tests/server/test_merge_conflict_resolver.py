@@ -37,6 +37,7 @@ from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar import persistence, sea_commands
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult, _git
 from kiss.agents.sorcar.persistence import _add_task, _add_task_usage
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.merge_conflict_resolver import resolve_merge_conflict
@@ -374,14 +375,27 @@ class TestMergeUsagePersistsWhenTheMergeIsStopped:
 
 
 class TestMergeSea:
-    def test_getters_follow_the_sea_contract(self) -> None:
+    def test_settings_follow_the_sea_contract(self) -> None:
+        # ``settings()`` is the one configuration getter: the ``worker``
+        # preset (no parallelism, web, memory, worktree, commits or
+        # classification — a merge runs on the real checkout) with the
+        # budget cap; ``system_prompt()`` supplies the base prompt.
         assert merge_sea.system_prompt() == merge_sea.SYSTEM_PROMPT
-        assert merge_sea.is_parallel() is False
-        assert merge_sea.use_web_tools() is False
-        assert merge_sea.use_memory() is False
-        assert merge_sea.use_worktree() is False
-        assert merge_sea.auto_commit() is False
-        assert merge_sea.max_budget() == merge_sea.MAX_BUDGET_USD
+        assert merge_sea.settings() == {
+            "preset": "worker", "max_budget": merge_sea.MAX_BUDGET_USD,
+        }
+        resolved = resolve_settings(vars(merge_sea))
+        assert resolved["preset"] == "worker"
+        assert resolved["is_parallel"] is False
+        assert resolved["use_web_tools"] is False
+        assert resolved["use_memory"] is False
+        assert resolved["use_worktree"] is False
+        assert resolved["auto_commit"] is False
+        assert resolved["classify_tasks"] is False
+        assert resolved["max_budget"] == merge_sea.MAX_BUDGET_USD
+        for legacy in ("is_parallel", "use_web_tools", "use_memory", "use_worktree",
+                       "auto_commit", "max_budget"):
+            assert not hasattr(merge_sea, legacy), legacy
 
     def test_prompt_lists_files_and_task(self) -> None:
         # The prompt names the repo in the OS's native form (``/r`` on
@@ -405,8 +419,9 @@ class TestMergeSea:
             assert path is not None and path.name == "merge_sea.py"
             assert path.parent.name == "merge"
             assert path.parents[1].name == "seas"
-            rewritten = sea_commands.rewrite_prompt_if_command("/merge finish the merge")
-            assert rewritten is not None and str(path) in rewritten[0]
+            # ``/merge <text>`` runs the merge SEA directly on ``<text>``.
+            hit = sea_commands.slash_command_task("/merge finish the merge")
+            assert hit == ("finish the merge", path)
         finally:
             sea_commands._reset_for_tests()
 
@@ -495,9 +510,9 @@ class TestAutoCommitMergeConflictEndToEnd(unittest.TestCase):
                 "model": STANDIN_MODEL,
                 "workDir": str(self.repo),
                 "useWorktree": True,
-                "useParallel": False,
+                "isParallel": False,
                 "autoCommit": True,
-                "webTools": False,
+                "useWebTools": False,
                 "maxBudget": 5.0,
                 "modelConfig": self.standin.model_config,
             },

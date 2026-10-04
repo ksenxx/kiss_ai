@@ -645,10 +645,24 @@ def schedule_daily_update(repo: str, max_budget: float = DAILY_UPDATE_BUDGET_USD
 
 
 def system_prompt() -> str:
-    """Return the agent's system prompt with the CLI commands filled in."""
-    return SYSTEM_PROMPT.replace("{python}", shlex.quote(sys.executable)).replace(
-        "{module}", MODULE,
-    )
+    """Return :data:`SYSTEM_PROMPT` with the interpreter and module filled in."""
+    return SYSTEM_PROMPT.replace(
+        "{python}", shlex.quote(sys.executable),
+    ).replace("{module}", MODULE)
+
+
+def settings() -> dict[str, Any]:
+    """A worker with the full toolset that may fan out, on the real checkout.
+
+    No worktree or auto-commit (it indexes repositories, it does not
+    change them), no classifier, no browser, no memory; fan-out stays on
+    for the per-repository indexing sub-agents.
+    """
+    return {
+        "preset": "worker",
+        "tool_profile": "full",
+        "is_parallel": True,
+    }
 
 
 def add_to_tools() -> list[Any]:
@@ -658,41 +672,6 @@ def add_to_tools() -> list[Any]:
         list_knowledge_pages, read_knowledge_page, search_knowledge_pages,
         write_knowledge_page, delete_knowledge_page, schedule_daily_update,
     ]
-
-
-def tool_profile() -> str:
-    """Return the built-in tool profile: the full set (Read, Bash, run_parallel, ...)."""
-    return "full"
-
-
-def is_parallel() -> bool:
-    """Return whether the agent may fan out: yes, module pages of big repositories."""
-    return True
-
-
-def use_worktree() -> bool:
-    """Return whether the run gets a worktree: no, the repository is never modified."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Return whether changes are auto-committed: no, nothing in the repository changes."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Return whether to run the task classifier: no, the prompt fixes the procedure."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Return whether the agent gets browser tools: no, the repository is the source."""
-    return False
-
-
-def use_memory() -> bool:
-    """Return whether the built-in memory tools load: no, the knowledge tools replace them."""
-    return False
 
 
 # ----- CLI ----------------------------------------------------------------------

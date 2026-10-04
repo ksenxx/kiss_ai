@@ -122,46 +122,17 @@ def system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
+def settings() -> dict[str, Any]:
+    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "preset": "worker",
+        "tool_profile": "bash",
+        "max_budget": 1.0,
+    }
+
+
 def add_to_tools() -> list[Any]:
     """Return the agent's tools: :func:`task_transcript`."""
     return [task_transcript]
 
 
-def tool_profile() -> str:
-    """Return the built-in tool profile: ``"bash"`` (Bash and finish only)."""
-    return "bash"
-
-
-def max_budget() -> float:
-    """Return the per-run budget cap in USD."""
-    return 1.0
-
-
-def is_parallel() -> bool:
-    """Return whether the agent may fan out sub-agents: never."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Return whether the agent gets the browser tools: never."""
-    return False
-
-
-def use_memory() -> bool:
-    """Return whether the agent gets the memory tools: never."""
-    return False
-
-
-def use_worktree() -> bool:
-    """Return whether the agent runs in a git worktree: never."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Return whether the agent's changes are auto-committed: never."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Return whether the framework classifies the prompt first: never."""
-    return False

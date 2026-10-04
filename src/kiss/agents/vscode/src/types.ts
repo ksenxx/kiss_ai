@@ -143,9 +143,9 @@ export type FromWebviewMessage =
       model: string;
       attachments: Attachment[];
       useWorktree?: boolean;
-      useParallel?: boolean;
+      isParallel?: boolean;
       autoCommit?: boolean;
-      webTools?: boolean;
+      useWebTools?: boolean;
       tabId?: string;
       workDir?: string;
       // The file tab the webview's user viewed last; the host's own
@@ -1260,9 +1260,9 @@ export interface AgentCommand {
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'nothing';
   useWorktree?: boolean;
-  useParallel?: boolean;
+  isParallel?: boolean;
   autoCommit?: boolean;
-  webTools?: boolean;
+  useWebTools?: boolean;
   classifyTasks?: boolean;
   task?: string;
   direction?: 'prev' | 'next';

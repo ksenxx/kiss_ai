@@ -379,11 +379,13 @@ def test_run_task_update_sea_runs_as_a_subagent_in_the_parents_chat(tmp_path: Pa
     assert names == {"finish", "task_context"}
     system = next(m for m in agentic[0]["messages"] if m["role"] == "system")
     assert str(system["content"]).startswith(ask_sea.system_prompt())
-    assert ask_sea.append_to_system_prompt() in str(system["content"])
+    assert ask_sea.add_to_system_prompt() in str(system["content"])
     user = next(m for m in agentic[0]["messages"] if m["role"] == "user")
     prompt = task_update.build_prompt(task_id)
     assert prompt.startswith(task_update.UPDATE_QUESTION)
-    assert prompt.endswith(ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id))
+    # The ask SEA's ``add_to_prompt`` with ``{task_id}`` filled in.
+    assert prompt.endswith(ask_sea.ADD_TO_PROMPT.replace("{task_id}", task_id))
+    assert "{task_id}" not in prompt
     assert prompt in str(user["content"])
     tool_results = [m for m in agentic[1]["messages"] if m["role"] == "tool"]
     assert len(tool_results) == 1

@@ -74,8 +74,17 @@ def forget_instruction(instruction: str) -> str:
 
 
 def system_prompt() -> str:
-    """Return the forget agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
+
+
+def settings() -> dict[str, Any]:
+    """A $1 worker with Bash only, running :data:`SYSTEM_PROMPT`."""
+    return {
+        "preset": "worker",
+        "tool_profile": "bash",
+        "max_budget": 1.0,
+    }
 
 
 def add_to_tools() -> list[Any]:
@@ -83,41 +92,3 @@ def add_to_tools() -> list[Any]:
     return [forget_instruction, list_instructions]
 
 
-def tool_profile() -> str:
-    """Give the agent the ``Bash`` tool and no other built-in tool."""
-    return "bash"
-
-
-def max_budget() -> float:
-    """Return the per-run budget cap in USD: a few tool calls and a finish."""
-    return 1.0
-
-
-def use_worktree() -> bool:
-    """Never use a worktree: the agent edits ``~/.kiss/AGENTS.md``, not the checkout."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never auto-commit: nothing in the checkout changes."""
-    return False
-
-
-def classify_tasks() -> bool:
-    """Skip the task classifier: the run needs no lite/full prompt choice."""
-    return False
-
-
-def is_parallel() -> bool:
-    """Never fan out: one instruction, a few tool calls."""
-    return False
-
-
-def use_web_tools() -> bool:
-    """Never enable browser tools."""
-    return False
-
-
-def use_memory() -> bool:
-    """Never load persistent memory tools: AGENTS.md is the memory here."""
-    return False

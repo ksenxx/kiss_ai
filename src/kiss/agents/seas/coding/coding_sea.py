@@ -344,60 +344,31 @@ class ContainerHarness:
             lines = lines[:MAX_LISTING_LINES] + [f"[{len(lines) - MAX_LISTING_LINES} more entries]"]
         return "\n".join(lines)
 
-    def model(self) -> str:
-        """The model the trial runs with."""
-        return self.model_name
-
     def system_prompt(self) -> str:
         """The unattended-engineering prompt (replaces Sorcar's default prompt)."""
         tests = TEST_CONTEXT_NOTE if self.test_context else ""
         return SYSTEM_PROMPT.format(workdir=self.workdir, test_context=tests)
 
-    def max_budget(self) -> float:
-        """Hard USD cap for the trial."""
-        return self.budget
+    def settings(self) -> dict[str, Any]:
+        """The trial's run settings (the SEA ``settings()`` contract).
 
-    def model_config(self) -> dict[str, Any] | None:
-        """Per-trial model request overrides, or ``None`` for the provider defaults."""
-        return self.model_overrides or None
-
-    def work_dir(self) -> str:
-        """Host scratch directory the daemon runs the task in (the tools run in the container)."""
-        return self.host_work_dir
-
-    def docker_image(self) -> str:
-        """Attach the run's tools to the trial container."""
-        return f"container:{self.container}"
-
-    @staticmethod
-    def use_worktree() -> bool:
-        """No host git worktree: all edits happen inside the container."""
-        return False
-
-    @staticmethod
-    def auto_commit() -> bool:
-        """Nothing to commit on the host."""
-        return False
-
-    @staticmethod
-    def use_web_tools() -> bool:
-        """No browser tools: the run is container-isolated."""
-        return False
-
-    @staticmethod
-    def classify_tasks() -> bool:
-        """No pre-run task classification."""
-        return False
-
-    @staticmethod
-    def use_memory() -> bool:
-        """No persistent memory across trials."""
-        return False
-
-    @staticmethod
-    def is_parallel() -> bool:
-        """Sub-agents are part of the basic toolset; they share the trial container."""
-        return True
+        A ``worker`` whose sub-agents stay on (they share the trial
+        container): the trial's model, hard USD cap and per-trial model
+        overrides (``None`` for the provider defaults), the host scratch
+        directory the daemon runs the task in (the tools run in the
+        container the ``docker_image`` attaches), no host git worktree or
+        auto-commit (all edits happen inside the container), no
+        pre-run classification, no browser, no persistent memory.
+        """
+        return {
+            "preset": "worker",
+            "model": self.model_name,
+            "max_budget": self.budget,
+            "model_config": self.model_overrides or None,
+            "work_dir": self.host_work_dir,
+            "docker_image": f"container:{self.container}",
+            "is_parallel": True,
+        }
 
     def llm_call_hook(self) -> Callable[[list], list]:
         """Return the hook that counts LLM turns and logs the new messages."""
@@ -934,18 +905,8 @@ def description() -> str:
 
 
 prompt = _harness.prompt
-model = _harness.model
 system_prompt = _harness.system_prompt
-max_budget = _harness.max_budget
-model_config = _harness.model_config
-work_dir = _harness.work_dir
-docker_image = _harness.docker_image
-use_worktree = _harness.use_worktree
-auto_commit = _harness.auto_commit
-use_web_tools = _harness.use_web_tools
-classify_tasks = _harness.classify_tasks
-use_memory = _harness.use_memory
-is_parallel = _harness.is_parallel
+settings = _harness.settings
 llm_call_hook = _harness.llm_call_hook
 tool_call_hook = _harness.tool_call_hook
 '''

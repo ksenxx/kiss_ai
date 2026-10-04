@@ -139,6 +139,9 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     ),
     # Single command runner (the bundled ``/sh`` agent): Bash and nothing else.
     "bash": frozenset({"Bash"}),
+    # No built-in tool at all: ``finish`` plus whatever the agent
+    # script's ``add_to_tools()`` supplies (the bundled ``/ask`` agent).
+    "none": frozenset(),
 }
 """Tool profiles an agent can run with (``finish`` is always added).
 
@@ -149,7 +152,7 @@ children the ``review`` profile; a parent may name a profile explicitly
 through ``run_parallel(..., tool_profile=...)``, and a top-level run
 through ``run(tool_profile=...)`` (the ``tool_profile`` parameter of
 :func:`kiss.server.sorcar.run` / the ``run_agent`` tool, or an agent
-script's ``tool_profile()`` getter).
+script's ``tool_profile`` setting).
 
 A profile name is either one key or several keys joined with ``+``
 (``"shell+edit+memory"``); see :func:`resolve_tool_profile`.
@@ -2122,8 +2125,8 @@ class SorcarAgent(RelentlessAgent):
             )
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(
-            tasks: str, max_workers: str = "", model_name: str = "",
-            tool_profile: str = "",
+            tasks: str, max_workers: str = "", model: str = "",
+            tool_profile: str = "", model_name: str = "",
         ) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
@@ -2167,7 +2170,7 @@ class SorcarAgent(RelentlessAgent):
                     string containing an integer (e.g. ``"4"``).  An empty
                     string (default) lets Python choose automatically.
                     Set to a lower number to limit concurrency.
-                model_name: LLM model for the sub-agents (e.g. a cheaper
+                model: LLM model for the sub-agents (e.g. a cheaper
                     or a different reviewer model).  Empty (default)
                     uses this agent's model.  Prefer this over asking
                     the sub-agent to call ``set_model`` itself, which
@@ -2186,6 +2189,8 @@ class SorcarAgent(RelentlessAgent):
                     with ``+`` for the union of their tools, e.g.
                     ``"shell+edit+memory"``.  Empty (default): review
                     tasks get ``"review"``, others the full toolset.
+                model_name: Deprecated alias of ``model``; used when
+                    ``model`` is empty.
 
             Returns:
                 A YAML-formatted string containing a list of result
@@ -2216,7 +2221,8 @@ class SorcarAgent(RelentlessAgent):
             except ValueError as exc:
                 return f"Error: {exc}"
             results = self._run_tasks_parallel(
-                task_list, max_workers=workers, model_name=model_name or None,
+                task_list, max_workers=workers,
+                model_name=model or model_name or None,
                 tool_profile=tool_profile,
             )
             result_str: str = yaml.dump(results, sort_keys=False)

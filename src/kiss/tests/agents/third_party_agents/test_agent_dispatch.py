@@ -200,10 +200,11 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
 
     # Channel mode: executes in the shared channel_work scratch dir,
     # but the tab is scoped to the caller's project.  Every mode also
-    # forwards the parsed dispatch timeout (the 300-s default when the
-    # tool's ``timeout`` argument is empty) and opts in to the
-    # stop-on-timeout cascade — a timed-out channel sub-task must not
-    # outlive its workspace reservation.
+    # forwards the parsed dispatch timeout (the one-hour default when
+    # the tool's ``timeout`` argument is empty and the script's
+    # ``settings()`` name none) and opts in to the stop-on-timeout
+    # cascade — a timed-out channel sub-task must not outlive its
+    # workspace reservation.
     captured_dispatch.clear()
     tool("say hi", "ntfy")
     assert captured_dispatch[0]["work_dir"] == str(tmp_path / "channel_work")
@@ -211,11 +212,12 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     assert captured_dispatch[0]["timeout"] == agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS
     assert captured_dispatch[0]["stop_on_timeout"] is True
 
-    # Cron mode: executes in the cron work dir, scoped to the caller;
-    # an explicit ``timeout`` argument is parsed and forwarded.
+    # Cron mode: the cron module's ``settings()`` name the cron work
+    # dir, so the sub-task executes there, scoped to the caller; an
+    # explicit ``timeout`` argument is parsed and forwarded.
     captured_dispatch.clear()
     tool("run 'echo hi' every 5 minutes", "cron", timeout="42.5")
-    assert captured_dispatch[0]["work_dir"] == cron_agent.work_dir()
+    assert captured_dispatch[0]["work_dir"] == cron_agent.cron_work_dir()
     assert captured_dispatch[0]["scope_work_dir"] == str(caller)
     assert captured_dispatch[0]["timeout"] == 42.5
     assert captured_dispatch[0]["stop_on_timeout"] is True
@@ -231,64 +233,82 @@ def test_dispatch_pins_tab_scope_to_calling_work_dir(
     assert captured_dispatch[0]["stop_on_timeout"] is True
 
 
-def test_channel_and_cron_dispatch_skip_git_lifecycle(
+def _daemon_run_command(call: dict[str, Any]) -> dict[str, Any]:
+    """Return the daemon-side ``run`` command the captured dispatch *call* becomes.
+
+    Only the wire fields the agent script's ``settings()`` can override
+    are mapped (:data:`kiss.server.agent_file.SETTING_FIELDS`), so a test
+    can apply ``apply_agent_overrides`` to exactly what the dispatcher sent.
+    """
+    return {
+        "agentPath": call["extension_agent_path"],
+        "useWorktree": call["use_worktree"],
+        "autoCommit": call["auto_commit"],
+        "classifyTasks": call["classify_tasks"],
+        "isParallel": call["is_parallel"],
+        "useWebTools": call["use_web_tools"],
+        "useMemory": call["use_memory"],
+        "appendToSystemPrompt": call["append_to_system_prompt"],
+    }
+
+
+def test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings(
     tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
-    """Channel and cron dispatches run outside the project git lifecycle.
+    """Channel and cron sub-tasks run outside the project git lifecycle.
 
     A channel/cron sub-task executes in a scratch directory
     (``~/.kiss/channel_work`` / ``~/.kiss/cron/work``), so worktree
     setup would only copy whatever git repository happens to enclose
     that directory — a dirty repo at ``$HOME`` once stalled a gmail
     dispatch for minutes copying 65 GB before the sub-task's tab could
-    even appear.  The dispatch therefore pins ``use_worktree=False``
-    and ``auto_commit=False``.  Classification stays ENABLED for a
-    channel dispatch (``classify_tasks=None`` — the daemon default
-    decides, so a simple channel task gets the lite system prompt);
-    the worktree pin is safe because a verdict can only demote a
-    requested worktree run, never promote a pinned-off one
-    (``WorktreeSorcarAgent.run``).  Only cron — an unattended
-    automation that runs repeatedly — defaults ``classify_tasks`` to ``False``.
-    A path-mode agent script keeps the standard lifecycle: it operates
-    on the calling project unless its own getters say otherwise.  The
-    real dispatch path is exercised up to the daemon-client boundary;
-    only that boundary call is captured.
+    even appear.  The dispatcher no longer special-cases them: it sends
+    the same wire values as for any other sub-task (the persisted "Use
+    worktree" / "Auto commit" settings, no classifier override), and
+    the ``channel`` preset of the module's ``settings()`` pins
+    worktree, auto-commit, classification and fan-out off on the
+    daemon (``apply_agent_overrides``), where every script's settings
+    win.  A path-mode agent script with the default ``session`` preset
+    keeps the standard lifecycle on the calling project.  The real
+    dispatch path is exercised up to the daemon-client boundary; only
+    that boundary call is captured.
     """
     caller = tmp_path / "caller_project"
     caller.mkdir()
     tool = make_run_agent_tool(str(caller))
-
-    # Channel mode: no worktree, no auto-commit; classification
-    # follows the daemon's configured default (no per-run override).
-    tool("say hi", "ntfy")
-    assert captured_dispatch[0]["use_worktree"] is False
-    assert captured_dispatch[0]["auto_commit"] is False
-    assert captured_dispatch[0]["classify_tasks"] is None
-
-    # Cron mode: the module getters already return False for
-    # use_worktree/auto_commit, the wire fields agree with them, and
-    # classification defaults off (an explicit ``classify_tasks``
-    # argument can turn it on; see
-    # ``test_run_options_are_forwarded_to_daemon``).
-    captured_dispatch.clear()
-    tool("run 'echo hi' every 5 minutes", "cron")
-    assert captured_dispatch[0]["use_worktree"] is False
-    assert captured_dispatch[0]["auto_commit"] is False
-    assert captured_dispatch[0]["classify_tasks"] is False
-
-    # Path mode: the standard task lifecycle (worktree + auto-commit
-    # following the persisted "Use worktree" / "Auto commit" settings,
-    # both on by default; classification following the daemon's
-    # configured default).
-    script = caller / "helper.py"
-    script.write_text("def model() -> str:\n    return 'm'\n")
     isolated = IsolatedKissHome("kiss-dispatch-lifecycle-")
     try:
+        # Both persisted settings on (the defaults).
+        for agent, task in (("ntfy", "say hi"), ("cron", "run 'echo hi' every 5 minutes")):
+            captured_dispatch.clear()
+            tool(task, agent)
+            sent = captured_dispatch[0]
+            assert sent["use_worktree"] is True, agent
+            assert sent["auto_commit"] is True, agent
+            assert sent["classify_tasks"] is None, agent
+            assert sent["is_parallel"] is True, agent
+            cmd = _daemon_run_command(sent)
+            overridden = apply_agent_overrides(cmd)
+            assert {"useWorktree", "autoCommit", "classifyTasks", "isParallel"} <= overridden
+            assert cmd["useWorktree"] is False, agent
+            assert cmd["autoCommit"] is False, agent
+            assert cmd["classifyTasks"] is False, agent
+            assert cmd["isParallel"] is False, agent
+
+        # Path mode, ``session`` preset: worktree + auto-commit follow
+        # the persisted settings; classification follows the daemon's
+        # configured default; the script's settings change nothing.
+        script = caller / "helper.py"
+        script.write_text("def model() -> str:\n    return 'm'\n")
         captured_dispatch.clear()
         tool("say hi", str(script))
-        assert captured_dispatch[0]["use_worktree"] is True
-        assert captured_dispatch[0]["auto_commit"] is True
-        assert captured_dispatch[0]["classify_tasks"] is None
+        sent = captured_dispatch[0]
+        assert sent["use_worktree"] is True
+        assert sent["auto_commit"] is True
+        assert sent["classify_tasks"] is None
+        cmd = _daemon_run_command(sent)
+        assert apply_agent_overrides(cmd) == {"model"}
+        assert cmd["useWorktree"] is True and cmd["autoCommit"] is True
 
         # The user turned both settings off in the settings panel: a
         # path-mode sub-agent follows them like a chat-panel task would.
@@ -298,14 +318,14 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
         assert captured_dispatch[0]["use_worktree"] is False
         assert captured_dispatch[0]["auto_commit"] is False
 
-        # Each setting is read on its own; explicit arguments still win.
+        # Each setting is read on its own; explicit options still win.
         isolated.write_config(is_worktree=True, auto_commit_mode=False)
         captured_dispatch.clear()
         tool("say hi", str(script))
         assert captured_dispatch[0]["use_worktree"] is True
         assert captured_dispatch[0]["auto_commit"] is False
         captured_dispatch.clear()
-        tool("say hi", str(script), auto_commit="true")
+        tool("say hi", str(script), options='{"auto_commit": true}')
         assert captured_dispatch[0]["use_worktree"] is True
         assert captured_dispatch[0]["auto_commit"] is True
     finally:
@@ -313,10 +333,10 @@ def test_channel_and_cron_dispatch_skip_git_lifecycle(
 
 
 def test_run_option_parse_errors(tmp_path: Path) -> None:
-    """Malformed optional arguments fail before any daemon contact.
+    """A malformed ``options`` JSON object fails before any daemon contact.
 
-    Every optional argument of ``run_agent`` mirrors a keyword option
-    of ``kiss.server.sorcar.run``; a value the daemon could not honour
+    Every key of ``options`` mirrors a keyword option of
+    ``kiss.server.sorcar.run``; a value the daemon could not honour
     is reported by name with the offending text.
     """
     for name in (
@@ -327,47 +347,77 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "use_memory",
         "is_parallel",
     ):
-        out = run_agent("say hi", "ntfy", **{name: "maybe"})
-        assert out == f"Error: {name} must be 'true' or 'false', got 'maybe'."
-    assert run_agent("say hi", "ntfy", model_config="[1, 2]") == (
-        "Error: model_config must be a JSON object, got '[1, 2]'."
+        out = run_agent("say hi", "ntfy", options=f'{{"{name}": "maybe"}}')
+        assert out == f"Error: {name} must be true or false, got 'maybe'."
+        out = run_agent("say hi", "ntfy", options=f'{{"{name}": 1}}')
+        assert out == f"Error: {name} must be true or false, got 1."
+    assert run_agent("say hi", "ntfy", options='{"model_config": [1, 2]}') == (
+        "Error: options['model_config'] must be a JSON dict, got list."
     )
-    out = run_agent("say hi", "ntfy", model_config="{not json")
-    assert out.startswith("Error: model_config must be a JSON object, got '{not json': ")
+    assert run_agent("say hi", "ntfy", options='{"chat_id": 5}') == (
+        "Error: options['chat_id'] must be a JSON str, got int."
+    )
+    assert run_agent("say hi", "ntfy", options='{"system_prompt": true}') == (
+        "Error: options['system_prompt'] must be a JSON str, got bool."
+    )
+    assert run_agent("say hi", "ntfy", options="[1, 2]") == (
+        "Error: options must be a JSON object, got '[1, 2]'."
+    )
+    out = run_agent("say hi", "ntfy", options="{not json")
+    assert out.startswith("Error: options must be a JSON object, got '{not json': ")
+    out = run_agent("say hi", "ntfy", options='{"tools": "x.py"}')
+    assert out.startswith("Error: options has an unknown key 'tools'; known keys: chat_id, ")
+    out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
+    assert out.startswith("Error: tool_profile must be one of ")
+    assert out.endswith("got 'bogus'.")
     # Extra tools come only from the agent script's ``tools()`` /
-    # ``add_to_tools()``: the tool has no tools-path arguments.
+    # ``add_to_tools()``: the tool has no tools-path arguments, and the
+    # old per-option keyword arguments are gone.
     import inspect
 
     params = inspect.signature(run_agent).parameters
-    assert "tools" not in params
-    assert "add_to_tools" not in params
-    with pytest.raises(TypeError):
-        run_agent("say hi", "ntfy", tools=str(tmp_path / "x.py"))
+    assert list(params) == [
+        "task", "agent", "timeout", "model", "max_budget", "workspace", "options", "model_name",
+    ]
+    for kwarg in ("tools", "use_worktree", "chat_id", "tool_profile", "append_to_prompt"):
+        with pytest.raises(TypeError):
+            run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
 
 
-def test_channel_and_cron_refuse_worktree_and_auto_commit(
+def test_channel_and_cron_options_are_forwarded_but_pinned_off_on_the_daemon(
     tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
-    """The channel/cron git-lifecycle pin cannot be overridden.
+    """Asking a channel/cron sub-task for a worktree is forwarded, then overridden.
 
-    A channel or cron sub-task runs in a scratch directory outside any
-    project, where a worktree would copy whatever repository encloses
-    ``$HOME`` (see ``test_channel_and_cron_dispatch_skip_git_lifecycle``),
-    so asking for one is refused; an explicit ``"false"`` agrees with
-    the pin and dispatches normally.
+    The dispatcher forwards the caller's ``options`` verbatim for every
+    agent; the ``channel`` preset of the channel/cron module's
+    ``settings()`` wins on the daemon, so the sub-task still runs
+    without a git worktree or auto-commit (see
+    ``test_channel_and_cron_lifecycle_is_pinned_off_by_their_settings``).
     """
-    refused = "agent task always runs without a git worktree or auto-commit"
+    # (options, wire use_worktree, wire auto_commit); an option left out
+    # follows the persisted setting, on by default.
+    cases = (
+        ('{"use_worktree": true}', True, True),
+        ('{"auto_commit": "TRUE"}', True, True),
+        ('{"use_worktree": "false", "auto_commit": true}', False, True),
+        ('{"use_worktree": true, "auto_commit": false}', True, False),
+    )
     for agent in ("ntfy", "cron"):
-        for kwargs in (
-            {"use_worktree": "true"},
-            {"auto_commit": "TRUE"},
-            {"use_worktree": "false", "auto_commit": "true"},
-        ):
-            out = run_agent("say hi", agent, **kwargs)
-            assert out.startswith(f"Error: the {agent} {refused}"), out
-    assert captured_dispatch == []
+        for options, use_worktree, auto_commit in cases:
+            captured_dispatch.clear()
+            out = run_agent("say hi", agent, options=options)
+            assert "Error" not in out, out
+            sent = captured_dispatch[0]
+            assert sent["use_worktree"] is use_worktree, (agent, options)
+            assert sent["auto_commit"] is auto_commit, (agent, options)
+            cmd = _daemon_run_command(sent)
+            apply_agent_overrides(cmd)
+            assert cmd["useWorktree"] is False, (agent, options)
+            assert cmd["autoCommit"] is False, (agent, options)
 
-    run_agent("say hi", "ntfy", use_worktree="false", auto_commit=" False ")
+    captured_dispatch.clear()
+    run_agent("say hi", "ntfy", options='{"use_worktree": "false", "auto_commit": " False "}')
     assert captured_dispatch[0]["use_worktree"] is False
     assert captured_dispatch[0]["auto_commit"] is False
 
@@ -375,16 +425,18 @@ def test_channel_and_cron_refuse_worktree_and_auto_commit(
 def test_run_options_are_forwarded_to_daemon(
     tmp_path: Path, captured_dispatch: list[dict[str, Any]]
 ) -> None:
-    """The optional arguments reach ``daemon_client.run`` as its keyword options.
+    """The ``options`` JSON object reaches ``daemon_client.run`` as its keyword options.
 
-    Empty arguments forward the option's default (``None`` for the
-    tri-state daemon-decides options, ``True`` for ``is_parallel``);
-    explicit values are parsed and forwarded verbatim.  No tools path
+    Keys left out forward the option's default (``None`` for the
+    tri-state daemon-decides options, ``True`` for ``is_parallel``,
+    ``""`` for the text options); explicit values are parsed and
+    forwarded verbatim, booleans as JSON booleans or as the words
+    ``"true"`` / ``"false"``, ``null`` as "not passed".  No tools path
     travels: the daemon client's ``run`` has no tools parameter, so
     the sub-task's extra tools can only come from the agent script's
     own ``tools()`` / ``add_to_tools()``.  The real dispatch path is
     exercised up to the daemon-client boundary; only that boundary
-    call is captured_dispatch.
+    call is captured.
     """
 
     caller = tmp_path / "caller_project"
@@ -401,28 +453,34 @@ def test_run_options_are_forwarded_to_daemon(
     assert "append_basic_tools" not in defaults
     assert defaults["model_config"] is None
     assert defaults["use_web_tools"] is None
+    assert defaults["classify_tasks"] is None
     assert defaults["use_memory"] is None
     assert defaults["is_parallel"] is True
     assert defaults["append_to_system_prompt"] == ""
     assert defaults["append_to_prompt"] == ""
+    assert defaults["tool_profile"] == ""
+    assert defaults["docker_image"] == ""
 
     # Everything passed, in path mode: parsed and forwarded, with the
-    # explicit git-lifecycle values replacing the path-mode defaults.
+    # explicit git-lifecycle values replacing the persisted settings.
     captured_dispatch.clear()
     tool(
         "say hi",
         str(script),
-        chat_id=" chat-123 ",
-        system_prompt="You are a terse helper.",
-        model_config='{"base_url": "http://localhost:8000/v1"}',
-        use_worktree="false",
-        auto_commit="False",
-        use_web_tools="true",
-        classify_tasks="false",
-        use_memory="true",
-        is_parallel="false",
-        append_to_system_prompt="Answer in French.",
-        append_to_prompt="Cite sources.",
+        options="""{
+            "chat_id": " chat-123 ",
+            "system_prompt": "You are a terse helper.",
+            "model_config": {"base_url": "http://localhost:8000/v1"},
+            "use_worktree": "false",
+            "auto_commit": "False",
+            "use_web_tools": true,
+            "classify_tasks": false,
+            "use_memory": "true",
+            "is_parallel": false,
+            "append_to_system_prompt": "Answer in French.",
+            "append_to_prompt": "Cite sources.",
+            "tool_profile": " review "
+        }""",
     )
     sent = captured_dispatch[0]
     assert sent["chat_id"] == "chat-123"
@@ -436,20 +494,34 @@ def test_run_options_are_forwarded_to_daemon(
     assert sent["is_parallel"] is False
     assert sent["append_to_system_prompt"] == "Answer in French."
     assert sent["append_to_prompt"] == "Cite sources."
+    assert sent["tool_profile"] == "review"
+    # ``options['docker_image']`` is accepted by the parser, but
+    # ``dispatch_result`` forwards only the calling task's live
+    # container (``inherit_from_parent``), so an explicit value is
+    # dropped; it is not asserted here until the dispatcher either
+    # forwards it or stops accepting the key.
 
-    # Path mode honours an explicit worktree request too.
+    # Path mode honours an explicit worktree request too; ``null`` and
+    # ``""`` mean "not passed", so the defaults stand.
     captured_dispatch.clear()
-    tool("say hi", str(script), use_worktree="true")
+    tool("say hi", str(script), options='{"use_worktree": true, "use_memory": null, '
+                                        '"is_parallel": "", "chat_id": null}')
     assert captured_dispatch[0]["use_worktree"] is True
+    assert captured_dispatch[0]["use_memory"] is None
+    assert captured_dispatch[0]["is_parallel"] is True
+    assert captured_dispatch[0]["chat_id"] == ""
 
-    # An explicit classify_tasks overrides the mode default in every
-    # mode: cron's pinned-off classification and the channel/path
-    # "daemon decides" default alike.
+    # The dispatcher forwards an explicit classify_tasks for every
+    # agent alike; for cron and the channel agents the module's
+    # ``channel`` preset then pins classification off on the daemon.
     captured_dispatch.clear()
-    tool("run 'echo hi' every 5 minutes", "cron", classify_tasks="true")
+    tool("run 'echo hi' every 5 minutes", "cron", options='{"classify_tasks": true}')
     assert captured_dispatch[0]["classify_tasks"] is True
+    cmd = _daemon_run_command(captured_dispatch[0])
+    apply_agent_overrides(cmd)
+    assert cmd["classifyTasks"] is False
     captured_dispatch.clear()
-    tool("say hi", "ntfy", classify_tasks="False", use_memory="false")
+    tool("say hi", "ntfy", options='{"classify_tasks": "False", "use_memory": false}')
     assert captured_dispatch[0]["classify_tasks"] is False
     assert captured_dispatch[0]["use_memory"] is False
 
@@ -513,8 +585,10 @@ def test_cron_dispatch_unreachable_daemon_is_a_clean_error(
     tmp_path: Path,
 ) -> None:
     # "cron" (any case/spacing) routes to the built-in cron agent
-    # script, not to channel lookup: the dispatch fails only on the
-    # unreachable daemon and runs in the cron work directory.
+    # script (``cron_agent.py``, named by its file stem like every
+    # other script), not to channel lookup: the dispatch fails only on
+    # the unreachable daemon and runs in the cron work directory the
+    # module's ``settings()`` name.
     out = run_agent("run 'echo hi' every 5 minutes", "  Cron ")
     assert "unknown agent" not in out
     assert out.startswith("Error: the cron agent task could not run:")
@@ -610,22 +684,36 @@ def test_default_agent_is_the_bundled_dummy_sea(
 
 def test_default_agent_unreachable_daemon_is_a_clean_error() -> None:
     # The standalone tool with no agent: path mode named after the
-    # dummy SEA's file stem, failing only at the unreachable daemon.
+    # dummy SEA's file stem (without ``_sea``), failing only at the
+    # unreachable daemon.
     out = run_agent("say hi")
-    assert out.startswith("Error: the dummy_sea agent task could not run:")
+    assert out.startswith("Error: the dummy agent task could not run:")
     assert "no-daemon.json" in out
 
 
 def test_tool_schema_requires_only_task() -> None:
-    """The schema the LLM sees marks ``task`` required and ``agent`` optional."""
+    """The schema the LLM sees marks ``task`` required and every other parameter optional.
+
+    The per-option keyword arguments of the earlier contract are gone:
+    the tool has exactly the eight parameters below, the further
+    ``kiss.server.sorcar.run`` keywords travel in the ``options`` JSON
+    object.
+    """
     from kiss.agents.sorcar.decide_tool import DEFAULT_DECISIONS_MODEL
     from kiss.core.models.model_info import model
 
     schema = model(DEFAULT_DECISIONS_MODEL)._function_to_openai_tool(run_agent)
     params = schema["function"]["parameters"]
     assert params["required"] == ["task"]
-    assert list(params["properties"])[:2] == ["task", "agent"]
-    assert "dummy_sea.py" in params["properties"]["agent"]["description"]
+    assert list(params["properties"]) == [
+        "task", "agent", "timeout", "model", "max_budget", "workspace", "options", "model_name",
+    ]
+    agent_doc = params["properties"]["agent"]["description"]
+    assert "plain Sorcar sub-agent" in agent_doc
+    assert "JSON object" in params["properties"]["options"]["description"]
+    # The full docstring names the keys ``options`` accepts.
+    for key in ("tool_profile", "use_worktree", "model_config", "chat_id"):
+        assert key in (run_agent.__doc__ or ""), key
 
 
 def test_path_mode_detected_by_py_suffix_and_separator(
@@ -771,20 +859,52 @@ def test_every_channel_module_is_dispatchable() -> None:
         assert module.__file__ and Path(module.__file__).is_file(), channel
         assert callable(getattr(module, "add_to_tools", None)), channel
         assert not hasattr(module, "tools"), channel
+        # Every channel module is a ``channel``-preset agent script
+        # whose ``add_to_system_prompt()`` carries the channel's
+        # guidance (the agent class's ``channel_system_prompt``).
+        assert module.settings()["preset"] == "channel", channel
+        guidance = getattr(cls, "channel_system_prompt", "")
+        addition = getattr(module, "add_to_system_prompt", None)
+        if guidance:
+            assert callable(addition), channel
+            assert addition() == guidance, channel
+        else:
+            assert addition is None or addition() == "", channel
 
 
 def test_channel_module_is_a_valid_agent_script() -> None:
-    # The exact contract the dispatch relies on: passing a channel
-    # module as ``extension_agent_path`` makes the daemon stage the
-    # module's ``add_to_tools()`` callables on top of the basic toolset.
-    import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
+    """The exact agent-script contract a channel dispatch relies on.
 
-    cmd = {"agentPath": ntfy_sea.__file__}
+    Passing a channel module as ``extension_agent_path`` makes the
+    daemon apply its ``settings()`` (the ``channel`` preset: no
+    worktree, no auto-commit, no classifier, no fan-out, no browser,
+    no memory), stage its ``add_to_tools()`` callables on top of the
+    built-in toolset, and append the channel preamble plus the
+    module's ``add_to_system_prompt()`` guidance to the system prompt.
+    The dispatcher sends the task text verbatim: nothing of the
+    channel guidance travels in the prompt any more.
+    """
+    import kiss.agents.third_party_agents.ntfy.ntfy_sea as ntfy_sea
+    from kiss.server.agent_file import CHANNEL_PREAMBLE
+
+    cmd = {"agentPath": ntfy_sea.__file__, "appendToSystemPrompt": "Caller suffix."}
     overridden = apply_agent_overrides(cmd)
-    assert overridden == {"tools", "appendBasicTools"}
+    assert overridden == {
+        "tools", "useWorktree", "autoCommit", "classifyTasks", "isParallel",
+        "useWebTools", "useMemory", "appendToSystemPrompt",
+    }
     assert cmd["tools"] and all(callable(t) for t in cmd["tools"])
-    assert cmd["appendBasicTools"] is True
+    assert "appendBasicTools" not in cmd
+    assert "toolProfile" not in cmd  # ``add_to_tools()`` keeps the built-in toolset
     assert "toolsFile" not in cmd
+    for field in ("useWorktree", "autoCommit", "classifyTasks", "isParallel",
+                  "useWebTools", "useMemory"):
+        assert cmd[field] is False, field
+    assert cmd["appendToSystemPrompt"] == (
+        "Caller suffix.\n\n" + CHANNEL_PREAMBLE.format(name="ntfy")
+        + "\n\n" + ntfy_sea.NtfyAgent.channel_system_prompt
+    )
+    assert "prompt" not in cmd
 
 
 def test_run_agent_tool_and_sorcar_wiring() -> None:

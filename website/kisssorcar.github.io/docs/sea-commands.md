@@ -10,9 +10,9 @@ Typing this in the chat box of the VS Code extension or the web app:
 /slack tell #eng that the deploy is done
 ```
 
-is the same as asking Sorcar, in plain language, to run the `slack/slack_sea.py` agent on the task "tell #eng that the deploy is done", except that the routing is fixed: the session must call its `run_agent` tool first, with the SEA's absolute path and your text, and cannot pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA.
+runs the `slack/slack_sea.py` agent directly, in the tab's own run, on the task "tell #eng that the deploy is done": the daemon makes that file the run's agent script and your text its prompt, so the SEA's `settings()`, system prompt and tools apply to the very session you are looking at. There is no relay turn in which a model is told to call `run_agent`, no nested sub-agent tab, and no chance for the model to pick a different agent or explore the code first. A slash command is therefore the predictable way to invoke a specific SEA; from inside a running task, `run_agent(agent="slack", task="...")` dispatches the same SEA as a sub-task.
 
-Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose top-level getters (`prompt()`, `model()`, `add_to_tools()`, `system_prompt()`, ...) configure the run. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
+Any file that is a valid SEA works: a bundled channel agent, or a file of your own whose `settings()` dict and `description()`, `system_prompt()`, `add_to_system_prompt()` and `add_to_tools()` functions configure the run. The SEA file format is described in [Client Interfaces: Sorcar Extension Agents](cli.md#sorcar-extension-agents-seas).
 
 ## Where commands come from
 
@@ -74,20 +74,16 @@ The daemon rescans `SEAS.md` and every listed folder every 2 seconds. Adding a l
         |                       |
         | yes                   | no  -> handled as an ordinary prompt
         v
-    - rewrites the prompt into a directive:
-        "Call run_agent IMMEDIATELY with
-           agent = /abs/path/to/deploy/deploy_sea.py
-           task  = ship v2.3"
+    - the tab's run becomes an agent-script run:
+        agent script = /abs/path/to/deploy/deploy_sea.py
+        prompt       = ship v2.3
         |
         v
-  Sorcar session calls run_agent(agent="/abs/path/to/deploy/deploy_sea.py",
-                                 task="ship v2.3")
+  daemon imports deploy_sea.py, applies its settings(), system prompt
+  and tools to this run, and the model works on "ship v2.3"
         |
         v
-  daemon imports deploy_sea.py, applies its getters, runs the sub-task
-        |
-        v
-  result is relayed back into your chat
+  the result is the task result in your tab
 ```
 
 Details worth knowing:
@@ -95,12 +91,16 @@ Details worth knowing:
 - **Autocomplete.** As soon as the first character in the box is `/`, a popup lists the matching commands (substring match, case-insensitive). Pick one with the mouse, or move with the arrow keys and press Tab or Enter; the client inserts `/name ` with a trailing space and closes the popup. Once you type a space after the command word, the popup hides and normal `@file` mentions and ghost-text suggestions resume.
 - **Only at position 0.** The command must be the first character of the prompt with no leading whitespace or blank line. `/deploy` on a later line of a multi-line prompt is ordinary text.
 - **Exact word match.** `/deployx ship` looks up a command named `deployx`; it does not match `/deploy`.
-- **Text is required.** `/deploy` alone, or a `/name` that is not registered, is not rewritten: it is sent to the model as a normal prompt and answered like any other question.
+- **Text is required.** `/deploy` alone, or a `/name` that is not registered, is not a command: it is sent to the model as a normal prompt and answered like any other question.
 - **`/deploy help` shows the description.** The one reserved sub-task is `help` (any letter case, nothing after it): the daemon does not run the SEA or call a model; it imports `deploy_sea.py`, calls its `description()` and posts the returned sentence as the task result. A SEA without a callable `description()` returning a non-empty string gets a diagnostic instead.
 - **`<task>` blocks stay intact.** A prompt such as `/deploy <task>build</task><task>publish</task>` reaches the SEA as one sub-task with the tags in place; the daemon does not split it into two Sorcar tasks.
-- **History keeps what you typed.** The task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`, not the rewritten directive.
-- **Where the sub-task runs.** A path-named SEA runs in the calling chat's working directory through the standard task lifecycle (worktree, auto-commit), unless the SEA's own `work_dir()`, `use_worktree()`, or `auto_commit()` getters say otherwise.
-- **How long it may run.** `run_agent` waits 300 seconds by default and stops the sub-task when the wait runs out. An SEA that works longer defines `dispatch_timeout()` returning the seconds it needs (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h, `/write` 1 h); the directive then adds `timeout = "<seconds>"`. A missing getter or a value that is not a positive number leaves the directive as before.
+- **History keeps what you typed.** The task panel, the task list, the chat history, and the frequent-task chips record `/deploy ship v2.3`; the model sees `ship v2.3` as its task.
+- **Where the run happens.** The SEA runs in the tab's working directory with the tab's settings (model, worktree, auto-commit, ...) unless its own `settings()` say otherwise: `/sh` declares `{"preset": "worker", "tool_profile": "bash"}`, so it runs with the Bash tool alone, directly on the checkout, without a worktree or auto-commit. For every run setting, the SEA's `settings()` win over what the tab or a caller passed.
+- **How long it may run.** A slash-command run is the tab's own task and runs as long as any chat task would. The `timeout` setting matters when another task dispatches the SEA through `run_agent`: the call waits that many seconds (`/write_paper` 6 h, `/review_paper` 2 h, `/revise_and_review_paper` 24 h, `/write` 1 h), else 3600 seconds, then stops the sub-task; an explicit `timeout` argument to `run_agent` overrides both.
+
+## Running a command's SEA from another task
+
+A running task reaches the same SEAs through its `run_agent` tool: `run_agent(agent="sh", task="git status --short")` runs the `/sh` SEA as a sub-task (own tab, own history row, result returned as YAML). `agent` is resolved in this order: empty or a generic label such as `"general"` or `"reviewer"` runs a plain Sorcar sub-agent; a path (a `.py` suffix or a path separator) runs that script; `"cron"` runs the scheduled-automations agent; an installed channel name (`"slack"`, `"telegram"`, ...) runs that channel agent; a registered command name (`"write_paper"`, `"sh"`, a `SEAS.md` folder; case, spaces, hyphens and underscores are ignored) runs that SEA. Anything else is an error that lists the available channels and commands. The other arguments are `timeout`, `model`, `max_budget`, `workspace` (multi-account channels) and `options`, a JSON object of further `sorcar.run()` keywords such as `{"tool_profile": "review", "use_web_tools": false}`. The sub-task's settings follow one rule: the SEA's `settings()` win, then `run_agent`'s arguments and options, then what the calling task inherits to its sub-task, then the user's persisted settings (the dispatch `timeout` is the exception noted above: an explicit argument wins over the SEA's). See [Client Interfaces: Dispatching SEAs from a task](cli.md#dispatching-seas-from-a-task-with-run_agent-and-run_parallel).
 
 ## Add your own command in three steps
 
@@ -122,7 +122,7 @@ Details worth knowing:
        )
    ```
 
-   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. For a SEA that carries its own tools, return a list of callables from `add_to_tools()` (added to the built-in toolset) or from `tools()` (those tools and `finish` only); the bundled channel agents are written the first way and are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
+   Helper modules, prompt files and data the SEA needs go into the same `standup/` folder. To change how the run is configured, add a `settings()` function returning a dict: a `preset` (`session`, `worker` or `channel`) plus any of the per-run settings listed in [Client Interfaces](cli.md#sorcar-extension-agents-seas) (`model`, `max_budget`, `tool_profile`, `timeout`, ...), for example `{"preset": "worker", "tool_profile": "bash"}` (what `/sh` declares) or `{"timeout": 3600}` (`/write`). For a SEA that carries its own tools, return a list of callables from `add_to_tools()`; they are added to the built-in toolset, or become the agent's only tools besides `finish` when `settings()` also sets `"tool_profile": "none"` (what `/ask` does). The bundled channel agents are a good template (see [`src/kiss/agents/third_party_agents/`](https://github.com/ksenxx/kiss_ai/tree/main/src/kiss/agents/third_party_agents), one folder per agent).
 
 2. Register the folder:
 
@@ -132,4 +132,4 @@ Details worth knowing:
 
 3. Within two seconds, type `/st` in the chat box: the popup offers `/standup`. Send `/standup help` to see the description you wrote, then `/standup finished the docs page, next is the release, blocked on review` and the note comes back in the chat.
 
-If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, getter raising, wrong return type) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.
+If the command does not appear, check that the script is `<folder>/<folder>_sea.py` (`standup/standup_sea.py`, not `standup_sea.py` at the top of `~/my-seas`), that the folder name uses only `A-Z a-z 0-9 _ -`, and that the folder line in `SEAS.md` resolves to the folder you expect (remember that relative paths are anchored at `~`, not at the project). A broken SEA (import error, `settings()` or another function raising, wrong return type, unknown settings key or preset) is still listed as a command; the failure surfaces as a diagnostic in the task result when you run it.

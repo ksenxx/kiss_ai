@@ -462,15 +462,26 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
 
     Yields:
         The freshly executed module, registered for the block's duration.
+
+    Raises:
+        SeaScriptError: When the file cannot be read, compiled or
+            executed (whatever it raises); the getter wrappers below
+            pass it through, so an import failure reads "failed to
+            import" and not "failed while evaluating X()".
     """
     name = f"_kiss_sea_{sea_path.stem}_{uuid.uuid4().hex}"
     module = ModuleType(name)
     module.__file__ = str(sea_path)
     sys.modules[name] = module
     try:
-        source = sea_path.read_text(encoding="utf-8")
-        code = compile(source, str(sea_path), "exec", dont_inherit=True)
-        exec(code, module.__dict__)  # noqa: S102 — the SEA script is the user's own code
+        try:
+            source = sea_path.read_text(encoding="utf-8")
+            code = compile(source, str(sea_path), "exec", dont_inherit=True)
+            exec(code, module.__dict__)  # noqa: S102 — the SEA script is the user's own code
+        except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+            raise SeaScriptError(
+                f"SEA '{sea_path}' failed to import: {type(exc).__name__}: {exc}"
+            ) from exc
         yield module
     finally:
         sys.modules.pop(name, None)
@@ -479,7 +490,7 @@ def _load_sea_module(sea_path: Path) -> Iterator[ModuleType]:
 class SeaScriptError(RuntimeError):
     """An SEA script failed to import or one of its getters raised.
 
-    Raised by :func:`sea_getter_is_false` with the original raise as
+    Raised by :func:`sea_settings` and :func:`sea_getter_value` with the original raise as
     ``__cause__`` — ``BaseException`` included, so an SEA raising
     ``KeyboardInterrupt``/``SystemExit`` at import time is reported as
     a broken script, not as a cancelled task, while a genuinely
@@ -510,6 +521,8 @@ def sea_getter_value(sea_path: Path, getter: str, *args: Any) -> Any:
         with _load_sea_module(sea_path) as module:
             fn = getattr(module, getter, None)
             return fn(*args) if callable(fn) else None
+    except SeaScriptError:
+        raise
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
             f"SEA {sea_path} failed while evaluating {getter}(): "
@@ -578,32 +591,39 @@ def run_picked_hook(model: str, work_dir: str, wait: bool = True) -> None:
         )
 
 
-def sea_getter_is_false(sea_path: Path, getter: str) -> bool:
-    """Return whether the SEA at *sea_path* defines ``getter()`` returning ``False``.
+def sea_settings(sea_path: Path) -> dict[str, Any]:
+    """Return the effective ``settings()`` of the SEA at *sea_path*.
 
-    Used by the task runner on the OUTER run of a ``/xxx`` command —
-    the relay that calls ``run_agent`` with its own work directory —
-    to honour an SEA's ``use_worktree()`` / ``auto_commit()`` verdicts
-    on that relay as well: an SEA that declares it works on the real
-    checkout (``/sh``, ``/merge``) must not be handed the relay's
-    worktree, and the relay must not auto-commit what such an SEA left
-    in the tree.
+    Executes the script and resolves its settings with
+    :func:`kiss.agents.sorcar.sea_settings.resolve_settings` (preset
+    defaults merged in, legacy per-field getters honoured).  The
+    dispatcher reads the ``preset`` and ``timeout`` from it; the task
+    runner reads ``use_worktree`` / ``auto_commit``.
 
     Args:
         sea_path: Absolute path of the SEA ``.py`` file.
-        getter: Name of the zero-argument getter, e.g. ``"use_worktree"``.
 
     Returns:
-        ``True`` only when the script defines a callable *getter* and
-        it returns exactly ``False``; a missing getter or any other
-        value yields ``False``.
+        The settings dict, at least ``{"preset": "session"}``.
 
     Raises:
-        SeaScriptError: When the script fails to import or *getter*
-            raises (whatever it raises), so the relay fails with the
-            diagnostic instead of running against a broken SEA.
+        SeaScriptError: When the script fails to import, a getter
+            raises (whatever it raises) or the settings are malformed,
+            so the caller fails with the diagnostic instead of running
+            against a broken SEA.
     """
-    return sea_getter_value(sea_path, getter) is False
+    from kiss.agents.sorcar.sea_settings import resolve_settings
+
+    try:
+        with _load_sea_module(sea_path) as module:
+            return resolve_settings(module.__dict__)
+    except SeaScriptError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
+        raise SeaScriptError(
+            f"SEA {sea_path} failed while evaluating settings(): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _registers_as_model(sea_path: Path) -> bool:
@@ -704,6 +724,8 @@ def sea_description(sea_path: Path) -> str:
             if not callable(fn):
                 raise TypeError("description must be a zero-argument function")
             text = fn()
+    except SeaScriptError:
+        raise
     except BaseException as exc:  # noqa: BLE001 — untrusted script code may raise anything
         raise SeaScriptError(
             f"SEA {sea_path} failed while evaluating description(): "
@@ -746,47 +768,21 @@ def help_text_if_command(prompt: str) -> str | None:
     return sea_description(sea_path)
 
 
-def _timeout_argument_line(sea_path: Path) -> str:
-    """Return the ``timeout`` argument line of a ``/xxx`` directive, or ``""``.
+def slash_command_task(prompt: str) -> tuple[str, Path] | None:
+    """Split a ``/xxx text`` prompt into the SEA to run and its task.
 
-    ``run_agent`` waits :data:`~kiss.agents.sorcar.agent_dispatch.DEFAULT_DISPATCH_TIMEOUT_SECONDS`
-    (300 s) for a sub-task and stops it afterwards, which kills any SEA
-    that works for longer (a paper writer, a multi-round loop).  An SEA
-    that needs more declares ``dispatch_timeout()`` returning the
-    seconds; the relay then passes ``timeout`` explicitly.  A missing
-    getter, a non-positive value or a broken script yield no line, so
-    the directive of every other SEA is unchanged (a broken script
-    fails at dispatch, as before).
-    """
-    try:
-        seconds = sea_getter_value(sea_path, "dispatch_timeout")
-    except SeaScriptError:
-        return ""
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
-        return ""
-    return f'  timeout = "{seconds:g}"\n'
-
-
-def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
-    """Rewrite a slash-command prompt into an explicit ``run_agent`` call.
-
-    When *prompt* starts with a registered ``/xxx`` command, returns
-    ``(rewritten_prompt, sea_path)`` where ``rewritten_prompt``
-    instructs the calling agent to invoke the ``run_agent`` tool
-    immediately with the SEA's absolute path and the user's trailing
-    text as the sub-task (plus ``timeout`` when the SEA defines
-    ``dispatch_timeout()``; see :func:`_timeout_argument_line`).
-    Returns ``None`` when the prompt does not
-    begin with a slash command, when the command is unknown, or when
-    the trailing text is empty (an empty ``run_agent`` task would be
-    rejected downstream).
+    The daemon runs the SEA directly on the trailing text — the same
+    run ``run_agent(agent="xxx", task=text)`` makes, with the SEA's
+    ``settings()`` and getters applied by ``apply_agent_overrides``.
 
     Args:
         prompt: The raw user prompt (as submitted by the client).
 
     Returns:
-        ``(rewritten_prompt, absolute_sea_path)`` on a hit, else
-        ``None``.
+        ``(task_text, sea_path)`` when *prompt* starts with a registered
+        command followed by non-empty text other than ``help`` (which
+        :func:`help_text_if_command` answers); else ``None`` — the
+        prompt runs as an ordinary task.
     """
     if not isinstance(prompt, str):
         return None
@@ -794,62 +790,12 @@ def rewrite_prompt_if_command(prompt: str) -> tuple[str, Path] | None:
     if parsed is None:
         return None
     command, task_text = parsed
-    if not task_text:
+    if not task_text or task_text.lower() == "help":
         return None
     sea_path = get_command(command)
     if sea_path is None:
         return None
-    abs_path = str(sea_path)
-    append_to_prompt = None
-    if command == "ask":
-        # ``/ask <question>`` is a fixed side-channel Q&A over the
-        # calling task's persisted events: ``append_to_prompt`` must
-        # reach ``run_agent`` unchanged.  ``<task_id>`` is left as a
-        # literal placeholder here — the calling task's id is not
-        # known until the daemon dispatch allocates one, so
-        # ``_dispatch`` substitutes it into ``append_to_prompt`` right
-        # before the daemon round trip.  Both texts are owned by
-        # ``ask_sea.py`` and read from the resolved SEA file itself;
-        # the system-prompt suffix is not repeated in the directive
-        # because the SEA's ``append_to_system_prompt()`` getter
-        # overrides the wire value daemon-side anyway.  The bundled
-        # ``seas/ask`` has the lowest registry precedence, so a
-        # ``SEAS.md`` folder may resolve ``/ask`` to a user SEA; one
-        # without ``APPEND_TO_PROMPT`` gets the ordinary rewrite below.
-        with _load_sea_module(sea_path) as module:
-            append_to_prompt = getattr(module, "APPEND_TO_PROMPT", None)
-    if append_to_prompt is not None:
-        rewritten = (
-            f"The user invoked the slash command /ask.  Call the "
-            f"run_agent tool IMMEDIATELY, as your very first action, "
-            f"with these arguments and no others:\n"
-            f'  agent = "{abs_path}"\n'
-            f"  task  = the text below, verbatim\n"
-            f'  append_to_prompt = "{append_to_prompt}"\n'
-            f"Do not modify these arguments, do not explore any source "
-            f"code, do not paraphrase the task, and do not call any "
-            f"other tool first.  When run_agent returns, relay its "
-            f"result to the user verbatim as your final answer.\n\n"
-            f"TASK TEXT FOR run_agent:\n{task_text}"
-        )
-        return rewritten, sea_path
-    # A directive, not a suggestion: the agent's routing rules already
-    # tell it to prefer ``run_agent`` for channel-style work, and this
-    # phrasing removes every reason to explore anything else first.
-    rewritten = (
-        f"The user invoked the slash command /{command}.  Call the "
-        f"run_agent tool IMMEDIATELY, as your very first action, with "
-        f"these arguments and no others:\n"
-        f'  agent = "{abs_path}"\n'
-        f"  task  = the text below, verbatim\n"
-        f"{_timeout_argument_line(sea_path)}"
-        f"Do not explore any source code, do not paraphrase the task, "
-        f"and do not call any other tool first.  When run_agent "
-        f"returns, relay its result to the user.\n\n"
-        f"TASK TEXT FOR run_agent:\n{task_text}"
-    )
-    return rewritten, sea_path
-
+    return task_text, sea_path
 
 def start_registry_watcher(
     poll_interval: float = _WATCHER_POLL_SECONDS,

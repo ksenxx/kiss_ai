@@ -273,7 +273,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
             "taskId": run_token,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(self.script),
         })
@@ -363,7 +363,7 @@ class TestPrestartShutdownAndStopHandshake(TestCase):
                 "tabId": tab_id,
                 "workDir": str(self.work_dir),
                 "useWorktree": False,
-                "useParallel": False,
+                "isParallel": False,
                 "autoCommit": False,
                 "agentPath": str(self.script),
             })

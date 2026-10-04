@@ -147,7 +147,7 @@ class TestStopBeforeThreadStart(TestCase):
             "tabId": tab_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(self.script),
         }

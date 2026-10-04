@@ -1399,10 +1399,10 @@ class _CommandsMixin:
         session's) is charged to the owner task with
         :func:`~kiss.server.task_update.charge_side_channel_usage`.
 
-        The ``<task_id>`` placeholder is substituted HERE so the
-        answering session receives the OWNER's task id even when it
-        would end up as the answering task's own parent id (which is
-        the same value; kept explicit for clarity).
+        The answering session is dispatched with the owner as its
+        ``parent_task_id``: the daemon applies the ask script's
+        ``settings()`` (its ``add_to_prompt`` names that id as the task
+        the question is about) and ``add_to_system_prompt()``.
 
         Args:
             tab_id: The frontend tab whose ``/ask`` produced this
@@ -1431,12 +1431,8 @@ class _CommandsMixin:
 
         # Always the bundled script: ``seas/`` has the lowest registry
         # precedence, so a ``SEAS.md`` folder may shadow the ``/ask``
-        # chat command, but the side channel reads ``APPEND_TO_PROMPT``
-        # and ``append_to_system_prompt()`` from this module and must
-        # dispatch the file those texts belong to.
+        # chat command, but the side channel is this answerer's.
         sea_path = Path(ask_sea.__file__)
-        append_to_prompt = ask_sea.APPEND_TO_PROMPT.replace("<task_id>", owner_task_id)
-        append_to_system_prompt = ask_sea.append_to_system_prompt()
         endpoint_file = _daemon_endpoint_file()
         epoch_getter = getattr(owner_agent, "_usage_epoch", None)
         epoch = epoch_getter() if callable(epoch_getter) else None
@@ -1447,8 +1443,6 @@ class _CommandsMixin:
                 result = daemon_client.run(
                     question,
                     extension_agent_path=str(sea_path),
-                    append_to_prompt=append_to_prompt,
-                    append_to_system_prompt=append_to_system_prompt,
                     parent_task_id=owner_task_id,
                     parent_tab_id=tab_id,
                     side_channel=True,

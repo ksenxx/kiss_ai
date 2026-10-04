@@ -38,12 +38,12 @@ Mirrors the Hermes agent's cron design in the simplest possible form:
   kiss-web daemon (they are submitted through its local endpoint).
 - A prompt job runs as its own Sorcar Extension Agent: every run
   writes a small SEA file into its scratch directory
-  (:func:`_write_prompt_sea` — the job's prompt, model and budget as
-  ``prompt()`` / ``model()`` / ``max_budget()`` getters, the job's
-  ``work_dir()`` / ``use_worktree()`` / ``auto_commit()`` — a job that
-  must work inside a specific project names that directory, otherwise
-  the run's scratch directory with worktree and auto-commit off — and
-  the pinned-off ``classify_tasks()``) and launches it with the
+  (:func:`_write_prompt_sea` — the job's prompt as ``prompt()``, and its
+  model, budget, ``work_dir`` / ``use_worktree`` / ``auto_commit`` — a
+  job that must work inside a specific project names that directory,
+  otherwise the run's scratch directory with worktree and auto-commit
+  off — and the pinned-off ``classify_tasks`` in ``settings()``) and
+  launches it with the
   same ``run_agent`` tool a chat task uses for any ``.py`` agent
   script (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`),
   so the whole run configuration lives in one place — the SEA — and
@@ -664,18 +664,15 @@ def _write_prompt_sea(job: dict[str, Any], scratch_dir: Path) -> Path:
     """Write the Sorcar Extension Agent that configures one run of *job*.
 
     The generated file follows the SEA contract of
-    ``src/kiss/server/README.md``: top-level getters the daemon calls
-    after importing the file (``apply_agent_overrides``), each
-    overriding the like-named ``run`` parameter.  ``description()``
-    names the job (every SEA must describe itself); ``prompt()`` returns
-    the Hermes-style preamble followed by the job's prompt; ``model()``
-    and ``max_budget()`` carry the job's LLM settings (``""`` / ``None``
-    mean "daemon default"); ``work_dir()`` is the job's ``work_dir``
-    when set (a prompt that must run inside a specific project) and
-    otherwise the run's private scratch directory; ``use_worktree()``
-    and ``auto_commit()`` carry the job's like-named flags (off unless
-    the job asked for them, since a scratch directory is not a git
-    repository); ``classify_tasks()`` is pinned off because an
+    ``src/kiss/server/README.md``: ``description()`` names the job
+    (every SEA must describe itself); ``prompt()`` returns the
+    Hermes-style preamble followed by the job's prompt; ``settings()``
+    carries the job's ``model`` and ``max_budget`` (``""`` / ``None``
+    mean "daemon default"), its ``work_dir`` when set (a prompt that
+    must run inside a specific project) and otherwise the run's private
+    scratch directory, its ``use_worktree`` and ``auto_commit`` flags
+    (off unless the job asked for them, since a scratch directory is
+    not a git repository), and ``classify_tasks`` pinned off because an
     unattended run must not stall on classification.  Values are
     embedded as Python literals via :func:`repr`, so any prompt text
     round-trips exactly.
@@ -719,28 +716,15 @@ def _write_prompt_sea(job: dict[str, Any], scratch_dir: Path) -> Path:
         "    return PREAMBLE + JOB_PROMPT\n"
         "\n"
         "\n"
-        "def work_dir() -> str:\n"
-        f"    return {str(work_dir)!r}\n"
-        "\n"
-        "\n"
-        "def model() -> str:\n"
-        f"    return {str(job.get('model_name') or '')!r}\n"
-        "\n"
-        "\n"
-        "def max_budget() -> float | None:\n"
-        f"    return {budget!r}\n"
-        "\n"
-        "\n"
-        "def use_worktree() -> bool:\n"
-        f"    return {bool(job.get('use_worktree'))!r}\n"
-        "\n"
-        "\n"
-        "def auto_commit() -> bool:\n"
-        f"    return {bool(job.get('auto_commit'))!r}\n"
-        "\n"
-        "\n"
-        "def classify_tasks() -> bool:\n"
-        "    return False\n"
+        "def settings() -> dict:\n"
+        "    return {\n"
+        f"        'work_dir': {str(work_dir)!r},\n"
+        f"        'model': {str(job.get('model_name') or '')!r},\n"
+        f"        'max_budget': {budget!r},\n"
+        f"        'use_worktree': {bool(job.get('use_worktree'))!r},\n"
+        f"        'auto_commit': {bool(job.get('auto_commit'))!r},\n"
+        "        'classify_tasks': False,\n"
+        "    }\n"
     )
     sea_path = scratch_dir / PROMPT_SEA_NAME
     sea_path.write_text(source, encoding="utf-8")
@@ -756,7 +740,7 @@ def _run_prompt_job(
     (:func:`_write_prompt_sea`) and launches it with the ``run_agent``
     tool (:func:`kiss.agents.sorcar.agent_dispatch.make_run_agent_tool`)
     exactly as a chat task launches any ``.py`` agent script — the
-    daemon imports the SEA and applies its getters to the run.  Mirrors
+    daemon imports the SEA and applies its settings to the run.  Mirrors
     Hermes: every run gets a brand-new session (no history), with a
     preamble marking the run as unattended and forbidding further
     scheduling; a ``[SILENT]`` (or empty) summary suppresses delivery.
@@ -794,6 +778,7 @@ def _run_prompt_job(
         make_run_agent_tool,
         stop_unconfirmed_error,
     )
+    from kiss.agents.sorcar.sea_settings import script_name
 
     sea_path = _write_prompt_sea(job, work_dir)
     timeout = _job_timeout(job, PROMPT_TIMEOUT_SECONDS)
@@ -806,7 +791,7 @@ def _run_prompt_job(
         task=f"Run cron job {job.get('id', '')} ({job.get('name', '')}).",
         timeout=str(timeout),
     )
-    if reply == stop_unconfirmed_error(sea_path.stem, timeout):
+    if reply == stop_unconfirmed_error(script_name(str(sea_path)), timeout):
         raise TimeoutError(reply)
     if reply.startswith("Error:"):
         return "error", reply
@@ -1795,11 +1780,11 @@ CRON_DISPATCH_PREAMBLE = (
     "itself is broken, report the failing command and its output in your "
     "result so it is fixed in a normal development task.\n\n"
 )
-"""Preamble prepended to every task dispatched to this agent script.
+"""Guidance appended to the system prompt of every cron-management session.
 
-Used by ``kiss.agents.sorcar.agent_dispatch`` when the ``run_agent``
-tool is called with ``"cron"`` as the agent, mirroring the channel
-agents' dispatch preamble.
+Returned by :func:`add_to_system_prompt`, which the daemon applies when
+``run_agent`` is called with ``"cron"`` as the agent (after the
+``channel`` preset's generic preamble).
 """
 
 
@@ -1815,14 +1800,13 @@ def add_to_tools() -> list:
     return [cron_job, gateway_command]
 
 
-def work_dir() -> str:
-    """Return the work directory for dispatched cron-management sessions.
+def cron_work_dir() -> str:
+    """Return the work directory of cron-management sessions and scheduled runs.
 
-    Agent-script getter (``kiss.server.sorcar.run``'s
-    ``extension_agent_path`` contract): a ``run_agent(agent="cron", ...)`` session manages the job
-    store under ``~/.kiss/cron`` and never touches the calling
-    project, so it runs in the cron state directory — the same
-    directory :func:`_run_prompt_job` uses for scheduled runs.
+    A ``run_agent(agent="cron", ...)`` session manages the job store
+    under ``~/.kiss/cron`` and never touches the calling project, so it
+    runs in the cron state directory — the same directory
+    :func:`_run_prompt_job` uses for scheduled runs.
 
     Returns:
         The cron work directory path (created when absent).
@@ -1832,28 +1816,20 @@ def work_dir() -> str:
     return str(work_dir)
 
 
-def use_worktree() -> bool:
-    """Return whether dispatched cron sessions use a git worktree.
+def settings() -> dict[str, Any]:
+    """Configure a cron-management session: a ``channel`` worker in the cron work directory.
 
-    Agent-script getter: managing the JSON job store needs no git
-    lifecycle.
-
-    Returns:
-        ``False``.
+    ``channel``: no git lifecycle (managing the JSON job store needs
+    none), nothing inherited from the calling task, the channel
+    preamble in the system prompt.  Classification is off: unattended
+    scheduled automations should not spend a classifier round trip.
     """
-    return False
+    return {"preset": "channel", "work_dir": cron_work_dir()}
 
 
-def auto_commit() -> bool:
-    """Return whether dispatched cron sessions auto-commit.
-
-    Agent-script getter: managing the JSON job store needs no git
-    lifecycle.
-
-    Returns:
-        ``False``.
-    """
-    return False
+def add_to_system_prompt() -> str:
+    """Return :data:`CRON_DISPATCH_PREAMBLE`, appended to the session's system prompt."""
+    return CRON_DISPATCH_PREAMBLE
 
 
 def main() -> None:

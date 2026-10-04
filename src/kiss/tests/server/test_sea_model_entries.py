@@ -37,6 +37,7 @@ from typing import Any
 from kiss.agents.seas.autorouter import autorouter_sea
 from kiss.agents.seas.autorouter.autorouter_sea import orchestrator_model
 from kiss.agents.seas.bestrouter import bestrouter_sea
+from kiss.agents.seas.sh import sh_sea
 from kiss.agents.sorcar import local_endpoint, sea_commands
 from kiss.agents.sorcar.cron_agent import load_jobs, save_jobs
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -91,7 +92,9 @@ def test_bundled_routers_are_the_model_picker_seas() -> None:
 def test_bestrouter_protocol_names_its_models_literally() -> None:
     """The protocol fixes the primary and the review model by name and the 75% cap."""
     assert bestrouter_sea.register_as_model() is True
-    assert bestrouter_sea.model() == bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1"
+    assert bestrouter_sea.settings() == {"model": bestrouter_sea.PRIMARY_MODEL}
+    assert bestrouter_sea.PRIMARY_MODEL == "claude-fable-5-1"
+    assert not hasattr(bestrouter_sea, "model"), "settings() replaced the model() getter"
     protocol = bestrouter_sea.add_to_system_prompt()
     assert protocol == bestrouter_sea.SYSTEM_PROMPT
     assert protocol.startswith(BESTROUTER_MARKER)
@@ -145,6 +148,7 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
                 "model_name": kwargs.get("model_name"),
                 "system_prompt": str(kwargs.get("system_prompt") or ""),
                 "prompt": str(arguments["task_description"]),
+                "tool_names": sorted(t.__name__ for t in (kwargs.get("tools") or [])),
             })
             raw = "success: true\nis_continue: false\nsummary: agent ok\n"
             printer = kwargs.get("printer")
@@ -379,11 +383,19 @@ class SeaModelEntriesTest(DaemonRunApiHarness):
         assert SorcarAgent._resolve_model_name(None) == real
 
     def test_slash_command_keeps_its_own_agent(self) -> None:
-        """``/sh ...`` names its agent; the pick only supplies the model."""
+        """``/sh ...`` runs the sh SEA directly as the tab's agent; the pick only picks the model.
+
+        The run's ``agentPath`` is the ``/sh`` SEA (its base system prompt
+        and ``bash`` tool profile shape the run), the LLM's task is the
+        trailing ``echo hi`` (no ``run_agent`` relay), and the bestrouter
+        pick contributes just the model name, not its protocol.
+        """
         run = self._run("/sh echo hi", model=BESTROUTER)
         assert run["model_name"] == "claude-fable-5-1"
         assert BESTROUTER_MARKER not in run["system_prompt"]
-        assert "run_agent" in run["prompt"], run["prompt"]
+        assert run["prompt"] == "# Task\necho hi", run["prompt"]
+        assert run["system_prompt"].startswith(sh_sea.SYSTEM_PROMPT), run["system_prompt"]
+        assert run["tool_names"] == ["Bash", "finish"], run["tool_names"]
 
     def test_other_models_are_left_untouched(self) -> None:
         """A real model name is neither rewritten nor given an agent script."""

@@ -27,6 +27,8 @@ final answer.
 
 from __future__ import annotations
 
+from typing import Any
+
 SYSTEM_PROMPT = """\
 ## Writing protocol (write)
 
@@ -146,12 +148,13 @@ def add_to_system_prompt() -> str:
     return SYSTEM_PROMPT
 
 
-def dispatch_timeout() -> float:
-    """Seconds the ``/write`` relay waits for the agent before stopping it.
+def settings() -> dict[str, Any]:
+    """Let a ``/write`` run take up to :data:`DISPATCH_TIMEOUT_SECONDS`.
 
-    Rewriting a long document means reading every source in full, writing,
-    editing, and running the tests that check the file; a 100 KB README took
-    over the default 300 s ``run_agent`` wait, which stopped the agent after
-    the edits were made but before it could return them.
+    Rewriting a long document means reading every source in full,
+    writing, editing, and running the tests that check the file; the
+    ``timeout`` tells the dispatcher how long to wait before stopping it.
     """
-    return DISPATCH_TIMEOUT_SECONDS
+    return {"timeout": DISPATCH_TIMEOUT_SECONDS}
+
+

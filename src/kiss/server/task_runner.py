@@ -43,17 +43,17 @@ from kiss.agents.sorcar.sea_commands import (
     SeaScriptError,
     model_sea,
     run_picked_hook,
-    sea_getter_value,
 )
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as _sea_help_text,
 )
 from kiss.agents.sorcar.sea_commands import (
-    rewrite_prompt_if_command as _rewrite_sea_command_prompt,
+    sea_settings as _sea_settings,
 )
 from kiss.agents.sorcar.sea_commands import (
-    sea_getter_is_false as _sea_getter_is_false,
+    slash_command_task as _slash_command_task,
 )
+from kiss.agents.sorcar.sea_settings import default_work_dir
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, resolve_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.agents.sorcar.worktree_sorcar_agent import (
@@ -65,7 +65,7 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models, get_default_model
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
-from kiss.server.agent_file import AgentFileError, apply_agent_overrides
+from kiss.server.agent_file import NO_TOOLS_PROFILE, AgentFileError, apply_agent_overrides
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
@@ -778,22 +778,22 @@ class _TaskRunnerMixin:
         same lookup ``_run_task_inner`` makes) — is such an entry, the
         command is rewritten in place:
 
-        * ``model`` becomes the model the SEA's ``model()`` getter names,
-          else the default model, so the run, its history row and its
-          sub-agents all name a real model;
+        * ``model`` becomes the model the SEA's ``model`` setting
+          names, else the default model, so the run, its history row
+          and its sub-agents all name a real model;
         * ``agentPath`` becomes the SEA file when the caller supplied
-          none, unless the prompt is a ``/xxx`` slash command.  A
-          supplied ``agentPath`` (a ``run_agent`` child, the ``/ask``
-          side channel) or a slash command names its own agent, and the
-          picked entry then only supplies the model it runs on; a
-          malformed supplied value is left for ``apply_agent_overrides``
-          to reject as it always did.
+          none.  A supplied ``agentPath`` (a ``run_agent`` child, the
+          ``/ask`` side channel, a ``/xxx`` slash command rewritten by
+          ``_run_task``) names its own agent, and the picked entry then
+          only supplies the model it runs on; a malformed supplied
+          value is left for ``apply_agent_overrides`` to reject as it
+          always did.
 
         Every other run is left untouched.  Called twice per run: before
         ``apply_agent_overrides`` (which must see the SEA as this run's
         ``agentPath`` and adds the SEA's ``add_to_system_prompt()`` protocol
         to the system prompt) and again in ``_run_task_inner`` before the
-        model is read, because an agent script's ``model()`` getter may
+        model is read, because an agent script's ``model`` setting may
         override ``model`` with ``""`` — "the tab's pick" — which would
         otherwise resolve back to the entry itself.
 
@@ -805,20 +805,16 @@ class _TaskRunnerMixin:
             or ``None`` when the run's model is a real model.
 
         Raises:
-            AgentFileError: When the SEA's ``model()`` getter raises.
+            AgentFileError: When the SEA's settings cannot be evaluated.
         """
         model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
         sea_path = model_sea(model) if isinstance(model, str) and model else None
         if sea_path is None:
             return None
-        prompt = cmd.get("prompt", "")
-        is_slash_command = (
-            isinstance(prompt, str) and _rewrite_sea_command_prompt(prompt) is not None
-        )
-        if cmd.get("agentPath") in (None, "") and not is_slash_command:
+        if cmd.get("agentPath") in (None, ""):
             cmd["agentPath"] = str(sea_path)
         try:
-            picked = sea_getter_value(sea_path, "model")
+            picked = _sea_settings(sea_path).get("model")
         except SeaScriptError as exc:
             raise AgentFileError(str(exc)) from exc
         cmd["model"] = picked if isinstance(picked, str) and picked else get_default_model()
@@ -841,6 +837,12 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         start_ms = int(time.time() * 1000)
         cmd["_start_ms"] = start_ms
+        # The wire vocabulary is the ``run()`` keyword vocabulary in
+        # camelCase; a client built before the rename still sends the
+        # old spellings for one release.
+        for legacy, field in (("webTools", "useWebTools"), ("useParallel", "isParallel")):
+            if legacy in cmd and field not in cmd:
+                cmd[field] = cmd[legacy]
         state: AgentState | None = None
         client_task_id = ""
         try:
@@ -865,20 +867,47 @@ class _TaskRunnerMixin:
             agent_file_error: AgentFileError | None = None
             overridden_fields: set[str] = set()
             try:
+                # A ``/xxx text`` slash command runs the SEA ``xxx``
+                # directly on ``text`` — the same run ``run_agent``
+                # would make — so the SEA becomes this run's
+                # ``agentPath`` and the text its prompt.  The raw
+                # prompt is kept on ``displayPrompt``: the tab's task
+                # panel, ``state.last_user_prompt`` and every
+                # persistence path keep showing what the user typed.
+                _slash = _slash_command_task(cmd.get("prompt", ""))
+                # Fields the slash rewrite changed; merged into the
+                # script's overrides so the tab's registry entry is
+                # re-pinned below exactly as for a ``work_dir`` setting.
+                _slash_fields: set[str] = set()
+                if _slash is not None:
+                    cmd["displayPrompt"] = cmd["prompt"]
+                    cmd["prompt"], cmd["agentPath"] = _slash[0], str(_slash[1])
+                    # The same work-directory rule as ``run_agent``: a
+                    # ``channel``-preset SEA (``/slack ...``) works in
+                    # the channel scratch directory, not the project.
+                    try:
+                        _slash_settings = _sea_settings(_slash[1])
+                    except SeaScriptError as exc:
+                        raise AgentFileError(str(exc)) from exc
+                    _client_work_dir = str(cmd.get("workDir") or self.work_dir)
+                    _slash_work_dir = default_work_dir(_slash_settings, _client_work_dir)
+                    if _slash_work_dir != _client_work_dir:
+                        cmd["workDir"] = _slash_work_dir
+                        _slash_fields.add("workDir")
+                else:
+                    cmd.pop("displayPrompt", None)
                 # A model-picker SEA (``autorouter``, ``bestrouter``) names
                 # an agent script, not a model: resolve it before the
                 # overrides run so they see the SEA as this run's
                 # ``agentPath``.
                 picked_sea = self._resolve_sea_model(cmd)
-                overridden_fields = apply_agent_overrides(cmd)
-                # ``tools`` / ``appendBasicTools`` are daemon-side
-                # fields the loader stages together from the script's
-                # ``tools()`` / ``add_to_tools()``; they never travel
-                # the wire, so whatever a client sent in them is
+                overridden_fields = apply_agent_overrides(cmd) | _slash_fields
+                # ``tools`` is a daemon-side field the loader stages
+                # from the script's ``add_to_tools()``; it never
+                # travels the wire, so whatever a client sent in it is
                 # dropped here rather than read as tool input.
                 if "tools" not in overridden_fields:
                     cmd.pop("tools", None)
-                    cmd.pop("appendBasicTools", None)
                 # Once per run whose model is a picker SEA, with the
                 # effective work dir (a ``work_dir()`` override included):
                 # the hook's side effects (autorouter's weekly cron job)
@@ -1499,20 +1528,12 @@ class _TaskRunnerMixin:
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
-        # Detect a slash-command dispatch (``/xxx text``) HERE, but do
-        # not rewrite the outer ``prompt`` yet — the tab's task-panel
-        # text, the task classifier, ``state.last_user_prompt`` and
-        # every persistence path all read the raw prompt, and they
-        # must keep showing what the user actually typed.  The
-        # rewritten ``run_agent`` directive is substituted lower down
-        # (after ``parse_task_tags``) as a SINGLE atomic subtask so a
-        # slash command whose task text embeds ``<task>`` blocks is
-        # not split into multiple subagents.
-        _sea_dispatch: tuple[str, Path] | None = None
-        if isinstance(prompt, str) and prompt:
-            _hit = _rewrite_sea_command_prompt(prompt)
-            if _hit is not None:
-                _sea_dispatch = _hit
+        # A ``/xxx text`` slash command (rewritten by ``_run_task``)
+        # executes ``text`` against the SEA, but the tab's task-panel
+        # text, ``state.last_user_prompt`` and every persistence path
+        # show the raw ``/xxx text`` the user typed.
+        _raw_display = cmd.get("displayPrompt")
+        display_prompt = _raw_display if isinstance(_raw_display, str) else prompt
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         # Caller-supplied custom base system prompt (wire field
@@ -1540,7 +1561,7 @@ class _TaskRunnerMixin:
 
         tab_id = cmd.get("tabId", "")
         state = self._resolve_run_state(cmd)
-        # Second pass: an agent script's ``model()`` getter may have
+        # Second pass: an agent script's ``model`` setting may have
         # blanked ``model`` back to "the tab's pick" (see the method).
         self._resolve_sea_model(cmd)
         model = cmd.get("model") or self._tab_model(tab_id)
@@ -1626,16 +1647,16 @@ class _TaskRunnerMixin:
         # diagnostic when the script is broken or lacks the getter.
         # Returning here is safe — ``_run_task``'s ``finally`` still
         # broadcasts ``status running:False``.
-        if isinstance(prompt, str) and prompt:
+        if isinstance(display_prompt, str) and display_prompt:
             try:
-                help_text = _sea_help_text(prompt)
+                help_text = _sea_help_text(display_prompt)
                 help_ok = True
             except SeaScriptError as exc:
                 help_text, help_ok = str(exc), False
             if help_text is not None:
                 self._finish_sea_help_task(
                     state,
-                    prompt=prompt,
+                    prompt=display_prompt,
                     text=help_text,
                     success=help_ok,
                     tab_id=tab_id,
@@ -1673,32 +1694,15 @@ class _TaskRunnerMixin:
                 )
                 return
             state.use_worktree = bool(cmd.get("useWorktree", True))
-            state.use_parallel = bool(cmd.get("useParallel", True))
+            state.use_parallel = bool(cmd.get("isParallel", True))
             state.auto_commit_mode = bool(cmd.get("autoCommit", True))
             state.is_task_active = True
             stop_event = state.stop_event
             use_worktree = state.use_worktree
         self.printer._thread_local.stop_event = stop_event
-        if _sea_dispatch is not None:
-            # The outer run of a ``/xxx`` command is only a relay that
-            # calls ``run_agent`` with ITS OWN work directory.  An SEA
-            # declaring ``use_worktree() -> False`` (``/sh``, ``/merge``
-            # act on the real checkout) must not be handed the relay's
-            # worktree instead, and the relay must not auto-commit what
-            # an SEA declaring ``auto_commit() -> False`` left in the
-            # tree — so both verdicts demote the relay as well.
-            if use_worktree and _sea_getter_is_false(_sea_dispatch[1], "use_worktree"):
-                use_worktree = False
-                with self._state_lock:
-                    state.use_worktree = False
-            if state.auto_commit_mode and _sea_getter_is_false(
-                _sea_dispatch[1], "auto_commit"
-            ):
-                with self._state_lock:
-                    state.auto_commit_mode = False
 
         self._broadcast_early_prompts(
-            prompt, active_file, tab_id, system_prompt_override,
+            display_prompt, active_file, tab_id, system_prompt_override,
             append_to_system_prompt, append_to_prompt,
         )
 
@@ -1726,7 +1730,7 @@ class _TaskRunnerMixin:
         # field (``classify_tasks`` on ``kiss.server.sorcar.run``).
         # Absent or malformed means "no override" — the persisted
         # "Classify tasks before running" setting decides, exactly
-        # like ``webTools`` falls back to "Use web tools".
+        # like ``useWebTools`` falls back to "Use web tools".
         _raw_classify = cmd.get("classifyTasks")
         _classify_enabled = (
             _raw_classify if isinstance(_raw_classify, bool) else None
@@ -1924,24 +1928,13 @@ class _TaskRunnerMixin:
         run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
-            if _sea_dispatch is not None:
-                # A ``/xxx text`` command runs as ONE atomic subtask
-                # against the resolved SEA — any ``<task>`` blocks in
-                # the trailing text are meaningful to the SEA, not to
-                # the kiss task splitter.  Overwriting ``subtasks``
-                # here (rather than at parse time) keeps the raw
-                # user-visible ``prompt`` intact for classification,
-                # persistence and the tab's task-panel echo.
-                subtasks = [_sea_dispatch[0]]
-            elif _agent_script_run and isinstance(prompt, str):
-                # The run the ``run_agent`` directive then starts
-                # against the SEA itself (``agentPath``) gets the
-                # user's trailing text as its whole task — the same
-                # text, so the same rule: ``<task>`` blocks in it are
-                # the SEA's to interpret, and splitting them here would
-                # hand the SEA one fragment (``hello`` out of ``ask
-                # /repo what does <task>hello</task> mean?``) and lose
-                # the rest.
+            if _agent_script_run and isinstance(prompt, str):
+                # An agent-script run (a ``/xxx text`` command, a
+                # ``run_agent`` child) gets its text as ONE atomic
+                # task: ``<task>`` blocks in it are the SEA's to
+                # interpret, and splitting them here would hand the
+                # SEA one fragment (``hello`` out of ``ask /repo what
+                # does <task>hello</task> mean?``) and lose the rest.
                 subtasks = [prompt]
             if append_to_prompt:
                 # The suffix is part of the EXECUTED prompt: appending
@@ -1971,7 +1964,7 @@ class _TaskRunnerMixin:
             if _my_model_config is not None:
                 _model_config = _my_model_config
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
-            _raw_web = cmd.get("webTools")
+            _raw_web = cmd.get("useWebTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
             # Per-run persistent-memory toggle: the ``useMemory`` wire
             # field (``use_memory`` on ``kiss.server.sorcar.run``).
@@ -1979,7 +1972,7 @@ class _TaskRunnerMixin:
             # agent then resolves the KISS_USE_MEMORY environment
             # variable / persisted ``use_memory`` setting itself
             # (``sorcar_agent._memory_settings``), so unlike
-            # ``webTools`` no config fallback is read here.
+            # ``useWebTools`` no config fallback is read here.
             _raw_memory = cmd.get("useMemory")
             _agent_memory = _raw_memory if isinstance(_raw_memory, bool) else None
             # Tool profile (``run(tool_profile=...)`` / an agent
@@ -1989,7 +1982,7 @@ class _TaskRunnerMixin:
             # persisted, so the generic handling below fails the task
             # with the diagnostic instead of leaving a half-set-up run.
             _raw_profile = cmd.get("toolProfile")
-            _tool_profile = _raw_profile if isinstance(_raw_profile, str) else ""
+            _tool_profile = _raw_profile.strip() if isinstance(_raw_profile, str) else ""
             resolve_tool_profile(_tool_profile)
             # Docker image (or ``container:<id>``) the run's shell and
             # file tools execute in; absent or malformed means the host.
@@ -2026,28 +2019,23 @@ class _TaskRunnerMixin:
                 is_subagent=bool(parent_task_id),
             )
 
-            # The agent script's ``tools()`` / ``add_to_tools()`` list,
-            # staged onto the command dict's ``tools`` field by
-            # ``apply_agent_overrides`` (which already type-checked it)
-            # together with the ``appendBasicTools`` flag the getter
-            # implies (``tools()`` -> False, ``add_to_tools()`` -> True).
-            # ``_run_task`` dropped any client-sent value of either
-            # field, so absent means "no extra tools, the built-in
-            # toolset as usual".
+            # The agent script's ``add_to_tools()`` list, staged onto
+            # the command dict's ``tools`` field by
+            # ``apply_agent_overrides`` (which already type-checked it).
+            # ``_run_task`` dropped any client-sent value of the field,
+            # so absent means "no extra tools".  The ``none`` tool
+            # profile strips the run to ``finish`` plus that list.
             _raw_tools = cmd.get("tools")
             client_tools: list[Callable[..., Any]] = (
                 list(_raw_tools) if isinstance(_raw_tools, list) else []
             )
-            _raw_append = cmd.get("appendBasicTools")
-            _append_basic_tools = (
-                _raw_append if isinstance(_raw_append, bool) else True
-            )
-            # A path-mode ``run_agent`` sub-task (wire field
-            # ``inheritTools``) also gets the extra tools of the
-            # calling task — the ``add_to_tools()`` tools of ITS agent
-            # script, plus those it inherited itself — so the tools
-            # the inherited system prompt refers to exist.  Not when
-            # this run's script's ``tools()`` fixed the whole set.
+            _append_basic_tools = _tool_profile != NO_TOOLS_PROFILE
+            # A ``run_agent`` sub-task (wire field ``inheritTools``)
+            # also gets the extra tools of the calling task — the
+            # ``add_to_tools()`` tools of ITS agent script, plus those
+            # it inherited itself — so the tools the inherited system
+            # prompt refers to exist.  Not when this run's script
+            # fixed the whole set with the ``none`` profile.
             _inherited_tools: list[Callable[..., Any]] = []
             if _append_basic_tools and cmd.get("inheritTools") is True:
                 _inherited_tools = _parent_extra_tools(parent_task_id)
@@ -2062,19 +2050,12 @@ class _TaskRunnerMixin:
             subtask_index = 0
             while subtask_index < len(subtasks):
                 task_prompt = subtasks[subtask_index]
-                # A slash-command dispatch is a single atomic subtask
-                # (see the ``_sea_dispatch`` branch above): keep the
-                # tab's ``last_user_prompt`` on the raw ``/xxx text``
-                # the user typed, not on the (long) ``run_agent``
-                # directive the LLM will actually see, so the tab
+                # A slash command keeps the tab's ``last_user_prompt``
+                # on the raw ``/xxx text`` the user typed, so the tab
                 # title / history rebind / merge flow all still show
                 # what was submitted.
-                if _sea_dispatch is not None and subtask_index == 0:
-                    state.last_user_prompt = prompt if isinstance(
-                        prompt, str,
-                    ) else task_prompt
-                else:
-                    state.last_user_prompt = task_prompt
+                _is_slash_run = display_prompt is not prompt and subtask_index == 0
+                state.last_user_prompt = display_prompt if _is_slash_run else task_prompt
                 state.last_result_summary = ""
                 # Reset per subtask: a later subtask that fails must not
                 # publish an earlier subtask's suggestion.
@@ -2142,19 +2123,12 @@ class _TaskRunnerMixin:
                         docker_image=_docker_image or None,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
-                        # Persist the raw ``/xxx text`` (not the
-                        # internal ``run_agent`` directive) in the
-                        # task-history row, frequent-tasks table and
-                        # the chat's last-user-prompt cache.  Only the
-                        # slash-command dispatch sets ``_sea_dispatch``,
-                        # so every other run persists as before.
-                        _history_prompt=(
-                            prompt
-                            if _sea_dispatch is not None
-                            and subtask_index == 0
-                            and isinstance(prompt, str)
-                            else None
-                        ),
+                        # Persist the raw ``/xxx text`` (not the SEA's
+                        # task text) in the task-history row,
+                        # frequent-tasks table and the chat's
+                        # last-user-prompt cache; every other run
+                        # persists as before.
+                        _history_prompt=display_prompt if _is_slash_run else None,
                     )
                     _run_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                     if _run_parsed and _run_parsed.get("summary"):
@@ -2282,22 +2256,12 @@ class _TaskRunnerMixin:
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
-                        # A slash-command dispatch stored the raw
-                        # ``/xxx text`` in the DB (see the
-                        # ``_history_prompt`` branch of
-                        # ``ChatSorcarAgent.run``); the fallback
+                        # A slash command stored the raw ``/xxx text``
+                        # in the DB (see the ``_history_prompt`` branch
+                        # of ``ChatSorcarAgent.run``); the fallback
                         # id-resolver for legacy callers must resolve
-                        # by that same string, not by the internal
-                        # ``run_agent`` directive.
-                        task_prompt=(
-                            prompt
-                            if (
-                                _sea_dispatch is not None
-                                and subtask_index == 0
-                                and isinstance(prompt, str)
-                            )
-                            else task_prompt
-                        ),
+                        # by that same string, not by the SEA's task text.
+                        task_prompt=display_prompt if _is_slash_run else task_prompt,
                         result_summary=result_summary,
                         model=model,
                         work_dir=work_dir,
@@ -2455,7 +2419,7 @@ class _TaskRunnerMixin:
                 self._persist_subtask_row(
                     state,
                     task_id=task_history_id,
-                    task_prompt=prompt,
+                    task_prompt=display_prompt,
                     result_summary=result_summary,
                     model=model,
                     work_dir=work_dir,

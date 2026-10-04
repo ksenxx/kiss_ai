@@ -4,12 +4,12 @@
 # add your name here
 """End-to-end tests of the bundled ``/write`` agent (:mod:`kiss.agents.seas.write.write_sea`).
 
-The SEA defines ``description()``, ``add_to_system_prompt()`` and
-``dispatch_timeout()`` only, so the tests check the things that matter: the
-slash command resolves to this file and carries the one-hour ``timeout`` (the
-default 300 s ``run_agent`` wait stopped a README rewrite before it was
-returned), the ``run_agent`` loader stages its protocol as an addition to the
-system prompt, and a real :class:`ChatSorcarAgent` run
+The SEA defines ``description()``, ``add_to_system_prompt()`` and a
+``settings()`` with ``timeout`` only, so the tests check the things that
+matter: the slash command resolves to this file, a ``run_agent`` dispatch of
+it waits one hour by default (a shorter default wait once stopped a README
+rewrite before it was returned), the daemon-side loader stages its protocol
+as an addition to the system prompt, and a real :class:`ChatSorcarAgent` run
 configured that way (against the scripted local chat-completions server)
 sends the default system prompt with the protocol added, never replaced.
 """
@@ -23,6 +23,7 @@ import yaml
 
 from kiss.agents.seas.write import write_sea
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.agent_dispatch import resolve_timeout
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.sorcar.local_model_server import MODEL, finish_body, serve
@@ -62,16 +63,26 @@ def test_description_is_one_sentence_naming_the_command() -> None:
 
 
 def test_slash_write_resolves_to_the_bundled_sea() -> None:
-    """``/write <task>`` is rewritten into a ``run_agent`` directive on this file."""
+    """``/write <task>`` resolves to the task text and this file, whose ``timeout`` is an hour.
+
+    The slash command runs the SEA directly (no ``run_agent`` relay), so
+    the timeout matters on the ``run_agent`` path only: an empty
+    ``timeout`` argument resolves to ``settings()["timeout"]`` and an
+    explicit argument wins over it.
+    """
     assert sea_commands.get_command("write") == _SEA_PATH
-    rewritten = sea_commands.rewrite_prompt_if_command("/write a release note from CHANGELOG.md")
-    assert rewritten is not None
-    prompt, path = rewritten
+    hit = sea_commands.slash_command_task("/write a release note from CHANGELOG.md")
+    assert hit is not None
+    task_text, path = hit
     assert path == _SEA_PATH
-    directive = f'agent = "{_SEA_PATH}"\n  task  = the text below, verbatim\n  timeout = "3600"\n'
-    assert directive in prompt
-    assert prompt.endswith("TASK TEXT FOR run_agent:\na release note from CHANGELOG.md")
-    assert write_sea.dispatch_timeout() == write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
+    assert task_text == "a release note from CHANGELOG.md"
+    assert write_sea.settings() == {"timeout": write_sea.DISPATCH_TIMEOUT_SECONDS}
+    assert write_sea.DISPATCH_TIMEOUT_SECONDS == 3600
+    settings = sea_commands.sea_settings(path)
+    assert settings == {"preset": "session", "timeout": 3600.0}
+    assert resolve_timeout("", settings) == 3600.0
+    assert resolve_timeout("120", settings) == 120.0
+    assert not hasattr(write_sea, "dispatch_timeout")
 
 
 def test_loader_adds_the_protocol_after_the_callers_suffix() -> None:

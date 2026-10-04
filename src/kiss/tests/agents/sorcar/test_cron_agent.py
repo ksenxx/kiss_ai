@@ -557,11 +557,21 @@ def test_prompt_job_runs_as_generated_sea(
 def test_prompt_sea_defaults_and_silent_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unset model/budget become daemon defaults; [SILENT] is silent."""
+    """An unset model/budget leave the daemon defaults in force; [SILENT] is silent.
+
+    The generated SEA's ``settings()`` carries ``model: ""`` (the
+    daemon's default model) and ``max_budget: None``; a ``None``
+    setting means "no override" and is dropped, so the wire value —
+    ``None`` from the dispatcher of a top-level cron run, i.e. the
+    daemon default — stands.
+    """
     from kiss.agents.sorcar import daemon_client
     from kiss.server.agent_file import apply_agent_overrides
 
+    captured: list[dict[str, object]] = []
+
     def silent_run(prompt: str, **kwargs: object) -> daemon_client.TaskResult:
+        captured.append(kwargs)
         return daemon_client.TaskResult(
             text="[SILENT]", success=True, cost=0.0, tokens=0, steps=0,
         )
@@ -571,13 +581,16 @@ def test_prompt_sea_defaults_and_silent_result(
     work_dir.mkdir()
     job = {"id": "abcd1234", "prompt": "say hi", "max_budget": 0}
     assert cron_agent._run_prompt_job(job, work_dir) == ("silent", None)
+    assert captured[0]["max_budget"] is None
     cmd: dict[str, object] = {
         "agentPath": str(work_dir / cron_agent.PROMPT_SEA_NAME),
         "prompt": "x", "model": "wire-model", "maxBudget": 3.0,
     }
-    apply_agent_overrides(cmd)
+    overridden = apply_agent_overrides(cmd)
+    assert "model" in overridden
+    assert "maxBudget" not in overridden
     assert cmd["model"] == ""
-    assert cmd["maxBudget"] is None
+    assert cmd["maxBudget"] == 3.0
 
 
 def test_prompt_sea_source_survives_adversarial_text(tmp_path: Path) -> None:
@@ -676,15 +689,48 @@ def test_cli_nothing_to_do(
 
 
 def test_agent_script_getters(tmp_path: Path) -> None:
-    # The agent-script contract used by run_agent(agent="cron", ...): the
-    # dispatched session runs in ~/.kiss/cron/work with no git
-    # lifecycle.
-    work_dir = cron_agent.work_dir()
+    """The SEA contract used by ``run_agent(agent="cron", ...)``.
+
+    ``settings()`` picks the ``channel`` preset in ``~/.kiss/cron/work``,
+    so the resolved settings (what the dispatcher and the daemon read)
+    turn the git lifecycle, classification and inheritance off; the
+    cron guidance reaches the session through ``add_to_system_prompt()``
+    (the daemon appends it to the system prompt suffix), not the task.
+    """
+    from kiss.agents.sorcar.sea_commands import sea_settings
+    from kiss.agents.sorcar.sea_settings import PRESETS
+    from kiss.server.agent_file import CHANNEL_PREAMBLE, apply_agent_overrides
+
+    work_dir = cron_agent.cron_work_dir()
     assert work_dir == str(tmp_path / "cron" / "work")
     assert Path(work_dir).is_dir()
-    assert cron_agent.use_worktree() is False
-    assert cron_agent.auto_commit() is False
+    assert cron_agent.settings() == {"preset": "channel", "work_dir": work_dir}
+    resolved = sea_settings(Path(cron_agent.__file__))
+    assert resolved == {"preset": "channel", **PRESETS["channel"], "work_dir": work_dir}
+    assert resolved["use_worktree"] is False
+    assert resolved["auto_commit"] is False
+    assert resolved["classify_tasks"] is False
+    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
     assert "cron_job" in cron_agent.CRON_DISPATCH_PREAMBLE
+    assert [tool.__name__ for tool in cron_agent.add_to_tools()] == [
+        "cron_job", "gateway_command",
+    ]
+    # Applied by the daemon: the channel preamble (named after the script)
+    # then the cron guidance land on the system prompt suffix, after the
+    # caller's own text; the task prompt is untouched.
+    cmd: dict[str, object] = {
+        "agentPath": cron_agent.__file__, "prompt": "schedule it",
+        "appendToSystemPrompt": "CALLER",
+    }
+    apply_agent_overrides(cmd)
+    assert cmd["prompt"] == "schedule it"
+    assert cmd["workDir"] == work_dir
+    assert cmd["useWorktree"] is False
+    assert cmd["autoCommit"] is False
+    assert cmd["appendToSystemPrompt"] == (
+        "CALLER\n\n" + CHANNEL_PREAMBLE.format(name="cron_agent")
+        + "\n\n" + cron_agent.CRON_DISPATCH_PREAMBLE
+    )
 
 
 def test_store_is_plain_json_list(tmp_path: Path) -> None:
@@ -794,7 +840,7 @@ def test_prompt_sea_carries_job_work_dir_worktree_and_timeout(
     """A job with work_dir/use_worktree/auto_commit/timeout configures its SEA and run.
 
     This is the shape of a "run the tests in my repo nightly" job: the
-    SEA's ``work_dir()`` names the project instead of the scratch
+    SEA's ``work_dir`` setting names the project instead of the scratch
     directory, the git toggles are on, and ``run_agent`` waits for the
     job's own timeout instead of :data:`PROMPT_TIMEOUT_SECONDS`.
     """

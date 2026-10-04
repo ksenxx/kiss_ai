@@ -114,7 +114,7 @@ class TestViewerStatusNewerRun(TestCase):
             "chatId": chat_id,
             "workDir": str(self.work_dir),
             "useWorktree": False,
-            "useParallel": False,
+            "isParallel": False,
             "autoCommit": False,
             "agentPath": str(script),
         })

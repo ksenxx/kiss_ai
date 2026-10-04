@@ -26,6 +26,7 @@ the SEA contract in :mod:`kiss.server.agent_file`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from kiss.core.brand import PRODUCT_NAME
 
@@ -90,38 +91,19 @@ def description() -> str:
 
 
 def system_prompt() -> str:
-    """Return the merge agent's base system prompt (replaces ``SYSTEM.md``)."""
+    """Return the agent's base system prompt (:data:`SYSTEM_PROMPT`)."""
     return SYSTEM_PROMPT
 
 
-def is_parallel() -> bool:
-    """Never fan out: the resolution of one merge is a single sequential job."""
-    return False
+def settings() -> dict[str, Any]:
+    """A worker on the real checkout (a merge must not run in a worktree).
 
-
-def use_web_tools() -> bool:
-    """Never enable browser tools: everything needed is in the repository."""
-    return False
-
-
-def use_memory() -> bool:
-    """Never load persistent memory tools: the job is local to one merge."""
-    return False
-
-
-def use_worktree() -> bool:
-    """Run directly on the checkout that holds the conflicted merge."""
-    return False
-
-
-def auto_commit() -> bool:
-    """Never auto-commit: the caller decides what to commit."""
-    return False
-
-
-def max_budget() -> float:
-    """Return the USD cap of one conflict-resolution run."""
-    return MAX_BUDGET_USD
+    The budget is capped at :data:`MAX_BUDGET_USD`.
+    """
+    return {
+        "preset": "worker",
+        "max_budget": MAX_BUDGET_USD,
+    }
 
 
 def build_prompt(

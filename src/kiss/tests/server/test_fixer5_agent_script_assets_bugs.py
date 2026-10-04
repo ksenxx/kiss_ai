@@ -108,11 +108,15 @@ class TestBrokenAgentScriptRaisesDiagnostic(unittest.TestCase):
             "    \"\"\"Return the tools.\"\"\"\n"
             "    return [greet]\n"
         )
+        # ``add_to_tools()`` ADDS to the built-in toolset: only ``tools``
+        # is staged; the caller's tool profile is left alone (no
+        # ``toolProfile`` override, no legacy ``appendBasicTools`` field).
         cmd: dict[str, Any] = {"agentPath": path}
-        self.assertEqual(apply_agent_overrides(cmd), {"tools", "appendBasicTools"})
+        self.assertEqual(apply_agent_overrides(cmd), {"tools"})
         self.assertEqual([t.__name__ for t in cmd["tools"]], ["greet"])
         self.assertEqual(cmd["tools"][0](name="bob"), "hi bob")
-        self.assertIs(cmd["appendBasicTools"], True)
+        self.assertNotIn("toolProfile", cmd)
+        self.assertNotIn("appendBasicTools", cmd)
         self.assertNotIn("toolsFile", cmd)
 
     def test_script_without_tool_getter_stages_no_tools(self) -> None:

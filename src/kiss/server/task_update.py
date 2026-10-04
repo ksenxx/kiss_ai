@@ -32,6 +32,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kiss.agents.seas.ask import ask_sea
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server.json_printer import stamp_event_ts
 
 log = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def build_prompt(task_id: str) -> str:
     """Return the ``/ask`` prompt the update run answers for *task_id*.
 
     What a ``/ask`` typed into the task's chat produces: the question
-    followed by :data:`ask_sea.APPEND_TO_PROMPT` with the task id
+    followed by :data:`ask_sea.ADD_TO_PROMPT` with the task id
     filled in.
 
     Args:
@@ -66,7 +67,7 @@ def build_prompt(task_id: str) -> str:
     """
     return (
         UPDATE_QUESTION + "\n\n"
-        + ask_sea.APPEND_TO_PROMPT.replace("<task_id>", task_id)
+        + ask_sea.ADD_TO_PROMPT.replace("{task_id}", task_id)
     )
 
 
@@ -349,6 +350,7 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
     agent.resume_chat_by_id(str(getattr(parent_agent, "chat_id", "") or ""))
     epoch_getter = getattr(parent_agent, "_usage_epoch", None)
     epoch = epoch_getter() if callable(epoch_getter) else None
+    ask_settings = resolve_settings(vars(ask_sea))
     result = ""
     try:
         result = agent.run(
@@ -356,19 +358,21 @@ def run_task_update_sea(parent_agent: Any, task_id: str) -> tuple[str, float]:
             model_name=model_name,
             work_dir=str(getattr(parent_agent, "work_dir", "") or "."),
             printer=printer,
-            # ``tools()`` is the SEA's whole tool set: no basic tools.
-            tools=ask_sea.tools(),
+            # The ask SEA's ``none`` tool profile: its ``add_to_tools()``
+            # and ``finish`` are the whole tool set, no built-in tools.
+            tools=ask_sea.add_to_tools(),
             append_basic_tools=False,
-            is_parallel=ask_sea.is_parallel(),
+            tool_profile=ask_settings["tool_profile"],
+            is_parallel=ask_settings["is_parallel"],
             max_budget=UPDATE_BUDGET_USD,
             model_config=(
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
             base_system_prompt=ask_sea.system_prompt(),
-            system_prompt=ask_sea.append_to_system_prompt(),
-            web_tools=ask_sea.use_web_tools(),
-            use_memory=ask_sea.use_memory(),
+            system_prompt=ask_sea.add_to_system_prompt(),
+            web_tools=ask_settings["use_web_tools"],
+            use_memory=ask_settings["use_memory"],
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)

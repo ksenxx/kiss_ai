@@ -1263,5 +1263,15 @@ def add_to_tools() -> list:
     return TelegramAgent()._get_tools()
 
 
+def settings() -> dict:
+    """Run as a ``channel`` worker (``kiss.server.sorcar.run`` agent-script contract).
+
+    No git lifecycle, nothing inherited from the calling task, the
+    channel preamble in the system prompt (see
+    :mod:`kiss.agents.sorcar.sea_settings`).
+    """
+    return {"preset": "channel"}
+
+
 if __name__ == "__main__":
     main()

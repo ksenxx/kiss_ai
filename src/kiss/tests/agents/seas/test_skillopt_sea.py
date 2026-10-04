@@ -44,6 +44,7 @@ from kiss.agents.seas.skillopt.skillopt_sea import (
     verify,
 )
 from kiss.agents.sorcar import sea_commands
+from kiss.agents.sorcar.sea_settings import resolve_settings
 from kiss.server.agent_file import apply_agent_overrides
 from kiss.tests.agents.sorcar.local_model_server import (
     MODEL,
@@ -115,7 +116,9 @@ def test_sea_target_reads_splices_and_validates_the_prompt_constant(tmp_path: Pa
     candidate = target.materialize(tricky, tmp_path / "cand")
     assert candidate.path.name == "sh_candidate.py"
     assert candidate.text() == tricky
-    # Every getter but the prompt is untouched: the candidate is loaded like a SEA.
+    # Everything but the prompt is untouched: the candidate is loaded like a
+    # SEA, so its ``settings()`` (``worker`` preset, Bash profile) reach the
+    # rollout exactly as the daemon would apply them.
     kwargs = candidate.rollout_kwargs()
     assert kwargs["base_system_prompt"] == tricky
     assert kwargs["tool_profile"] == "bash"
@@ -200,7 +203,9 @@ def test_sea_target_maps_every_getter_and_both_tool_getters(tmp_path: Path) -> N
     )
     kwargs = SeaTarget(sea).rollout_kwargs()
     assert kwargs["base_system_prompt"] == "p"
-    assert kwargs["tool_profile"] == "shell"
+    # The legacy ``tools()`` fixes the whole tool set: the ``none``
+    # profile, whatever ``tool_profile()`` said.
+    assert kwargs["tool_profile"] == "none"
     assert kwargs["model_name"] == "m"
     assert kwargs["model_config"] == {"k": 1}
     assert kwargs["system_prompt"] == "suffix"
@@ -218,9 +223,10 @@ def test_sea_target_maps_every_getter_and_both_tool_getters(tmp_path: Path) -> N
         encoding="utf-8",
     )
     added = SeaTarget(added_tools).rollout_kwargs()
-    # ``add_to_tools()`` extends the basic toolset.
+    # ``add_to_tools()`` extends the basic toolset: no profile is forced
+    # and the eval set's ``append_basic_tools`` default stands.
     assert [t.__name__ for t in added["tools"]] == ["helper"]
-    assert added["append_basic_tools"] is True
+    assert "append_basic_tools" not in added and "tool_profile" not in added
 
 
 def test_sea_target_rejects_invalid_tool_getters(tmp_path: Path) -> None:
@@ -529,7 +535,8 @@ def test_one_round_accepts_a_candidate_that_passes_more_selection_tasks(tmp_path
         ns["system_prompt"]()
         == sh_sea.system_prompt().rstrip("\n") + "\nReturn the exact output.\n"
     )
-    assert ns["tool_profile"]() == "bash"
+    # Every other line of the SEA is kept: its ``settings()`` still pin the Bash profile.
+    assert ns["settings"]() == sh_sea.settings() == {"preset": "worker", "tool_profile": "bash"}
     assert sea.read_text(encoding="utf-8") == _SH_SEA.read_text(encoding="utf-8")
 
     out = tmp_path / "out"
@@ -938,18 +945,38 @@ def test_sea_getters_and_tools_follow_the_contract(tmp_path: Path) -> None:
     """The SkillOpt SEA is registered as ``/skillopt`` and exposes optimize/status."""
     assert skillopt_sea.system_prompt().startswith("You are SkillOpt")
     assert [t.__name__ for t in skillopt_sea.add_to_tools()] == ["optimize", "status"]
-    assert skillopt_sea.tool_profile() == "shell"
-    assert skillopt_sea.use_worktree() is False
-    assert skillopt_sea.auto_commit() is False
-    assert skillopt_sea.classify_tasks() is False
-    assert skillopt_sea.is_parallel() is False
-    assert skillopt_sea.use_web_tools() is False
-    assert skillopt_sea.use_memory() is False
+    assert skillopt_sea.settings() == {"preset": "worker", "tool_profile": "shell"}
+    # ``worker`` turns worktree, auto-commit, classifier, fan-out, browser
+    # and memory off; ``system_prompt()`` stays a getter.
+    assert resolve_settings(vars(skillopt_sea)) == {
+        "preset": "worker",
+        "tool_profile": "shell",
+        "system_prompt": skillopt_sea.SYSTEM_PROMPT,
+        "use_worktree": False,
+        "auto_commit": False,
+        "classify_tasks": False,
+        "is_parallel": False,
+        "use_web_tools": False,
+        "use_memory": False,
+    }
+    for legacy in (
+        "tool_profile", "use_worktree", "auto_commit", "classify_tasks", "is_parallel",
+        "use_web_tools", "use_memory",
+    ):
+        assert not hasattr(skillopt_sea, legacy), legacy
     assert sea_commands.get_command("skillopt") == _SKILLOPT_SEA
+    assert sea_commands.slash_command_task("/skillopt x.py evals.json") == (
+        "x.py evals.json", _SKILLOPT_SEA
+    )
+    assert sea_commands.sea_settings(_SKILLOPT_SEA) == resolve_settings(vars(skillopt_sea))
     cmd: dict[str, Any] = {"agentPath": str(_SKILLOPT_SEA)}
-    assert "autoCommit" in apply_agent_overrides(cmd)
+    assert apply_agent_overrides(cmd) == {
+        "systemPrompt", "tools", "toolProfile", "useWorktree", "autoCommit", "classifyTasks",
+        "isParallel", "useWebTools", "useMemory",
+    }
     assert cmd["autoCommit"] is False and cmd["useWorktree"] is False
     assert cmd["toolProfile"] == "shell" and all(callable(tool) for tool in cmd["tools"])
+    assert "appendBasicTools" not in cmd
     assert cmd["systemPrompt"] == skillopt_sea.SYSTEM_PROMPT
     assert skillopt_sea.status(str(tmp_path / "none")) == f"no state.json under {tmp_path / 'none'}"
     # The tool wrapper with a zero cost cap runs no round and needs no model.

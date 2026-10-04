@@ -668,7 +668,7 @@ class TestPendingMessagesClearedOnTaskFinish:
             "prompt": "test prompt",
             "tabId": tab_id,
             "workDir": "/tmp",
-            "useParallel": False,
+            "isParallel": False,
             "useWorktree": False,
             "autoCommit": False,
             "_state_key": "task-clear-after-run",

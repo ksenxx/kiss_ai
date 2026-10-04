@@ -10,11 +10,11 @@ side channel in :mod:`kiss.server.commands` (running tab) hand this
 script:
 
 * the user's question as the sub-task prompt,
-* ``append_to_prompt`` = :data:`APPEND_TO_PROMPT` with ``<task_id>``
+* ``add_to_prompt`` = :data:`ADD_TO_PROMPT` with ``{task_id}``
   substituted by the calling (parent) task's id, so the answering
   agent knows which task the user is asking about,
-* ``append_to_system_prompt`` = :func:`append_to_system_prompt` — the
-  no-internet directive plus the answering playbook.
+* ``add_to_system_prompt()`` — the no-internet directive plus the
+  answering playbook.
 
 The answering session is a two-step Q&A, modelled on Guv's "Ask about
 this chat" side channel: one call of :func:`task_context` returns the
@@ -27,17 +27,13 @@ steps on the missing ``sqlite3`` CLI, a schema dump and raw event JSON
 (median 9 steps, $0.91 and 99 s per answer); with no other tool to
 reach for, the answer comes straight from the context.
 
-Overrides: :func:`system_prompt` swaps the base system prompt for the
-SYSTEM_LITE ablation prompt, :func:`append_to_system_prompt` supplies
-the fixed suffix (a getter defined in this file wins over the wire
-value, so it is the single source of truth for both dispatch paths),
-:func:`tools` makes :func:`task_context` the whole tool set (a
-``tools()`` getter, unlike ``add_to_tools()``, builds no basic toolset)
-so the session has no built-in tool besides ``finish`` (the parent task
-is still running in the same working tree, so the answerer must never
-edit files or run commands), and
-:func:`is_parallel`, :func:`use_web_tools`, :func:`use_memory` return
-``False`` so the answer comes from the context alone.
+Configuration: :func:`settings` picks the ``worker`` preset with the
+``none`` tool profile (no built-in tool besides ``finish`` — the parent
+task is still running in the same working tree, so the answerer must
+never edit files or run commands), the SYSTEM_LITE ablation prompt as
+the base system prompt and :data:`ADD_TO_PROMPT`;
+:func:`add_to_system_prompt` supplies the playbook and
+:func:`add_to_tools` makes :func:`task_context` the only tool.
 """
 
 from __future__ import annotations
@@ -55,13 +51,11 @@ from kiss.core.brand import render_brand
 # study actually ran and is not read by the product.
 _SYSTEM_LITE_PATH = Path(__file__).resolve().parent / "_ask_system_lite.md"
 
-# The prompt suffix both dispatch paths append to the user's question.
-# ``<task_id>`` is a literal placeholder: the idle-tab rewrite keeps it
-# (the calling task's id is only known at dispatch time and
-# :func:`kiss.agents.sorcar.agent_dispatch._dispatch` substitutes it);
-# the side channel formats it directly.
-APPEND_TO_PROMPT = (
-    "The question above is about the task with id <task_id>. "
+# The prompt suffix of every ``/ask`` dispatch (``settings()["add_to_prompt"]``):
+# the daemon fills ``{task_id}`` with the calling task's id; the side
+# channel (:mod:`kiss.server.commands`) formats it itself.
+ADD_TO_PROMPT = (
+    "The question above is about the task with id {task_id}. "
     "Call task_context with that task id, then answer the question."
 )
 
@@ -112,21 +106,39 @@ def system_prompt() -> str:
     """Return the SYSTEM_LITE ablation prompt as the base system prompt.
 
     Reads the bundled ``_ask_system_lite.md`` next to this module and
-    fills the brand placeholders, so the same text is served from a
-    source checkout and from a wheel install.
+    fills the brand placeholders.
     """
     return render_brand(_SYSTEM_LITE_PATH.read_text(encoding="utf-8"))
 
 
-def append_to_system_prompt() -> str:
+def settings() -> dict[str, Any]:
+    """Configure the answering session: a worker with no built-in tools.
+
+    ``worker``: no worktree, auto-commit, classifier, fan-out, browser or
+    memory — the answer comes from ``task_context`` alone, quickly.
+    ``tool_profile: "none"`` keeps even the built-in toolset out, so the
+    answerer (which shares the running task's tree) cannot run commands
+    or touch files.  ``system_prompt`` is the SYSTEM_LITE ablation prompt
+    (``_ask_system_lite.md`` next to this module, brand placeholders
+    filled).  ``add_to_prompt`` names the task the question is about:
+    ``{task_id}`` is the calling task's id, filled in by the daemon.
+    """
+    return {
+        "preset": "worker",
+        "tool_profile": "none",
+        "add_to_prompt": ADD_TO_PROMPT,
+    }
+
+
+def add_to_system_prompt() -> str:
     """Return the fixed suffix appended to the answering agent's system prompt.
 
     The no-internet and answer-quickly directives followed by the
     answering playbook (:data:`_PLAYBOOK`): the two-call recipe
     (``task_context`` then ``finish``) and the style of the answer.
-    Both dispatch paths read the string from here, and the daemon
-    applies this getter over the wire value as well, so there is
-    exactly one copy of the text.
+    The daemon appends it for both dispatch paths (the ``/ask`` chat
+    command and the running tab's side channel), so there is exactly
+    one copy of the text.
     """
     return _PLAYBOOK
 
@@ -156,41 +168,15 @@ def task_context(task_id: str) -> str:
     return context(task_id)
 
 
-def tools() -> list[Any]:
-    """Return the whole tool set: :func:`task_context` only (plus ``finish``).
+def add_to_tools() -> list[Any]:
+    """Return the only tool: :func:`task_context`.
 
-    ``tools()`` (not ``add_to_tools()``) so the built-in toolset is never
-    built: the parent task is still running in the same working tree, so
-    the answerer must not run commands or touch files; and every extra
-    tool schema is a temptation to take a step the user has to wait for.
+    With the ``none`` tool profile (see :func:`settings`) the built-in
+    toolset is never built: the parent task is still running in the
+    same working tree, so the answerer must not run commands or touch
+    files; and every extra tool schema is a temptation to take a step
+    the user has to wait for.
     """
     return [task_context]
 
 
-def is_parallel() -> bool:
-    """Never fan out the answering session.
-
-    A ``/ask`` invocation is a single read-only Q&A over one task's
-    persisted events; a parallel run would only fragment the answer.
-    """
-    return False
-
-
-def use_web_tools() -> bool:
-    """Never enable browser tools for the answering session.
-
-    The answer is derived solely from the task's own events in
-    ``~/.kiss/history.db``; internet access would let the answering
-    agent drift off the local trajectory the user is asking about.
-    """
-    return False
-
-
-def use_memory() -> bool:
-    """Never give the answering session the memory tools.
-
-    Earlier runs spent their first steps searching memory and their
-    last steps writing pages while the user waited; the answer must
-    come from the context tool alone.
-    """
-    return False

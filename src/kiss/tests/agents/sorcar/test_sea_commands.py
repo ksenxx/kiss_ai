@@ -12,8 +12,9 @@ Covers the module in :mod:`kiss.agents.sorcar.sea_commands`:
   package);
 * live-reload behaviour when ``~/.kiss/SEAS.md`` or a watched folder
   changes;
-* the slash-command prompt rewriter that turns ``/xxx text`` into an
-  explicit ``run_agent`` directive.
+* the slash-command splitter that turns ``/xxx text`` into the SEA to
+  run and its task text, and the ``settings()`` resolver the daemon
+  and dispatcher read.
 
 Every test isolates :mod:`kiss.agents.sorcar.sea_commands` via a
 ``_reset_for_tests()`` fixture so a subscriber leaked from one test
@@ -225,57 +226,71 @@ def test_private_underscore_prefixed_seas_are_included(tmp_path: Path) -> None:
     assert "_helper" in commands
 
 
-def test_rewrite_prompt_for_registered_command(tmp_path: Path) -> None:
-    """A ``/<name> <text>`` prompt is turned into a ``run_agent`` directive."""
+def test_slash_command_task_for_registered_command(tmp_path: Path) -> None:
+    """``/<name> <text>`` is split into the trailing text and the SEA to run.
+
+    The daemon runs the SEA directly on the trailing text (no
+    ``run_agent`` directive is composed), so the task text comes back
+    verbatim and the path is the registered file.
+    """
     folder = tmp_path / "seas"
     sea_path = _touch_sea(folder, "myslack")
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
-    result = sea_commands.rewrite_prompt_if_command(
+    result = sea_commands.slash_command_task(
         '/myslack post "hi there" to #general',
     )
     assert result is not None
-    rewritten, resolved = result
+    task_text, resolved = result
     assert resolved == sea_path.resolve()
-    assert "run_agent" in rewritten
-    assert str(sea_path.resolve()) in rewritten
-    assert 'post "hi there" to #general' in rewritten
+    assert task_text == 'post "hi there" to #general'
+    assert "run_agent" not in task_text
 
 
-def test_rewrite_returns_none_for_unknown_command() -> None:
-    """A slash prefix that does not match any SEA MUST NOT rewrite."""
+def test_slash_command_task_is_none_for_unknown_command() -> None:
+    """A slash prefix that does not match any SEA runs as an ordinary prompt."""
     sea_commands.refresh_registry()
-    assert sea_commands.rewrite_prompt_if_command("/definitelynot hi") is None
+    assert sea_commands.slash_command_task("/definitelynot hi") is None
 
 
-def test_rewrite_returns_none_without_trailing_text(tmp_path: Path) -> None:
-    """``/xxx`` alone (no task text) must not rewrite; run_agent needs a task."""
+def test_slash_command_task_is_none_without_trailing_text(tmp_path: Path) -> None:
+    """``/xxx`` alone (no task text) and ``/xxx help`` are not SEA runs.
+
+    The bare command has no task to run; ``help`` is answered by
+    :func:`sea_commands.help_text_if_command` instead.
+    """
     folder = tmp_path / "seas"
     _touch_sea(folder, "solo")
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
-    assert sea_commands.rewrite_prompt_if_command("/solo") is None
-    assert sea_commands.rewrite_prompt_if_command("/solo   ") is None
+    assert sea_commands.slash_command_task("/solo") is None
+    assert sea_commands.slash_command_task("/solo   ") is None
+    assert sea_commands.slash_command_task("/solo help") is None
+    assert sea_commands.slash_command_task("/solo HELP") is None
+    assert sea_commands.slash_command_task("/solo help me") is not None
 
 
-def test_rewrite_ignores_prompts_that_are_not_slash_commands() -> None:
+def test_slash_command_task_ignores_prompts_that_are_not_slash_commands() -> None:
     """Plain prompts, chat text with a slash mid-line, etc. pass through."""
     sea_commands.refresh_registry()
-    assert sea_commands.rewrite_prompt_if_command("hello world") is None
-    assert sea_commands.rewrite_prompt_if_command("\n/slack hi") is None
-    assert sea_commands.rewrite_prompt_if_command("say /slack") is None
-    assert sea_commands.rewrite_prompt_if_command("") is None
-    assert sea_commands.rewrite_prompt_if_command("/") is None
+    assert sea_commands.slash_command_task("hello world") is None
+    assert sea_commands.slash_command_task("\n/slack hi") is None
+    assert sea_commands.slash_command_task("say /slack") is None
+    assert sea_commands.slash_command_task("") is None
+    assert sea_commands.slash_command_task("/") is None
+    assert sea_commands.slash_command_task(None) is None  # type: ignore[arg-type]
 
 
-def test_rewrite_requires_whitespace_after_command_name(tmp_path: Path) -> None:
+def test_slash_command_task_requires_whitespace_after_command_name(
+    tmp_path: Path,
+) -> None:
     """``/slackfoo bar`` must NOT match ``/slack`` — the boundary is a space."""
     folder = tmp_path / "seas"
     _touch_sea(folder, "slk")
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
-    assert sea_commands.rewrite_prompt_if_command("/slkextra text") is None
-    assert sea_commands.rewrite_prompt_if_command("/slk text") is not None
+    assert sea_commands.slash_command_task("/slkextra text") is None
+    assert sea_commands.slash_command_task("/slk text") is not None
 
 
 def test_watcher_picks_up_seas_md_change(tmp_path: Path) -> None:
@@ -575,10 +590,9 @@ def test_dataclass_sea_with_future_annotations_loads(tmp_path: Path) -> None:
     _write_seas_md([str(folder)])
     sea_commands.refresh_registry()
 
-    assert sea_commands.rewrite_prompt_if_command("/verdict go") is not None
-    assert sea_commands.sea_getter_is_false(sea, "use_worktree") is True
-    assert sea_commands.sea_getter_is_false(sea, "auto_commit") is False
-    assert sea_commands.sea_getter_is_false(sea, "missing_getter") is False
+    assert sea_commands.slash_command_task("/verdict go") == ("go", sea.resolve())
+    settings = sea_commands.sea_settings(sea)
+    assert settings == {"preset": "session", "use_worktree": False, "auto_commit": True}
     with sea_commands._load_sea_module(sea) as loaded:
         assert sys.modules[loaded.__name__] is loaded
         assert loaded.__name__.startswith("_kiss_sea_verdict_sea_")
@@ -592,7 +606,7 @@ def test_failed_sea_import_leaves_no_sys_modules_entry(tmp_path: Path) -> None:
     sea = tmp_path / "boom_sea.py"
     sea.write_text("raise SystemExit(3)\n", encoding="utf-8")
     with pytest.raises(sea_commands.SeaScriptError, match="SystemExit: 3") as info:
-        sea_commands.sea_getter_is_false(sea, "use_worktree")
+        sea_commands.sea_settings(sea)
     assert isinstance(info.value.__cause__, SystemExit)
     assert not [n for n in sys.modules if n.startswith("_kiss_sea_boom_sea_")]
 
@@ -642,7 +656,7 @@ def test_concurrent_same_stem_loads_do_not_clobber_each_other(
 
     def _evaluate(label: str, sea: Path) -> None:
         try:
-            results[label] = sea_commands.sea_getter_is_false(sea, "use_worktree")
+            results[label] = sea_commands.sea_settings(sea)["use_worktree"] is False
         except sea_commands.SeaScriptError as exc:
             results[label] = exc
 
@@ -671,10 +685,10 @@ def use_worktree() -> bool:
 def test_help_returns_stripped_description(tmp_path: Path) -> None:
     """``/xxx help`` (any letter case) yields the SEA's stripped ``description()``.
 
-    Anything but the bare word ``help`` is an ordinary sub-task, an
+    Anything but the bare word ``help`` is the SEA's task text, an
     unknown command and a non-command prompt yield ``None``, and the
-    same prompt is never ALSO rewritten into a ``run_agent`` directive
-    by the caller because the task runner checks help first.
+    same prompt is never ALSO run as an SEA task by the caller because
+    the task runner checks help first.
     """
     folder = tmp_path / "seas"
     sea = _touch_sea(folder, "echo")

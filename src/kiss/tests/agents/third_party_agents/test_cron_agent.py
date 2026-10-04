@@ -76,11 +76,10 @@ def test_get_tools_and_sorcar_wiring() -> None:
     agent_text = agent_source.read_text(encoding="utf-8")
     assert "tools.append(cron_job)" not in agent_text
     assert "from kiss.agents.sorcar.cron_agent import cron_job" not in agent_text
-    dispatch_source = Path(cron_agent.__file__).parent / "agent_dispatch.py"
-    assert (
-        "cron_agent.CRON_DISPATCH_PREAMBLE + task"
-        in dispatch_source.read_text(encoding="utf-8")
-    )
+    # The dispatch preamble reaches the session through the agent-script
+    # contract (``add_to_system_prompt()``), not through a prompt prefix.
+    assert cron_agent.add_to_system_prompt() == cron_agent.CRON_DISPATCH_PREAMBLE
+    assert cron_agent.settings()["preset"] == "channel"
     # The system prompt directs scheduling requests to run_agent(agent="cron").
     system_md = Path(cron_agent.__file__).parents[2] / "SYSTEM.md"
     assert 'run_agent tool with "cron"' in system_md.read_text(encoding="utf-8")

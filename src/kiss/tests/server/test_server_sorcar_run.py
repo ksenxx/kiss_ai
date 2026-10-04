@@ -953,7 +953,7 @@ class SorcarRunApiTest(unittest.TestCase):
 
         The daemon treats the ``run`` command as untrusted input: a
         boolean ``maxBudget``, a non-dict ``modelConfig``, a
-        non-boolean ``webTools``, and a non-boolean ``useMemory`` are
+        non-boolean ``useWebTools``, and a non-boolean ``useMemory`` are
         ignored rather than applied or crashing the task thread.
         """
         seen: dict[str, Any] = {}
@@ -973,7 +973,7 @@ class SorcarRunApiTest(unittest.TestCase):
             extra_cmd={
                 "maxBudget": True,
                 "modelConfig": "junk",
-                "webTools": "yes",
+                "useWebTools": "yes",
                 "useMemory": "yes",
             },
         )
@@ -997,7 +997,7 @@ class SorcarRunApiTest(unittest.TestCase):
         ``classify_task_for_run(enabled=...)`` — the run-side gate of
         the settings panel's "Classify tasks before running" option.
         Absent and malformed values mean "no override" (``None``), the
-        same untrusted-input contract as ``webTools``.  The suite-wide
+        same untrusted-input contract as ``useWebTools``.  The suite-wide
         ``KISS_DISABLE_TASK_CLASSIFIER=1`` kill switch keeps the real
         ``classify_task_for_run`` from ever calling a model here, so
         the full daemon pipeline runs with only the ``run`` stub.

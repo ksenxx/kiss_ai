@@ -31,6 +31,7 @@ from typing import Any
 
 from kiss.agents.seas.merge import merge_sea
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
+from kiss.agents.sorcar.sea_settings import resolve_settings
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +89,22 @@ def run_merge_sea(parent_agent: Any, prompt: str, repo: Path) -> None:
         "reviewer": False,
         "side_channel": True,
     }
+    merge_settings = resolve_settings(vars(merge_sea))
     try:
         agent.run(
             prompt_template=prompt,
             model_name=model_name,
             work_dir=str(repo),
             printer=printer,
-            is_parallel=merge_sea.is_parallel(),
-            max_budget=merge_sea.max_budget(),
+            is_parallel=merge_settings["is_parallel"],
+            max_budget=merge_settings["max_budget"],
             model_config=(
                 getattr(parent_agent, "model_config", None)
                 if model_name == parent_agent.model_name else None
             ),
             base_system_prompt=merge_sea.system_prompt(),
-            web_tools=merge_sea.use_web_tools(),
-            use_memory=merge_sea.use_memory(),
+            web_tools=merge_settings["use_web_tools"],
+            use_memory=merge_settings["use_memory"],
         )
     finally:
         budget, tokens, steps = _live_agent_usage(agent)

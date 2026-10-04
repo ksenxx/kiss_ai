@@ -434,21 +434,21 @@ def run(
             running indicator when the run ends.  Empty (the default)
             runs as an ordinary top-level task.  It is a
             client/UI-transport parameter with no agent-script
-            getter: a dispatched script must not be able to re-parent
+            setting: a dispatched script must not be able to re-parent
             itself under an unrelated task.
         parent_tab_id: Frontend tab id of the calling task's tab,
             forwarded on the sub-agent's ``new_tab`` broadcast so the
             webview knows which tab spawned it (nested placement and
             cascade-close).  Only meaningful with *parent_task_id*;
             empty spawns a parentless sub-agent tab, exactly like a
-            headless ``run_parallel`` fan-out.  No agent-script getter.
+            headless ``run_parallel`` fan-out.  No agent-script setting.
         parent_reviewer: Whether the dispatched run belongs to a
             reviewer's sub-tree — the caller is a reviewer sub-agent,
             or *prompt* itself is a review task (see
             :mod:`kiss.agents.sorcar.fanout_guard`).  Stamped on the
             child's ``_subagent_info`` so it and its helpers keep the
             read-only ``review`` tool profile.  Only meaningful with
-            *parent_task_id*; no agent-script getter, for the same
+            *parent_task_id*; no agent-script setting, for the same
             reason as *parent_task_id*.
         side_channel: Whether the run is a side channel of the parent
             — a sub-agent whose result is delivered into the PARENT's
@@ -456,7 +456,7 @@ def run(
             tab is scaffolding that is closed when the run ends and
             never re-opened by a replay.  Persisted on the child's
             history row; only meaningful with *parent_task_id*; no
-            agent-script getter.
+            agent-script setting.
         model: Model name; the daemon's selected default when empty.
         chat_id: Optional existing chat session id to continue.  Pass
             the ``chat_id`` of a previous :class:`TaskResult` to run
@@ -474,77 +474,64 @@ def run(
             system prompt as usual.
         extension_agent_path: Optional path — a string — to a Python
             *agent script*, also called a Sorcar Extension Agent (SEA),
-            that computes this run's parameters **on the daemon**.
-            When non-empty, the daemon imports the file and,
-            for each parameter ``X`` of this function except
-            ``extension_agent_path`` itself (and the getter-less
-            parameters noted below), calls the script's top-level
-            ``X()`` function — when the script defines one — and
-            uses its return value for ``X``, replacing the value passed
-            to this call.  A parameter whose ``X()`` the script
-            does not define keeps the value passed here, which is the
-            parameter's default when the caller did not pass one.
-            Extra agent tools have no parameter of their own (a
-            callable cannot travel the wire): the script's tool set
-            comes from the two tool getters described below.
+            that configures this run **on the daemon**.  When
+            non-empty, the daemon imports the file and applies its
+            ``settings()`` and getters
+            (:mod:`kiss.agents.sorcar.sea_settings`,
+            :func:`kiss.server.agent_file.apply_agent_overrides`) on top
+            of the values passed to this call: a setting the script
+            declares replaces the parameter of the same name; one it
+            does not declare keeps the value passed here.
 
-            Script format: a plain Python file defining any subset of
-            these zero-argument top-level functions, each returning a
-            value of the corresponding parameter's documented type::
+            Script format — a plain Python file defining any subset of
+            these top-level functions::
 
-                def prompt() -> str: ...          # non-empty
-                def work_dir() -> str: ...
-                def model() -> str: ...
-                def chat_id() -> str: ...
-                def system_prompt() -> str: ...
-                def use_worktree() -> bool: ...
-                def auto_commit() -> bool: ...
-                def max_budget() -> float | None: ...   # finite
-                def model_config() -> dict | None: ...
-                def append_to_system_prompt() -> str: ...
-                def append_to_prompt() -> str: ...
-                def use_web_tools() -> bool | None: ...
-                def classify_tasks() -> bool | None: ...
-                def use_memory() -> bool | None: ...
-                def is_parallel() -> bool: ...
-                def tool_profile() -> str: ...
-
-            The script's tools come from at most ONE of these two
-            getters, each returning a list of tool callables (never a
-            file path)::
-
-                def tools() -> list: ...         # ONLY these + finish
-                def add_to_tools() -> list: ...  # basic toolset + these
-
-            ``tools()`` makes the returned tools plus ``finish`` the
-            run's entire tool set (the built-in basic toolset —
-            ``Bash``, ``Read``, ``Edit``, ``Write``, browser tools,
-            ``run_agent``, ``ask_user_question``, ``talk``,
-            ``set_model``, ``decide``, ``summary``, ``run_parallel``,
-            ... — is not built, so *use_web_tools*, *is_parallel* and
-            *tool_profile* have no tools left to act on, and the
-            default ``SYSTEM.md`` prompt, whose workflow rules name
-            ``Read``, ``Edit``, ``Bash`` and the browser tools, should
-            usually be replaced by a *system_prompt* written for the
-            tools the run actually has); ``add_to_tools()`` adds the
-            returned tools to the built-in basic toolset.  Each tool's
-            name, docstring (Google-style ``Args:`` section for
-            parameter descriptions), and annotated keyword-bindable
-            parameters define the tool schema the agent sees, exactly
-            like a native tool.  Defining both getters stops the task
-            like any other broken getter.
-
-            The script may also define two hook getters with no
-            corresponding parameter on this function (a callable
-            cannot travel the wire, so the hooks exist ONLY as
-            agent-script getters)::
-
+                def description() -> str: ...        # /xxx help text
+                def settings() -> dict: ...           # preset + run() keywords
+                def system_prompt() -> str: ...       # replaces the base prompt
+                def add_to_system_prompt() -> str: ... # appended to the system prompt
+                def add_to_tools() -> list: ...       # extra tool callables
                 def llm_call_hook() -> Callable | None: ...
                 def tool_call_hook() -> Callable | None: ...
+                def register_as_model() -> bool: ...  # model-picker entry
+                def on_picked_as_model(work_dir: str) -> str: ...
 
-            Each returns a callable — ``llm_call_hook`` and
-            ``tool_call_hook`` respectively — (or ``None`` for "no
-            hook") that the daemon passes to the underlying
+            ``settings()`` returns a dict of a ``preset`` and any of
+            the keyword parameters of this function except the
+            transport and identity ones: ``prompt`` (non-empty),
+            ``work_dir``, ``model``, ``chat_id``, ``system_prompt``,
+            ``use_worktree``, ``auto_commit``, ``max_budget`` (finite),
+            ``model_config``, ``use_web_tools``, ``classify_tasks``,
+            ``use_memory``, ``is_parallel``, ``tool_profile``,
+            ``docker_image``; plus ``timeout`` (seconds a ``run_agent``
+            call waits for this script's sub-task) and ``add_to_prompt``
+            (text appended to the task prompt after *append_to_prompt*,
+            ``{task_id}`` in it replaced by *parent_task_id*).  A
+            ``None`` value means "no override".  Presets: ``session``
+            (default, changes nothing), ``worker`` (``use_worktree``,
+            ``auto_commit``, ``classify_tasks``, ``is_parallel``,
+            ``use_web_tools``, ``use_memory`` all off) and ``channel``
+            (a worker for an external service: ``run_agent`` runs it in
+            ``~/.kiss/channel_work`` and inherits nothing into it, and
+            the daemon prepends a channel preamble to its system
+            prompt).  Explicit keys override the preset.
+
+            ``add_to_system_prompt()`` returns text ADDED to the run's
+            system prompt after *append_to_system_prompt*, never
+            replacing it.  ``add_to_tools()`` returns a list of tool
+            callables (never a file path) added to the built-in
+            toolset; with ``"tool_profile": "none"`` they and
+            ``finish`` are the run's whole tool set (the built-in
+            toolset is not built, so the default ``SYSTEM.md`` prompt,
+            whose workflow rules name ``Read``, ``Edit``, ``Bash`` and
+            the browser tools, should usually be replaced by a
+            ``system_prompt()`` written for the tools the run has).
+            Each tool's name, docstring (Google-style ``Args:``
+            section) and annotated keyword-bindable parameters define
+            the tool schema the agent sees, exactly like a native tool.
+
+            The hook getters each return a callable (or ``None`` for
+            "no hook") that the daemon passes to the underlying
             :meth:`kiss.core.kiss_agent.KISSAgent.run` of every
             task-executor sub-session of the task's agent (internal
             helper sessions, e.g. the failed-session trajectory
@@ -554,51 +541,45 @@ def run(
             to be sent, and ``tool_call_hook(name, args)`` is called
             before every tool call — the tool executes only when the
             hook returns ``"OK"``; any other returned string is given
-            to the model as the tool's result instead.  Like every
-            getter, they execute **in the daemon process**; the hooks
-            apply to the task's own agent, not to sub-agents it spawns
-            via ``run_parallel``.
+            to the model as the tool's result instead.  The hooks apply
+            to the task's own agent, not to sub-agents it spawns via
+            ``run_parallel``.
 
-            Two more getters make a SEA a *model routing* entry::
+            A SEA whose ``register_as_model()`` returns ``True`` is
+            listed in the model picker under its command name (the
+            bundled ``autorouter`` and ``bestrouter``); picking it runs
+            every task of the tab through the SEA on the model its
+            ``settings()["model"]`` names (else the default model),
+            with its ``add_to_system_prompt()`` protocol added to the
+            system prompt.
 
-                def add_to_system_prompt() -> str: ...   # the routing protocol
-                def register_as_model() -> bool: ...
+            Compatibility: the earlier per-field getters (``def
+            use_worktree() -> bool`` and so on for every settings key,
+            ``dispatch_timeout()`` for ``timeout``, ``append_to_prompt()``
+            for ``add_to_prompt``, ``append_to_system_prompt()`` for
+            ``add_to_system_prompt()``, and ``tools()`` for
+            ``add_to_tools()`` with the ``none`` profile) are still
+            accepted for one release and are deprecated.
 
-            ``add_to_system_prompt()`` returns text that is ADDED to
-            the run's system prompt after the *append_to_system_prompt*
-            value (the caller's or an ``append_to_system_prompt()``
-            getter's), never replacing it.  A SEA whose
-            ``register_as_model()`` returns ``True`` is listed in the
-            model picker under its command name (the bundled
-            ``autorouter`` and ``bestrouter``); picking it runs every
-            task of the tab through the SEA on the model its ``model()``
-            getter names (else the default model), with the protocol
-            added to the system prompt.
-
-            The ``X()`` functions are never serialized by the
-            client — they run **in the daemon process**.
-            ``use_web_tools()``, ``classify_tasks()``, and
-            ``use_memory()`` return a bool for a per-run override
-            or ``None`` for the daemon's configured default; and
-            ``is_parallel()`` returns a bool.  ``timeout``,
-            *stop_on_timeout*, *endpoint_file*, *scope_work_dir*,
-            *parent_task_id*, and *parent_tab_id* have no getters by
-            design: the first three
-            are client-transport parameters — the script only runs on
-            the daemon that *endpoint_file* selects, *timeout* bounds this
+            Everything the script defines runs **in the daemon
+            process**; nothing is serialized by the client.
+            ``timeout``, *stop_on_timeout*, *endpoint_file*,
+            *scope_work_dir*, *parent_task_id*, and *parent_tab_id*
+            have no settings key by design: the first three are
+            client-transport parameters — the script only runs on the
+            daemon that *endpoint_file* selects, *timeout* bounds this
             client's local wait, and *stop_on_timeout* picks this
             client's timeout behavior — and *scope_work_dir* /
-            *parent_task_id* /
-            *parent_tab_id* are the CALLING task's identity, which the
-            script must not be able to forge.  The
-            *extension_agent_path* itself is resolved against this process's
-            working directory and validated eagerly.  A
+            *parent_task_id* / *parent_tab_id* are the CALLING task's
+            identity, which the script must not be able to forge.  The
+            *extension_agent_path* itself is resolved against this
+            process's working directory and validated eagerly.  A
             broken agent script (deleted before the daemon reads it,
-            raising at import time, a non-callable getter ``X``, a
-            raising ``X()``, or a wrong-typed return value) stops the
-            task: the daemon fails the run and the returned
-            :class:`TaskResult` carries the diagnostic error in its
-            ``text`` with ``success=False``.
+            raising at import time, a non-callable getter, a raising
+            ``settings()`` or getter, an unknown settings key or
+            preset, or a wrong-typed value) stops the task: the daemon
+            fails the run and the returned :class:`TaskResult` carries
+            the diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
             Defaults to True.
         auto_commit: Auto-commit the task's changes on success.
@@ -675,8 +656,11 @@ def run(
             several keys joined with ``+`` for the union of their
             tools (``"shell+edit+memory"``); ``bash`` is the
             single-command runner of the bundled ``/sh`` agent:
-            ``Bash`` and ``finish`` only.  Empty (the default) keeps
-            the daemon's usual choice (the full toolset).
+            ``Bash`` and ``finish`` only; ``none`` keeps no built-in
+            tool at all (``finish`` plus the agent script's
+            ``add_to_tools()``, the bundled ``/ask`` agent).  Empty
+            (the default) keeps the daemon's usual choice (the full
+            toolset).
             An unknown name stops the task with a diagnostic error.
             Ignored when the agent script's ``tools()`` supplies the
             whole tool set, which builds no built-in toolset at all.
@@ -831,10 +815,10 @@ def run(
             "autoCommit": auto_commit,
             "maxBudget": max_budget,
             "modelConfig": model_config,
-            "webTools": use_web_tools,
+            "useWebTools": use_web_tools,
             "classifyTasks": classify_tasks,
             "useMemory": use_memory,
-            "useParallel": is_parallel,
+            "isParallel": is_parallel,
             "appendToSystemPrompt": append_to_system_prompt,
             "appendToPrompt": append_to_prompt,
             "toolProfile": tool_profile,
