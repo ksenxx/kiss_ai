@@ -531,8 +531,8 @@ def test_dispatch_threads_the_parent_task_id_and_passes_the_text_through(
     for text in ("literal {task_id} stays here", "no placeholder at all", ""):
         options = dataclasses.replace(
             RunOptions(),
-            append_to_prompt=text,
-            append_to_system_prompt="caller system text",
+            add_to_prompt=text,
+            add_to_system_prompt="caller system text",
         )
         captured = _run_dispatch(
             _ASK_PATH, options, parent_task_id="task-abc-123",

@@ -249,9 +249,12 @@ class AgentPathApiTest(unittest.TestCase):
                 return 2 * x
 
 
+            def prompt(task):
+                return "scripted prompt marker"
+
+
             def settings():
                 return {{
-                    "prompt": "scripted prompt marker",
                     "work_dir": {repo2!r},
                     "model": {script_model!r},
                     "use_worktree": False,
@@ -336,8 +339,8 @@ class AgentPathApiTest(unittest.TestCase):
             """Agent script overriding only the prompt."""
 
 
-            def settings():
-                return {"prompt": "prompt from script"}
+            def prompt(task):
+                return "prompt from script (" + task + ")"
             ''',
         )
         seen: dict[str, Any] = {}
@@ -509,8 +512,13 @@ class AgentPathApiTest(unittest.TestCase):
             ),
             (
                 "empty_prompt_agent.py",
-                "def settings():\n    return {'prompt': '  '}\n",
-                ["settings()['prompt']", "must return a non-empty string"],
+                "def prompt(task):\n    return '  '\n",
+                ["prompt()", "must return a non-empty string"],
+            ),
+            (
+                "legacy_prompt_agent.py",
+                "def settings():\n    return {'prompt': 'x'}\n",
+                ["settings()['prompt']", "is no longer a setting", "def prompt(task: str) -> str"],
             ),
             (
                 "none_getter_agent.py",
@@ -554,11 +562,11 @@ class AgentPathApiTest(unittest.TestCase):
             (
                 "evil_value_agent.py",
                 "class _Evil(str):\n"
-                "    def strip(self, *args):\n"
-                "        raise RuntimeError('evil strip')\n"
-                "def settings():\n"
-                "    return {'prompt': _Evil('x')}\n",
-                ["settings()['prompt']", "returned a broken value", "evil strip"],
+                "    def __str__(self):\n"
+                "        raise RuntimeError('evil str')\n"
+                "def prompt(task):\n"
+                "    return _Evil('x')\n",
+                ["prompt()", "returned a broken value", "evil str"],
             ),
         ]
         for name, source, expected_parts in cases:

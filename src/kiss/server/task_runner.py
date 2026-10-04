@@ -27,6 +27,12 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar.channel_workspace import (
+    WORKSPACE_WAIT_TIMEOUT_SECONDS,
+    enter_workspace,
+    exit_workspace,
+    held_workspace,
+)
 from kiss.agents.sorcar.fanout_guard import is_review_task as _is_review_task
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
@@ -40,20 +46,19 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sea_commands import (
+    SeaLayer,
     SeaScriptError,
     model_sea,
     run_picked_hook,
+    sea_layers,
 )
 from kiss.agents.sorcar.sea_commands import (
     help_text_if_command as _sea_help_text,
 )
 from kiss.agents.sorcar.sea_commands import (
-    sea_settings as _sea_settings,
-)
-from kiss.agents.sorcar.sea_commands import (
     slash_command_task as _slash_command_task,
 )
-from kiss.agents.sorcar.sea_settings import default_work_dir
+from kiss.agents.sorcar.sea_settings import default_work_dir, merge_settings
 from kiss.agents.sorcar.sorcar_agent import _notify_subagent_done, resolve_tool_profile
 from kiss.agents.sorcar.task_classifier import classification_enabled
 from kiss.agents.sorcar.worktree_sorcar_agent import (
@@ -65,7 +70,14 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models, get_default_model
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
-from kiss.server.agent_file import NO_TOOLS_PROFILE, AgentFileError, apply_agent_overrides
+from kiss.server.agent_file import (
+    DAEMON_SIDE_FIELDS,
+    NO_TOOLS_PROFILE,
+    AgentFileError,
+    apply_agent_overrides,
+    channel_workspace,
+    load_layers,
+)
 from kiss.server.agent_state import AgentState
 from kiss.server.browser_tab import BrowserTabService
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
@@ -297,6 +309,18 @@ def build_task_extra_payload(
         "startTs": start_ms,
         "endTs": end_ms,
     }
+
+
+def _picker_model(layers: list[SeaLayer], picker: Path) -> str:
+    """Return the real model a run submitted under a model-picker SEA names.
+
+    The picker's own ``model`` setting, else the default model: the run
+    must name a real model even when no layer sets one, and when a
+    layer blanks ``model`` back to ``""`` ("the tab's pick", which is
+    the picker entry itself).
+    """
+    picker_layer = next(layer for layer in layers if layer.path == picker)
+    return str(picker_layer.settings.get("model") or get_default_model())
 
 
 def _client_task_id_of(cmd: dict[str, Any]) -> str:
@@ -768,57 +792,135 @@ class _TaskRunnerMixin:
         def _refresh_files_after_task(self, work_dir: str = "") -> None: ...
         def _merge_deferred_worktrees(self, repo: Path | None) -> None: ...
 
-    def _resolve_sea_model(self, cmd: dict[str, Any]) -> str | None:
-        """Turn a run whose model is a model-picker SEA into a run of that SEA.
+    def _picker_sea(self, cmd: dict[str, Any]) -> tuple[str, Path] | None:
+        """Return the model-picker SEA a run's model names, if any.
 
         A SEA whose ``register_as_model()`` returns ``True`` (``autorouter``,
         ``bestrouter``; :func:`kiss.agents.sorcar.sea_commands.model_seas`)
         is offered in the model picker under its command name.  When the
         run's model — the wire field ``model``, else the tab's pick (the
         same lookup ``_run_task_inner`` makes) — is such an entry, the
-        command is rewritten in place:
+        SEA becomes the OUTERMOST layer of the run (``load_layers(cmd,
+        base=...)``): a run naming no ``agentPath`` runs the picker SEA
+        itself; a run naming one (a ``run_agent`` child, the ``/ask``
+        side channel, a ``/xxx`` slash command) runs its own SEA on top
+        of the picker's, keeping the picker's model and routing
+        protocol.  ``_apply_sea`` then rewrites ``model`` to the model
+        the picker's ``model`` setting names (else the default model),
+        so the run, its history row and its sub-agents all name a real
+        model.
 
-        * ``model`` becomes the model the SEA's ``model`` setting
-          names, else the default model, so the run, its history row
-          and its sub-agents all name a real model;
-        * ``agentPath`` becomes the SEA file when the caller supplied
-          none.  A supplied ``agentPath`` (a ``run_agent`` child, the
-          ``/ask`` side channel, a ``/xxx`` slash command rewritten by
-          ``_run_task``) names its own agent, and the picked entry then
-          only supplies the model it runs on; a malformed supplied
-          value is left for ``apply_agent_overrides`` to reject as it
-          always did.
+        Args:
+            cmd: The ``run`` command.
 
-        Every other run is left untouched.  Called twice per run: before
-        ``apply_agent_overrides`` (which must see the SEA as this run's
-        ``agentPath`` and adds the SEA's ``add_to_system_prompt()`` protocol
-        to the system prompt) and again in ``_run_task_inner`` before the
-        model is read, because an agent script's ``model`` setting may
-        override ``model`` with ``""`` — "the tab's pick" — which would
-        otherwise resolve back to the entry itself.
+        Returns:
+            ``(picked_name, sea_path)`` — the model the run was
+            submitted with and the SEA file — or ``None`` when the
+            run's model is a real model.
+        """
+        model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
+        sea_path = model_sea(model) if isinstance(model, str) and model else None
+        return None if sea_path is None else (model, sea_path)
+
+    def _apply_sea(self, cmd: dict[str, Any]) -> set[str]:
+        """Execute the run's agent scripts ONCE and apply them to *cmd*, in place.
+
+        The SEA pipeline of a run, in order: a ``/xxx text`` slash
+        command becomes a run of the SEA ``xxx`` on ``text`` (the raw
+        prompt kept on ``displayPrompt``); the tab's model-picker SEA, if
+        any, becomes the outermost layer (:meth:`_picker_sea`); the
+        layers are executed once (:func:`load_layers`); a ``channel``
+        preset's workspace is entered on this thread (released by
+        ``_run_task``'s outer ``finally``); the layers are applied
+        (:func:`apply_agent_overrides`); client-sent values of the
+        daemon-side fields are dropped; a picker entry a layer's
+        ``model`` setting names is resolved to a real model; and the
+        picker's ``on_picked_as_model`` hook runs with the effective
+        work directory.
 
         Args:
             cmd: The ``run`` command, mutated in place.
 
         Returns:
-            The picked SEA's name (the model the run was submitted with),
-            or ``None`` when the run's model is a real model.
+            The fields the scripts (or the slash rewrite) changed, so the
+            tab's registry entry is re-pinned only for those.
 
         Raises:
-            AgentFileError: When the SEA's settings cannot be evaluated.
+            AgentFileError: When a script is broken.
         """
-        model = cmd.get("model") or self._tab_model(cmd.get("tabId", ""))
-        sea_path = model_sea(model) if isinstance(model, str) and model else None
-        if sea_path is None:
-            return None
-        if cmd.get("agentPath") in (None, ""):
-            cmd["agentPath"] = str(sea_path)
-        try:
-            picked = _sea_settings(sea_path).get("model")
-        except SeaScriptError as exc:
-            raise AgentFileError(str(exc)) from exc
-        cmd["model"] = picked if isinstance(picked, str) and picked else get_default_model()
-        return model
+        overridden: set[str] = set()
+        _slash = _slash_command_task(cmd.get("prompt", ""))
+        if _slash is not None:
+            cmd["displayPrompt"] = cmd["prompt"]
+            cmd["prompt"], cmd["agentPath"] = _slash[0], str(_slash[1])
+        else:
+            cmd.pop("displayPrompt", None)
+        picked = self._picker_sea(cmd)
+        layers = load_layers(cmd, base=None if picked is None else picked[1])
+        if picked is not None:
+            cmd["model"] = _picker_model(layers, picked[1])
+        if _slash is not None:
+            # The same work-directory rule as ``run_agent``: a
+            # ``channel``-preset SEA (``/slack ...``) works in the
+            # channel scratch directory, not the project.
+            _client_work_dir = str(cmd.get("workDir") or self.work_dir)
+            _slash_work_dir = default_work_dir(
+                merge_settings([layer.settings for layer in layers]), _client_work_dir,
+            )
+            if _slash_work_dir != _client_work_dir:
+                cmd["workDir"] = _slash_work_dir
+                overridden.add("workDir")
+        # A ``channel``-preset run holds its workspace (the account its
+        # channel tools load credentials for) from BEFORE its tools are
+        # built — ``add_to_tools()`` binds the workspace active at that
+        # moment — until ``_run_task``'s outer ``finally`` releases what
+        # this thread holds (``held_workspace()``); ``/slack ...``,
+        # ``run_agent("slack")`` and ``run_agent(".../slack_sea.py")``
+        # alike.  The exported workspace is process-global, so a run
+        # whose workspace differs from a running channel task's waits
+        # here (bounded) instead of handing that task the wrong
+        # credentials.
+        workspace = channel_workspace(cmd, layers)
+        if workspace and not enter_workspace(workspace, timeout=WORKSPACE_WAIT_TIMEOUT_SECONDS):
+            raise AgentFileError(
+                f"workspace {workspace!r} could not be activated within "
+                f"{WORKSPACE_WAIT_TIMEOUT_SECONDS:g}s because a concurrent "
+                f"channel task is still using a different workspace; retry "
+                f"when it finishes."
+            )
+        overridden |= apply_agent_overrides(cmd, layers)
+        # Daemon-side fields (tool callables, hooks) never travel the
+        # wire: whatever a client sent in them is dropped rather than
+        # read as input.
+        for field in DAEMON_SIDE_FIELDS:
+            if field not in overridden:
+                cmd.pop(field, None)
+        # A layer's ``model`` setting may name a picker entry — the
+        # tab's own ("" or its name: keep the picker's model) or another
+        # one, which is executed once here and resolved the same way.
+        model = cmd.get("model")
+        chosen = model_sea(model) if isinstance(model, str) and model else None
+        if picked is not None and (not model or chosen == picked[1]):
+            cmd["model"] = _picker_model(layers, picked[1])
+        elif chosen is not None:
+            try:
+                picked = (str(model), chosen)
+                layers = sea_layers(chosen)
+            except SeaScriptError as exc:
+                raise AgentFileError(str(exc)) from exc
+            cmd["model"] = _picker_model(layers, chosen)
+        if picked is not None:
+            # Once per run whose model is a picker SEA, with the
+            # effective work dir (a ``work_dir`` setting included): the
+            # hook's side effects (autorouter's weekly cron job) get up
+            # to PICKED_HOOK_TIMEOUT_SECONDS to land before the task
+            # starts.  The already-executed namespace is reused.
+            picker_layer = next(layer for layer in layers if layer.path == picked[1])
+            run_picked_hook(
+                picked[0], str(cmd.get("workDir") or self.work_dir),
+                namespace=picker_layer.namespace,
+            )
+        return overridden
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -861,54 +963,7 @@ class _TaskRunnerMixin:
             agent_file_error: AgentFileError | None = None
             overridden_fields: set[str] = set()
             try:
-                # A ``/xxx text`` slash command runs the SEA ``xxx``
-                # directly on ``text`` — the same run ``run_agent``
-                # would make — so the SEA becomes this run's
-                # ``agentPath`` and the text its prompt.  The raw
-                # prompt is kept on ``displayPrompt``: the tab's task
-                # panel, ``state.last_user_prompt`` and every
-                # persistence path keep showing what the user typed.
-                _slash = _slash_command_task(cmd.get("prompt", ""))
-                # Fields the slash rewrite changed; merged into the
-                # script's overrides so the tab's registry entry is
-                # re-pinned below exactly as for a ``work_dir`` setting.
-                _slash_fields: set[str] = set()
-                if _slash is not None:
-                    cmd["displayPrompt"] = cmd["prompt"]
-                    cmd["prompt"], cmd["agentPath"] = _slash[0], str(_slash[1])
-                    # The same work-directory rule as ``run_agent``: a
-                    # ``channel``-preset SEA (``/slack ...``) works in
-                    # the channel scratch directory, not the project.
-                    try:
-                        _slash_settings = _sea_settings(_slash[1])
-                    except SeaScriptError as exc:
-                        raise AgentFileError(str(exc)) from exc
-                    _client_work_dir = str(cmd.get("workDir") or self.work_dir)
-                    _slash_work_dir = default_work_dir(_slash_settings, _client_work_dir)
-                    if _slash_work_dir != _client_work_dir:
-                        cmd["workDir"] = _slash_work_dir
-                        _slash_fields.add("workDir")
-                else:
-                    cmd.pop("displayPrompt", None)
-                # A model-picker SEA (``autorouter``, ``bestrouter``) names
-                # an agent script, not a model: resolve it before the
-                # overrides run so they see the SEA as this run's
-                # ``agentPath``.
-                picked_sea = self._resolve_sea_model(cmd)
-                overridden_fields = apply_agent_overrides(cmd) | _slash_fields
-                # ``tools`` is a daemon-side field the loader stages
-                # from the script's ``add_to_tools()``; it never
-                # travels the wire, so whatever a client sent in it is
-                # dropped here rather than read as tool input.
-                if "tools" not in overridden_fields:
-                    cmd.pop("tools", None)
-                # Once per run whose model is a picker SEA, with the
-                # effective work dir (a ``work_dir()`` override included):
-                # the hook's side effects (autorouter's weekly cron job)
-                # get up to PICKED_HOOK_TIMEOUT_SECONDS to land before the
-                # task starts.
-                if picked_sea is not None:
-                    run_picked_hook(picked_sea, str(cmd.get("workDir") or self.work_dir))
+                overridden_fields = self._apply_sea(cmd)
             except AgentFileError as exc:
                 agent_file_error = exc
             client_task_id = _client_task_id_of(cmd)
@@ -1093,6 +1148,11 @@ class _TaskRunnerMixin:
                                 {**viewer_result, "tabId": viewer_tab_id},
                             )
         finally:
+            # The channel workspace ``_apply_sea`` entered on this
+            # thread is released on every exit path — a script that
+            # broke after the hold and a stop during setup included.
+            if held_workspace():
+                exit_workspace(held_workspace())
             if state is None:
                 # The interrupt (or an override crash) landed before
                 # the state was resolved above.  ``_cmd_run`` already
@@ -1555,9 +1615,6 @@ class _TaskRunnerMixin:
 
         tab_id = cmd.get("tabId", "")
         state = self._resolve_run_state(cmd)
-        # Second pass: an agent script's ``model`` setting may have
-        # blanked ``model`` back to "the tab's pick" (see the method).
-        self._resolve_sea_model(cmd)
         model = cmd.get("model") or self._tab_model(tab_id)
 
         with self._state_lock:

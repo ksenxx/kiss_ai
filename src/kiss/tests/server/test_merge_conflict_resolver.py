@@ -401,15 +401,20 @@ class TestMergeSea:
         # The prompt names the repo in the OS's native form (``/r`` on
         # POSIX, ``\r`` on Windows), as the agent's tools expect it.
         repo = Path("/r")
-        prompt = merge_sea.build_prompt(
+        task = merge_sea.conflict_task(
             repo, "kiss/wt-x", "main", ["a.py", "b.md"], "  do X  ",
         )
-        assert f"Repository: {repo}\n" in prompt
-        assert "(ours, HEAD): main" in prompt
-        assert "(theirs): kiss/wt-x" in prompt
-        assert "- a.py\n- b.md" in prompt
-        assert "<task>\ndo X\n</task>" in prompt
-        assert "<task>" not in merge_sea.build_prompt(Path("/r"), "b", "main", ["a.py"])
+        assert f"Repository: {repo}\n" in task
+        assert "(ours, HEAD): main" in task
+        assert "(theirs): kiss/wt-x" in task
+        assert "- a.py\n- b.md" in task
+        assert "<task>\ndo X\n</task>" in task
+        assert "<task>" not in merge_sea.conflict_task(Path("/r"), "b", "main", ["a.py"])
+        # ``prompt(task)`` (the SEA getter) adds the standing instructions
+        # to the facts block and to a ``/merge <text>`` task alike.
+        prompt = merge_sea.prompt(task)
+        assert prompt.startswith(task) and prompt.endswith("Do not commit.")
+        assert "stage the resolved files with `git add`" in merge_sea.prompt("finish merge X")
 
     def test_merge_is_a_registered_slash_command(self) -> None:
         sea_commands._reset_for_tests()

@@ -127,10 +127,10 @@ from kiss.agents.sorcar.git_worktree import (
     USER_PROMPT_HEADING,
     strip_worktree_suffix,
 )
+from kiss.agents.sorcar.sea_settings import execute_python_file
 from kiss.core.brand import HOME_DIR, render_brand
 from kiss.core.config import kiss_home
 from kiss.core.utils import rmtree_force
-from kiss.server.agent_file import execute_python_file
 from kiss.server.agent_state import current_agent
 
 DEFAULT_DAYS = 7

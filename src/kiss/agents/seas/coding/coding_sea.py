@@ -321,17 +321,21 @@ class ContainerHarness:
 
     # ---- SEA parameter getters ------------------------------------------
 
-    def prompt(self) -> str:
+    def prompt(self, task: str = "") -> str:
         """The task instruction shown to the model, followed by ``ls -la`` of the workdir.
 
-        The listing costs nothing and settles the first question of every run
-        (what is here?), so the model sees the task's own binaries and data
-        from the start.
+        The SEA ``prompt(task)`` getter: the instruction is the config's
+        ``prompt`` (the trial runner's ``run_agent`` task text is only a
+        label), or *task* when the config has none.  The listing costs
+        nothing and settles the first question of every run (what is
+        here?), so the model sees the task's own binaries and data from
+        the start.
         """
+        instruction = self.task_prompt or task
         listing = self.workdir_listing()
         if not listing:
-            return self.task_prompt
-        return (f"{self.task_prompt}\n\n---\n`ls -la {self.workdir}` when the run started:\n"
+            return instruction
+        return (f"{instruction}\n\n---\n`ls -la {self.workdir}` when the run started:\n"
                 f"{listing}")
 
     def workdir_listing(self) -> str:
@@ -353,8 +357,7 @@ class ContainerHarness:
         """The trial's run settings (the SEA ``settings()`` contract).
 
         A ``worker`` whose sub-agents stay on (they share the trial
-        container): the task :meth:`prompt`, the trial's model, hard USD
-        cap and per-trial model
+        container): the trial's model, hard USD cap and per-trial model
         overrides (``None`` for the provider defaults), the host scratch
         directory the daemon runs the task in (the tools run in the
         container the ``docker_image`` attaches), no host git worktree or
@@ -363,7 +366,6 @@ class ContainerHarness:
         """
         return {
             "preset": "worker",
-            "prompt": self.prompt(),
             "model": self.model_name,
             "max_budget": self.budget,
             "model_config": self.model_overrides or None,
@@ -906,6 +908,7 @@ def description() -> str:
     )
 
 
+prompt = _harness.prompt
 system_prompt = _harness.system_prompt
 settings = _harness.settings
 llm_call_hook = _harness.llm_call_hook

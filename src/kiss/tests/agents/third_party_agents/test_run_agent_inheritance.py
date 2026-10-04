@@ -212,8 +212,8 @@ class TestDispatchResultInheritance:
         parent = _parent_after_a_run(env.repo, auto_commit=True, use_worktree=True)
         options = RunOptions(
             chat_id="chat-explicit", model_config={"base_url": "http://x/v1"},
-            system_prompt="explicit base", append_to_system_prompt="explicit suffix",
-            append_to_prompt="explicit prompt suffix",
+            system_prompt="explicit base", add_to_system_prompt="explicit suffix",
+            add_to_prompt="explicit prompt suffix",
             use_worktree=False, auto_commit=False, use_web_tools=True, use_memory=False,
         )
         _dispatch(parent, model_name=PARENT_MODEL, budget=0.5, options=options)
@@ -311,11 +311,11 @@ class TestDispatchResultInheritance:
             captured.clear()
             text = run_agent(task="say hi", agent=str(script), timeout="30")
             # A file that does not even compile "failed to import";
-            # one that runs but misdeclares its settings "failed while
-            # evaluating settings()".
+            # one that runs but misdeclares its settings names the
+            # settings() problem.
             expected = (
-                f"Error: SEA '{script}' failed to import" if label == "unparsable"
-                else f"Error: SEA {script} failed while evaluating settings()"
+                f"Error: agent script '{script}' failed to import" if label == "unparsable"
+                else f"Error: agent script '{script}': settings()"
             )
             assert text.startswith(expected), (label, text)
             assert captured == [], label

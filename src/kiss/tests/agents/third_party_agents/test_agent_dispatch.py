@@ -40,12 +40,12 @@ import pytest
 
 from kiss.agents.sorcar import agent_dispatch, cron_agent
 from kiss.agents.sorcar.agent_dispatch import (
-    _agent_class,
     _daemon_endpoint_file,
     available_channels,
     make_run_agent_tool,
 )
-from kiss.server.agent_file import apply_agent_overrides
+from kiss.agents.third_party_agents.auth_status import _agent_class
+from kiss.server.agent_file import apply_agent_overrides, channel_workspace, load_layers
 from kiss.tests.server.parallel_agent_harness import IsolatedKissHome
 
 # The standalone tool (no calling-task work directory): relative agent
@@ -357,8 +357,17 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     assert run_agent("say hi", "ntfy", options='{"chat_id": 5}') == (
         "Error: options['chat_id'] must be a JSON str, got int."
     )
-    assert run_agent("say hi", "ntfy", options='{"system_prompt": true}') == (
-        "Error: options['system_prompt'] must be a JSON str, got bool."
+    assert run_agent("say hi", "ntfy", options='{"add_to_system_prompt": true}') == (
+        "Error: options['add_to_system_prompt'] must be a JSON str, got bool."
+    )
+    # The removed spellings fail with the new name, not as unknown keys;
+    # the replacement base prompt is a script's ``system_prompt()``,
+    # not an option.
+    assert run_agent("say hi", "ntfy", options='{"append_to_prompt": "x"}') == (
+        "Error: options key 'append_to_prompt' was renamed to 'add_to_prompt'."
+    )
+    assert run_agent("say hi", "ntfy", options='{"system_prompt": "x"}').startswith(
+        "Error: options has an unknown key 'system_prompt'"
     )
     assert run_agent("say hi", "ntfy", options="[1, 2]") == (
         "Error: options must be a JSON object, got '[1, 2]'."
@@ -366,7 +375,9 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
     out = run_agent("say hi", "ntfy", options="{not json")
     assert out.startswith("Error: options must be a JSON object, got '{not json': ")
     out = run_agent("say hi", "ntfy", options='{"tools": "x.py"}')
-    assert out.startswith("Error: options has an unknown key 'tools'; known keys: chat_id, ")
+    assert out.startswith(
+        "Error: options has an unknown key 'tools'; known keys: work_dir, chat_id, "
+    )
     out = run_agent("say hi", "ntfy", options='{"tool_profile": "bogus"}')
     assert out.startswith("Error: tool_profile must be one of ")
     assert out.endswith("got 'bogus'.")
@@ -380,7 +391,7 @@ def test_run_option_parse_errors(tmp_path: Path) -> None:
         "task", "agent", "timeout", "model", "max_budget", "workspace", "options",
     ]
     for kwarg in (
-        "tools", "use_worktree", "chat_id", "tool_profile", "append_to_prompt", "model_name",
+        "tools", "use_worktree", "chat_id", "tool_profile", "add_to_prompt", "model_name",
     ):
         with pytest.raises(TypeError):
             run_agent("say hi", "ntfy", **{kwarg: str(tmp_path / "x.py")})
@@ -471,7 +482,6 @@ def test_run_options_are_forwarded_to_daemon(
         str(script),
         options="""{
             "chat_id": " chat-123 ",
-            "system_prompt": "You are a terse helper.",
             "model_config": {"base_url": "http://localhost:8000/v1"},
             "use_worktree": "false",
             "auto_commit": "False",
@@ -479,14 +489,14 @@ def test_run_options_are_forwarded_to_daemon(
             "classify_tasks": false,
             "use_memory": "true",
             "is_parallel": false,
-            "append_to_system_prompt": "Answer in French.",
-            "append_to_prompt": "Cite sources.",
+            "add_to_system_prompt": "Answer in French.",
+            "add_to_prompt": "Cite sources.",
             "tool_profile": " review "
         }""",
     )
     sent = captured_dispatch[0]
     assert sent["chat_id"] == "chat-123"
-    assert sent["system_prompt"] == "You are a terse helper."
+    assert sent["system_prompt"] == ""
     assert sent["model_config"] == {"base_url": "http://localhost:8000/v1"}
     assert sent["use_worktree"] is False
     assert sent["auto_commit"] is False
@@ -782,41 +792,23 @@ def test_standalone_relative_path_resolves_against_cwd(
     assert out.startswith("Error: the local_agent agent task could not run:")
 
 
-def test_dispatch_uses_launcher_workspace_registry(
-    monkeypatch: pytest.MonkeyPatch,
+def test_dispatch_forwards_the_workspace_to_the_daemon(
+    captured_dispatch: list[dict[str, Any]],
 ) -> None:
-    # The workspace env var follows the launcher's reference-counting
-    # registry (shared with the channel CLIs): while a launch with a
-    # DIFFERENT workspace is active a dispatch refuses to overwrite
-    # the exported value (it would hand the running session the wrong
-    # account's credentials) and fails loudly after its bounded wait;
-    # the last exit removes the env var — a pre-existing value counts
-    # as stale, exactly as in
-    # kiss.agents.third_party_agents._kiss_web_launcher.
+    # The dispatcher never touches the process-global workspace: it
+    # forwards the ``workspace`` argument as a wire field, and the
+    # daemon's task runner holds it for the channel run's lifetime
+    # (see kiss.server.task_runner).  Options never carry it.
     import os
 
-    from kiss.agents.third_party_agents._kiss_web_launcher import (
-        _enter_workspace,
-        _exit_workspace,
-    )
-
-    monkeypatch.setenv("KISS_CHANNEL_WORKSPACE", "stale-ws")
-    monkeypatch.setattr(agent_dispatch, "WORKSPACE_WAIT_TIMEOUT_SECONDS", 0.2)
-    assert _enter_workspace("other-ws")  # a concurrent dispatch is active
-    try:
-        out = run_agent("say hi", "ntfy", workspace="my-ws")
-        assert out.startswith("Error: workspace 'my-ws' could not be activated")
-        # The concurrent dispatch is still active; its workspace was
-        # never overwritten.
-        assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
-        # A dispatch SHARING the active workspace proceeds normally
-        # (and fails only at the unreachable daemon endpoint).
-        out = run_agent("say hi", "ntfy", workspace="other-ws")
-        assert out.startswith("Error: the ntfy agent task could not run:")
-        assert os.environ["KISS_CHANNEL_WORKSPACE"] == "other-ws"
-    finally:
-        _exit_workspace("other-ws")
+    run_agent("say hi", "ntfy", workspace=" my-ws ")
+    assert captured_dispatch[0]["workspace"] == "my-ws"
+    assert captured_dispatch[0]["extension_agent_path"].endswith("ntfy/ntfy_sea.py")
     assert "KISS_CHANNEL_WORKSPACE" not in os.environ
+    captured_dispatch.clear()
+    run_agent("say hi", "ntfy")
+    assert captured_dispatch[0]["workspace"] == ""
+    assert not hasattr(agent_dispatch, "WORKSPACE_WAIT_TIMEOUT_SECONDS")
 
 
 def test_dispatch_uses_recorded_daemon_endpoint(
@@ -895,6 +887,7 @@ def test_channel_module_is_a_valid_agent_script() -> None:
         "tools", "useWorktree", "autoCommit", "classifyTasks", "isParallel",
         "useWebTools", "useMemory", "appendToSystemPrompt",
     }
+    assert channel_workspace(cmd, load_layers(cmd)) == "default"
     assert cmd["tools"] and all(callable(t) for t in cmd["tools"])
     assert "appendBasicTools" not in cmd
     assert "toolProfile" not in cmd  # ``add_to_tools()`` keeps the built-in toolset
